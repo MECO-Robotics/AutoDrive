@@ -1,0 +1,1648 @@
+"""Torch-only PPO for :class:`TensorDefenseEnv`.
+
+Rollouts, advantages, minibatches, and optimizer updates stay as Torch tensors
+on the selected device. On ROCm, PyTorch exposes the GPU through ``cuda`` too.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+    import torch
+    from torch import nn
+    from torch.distributions import Normal
+except ImportError as exc:  # keep the module's import error actionable
+    raise ImportError(
+        "Tensor PPO requires PyTorch. Install a Torch build for your platform, "
+        "including ROCm or CUDA support when using a GPU."
+    ) from exc
+
+
+OBS_DIM = 35
+ACTION_DIM = 3
+OBS_NORMALIZATION = "fixed_physical_scale_v1"
+MIXED_DEFENSE_OPPONENTS = ("adstar", "offense", "intercept", "velocity_intercept", "mirror")
+MIXED_ADSTAR_FITNESS_WEIGHT = .8
+MIXED_SCRIPTED_FITNESS_WEIGHT = .2
+STATIC_OPPONENT_FRACTION = .20
+CURRICULUM_STAGES = ("static_straight", "scripted", "adstar", "mixed", "learned")
+
+
+def _curriculum_stage(progress: float) -> int:
+    return min(len(CURRICULUM_STAGES) - 1,
+               max(0, int(max(0., min(.999999, progress)) * len(CURRICULUM_STAGES))))
+
+
+def _curriculum_opponents(task: str, stage: int, learned_available: bool = True) -> tuple[str, ...]:
+    """Expand training from easy motion to durable scripted and learned pools."""
+    if task == "defense":
+        base = ("offense", "intercept", "mirror", "adstar", "velocity_intercept")
+        pools = (("offense",), ("offense", "intercept", "mirror"),
+                 ("offense", "intercept", "mirror", "adstar"), base,
+                 base + (("learned",) if learned_available else ()))
+    else:
+        base = ("guard", "intercept", "mirror", "adstar_defender")
+        pools = (("guard",), ("guard", "intercept", "mirror"),
+                 ("guard", "intercept", "mirror", "adstar_defender"), base,
+                 base + (("learned",) if learned_available else ()))
+    return pools[min(max(0, stage), len(pools) - 1)]
+
+
+class ActorCritic(nn.Module):
+    """Fixed-size actor/critic for continuous controls or categorical tactics."""
+
+    def __init__(self, obs_dim: int = OBS_DIM, action_dim: int = ACTION_DIM,
+                 action_kind: str = "continuous"):
+        super().__init__()
+        if action_kind not in ("continuous", "categorical"):
+            raise ValueError("action_kind must be continuous or categorical")
+        self.action_kind = action_kind
+        self.trunk = nn.Sequential(nn.Linear(obs_dim, 128), nn.Tanh(),
+                                   nn.Linear(128, 128), nn.Tanh())
+        self.actor = nn.Linear(128, action_dim)
+        self.critic = nn.Linear(128, 1)
+        if action_kind == "continuous":
+            self.log_std = nn.Parameter(torch.zeros(action_dim))
+
+    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        features = self.trunk(obs)
+        logits_or_mean = self.actor(features)
+        scale = (None if self.action_kind == "categorical"
+                 else self.log_std.expand_as(logits_or_mean))
+        return logits_or_mean, scale, self.critic(features).squeeze(-1)
+
+    def sample(self, obs: torch.Tensor, deterministic: bool = False):
+        mean, log_std, value = self(obs)
+        if self.action_kind == "categorical":
+            dist = torch.distributions.Categorical(logits=mean)
+            action = mean.argmax(-1) if deterministic else dist.sample()
+            return action, dist.log_prob(action), value
+        dist = Normal(mean, log_std.exp())
+        latent = mean if deterministic else dist.rsample()
+        action = torch.tanh(latent)
+        # Change of variables for tanh. Clamp only the correction's argument
+        # to avoid log(0) at saturated actions.
+        log_prob = dist.log_prob(latent).sum(-1) - torch.log(1 - action.square() + 1e-6).sum(-1)
+        return action, log_prob, value
+
+    def score(self, obs: torch.Tensor, actions: torch.Tensor):
+        mean, log_std, value = self(obs)
+        if self.action_kind == "categorical":
+            dist = torch.distributions.Categorical(logits=mean)
+            actions = actions.to(torch.long).reshape(-1)
+            return dist.log_prob(actions), dist.entropy(), value, mean
+        actions = actions.clamp(-0.999999, 0.999999)
+        latent = torch.atanh(actions)
+        dist = Normal(mean, log_std.exp())
+        log_prob = dist.log_prob(latent).sum(-1) - torch.log(1 - actions.square() + 1e-6).sum(-1)
+        entropy = dist.entropy().sum(-1)
+        return log_prob, entropy, value, mean
+
+
+def _device(requested: str) -> torch.device:
+    dev = torch.device(requested)
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested accelerator {requested!r} is unavailable; refusing CPU fallback")
+    return dev
+
+
+def _env(num_envs: int, task: str, device: torch.device, seed: int, opponent: str,
+         horizon: int = 750, normalize_observations: bool = True,
+         static_opponent_fraction: float = 0., architecture: str = "direct"):
+    try:
+        from .tensor_sim import TensorDefenseEnv
+    except ImportError as exc:
+        raise RuntimeError("Tensor PPO requires frc_defense.tensor_sim.TensorDefenseEnv") from exc
+    env = TensorDefenseEnv(num_envs=num_envs, task=task, device=device,
+                           seed=seed, opponent=opponent, horizon=horizon,
+                           normalize_observations=normalize_observations,
+                           static_opponent_fraction=static_opponent_fraction,
+                           action_mode={"direct": "direct", "tactical_adstar": "tactical",
+                                        "strategic_adstar": "strategic"}.get(architecture, architecture))
+    return env
+
+
+def _attach_historical_opponent(env, task: str, device: torch.device) -> bool:
+    """Load the previous role-specific direct NN as a frozen curriculum opponent."""
+    name = "rebuilt-counter-defense" if task == "defense" else "rebuilt-defense"
+    checkpoint = Path("checkpoints") / name / "policy.pt"
+    if not checkpoint.is_file():
+        return False
+    try:
+        payload = torch.load(checkpoint, map_location=device, weights_only=True)
+        if int(payload.get("obs_dim", OBS_DIM)) != 35:
+            # The callback receives the legacy role-swapped world vector.
+            # Refuse an incompatible checkpoint rather than feeding it a
+            # truncated strategic observation or bypassing AD*.
+            return False
+        model = ActorCritic(payload.get("obs_dim", OBS_DIM),
+                            payload.get("action_dim", ACTION_DIM),
+                            payload.get("action_kind", "continuous")).to(device)
+        model.load_state_dict(payload["model_state_dict"])
+        model.eval()
+    except (OSError, RuntimeError, KeyError, ValueError):
+        return False
+
+    @torch.no_grad()
+    def policy(observation):
+        action, _, _ = model(observation)
+        if model.action_kind == "categorical":
+            return action.argmax(-1)
+        return torch.tanh(action)
+
+    env.learned_opponent_fn = policy
+    env.learned_opponent_checkpoint = str(checkpoint)
+    return True
+
+
+def _reset_obs(result: Any) -> torch.Tensor:
+    """Accept Gym-style ``(obs, info)`` as well as the bare tensor contract."""
+    return result[0] if isinstance(result, tuple) else result
+
+
+def _task_opponent(task: str, opponent: str | None) -> str:
+    if opponent is None:
+        return "guard" if task == "counter_defense" else "offense"
+    if task == "defense" and opponent == "guard":
+        return "offense"
+    return opponent
+
+
+def _adstar_reference(env, device, max_worlds: int = 64, world_indices=None,
+                      include_all_routes: bool = False):
+    """Plan sparse teacher routes with the same device-resident grid search."""
+    from .tensor_adstar import TensorADStar
+    count = min(max_worlds, env.n)
+    # Keep world zero first because it is the representative world exported to
+    # the playback recording; fill the remaining references randomly.
+    if world_indices is not None:
+        indices = torch.as_tensor(world_indices, device=device, dtype=torch.long)
+        count = int(indices.numel())
+    elif count == 1:
+        indices = torch.zeros(1, device=device, dtype=torch.long)
+    else:
+        indices = torch.cat((torch.zeros(1, device=device, dtype=torch.long),
+                             torch.randperm(env.n - 1, device=device)[:count-1] + 1))
+    starts=env.sim.pose[:,0,:2]
+    goals=env.goal.clone()
+    if env.task == "defense":
+        # Reference an intercept point on the attacker's straight-line scoring
+        # approach; the field planner routes the defender around solid elements.
+        goals=.55*env.goal+.45*env.sim.pose[:,1,:2]
+    planner=TensorADStar(env)
+    dynamic=env.task=="counter_defense"
+    padded_all,lengths_all,_,_=planner.plan(starts,goals,env.sim.pose[:,0,2],
+        env.sim.length[:,0],env.sim.width[:,0],env.sim.speed[:,0],
+        env.sim.pose[:,1,:2],torch.zeros_like(env.sim.velocity[:,1,:2]),dynamic,
+        env.sim.lateral_mu[:,0],env.sim.accel[:,0])
+    padded=padded_all[indices]
+    lengths=lengths_all[indices]
+    segments = (padded[:, 1:] - padded[:, :-1]).norm(dim=-1)
+    cumulative = torch.cat((torch.zeros((count, 1), device=device), segments.cumsum(-1)), -1)
+    total = cumulative.gather(1, (lengths - 1)[:, None]).squeeze(1)
+    # Training exports only its representative route. Evaluation playback can
+    # request one route per sampled scenario for its ghost rollouts.
+    route_count = count if include_all_routes else min(1, count)
+    routes=[padded[i,:int(lengths[i].item())].detach().cpu().tolist()
+            for i in range(route_count)]
+    return indices, padded, lengths, cumulative, total, routes
+
+
+def _reference_action(routes, positions, headings, speeds):
+    indices, points, lengths, _cumulative, _total = routes[:5]
+    pos = positions[indices]
+    d2 = (points - pos[:, None, :]).square().sum(-1)
+    valid = torch.arange(points.shape[1], device=points.device)[None, :] < lengths[:, None]
+    nearest = d2.masked_fill(~valid, float("inf")).argmin(-1)
+    target_index = torch.minimum(nearest + 1, lengths - 1)
+    target = points[torch.arange(len(indices), device=points.device), target_index]
+    delta = target - pos
+    angle = headings[indices]
+    body = torch.stack((angle.cos() * delta[:, 0] + angle.sin() * delta[:, 1],
+                        -angle.sin() * delta[:, 0] + angle.cos() * delta[:, 1]), -1)
+    return torch.cat(((body / body.norm(dim=-1, keepdim=True).clamp_min(1e-6)),
+                      torch.zeros((len(indices), 1), device=points.device)), -1)
+
+
+def _reference_potential(routes, positions):
+    indices, points, lengths, cumulative, total = routes[:5]
+    pos = positions[indices]
+    d2 = (points - pos[:, None, :]).square().sum(-1)
+    valid = torch.arange(points.shape[1], device=points.device)[None, :] < lengths[:, None]
+    nearest = d2.masked_fill(~valid, float("inf")).argmin(-1)
+    travelled = cumulative.gather(1, nearest[:, None]).squeeze(1)
+    return travelled - total
+
+
+def _reference_tracking_error(routes, positions):
+    """Distance from each sampled robot to its nearest AD* route segment."""
+    indices, points, lengths, _cumulative, _total = routes[:5]
+    pos = positions[indices]
+    if points.shape[1] == 1:
+        return (pos - points[:, 0]).norm(dim=-1)
+    start, end = points[:, :-1], points[:, 1:]
+    segment = end - start
+    fraction = ((pos[:, None] - start) * segment).sum(-1) / segment.square().sum(-1).clamp_min(1e-8)
+    projection = start + fraction.clamp(0, 1)[..., None] * segment
+    distance = (pos[:, None] - projection).square().sum(-1)
+    valid = torch.arange(points.shape[1] - 1, device=points.device)[None, :] < (lengths - 1)[:, None]
+    segment_distance = distance.masked_fill(~valid, float("inf")).min(-1).values.clamp_min(0).sqrt()
+    point_distance = (pos - points[:, 0]).norm(dim=-1)
+    return torch.where(lengths == 1, point_distance, segment_distance)
+
+
+def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
+                num_envs: int, device: torch.device, opponent: str,
+                initial_checkpoint: str | Path | None,
+                rollout_steps: int, epochs: int, minibatch_size: int,
+                learning_rate: float, gamma: float, gae_lambda: float,
+                clip_coef: float, value_coef: float, entropy_coef: float,
+                max_grad_norm: float, l2_coef: float, horizon: int,
+                architecture: str = "direct", curriculum: bool = True) -> dict[str, Any]:
+    if horizon < 1:
+        raise ValueError("horizon must be positive")
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    env = _env(num_envs, task, device, seed, opponent, horizon,
+               static_opponent_fraction=STATIC_OPPONENT_FRACTION,
+               architecture=architecture)
+    learned_opponent_available = _attach_historical_opponent(env, task, device)
+    uses_adstar_teacher = task != "defense" and architecture == "direct"
+    obs_dim = int(getattr(env, "obs_dim", OBS_DIM))
+    action_dim = int(getattr(env, "action_dim", ACTION_DIM))
+    action_kind = "categorical" if architecture == "strategic_adstar" else "continuous"
+    model = ActorCritic(obs_dim, action_dim, action_kind).to(device)
+    if initial_checkpoint is not None:
+        payload = torch.load(initial_checkpoint, map_location=device, weights_only=True)
+        if payload.get("drivetrain_config") != env.drivetrain_config:
+            raise ValueError("initial checkpoint drivetrain configuration does not match this run; "
+                             "retrain without that checkpoint or use its exact FRC_DRIVETRAIN_CONFIG")
+        if payload.get("architecture", "direct") != architecture:
+            raise ValueError("initial checkpoint architecture differs from this training run")
+        model.load_state_dict(payload["model_state_dict"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, eps=1e-5)
+    obs = _reset_obs(env.reset())
+    if not isinstance(obs, torch.Tensor):
+        raise TypeError("TensorDefenseEnv.reset() must return a Torch tensor")
+    obs = obs.to(device=device, dtype=torch.float32)
+    start = time.perf_counter()
+    started_at = time.time()
+    updates = (timesteps + rollout_steps * num_envs - 1) // (rollout_steps * num_envs)
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+    checkpoint = out / "policy.pt"
+    status_path = out / "status.json"
+    playback_path = out / "playback.json"
+    playback_frames: list[dict[str, Any]] = []
+    def write_json(path: Path, value: dict[str, Any]) -> None:
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(value, indent=2))
+        temp.replace(path)
+    write_json(status_path, {"status": "running", "task": task, "opponent": opponent,
+        "architecture": architecture, "action_kind": action_kind,
+        "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
+        "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
+        "requested_timesteps": timesteps, "num_envs": num_envs, "device": str(device),
+        "observation_normalization": OBS_NORMALIZATION,
+        "l2_coefficient": l2_coef,
+        "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
+        "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+        "completed_timesteps": 0, "updates": 0, "total_updates": updates,
+        "adstar_action_loss_weight": .25 if uses_adstar_teacher else 0., "task_reward_scale": 1.,
+        "adstar_tracking_error_m": None, "started_at": started_at,
+        "drivetrain_config": env.drivetrain_config})
+    write_json(playback_path, {"task": task, "dt": env.dt, "frames": []})
+    # Attacker training can use sparse route imitation; defenders learn only
+    # from task reward and the visible robot/field state.
+    adstar_action_loss_weight = .25 if uses_adstar_teacher else 0.
+    task_reward_scale = 1.
+    tracking_error_ema = None
+    good_tracking_updates = 0
+    for update_index in range(updates):
+        stage = _curriculum_stage(update_index / max(1, updates)) if curriculum else -1
+        if curriculum:
+            available = learned_opponent_available and stage >= 4
+            candidates = _curriculum_opponents(task, stage, learned_available=available)
+            env.opponent = candidates[update_index % len(candidates)]
+            env.static_opponent_fraction = (.4 if stage == 0 else STATIC_OPPONENT_FRACTION)
+        # AD* is evaluated at rollout boundaries for a sparse reference set.
+        # The simulator and PPO tensors stay device resident during each step.
+        routes = _adstar_reference(env, device) if uses_adstar_teacher else None
+        reference_mask = torch.zeros(num_envs, device=device, dtype=torch.bool)
+        if routes is not None:
+            reference_mask[routes[0]] = True
+        reference_active = reference_mask.clone()
+        action_shape = (action_dim,) if action_kind == "continuous" else ()
+        action_dtype = torch.float32 if action_kind == "continuous" else torch.long
+        b_obs = torch.empty((rollout_steps, num_envs, obs_dim), device=device)
+        b_actions = torch.empty((rollout_steps, num_envs, *action_shape), device=device,
+                                dtype=action_dtype)
+        b_logprobs = torch.empty((rollout_steps, num_envs), device=device)
+        b_rewards = torch.empty((rollout_steps, num_envs), device=device)
+        b_dones = torch.empty((rollout_steps, num_envs), device=device, dtype=torch.bool)
+        b_truncated = torch.empty((rollout_steps, num_envs), device=device, dtype=torch.bool)
+        b_values = torch.empty((rollout_steps, num_envs), device=device)
+        b_next_values = torch.empty((rollout_steps, num_envs), device=device)
+        b_teacher_actions = torch.zeros((rollout_steps, num_envs, action_dim), device=device)
+        b_teacher_mask = torch.zeros((rollout_steps, num_envs), device=device, dtype=torch.bool)
+        tracking_error_sum = torch.zeros((), device=device)
+        tracking_error_count = torch.zeros((), device=device)
+        update_frames = []
+        frame_stride = max(1, rollout_steps // 24)
+        for t in range(rollout_steps):
+            b_obs[t] = obs
+            if routes is not None:
+                pos_before = env.sim.pose[:, 0, :2]
+                tracking_error = _reference_tracking_error(routes, pos_before)
+                sampled_active = reference_active[routes[0]]
+                tracking_error_sum += (tracking_error * sampled_active.float()).sum()
+                tracking_error_count += sampled_active.sum()
+                potential_before = _reference_potential(routes, pos_before)
+                teacher = _reference_action(routes, pos_before, env.sim.pose[:, 0, 2], env.sim.speed[:, 0])
+                b_teacher_actions[t, routes[0]] = teacher
+                b_teacher_mask[t] = reference_active
+            with torch.no_grad():
+                action, logprob, value = model.sample(obs)
+            next_obs, reward, done, truncated, _info = env.step(action)
+            reward *= task_reward_scale
+            if routes is not None:
+                potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
+                # Dense route progress complements the task reward.
+                route_progress = (potential_after - potential_before).clamp(-.25, .25)
+                reward[routes[0]] += .20 * route_progress * reference_active[routes[0]]
+            if t % frame_stride == 0:
+                update_frames.append(torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
+                    env.sim.length[0], env.sim.width[0], env.goal_radius[0:1])).detach().clone())
+            next_obs = next_obs.to(device=device, dtype=torch.float32)
+            reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
+            done = done.to(device=device, dtype=torch.bool).reshape(num_envs)
+            truncated = truncated.to(device=device, dtype=torch.bool).reshape(num_envs)
+            b_actions[t], b_logprobs[t], b_values[t] = action, logprob, value
+            b_rewards[t], b_dones[t], b_truncated[t] = reward, done, truncated
+            with torch.no_grad():
+                b_next_values[t] = model(next_obs)[2]
+            ended = done | truncated
+            reset_done = getattr(env, "reset_done", None)
+            if reset_done is None:
+                raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
+            # reset_done returns the complete observation batch with only
+            # selected worlds replaced by freshly initialized states.
+            next_obs = reset_done(ended).to(device=device, dtype=torch.float32)
+            reference_active &= ~ended
+            obs = next_obs
+
+        with torch.no_grad():
+            advantages = torch.zeros_like(b_rewards)
+            last_gae = torch.zeros(num_envs, device=device)
+            for t in reversed(range(rollout_steps)):
+                # These are values of the actual post-step observations, before
+                # any completed worlds are selectively reset.
+                nv = b_next_values[t]
+                nonterminal = (~b_dones[t]).float()
+                delta = b_rewards[t] + gamma * nv * nonterminal - b_values[t]
+                continuation = (~(b_dones[t] | b_truncated[t])).float()
+                last_gae = delta + gamma * gae_lambda * continuation * last_gae
+                advantages[t] = last_gae
+            returns = advantages + b_values
+
+        flat_obs = b_obs.reshape(-1, obs_dim)
+        flat_actions = b_actions.reshape((-1, action_dim) if action_kind == "continuous" else (-1,))
+        flat_logprobs = b_logprobs.reshape(-1)
+        flat_advantages = advantages.reshape(-1)
+        flat_returns = returns.reshape(-1)
+        flat_teacher_actions = b_teacher_actions.reshape(-1, action_dim)
+        flat_reference_mask = b_teacher_mask.reshape(-1)
+        batch_size = flat_obs.shape[0]
+        for _epoch in range(epochs):
+            indices = torch.randperm(batch_size, device=device)
+            for idx in indices.split(minibatch_size):
+                new_logprob, entropy, new_value, mean = model.score(flat_obs[idx], flat_actions[idx])
+                logratio = new_logprob - flat_logprobs[idx]
+                ratio = logratio.exp()
+                mb_adv = flat_advantages[idx]
+                mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std(unbiased=False) + 1e-8)
+                pg = torch.maximum(-mb_adv * ratio,
+                                   -mb_adv * torch.clamp(ratio, 1-clip_coef, 1+clip_coef)).mean()
+                value_loss = 0.5 * (new_value - flat_returns[idx]).square().mean()
+                teacher_rows = flat_reference_mask[idx].float()
+                teacher_target = torch.atanh(flat_teacher_actions[idx].clamp(-.95, .95))
+                teacher_error = (mean - teacher_target).square().mean(-1)
+                teacher_loss = (teacher_error * teacher_rows).sum() / teacher_rows.sum().clamp_min(1.)
+                l2_norm = sum(parameter.square().sum() for parameter in model.parameters()
+                              if parameter.ndim > 1)
+                loss = (pg + value_coef * value_loss - entropy_coef * entropy.mean() +
+                        adstar_action_loss_weight * teacher_loss + l2_coef * l2_norm)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+
+        # Keep the latest policy usable for the dashboard and for recovery if
+        # a long run is interrupted. Status and playback are atomically replaced.
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        update_tracking_error = None
+        if uses_adstar_teacher:
+            update_tracking_error = float((tracking_error_sum / tracking_error_count.clamp_min(1)).item())
+            tracking_error_ema = (update_tracking_error if tracking_error_ema is None else
+                                  .8 * tracking_error_ema + .2 * update_tracking_error)
+            if tracking_error_ema <= .35:
+                good_tracking_updates += 1
+            else:
+                good_tracking_updates = 0
+            if good_tracking_updates >= 3:
+                adstar_action_loss_weight = max(.025, adstar_action_loss_weight * .7)
+                task_reward_scale = min(2., task_reward_scale * 1.25)
+                good_tracking_updates = 0
+        torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
+                    "action_dim": action_dim, "action_kind": action_kind,
+                    "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
+                    "drivetrain_config": env.drivetrain_config}, checkpoint)
+        exported_path = routes[5][0] if routes is not None else []
+        playback_frames.extend({"robots": [row[:3], row[3:6]],
+            "goal": row[6:8], "sizes": row[8:12], "goal_radius":row[12],
+            "adstar_path": exported_path} for row in torch.stack(update_frames).cpu().tolist())
+        playback_frames = playback_frames[-480:]
+        from .field import (ALLIANCE_ZONE_DEPTH, BUMP_ACCELERATION_SCALE,
+                            BUMP_SPEED_SCALE, bump_boxes, static_collision_boxes)
+        write_json(playback_path, {"task": task, "dt": env.dt, "field": {
+            "length": env.sim.field_length, "width": env.sim.field_width,
+            "alliance_zone_depth": ALLIANCE_ZONE_DEPTH,
+            "elements": [box.as_dict() for box in env.field_boxes],
+            "colliders": [box.as_dict() for box in static_collision_boxes(env.field_boxes)],
+            "bump_regions": [box.as_dict() for box in bump_boxes(env.field_boxes)],
+            "trench_paths": [box.as_dict() for box in env.field_boxes
+                             if "_trench_" in box.name and "_support_" not in box.name],
+            "trench_supports": [box.as_dict() for box in env.field_boxes
+                                if "_trench_support_" in box.name],
+            "bump_speed_scale": BUMP_SPEED_SCALE,
+            "bump_acceleration_scale": BUMP_ACCELERATION_SCALE},
+            "frames": playback_frames})
+        completed = min((update_index + 1) * rollout_steps * num_envs, timesteps)
+        elapsed = time.perf_counter() - start
+        write_json(status_path, {"status": "running", "task": task, "opponent": opponent,
+            "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
+            "requested_timesteps": timesteps, "completed_timesteps": completed,
+            "num_envs": num_envs, "device": str(device),
+            "observation_normalization": OBS_NORMALIZATION,
+            "l2_coefficient": l2_coef,
+            "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
+            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+            "updates": update_index + 1, "total_updates": updates,
+            "adstar_tracking_error_m": tracking_error_ema,
+            "adstar_tracking_error_update_m": update_tracking_error,
+            "adstar_tracking_target_m": .35,
+            "adstar_action_loss_weight": adstar_action_loss_weight,
+            "task_reward_scale": task_reward_scale,
+            "good_tracking_updates": good_tracking_updates,
+            "elapsed_seconds": elapsed, "transitions_per_second": completed / max(elapsed, 1e-12),
+            "checkpoint": str(checkpoint), "started_at": started_at,
+            "drivetrain_config": env.drivetrain_config})
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - start
+    torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
+                "action_dim": action_dim, "action_kind": action_kind,
+                "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
+                "drivetrain_config": env.drivetrain_config}, checkpoint)
+    metadata = {"task": task, "architecture": architecture, "action_kind": action_kind,
+                "observation_dim": obs_dim, "action_dim": action_dim,
+                "opponent": opponent, "seed": seed,
+                "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
+                "timesteps": updates * rollout_steps * num_envs, "requested_timesteps": timesteps,
+                "reference_planner": "ADStarPlanner" if uses_adstar_teacher else None,
+                "reference_worlds_per_update": min(64, num_envs) if uses_adstar_teacher else 0,
+                "reference_reward_scale": .20 if uses_adstar_teacher else 0.,
+                "reference_action_loss_weight_final": adstar_action_loss_weight,
+                "task_reward_scale_final": task_reward_scale,
+                "adstar_tracking_error_ema_m": tracking_error_ema,
+                "num_envs": num_envs, "device": str(device), "checkpoint": str(checkpoint),
+                "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
+                "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+                "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+                "domain_randomization": True,
+                "observation_normalization": OBS_NORMALIZATION,
+                "l2_coefficient": l2_coef,
+                "elapsed_seconds": elapsed, "transitions_per_second": updates * rollout_steps * num_envs / max(elapsed, 1e-12),
+                "started_at": started_at,
+                "completed_episodes_observed": None}
+    metadata["drivetrain_config"] = env.drivetrain_config
+    (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    write_json(status_path, {**metadata, "status": "completed", "completed_timesteps": updates * rollout_steps * num_envs,
+                             "total_updates": updates, "updates": updates})
+    return metadata
+
+
+def train(task: str = "counter_defense", timesteps: int = 1_000_000,
+          output: str | Path = "checkpoints/tensor-ppo", *, seed: int = 7,
+          num_envs: int = 2048, device: str = "cuda", opponent: str | None = None,
+          initial_checkpoint: str | Path | None = None,
+          rollout_steps: int = 128, epochs: int = 4, minibatch_size: int = 4096,
+          learning_rate: float = 3e-4, gamma: float = .99, gae_lambda: float = .95,
+          clip_coef: float = .2, value_coef: float = .5, entropy_coef: float = 0.,
+          max_grad_norm: float = .5, l2_coef: float = 1e-5,
+          horizon: int = 750, algorithm: str = "generational", generations: int = 20,
+          population_size: int = 8, elite_count: int = 2,
+          mutation_scale: float = .01, architecture: str = "strategic_adstar") -> dict[str, Any]:
+    """Train with generational search by default or PPO when explicitly selected."""
+    if algorithm == "generational":
+        return generational_train(task, generations, output, seed=seed,
+            num_envs=num_envs, device=device, opponent=opponent,
+            initial_checkpoint=initial_checkpoint, horizon=horizon,
+            population_size=population_size, elite_count=elite_count,
+            mutation_scale=mutation_scale, l2_coef=l2_coef,
+            architecture=architecture,
+            curriculum=(opponent is None or opponent == "mixed"))
+    if algorithm != "ppo":
+        raise ValueError("algorithm must be 'generational' or 'ppo'")
+    if min(timesteps, num_envs, rollout_steps, epochs, minibatch_size, horizon) < 1:
+        raise ValueError("timesteps, num_envs, rollout_steps, epochs, minibatch_size and horizon must be positive")
+    if not math.isfinite(l2_coef) or l2_coef < 0:
+        raise ValueError("l2_coef must be finite and non-negative")
+    selected = _device(device)
+    chosen_opponent = _task_opponent(task,opponent)
+    kwargs = dict(task=task, timesteps=timesteps, output=output, seed=seed,
+                  num_envs=num_envs, opponent=chosen_opponent, rollout_steps=rollout_steps,
+                  initial_checkpoint=initial_checkpoint,
+                  epochs=epochs, minibatch_size=min(minibatch_size, rollout_steps*num_envs),
+                  learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
+                  clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
+                  max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
+                  architecture=architecture, curriculum=(opponent is None or opponent == "mixed"))
+    return _train_once(device=selected, **kwargs)
+
+
+def generational_train(task: str, generations: int, output: str | Path, *,
+                       seed: int = 7, num_envs: int = 256, device: str = "cuda",
+                       opponent: str | None = None, initial_checkpoint: str | Path | None = None,
+                       horizon: int = 750, population_size: int = 8,
+                       elite_count: int = 2, mutation_scale: float = .01,
+                       l2_coef: float = 1e-5,
+                       architecture: str = "strategic_adstar",
+                       curriculum: bool = True) -> dict[str, Any]:
+    """Population based policy search, scoring whole seeded episode batches."""
+    if min(generations, num_envs, horizon, population_size, elite_count) < 1:
+        raise ValueError("generation, environment, horizon, and population sizes must be positive")
+    if elite_count >= population_size:
+        raise ValueError("elite_count must be smaller than population_size")
+    if mutation_scale <= 0 or l2_coef < 0 or not math.isfinite(mutation_scale + l2_coef):
+        raise ValueError("mutation_scale must be positive and l2_coef non-negative")
+    selected = _device(device)
+    opponent = _task_opponent(task, opponent)
+    mixed_opponents = task == "defense" and opponent == "mixed"
+    opponent_names = (_curriculum_opponents(task, 0, learned_available=False)
+                      if curriculum else
+                      (MIXED_DEFENSE_OPPONENTS if mixed_opponents else (opponent,)))
+    playback_opponent = "adstar" if mixed_opponents else opponent_names[0]
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
+    checkpoint, status_path = out / "policy.pt", out / "status.json"
+    playback_path = out / "playback.json"
+    torch.manual_seed(seed)
+    if selected.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    env = _env(num_envs, task, selected, seed, playback_opponent, horizon,
+               static_opponent_fraction=STATIC_OPPONENT_FRACTION,
+               architecture=architecture)
+    learned_opponent_available = _attach_historical_opponent(env, task, selected)
+    env.adstar_spawn_hint = False
+    playback_env = _env(1, task, selected, seed + 104729, playback_opponent, horizon,
+                        architecture=architecture)
+    learned_opponent_available &= _attach_historical_opponent(playback_env, task, selected)
+    obs_dim = int(getattr(env, "obs_dim", OBS_DIM))
+    action_dim = int(getattr(env, "action_dim", ACTION_DIM))
+    action_kind = "categorical" if architecture == "strategic_adstar" else "continuous"
+    model = ActorCritic(obs_dim, action_dim, action_kind).to(selected)
+    if initial_checkpoint:
+        payload = torch.load(initial_checkpoint, map_location=selected, weights_only=True)
+        if payload.get("architecture", "direct") != architecture:
+            raise ValueError("initial checkpoint architecture differs from this training run")
+        model.load_state_dict(payload["model_state_dict"])
+    names = list(model.state_dict())
+    base = torch.cat([value.detach().reshape(-1) for value in model.state_dict().values()])
+    sizes = [value.numel() for value in model.state_dict().values()]
+    population = [base.clone() for _ in range(population_size)]
+    population[0] = base.clone()
+    for i in range(1, population_size):
+        population[i] = base + torch.randn_like(base) * mutation_scale
+    started = time.perf_counter()
+    started_at = time.time()
+    # Mixed training changes only the attacker controller between matched
+    # seeded rollouts. Fitness rollouts do not use AD* route-based spawn hints.
+    def atomic_json(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(value, separators=(",", ":")))
+        temp.replace(path)
+
+    generation_opponents = [(_curriculum_opponents(
+        task, _curriculum_stage(generation / max(1, generations)),
+        learned_available=learned_opponent_available)
+        if curriculum else opponent_names) for generation in range(generations)]
+    requested_timesteps = (population_size * num_envs * horizon *
+                           sum(len(names) for names in generation_opponents))
+    atomic_json(status_path, {"status": "running", "algorithm": "generational", "task": task,
+        "architecture": architecture, "action_kind": action_kind,
+        "observation_dim": obs_dim, "action_dim": action_dim,
+        "opponent": opponent, "opponents": list(opponent_names),
+        "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
+        "learned_opponent_checkpoint": getattr(env, "learned_opponent_checkpoint", None),
+        "stationary_opponent_fraction": (.4 if curriculum else STATIC_OPPONENT_FRACTION),
+        "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
+                              "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
+                             if mixed_opponents else {opponent: 1.}),
+        "generation": 0, "total_generations": generations,
+        "population_size": population_size, "elite_count": elite_count,
+        "mutation_scale": mutation_scale, "requested_timesteps": requested_timesteps,
+        "completed_timesteps": 0, "started_at": started_at, "elapsed_seconds": 0.,
+        "initialization": ("checkpoint" if initial_checkpoint else "random"),
+        "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
+        "checkpoint": str(checkpoint), "observation_normalization": OBS_NORMALIZATION,
+        "drivetrain_config": env.drivetrain_config})
+    atomic_json(playback_path, {"task": task, "dt": playback_env.dt, "frames": []})
+
+    def set_vector(vector):
+        state, offset = {}, 0
+        for name, size, target in zip(names, sizes, model.state_dict().values()):
+            state[name] = vector[offset:offset + size].view_as(target)
+            offset += size
+        model.load_state_dict(state)
+
+    def save_checkpoint(generation, fitness):
+        torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
+                    "action_dim": action_dim, "action_kind": action_kind,
+                    "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
+                    "algorithm": "generational", "generation": generation,
+                    "fitness": fitness,
+                    "initialization": ("checkpoint" if initial_checkpoint else "random"),
+                                "drivetrain_config": env.drivetrain_config}, checkpoint)
+
+    def playback_frame(source_env, action, info, world_index=0, *, include_planner=True):
+        if action.ndim >= 2 and action.shape[-1] >= 2:
+            own_effort=(action[world_index, :2] * source_env.sim.speed[world_index, 0]).detach().cpu().tolist()
+        else:
+            own_effort=source_env.sim.velocity[world_index, 0, :2].detach().cpu().tolist()
+        strategic = source_env.action_mode == "strategic"
+        frame = {"robots": source_env.sim.pose[world_index].detach().cpu().tolist(),
+            "goal": None if strategic else source_env.goal[world_index].detach().cpu().tolist(),
+            "sizes": torch.stack((source_env.sim.length[world_index],
+                source_env.sim.width[world_index]), -1).reshape(-1).detach().cpu().tolist(),
+            "goal_radius": (None if strategic else float(source_env.goal_radius[world_index].item())),
+            "robot_effort_vectors": [own_effort,
+                info.get("opponent_effort_vector", torch.zeros((source_env.n, 2), device=selected))[
+                    world_index].detach().cpu().tolist()]}
+        paths = info.get("adstar_paths", []) if include_planner else []
+        path_lengths = info.get("adstar_path_lengths", [])
+        intercepts = info.get("predicted_intercepts", [])
+        intercept_times = info.get("predicted_intercept_times", [])
+        if len(paths) > world_index:
+            path_count=int(path_lengths[world_index].item()) if len(path_lengths) else paths.shape[1]
+            opponent_path = paths[world_index,:path_count].detach().cpu().tolist()
+            if strategic:
+                controlled = info.get("controlled_adstar_path", [])
+                controlled_lengths = info.get("controlled_adstar_path_lengths", [])
+                own_count = (int(controlled_lengths[world_index].item())
+                             if len(controlled_lengths) else controlled.shape[1])
+                own_path = controlled[world_index,:own_count].detach().cpu().tolist()
+                frame["adstar_paths"] = [own_path, opponent_path]
+            else:
+                frame["adstar_path"] = opponent_path
+        if len(intercepts) > world_index:
+            frame["predicted_intercept"] = intercepts[world_index].detach().cpu().tolist()
+        if len(intercept_times) > world_index:
+            frame["predicted_intercept_time"] = float(intercept_times[world_index].item())
+        for key, attribute in (("hub_active", "hub_active"),
+                               ("match_remaining", "match_remaining"), ("match_elapsed", "match_elapsed"),
+                               ("fuel_score_count", "fuel_score_count")):
+            value=getattr(source_env, attribute, None)
+            if value is not None:
+                item=value[world_index]
+                frame[key]=item.detach().cpu().tolist() if isinstance(item, torch.Tensor) else item
+        if strategic:
+            frame["hub_centers"] = source_env.hub_centers.detach().cpu().tolist()
+            active = source_env.piece_active[world_index]
+            pieces = torch.cat((source_env.piece_pos[world_index],
+                source_env.piece_owner[world_index,:,None].to(source_env.piece_pos.dtype)), -1)
+            frame["fuel_pieces"] = pieces[active].detach().cpu().tolist()
+        return frame
+
+    best_fitness = None
+    best_population_generation = None
+    best_run_score = None
+    history = []
+    best_frames = []
+    generation_playbacks = []
+    from .field import (ALLIANCE_ZONE_DEPTH, BUMP_ACCELERATION_SCALE,
+                        BUMP_SPEED_SCALE, bump_boxes, static_collision_boxes)
+    boxes = playback_env.field_boxes
+    playback_field = {"length": playback_env.sim.field_length, "width": playback_env.sim.field_width,
+        "alliance_zone_depth": ALLIANCE_ZONE_DEPTH,
+        "elements": [box.as_dict() for box in boxes],
+        "colliders": [box.as_dict() for box in static_collision_boxes(boxes)],
+        "bump_regions": [box.as_dict() for box in bump_boxes(boxes)],
+        "trench_paths": [box.as_dict() for box in boxes if "_trench_" in box.name and "_support_" not in box.name],
+        "trench_supports": [box.as_dict() for box in boxes if "_trench_support_" in box.name],
+        "bump_speed_scale": BUMP_SPEED_SCALE,
+        "bump_acceleration_scale": BUMP_ACCELERATION_SCALE}
+    for generation in range(generations):
+        stage = _curriculum_stage(generation / max(1, generations)) if curriculum else -1
+        opponent_names = generation_opponents[generation]
+        env.static_opponent_fraction = (.4 if stage == 0 else STATIC_OPPONENT_FRACTION)
+        rollout_multiplier = len(opponent_names)
+        completed_multiplier = sum(len(items) for items in generation_opponents[:generation + 1])
+        # All candidates see the same initial field layouts and randomization.
+        scenario_seed = seed + generation * 1009
+        candidate_scores = []
+        candidate_opponent_fitness = []
+        candidate_opponent_metrics = []
+        candidate_playbacks = []
+        for candidate, vector in enumerate(population):
+            set_vector(vector)
+            model.eval()
+            mode_returns = {}
+            mode_results = {}
+            frames = []
+            for mode in opponent_names:
+                env.opponent = mode
+                obs = _reset_obs(env.reset(seed=scenario_seed)).to(selected, dtype=torch.float32)
+                returns = torch.zeros(num_envs, device=selected)
+                alive = torch.ones(num_envs, device=selected, dtype=torch.bool)
+                holds = torch.zeros(num_envs, device=selected)
+                score_times = torch.zeros(num_envs, device=selected)
+                frame_stride = max(1, horizon // 60)
+                sample_done = False
+                with torch.no_grad():
+                    for step_index in range(horizon):
+                        action, _, _ = model.sample(obs, deterministic=True)
+                        next_obs, reward, done, truncated, info = env.step(action)
+                        was_alive = alive
+                        returns += reward.to(selected).reshape(num_envs) * was_alive
+                        holds += info["success"].to(selected).reshape(num_envs) * was_alive
+                        score_times += info["time_to_goal"].to(selected).reshape(num_envs) * was_alive
+                        ended = done.to(selected, dtype=torch.bool).reshape(num_envs) | truncated.to(selected, dtype=torch.bool).reshape(num_envs)
+                        alive &= ~ended
+                        if mode == playback_opponent and not sample_done and step_index % frame_stride == 0:
+                            if bool(alive[0].item()):
+                                frames.append(playback_frame(env, action, info))
+                            else:
+                                sample_done = True
+                        obs = next_obs.to(selected, dtype=torch.float32)
+                mode_returns[mode] = float(returns.mean().item())
+                hold_rate = float(holds.mean().item())
+                scored_count = float((score_times > 0).sum().item())
+                mode_results[mode] = {"hold_rate": hold_rate,
+                    "score_rate": 1. - hold_rate,
+                    "mean_score_time": float(score_times.sum().item() / max(1., scored_count)) if scored_count else None}
+            weights_l2 = sum(p.square().sum() for p in model.parameters() if p.ndim > 1)
+            regularization = float((l2_coef * weights_l2).item())
+            mode_fitness = {mode: mode_returns[mode] - regularization for mode in opponent_names}
+            if "adstar" in opponent_names and len(opponent_names) > 1:
+                scripted_mean = sum(mode_fitness[mode] for mode in opponent_names if mode != "adstar") / (len(opponent_names) - 1)
+                adstar_weight=MIXED_ADSTAR_FITNESS_WEIGHT
+                fitness = (adstar_weight * mode_fitness["adstar"] +
+                           MIXED_SCRIPTED_FITNESS_WEIGHT * scripted_mean)
+            else:
+                fitness = mode_fitness[opponent]
+            candidate_scores.append(fitness)
+            candidate_opponent_fitness.append(mode_fitness)
+            candidate_opponent_metrics.append(mode_results)
+            candidate_playbacks.append(frames)
+        order = sorted(range(population_size), key=candidate_scores.__getitem__, reverse=True)
+        generation_summary = {"generation": generation + 1,
+            "scenario_seed": scenario_seed,
+            "opponent_fitness_mean": {mode: sum(scores[mode] for scores in candidate_opponent_fitness) / population_size
+                                       for mode in opponent_names},
+            "candidates": [{"rank": rank + 1, "fitness": candidate_scores[candidate],
+                "opponent_fitness": candidate_opponent_fitness[candidate],
+                "opponent_metrics": candidate_opponent_metrics[candidate]}
+                for rank, candidate in enumerate(order[:5])]}
+        generation_playbacks.append(generation_summary)
+        atomic_json(out / "generation-playback" / f"generation-{generation + 1}.json", {
+            "task": task, "dt": env.dt, "field": playback_field,
+            "generation": generation + 1, "scenario_seed": scenario_seed,
+            "candidates": [{"rank": rank + 1, "fitness": candidate_scores[candidate],
+                "opponent_fitness": candidate_opponent_fitness[candidate],
+                "opponent_metrics": candidate_opponent_metrics[candidate],
+                "frames": candidate_playbacks[candidate]}
+                for rank, candidate in enumerate(order[:5])]})
+        elites = [population[i].clone() for i in order[:elite_count]]
+        parent_scores = [candidate_scores[i] for i in order[:elite_count]]
+        generation_best_fitness = parent_scores[0]
+        set_vector(elites[0])
+        # Keep one global champion. The playback score is its raw return on a
+        # fixed, single-world scenario, so it can be compared across generations.
+        became_global_best = best_fitness is None or generation_best_fitness > best_fitness
+        generation_run_score = None
+        if became_global_best:
+            obs = _reset_obs(playback_env.reset(seed=seed + 104729)).to(selected, dtype=torch.float32)
+            frames = []
+            run_return = torch.zeros(1, device=selected)
+            frame_stride = max(1, horizon // 120)
+            with torch.no_grad():
+                for step_index in range(horizon):
+                    action, _, _ = model.sample(obs, deterministic=True)
+                    obs, reward, done, truncated, info = playback_env.step(action)
+                    run_return += reward.to(selected).reshape(1)
+                    ended = bool((done.reshape(-1)[0] | truncated.reshape(-1)[0]).item())
+                    if step_index % frame_stride == 0 or ended:
+                        frames.append(playback_frame(playback_env, action, info))
+                    if ended:
+                        break
+            best_fitness = generation_best_fitness
+            best_population_generation = generation + 1
+            best_run_score = float(run_return.item())
+            generation_run_score = best_run_score
+            best_frames = frames
+            save_checkpoint(generation + 1, best_fitness)
+        atomic_json(playback_path, {"task": task, "dt": playback_env.dt,
+            "field": playback_field, "frames": best_frames,
+            "generations": generation_playbacks,
+            "best_population": {"generation": best_population_generation,
+                "fitness": best_fitness, "run_score": best_run_score},
+            "best_run_score": best_run_score, "validation_seed": seed + 104729})
+        winner_opponent_fitness = candidate_opponent_fitness[order[0]]
+        winner_opponent_metrics = candidate_opponent_metrics[order[0]]
+        history.append({"generation": generation + 1,
+                        "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
+                        "opponents": list(opponent_names),
+                        "best_fitness": generation_best_fitness,
+                        "generation_best_fitness": generation_best_fitness,
+                        "generation_best_run_score": generation_run_score,
+                        "became_global_best": became_global_best,
+                        "elite_mean_fitness": sum(parent_scores) / len(parent_scores),
+                        "population_best": max(candidate_scores),
+                        "population_mean": sum(candidate_scores) / len(candidate_scores),
+                        "opponent_fitness": winner_opponent_fitness,
+                        "opponent_metrics": winner_opponent_metrics})
+        elapsed = time.perf_counter() - started
+        status = {"status": "running", "algorithm": "generational", "task": task,
+            "opponent": opponent,
+            "stationary_opponent_fraction": env.static_opponent_fraction,
+            "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
+                                  "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
+                                 if mixed_opponents else {opponent: 1.}),
+            "opponent_metrics": winner_opponent_metrics,
+            "opponent_fitness": winner_opponent_fitness,
+            "generation": generation + 1, "total_generations": generations,
+            "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
+            "opponents": list(opponent_names),
+            "population_size": population_size, "elite_count": elite_count,
+            "num_envs": num_envs, "horizon": horizon,
+            "mutation_scale": mutation_scale, "l2_coefficient": l2_coef,
+            "best_fitness": best_fitness, "generation_best_fitness": generation_best_fitness,
+            "best_population_generation": best_population_generation,
+            "best_population_fitness": best_fitness, "best_run_score": best_run_score,
+            "elite_mean_fitness": history[-1]["elite_mean_fitness"],
+            "requested_timesteps": requested_timesteps,
+            "started_at": started_at,
+            "generation_history": history, "completed_timesteps": completed_multiplier * population_size * num_envs * horizon,
+            "transitions_per_second": completed_multiplier * population_size * num_envs * horizon / max(elapsed, 1e-12),
+            "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
+            "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+            "elapsed_seconds": elapsed,
+            "checkpoint": str(checkpoint), "architecture": architecture,
+            "action_kind": action_kind, "observation_dim": obs_dim,
+            "action_dim": action_dim, "observation_normalization": OBS_NORMALIZATION,
+            "initialization": ("checkpoint" if initial_checkpoint else "random"),
+                "drivetrain_config": env.drivetrain_config}
+        tmp = status_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(status, indent=2)); tmp.replace(status_path)
+        population = elites + [elites[i % elite_count] + torch.randn_like(base) * mutation_scale
+                               for i in range(population_size - elite_count)]
+    if selected.type == "cuda":
+        torch.cuda.synchronize(selected)
+    elapsed = time.perf_counter() - started
+    metadata = {"status": "completed", "algorithm": "generational", "task": task,
+        "architecture": architecture, "action_kind": action_kind,
+        "observation_dim": obs_dim, "action_dim": action_dim,
+        "opponent": opponent, "opponents": list(opponent_names),
+        "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
+        "learned_opponent_checkpoint": getattr(env, "learned_opponent_checkpoint", None),
+        "stationary_opponent_fraction": env.static_opponent_fraction,
+        "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
+                              "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
+                             if mixed_opponents else {opponent: 1.}),
+        "generations": generations, "population_size": population_size,
+        "elite_count": elite_count, "mutation_scale": mutation_scale, "l2_coefficient": l2_coef,
+        "best_fitness": best_fitness, "best_population_generation": best_population_generation,
+        "best_population_fitness": best_fitness, "best_run_score": best_run_score,
+        "opponent_metrics": history[-1]["opponent_metrics"] if history else {},
+        "opponent_fitness": history[-1]["opponent_fitness"] if history else {},
+        "generation_history": history,
+        "completed_timesteps": requested_timesteps,
+        "requested_timesteps": requested_timesteps,
+        "transitions_per_second": requested_timesteps / max(elapsed, 1e-12),
+        "elapsed_seconds": elapsed, "num_envs": num_envs, "horizon": horizon,
+        "started_at": started_at,
+        "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
+        "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+        "checkpoint": str(checkpoint), "observation_normalization": OBS_NORMALIZATION,
+        "initialization": ("checkpoint" if initial_checkpoint else "random"),
+        "drivetrain_config": env.drivetrain_config}
+    (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    status_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return metadata
+
+
+def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
+             episodes: int = 32, seed: int = 1000, num_envs: int = 32,
+             device: str = "cuda", opponent: str = "random",
+             output: str | Path = "metrics/tensor-evaluation.json",
+             horizon: int = 750) -> dict[str, Any]:
+    """Run deterministic policy evaluation and write a compact JSON report."""
+    if episodes < 1 or num_envs < 1 or horizon < 1:
+        raise ValueError("episodes, num_envs and horizon must be positive")
+    if task == "defense" and opponent == "mixed":
+        root = Path(output)
+        results = {}
+        matched_num_envs = max(num_envs, episodes)
+        for mode in MIXED_DEFENSE_OPPONENTS:
+            mode_output = root.parent / f"{root.stem}-{mode}" / "metrics.json"
+            results[mode] = evaluate(checkpoint, task=task, episodes=episodes, seed=seed,
+                num_envs=matched_num_envs, device=device, opponent=mode, output=mode_output,
+                horizon=horizon)
+        by_opponent = {}
+        for mode, metrics in results.items():
+            hold_rate = float(metrics.get("mean_success", 0.))
+            wins = int(round(hold_rate * episodes))
+            lower, upper = _wilson_interval(wins, episodes)
+            score_rate = 1. - hold_rate
+            mean_score_time = (float(metrics.get("mean_time_to_goal", 0.)) / score_rate
+                               if score_rate > 0. else None)
+            by_opponent[mode] = {"hold_rate": hold_rate,
+                "hold_count": wins, "score_count": episodes - wins,
+                "hold_rate_95ci": [lower, upper],
+                "attacker_score_rate": score_rate,
+                "mean_score_time": mean_score_time,
+                "episodes": episodes, "mean_return": metrics.get("mean_return"),
+                "mean_episode_length": metrics.get("mean_episode_length"),
+                "metrics_file": str(root.parent / f"{root.stem}-{mode}" / "metrics.json")}
+        passed = by_opponent["adstar"]["hold_rate"] >= .70 and by_opponent["offense"]["hold_rate"] >= .70
+        report = {"task": task, "opponent": "mixed", "checkpoint": str(checkpoint),
+            "episodes_per_opponent": episodes, "matched_envs": matched_num_envs,
+            "seed": seed, "horizon": horizon,
+            "opponent_results": by_opponent, "acceptance_threshold": .70,
+            "acceptance_passed": passed,
+            "acceptance_required_opponents": ["adstar", "offense"]}
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.write_text(json.dumps(report, indent=2, sort_keys=True))
+        return report
+    selected = _device(device)
+    opponent = _task_opponent(task,opponent)
+    return _evaluate_once(checkpoint, task, episodes, seed, num_envs,
+                          selected, opponent, output, horizon=horizon)
+
+
+def _wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    if total <= 0:
+        return 0., 1.
+    p = successes / total
+    denom = 1. + z * z / total
+    center = (p + z * z / (2. * total)) / denom
+    radius = z * math.sqrt(p * (1. - p) / total + z * z / (4. * total * total)) / denom
+    return max(0., center - radius), min(1., center + radius)
+
+
+def _scripted_game_action(env, task: str) -> torch.Tensor:
+    """Small game-state strategy whose navigation is delegated to simulator AD*."""
+    if task == "defense":
+        # The simulator resolves class 2 to an intercept of the attacker's
+        # current motion lane; this policy never reads the scoring goal.
+        return torch.full((env.n,), 2, device=env.device, dtype=torch.long)
+    has_piece = (env.piece_active & (env.piece_owner == 0)).any(-1)
+    can_score = has_piece & env.hub_active[:, 0]
+    # Strategic class 1 routes to the hub; class 0 collects the nearest free
+    # piece (or returns to the staging approach when none are available).
+    return can_score.to(torch.long)
+
+
+def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
+                   output, horizon=750, scripted_strategy=None):
+    payload = (torch.load(checkpoint, map_location=device, weights_only=True)
+               if checkpoint is not None else None)
+    architecture = (payload.get("architecture", "direct") if payload is not None
+                    else "strategic_adstar")
+    action_kind = (payload.get("action_kind", "continuous") if payload is not None
+                   else "categorical")
+    model = None
+    if payload is not None:
+        model = ActorCritic(payload.get("obs_dim", OBS_DIM),
+                            payload.get("action_dim", ACTION_DIM), action_kind).to(device)
+        model.load_state_dict(payload["model_state_dict"])
+        model.eval()
+    scenario_opponent = "adstar" if task == "defense" and opponent in MIXED_DEFENSE_OPPONENTS else opponent
+    env = _env(num_envs, task, device, seed, scenario_opponent, horizon,
+               normalize_observations=bool(payload and
+                   payload.get("observation_normalization") == OBS_NORMALIZATION),
+               architecture=architecture)
+    # Planner routes must not determine the defender's initial position or
+    # enter its policy inputs during defense evaluation.
+    if task == "defense":
+        env.adstar_spawn_hint = False
+    env.opponent = opponent
+    checkpoint_drivetrain_config = payload.get("drivetrain_config") if payload else None
+    if (checkpoint_drivetrain_config is not None and
+            checkpoint_drivetrain_config != env.drivetrain_config):
+        raise ValueError("checkpoint drivetrain configuration does not match this simulator; "
+                         "use the same FRC_DRIVETRAIN_CONFIG used during training")
+    is_adstar_defense = task == "defense" and opponent == "adstar"
+    # The traditional "guard" mode is now the same obstacle-aware AD* policy;
+    # keep its public opponent name so existing training/evaluation commands
+    # and dashboard links continue to work.
+    is_adstar_defender = task == "counter_defense" and opponent in ("guard", "adstar_defender")
+    uses_adstar_playback_route = is_adstar_defense or is_adstar_defender
+    run_dir = Path(output).parent
+    status_path = run_dir / "status.json"
+    playback_path = run_dir / "playback.json"
+    playback_frames = []
+    eval_start = time.perf_counter()
+
+    def atomic_json(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(value, indent=2))
+        temp.replace(path)
+
+    from .field import (ALLIANCE_ZONE_DEPTH, BUMP_ACCELERATION_SCALE,
+                        BUMP_SPEED_SCALE, bump_boxes, static_collision_boxes)
+    playback_field = {"length": env.sim.field_length, "width": env.sim.field_width,
+        "alliance_zone_depth": ALLIANCE_ZONE_DEPTH,
+        "elements": [box.as_dict() for box in env.field_boxes],
+        "colliders": [box.as_dict() for box in static_collision_boxes(env.field_boxes)],
+        "bump_regions": [box.as_dict() for box in bump_boxes(env.field_boxes)],
+        "trench_paths": [box.as_dict() for box in env.field_boxes if "_trench_" in box.name and "_support_" not in box.name],
+        "trench_supports": [box.as_dict() for box in env.field_boxes if "_trench_support_" in box.name],
+        "bump_speed_scale": BUMP_SPEED_SCALE,
+        "bump_acceleration_scale": BUMP_ACCELERATION_SCALE}
+
+    playback_scenarios = []
+    playback_scenario_done = []
+    # Every dashboard mode records the same seeded scenario batch. Endpoint
+    # generation lives in TensorDefenseEnv, so policy and opponent modes differ
+    # only in motion, never in scenario sampling.
+    playback_scenario_count = min(3, num_envs, episodes)
+    if playback_scenario_count:
+        playback_scenarios = [{"id": str(i + 1), "label": f"Scenario {i + 1}", "frames": []}
+            for i in range(playback_scenario_count)]
+        playback_scenario_done = [False] * playback_scenario_count
+
+    def write_playback():
+        atomic_json(playback_path, {"task": "adstar_attacker_defense" if is_adstar_defense else task,
+                                    "scenario_seed": seed, "dt": env.dt,
+                                    "field": playback_field, "frames": playback_frames,
+                                    "scenarios": playback_scenarios})
+
+    def eval_status(status):
+        hold_rate = sum(metric_rows["success"]) / max(1, len(metric_rows["success"]))
+        score_times = [value for value in metric_rows["time_to_goal"] if value > 0]
+        value = {"status": status, "task": "defense", "opponent": "adstar",
+                 "checkpoint": str(checkpoint) if checkpoint else None, "device": str(device),
+                 "checkpoint_mtime": Path(checkpoint).stat().st_mtime if checkpoint else None,
+                 "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+                 "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+                 "num_envs": num_envs,
+                 "progress_unit": "episodes", "completed_timesteps": len(scores),
+                 "requested_timesteps": episodes, "completed_episodes": len(scores),
+                 "requested_episodes": episodes, "adstar_defender_hold_rate": hold_rate,
+                 "adstar_attacker_score_rate": len(score_times) / max(1, len(scores)),
+                 "adstar_mean_attack_time_to_score": sum(score_times) / max(1, len(score_times)) if score_times else None,
+                 "adstar_replan_interval_steps": env.adstar_replan_interval,
+                 "elapsed_seconds": time.perf_counter() - eval_start,
+                 "drivetrain_config": env.drivetrain_config}
+        atomic_json(status_path, value)
+
+    if is_adstar_defender:
+        atomic_json(status_path, {"status": "running", "task": task,
+            "opponent": opponent, "checkpoint": str(checkpoint),
+            "device": str(device), "device_name": torch.cuda.get_device_name(device)
+            if device.type == "cuda" else "CPU", "num_envs": num_envs,
+            "progress_unit": "episodes", "completed_timesteps": 0,
+            "requested_timesteps": episodes, "started_at": time.time(),
+            "drivetrain_config": env.drivetrain_config,
+            "checkpoint_drivetrain_config": checkpoint_drivetrain_config})
+
+    obs = _reset_obs(env.reset()).to(device=device, dtype=torch.float32)
+    planning_latencies = []
+    planning_calls = 0
+    for planner_name in ("_adstar_planners", "_adstar_defender_planners",
+                         "_adstar_tactical_planner"):
+        planner = getattr(env, planner_name, None)
+        if planner is None or not callable(getattr(planner, "plan", None)):
+            continue
+        original_plan = planner.plan
+        def timed_plan(*args, _original=original_plan, **kwargs):
+            nonlocal planning_calls
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            result = _original(*args, **kwargs)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            planning_latencies.append((time.perf_counter() - started) * 1000.)
+            planning_calls += 1
+            return result
+        try:
+            planner.plan = timed_plan
+        except (AttributeError, TypeError):
+            pass
+    start_robot = 0 if task == "counter_defense" else 1
+    for i, scenario in enumerate(playback_scenarios):
+        scenario["start"] = env.sim.pose[i, start_robot, :2].detach().cpu().tolist()
+        scenario["goal"] = (None if architecture == "strategic_adstar"
+                             else env.goal[i].detach().cpu().tolist())
+    playback_reference_routes = []
+    if not uses_adstar_playback_route and task != "defense":
+        *_, playback_reference_routes = _adstar_reference(
+            env, device, max_worlds=playback_scenario_count,
+            world_indices=range(playback_scenario_count), include_all_routes=True)
+    totals = torch.zeros(num_envs, device=device)
+    lengths = torch.zeros(num_envs, dtype=torch.long, device=device)
+    base_quota, extra_quota = divmod(episodes, num_envs)
+    episode_quota = torch.full((num_envs,), base_quota, dtype=torch.long, device=device)
+    if extra_quota:
+        episode_quota[:extra_quota] += 1
+    episode_counts = torch.zeros((num_envs,), dtype=torch.long, device=device)
+    active = episode_quota > 0
+    scores, episode_lengths = [], []
+    metric_names = ("contact", "opponent_contact", "field_contact", "wall_contact",
+                    "opponent_field_contact", "opponent_wall_contact", "opponent_static_contact",
+                    "static_contact_started", "contact_duration", "contact_count", "time_blocked", "time_to_goal",
+                    "success", "defensive_delay", "useful_position", "path_length",
+                    "command_smoothness", "spin_rate_ratio", "maneuver_penalty",
+                    "path_efficiency", "out_of_bounds")
+    metric_totals = {name: torch.zeros(num_envs,device=device) for name in metric_names}
+    metric_rows = {name: [] for name in metric_names}
+    game_event_names = ("fuel_acquired_event", "fuel_scored_event",
+                        "fuel_denied_event", "fuel_abandoned_event")
+    game_event_totals = {name: torch.zeros((num_envs, 2), device=device)
+                         for name in game_event_names}
+    game_metric_rows = {name: [] for name in (
+        "acquisitions", "scores", "denied_objectives", "abandoned_objectives",
+        "cycle_time", "opponent_acquisitions", "opponent_scores",
+        "opponent_denied_objectives", "opponent_abandoned_objectives",
+        "total_simulated_score")}
+    acquired_at = torch.zeros((num_envs, env.piece_owner.shape[1], 2), device=device)
+    previous_piece_owner = env.piece_owner.clone()
+    cycle_time_sum = torch.zeros((num_envs, 2), device=device)
+    cycle_count = torch.zeros((num_envs, 2), device=device)
+    inference_latencies = []
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_playback()
+    if is_adstar_defense:
+        eval_status("evaluating")
+    while len(scores) < episodes:
+        if model is not None:
+            inference_start=time.perf_counter()
+            with torch.no_grad():
+                actions, _, _ = model.sample(obs, deterministic=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            inference_latencies.append((time.perf_counter()-inference_start)*1000.)
+        elif scripted_strategy in ("offense", "defense"):
+            actions = _scripted_game_action(env, task)
+        else:
+            raise ValueError("evaluation needs a valid checkpoint or an explicit scripted strategy")
+        next_obs, rewards, dones, truncated, info = env.step(actions)
+        active_float = active.to(device=device, dtype=torch.float32)
+        totals += rewards.to(device=device, dtype=torch.float32).reshape(num_envs) * active_float
+        lengths += active.to(device=device, dtype=torch.long)
+        for name in metric_names:
+            value=info.get(name)
+            if value is not None:
+                metric_totals[name]+=torch.as_tensor(value,device=device,dtype=torch.float32).reshape(num_envs) * active_float
+        for name in game_event_names:
+            value = info.get(name)
+            if value is not None:
+                game_event_totals[name] += torch.as_tensor(value, device=device,
+                    dtype=torch.float32).reshape(num_envs, 2) * active_float[:, None]
+        current_owner = env.piece_owner
+        # Use simulated seconds for robot acquisition-to-score cycles; the
+        # strategic match clock may be compressed to fit the rollout horizon.
+        episode_clock = lengths.to(dtype=torch.float32) * env.dt
+        for robot in (0, 1):
+            newly_acquired = (current_owner == robot) & (previous_piece_owner != robot)
+            acquired_at[:, :, robot] = torch.where(newly_acquired & active[:, None],
+                episode_clock[:, None], acquired_at[:, :, robot])
+            just_scored = (current_owner == -2) & (previous_piece_owner == robot)
+            elapsed_held = (episode_clock[:, None] - acquired_at[:, :, robot]).clamp_min(0.)
+            cycle_time_sum[:, robot] += (elapsed_held * just_scored.float()).sum(-1) * active_float
+            cycle_count[:, robot] += just_scored.sum(-1).float() * active_float
+            released = (previous_piece_owner == robot) & (current_owner != robot)
+            acquired_at[:, :, robot] = torch.where(released, torch.zeros_like(acquired_at[:, :, robot]),
+                                                    acquired_at[:, :, robot])
+        previous_piece_owner.copy_(current_owner)
+        finished = active & (dones.to(device=device, dtype=torch.bool).reshape(num_envs) | truncated.to(device=device, dtype=torch.bool).reshape(num_envs))
+        if playback_scenario_count:
+            # Keep a few independent worlds as separate rollouts; never splice
+            # parallel worlds into one playback timeline.
+            sample_finished = False
+            wrote_frame = False
+            for i in range(playback_scenario_count):
+                if playback_scenario_done[i]:
+                    continue
+                sample_finished = bool(finished[i].item())
+                step_index = int(lengths[i].item())
+                if step_index % 3 == 0 or sample_finished:
+                    paths = info.get("adstar_paths", [])
+                    path_lengths = info.get("adstar_path_lengths", [])
+                    intercepts = info.get("predicted_intercepts", [])
+                    intercept_times = info.get("predicted_intercept_times", [])
+                    if uses_adstar_playback_route and len(paths):
+                        path_count=int(path_lengths[i].item()) if len(path_lengths) else paths.shape[1]
+                        route=paths[i,:path_count].detach().cpu().tolist()
+                        predicted_intercept=intercepts[i].detach().cpu().tolist() if is_adstar_defense and len(intercepts) else None
+                        predicted_intercept_time=float(intercept_times[i].item()) if is_adstar_defense and len(intercept_times) else None
+                    else:
+                        route=playback_reference_routes[i] if playback_reference_routes else []
+                        predicted_intercept=None
+                        predicted_intercept_time=None
+                    pose = env.sim.pose[i].detach().cpu().tolist()
+                    sizes = torch.stack((env.sim.length[i], env.sim.width[i]), -1).reshape(-1).detach().cpu().tolist()
+                    own_effort=((actions[i, :2] * env.sim.speed[i, 0]).detach().cpu().tolist()
+                                if actions.ndim >= 2 and actions.shape[-1] >= 2
+                                else env.sim.velocity[i, 0, :2].detach().cpu().tolist())
+                    game_frame={}
+                    for key, attribute in (("hub_active", "hub_active"),
+                                           ("match_remaining", "match_remaining"), ("match_elapsed", "match_elapsed"),
+                                           ("fuel_score_count", "fuel_score_count")):
+                        value=getattr(env,attribute,None)
+                        if value is not None:
+                            item=value[i]
+                            game_frame[key]=item.detach().cpu().tolist() if isinstance(item,torch.Tensor) else item
+                    if env.action_mode == "strategic":
+                        game_frame["hub_centers"] = env.hub_centers.detach().cpu().tolist()
+                        active_fuel = env.piece_active[i]
+                        fuel_pieces = torch.cat((env.piece_pos[i],
+                            env.piece_owner[i,:,None].to(env.piece_pos.dtype)), -1)
+                        game_frame["fuel_pieces"] = fuel_pieces[active_fuel].detach().cpu().tolist()
+                        controlled = info.get("controlled_adstar_path", [])
+                        controlled_lengths = info.get("controlled_adstar_path_lengths", [])
+                        if len(controlled):
+                            own_count = (int(controlled_lengths[i].item()) if len(controlled_lengths)
+                                         else controlled.shape[1])
+                            own_path = controlled[i,:own_count].detach().cpu().tolist()
+                            game_frame["adstar_paths"] = [own_path, route]
+                    strategic = env.action_mode == "strategic"
+                    frame = {"robots": pose,
+                    "goal": None if strategic else env.goal[i].detach().cpu().tolist(),
+                    "sizes": sizes, "goal_radius": None if strategic else float(env.goal_radius[i].item()),
+                    "chassis_effort_vector": own_effort,
+                    "robot_effort_vectors": [
+                        own_effort,
+                        info.get("opponent_effort_vector", torch.zeros((num_envs, 2), device=device))[i].detach().cpu().tolist()],
+                    **({} if strategic else {"adstar_path": [list(point) for point in route]}),
+                    "predicted_intercept": predicted_intercept,
+                    "predicted_intercept_time": predicted_intercept_time}
+                    frame.update(game_frame)
+                    playback_scenarios[i]["frames"].append(frame)
+                    if i == 0:
+                        playback_frames.append(frame)
+                    wrote_frame = True
+                if sample_finished:
+                    playback_scenario_done[i] = True
+            if wrote_frame and (len(playback_scenarios[0]["frames"]) % 10 == 0 or any(playback_scenario_done)):
+                write_playback()
+        for index in torch.nonzero(finished, as_tuple=False).flatten():
+            if len(scores) < episodes:
+                i = int(index.item())
+                scores.append(float(totals[i].item()))
+                length_i=int(lengths[i].item())
+                episode_lengths.append(length_i)
+                episode_counts[i] += 1
+                for name in metric_names:
+                    value=float(metric_totals[name][i].item())
+                    metric_rows[name].append(value/length_i if name=="contact" else value)
+                for event_name, row_name in (("fuel_acquired_event", "acquisitions"),
+                    ("fuel_scored_event", "scores"), ("fuel_denied_event", "denied_objectives")):
+                    game_metric_rows[row_name].append(float(game_event_totals[event_name][i, 0].item()))
+                    opponent_row = "opponent_" + row_name
+                    game_metric_rows[opponent_row].append(float(game_event_totals[event_name][i, 1].item()))
+                game_metric_rows["abandoned_objectives"].append(None)
+                game_metric_rows["opponent_abandoned_objectives"].append(None)
+                cycle_n = float(cycle_count[i, 0].item())
+                game_metric_rows["cycle_time"].append(
+                    float(cycle_time_sum[i, 0].item()) / cycle_n if cycle_n else None)
+                game_metric_rows["total_simulated_score"].append(
+                    float(game_event_totals["fuel_scored_event"][i].sum().item()))
+                totals[i] = 0
+                lengths[i] = 0
+                for values in metric_totals.values():
+                    values[i]=0
+                for values in game_event_totals.values():
+                    values[i].zero_()
+                acquired_at[i].zero_()
+                cycle_time_sum[i].zero_()
+                cycle_count[i].zero_()
+                previous_piece_owner[i].fill_(-1)
+                if is_adstar_defense:
+                    eval_status("evaluating")
+        reset_done = getattr(env, "reset_done", None)
+        if reset_done is None:
+            raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
+        active &= ~finished
+        reset_mask = finished & (episode_counts < episode_quota)
+        if len(scores) < episodes and bool(reset_mask.any().item()):
+            active |= reset_mask
+            next_obs = reset_done(reset_mask)
+            totals.masked_fill_(reset_mask, 0.)
+            lengths.masked_fill_(reset_mask, 0)
+            for values in metric_totals.values():
+                values.masked_fill_(reset_mask, 0.)
+            for values in game_event_totals.values():
+                values[reset_mask] = 0.
+            acquired_at[reset_mask] = 0.
+            cycle_time_sum[reset_mask] = 0.
+            cycle_count[reset_mask] = 0.
+            previous_piece_owner[reset_mask] = env.piece_owner[reset_mask]
+        obs = next_obs.to(device=device, dtype=torch.float32)
+    write_playback()
+    result = {"task": task, "opponent": opponent, "checkpoint": str(checkpoint) if checkpoint else None,
+              "checkpoint_mtime": Path(checkpoint).stat().st_mtime if checkpoint else None,
+              "episodes": episodes, "seed": seed, "device": str(device),
+              "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+              "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+              "drivetrain_config": env.drivetrain_config,
+              "mean_return": sum(scores)/len(scores),
+              "mean_episode_length": sum(episode_lengths)/len(episode_lengths),
+              "returns": scores, "episode_lengths": episode_lengths}
+    result.update({"mean_"+name:sum(values)/len(values) for name,values in metric_rows.items() if values})
+    def optional_mean(values):
+        available = [float(value) for value in values if value is not None]
+        return sum(available) / len(available) if available else None
+    result.update({
+        "mean_acquisitions": optional_mean(game_metric_rows["acquisitions"]),
+        "mean_scores": optional_mean(game_metric_rows["scores"]),
+        "mean_cycle_time": optional_mean(game_metric_rows["cycle_time"]),
+        "mean_denied_objectives": optional_mean(game_metric_rows["denied_objectives"]),
+        "mean_abandoned_objectives": optional_mean(game_metric_rows["abandoned_objectives"]),
+        "mean_opponent_acquisitions": optional_mean(game_metric_rows["opponent_acquisitions"]),
+        "mean_opponent_scores": optional_mean(game_metric_rows["opponent_scores"]),
+        "mean_opponent_denied_objectives": optional_mean(game_metric_rows["opponent_denied_objectives"]),
+        "mean_opponent_abandoned_objectives": optional_mean(game_metric_rows["opponent_abandoned_objectives"]),
+        "mean_total_score": optional_mean(game_metric_rows["scores"]),
+        "mean_total_simulated_score": optional_mean(game_metric_rows["total_simulated_score"]),
+        "score_semantics": "scored FUEL piece count; simulator does not assign official match points",
+        "cycle_time_units": "simulated seconds from piece acquisition to scoring",
+        "unavailable_metrics": ["abandoned_objectives (not modeled by simulator)"],
+        "game_metrics_by_episode": game_metric_rows,
+        "planning_latency_ms_mean": optional_mean(planning_latencies),
+        "planning_latency_ms_p95": (sorted(planning_latencies)[min(len(planning_latencies)-1,
+            int(.95*(len(planning_latencies)-1)))] if planning_latencies else None),
+        "planning_calls": planning_calls,
+        "scripted_strategy": scripted_strategy,
+    })
+    if is_adstar_defense:
+        hold_rate = sum(metric_rows["success"]) / max(1, len(metric_rows["success"]))
+        score_times = [value for value in metric_rows["time_to_goal"] if value > 0]
+        result.update({"adstar_defender_hold_rate": hold_rate,
+                       "adstar_attacker_score_rate": len(score_times) / episodes,
+                       "adstar_mean_attack_time_to_score": sum(score_times) / max(1, len(score_times)) if score_times else None,
+                       "adstar_replan_interval_steps": env.adstar_replan_interval})
+    sorted_latency=sorted(inference_latencies)
+    result["inference_latency_ms_mean"]=sum(inference_latencies)/max(1,len(inference_latencies))
+    result["inference_latency_ms_p95"]=sorted_latency[min(len(sorted_latency)-1,int(.95*(len(sorted_latency)-1)))] if sorted_latency else 0.
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2, sort_keys=True))
+    if is_adstar_defense:
+        eval_status("completed")
+    elif is_adstar_defender:
+        atomic_json(status_path, {**result, "status": "completed",
+            "progress_unit": "episodes", "completed_timesteps": episodes,
+            "requested_timesteps": episodes,
+            "checkpoint_drivetrain_config": checkpoint_drivetrain_config})
+    return result
+
+
+def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
+        defense_checkpoint: str | Path | None = None, episodes: int = 8,
+        seed: int = 4100, num_envs: int = 8, device: str = "cuda",
+        output: str | Path = "metrics/ablations.json", horizon: int = 750) -> dict[str, Any]:
+    """Run matched strategic-policy comparisons and persist the canonical report.
+
+    Scripted sides emit only the environment's semantic collect/score/intercept
+    classes; AD* remains responsible for all resulting navigation.
+    """
+    if episodes < 1 or num_envs < 1 or horizon < 1:
+        raise ValueError("episodes, num_envs and horizon must be positive")
+    selected = _device(device)
+    matched_envs = max(num_envs, episodes)
+    output_path = Path(output)
+    specs = (
+        ("scripted_offense_adstar", "counter_defense", "adstar_defender",
+         "offense", None, "offense_pair"),
+        ("learned_offense_adstar", "counter_defense", "adstar_defender",
+         None, offense_checkpoint, "offense_pair"),
+        ("scripted_defense_adstar", "defense", "adstar", "defense", None,
+         "defense_pair"),
+        ("learned_defense_adstar", "defense", "adstar", None,
+         defense_checkpoint, "defense_pair"),
+    )
+    evaluations: list[dict[str, Any]] = []
+    for name, task, opponent, scripted_strategy, checkpoint, group in specs:
+        missing_reason = None
+        architecture = "strategic_adstar" if scripted_strategy else None
+        if not scripted_strategy:
+            if not checkpoint or not Path(checkpoint).is_file():
+                missing_reason = "No checkpoint supplied for this learned role."
+            else:
+                checkpoint_path = Path(checkpoint)
+                try:
+                    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                    missing_reason = f"Could not load checkpoint: {exc}"
+                    payload = None
+                if payload is not None:
+                    architecture = payload.get("architecture", "direct")
+                    if architecture not in ("tactical_adstar", "strategic_adstar"):
+                        missing_reason = ("Checkpoint is direct-control; a tactical+AD* or "
+                                          "strategic+AD* checkpoint is required.")
+                    else:
+                        metadata = None
+                        for metadata_path in (checkpoint_path.parent / "metadata.json",
+                                              checkpoint_path.parent / "status.json"):
+                            try:
+                                metadata = json.loads(metadata_path.read_text())
+                                break
+                            except (OSError, json.JSONDecodeError):
+                                continue
+                        if metadata is None or metadata.get("task") != task:
+                            found_task = metadata.get("task") if metadata else None
+                            missing_reason = (f"Checkpoint task role cannot be confirmed: expected {task}, "
+                                              f"found {found_task or 'no task metadata'}.")
+        if missing_reason:
+            evaluations.append({"name": name, "task": task, "architecture": architecture,
+                "role": "offense" if task == "counter_defense" else "defense",
+                "opponent": opponent, "episodes": 0, "seed": seed,
+                "seeds": [], "comparison_group": group, "comparable": False,
+                "scenario_comparability": "not evaluable", "evaluated": False,
+                "missing_reason": missing_reason, "checkpoint": str(checkpoint) if checkpoint else None})
+            continue
+        mode_output = output_path.parent / f"{output_path.stem}-{name}" / "metrics.json"
+        try:
+            metrics = _evaluate_once(checkpoint, task, episodes, seed, matched_envs,
+                selected, opponent, mode_output, horizon=horizon,
+                scripted_strategy=scripted_strategy)
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            evaluations.append({"name": name, "task": task, "architecture": architecture,
+                "role": "offense" if task == "counter_defense" else "defense",
+                "opponent": opponent, "episodes": 0, "seed": seed,
+                "seeds": [], "comparison_group": group, "comparable": False,
+                "scenario_comparability": "not evaluable", "evaluated": False,
+                "missing_reason": f"Evaluation failed: {exc}",
+                "checkpoint": str(checkpoint) if checkpoint else None})
+            continue
+        score_rate = (float(metrics.get("mean_success", 0.)) if task == "counter_defense"
+                      else 1. - float(metrics.get("mean_success", 0.)))
+        evaluations.append({
+            "name": name, "task": task, "role": "offense" if task == "counter_defense" else "defense",
+            "architecture": architecture or "scripted_adstar", "opponent": opponent,
+            "episodes": episodes, "seed": seed,
+            "seeds": list(range(seed, seed + episodes)),
+            "comparison_group": group, "comparable": False,
+            "scenario_comparable": False, "scenario_comparability": "awaiting paired role result",
+            "evaluated": True, "missing_reason": None,
+            "checkpoint": str(checkpoint) if checkpoint else None,
+            "metrics_file": str(mode_output),
+            "success_rate": float(metrics.get("mean_success", 0.)),
+            "scoring_rate": score_rate,
+            "concession_rate": score_rate if task == "defense" else None,
+            "mean_acquisitions": metrics.get("mean_acquisitions"),
+            "mean_scores": metrics.get("mean_scores"),
+            "mean_cycle_time": metrics.get("mean_cycle_time"),
+            # Defensive delay is computed below as a paired score-time delta;
+            # a per-step counter is not a counterfactual delay measurement.
+            "mean_defensive_delay": None,
+            "mean_attacker_time_to_score": (metrics.get("mean_time_to_goal")
+                if task == "defense" and metrics.get("mean_time_to_goal", 0.) > 0 else None),
+            "mean_denied_objectives": metrics.get("mean_denied_objectives"),
+            "mean_abandoned_objectives": metrics.get("mean_abandoned_objectives"),
+            "mean_contacts": metrics.get("mean_contact_count"),
+            "mean_contact_fraction": metrics.get("mean_contact"),
+            "mean_total_score": metrics.get("mean_total_score"),
+            "mean_total_simulated_score": metrics.get("mean_total_simulated_score"),
+            "mean_opponent_score": metrics.get("mean_opponent_scores"),
+            "mean_path_efficiency": metrics.get("mean_path_efficiency"),
+            "inference_latency_ms_mean": metrics.get("inference_latency_ms_mean"),
+            "planning_latency_ms_mean": metrics.get("planning_latency_ms_mean"),
+            "planning_calls": metrics.get("planning_calls"),
+            "score_semantics": metrics.get("score_semantics"),
+            "horizon": horizon, "num_envs": matched_envs,
+            "drivetrain_config": metrics.get("drivetrain_config"),
+        })
+    for group in ("offense_pair", "defense_pair"):
+        pair = [row for row in evaluations if row["comparison_group"] == group]
+        complete = len(pair) == 2 and all(row.get("evaluated") for row in pair)
+        for row in pair:
+            row["comparable"] = complete
+            row["scenario_comparable"] = complete
+            row["scenario_comparability"] = (
+                f"matched seed={seed}, episodes={episodes}, horizon={horizon}"
+                if complete else "unpaired: learned checkpoint unavailable or evaluation failed")
+            row["comparable_to"] = [other["name"] for other in pair
+                                    if other is not row] if complete else []
+        if group == "defense_pair" and complete:
+            baseline = next((row for row in pair if row["name"] == "scripted_defense_adstar"), None)
+            learned = next((row for row in pair if row["name"] == "learned_defense_adstar"), None)
+            if baseline is not None and learned is not None:
+                baseline_time = baseline.get("mean_attacker_time_to_score")
+                learned_time = learned.get("mean_attacker_time_to_score")
+                match_duration = horizon * .02
+                if baseline_time is not None:
+                    observed_time = learned_time if learned_time is not None else match_duration
+                    learned["mean_defensive_delay"] = observed_time - baseline_time
+                    baseline["mean_defensive_delay"] = 0.
+                    learned["defensive_delay_definition"] = (
+                        "learned defender attacker-score time minus paired scripted-defense time; "
+                        "no score is censored at episode duration")
+    report = {"schema_version": 1, "created_at": time.time(),
+        "task": "FRC FUEL strategic+AD* ablations", "episodes_per_strategy": episodes,
+        "seed": seed, "matched_envs": matched_envs, "horizon": horizon,
+        "device": str(selected), "evaluations": evaluations}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(report, indent=2, sort_keys=True))
+    temp_path.replace(output_path)
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Tensor-resident FRC defense learning")
+    commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser("train")
+    p.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
+    p.add_argument("--steps", type=int, default=1_000_000)
+    p.add_argument("--envs", type=int, default=256)
+    p.add_argument("--rollout-steps", type=int, default=128)
+    p.add_argument("--horizon", type=int, default=750)
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--opponent")
+    p.add_argument("--epochs", type=int, default=4)
+    p.add_argument("--algorithm", choices=("generational", "ppo"), default="generational")
+    p.add_argument("--architecture", choices=("strategic_adstar", "tactical_adstar", "direct"),
+                   default="strategic_adstar")
+    p.add_argument("--generations", type=int, default=20)
+    p.add_argument("--population", type=int, default=8)
+    p.add_argument("--elites", type=int, default=2)
+    p.add_argument("--mutation-scale", type=float, default=.01)
+    p.add_argument("--l2-coef", type=float, default=1e-5)
+    p.add_argument("--initial-checkpoint")
+    p.add_argument("--output", default="checkpoints/tensor-ppo")
+    p.add_argument("--device", default="cuda")
+    e = commands.add_parser("evaluate")
+    e.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
+    e.add_argument("--checkpoint", required=True)
+    e.add_argument("--episodes", type=int, default=32)
+    e.add_argument("--horizon", type=int, default=750)
+    e.add_argument("--envs", type=int, default=32)
+    e.add_argument("--seed", type=int, default=1000)
+    e.add_argument("--opponent", default="random")
+    e.add_argument("--output", default="metrics/tensor-evaluation.json")
+    e.add_argument("--device", default="cuda")
+    a = commands.add_parser("evaluate-game-ablations")
+    a.add_argument("--offense-checkpoint")
+    a.add_argument("--defense-checkpoint")
+    a.add_argument("--episodes", type=int, default=8)
+    a.add_argument("--horizon", type=int, default=750)
+    a.add_argument("--envs", type=int, default=8)
+    a.add_argument("--seed", type=int, default=4100)
+    a.add_argument("--output", default="metrics/ablations.json")
+    a.add_argument("--device", default="cuda")
+    args = parser.parse_args()
+    try:
+        if args.command == "train":
+            result = train(args.task, args.steps, args.output, seed=args.seed,
+                           num_envs=args.envs, device=args.device, opponent=args.opponent,
+                           rollout_steps=args.rollout_steps, epochs=args.epochs,
+                           initial_checkpoint=args.initial_checkpoint, horizon=args.horizon,
+                           l2_coef=args.l2_coef, algorithm=args.algorithm,
+                           generations=args.generations, population_size=args.population,
+                           elite_count=args.elites, mutation_scale=args.mutation_scale,
+                           architecture=args.architecture)
+        elif args.command == "evaluate":
+            result = evaluate(args.checkpoint, task=args.task, episodes=args.episodes,
+                              seed=args.seed, num_envs=args.envs, device=args.device,
+                              opponent=args.opponent, output=args.output, horizon=args.horizon)
+        else:
+            result = evaluate_game_ablations(offense_checkpoint=args.offense_checkpoint,
+                defense_checkpoint=args.defense_checkpoint, episodes=args.episodes,
+                seed=args.seed, num_envs=args.envs, device=args.device,
+                output=args.output, horizon=args.horizon)
+    except Exception as exc:
+        if args.command == "train":
+            out = Path(args.output)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "status.json").write_text(json.dumps({"status": "failed", "error": str(exc)}))
+        raise
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

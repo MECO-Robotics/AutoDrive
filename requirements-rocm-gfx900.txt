@@ -1,0 +1,2 @@
+--index-url https://nightly.repo.amd.com/rocm/whl-next/
+torch[device-gfx900]==2.14.0+rocm10.2.0a20260927

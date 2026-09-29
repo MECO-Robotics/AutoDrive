@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frc-defense"
+version = "0.1.0"
+description = "Vectorized learned defense and counter-defense for holonomic FRC robots"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+train = ["gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2"]
+tensor = ["torch>=2.2"]
+
+[project.scripts]
+frc-defense = "frc_defense.tensor_training:main"
+frc-defense-tensor = "frc_defense.tensor_training:main"
+frc-defense-sb3 = "frc_defense.training:main"
+frc-defense-dashboard = "frc_defense.dashboard:main"
+
+[tool.setuptools.packages.find]
+include = ["frc_defense*"]

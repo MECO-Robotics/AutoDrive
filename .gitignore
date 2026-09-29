@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local training outputs and generated analysis data are reproducible artifacts.
+checkpoints/
+metrics/
+evaluations/
+logs/
+graphify-out/
