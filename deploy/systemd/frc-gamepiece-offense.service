@@ -1,0 +1,14 @@
+[Unit]
+Description=2026 REBUILT FUEL offense policy training (strategic objectives)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/brian/AutoDrive
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/bash /home/brian/AutoDrive/scripts/run_gamepiece_training.sh counter_defense cuda:0 4026 /home/brian/AutoDrive/checkpoints/rebuilt-gamepiece-offense
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

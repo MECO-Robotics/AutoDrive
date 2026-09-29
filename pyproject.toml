@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "frc-defense"
 version = "0.1.0"
-description = "Vectorized learned defense and counter-defense for holonomic FRC robots"
+description = "GPU-vectorized 2026 REBUILT FUEL acquisition and scoring training for FRC robots"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 

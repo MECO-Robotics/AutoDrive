@@ -1,67 +1,56 @@
-# FRC Defense and Counter-Defense
+# 2026 REBUILT Gamepiece Training
 
-Small Python package for learning two dynamic robot-vs-robot tasks. The simulator is independent from the policy runtime contracts in `frc_defense.types` and uses field-relative chassis velocity commands.
+GPU-vectorized training for FRC robots acquiring FUEL, carrying it to an active HUB, and scoring. Offense learns which gamepiece or scoring objective to pursue; defense reads the same visible field state and chooses where to contest. AD* plus the robot controller handles movement. Policies are scored on acquisitions, FUEL scored or denied, and simulated match points.
 
-## Install and run
+## Train on the WX 9100 GPUs
+
+The project uses two independent game policies. Install the included user services, then start both policies:
 
 ```sh
-python3 -m pip install -e .
-python3 -m pip install -e '.[tensor]'
-python3 -m frc_defense.tensor_training train --task counter_defense --envs 256 --device cuda:0
-python3 -m frc_defense.tensor_training evaluate --task counter_defense --checkpoint checkpoints/tensor-ppo/policy.pt --device cuda:0
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/frc-gamepiece-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now frc-gamepiece-offense.service frc-gamepiece-defense.service
 ```
 
-The `frc-defense` command uses tensor generational batch learning by default and runs on the selected ROCm/CUDA device. It evaluates a population of perturbed policies against the same seeded batch of episodes each generation, retains elites, and mutates the retained policies to produce the next generation. Use `--algorithm ppo` to select tensor PPO. Training, simulation, and evaluation now fail with an error if an explicitly requested accelerator is unavailable or fails; they never silently restart on CPU. `frc-defense-sb3` and `python3 -m frc_defense.training` retain the separate Stable-Baselines3/NumPy CPU workflow. Inference imports do not import Gymnasium, SB3, or PyTorch. Model files and JSON metadata are written under `checkpoints/`; evaluation and benchmark JSON are written under `metrics/` by default.
+Offense runs on `cuda:0`; defense runs on `cuda:1`. Each service searches 40 generations over a shared curriculum of static, scripted, AD*, mixed, and available learned opponents. It resumes from the latest saved policy after a process failure. Training state and checkpoints go under `checkpoints/rebuilt-gamepiece-{offense,defense}/`.
 
-The legacy SB3/NumPy commands above are CPU-oriented. The tensor command does not fall back to CPU when the GPU backend is unavailable or fails. For the Pascal GPU, install a CUDA 12.6 PyTorch wheel (`python3 -m pip install --index-url https://download.pytorch.org/whl/cu126 torch`); newer CUDA 13 PyTorch builds no longer include Pascal support, as shown in the [PyTorch CUDA support matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md).
+Check both runs and follow their logs:
 
-## WX 9100 tensor training
+```sh
+systemctl --user status frc-gamepiece-offense.service frc-gamepiece-defense.service
+journalctl --user -fu frc-gamepiece-offense.service
+journalctl --user -fu frc-gamepiece-defense.service
+```
 
-For the onboard Radeon Pro WX 9100, use `frc-defense` (or the alias `frc-defense-tensor`) / `frc_defense.tensor_training`. The batched simulator, observations, rewards, policy inference, and population search remain Torch tensors on the selected device; only checkpoints and JSON output cross to the CPU. Select the card with `--device cuda:0` or `--device cuda:1`. Tensor training randomizes robot size/mass, traction, speed and acceleration limits, steering limits, gearing, motor and supply current caps, battery resistance, control and observation delay, observation noise/dropout, starting pose/velocity, goal radius/location, and scripted opponents. In every training run, 20% of opponent episodes use a stationary robot control: its motors issue no movement command and its velocity is held at zero. Evaluation rollouts do not include this training-only control. Hardware-limited acceleration is computed from motor torque, current limit, gearing, wheel radius, robot mass, and traction, with the configured acceleration as an upper bound. Observations use fixed physical scales in place at the environment boundary (field-relative positions, robot speed/yaw limits, and field dimensions), shared by training and evaluation; no running statistics are fitted per rollout. The reward penalizes yaw rate normalized by the robot's yaw limit, sustained rotational command, and abrupt changes in that command. The population fitness includes L2 regularization of network weight matrices (`--l2-coef`, default `1e-5`). An unavailable or failing requested GPU stops the run with an error rather than moving the workload to CPU.
+The dashboard at `http://100.121.248.52:8765/` reports generation progress, game-level acquisition/scoring metrics, and playback with FUEL positions. Status files are written after each generation.
 
-On this host, both WX 9100 cards enumerate and complete PyTorch operations using the isolated ROCm 10.2 nightly `gfx900` build. AMD publishes device-specific wheels through [TheRock's package index](https://github.com/ROCm/TheRock/blob/main/RELEASES.md#installing-multi-arch-pytorch-python-packages); the `gfx900` target is marked as not sanity-tested, so this remains a working local setup rather than a generally qualified ROCm target. Create a Python 3.12 environment and install the pinned GFX900 build:
+For a direct launch, install the tensor extra and run either strategic game task:
+
+```sh
+python3 -m pip install -e '.[tensor]'
+python3 -m frc_defense.tensor_training train --task counter_defense --algorithm generational --architecture strategic_adstar --generations 40 --population 8 --elites 2 --envs 256 --horizon 750 --device cuda:0 --output checkpoints/rebuilt-gamepiece-offense
+python3 -m frc_defense.tensor_training train --task defense --algorithm generational --architecture strategic_adstar --generations 40 --population 8 --elites 2 --envs 256 --horizon 750 --device cuda:1 --output checkpoints/rebuilt-gamepiece-defense
+```
+
+## Game model
+
+- Both policies observe the same visible game state: robot poses, FUEL locations and possession, HUB activity, field geometry, and match time. The defender receives no hidden attacker goal.
+- Intake is on each robot's local `+X` front. Only FUEL in the forward capture band can be acquired.
+- Policies select game objectives; AD* plans and the controller follows the route.
+- Scoring, possession, pickup, and legal field contact update the simulation and the training reward. Game evaluations report acquisitions, scores, cycle time, defensive delay, denied/abandoned objectives, contacts, and total simulated score.
+
+The model keeps gamepiece motion lightweight. HUB scoring is a planar proximity surrogate for FUEL passing through the regulation opening; it does not simulate launch trajectories, height, or the sensor array. Drivetrain parameters are illustrative unless populated from robot hardware and checked against measured traces. See the [official 2026 REBUILT manual](https://firstfrc.blob.core.windows.net/frc2026/Manual/HTML/2026GameManual.htm) and [FIRST field drawings](https://firstfrc.blob.core.windows.net/frc2026/FieldAssets/2026-field-dimension-dwgs.pdf).
+
+## Host setup
+
+The training units assume a Python 3.12 environment at `.venv/` with the pinned ROCm build in `requirements-rocm-gfx900.txt`. Install on this host with:
 
 ```sh
 uv venv --python 3.12 .venv
 .venv/bin/python -m ensurepip --upgrade
 .venv/bin/python -m pip install --no-cache-dir -r requirements-rocm-gfx900.txt
 .venv/bin/python -m pip install --no-cache-dir -e .
-.venv/bin/python -m frc_defense.tensor_training train --task counter_defense --generations 20 --population 8 --elites 2 --envs 256 --device cuda:0
-.venv/bin/python -m frc_defense.tensor_training train --task defense --generations 20 --population 8 --elites 2 --envs 256 --device cuda:1
 ```
 
-Generational search reports progress after completing each full candidate batch. It uses common seeded initial field layouts within each generation, retains the top candidates, and creates the next batch with Gaussian weight mutations. `--generations`, `--population`, `--elites`, `--envs`, and `--mutation-scale` control the search. `--initial-checkpoint` warm-starts the population; use `--algorithm ppo --steps ... --rollout-steps ...` for gradient-based training. The package does not import Torch from `frc_defense`'s inference entrypoints; install the `[tensor]` extra for a generic PyTorch build on CPU, or use the pinned ROCm wheel above on GFX900. This is a batched planar approximation rather than a complete robot digital twin: it models module kinematics, steering/drive motor and current limits, battery sag, anisotropic tire friction, yaw inertia, and robot contact, while detailed tire deformation, firmware behavior, CAN scheduling, thermal limits, and battery chemistry remain unmodeled.
-
-Defense supports `--opponent mixed`, which scores every candidate on matched seeded rollouts against AD*, direct offense, intercept, velocity-intercept, and mirror attackers. The defender policy receives robot and field state but not the scoring goal or its radius; PPO defense training uses no goal-derived AD* route teacher or route-progress reward. New defense policies start without goal-conditioned behavior cloning. The deterministic velocity-intercept attacker predicts the defender's position from its current velocity and selects a bypass waypoint when that prediction blocks the scoring lane. AD* receives 80% of fitness; the four scripted attackers share the other 20%. Mixed-training/evaluation defender starts are independent of AD* route geometry. Mixed evaluation writes per-opponent metrics plus 95% Wilson intervals, using at least one environment per held-out episode so every opponent sees the same starts. Defense reward permits attacker bumper contact, charges static collision only when contact starts, and gives a terminal hold bonus symmetric with the attacker score penalty.
-
-For live monitoring, run `frc-defense-dashboard --run-dir checkpoints` in another terminal and open `http://127.0.0.1:8765/`. Select a run to view generation- or update-level status, the latest policy checkpoint, and rollout playback over field structures and traversable terrain. Training writes `status.json` and `policy.pt` after each completed generation or PPO update. The AD* attacker replans every 20 simulation steps (0.4 s at the default 20 ms step) to reduce route-direction jitter from small changes in the predicted defender intercept.
-
-A synchronized 4,096-transition counter-defense run with 128 environments measured about **8,244 transitions/s on CPU**, **2,329 on WX 9100 GPU 0**, and **2,826 on GPU 1** (one PPO epoch). The GPU path is fully device-resident, but the host CPU is faster at this batch size; benchmark the intended environment count and PPO settings before committing long training runs to a device.
-
-## Physics and configuration
-
-`VectorizedSimulator` batches worlds in NumPy. Each robot has four swerve modules at configurable measured offsets. Chassis velocity requests are converted to module speed/azimuth targets; module steering rate and acceleration, drive-motor back-EMF, torque/current curves, per-controller stator and supply current caps, robot-wide supply cap, battery voltage sag, longitudinal drive force, lateral scrub perpendicular to each module, mass, and yaw inertia affect the resulting motion. Hardware-limited linear acceleration is derived from motor torque/gearing and tire grip. Lateral scrub has a separately configurable friction cap and contributes braking and rotational resistance. `lateral_friction` and `yaw_inertia_multiplier` are configurable simulator parameters; `SwerveParameters` and `DCMotorParameters` expose drivetrain assumptions. Their defaults are illustrative starting values and are not a robot-accurate model until configured and characterized.
-
-The tensor trainer loads a robot configuration JSON from `FRC_DRIVETRAIN_CONFIG`. Start training and evaluation with the same file set, for example `FRC_DRIVETRAIN_CONFIG=config/my-robot.json frc-defense ...`. `config/drivetrain.generic.example.json` documents the schema and contains illustrative values only. Set motor type/curve, wheel radius, measured module offsets, reduction, stator and per-controller supply limits, robot-wide supply limit, mass, battery resistance, steering response, tire grip, and speed limits from the real robot. The default for an explicit hardware config is `randomize: false`; measured logs should be used to fit any uncertain parameters before enabling bounded randomization. Training checkpoints made with a different drivetrain configuration should not be treated as interchangeable. CPU work is limited to Python orchestration and writing requested metadata/playback; tensorized state, policy operations, planning, rewards, and simulation remain on the requested device.
-
-Robot bumpers use oriented-box SAT; circles use circle-versus-oriented-box closest-point contact. Field boxes, circles, walls, and robot pairs resolve penetration iteratively, then apply a low-restitution normal impulse and Coulomb friction at an estimated contact point. The impulse includes yaw inertia, so an off-center hit generates angular velocity. NumPy and tensor implementations use matching rigid-body impulse equations, and tensor contacts remain batched on the selected device. Contact points and bumper compliance are approximations that need measured impact traces for robot-specific calibration. The default planar field uses 2026 REBUILT dimensions. Hubs, towers, depots, and trench support strips use solid axis-aligned colliders; overhead trench arms are visible but traversable. Bump footprints are traversable with a smooth speed limit down to 65% and acceleration limit down to 25% while the robot crosses them. Trench traversal assumes the robot clears the 22.25in opening. Vertical ramp profile, pitch/roll, suspension, and robot-to-trench height clearance are not simulated. Custom circular field obstacles remain configurable as `(x, y, radius)` tuples. Wall, lateral tire, and robot contact friction are separately configurable. Domain randomization covers robot size, mass, chassis limits, bumper/ground/lateral friction, yaw inertia, gearing, current limits, battery resistance, latency, observation noise/dropout, start states, goal positions/regions, and scripted opponents.
-
-REBUILT field dimensions and nominal element footprints are based on the [official 2026 Game Manual](https://firstfrc.blob.core.windows.net/frc2026/Manual/HTML/2026GameManual.htm) and [FIRST field dimension drawings](https://firstfrc.blob.core.windows.net/frc2026/FieldAssets/2026-field-dimension-dwgs.pdf).
-
-This is a tractable learning model, not a complete vehicle digital twin. It does not yet resolve detailed tire deformation/slip curves, module compliance, steering motor electromagnetic curves, controller firmware/PID details, battery chemistry/thermal dynamics, wiring, or other robot loads. The steering loop remains an approximation and full robot fidelity requires characterization traces. Those effects require robot-specific measurements and should be added when measured sim-to-real error shows they matter.
-
-The module inverse-kinematics and angle optimization follow the WPILib swerve state conventions. Motor model values should be set from the selected vendor's data and robot characterization; for example, CTRE lists 7.09 N·m stall torque for Kraken X60, and its controller supports distinct supply and stator current limits. Battery voltage sag is configurable because FRC battery internal resistance changes with battery and connector condition. See [WPILib swerve kinematics](https://docs.wpilib.org/en/latest/docs/software/kinematics-and-odometry/swerve-drive-kinematics.html), [CTRE Kraken X60 specifications](https://store.ctr-electronics.com/products/kraken-x60), and [FIRST battery guidance](https://frcdocs.wpi.edu/en/2024/docs/hardware/hardware-basics/robot-battery.html).
-
-## Runtime use
-
-`PPOPolicy(model)` adapts an SB3 model, and `TensorPPOPolicy(checkpoint, device="cuda:0")` lazily loads a tensor PPO checkpoint, to the simulator-independent `predict(state, params, goal)` contract. Both use the same 35-value observation layout and fixed normalization as the training environments, including maximum linear acceleration divided by 10. The tensor checkpoint records its normalization version; legacy checkpoints without it retain raw-input behavior. Set `RobotParameters.max_acceleration` from the drivetrain hardware configuration. `SafePolicyRunner` applies finite-value checks, stale-state fallback, translational/rotational speed and acceleration limits, field-edge constraints, and optional raw/constrained command logging. It accepts an optional manual fallback command.
-
-```python
-from frc_defense import Objective, RobotParameters, SafePolicyRunner
-
-runner = SafePolicyRunner(policy, RobotParameters(), stale_after=0.15)
-result = runner.predict(world_state, Objective(x=8.0, y=4.0))
-command = result.constrained
-```
-
-The simulator supports `counter_defense` and `defense` Gymnasium tasks, fixed-seed evaluation, a scripted opponent set, optional checkpoint population storage, and machine-readable metrics.
+Training checkpoints, evaluation data, logs, and local environment files are generated locally and excluded from Git.

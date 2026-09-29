@@ -648,7 +648,7 @@ def generational_train(task: str, generations: int, output: str | Path, *,
         if curriculum else opponent_names) for generation in range(generations)]
     requested_timesteps = (population_size * num_envs * horizon *
                            sum(len(names) for names in generation_opponents))
-    atomic_json(status_path, {"status": "running", "algorithm": "generational", "task": task,
+    live_status = {"status": "running", "algorithm": "generational", "task": task,
         "architecture": architecture, "action_kind": action_kind,
         "observation_dim": obs_dim, "action_dim": action_dim,
         "opponent": opponent, "opponents": list(opponent_names),
@@ -665,7 +665,8 @@ def generational_train(task: str, generations: int, output: str | Path, *,
         "initialization": ("checkpoint" if initial_checkpoint else "random"),
         "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
         "checkpoint": str(checkpoint), "observation_normalization": OBS_NORMALIZATION,
-        "drivetrain_config": env.drivetrain_config})
+        "drivetrain_config": env.drivetrain_config}
+    atomic_json(status_path, live_status)
     atomic_json(playback_path, {"task": task, "dt": playback_env.dt, "frames": []})
 
     def set_vector(vector):
@@ -769,7 +770,7 @@ def generational_train(task: str, generations: int, output: str | Path, *,
             mode_returns = {}
             mode_results = {}
             frames = []
-            for mode in opponent_names:
+            for opponent_index, mode in enumerate(opponent_names):
                 env.opponent = mode
                 obs = _reset_obs(env.reset(seed=scenario_seed)).to(selected, dtype=torch.float32)
                 returns = torch.zeros(num_envs, device=selected)
@@ -800,6 +801,17 @@ def generational_train(task: str, generations: int, output: str | Path, *,
                 mode_results[mode] = {"hold_rate": hold_rate,
                     "score_rate": 1. - hold_rate,
                     "mean_score_time": float(score_times.sum().item() / max(1., scored_count)) if scored_count else None}
+                completed = ((completed_multiplier - len(opponent_names)) * population_size +
+                    candidate * len(opponent_names) + opponent_index + 1) * num_envs * horizon
+                elapsed = time.perf_counter() - started
+                live_status.update({"status": "running", "generation": generation,
+                    "current_generation": generation + 1, "candidate": candidate + 1,
+                    "opponents": list(opponent_names),
+                    "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
+                    "current_opponent": mode, "completed_timesteps": completed,
+                    "elapsed_seconds": elapsed,
+                    "transitions_per_second": completed / max(elapsed, 1e-12)})
+                atomic_json(status_path, live_status)
             weights_l2 = sum(p.square().sum() for p in model.parameters() if p.ndim > 1)
             regularization = float((l2_coef * weights_l2).item())
             mode_fitness = {mode: mode_returns[mode] - regularization for mode in opponent_names}
