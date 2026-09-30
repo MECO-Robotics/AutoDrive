@@ -185,6 +185,72 @@ def _reset_obs(result: Any) -> torch.Tensor:
     return result[0] if isinstance(result, tuple) else result
 
 
+def _snapshot_inactive_rows(env, active: torch.Tensor):
+    """Capture vector state for rows already ended inside a held action."""
+    inactive = ~active
+    if not bool(inactive.any()):
+        return []
+    snapshots = []
+    for obj in (env, getattr(env, "sim", None)):
+        if obj is None:
+            continue
+        for _name, value in vars(obj).items():
+            if isinstance(value, torch.Tensor) and value.ndim and value.shape[0] == env.n:
+                snapshots.append((value, inactive, value[inactive].clone()))
+    return snapshots
+
+
+def _restore_inactive_rows(snapshots) -> None:
+    for value, inactive, saved in snapshots:
+        value[inactive] = saved
+
+
+def _held_action_interval(env, action: torch.Tensor, ticks: int,
+                          initial_obs: torch.Tensor):
+    """Advance active worlds under one action without crossing episode ends."""
+    active_this_decision = torch.ones(env.n, dtype=torch.bool, device=env.device)
+    done = torch.zeros_like(active_this_decision)
+    truncated = torch.zeros_like(active_this_decision)
+    reward = torch.zeros(env.n, dtype=torch.float32, device=env.device)
+    transition_next_obs = initial_obs
+    complete_matches = 0
+    physics_ticks = 0
+    for _ in range(ticks):
+        snapshots = _snapshot_inactive_rows(env, active_this_decision)
+        next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(action)
+        _restore_inactive_rows(snapshots)
+        active_before_tick = active_this_decision
+        reward += tick_reward.to(device=env.device, dtype=torch.float32) * active_before_tick
+        tick_done = tick_done.to(device=env.device, dtype=torch.bool)
+        tick_truncated = tick_truncated.to(device=env.device, dtype=torch.bool)
+        done |= tick_done & active_before_tick
+        truncated |= tick_truncated & active_before_tick
+        transition_next_obs = torch.where(
+            active_before_tick[:, None], next_obs, transition_next_obs)
+        newly_ended = active_before_tick & (tick_done | tick_truncated)
+        complete_matches += int((tick_truncated & active_before_tick).sum().item())
+        active_this_decision &= ~newly_ended
+        physics_ticks += 1
+    return (reward, done, truncated, transition_next_obs, active_this_decision,
+            physics_ticks, complete_matches)
+
+
+def _gae_advantages(rewards: torch.Tensor, dones: torch.Tensor,
+                    truncated: torch.Tensor, values: torch.Tensor,
+                    next_values: torch.Tensor, gamma: float,
+                    gae_lambda: float) -> torch.Tensor:
+    """GAE bootstraps horizon truncations, but never true terminations."""
+    advantages = torch.zeros_like(rewards)
+    last_gae = torch.zeros_like(rewards[0])
+    for t in reversed(range(rewards.shape[0])):
+        nonterminal = (~dones[t]).float()
+        delta = rewards[t] + gamma * next_values[t] * nonterminal - values[t]
+        continuation = (~(dones[t] | truncated[t])).float()
+        last_gae = delta + gamma * gae_lambda * continuation * last_gae
+        advantages[t] = last_gae
+    return advantages
+
+
 def _task_opponent(task: str, opponent: str | None) -> str:
     if opponent is None:
         return "guard" if task == "counter_defense" else "offense"
@@ -432,24 +498,21 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 strategic_phase -= ticks_this_decision
             else:
                 ticks_this_decision = 1
-            reward = torch.zeros(num_envs, device=device)
-            done = torch.zeros(num_envs, device=device, dtype=torch.bool)
-            truncated = torch.zeros_like(done)
-            for _ in range(ticks_this_decision):
-                next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(action)
-                reward += tick_reward
-                done |= tick_done
-                truncated |= tick_truncated
+            if architecture == "strategic_adstar":
+                (reward, done, truncated, next_obs, active_this_decision,
+                 decision_physics_ticks, decision_matches) = _held_action_interval(
+                    env, action, ticks_this_decision, obs)
+                physics_ticks += decision_physics_ticks
+                complete_matches += decision_matches
+            else:
+                next_obs, reward, done, truncated, _info = env.step(action)
                 physics_ticks += 1
+                complete_matches += int(truncated.sum().item())
                 if routes is not None:
                     potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
                     route_progress = (potential_after - potential_before).clamp(-.25, .25)
                     reward[routes[0]] += .20 * route_progress * reference_active[routes[0]]
-                ended_tick = tick_done | tick_truncated
-                complete_matches += int(tick_done.sum().item())
-                if bool(ended_tick.any()):
-                    next_obs = env.reset_done(ended_tick)
-                    reference_active &= ~ended_tick
+            reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
             reward *= task_reward_scale
             if t % frame_stride == 0:
                 update_frames.append(torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
@@ -460,27 +523,23 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             truncated = truncated.to(device=device, dtype=torch.bool).reshape(num_envs)
             b_actions[t], b_logprobs[t], b_values[t] = action, logprob, value
             b_rewards[t], b_dones[t], b_truncated[t] = reward, done, truncated
-            with torch.no_grad():
-                b_next_values[t] = model(next_obs)[2]
             ended = done | truncated
-            # Worlds ending during a held-action interval were selectively reset
-            # immediately inside that interval; otherwise keep the exact state.
-            next_obs = next_obs.to(device=device, dtype=torch.float32)
+            # Bootstrap from the terminal observation, then reset ended rows
+            # before sampling the next strategic action.
+            transition_next_obs = next_obs.to(device=device, dtype=torch.float32)
             reference_active &= ~ended
-            obs = next_obs
+            with torch.no_grad():
+                b_next_values[t] = model(transition_next_obs)[2]
+            reset_done = getattr(env, "reset_done", None)
+            if reset_done is None:
+                raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
+            next_obs = reset_done(ended) if bool(ended.any()) else transition_next_obs
+            obs = next_obs.to(device=device, dtype=torch.float32)
 
         with torch.no_grad():
-            advantages = torch.zeros_like(b_rewards)
-            last_gae = torch.zeros(num_envs, device=device)
-            for t in reversed(range(rollout_steps)):
-                # These are values of the actual post-step observations, before
-                # any completed worlds are selectively reset.
-                nv = b_next_values[t]
-                nonterminal = (~b_dones[t]).float()
-                delta = b_rewards[t] + gamma * nv * nonterminal - b_values[t]
-                continuation = (~(b_dones[t] | b_truncated[t])).float()
-                last_gae = delta + gamma * gae_lambda * continuation * last_gae
-                advantages[t] = last_gae
+            advantages = _gae_advantages(
+                b_rewards, b_dones, b_truncated, b_values, b_next_values,
+                gamma, gae_lambda)
             returns = advantages + b_values
 
         flat_obs = b_obs.reshape(-1, obs_dim)
