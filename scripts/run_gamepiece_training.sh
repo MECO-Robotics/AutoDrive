@@ -16,7 +16,7 @@ checkpoint="$output/policy.pt"
 
 args=("$python_bin" -m frc_defense.tensor_training train
     --task "$task" --algorithm generational --architecture strategic_adstar
-    --generations 40 --population 8 --elites 2 --envs 256 --horizon 750
+    --generations 40 --opponent-pool-size 8 --strong-checkpoints 2 --envs 24 --horizon 8000
     --seed "$seed" --output "$output" --device "$device")
 
 if [[ -s "$checkpoint" ]]; then

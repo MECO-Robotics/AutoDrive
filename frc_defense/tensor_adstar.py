@@ -40,6 +40,12 @@ class TensorADStar:
         self._neighbors = ((1, 0, 1.), (-1, 0, 1.), (0, 1, 1.), (0, -1, 1.),
                            (1, 1, 1.41421356237), (1, -1, 1.41421356237),
                            (-1, 1, 1.41421356237), (-1, -1, 1.41421356237))
+        self._offsets = torch.tensor([(dx, dy) for dx, dy, _ in self._neighbors],
+                                     device=self.device)
+        self._batch = torch.arange(self.n, device=self.device)
+        self._edge_cost = torch.tensor((1.41421356237, 1., 1.41421356237, 1.,
+                                        1., 1., 1.41421356237, 1., 1.41421356237),
+                                       device=self.device, dtype=self.dtype)[None, :, None]
         self.last_path = torch.zeros((self.n, self.max_points, 2), device=self.device,
                                      dtype=self.dtype)
         self.last_lengths = torch.zeros(self.n, device=self.device, dtype=torch.long)
@@ -137,7 +143,7 @@ class TensorADStar:
         # targets can land on a bump while projecting an interception point;
         # move those endpoints to the nearest reachable clearance cell.
         sx, sy = self._indices(start); gx, gy = self._indices(goal)
-        batch = torch.arange(self.n, device=self.device)
+        batch = self._batch
         if self.avoid_bumps:
             blocked_goal=blocked[batch,gx,gy]
             goal_distance=((self.xx.reshape(1,-1)-goal[:,0,None]).square()+
@@ -162,9 +168,6 @@ class TensorADStar:
         value[batch, gx, gy] = 0.
         # Jacobi Bellman sweeps are parallel across both cells and worlds.
         import torch.nn.functional as F
-        edge_cost=torch.tensor((1.41421356237,1.,1.41421356237,1.,
-                                1.,1.,1.41421356237,1.,1.41421356237),
-                               device=self.device,dtype=self.dtype)[None,:,None]
         blocked_neighbors=F.unfold(
             F.pad(blocked[:,None].to(self.dtype),(1,1,1,1),value=1.),3
         ).view(self.n,9,self.nx*self.ny)>.5
@@ -176,7 +179,7 @@ class TensorADStar:
         for _ in range(self.sweeps):
             padded=F.pad(value[:,None],(1,1,1,1),value=1.e6)
             neighbors=F.unfold(padded,3).view(self.n,9,self.nx*self.ny)
-            candidate=neighbors+edge_cost*bump_cost.flatten(1)[:,None,:]
+            candidate=neighbors+self._edge_cost*bump_cost.flatten(1)[:,None,:]
             candidate=candidate.masked_fill(~corner_clear,float("inf"))
             value=torch.minimum(value.flatten(1),candidate.amin(1)).view(self.n,self.nx,self.ny)
             value=torch.where(blocked,inf,value)
@@ -202,8 +205,7 @@ class TensorADStar:
             scores=torch.stack(candidates,-1)
             choice=scores.argmin(-1)
             next_score=scores.gather(1,choice[:,None]).squeeze(1)
-            offsets=torch.tensor([(dx,dy) for dx,dy,_ in self._neighbors],device=self.device)
-            off=offsets[choice]
+            off=self._offsets[choice]
             nx,ny=px+off[:,0],py+off[:,1]
             progressing=active & (next_score < value[rows,px,py] - 1e-5)
             px=torch.where(progressing,nx,px); py=torch.where(progressing,ny,py)
@@ -213,6 +215,11 @@ class TensorADStar:
             lengths += progressing.long()
             reached=(px==gx)&(py==gy)
             active &= progressing & ~reached
+            # Route extraction is sequential, but once every world is done,
+            # remaining iterations are no-ops. Check in chunks to avoid a
+            # device synchronization on each path point.
+            if k % 16 == 0 and not bool(active.any().item()):
+                break
         self.last_path.copy_(path); self.last_lengths.copy_(lengths)
         self.last_intercept.copy_(intercept); self.last_intercept_time.copy_(t)
         self.last_start.copy_(start); self.last_goal.copy_(goal); self.last_heading.copy_(heading)

@@ -39,6 +39,25 @@ class TensorState:
 
 
 @dataclass(frozen=True)
+class PerceptionState:
+    own_pose: Any
+    own_velocity: Any
+    own_possession: Any
+    capacity: int
+    opponent_pose: Any
+    opponent_velocity: Any
+    opponent_valid: Any
+    opponent_track_age: Any
+    fuel_position: Any
+    fuel_velocity: Any
+    fuel_mask: Any
+    fuel_track_age: Any
+    hub_active: Any
+    hub_centers: Any
+    match_elapsed: Any
+
+
+@dataclass(frozen=True)
 class TensorSwerveParameters:
     wheel_radius: float = .0508
     drive_ratio: float = 6.75
@@ -519,13 +538,32 @@ class TensorDefenseEnv:
                 if name in config:
                     kwargs.setdefault(name, config[name])
             kwargs.setdefault("swerve", TensorSwerveParameters(**config.get("swerve", {})))
+            if "gamepieces" in config:
+                kwargs.setdefault("gamepiece_config", config["gamepieces"])
         self.n,self.device,self.task,self.opponent=int(num_envs),torch.device(device),task,opponent
         self.action_mode=str(kwargs.pop("action_mode","direct")).lower()
+        mode_default=(opponent.get("mode","INTERCEPT") if isinstance(opponent,dict)
+                      and task=="counter_defense" else
+                      "INTERCEPT" if task=="counter_defense" else None)
+        selected_mode=kwargs.pop("defense_mode",mode_default)
+        self.defense_mode=None if selected_mode is None else str(selected_mode).upper()
+        if self.defense_mode is not None and self.defense_mode not in (
+                "INTERCEPT","LANE_BLOCK","FUEL_DENIAL","SHADOW","HUB_GUARD"):
+            raise ValueError("defense_mode must be INTERCEPT, LANE_BLOCK, FUEL_DENIAL, SHADOW, or HUB_GUARD")
         if self.action_mode not in ("direct","tactical","strategic"):
             raise ValueError("action_mode must be direct, tactical, or strategic")
-        self.action_dim=2 if self.action_mode=="tactical" else 3
-        self.obs_dim={"direct":35,"tactical":38,"strategic":89}[self.action_mode]
+        self.action_dim={"direct":3,"tactical":2,"strategic":8}[self.action_mode]
+        self.obs_dim={"direct":35,"tactical":38,"strategic":137}[self.action_mode]
         self.learned_opponent_fn=kwargs.pop("learned_opponent_fn",None)
+        gamepiece_config=kwargs.pop("gamepiece_config",{})
+        if not isinstance(gamepiece_config,dict):
+            raise ValueError("gamepiece_config must be a mapping")
+        # These are configurable robot assumptions, not REBUILT regulation limits.
+        self.fuel_capacity=max(0,int(kwargs.pop("max_fuel_capacity",gamepiece_config.get("max_capacity",8))))
+        self.intake_interval=float(kwargs.pop("intake_interval",gamepiece_config.get("intake_interval_s",.20)))
+        self.score_interval=float(kwargs.pop("score_interval",gamepiece_config.get("score_interval_s",.10)))
+        if self.intake_interval<0 or self.score_interval<0:
+            raise ValueError("gamepiece intervals must be nonnegative")
         self.fuel_count=int(kwargs.pop("fuel_count",504))
         preload_setting=kwargs.pop("preloaded_per_robot",None)
         self.preloaded_per_robot=None if preload_setting is None else int(preload_setting)
@@ -533,8 +571,10 @@ class TensorDefenseEnv:
             raise ValueError("fuel_count must be 96 + 6*preloaded_per_robot through 600")
         if self.preloaded_per_robot is not None and not 0<=self.preloaded_per_robot<=8:
             raise ValueError("preloaded_per_robot must be between 0 and 8")
-        self.dt=float(kwargs.pop("dt",.02)); self.horizon=int(kwargs.pop("horizon",750)); self.base_goal_radius=float(kwargs.pop("goal_radius",.5))
-        self.match_clock_step=160./max(self.horizon,1) if self.action_mode=="strategic" else self.dt
+        self.dt=float(kwargs.pop("dt",.02)); self.horizon=int(kwargs.pop("horizon",8000)); self.base_goal_radius=float(kwargs.pop("goal_radius",.5))
+        if self.action_mode=="strategic":
+            self.horizon=max(self.horizon,math.ceil(160./self.dt))
+        self.match_clock_step=self.dt
         self.adstar_replan_interval=max(1,int(kwargs.pop("adstar_replan_interval",20)))
         self._planner_tick=0
         self.adstar_spawn_hint=bool(kwargs.pop("adstar_spawn_hint",True))
@@ -545,6 +585,20 @@ class TensorDefenseEnv:
         self.normalize_observations=bool(kwargs.pop("normalize_observations",True))
         self.observation_noise=float(kwargs.pop("observation_noise",.01))
         self.observation_dropout=float(kwargs.pop("observation_dropout",.02))
+        perception=kwargs.pop("perception_config",{}) or {}
+        if not isinstance(perception,dict):
+            raise ValueError("perception_config must be a mapping")
+        self.perception_fov=float(perception.get("fov_degrees",360.))
+        self.perception_range=float(perception.get("range_m",math.hypot(
+            float(kwargs.get("field_length",16.54)),float(kwargs.get("field_width",8.07)))))
+        self.perception_dropout=float(perception.get("detection_dropout",.02))
+        self.perception_position_noise=float(perception.get("position_noise_m",.015))
+        self.perception_velocity_noise=float(perception.get("velocity_noise_mps",.05))
+        self.perception_track_timeout=float(perception.get("track_timeout_s",1.0))
+        if not 0. < self.perception_fov <= 360. or self.perception_range <= 0.:
+            raise ValueError("perception FOV and range must be positive (FOV <= 360)")
+        if not 0. <= self.perception_dropout <= 1. or self.perception_track_timeout < 0.:
+            raise ValueError("invalid perception dropout or track timeout")
         self.max_control_latency_steps=max(0,int(kwargs.pop("max_control_latency_steps",6)))
         self.max_observation_latency_steps=max(0,int(kwargs.pop("max_observation_latency_steps",8)))
         field_layout=kwargs.pop("field_layout","2026_rebuilt")
@@ -579,14 +633,16 @@ class TensorDefenseEnv:
         self._adstar_contact_latched=torch.zeros(self.n,device=self.device,dtype=torch.bool)
         opponent_kind=opponent.get("value","") if isinstance(opponent,dict) else opponent
         if self.task=="defense" and (self.action_mode=="strategic" or
-                isinstance(opponent_kind,str) and opponent_kind.lower()=="adstar"):
+                isinstance(opponent_kind,str) and opponent_kind.lower() in ("adstar","offense","guard")):
             from .tensor_adstar import TensorADStar
             self._adstar_planners=TensorADStar(self)
         elif (self.task=="counter_defense" and (self.action_mode=="strategic" or
-              isinstance(opponent_kind,str) and opponent_kind.lower() in ("guard", "adstar_defender"))):
+              isinstance(opponent_kind,str) and opponent_kind.lower() in ("guard", "adstar_defender",
+                  "intercept","lane_block","fuel_denial","shadow","hub_guard","mirror",
+                  "cutoff","velocity_intercept"))):
             from .tensor_adstar import TensorADStar
             self._adstar_defender_planners=TensorADStar(self,avoid_bumps=True)
-        if self.action_mode in ("tactical","strategic"):
+        if self.action_mode in ("tactical","strategic") or (self.task=="defense" and self.defense_mode):
             from .tensor_adstar import TensorADStar
             self._adstar_tactical_planner=TensorADStar(self,avoid_bumps=True)
         if self.field_feature_boxes:
@@ -602,12 +658,22 @@ class TensorDefenseEnv:
         self.hub_centers=self._game_hub_centers()
         self.hub_inactive_first=torch.randint(2,(self.n,),device=self.device,generator=self.generator)
         self.auto_fuel_scores=torch.zeros((self.n,2),device=self.device,dtype=torch.long)
-        self.piece_pos=torch.zeros((self.n,600,2),device=self.device)
+        self.piece_pos=torch.zeros((self.n,self.fuel_count,2),device=self.device)
         self.piece_vel=torch.zeros_like(self.piece_pos)
-        self.piece_active=torch.zeros((self.n,600),device=self.device,dtype=torch.bool)
-        self.piece_owner=torch.full((self.n,600),-1,device=self.device,dtype=torch.long)
-        self.piece_zone=torch.full((self.n,600),-1,device=self.device,dtype=torch.long)
-        self.piece_type=torch.full((self.n,600),-1,device=self.device,dtype=torch.long)
+        self.piece_active=torch.zeros((self.n,self.fuel_count),device=self.device,dtype=torch.bool)
+        self.piece_owner=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
+        self.piece_zone=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
+        self.piece_type=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
+        # Per-robot tracks are the only FUEL representation exposed to a
+        # controller. Simulator truth remains in piece_* for physics/scoring.
+        self._track_pos=torch.zeros((self.n,2,self.fuel_count,2),device=self.device)
+        self._track_vel=torch.zeros_like(self._track_pos)
+        self._track_mask=torch.zeros((self.n,2,self.fuel_count),device=self.device,dtype=torch.bool)
+        self._track_age=torch.full((self.n,2,self.fuel_count),float("inf"),device=self.device)
+        self._opponent_track_pose=torch.zeros((self.n,2,3),device=self.device)
+        self._opponent_track_velocity=torch.zeros_like(self._opponent_track_pose)
+        self._opponent_track_valid=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
+        self._opponent_track_age=torch.full((self.n,2),float("inf"),device=self.device)
         self.preloads_per_robot=torch.zeros((self.n,),device=self.device,dtype=torch.long)
         self.fuel_acquisition_count=torch.zeros((self.n,2),device=self.device,dtype=torch.long)
         self.fuel_score_count=torch.zeros_like(self.fuel_acquisition_count)
@@ -617,6 +683,8 @@ class TensorDefenseEnv:
         self.fuel_scored_event=torch.zeros_like(self.fuel_acquisition_count)
         self.fuel_denied_event=torch.zeros_like(self.fuel_acquisition_count)
         self.fuel_abandoned_event=torch.zeros_like(self.fuel_acquisition_count)
+        self.next_intake_time=torch.zeros((self.n,2),device=self.device)
+        self.next_score_time=torch.zeros_like(self.next_intake_time)
         self._last_hub_zone=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
         self._last_strategic_action=torch.zeros((self.n,),device=self.device,dtype=torch.long)
         self.static_opponent_mask=torch.zeros(self.n,device=self.device,dtype=torch.bool)
@@ -647,29 +715,150 @@ class TensorDefenseEnv:
         return torch.tensor(points,device=self.device,dtype=self.sim.pose.dtype)
 
     def _attacker_objective(self):
-        if self.action_mode=="strategic":
-            side=0 if self.task=="counter_defense" else 1
-            hub=self.hub_centers[side].expand(self.n,-1)
-            if self.task=="defense" and self.piece_active.shape[1]:
-                # Scripted attacker baseline: acquire the nearest available
-                # FUEL, then route to its active HUB. This chooses an objective
-                # from current game state and never consumes a hidden goal.
-                carrying=(self.piece_active&(self.piece_owner==1)).any(-1)
-                free=self.piece_active&(self.piece_owner<0)
-                distance=(self.piece_pos-self.sim.pose[:,1,None,:2]).norm(dim=-1)
-                distance=distance.masked_fill(~free,float("inf"))
-                nearest,index=distance.min(-1)
-                piece=self.piece_pos[torch.arange(self.n,device=self.device),index]
-                direction=self.sim.pose[:,1,:2]-hub
-                direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-                radius=.595+.5*torch.sqrt(self.sim.length[:,1].square()+self.sim.width[:,1].square())+.02
-                approach=hub+direction*radius[:,None]
-                score_target=carrying&self.hub_active[:,side]
-                target=torch.where(score_target[:,None],approach,
-                    torch.where(torch.isfinite(nearest)[:,None],piece,approach))
-                return target
-            return hub
-        return self.goal
+        robot=0 if self.task=="counter_defense" else 1
+        hub=self.hub_centers[robot].expand(self.n,-1)
+        position=self.sim.pose[:,robot,:2]
+        direction=position-hub
+        direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        radius=.595+.5*torch.sqrt(self.sim.length[:,robot].square()+
+            self.sim.width[:,robot].square())+.02
+        approach=hub+direction*radius[:,None]
+        points,_,visible=self._perceived_fuel(robot)
+        distance=(points-position[:,None,:]).norm(dim=-1).masked_fill(~visible,float("inf"))
+        nearest,index=distance.min(-1)
+        piece=points[torch.arange(self.n,device=self.device),index]
+        carrying=self._own_possession(robot)>0
+        score_target=carrying&self.hub_active[:,robot]
+        return torch.where(score_target[:,None],approach,
+            torch.where(torch.isfinite(nearest)[:,None],piece,approach))
+
+    def _own_possession(self, robot):
+        """Exact onboard possession estimate for the observing robot only."""
+        return (self.piece_active & (self.piece_owner == int(robot))).sum(-1)
+
+    def perception_state(self, focal):
+        """Per-robot controller view; contains no simulator piece-owner data."""
+        other=1-int(focal)
+        opponent_pose,opponent_velocity=self._observed_robot(focal,other)
+        return PerceptionState(
+            own_pose=self.sim.pose[:,focal], own_velocity=self.sim.velocity[:,focal],
+            own_possession=self._own_possession(focal), capacity=self.fuel_capacity,
+            opponent_pose=opponent_pose, opponent_velocity=opponent_velocity,
+            opponent_valid=self._opponent_track_valid[:,focal],
+            opponent_track_age=self._opponent_track_age[:,focal],
+            fuel_position=self._track_pos[:,focal], fuel_velocity=self._track_vel[:,focal],
+            fuel_mask=self._track_mask[:,focal], fuel_track_age=self._track_age[:,focal],
+            hub_active=self.hub_active, hub_centers=self.hub_centers,
+            match_elapsed=self.match_elapsed)
+
+    def _perceived_fuel(self, focal):
+        """Return tracked FUEL position, velocity, and validity without truth IDs/owners."""
+        return (self._track_pos[:,focal],self._track_vel[:,focal],self._track_mask[:,focal])
+
+    def _observed_robot(self, focal, robot):
+        if focal==robot:
+            return self.sim.pose[:,robot],self.sim.velocity[:,robot]
+        valid=self._opponent_track_valid[:,focal]
+        return (torch.where(valid[:,None],self._opponent_track_pose[:,focal],
+                            torch.zeros_like(self._opponent_track_pose[:,focal])),
+                torch.where(valid[:,None],self._opponent_track_velocity[:,focal],
+                            torch.zeros_like(self._opponent_track_velocity[:,focal])))
+
+    def _opponent_track_features(self, focal):
+        valid=self._opponent_track_valid[:,focal].to(self.sim.pose.dtype)
+        age=(self._opponent_track_age[:,focal]/max(self.perception_track_timeout,1e-6)).clamp(0.,1.)
+        return torch.stack((valid,age),dim=-1)
+
+    def _update_perception(self, reset_mask=None):
+        """Advance simple per-robot FUEL tracking from simulated sensor detections."""
+        dt=self.dt
+        if reset_mask is None:
+            self._track_age=torch.where(self._track_mask,self._track_age+dt,self._track_age)
+            self._opponent_track_age=torch.where(self._opponent_track_valid,
+                self._opponent_track_age+dt,self._opponent_track_age)
+        else:
+            reset_mask=reset_mask.to(device=self.device,dtype=torch.bool)
+            self._track_mask[reset_mask]=False
+            self._track_age[reset_mask]=float("inf")
+            self._opponent_track_valid[reset_mask]=False
+            self._opponent_track_age[reset_mask]=float("inf")
+        for robot in range(2):
+            pose=self.sim.pose[:,robot]
+            delta=self.piece_pos-pose[:,None,:2]
+            distance=delta.norm(dim=-1)
+            bearing=torch.atan2(delta[...,1],delta[...,0])
+            angle=torch.atan2(torch.sin(bearing-pose[:,None,2]),torch.cos(bearing-pose[:,None,2])).abs()
+            visible=self.piece_active & (self.piece_owner < 0) & (distance <= self.perception_range)
+            visible &= angle <= math.radians(self.perception_fov)*.5
+            # Circle/radius approximation keeps occlusion vectorized. It only
+            # controls simulated detections; it never becomes policy input.
+            occ=self.field_feature_obstacles
+            if occ.numel():
+                segment=delta
+                denom=segment.square().sum(-1).clamp_min(1e-8)
+                rel=occ[None,None,:,:2]-pose[:,None,None,:2]
+                t=(rel*segment[:,:,None,:]).sum(-1)/denom[:,:,None]
+                closest=pose[:,None,None,:2]+t.clamp(0.,1.)[...,None]*segment[:,:,None,:]
+                blocked=((occ[None,None,:,2]+.03 > 0) &
+                         ((closest-occ[None,None,:,:2]).norm(dim=-1) <= occ[None,None,:,2]+.03) &
+                         (t > .02) & (t < .98)).any(-1)
+                visible &= ~blocked
+            other=1-robot
+            other_pos=self.sim.pose[:,other,:2]
+            rel=other_pos[:,None,:]-pose[:,None,:2]
+            seg=delta
+            denom=seg.square().sum(-1).clamp_min(1e-8)
+            t=(rel*seg).sum(-1)/denom
+            closest=pose[:,None,:2]+t.clamp(0.,1.)[...,None]*seg
+            other_radius=.5*torch.sqrt(self.sim.length[:,other].square()+self.sim.width[:,other].square())
+            occluded=((closest-other_pos[:,None,:]).norm(dim=-1)<=other_radius[:,None]) & (t>.02) & (t<.98)
+            visible &= ~occluded
+            if self.perception_dropout:
+                detected=torch.rand(visible.shape,device=self.device,generator=self.generator)>=self.perception_dropout
+                visible &= detected
+            noise=torch.randn(self.piece_pos.shape,device=self.device,generator=self.generator)*self.perception_position_noise
+            measured=self.piece_pos+noise
+            updated_velocity=self.piece_vel.clone()
+            if self.perception_velocity_noise:
+                updated_velocity += torch.randn(self.piece_vel.shape,device=self.device,generator=self.generator)*self.perception_velocity_noise
+            self._track_pos[:,robot]=torch.where(visible[...,None],measured,self._track_pos[:,robot])
+            self._track_vel[:,robot]=torch.where(visible[...,None],updated_velocity,self._track_vel[:,robot])
+            self._track_age[:,robot]=torch.where(visible,torch.zeros_like(self._track_age[:,robot]),self._track_age[:,robot])
+            self._track_mask[:,robot] |= visible
+            observed_pose=self.sim.pose[:,1-robot].clone()
+            observed_velocity=self.sim.velocity[:,1-robot].clone()
+            robot_delta=observed_pose[:,:2]-self.sim.pose[:,robot,:2]
+            robot_bearing=torch.atan2(robot_delta[:,1],robot_delta[:,0])
+            bearing_error=torch.atan2(torch.sin(robot_bearing-self.sim.pose[:,robot,2]),
+                torch.cos(robot_bearing-self.sim.pose[:,robot,2])).abs()
+            detected=(torch.rand((self.n,),device=self.device,generator=self.generator)>=self.perception_dropout)
+            detected &= (robot_delta.norm(dim=-1)<=self.perception_range)
+            detected &= bearing_error<=math.radians(self.perception_fov)*.5
+            if occ.numel():
+                denom=robot_delta.square().sum(-1).clamp_min(1e-8)
+                ray=occ[None,:,:2]-self.sim.pose[:,robot,None,:2]
+                t=(ray*robot_delta[:,None,:]).sum(-1)/denom[:,None]
+                closest=self.sim.pose[:,robot,None,:2]+t.clamp(0.,1.)[...,None]*robot_delta[:,None,:]
+                blocked=((closest-occ[None,:,:2]).norm(dim=-1)<=occ[None,:,2]+.03)
+                blocked &= (t>.02)&(t<.98)
+                detected &= ~blocked.any(-1)
+            position_noise=torch.randn((self.n,2),device=self.device,generator=self.generator)*self.perception_position_noise
+            heading_noise=torch.randn((self.n,),device=self.device,generator=self.generator)*min(
+                .05,self.perception_position_noise)
+            velocity_noise=torch.randn((self.n,3),device=self.device,generator=self.generator)*self.perception_velocity_noise
+            observed_pose[:,:2]+=position_noise
+            observed_pose[:,2]+=heading_noise
+            observed_velocity+=velocity_noise
+            self._opponent_track_pose[:,robot]=torch.where(detected[:,None],observed_pose,
+                self._opponent_track_pose[:,robot])
+            self._opponent_track_velocity[:,robot]=torch.where(detected[:,None],observed_velocity,
+                self._opponent_track_velocity[:,robot])
+            self._opponent_track_age[:,robot]=torch.where(detected,torch.zeros_like(self._opponent_track_age[:,robot]),
+                self._opponent_track_age[:,robot])
+            self._opponent_track_valid[:,robot] |= detected
+        expired=self._track_age>self.perception_track_timeout
+        self._track_mask &= ~expired
+        self._opponent_track_valid &= self._opponent_track_age<=self.perception_track_timeout
 
     def release_outpost_fuel(self, alliance, position, count=1, mask=None):
         """Model a human-player fuel release at a caller-supplied chute opening.
@@ -703,7 +892,7 @@ class TensorDefenseEnv:
         return released
 
     def _initialize_gamepieces(self, mask=None):
-        """Reset 2026 FUEL staging with a bounded 600-slot tensor catalog.
+        """Reset 2026 FUEL staging in a fixed-size tensor catalog of up to 600 slots.
 
         Default count follows the official 504-piece match staging. The 2D
         model places 24 at each DEPOT and the neutral count (360..408) in the
@@ -797,6 +986,8 @@ class TensorDefenseEnv:
         self.preloads_per_robot=torch.where(mask,per_robot,self.preloads_per_robot)
 
     def _update_match_clock(self):
+        # REBUILT runs 20 s autonomous followed by 140 s of teleop (2:40 total).
+        # Training uses 8,000 x 20 ms steps so the dynamics advance in real time.
         self.match_elapsed=(self.match_elapsed+self.match_clock_step).clamp(max=160.)
         self.match_remaining=(160.-self.match_elapsed).clamp_min(0.)
         red_auto=self.auto_fuel_scores[:,0]
@@ -804,11 +995,13 @@ class TensorDefenseEnv:
         first_inactive=torch.where(red_auto>blue_auto,torch.zeros_like(self.hub_inactive_first),
             torch.where(blue_auto>red_auto,torch.ones_like(self.hub_inactive_first),self.hub_inactive_first))
         elapsed=self.match_elapsed
-        in_shifts=(elapsed>=30.)&(elapsed<130.)
-        shift=((elapsed-30.).clamp_min(0.)/25.).floor().long().clamp(0,3)
-        inactive=torch.where((shift%2)==0,first_inactive,1-first_inactive)
+        # The requested training schedule alternates the inactive HUB every
+        # 30 s of teleop. Both HUBs remain active during autonomous.
+        teleop_elapsed=(elapsed-20.).clamp_min(0.)
+        cycle=(teleop_elapsed/30.).floor().long()
+        inactive=torch.where((cycle%2)==0,first_inactive,1-first_inactive)
         self.hub_active=torch.ones((self.n,2),device=self.device,dtype=torch.bool)
-        self.hub_active.scatter_(1,inactive[:,None],(~in_shifts)[:,None])
+        self.hub_active.scatter_(1,inactive[:,None],(~(elapsed>=20.))[:,None])
 
     def _update_gamepieces(self):
         """Vectorized pickup/score state; HUB score is a 2D range surrogate.
@@ -827,7 +1020,8 @@ class TensorDefenseEnv:
         # Intake is on the robot's local +X/front side. Its capture band starts
         # just inside the front bumper and extends 0.35 m ahead, across the
         # bumper width plus a small game-piece margin. Rear/side contacts do
-        # not acquire pieces. One pickup per robot per step; carrying is uncapped.
+        # not acquire pieces. The configured capacity and intake interval bound
+        # possession even when the robot remains over a pile.
         for robot in (0,1):
             pose=self.sim.pose[:,robot]
             position=pose[:,:2]
@@ -841,11 +1035,16 @@ class TensorDefenseEnv:
             intake_reach=.35
             intake_half_width=self.sim.width[:,robot,None]*.5+.075
             intake=(longitudinal>=front_edge-.075)&(longitudinal<=front_edge+intake_reach)&(lateral<=intake_half_width)
-            distance=delta.norm(dim=-1).masked_fill(~(free&intake),float("inf"))
+            possession=(self.piece_active&(self.piece_owner==robot)).sum(-1)
+            ready=self.match_elapsed+1e-6>=self.next_intake_time[:,robot]
+            can_intake=(possession<self.fuel_capacity)&ready
+            distance=delta.norm(dim=-1).masked_fill(~(free&intake&can_intake[:,None]),float("inf"))
             nearest,index=distance.min(-1)
             picked=torch.isfinite(nearest)
             self.piece_owner[rows[picked],index[picked]]=robot
             self.fuel_acquired_event[:,robot]=picked.long()
+            self.next_intake_time[:,robot]=torch.where(picked,
+                self.match_elapsed+self.intake_interval,self.next_intake_time[:,robot])
             free[rows[picked],index[picked]]=False
         for robot in (0,1):
             held=self.piece_active&(self.piece_owner==robot)
@@ -855,36 +1054,50 @@ class TensorDefenseEnv:
             robot_radius=.5*torch.sqrt(self.sim.length[:,robot].square()+self.sim.width[:,robot].square())
             near_hub=(self.sim.pose[:,robot,:2]-center).norm(dim=-1)<=(.595+robot_radius+.075)
             has_fuel=held.any(-1)
-            score_intent=((self._last_strategic_action==1) if self.action_mode=="strategic"
+            score_intent=((self._last_strategic_action==4) if self.action_mode=="strategic"
                           else torch.ones((self.n,),device=self.device,dtype=torch.bool))
-            entering=near_hub&score_intent&~self._last_hub_zone[:,robot]
+            hub_vector=center-self.sim.pose[:,robot,:2]
+            hub_bearing=torch.atan2(hub_vector[:,1],hub_vector[:,0])
+            angle_error=torch.atan2(torch.sin(hub_bearing-self.sim.pose[:,robot,2]),
+                                    torch.cos(hub_bearing-self.sim.pose[:,robot,2])).abs()
+            # A dumper must face the HUB; use a 90-degree total acceptance cone.
+            aimed=angle_error<=math.pi/4.
+            scoring_ready=near_hub&aimed&score_intent
+            entering=scoring_ready&~self._last_hub_zone[:,robot]
             denied=entering&has_fuel&~self.hub_active[:,robot]
             self.fuel_denied_event[:,robot]=denied.long()
             self.fuel_denied_count[:,robot]+=denied.long()
-            scored=held&near_hub[:,None]&self.hub_active[:,robot,None]&score_intent[:,None]
+            score_ready=self.match_elapsed+1e-6>=self.next_score_time[:,robot]
+            eligible=held&scoring_ready[:,None]&self.hub_active[:,robot,None]&score_ready[:,None]
+            eligible_distance=torch.arange(self.fuel_count,device=self.device)[None,:].expand(self.n,-1)
+            selected=eligible&(eligible_distance==eligible.to(torch.int64).argmax(-1,keepdim=True))
+            scored=selected
             newly_scored|=scored
             score_count=scored.sum(-1)
             self.fuel_scored_event[:,robot]=score_count
             self.fuel_score_count[:,robot]+=score_count
+            self.next_score_time[:,robot]=torch.where(score_count>0,
+                self.match_elapsed+self.score_interval,self.next_score_time[:,robot])
             in_auto=self.match_elapsed<=20.+self.dt
             self.auto_fuel_scores[:,robot]+=score_count*in_auto.long()
             self.piece_owner=torch.where(scored,-2,self.piece_owner)
             self.piece_zone=torch.where(scored,torch.full_like(self.piece_zone,6),self.piece_zone)
             self.piece_vel=torch.where(scored[...,None],torch.zeros_like(self.piece_vel),self.piece_vel)
-            self._last_hub_zone[:,robot]=near_hub&score_intent
+            self._last_hub_zone[:,robot]=scoring_ready
         self.piece_active=torch.where(newly_scored,torch.zeros_like(self.piece_active),self.piece_active)
         self.fuel_acquisition_count+=self.fuel_acquired_event
         self.fuel_abandoned_count+=self.fuel_abandoned_event
         return self.fuel_acquired_event,self.fuel_scored_event,self.fuel_denied_event
 
     def _role_swapped_observation(self):
-        """Build the legacy 35-feature view for robot 1 as policy focal robot."""
+        """Build robot 1's role-swapped input for direct and strategic policies."""
+        if self.action_mode=="strategic":
+            return self._strategic_observation(1)
         p,v=self.sim.pose,self.sim.velocity
-        objective=self._attacker_objective()
-        relative_goal=(torch.zeros((self.n,2),device=self.device) if self.action_mode=="strategic"
-                       else objective-p[:,1,:2])
-        radius=(torch.full_like(self.goal_radius,.595) if self.action_mode=="strategic" else self.goal_radius)
-        raw=torch.cat((p[:,1],v[:,1],p[:,0],v[:,0],relative_goal,radius[:,None],
+        observed_opponent,observed_velocity=self._observed_robot(1,0)
+        relative_goal=self._opponent_track_features(1)
+        radius=torch.full_like(self.goal_radius,.595)
+        raw=torch.cat((p[:,1],v[:,1],observed_opponent,observed_velocity,relative_goal,radius[:,None],
             torch.full((self.n,1),self.sim.field_length,device=self.device),
             torch.full((self.n,1),self.sim.field_width,device=self.device),
             self.sim.length[:,[1,0]],self.sim.width[:,[1,0]],self.sim.accel[:,[1,0]]/10.,
@@ -894,16 +1107,129 @@ class TensorDefenseEnv:
                 self.sim.speed[:,[1,0]],self.sim.omega_limit[:,[1,0]])
         return raw
 
-    def _raw_obs(self):
+    def _fuel_candidates(self, focal):
+        points,_,free=self._perceived_fuel(focal)
+        distance=(points-self.sim.pose[:,focal,None,:2]).norm(dim=-1)
+        distance=distance.masked_fill(~free,float("inf"))
+        nearest,indices=distance.topk(4,dim=-1,largest=False)
+        return indices,torch.isfinite(nearest),nearest
+
+    def _strategic_candidate_features(self, focal):
+        other=1-focal
+        indices,valid,own_distance=self._fuel_candidates(focal)
+        rows=torch.arange(self.n,device=self.device)[:,None]
+        points,_,_=self._perceived_fuel(focal)
+        points=points[rows,indices]
+        own_eta=own_distance/self.sim.speed[:,focal,None].clamp_min(.1)
+        opponent_pose,_=self._observed_robot(focal,other)
+        opponent_distance=(points-opponent_pose[:,None,:2]).norm(dim=-1)
+        opponent_eta=opponent_distance/self.sim.speed[:,other,None].clamp_min(.1)
+        hub=self.hub_centers[focal]
+        robot_radius=.5*torch.sqrt(self.sim.length[:,focal].square()+self.sim.width[:,focal].square())
+        score_distance=(points-hub).norm(dim=-1)-(.595+robot_radius[:,None])
+        to_score=score_distance.clamp_min(0.)/self.sim.speed[:,focal,None].clamp_min(.1)
+        risk=torch.sigmoid((own_eta-opponent_eta)*2.)
+        zone=(points[...,0]/self.sim.field_length*6.).floor().clamp(0,5).to(points.dtype)/6.
+        own_count=self._own_possession(focal).to(points.dtype)
+        own_pos=(own_count/max(self.fuel_capacity,1))[:,None].expand(-1,4)
+        capacity_left=((self.fuel_capacity-own_count).clamp_min(0)/max(self.fuel_capacity,1))[:,None].expand(-1,4)
+        features=torch.stack(((points[...,0]-self.sim.pose[:,focal,None,0])/self.sim.field_length,
+            (points[...,1]-self.sim.pose[:,focal,None,1])/self.sim.field_width,
+            own_eta/20.,opponent_eta/20.,to_score/20.,risk,zone,own_pos,capacity_left,
+            valid.to(points.dtype)),dim=-1)
+        features=torch.where(valid[...,None],features,torch.zeros_like(features))
+        return features.reshape(self.n,40)
+
+    def strategic_action_mask(self, focal=0):
+        """Valid categorical choices for the current game state and robot role."""
+        _,valid,_=self._fuel_candidates(focal)
+        offense=(self.task=="counter_defense" and focal==0) or (self.task=="defense" and focal==1)
+        mask=torch.zeros((self.n,8),device=self.device,dtype=torch.bool)
+        if offense:
+            mask[:,:4]=valid
+            carrying=(self.piece_active&(self.piece_owner==focal)).any(-1)
+            mask[:,4]=carrying
+            # Passing remains unavailable in the 1v1 field model until a teammate
+            # state is supplied; the categorical slot is reserved for that action.
+            mask[:,6]=True
+            mask[:,7]=True
+        else:
+            mask[:,0]=True  # intercept the attacker's observed route
+            mask[:,1:5]=valid  # deny one of the visible candidate FUEL pieces
+            mask[:,5]=True  # block the likely scoring lane
+            mask[:,6]=True  # shadow the attacker
+        return mask
+
+    def _strategic_observation(self, focal):
         p,v=self.sim.pose,self.sim.velocity
-        objective=(self.hub_centers[0].expand(self.n,-1) if self.action_mode=="strategic" else self.goal)
-        rel=(torch.zeros_like(self.goal) if self.action_mode=="strategic"
-             else objective-p[:,0,:2])
+        other=1-focal
+        other_pose,other_velocity=self._observed_robot(focal,other)
+        base=torch.cat((p[:,focal],v[:,focal],other_pose,other_velocity,
+            self._opponent_track_features(focal),
+            torch.full((self.n,1),.595,device=self.device),
+            torch.full((self.n,1),self.sim.field_length,device=self.device),
+            torch.full((self.n,1),self.sim.field_width,device=self.device),
+            self.sim.length[:,[focal,other]],self.sim.width[:,[focal,other]],
+            self.sim.accel[:,[focal,other]]/10.,self._obstacle_features(robot_index=focal)),dim=-1)
+        route=torch.zeros((self.n,3),device=self.device)
+        planner=(self._adstar_tactical_planner if focal==0 else
+                 self._adstar_planners if self.task=="defense" else self._adstar_defender_planners)
+        if planner is not None:
+            has_route=planner.last_lengths>1
+            first=planner.last_path[:,1,:]-p[:,focal,:2]
+            segment=(planner.last_path[:,1:,:]-planner.last_path[:,:-1,:]).norm(dim=-1)
+            valid_path=(torch.arange(segment.shape[1],device=self.device)[None,:]
+                        <(planner.last_lengths-1).clamp_min(0)[:,None])
+            cost=(segment*valid_path).sum(-1)
+            route=torch.stack((first[:,0]/self.sim.field_length,first[:,1]/self.sim.field_width,
+                cost/math.hypot(self.sim.field_length,self.sim.field_width)),dim=-1)
+            route=torch.where(has_route[:,None],route,torch.zeros_like(route))
+        local=[]
+        for robot in (focal,other):
+            if robot!=focal:
+                # Do not fuse the opponent's private sensor tracks into this
+                # robot's observation; no teammate communications are modeled.
+                local.append(torch.zeros((self.n,20),device=self.device,dtype=base.dtype))
+                continue
+            tracked_points,tracked_velocities,tracked_mask=self._perceived_fuel(robot)
+            distance=(tracked_points-self.sim.pose[:,robot,None,:2]).norm(dim=-1).masked_fill(~tracked_mask,float("inf"))
+            nearest,indices=distance.topk(4,dim=-1,largest=False)
+            rows=torch.arange(self.n,device=self.device)[:,None]
+            points=tracked_points[rows,indices];velocities=tracked_velocities[rows,indices]
+            valid=torch.isfinite(nearest)
+            relative=points-self.sim.pose[:,robot,None,:2]
+            normalized_velocity=velocities/self.sim.speed[:,robot,None,None].clamp_min(.1)
+            slot=torch.cat((relative[...,0:1]/self.sim.field_length,
+                relative[...,1:2]/self.sim.field_width,normalized_velocity,
+                valid[...,None].to(base.dtype)),dim=-1)
+            local.append(torch.where(valid[...,None],slot,torch.zeros_like(slot)).reshape(self.n,-1))
+        possession=torch.stack((self._own_possession(focal),torch.zeros_like(self._own_possession(focal))),dim=-1).to(base.dtype)
+        possession=possession/max(self.fuel_capacity,1)
+        match=torch.cat((self.match_elapsed[:,None]/160.,self.hub_active.to(base.dtype),
+            self.fuel_score_count[:,[focal,other]].to(base.dtype)/max(self.fuel_count,1),
+            (self.hub_centers[None,:,:]-p[:,focal,None,:2]).reshape(self.n,4)/
+                torch.tensor((self.sim.field_length,self.sim.field_width,self.sim.field_length,
+                              self.sim.field_width),device=self.device)),dim=-1)
+        raw=torch.cat((base,route,*local,possession,match,
+            self._strategic_candidate_features(focal),
+            self.strategic_action_mask(focal).to(base.dtype)),dim=-1)
+        if self.normalize_observations:
+            normalize_tensor_observation_batch_in_place(raw,self.sim.field_length,self.sim.field_width,
+                self.sim.speed[:,[focal,other]],self.sim.omega_limit[:,[focal,other]])
+        return raw
+
+    def _raw_obs(self):
+        if self.action_mode=="strategic":
+            return self._strategic_observation(0)
+        p,v=self.sim.pose,self.sim.velocity
+        opponent_pose,opponent_velocity=self._observed_robot(0,1)
+        # Legacy continuous policies keep their feature width, but receive no
+        # hidden episode goal; strategy must be inferred from observable state.
+        rel=self._opponent_track_features(0)
         # Tactical defense needs the defended region to choose an interception
         # point. Both tasks expose the goal and radius at the shared indices.
-        goal_radius=(torch.full((self.n,1),.595,device=self.device) if self.action_mode=="strategic"
-                     else self.goal_radius[:,None])
-        raw=torch.cat((p[:,0],v[:,0],p[:,1],v[:,1],rel,goal_radius,
+        goal_radius=torch.full((self.n,1),.595,device=self.device)
+        raw=torch.cat((p[:,0],v[:,0],opponent_pose,opponent_velocity,rel,goal_radius,
                        torch.full((self.n,1),self.sim.field_length,device=self.device),torch.full((self.n,1),self.sim.field_width,device=self.device),
                        self.sim.length,self.sim.width,self.sim.accel/10.,self._obstacle_features()),-1)
         if self.action_mode in ("tactical","strategic"):
@@ -925,34 +1251,6 @@ class TensorDefenseEnv:
                     path_cost/math.hypot(self.sim.field_length,self.sim.field_width)),dim=-1)
                 route_features=torch.where(has_route[:,None],route_features,torch.zeros_like(route_features))
             raw=torch.cat((raw,route_features),dim=-1)
-        if self.action_mode=="strategic":
-            free=self.piece_active&(self.piece_owner<0)
-            local_features=[]
-            for robot in (0,1):
-                distance=(self.piece_pos-self.sim.pose[:,robot,None,:2]).norm(dim=-1)
-                distance=distance.masked_fill(~free,float("inf"))
-                nearest,indices=distance.topk(4,dim=-1,largest=False)
-                rows=torch.arange(self.n,device=self.device)[:,None]
-                points=self.piece_pos[rows,indices]
-                velocities=self.piece_vel[rows,indices]
-                valid=torch.isfinite(nearest)
-                relative=points-self.sim.pose[:,robot,None,:2]
-                normalized_velocity=velocities/self.sim.speed[:,robot,None,None].clamp_min(.1)
-                slot=torch.cat((relative[...,0:1]/self.sim.field_length,
-                    relative[...,1:2]/self.sim.field_width,normalized_velocity,
-                    valid[...,None].to(raw.dtype)),dim=-1)
-                local_features.append(torch.where(valid[...,None],slot,torch.zeros_like(slot)).reshape(self.n,-1))
-            possession=torch.stack((
-                (self.piece_active&(self.piece_owner==0)).sum(-1).to(raw.dtype),
-                (self.piece_active&(self.piece_owner==1)).sum(-1).to(raw.dtype)),dim=-1)
-            possession=possession/max(self.fuel_count,1)
-            match_features=torch.cat((self.match_elapsed[:,None]/160.,
-                self.hub_active.to(raw.dtype),
-                self.fuel_score_count.to(raw.dtype)/max(self.fuel_count,1),
-                (self.hub_centers[None,:,:]-p[:,0,None,:2]).reshape(self.n,4)/
-                    torch.tensor((self.sim.field_length,self.sim.field_width,
-                                  self.sim.field_length,self.sim.field_width),device=self.device)),dim=-1)
-            raw=torch.cat((raw,*local_features,possession,match_features),dim=-1)
         # Feature scales are fixed and shared with external policy adapters;
         # no rollout-fitted running statistics can leak into evaluation.
         if self.normalize_observations:
@@ -1192,9 +1490,6 @@ class TensorDefenseEnv:
             torch.zeros_like(self.sim.velocity[:,1]),self.sim.velocity[:,1])
         if options and "goal_radius" in options:
             self.goal_radius.copy_(torch.as_tensor(options["goal_radius"],device=self.device,dtype=self.goal.dtype).expand_as(self.goal_radius))
-        self._move_adstar_defenders_to_clear_start()
-        self._place_defenders_near_clear_adstar_paths()
-        self._initialize_gamepieces()
         self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
         self.hub_active.fill_(True)
         self.hub_inactive_first=torch.randint(2,(self.n,),device=self.device,generator=self.generator)
@@ -1203,6 +1498,12 @@ class TensorDefenseEnv:
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
                       self.fuel_denied_event,self.fuel_abandoned_event):
             value.zero_()
+        for value in (self.next_intake_time,self.next_score_time):
+            value.zero_()
+        self._initialize_gamepieces()
+        self._update_perception(torch.ones((self.n,),device=self.device,dtype=torch.bool))
+        self._move_adstar_defenders_to_clear_start()
+        self._place_defenders_near_clear_adstar_paths()
         self._last_hub_zone.zero_(); self._last_strategic_action.zero_()
         if (self._adstar_planners is not None or self._adstar_defender_planners is not None
                 or self._adstar_tactical_planner is not None):
@@ -1243,9 +1544,6 @@ class TensorDefenseEnv:
         start, goal = self._sample_episode_endpoints()
         self.sim.pose[:, pidx, :2] = torch.where(mask[:, None], start, self.sim.pose[:, pidx, :2])
         self.goal=torch.where(mask[:,None],goal,self.goal)
-        self._move_adstar_defenders_to_clear_start(mask)
-        self._place_defenders_near_clear_adstar_paths(mask)
-        self._initialize_gamepieces(mask)
         self.match_elapsed=torch.where(mask,torch.zeros_like(self.match_elapsed),self.match_elapsed)
         self.match_remaining=torch.where(mask,torch.full_like(self.match_remaining,160.),self.match_remaining)
         self.hub_active=torch.where(mask[:,None],torch.ones_like(self.hub_active),self.hub_active)
@@ -1253,10 +1551,16 @@ class TensorDefenseEnv:
         self.hub_inactive_first=torch.where(mask,tie_choice,self.hub_inactive_first)
         self.auto_fuel_scores=torch.where(mask[:,None],torch.zeros_like(self.auto_fuel_scores),self.auto_fuel_scores)
         self._last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self._last_hub_zone),self._last_hub_zone)
+        self._initialize_gamepieces(mask)
+        self._update_perception(mask)
+        self._move_adstar_defenders_to_clear_start(mask)
+        self._place_defenders_near_clear_adstar_paths(mask)
         self._last_strategic_action=torch.where(mask,torch.zeros_like(self._last_strategic_action),self._last_strategic_action)
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
                       self.fuel_denied_event,self.fuel_abandoned_event):
+            value.masked_fill_(mask[:,None],0)
+        for value in (self.next_intake_time,self.next_score_time):
             value.masked_fill_(mask[:,None],0)
         if (self._adstar_planners is not None or self._adstar_defender_planners is not None
                 or self._adstar_tactical_planner is not None):
@@ -1301,8 +1605,9 @@ class TensorDefenseEnv:
             if a.ndim==2 and a.shape[-1]==1:a=a.squeeze(-1)
             if a.ndim==0:a=a.expand(self.n)
             if tuple(a.shape)!=(self.n,):raise ValueError(f"strategic action must be {(self.n,)} class indices")
-            strategy=a.long().clamp(0,2)
-            stored_action=torch.nn.functional.one_hot(strategy,num_classes=3).to(self.sim.pose.dtype)
+            strategy=a.long().clamp(0,7)
+            stored_action=torch.zeros((self.n,3),device=self.device,dtype=self.sim.pose.dtype)
+            stored_action[:,0]=strategy.to(self.sim.pose.dtype)
         else:
             action_dim=2 if self.action_mode=="tactical" else 3
             if a.shape==(action_dim,):a=a.expand(self.n,action_dim)
@@ -1310,22 +1615,32 @@ class TensorDefenseEnv:
             a=torch.nan_to_num(a).clamp(-1,1)
             stored_action=(torch.cat((a,torch.zeros((self.n,1),device=self.device)),dim=-1)
                            if action_dim==2 else a)
-        # Keep the existing three-channel latency buffer for old direct-control
-        # policies; tactical policies use its first two waypoint channels and
-        # strategic policies encode their discrete class as a one-hot triple.
+        # Keep the three-channel latency buffer for continuous policies;
+        # strategic choices store their categorical id in channel zero.
         self.action_history=torch.cat((stored_action[:,None,:],self.action_history[:,:-1,:]),dim=1)
         applied=self.action_history.gather(1,self.control_delay[:,None,None].expand(-1,1,3)).squeeze(1)
         a=applied
-        if self.action_mode=="tactical":
+        if self.task=="defense" and self.defense_mode is not None:
+            target=self._defense_target(self.defense_mode,0,1)
+            own=self._adstar_target_velocity(target)
+            a=torch.cat((own[:,:2]/self.sim.speed[:,0,None].clamp_min(.1),
+                         torch.zeros((self.n,1),device=self.device)),dim=-1)
+        elif self.action_mode=="tactical":
             own=self._adstar_tactical_velocity(a[:,:2])
             a=torch.cat((own[:,:2]/self.sim.speed[:,0,None].clamp_min(.1),
                          torch.zeros((self.n,1),device=self.device)),dim=-1)
         elif self.action_mode=="strategic":
-            self._last_strategic_action=applied.argmax(-1)
+            proposed=applied[:,0].long().clamp(0,7)
+            action_mask=self.strategic_action_mask()
+            valid=action_mask.gather(1,proposed[:,None]).squeeze(1)
+            fallback=action_mask.to(torch.int64).argmax(-1)
+            self._last_strategic_action=torch.where(valid,proposed,fallback)
             target=self._strategic_target(self._last_strategic_action)
             own=self._adstar_target_velocity(target)
+            dumping=(self._last_strategic_action==4) if self.task=="counter_defense" else torch.zeros_like(self._last_strategic_action,dtype=torch.bool)
+            omega=self._face_hub_omega(0,dumping)
             a=torch.cat((own[:,:2]/self.sim.speed[:,0,None].clamp_min(.1),
-                         torch.zeros((self.n,1),device=self.device)),dim=-1)
+                         (omega/self.sim.omega_limit[:,0].clamp_min(.1))[:,None]),dim=-1)
         else:
             own=torch.cat((a[:,:2]*self.sim.speed[:,0,None],(a[:,2]*self.sim.omega_limit[:,0])[:,None]),-1)
         p=self.sim.pose; goal=self._attacker_objective()
@@ -1337,7 +1652,10 @@ class TensorDefenseEnv:
         kind=self.opponent.get("value","guard") if isinstance(self.opponent,dict) else self.opponent
         if not isinstance(kind,str): kind="guard"
         kind=kind.lower()
-        if self.task=="defense" and kind=="guard": kind="offense"
+        if self.task=="counter_defense":
+            kind={"cutoff":"intercept","mirror":"shadow","velocity_intercept":"intercept",
+                  "pursuit":"shadow"}.get(kind,kind)
+        if self.task=="defense" and kind in ("guard","pursuit"): kind="offense"
         elif self.task=="counter_defense" and kind=="guard": kind="adstar_defender"
         controlled=p[:,0,:2]
         goal_target=goal
@@ -1348,7 +1666,7 @@ class TensorDefenseEnv:
             target=controlled
         if kind=="guard":
             target=.5*(controlled+goal_target)
-        elif kind in ("intercept","cutoff"):
+        elif kind=="cutoff":
             route=goal_target-controlled
             unit=route/route.norm(dim=-1,keepdim=True).clamp_min(1e-8)
             target=controlled+self.sim.velocity[:,0,:2]*.45+unit*.65
@@ -1356,23 +1674,27 @@ class TensorDefenseEnv:
             target=self._velocity_intercept_target()
         elif kind=="mirror":
             target=2*goal_target-controlled
-        elif kind in ("pursuit","offense"):
+        elif kind=="pursuit":
             target=goal_target if self.task=="defense" else controlled
-        elif kind=="adstar_defender":
+        elif kind in ("adstar_defender","intercept","lane_block","fuel_denial","shadow","hub_guard"):
             if self.task!="counter_defense" or self._adstar_defender_planners is None:
-                raise ValueError("the AD* defender is available for the counter-defense task")
-            oppxy=self._opponent_velocity_command(self._adstar_defender_velocity())
+                raise ValueError("scripted defense modes are available for the counter-defense task")
+            mode=self.defense_mode if kind=="adstar_defender" else kind.upper()
+            target=self._defense_target(mode,1,0)
+            oppxy=self._opponent_velocity_command(self._adstar_defender_velocity(target))
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
             commands=torch.stack((own,opp),dim=1)
             self.sim.step(commands); self.steps+=1
             return self._finish_step(goal,old_position,old_distance,a)
-        elif kind=="adstar":
+        elif kind in ("adstar","offense"):
             if self.task!="defense" or self._adstar_planners is None:
                 raise ValueError("the AD* attacker is available for the defense task")
             # _swerve accepts field-relative chassis velocity and performs the
             # body-frame conversion internally for module kinematics.
             oppxy=self._opponent_velocity_command(self._adstar_attacker_velocity())
-            opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
+            carrying=self._own_possession(1)>0
+            omega=self._face_hub_omega(1,carrying)
+            opp=torch.cat((oppxy,omega[:,None]),dim=-1)
             commands=torch.stack((own,opp),dim=1)
             self.sim.step(commands); self.steps+=1
             return self._finish_step(goal,old_position,old_distance,a)
@@ -1390,19 +1712,33 @@ class TensorDefenseEnv:
                                      device=self.device,dtype=self.sim.pose.dtype)
             learned=torch.nan_to_num(learned).clamp(-1,1)
             if self.action_mode=="strategic":
-                if learned.shape==(3,):learned=learned.expand(self.n,3)
-                if learned.shape==(self.n,3):
-                    # Historical direct-control policies are retained in the
-                    # opponent pool as tactical diversity. Their output only
-                    # selects a semantic objective; AD* still owns motion.
-                    action_class=learned.argmax(-1)
+                if learned.ndim==1 and learned.shape[0] in (3,8):learned=learned.expand(self.n,-1)
+                if learned.shape==(self.n,8):
+                    action_class=learned.long().clamp(0,7)
+                elif learned.shape==(self.n,3):
+                    # Three-output checkpoints keep their old semantic mapping;
+                    # the new 8-choice policy selects explicit candidates.
+                    legacy=learned.argmax(-1)
+                    if self.task=="defense":
+                        action_class=torch.where(legacy==0,torch.zeros_like(legacy),
+                            torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
+                    else:
+                        action_class=torch.where(legacy==0,torch.full_like(legacy,5),
+                            torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy)))
                 elif learned.shape==(self.n,):
-                    action_class=learned.long().clamp(0,2)
+                    legacy=learned.long().clamp(0,2)
+                    action_class=(torch.where(legacy==0,torch.zeros_like(legacy),
+                        torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
+                        if self.task=="defense" else
+                        torch.where(legacy==0,torch.full_like(legacy,5),
+                            torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy))))
                 else:
-                    raise ValueError(f"learned strategic opponent must return {(self.n,3)} scores or {(self.n,)} classes")
+                    raise ValueError(f"learned strategic opponent must return 3/8 scores or {(self.n,)} classes")
                 target=self._strategic_opponent_target(action_class)
                 oppxy=self._adstar_opponent_velocity(target)
-                opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
+                dumping=(action_class==4) if self.task=="defense" else torch.zeros_like(action_class,dtype=torch.bool)
+                omega=self._face_hub_omega(1,dumping)
+                opp=torch.cat((oppxy,omega[:,None]),dim=-1)
                 commands=torch.stack((own,opp),dim=1)
                 self.sim.step(commands); self.steps+=1
                 return self._finish_step(goal,old_position,old_distance,a)
@@ -1419,7 +1755,9 @@ class TensorDefenseEnv:
         direction=target-p[:,1,:2]
         oppxy=direction/(direction.norm(dim=-1,keepdim=True).clamp_min(1e-8))*self.sim.speed[:,1,None]
         oppxy=self._opponent_velocity_command(oppxy)
-        opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
+        carrying=self._own_possession(1)>0
+        omega=self._face_hub_omega(1,carrying) if self.task=="defense" else torch.zeros((self.n,),device=self.device)
+        opp=torch.cat((oppxy,omega[:,None]),dim=-1)
         commands=torch.stack((own,opp),dim=1)
         self.sim.step(commands); self.steps+=1
         return self._finish_step(goal,old_position,old_distance,a)
@@ -1429,6 +1767,15 @@ class TensorDefenseEnv:
         target=torch.stack(((waypoint_action[:,0]+1.)*.5*self.sim.field_length,
                             (waypoint_action[:,1]+1.)*.5*self.sim.field_width),dim=-1)
         return self._adstar_target_velocity(target)
+
+    def _face_hub_omega(self, robot, intent):
+        """Turn a dumper toward its HUB while it executes a scoring objective."""
+        pose=self.sim.pose[:,robot]
+        delta=self.hub_centers[robot]-pose[:,:2]
+        bearing=torch.atan2(delta[:,1],delta[:,0])
+        error=torch.atan2(torch.sin(bearing-pose[:,2]),torch.cos(bearing-pose[:,2]))
+        rate=(4.0*error).clamp(-self.sim.omega_limit[:,robot],self.sim.omega_limit[:,robot])
+        return torch.where(intent,rate,torch.zeros_like(rate))
 
     def _adstar_target_velocity(self, waypoint):
         """Route robot 0 to an absolute strategic waypoint with AD*."""
@@ -1449,15 +1796,14 @@ class TensorDefenseEnv:
         return torch.cat((command,torch.zeros((self.n,1),device=self.device)),dim=-1)
 
     def _strategic_target(self,action_class):
-        """Resolve collect, score, and contest classes into AD* waypoint goals."""
+        """Resolve masked strategic choices into waypoints for the AD* controller."""
         position=self.sim.pose[:,0,:2]
-        free=self.piece_active&(self.piece_owner<0)
-        distances=(self.piece_pos-position[:,None,:]).norm(dim=-1).masked_fill(~free,float("inf"))
-        nearest_distance,nearest_index=distances.min(-1)
-        nearest=self.piece_pos[torch.arange(self.n,device=self.device),nearest_index]
+        candidates,valid,_=self._fuel_candidates(0)
+        rows=torch.arange(self.n,device=self.device)
         if self.task=="defense":
-            attacker=self.sim.pose[:,1,:2]
-            velocity=self.sim.velocity[:,1,:2]
+            attacker_pose,attacker_velocity=self._observed_robot(0,1)
+            attacker=attacker_pose[:,:2]
+            velocity=attacker_velocity[:,:2]
             speed=velocity.norm(dim=-1,keepdim=True)
             to_defender=position-attacker
             fallback=to_defender/to_defender.norm(dim=-1,keepdim=True).clamp_min(1e-6)
@@ -1474,34 +1820,40 @@ class TensorDefenseEnv:
             target_direction=target_direction/target_distance
             block_lane=attacker+target_direction*torch.minimum(target_distance*.35,
                 torch.full_like(target_distance,.9))
-            deny=torch.where(torch.isfinite(nearest_distance)[:,None],nearest,block_lane)
-            # Defender options use visible motion and game state: guard the
-            # likely scoring lane, deny the nearest loose FUEL, or contest the
-            # attacker's predicted position. No target is supplied to policy.
-            return torch.where((action_class==0)[:,None],block_lane,
-                torch.where((action_class==1)[:,None],deny,contest))
+            slot=(action_class-1).clamp(0,3)
+            points,_,_=self._perceived_fuel(0)
+            candidate=points[rows,candidates[rows,slot]]
+            candidate_valid=valid[rows,slot]
+            deny=torch.where(candidate_valid[:,None],candidate,block_lane)
+            target=torch.where((action_class==0)[:,None],contest,
+                torch.where(((action_class>=1)&(action_class<=4))[:,None],deny,
+                    torch.where((action_class==5)[:,None],block_lane,
+                        torch.where((action_class==6)[:,None],attacker+velocity*.35,contest))))
+            fuel_action=(action_class>=1)&(action_class<=4)
+            available=self._opponent_track_valid[:,0]|fuel_action
+            return torch.where(available[:,None],target,position)
         else:
             own_hub=self.hub_centers[0].expand(self.n,-1)
             hub_direction=position-own_hub
             hub_direction=hub_direction/hub_direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
             approach=own_hub+hub_direction*(.595+.5*torch.sqrt(
                 self.sim.length[:,0].square()+self.sim.width[:,0].square())+.02)[:,None]
-            opponent=self.sim.pose[:,1,:2]
-            contested_distance=(self.piece_pos-opponent[:,None,:]).norm(dim=-1).masked_fill(~free,float("inf"))
-            _,contested_index=contested_distance.min(-1)
-            contest=self.piece_pos[torch.arange(self.n,device=self.device),contested_index]
-            contest=torch.where(torch.isfinite(contested_distance.min(-1).values)[:,None],contest,approach)
-        collect=torch.where(torch.isfinite(nearest_distance)[:,None],nearest,approach)
-        return torch.where((action_class==0)[:,None],collect,
-            torch.where((action_class==1)[:,None],approach,contest))
+            slot=action_class.clamp(0,3)
+            points,_,_=self._perceived_fuel(0)
+            collect=points[rows,candidates[rows,slot]]
+            collect=torch.where(valid[rows,slot,None],collect,approach)
+            direction=own_hub-position
+            direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+            tactical=position+direction*1.5
+            return torch.where((action_class<=3)[:,None],collect,
+                torch.where((action_class==4)[:,None],approach,
+                    torch.where((action_class==6)[:,None],tactical,position)))
 
     def _strategic_opponent_target(self,action_class):
-        """Resolve a historical policy's semantic choice for robot 1."""
+        """Resolve the opponent's candidate choice to an AD* objective."""
         position=self.sim.pose[:,1,:2]
-        free=self.piece_active&(self.piece_owner<0)
-        distance=(self.piece_pos-position[:,None,:]).norm(dim=-1).masked_fill(~free,float("inf"))
-        nearest_distance,index=distance.min(-1)
-        nearest=self.piece_pos[torch.arange(self.n,device=self.device),index]
+        candidates,valid,_=self._fuel_candidates(1)
+        rows=torch.arange(self.n,device=self.device)
         if self.task=="defense":
             side=1
             hub=self.hub_centers[side].expand(self.n,-1)
@@ -1509,31 +1861,44 @@ class TensorDefenseEnv:
             direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
             radius=.595+.5*torch.sqrt(self.sim.length[:,1].square()+self.sim.width[:,1].square())+.02
             approach=hub+direction*radius[:,None]
-            carrying=(self.piece_active&(self.piece_owner==1)).any(-1)
-            score=carrying&self.hub_active[:,side]
-            collect=torch.where(torch.isfinite(nearest_distance)[:,None],nearest,approach)
-            return torch.where((action_class==0)[:,None],collect,
-                torch.where((action_class==1)[:,None],approach,collect))
+            slot=action_class.clamp(0,3)
+            points,_,_=self._perceived_fuel(1)
+            collect=points[rows,candidates[rows,slot]]
+            collect=torch.where(valid[rows,slot,None],collect,approach)
+            direction=hub-position
+            direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+            return torch.where((action_class<=3)[:,None],collect,
+                torch.where((action_class==4)[:,None],approach,
+                    torch.where((action_class==6)[:,None],position+direction*1.5,position)))
 
-        attacker=position
-        defender=self.sim.pose[:,0,:2]
-        attacker_velocity=self.sim.velocity[:,0,:2]
+        attacker_pose,attacker_velocity=self._observed_robot(1,0)
+        defender=position
+        attacker=attacker_pose[:,:2]
+        attacker_velocity=attacker_velocity[:,:2]
         speed=attacker_velocity.norm(dim=-1,keepdim=True)
         to_defender=defender-attacker
         fallback=to_defender/to_defender.norm(dim=-1,keepdim=True).clamp_min(1e-6)
         heading=torch.where(speed>.15,attacker_velocity/speed.clamp_min(.15),fallback)
-        hubs=self.hub_centers[None,:,:]-defender[:,None,:]
+        hubs=self.hub_centers[None,:,:]-attacker[:,None,:]
         hub_distance=hubs.norm(dim=-1).clamp_min(1e-6)
         likely=(heading[:,None,:]*hubs/hub_distance[...,None]).sum(-1).argmax(-1)
-        route=self.hub_centers[likely]-defender
+        route=self.hub_centers[likely]-attacker
         route_distance=route.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-        block_lane=defender+route/route_distance*torch.minimum(route_distance*.35,
+        block_lane=attacker+route/route_distance*torch.minimum(route_distance*.35,
             torch.full_like(route_distance,.9))
-        eta=((attacker-defender).norm(dim=-1,keepdim=True)/self.sim.speed[:,1,None].clamp_min(.1)).clamp(0.,1.25)
+        eta=((defender-attacker).norm(dim=-1,keepdim=True)/self.sim.speed[:,1,None].clamp_min(.1)).clamp(0.,1.25)
         intercept=attacker+attacker_velocity*eta+heading*.55
-        deny=torch.where(torch.isfinite(nearest_distance)[:,None],nearest,block_lane)
-        return torch.where((action_class==0)[:,None],block_lane,
-            torch.where((action_class==1)[:,None],deny,intercept))
+        slot=(action_class-1).clamp(0,3)
+        points,_,_=self._perceived_fuel(1)
+        candidate=points[rows,candidates[rows,slot]]
+        deny=torch.where(valid[rows,slot,None],candidate,block_lane)
+        target=torch.where((action_class==0)[:,None],intercept,
+            torch.where(((action_class>=1)&(action_class<=4))[:,None],deny,
+                torch.where((action_class==5)[:,None],block_lane,
+                    torch.where((action_class==6)[:,None],attacker+attacker_velocity*.35,intercept))))
+        fuel_action=(action_class>=1)&(action_class<=4)
+        available=self._opponent_track_valid[:,1]|fuel_action
+        return torch.where(available[:,None],target,position)
 
     def _adstar_opponent_velocity(self,target):
         """Plan robot 1's route to a game-state objective."""
@@ -1542,10 +1907,11 @@ class TensorDefenseEnv:
         if planner is None:
             raise RuntimeError("strategic opponent motion requires its AD* planner")
         pose=self.sim.pose[:,1]
+        observed_defender,observed_velocity=self._observed_robot(1,0)
         self._planner_tick+=1
         if self._planner_tick%self.adstar_replan_interval==0:
             planner.plan(pose[:,:2],target,pose[:,2],self.sim.length[:,1],self.sim.width[:,1],
-                self.sim.speed[:,1],self.sim.pose[:,0,:2],self.sim.velocity[:,0,:2],
+                self.sim.speed[:,1],observed_defender[:,:2],observed_velocity[:,:2],
                 self.task=="defense",self.sim.lateral_mu[:,1],self.sim.accel[:,1])
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
@@ -1555,14 +1921,15 @@ class TensorDefenseEnv:
     def _velocity_intercept_target(self):
         """Deterministic attacker waypoint that evades the defender's predicted lane intercept."""
         attacker=self.sim.pose[:,1,:2]
-        defender=self.sim.pose[:,0,:2]
+        defender_pose,defender_velocity=self._observed_robot(1,0)
+        defender=defender_pose[:,:2]
         goal=self._attacker_objective()
         route=goal-attacker
         distance=route.norm(dim=-1,keepdim=True).clamp_min(1e-6)
         direction=route/distance
         defender_along=((defender-attacker)*direction).sum(-1).clamp_min(0.)
         time_to_intercept=(defender_along/self.sim.speed[:,1].clamp_min(.1)).clamp(0.,1.2)
-        predicted_defender=defender+self.sim.velocity[:,0,:2]*time_to_intercept[:,None]
+        predicted_defender=defender+defender_velocity[:,:2]*time_to_intercept[:,None]
         along=((predicted_defender-attacker)*direction).sum(-1).clamp_min(0.).minimum(distance[:,0])
         closest=attacker+direction*along[:,None]
         lateral=predicted_defender-closest
@@ -1577,35 +1944,76 @@ class TensorDefenseEnv:
         """Batched GPU route planning and velocity tracking; no host state copies."""
         planner=self._adstar_planners
         pose=self.sim.pose[:,1]
+        observed_defender,_=self._observed_robot(1,0)
         self._planner_tick+=1
         # A host-side fixed cadence avoids the device synchronization caused by
         # branching on per-world contact/replan masks. Contact replanning is
         # bounded by this interval instead of synchronizing every control tick.
         if self._planner_tick % self.adstar_replan_interval == 0:
             planner.plan(pose[:,:2],self._attacker_objective(),pose[:,2],self.sim.length[:,1],
-                self.sim.width[:,1],self.sim.speed[:,1],self.sim.pose[:,0,:2],
-                self.sim.velocity[:,0,:2],True,self.sim.lateral_mu[:,1],self.sim.accel[:,1])
+                self.sim.width[:,1],self.sim.speed[:,1],observed_defender[:,:2],
+                self._observed_robot(1,0)[1][:,:2],True,self.sim.lateral_mu[:,1],self.sim.accel[:,1])
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
             self.sim.speed[:,1,None]/magnitude.clamp_min(1e-6))
 
-    def _adstar_defender_velocity(self):
-        """Route toward the attacker's current motion lane without goal access."""
+    def _defense_target(self, mode, defender_index, attacker_index):
+        """Create a defense waypoint from observable tracks, then AD* executes it."""
+        defender_pose,defender_velocity=self._observed_robot(defender_index,defender_index)
+        attacker_pose,attacker_velocity=self._observed_robot(defender_index,attacker_index)
+        defender=defender_pose[:,:2]
+        attacker=attacker_pose[:,:2]
+        velocity=attacker_velocity[:,:2]
+        speed=velocity.norm(dim=-1,keepdim=True)
+        toward=defender-attacker
+        fallback=toward/toward.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        heading=torch.where(speed>.15,velocity/speed.clamp_min(.15),fallback)
+        distance=(defender-attacker).norm(dim=-1,keepdim=True)
+        eta=(distance/self.sim.speed[:,defender_index,None].clamp_min(.1)).clamp(0.,1.25)
+        intercept=attacker+velocity*eta+heading*.55
+        hub=self.hub_centers[attacker_index].expand(self.n,-1)
+        to_hub=hub-attacker
+        hub_distance=to_hub.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        lane=to_hub/hub_distance
+        block=attacker+lane*torch.minimum(hub_distance*.4,torch.full_like(hub_distance,1.0))
+        guard=hub-lane*(.595+.5*torch.sqrt(self.sim.length[:,defender_index].square()+
+            self.sim.width[:,defender_index].square())+.15)[:,None]
+        if mode=="FUEL_DENIAL":
+            candidates,valid,distances=self._fuel_candidates(defender_index)
+            points,_,_=self._perceived_fuel(defender_index)
+            index=distances.masked_fill(~valid,float("inf")).argmin(-1)
+            fuel=points[torch.arange(self.n,device=self.device),candidates.gather(1,index[:,None]).squeeze(1)]
+            target=torch.where(valid.any(-1)[:,None],fuel,block)
+        elif mode=="LANE_BLOCK":
+            target=block
+        elif mode=="SHADOW":
+            target=attacker+velocity*.35
+        elif mode=="HUB_GUARD":
+            target=guard
+        else:
+            target=intercept
+        tracked=self._opponent_track_valid[:,defender_index].clone()
+        if mode=="FUEL_DENIAL":
+            tracked |= self._fuel_candidates(defender_index)[1].any(-1)
+        return torch.where(tracked[:,None],target,defender)
+
+    def _adstar_defender_velocity(self, target=None):
+        """Route a defender toward a perception-derived objective with AD*."""
         planner=self._adstar_defender_planners
         defender=self.sim.pose[:,1]
-        attacker=self.sim.pose[:,0,:2]
-        attacker_velocity=self.sim.velocity[:,0,:2]
-        attacker_speed=attacker_velocity.norm(dim=-1,keepdim=True)
-        to_attacker=attacker-defender[:,:2]
-        fallback=to_attacker/to_attacker.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-        velocity_direction=torch.where(attacker_speed>.15,
-            attacker_velocity/attacker_speed.clamp_min(.15),fallback)
-        defender_distance=(attacker-defender[:,:2]).norm(dim=-1,keepdim=True)
-        reach_time=(defender_distance/self.sim.speed[:,1,None].clamp_min(.1)).clamp(0.,1.25)
-        intercept_time=reach_time.clamp(max=1.25)
-        predicted=attacker+attacker_velocity*intercept_time
-        target=predicted+velocity_direction*.55
+        attacker_pose,attacker_observed_velocity=self._observed_robot(1,0)
+        attacker=attacker_pose[:,:2]
+        attacker_velocity=attacker_observed_velocity[:,:2]
+        if target is None:
+            attacker_speed=attacker_velocity.norm(dim=-1,keepdim=True)
+            to_attacker=attacker-defender[:,:2]
+            fallback=to_attacker/to_attacker.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+            velocity_direction=torch.where(attacker_speed>.15,
+                attacker_velocity/attacker_speed.clamp_min(.15),fallback)
+            defender_distance=(attacker-defender[:,:2]).norm(dim=-1,keepdim=True)
+            reach_time=(defender_distance/self.sim.speed[:,1,None].clamp_min(.1)).clamp(0.,1.25)
+            target=attacker+attacker_velocity*reach_time+velocity_direction*.55
         self._planner_tick+=1
         if self._planner_tick%self.adstar_replan_interval==0:
             planner.plan(defender[:,:2],target,defender[:,2],self.sim.length[:,1],
@@ -1621,11 +2029,14 @@ class TensorDefenseEnv:
             torch.zeros_like(self.sim.velocity[:,1]),self.sim.velocity[:,1])
         p=self.sim.pose
         acquisitions,scores,denied=self._update_gamepieces()
+        self._update_perception()
         d=(goal-p[:,1,:2]).norm(dim=-1)
         attacker_index=0 if self.task=="counter_defense" else 1
         if self.action_mode=="strategic":
             attack_score=scores[:,attacker_index].float()
-            terminated=attack_score>0
+            # A score is one cycle event, not an episode boundary. Strategic
+            # episodes continue until the full physics-time match horizon.
+            terminated=torch.zeros_like(attack_score,dtype=torch.bool)
             if self.task=="counter_defense":
                 reward=attack_score+.05*acquisitions[:,0].float()-.001
                 score=torch.zeros_like(reward)
@@ -1678,7 +2089,7 @@ class TensorDefenseEnv:
         self.last_contact.copy_(contact); self.last_action.copy_(action)
         truncated=self.steps>=self.horizon
         if self.action_mode=="strategic":
-            success=(scores[:,0]>0) if self.task=="counter_defense" else (
+            success=(truncated&(self.fuel_score_count[:,0]>0)) if self.task=="counter_defense" else (
                 truncated&(self.fuel_score_count[:,1]==0))
         else:
             success=terminated if self.task=="counter_defense" else (truncated&~terminated)
@@ -1701,7 +2112,8 @@ class TensorDefenseEnv:
               "opponent_wall_contact":opponent_wall.float(),
               "opponent_static_contact":opponent_static_contact.float(),
               "contact_count":contact_started.float(),"time_blocked":blocked.float()*self.dt,
-              "time_to_goal":((self.match_elapsed if self.action_mode=="strategic" else self.steps*self.dt)*terminated).float(),"success":success.float(),
+              "time_to_goal":((self.match_elapsed*(scores[:,attacker_index]>0)
+                  if self.action_mode=="strategic" else self.steps*self.dt*terminated)).float(),"success":success.float(),
               "defensive_delay":torch.full_like(self.steps,self.dt,dtype=torch.float32) if self.task=="defense" else torch.zeros_like(self.steps,dtype=torch.float32),
               "useful_position":score,"path_length":moved,"command_smoothness":smoothness,
               "spin_rate_ratio":spin_rate_ratio.abs(),"maneuver_penalty":maneuver_penalty,
@@ -1719,6 +2131,9 @@ class TensorDefenseEnv:
             "fuel_denied_count":self.fuel_denied_count,
             "fuel_abandoned_count":self.fuel_abandoned_count,
             "fuel_possession_count":possession,
+            "fuel_capacity_per_robot":self.fuel_capacity,
+            "fuel_intake_interval_s":self.intake_interval,
+            "fuel_score_interval_s":self.score_interval,
             "match_elapsed":self.match_elapsed,
             "match_remaining":self.match_remaining,
             "match_progress":self.match_elapsed/160.,
@@ -1735,6 +2150,9 @@ class TensorDefenseEnv:
                 "fuel_denied_event":denied,
                 "fuel_abandoned_event":self.fuel_abandoned_event,
                 "fuel_possession_count":possession,
+                "fuel_capacity_per_robot":self.fuel_capacity,
+                "fuel_intake_interval_s":self.intake_interval,
+                "fuel_score_interval_s":self.score_interval,
                 "fuel_score_count":self.fuel_score_count,
                 "match_elapsed":self.match_elapsed,
                 "match_remaining":self.match_remaining,

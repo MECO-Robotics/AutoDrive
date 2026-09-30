@@ -1,5 +1,5 @@
 [Unit]
-Description=2026 REBUILT FUEL defense policy training (strategic objectives)
+Description=2026 REBUILT FUEL defense policy training (PPO strategic policy with opponent-population generations)
 After=network-online.target
 
 [Service]

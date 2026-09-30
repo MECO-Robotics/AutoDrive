@@ -8,6 +8,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -25,10 +28,10 @@ except ImportError as exc:  # keep the module's import error actionable
 
 OBS_DIM = 35
 ACTION_DIM = 3
+STRATEGIC_LEGACY_OBS_DIM = 89
+STRATEGIC_ACTION_DIM = 8
 OBS_NORMALIZATION = "fixed_physical_scale_v1"
 MIXED_DEFENSE_OPPONENTS = ("adstar", "offense", "intercept", "velocity_intercept", "mirror")
-MIXED_ADSTAR_FITNESS_WEIGHT = .8
-MIXED_SCRIPTED_FITNESS_WEIGHT = .2
 STATIC_OPPONENT_FRACTION = .20
 CURRICULUM_STAGES = ("static_straight", "scripted", "adstar", "mixed", "learned")
 
@@ -76,9 +79,12 @@ class ActorCritic(nn.Module):
                  else self.log_std.expand_as(logits_or_mean))
         return logits_or_mean, scale, self.critic(features).squeeze(-1)
 
-    def sample(self, obs: torch.Tensor, deterministic: bool = False):
+    def sample(self, obs: torch.Tensor, deterministic: bool = False,
+               action_mask: torch.Tensor | None = None):
         mean, log_std, value = self(obs)
         if self.action_kind == "categorical":
+            if action_mask is not None:
+                mean=mean.masked_fill(~action_mask.bool(),torch.finfo(mean.dtype).min)
             dist = torch.distributions.Categorical(logits=mean)
             action = mean.argmax(-1) if deterministic else dist.sample()
             return action, dist.log_prob(action), value
@@ -90,9 +96,12 @@ class ActorCritic(nn.Module):
         log_prob = dist.log_prob(latent).sum(-1) - torch.log(1 - action.square() + 1e-6).sum(-1)
         return action, log_prob, value
 
-    def score(self, obs: torch.Tensor, actions: torch.Tensor):
+    def score(self, obs: torch.Tensor, actions: torch.Tensor,
+              action_mask: torch.Tensor | None = None):
         mean, log_std, value = self(obs)
         if self.action_kind == "categorical":
+            if action_mask is not None:
+                mean=mean.masked_fill(~action_mask.bool(),torch.finfo(mean.dtype).min)
             dist = torch.distributions.Categorical(logits=mean)
             actions = actions.to(torch.long).reshape(-1)
             return dist.log_prob(actions), dist.entropy(), value, mean
@@ -112,7 +121,7 @@ def _device(requested: str) -> torch.device:
 
 
 def _env(num_envs: int, task: str, device: torch.device, seed: int, opponent: str,
-         horizon: int = 750, normalize_observations: bool = True,
+         horizon: int = 8000, normalize_observations: bool = True,
          static_opponent_fraction: float = 0., architecture: str = "direct"):
     try:
         from .tensor_sim import TensorDefenseEnv
@@ -127,18 +136,21 @@ def _env(num_envs: int, task: str, device: torch.device, seed: int, opponent: st
     return env
 
 
-def _attach_historical_opponent(env, task: str, device: torch.device) -> bool:
-    """Load the previous role-specific direct NN as a frozen curriculum opponent."""
-    name = "rebuilt-counter-defense" if task == "defense" else "rebuilt-defense"
-    checkpoint = Path("checkpoints") / name / "policy.pt"
-    if not checkpoint.is_file():
+def _attach_historical_opponent(env, task: str, device: torch.device,
+                               checkpoint_path: str | Path | None = None) -> bool:
+    """Load historical direct or 89-feature strategic policies as opponents."""
+    names = (("rebuilt-gamepiece-offense", "rebuilt-counter-defense")
+             if task == "defense" else
+             ("rebuilt-gamepiece-defense", "rebuilt-defense-generational", "rebuilt-defense"))
+    checkpoint = (Path(checkpoint_path) if checkpoint_path else
+        next((Path("checkpoints") / name / "policy.pt" for name in names
+              if (Path("checkpoints") / name / "policy.pt").is_file()),None))
+    if checkpoint is None:
         return False
     try:
         payload = torch.load(checkpoint, map_location=device, weights_only=True)
-        if int(payload.get("obs_dim", OBS_DIM)) != 35:
-            # The callback receives the legacy role-swapped world vector.
-            # Refuse an incompatible checkpoint rather than feeding it a
-            # truncated strategic observation or bypassing AD*.
+        expected_obs=int(payload.get("obs_dim",OBS_DIM))
+        if expected_obs not in (OBS_DIM,STRATEGIC_LEGACY_OBS_DIM,137):
             return False
         model = ActorCritic(payload.get("obs_dim", OBS_DIM),
                             payload.get("action_dim", ACTION_DIM),
@@ -150,12 +162,20 @@ def _attach_historical_opponent(env, task: str, device: torch.device) -> bool:
 
     @torch.no_grad()
     def policy(observation):
-        action, _, _ = model(observation)
+        expected_obs=int(payload.get("obs_dim",OBS_DIM))
+        obs=observation[:,:expected_obs]
+        action, _, _ = model(obs)
         if model.action_kind == "categorical":
+            if model.actor.out_features==STRATEGIC_ACTION_DIM and observation.shape[-1]>=STRATEGIC_ACTION_DIM:
+                mask=observation[:,-STRATEGIC_ACTION_DIM:].bool()
+                action=action.masked_fill(~mask,torch.finfo(action.dtype).min)
             return action.argmax(-1)
         return torch.tanh(action)
 
     env.learned_opponent_fn = policy
+    env.learned_opponent_obs_dim=expected_obs
+    env.learned_opponent_action_dim=int(payload.get("action_dim",ACTION_DIM))
+    env.learned_opponent_architecture=payload.get("architecture","direct")
     env.learned_opponent_checkpoint = str(checkpoint)
     return True
 
@@ -263,7 +283,9 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 learning_rate: float, gamma: float, gae_lambda: float,
                 clip_coef: float, value_coef: float, entropy_coef: float,
                 max_grad_norm: float, l2_coef: float, horizon: int,
-                architecture: str = "direct", curriculum: bool = True) -> dict[str, Any]:
+                architecture: str = "direct", curriculum: bool = True,
+                learned_opponent_checkpoint: str | Path | None = None,
+                status_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if horizon < 1:
         raise ValueError("horizon must be positive")
     torch.manual_seed(seed)
@@ -272,7 +294,9 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     env = _env(num_envs, task, device, seed, opponent, horizon,
                static_opponent_fraction=STATIC_OPPONENT_FRACTION,
                architecture=architecture)
-    learned_opponent_available = _attach_historical_opponent(env, task, device)
+    horizon=int(env.horizon)
+    learned_opponent_available = _attach_historical_opponent(
+        env, task, device, learned_opponent_checkpoint)
     uses_adstar_teacher = task != "defense" and architecture == "direct"
     obs_dim = int(getattr(env, "obs_dim", OBS_DIM))
     action_dim = int(getattr(env, "action_dim", ACTION_DIM))
@@ -299,21 +323,28 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     checkpoint = out / "policy.pt"
     status_path = out / "status.json"
     playback_path = out / "playback.json"
+    status_context = dict(status_context or {})
+    completed_timesteps_base = int(status_context.get("completed_timesteps_base", 0))
+    requested_timesteps_total = int(status_context.get("requested_timesteps_total", timesteps))
     playback_frames: list[dict[str, Any]] = []
     def write_json(path: Path, value: dict[str, Any]) -> None:
         temp = path.with_suffix(path.suffix + ".tmp")
         temp.write_text(json.dumps(value, indent=2))
         temp.replace(path)
-    write_json(status_path, {"status": "running", "task": task, "opponent": opponent,
+    def write_checkpoint(value: dict[str, Any]) -> None:
+        temp = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+        torch.save(value, temp)
+        temp.replace(checkpoint)
+    write_json(status_path, {**status_context, "status": "running", "task": task, "opponent": opponent,
         "architecture": architecture, "action_kind": action_kind,
         "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
         "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
-        "requested_timesteps": timesteps, "num_envs": num_envs, "device": str(device),
+        "requested_timesteps": requested_timesteps_total, "num_envs": num_envs, "device": str(device),
         "observation_normalization": OBS_NORMALIZATION,
         "l2_coefficient": l2_coef,
         "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
-        "completed_timesteps": 0, "updates": 0, "total_updates": updates,
+        "completed_timesteps": completed_timesteps_base, "updates": 0, "total_updates": updates,
         "adstar_action_loss_weight": .25 if uses_adstar_teacher else 0., "task_reward_scale": 1.,
         "adstar_tracking_error_m": None, "started_at": started_at,
         "drivetrain_config": env.drivetrain_config})
@@ -343,6 +374,8 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         b_obs = torch.empty((rollout_steps, num_envs, obs_dim), device=device)
         b_actions = torch.empty((rollout_steps, num_envs, *action_shape), device=device,
                                 dtype=action_dtype)
+        b_action_masks=(torch.empty((rollout_steps,num_envs,action_dim),device=device,dtype=torch.bool)
+                        if action_kind=="categorical" else None)
         b_logprobs = torch.empty((rollout_steps, num_envs), device=device)
         b_rewards = torch.empty((rollout_steps, num_envs), device=device)
         b_dones = torch.empty((rollout_steps, num_envs), device=device, dtype=torch.bool)
@@ -368,7 +401,11 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 b_teacher_actions[t, routes[0]] = teacher
                 b_teacher_mask[t] = reference_active
             with torch.no_grad():
-                action, logprob, value = model.sample(obs)
+                action_mask=(obs[:,-action_dim:].bool() if action_kind=="categorical" and
+                             action_dim==STRATEGIC_ACTION_DIM else None)
+                action, logprob, value = model.sample(obs,action_mask=action_mask)
+            if b_action_masks is not None:
+                b_action_masks[t]=action_mask
             next_obs, reward, done, truncated, _info = env.step(action)
             reward *= task_reward_scale
             if routes is not None:
@@ -413,6 +450,7 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
 
         flat_obs = b_obs.reshape(-1, obs_dim)
         flat_actions = b_actions.reshape((-1, action_dim) if action_kind == "continuous" else (-1,))
+        flat_action_masks=(b_action_masks.reshape(-1,action_dim) if b_action_masks is not None else None)
         flat_logprobs = b_logprobs.reshape(-1)
         flat_advantages = advantages.reshape(-1)
         flat_returns = returns.reshape(-1)
@@ -422,7 +460,8 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         for _epoch in range(epochs):
             indices = torch.randperm(batch_size, device=device)
             for idx in indices.split(minibatch_size):
-                new_logprob, entropy, new_value, mean = model.score(flat_obs[idx], flat_actions[idx])
+                action_mask=flat_action_masks[idx] if flat_action_masks is not None else None
+                new_logprob, entropy, new_value, mean = model.score(flat_obs[idx], flat_actions[idx],action_mask)
                 logratio = new_logprob - flat_logprobs[idx]
                 ratio = logratio.exp()
                 mb_adv = flat_advantages[idx]
@@ -460,10 +499,11 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 adstar_action_loss_weight = max(.025, adstar_action_loss_weight * .7)
                 task_reward_scale = min(2., task_reward_scale * 1.25)
                 good_tracking_updates = 0
-        torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
+        write_checkpoint({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
                     "action_dim": action_dim, "action_kind": action_kind,
-                    "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
-                    "drivetrain_config": env.drivetrain_config}, checkpoint)
+                    "architecture": architecture, "task": task,
+                    "observation_normalization": OBS_NORMALIZATION,
+                    "drivetrain_config": env.drivetrain_config})
         exported_path = routes[5][0] if routes is not None else []
         playback_frames.extend({"robots": [row[:3], row[3:6]],
             "goal": row[6:8], "sizes": row[8:12], "goal_radius":row[12],
@@ -486,9 +526,10 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             "frames": playback_frames})
         completed = min((update_index + 1) * rollout_steps * num_envs, timesteps)
         elapsed = time.perf_counter() - start
-        write_json(status_path, {"status": "running", "task": task, "opponent": opponent,
+        write_json(status_path, {**status_context, "status": "running", "task": task, "opponent": opponent,
             "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
-            "requested_timesteps": timesteps, "completed_timesteps": completed,
+            "requested_timesteps": requested_timesteps_total,
+            "completed_timesteps": completed_timesteps_base + completed,
             "num_envs": num_envs, "device": str(device),
             "observation_normalization": OBS_NORMALIZATION,
             "l2_coefficient": l2_coef,
@@ -508,10 +549,11 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - start
-    torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
+    write_checkpoint({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
                 "action_dim": action_dim, "action_kind": action_kind,
-                "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
-                "drivetrain_config": env.drivetrain_config}, checkpoint)
+                "architecture": architecture, "task": task,
+                "observation_normalization": OBS_NORMALIZATION,
+                "drivetrain_config": env.drivetrain_config})
     metadata = {"task": task, "architecture": architecture, "action_kind": action_kind,
                 "observation_dim": obs_dim, "action_dim": action_dim,
                 "opponent": opponent, "seed": seed,
@@ -535,7 +577,9 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "completed_episodes_observed": None}
     metadata["drivetrain_config"] = env.drivetrain_config
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
-    write_json(status_path, {**metadata, "status": "completed", "completed_timesteps": updates * rollout_steps * num_envs,
+    write_json(status_path, {**status_context, **metadata, "status": "completed",
+                             "requested_timesteps": requested_timesteps_total,
+                             "completed_timesteps": completed_timesteps_base + updates * rollout_steps * num_envs,
                              "total_updates": updates, "updates": updates})
     return metadata
 
@@ -548,18 +592,19 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
           learning_rate: float = 3e-4, gamma: float = .99, gae_lambda: float = .95,
           clip_coef: float = .2, value_coef: float = .5, entropy_coef: float = 0.,
           max_grad_norm: float = .5, l2_coef: float = 1e-5,
-          horizon: int = 750, algorithm: str = "generational", generations: int = 20,
+          horizon: int = 8000, algorithm: str = "generational", generations: int = 20,
           population_size: int = 8, elite_count: int = 2,
-          mutation_scale: float = .01, architecture: str = "strategic_adstar") -> dict[str, Any]:
-    """Train with generational search by default or PPO when explicitly selected."""
+          architecture: str = "strategic_adstar") -> dict[str, Any]:
+    """Train with PPO and a generation-managed opponent/checkpoint population."""
     if algorithm == "generational":
         return generational_train(task, generations, output, seed=seed,
             num_envs=num_envs, device=device, opponent=opponent,
-            initial_checkpoint=initial_checkpoint, horizon=horizon,
+            initial_checkpoint=initial_checkpoint, horizon=horizon, timesteps=timesteps,
             population_size=population_size, elite_count=elite_count,
-            mutation_scale=mutation_scale, l2_coef=l2_coef,
-            architecture=architecture,
-            curriculum=(opponent is None or opponent == "mixed"))
+            rollout_steps=rollout_steps, epochs=epochs, minibatch_size=min(minibatch_size, rollout_steps*num_envs),
+            learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
+            clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm, l2_coef=l2_coef, architecture=architecture)
     if algorithm != "ppo":
         raise ValueError("algorithm must be 'generational' or 'ppo'")
     if min(timesteps, num_envs, rollout_steps, epochs, minibatch_size, horizon) < 1:
@@ -579,395 +624,355 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
     return _train_once(device=selected, **kwargs)
 
 
+def _opponent_population_paths(task: str, output: Path) -> list[Path]:
+    """Find current and retained checkpoints for the opposing role."""
+    peer_name = ("rebuilt-gamepiece-offense" if task == "defense"
+                 else "rebuilt-gamepiece-defense")
+    peer = output.parent / peer_name
+    roots = [peer]
+    default_roots = (("rebuilt-gamepiece-offense", "rebuilt-counter-defense")
+                     if task == "defense" else
+                     ("rebuilt-gamepiece-defense", "rebuilt-defense-generational", "rebuilt-defense"))
+    roots.extend(Path("checkpoints") / name for name in default_roots)
+    paths: list[Path] = []
+    for root in roots:
+        current = root / "policy.pt"
+        if current.is_file():
+            paths.append(current)
+        paths.extend(sorted((root / "opponent-population").glob("*.pt")))
+        paths.extend(sorted((root / "historical-opponents").glob("*.pt")))
+    # Include other explicitly role-tagged historical policies without loading
+    # unrelated checkpoint files into the opponent pool.
+    opponent_task = "defense" if task == "counter_defense" else "counter_defense"
+    for current in Path("checkpoints").glob("*/policy.pt"):
+        for metadata_path in (current.parent / "metadata.json", current.parent / "status.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if metadata.get("task") == opponent_task:
+                paths.append(current)
+                break
+    loadable: list[Path] = []
+    for path in dict.fromkeys(path.resolve() for path in paths if path.is_file()):
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+            obs_dim = int(payload.get("obs_dim", OBS_DIM))
+            action_dim = int(payload.get("action_dim", ACTION_DIM))
+            if ("model_state_dict" in payload and obs_dim in
+                    (OBS_DIM, STRATEGIC_LEGACY_OBS_DIM, 137) and action_dim in (3, 8)):
+                loadable.append(path)
+        except (OSError, RuntimeError, KeyError, ValueError, EOFError):
+            continue
+    return loadable
+
+
+def _checkpoint_vector(path: Path) -> torch.Tensor:
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    return torch.cat([value.detach().float().reshape(-1)
+                      for value in payload["model_state_dict"].values()])
+
+
+def _select_checkpoint_population(entries: list[dict[str, Any]], capacity: int,
+                                   elite_count: int) -> list[dict[str, Any]]:
+    """Keep high-scoring policies first, then add parameter-diverse candidates."""
+    ranked = sorted(entries, key=lambda item: float(item.get("fitness", -math.inf)), reverse=True)
+    if len(ranked) <= capacity:
+        return ranked
+    shortlist = ranked[:max(capacity * 4, elite_count)]
+    selected = shortlist[:min(elite_count, capacity)]
+    vectors = {item["checkpoint"]: _checkpoint_vector(Path(item["checkpoint"]))
+               for item in shortlist}
+    while len(selected) < capacity:
+        remaining = [item for item in shortlist if item not in selected]
+        if not remaining:
+            break
+        chosen = max(remaining, key=lambda item: (
+            min(float(1. - torch.nn.functional.cosine_similarity(
+                vectors[item["checkpoint"]], vectors[kept["checkpoint"]], dim=0))
+                for kept in selected), float(item.get("fitness", -math.inf))))
+        selected.append(chosen)
+    return selected
+
+
 def generational_train(task: str, generations: int, output: str | Path, *,
                        seed: int = 7, num_envs: int = 256, device: str = "cuda",
                        opponent: str | None = None, initial_checkpoint: str | Path | None = None,
-                       horizon: int = 750, population_size: int = 8,
-                       elite_count: int = 2, mutation_scale: float = .01,
-                       l2_coef: float = 1e-5,
-                       architecture: str = "strategic_adstar",
-                       curriculum: bool = True) -> dict[str, Any]:
-    """Population based policy search, scoring whole seeded episode batches."""
-    if min(generations, num_envs, horizon, population_size, elite_count) < 1:
-        raise ValueError("generation, environment, horizon, and population sizes must be positive")
-    if elite_count >= population_size:
-        raise ValueError("elite_count must be smaller than population_size")
-    if mutation_scale <= 0 or l2_coef < 0 or not math.isfinite(mutation_scale + l2_coef):
-        raise ValueError("mutation_scale must be positive and l2_coef non-negative")
-    selected = _device(device)
-    opponent = _task_opponent(task, opponent)
-    mixed_opponents = task == "defense" and opponent == "mixed"
-    opponent_names = (_curriculum_opponents(task, 0, learned_available=False)
-                      if curriculum else
-                      (MIXED_DEFENSE_OPPONENTS if mixed_opponents else (opponent,)))
-    playback_opponent = "adstar" if mixed_opponents else opponent_names[0]
+                       horizon: int = 8000, population_size: int = 8,
+                       elite_count: int = 2, l2_coef: float = 1e-5,
+                       architecture: str = "strategic_adstar", curriculum: bool = True,
+                       timesteps: int | None = None, rollout_steps: int = 128,
+                       epochs: int = 4, minibatch_size: int = 4096,
+                       learning_rate: float = 3e-4, gamma: float = .99,
+                       gae_lambda: float = .95, clip_coef: float = .2,
+                       value_coef: float = .5, entropy_coef: float = 0.,
+                       max_grad_norm: float = .5,
+                       evaluation_episodes: int = 4) -> dict[str, Any]:
+    """Run PPO generations and manage a diverse, evaluated opponent population.
+
+    Each generation continues the prior PPO checkpoint. One member is sampled
+    from deterministic baselines and learned opponent checkpoints for training;
+    the resulting policy is then evaluated against every fixed baseline and
+    each available learned population member on a shared seeded batch.
+    """
+    if task not in ("counter_defense", "defense"):
+        raise ValueError("task must be counter_defense or defense")
+    if min(generations, num_envs, horizon, population_size, elite_count,
+           rollout_steps, epochs, minibatch_size, evaluation_episodes) < 1:
+        raise ValueError("generation, environment, horizon, population, PPO, and evaluation sizes must be positive")
+    if elite_count > population_size:
+        raise ValueError("elite_count cannot exceed opponent population capacity")
+    if timesteps is not None and timesteps < 1:
+        raise ValueError("timesteps must be positive")
+    if l2_coef < 0 or not math.isfinite(l2_coef):
+        raise ValueError("l2_coef must be finite and non-negative")
+    selected_device = _device(device)
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
-    checkpoint, status_path = out / "policy.pt", out / "status.json"
-    playback_path = out / "playback.json"
-    torch.manual_seed(seed)
-    if selected.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-    env = _env(num_envs, task, selected, seed, playback_opponent, horizon,
-               static_opponent_fraction=STATIC_OPPONENT_FRACTION,
-               architecture=architecture)
-    learned_opponent_available = _attach_historical_opponent(env, task, selected)
-    env.adstar_spawn_hint = False
-    playback_env = _env(1, task, selected, seed + 104729, playback_opponent, horizon,
-                        architecture=architecture)
-    learned_opponent_available &= _attach_historical_opponent(playback_env, task, selected)
-    obs_dim = int(getattr(env, "obs_dim", OBS_DIM))
-    action_dim = int(getattr(env, "action_dim", ACTION_DIM))
-    action_kind = "categorical" if architecture == "strategic_adstar" else "continuous"
-    model = ActorCritic(obs_dim, action_dim, action_kind).to(selected)
-    if initial_checkpoint:
-        payload = torch.load(initial_checkpoint, map_location=selected, weights_only=True)
-        if payload.get("architecture", "direct") != architecture:
-            raise ValueError("initial checkpoint architecture differs from this training run")
-        model.load_state_dict(payload["model_state_dict"])
-    names = list(model.state_dict())
-    base = torch.cat([value.detach().reshape(-1) for value in model.state_dict().values()])
-    sizes = [value.numel() for value in model.state_dict().values()]
-    population = [base.clone() for _ in range(population_size)]
-    population[0] = base.clone()
-    for i in range(1, population_size):
-        population[i] = base + torch.randn_like(base) * mutation_scale
-    started = time.perf_counter()
+    archive_dir = out / "opponent-population"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = out / "policy.pt"
+    status_path = out / "status.json"
+    history_path = out / "generation-history.json"
+    population_path = archive_dir / "population.json"
+    history: list[dict[str, Any]] = []
+    try:
+        prior = json.loads(history_path.read_text())
+        history = list(prior.get("generations", []))
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    previous_checkpoint: str | Path | None = checkpoint if checkpoint.is_file() else initial_checkpoint
+    expected_obs = {"direct": OBS_DIM, "tactical_adstar": 38,
+                    "strategic_adstar": 137}.get(architecture)
+    expected_action = {"direct": ACTION_DIM, "tactical_adstar": 2,
+                       "strategic_adstar": STRATEGIC_ACTION_DIM}.get(architecture)
+    if previous_checkpoint is not None and expected_obs is not None:
+        prior_payload = None
+        try:
+            prior_payload = torch.load(previous_checkpoint, map_location="cpu", weights_only=True)
+            compatible = (prior_payload.get("architecture", "direct") == architecture
+                and int(prior_payload.get("obs_dim", OBS_DIM)) == expected_obs
+                and int(prior_payload.get("action_dim", ACTION_DIM)) == expected_action)
+        except (OSError, RuntimeError, KeyError, ValueError, EOFError):
+            compatible = False
+        if not compatible:
+            # Keep older strategic checkpoints as learned opponents. The new
+            # 137-input/8-action policy cannot safely load 89-input/3-action
+            # weights, so its first PPO generation starts with a fresh head.
+            historical = out / "historical-opponents"
+            historical.mkdir(parents=True, exist_ok=True)
+            source = Path(previous_checkpoint)
+            backup = historical / f"pre-ppo-{source.parent.name}.pt"
+            if prior_payload is not None and source.is_file() and source.resolve() != backup.resolve():
+                shutil.copy2(source, backup)
+            previous_checkpoint = None
+    start_generation = len(history)
+    if start_generation >= generations:
+        start_generation = 0
+        history = []
+    per_generation_steps = (max(num_envs * rollout_steps, timesteps // generations)
+                            if timesteps is not None else
+                            num_envs * min(max(rollout_steps, horizon), rollout_steps * 4))
+    per_generation_steps = max(num_envs * rollout_steps, per_generation_steps)
+    if task == "counter_defense":
+        fixed_baselines = ("guard", "adstar_defender", "intercept", "lane_block",
+                           "fuel_denial", "shadow", "hub_guard")
+    else:
+        fixed_baselines = ("offense", "adstar", "mirror", "cutoff", "velocity_intercept")
+    evaluation_count = max(1, min(evaluation_episodes, num_envs))
     started_at = time.time()
-    # Mixed training changes only the attacker controller between matched
-    # seeded rollouts. Fitness rollouts do not use AD* route-based spawn hints.
-    def atomic_json(path, value):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    rng = random.Random(seed)
+    requested_timesteps = per_generation_steps * generations
+    mode_counts: dict[str, int] = {}
+    last_opponent_results: dict[str, Any] = {}
+    archive_entries: list[dict[str, Any]] = []
+    try:
+        archive_entries = json.loads(population_path.read_text()).get("members", [])
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    archive_root = archive_dir.resolve()
+    archive_entries = [item for item in archive_entries
+        if isinstance(item, dict)
+        and Path(str(item.get("checkpoint", ""))).parent.resolve() == archive_root
+        and Path(str(item.get("checkpoint", ""))).is_file()]
+    training_specs: list[dict[str, Any]] = []
+
+    def learned_member_name(path: Path) -> str:
+        owner = path.parent.parent.name if path.parent.name in (
+            "opponent-population", "historical-opponents") else path.parent.name
+        source = path.parent.name if owner != path.parent.name else "current"
+        return f"NN · {owner} · {source} · {path.stem}"
+
+    def write_json(path: Path, value: dict[str, Any]) -> None:
         temp = path.with_suffix(path.suffix + ".tmp")
-        temp.write_text(json.dumps(value, separators=(",", ":")))
+        temp.write_text(json.dumps(value, indent=2, sort_keys=True))
         temp.replace(path)
 
-    generation_opponents = [(_curriculum_opponents(
-        task, _curriculum_stage(generation / max(1, generations)),
-        learned_available=learned_opponent_available)
-        if curriculum else opponent_names) for generation in range(generations)]
-    requested_timesteps = (population_size * num_envs * horizon *
-                           sum(len(names) for names in generation_opponents))
-    live_status = {"status": "running", "algorithm": "generational", "task": task,
-        "architecture": architecture, "action_kind": action_kind,
-        "observation_dim": obs_dim, "action_dim": action_dim,
-        "opponent": opponent, "opponents": list(opponent_names),
-        "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
-        "learned_opponent_checkpoint": getattr(env, "learned_opponent_checkpoint", None),
-        "stationary_opponent_fraction": (.4 if curriculum else STATIC_OPPONENT_FRACTION),
-        "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
-                              "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
-                             if mixed_opponents else {opponent: 1.}),
-        "generation": 0, "total_generations": generations,
-        "population_size": population_size, "elite_count": elite_count,
-        "mutation_scale": mutation_scale, "requested_timesteps": requested_timesteps,
-        "completed_timesteps": 0, "started_at": started_at, "elapsed_seconds": 0.,
-        "initialization": ("checkpoint" if initial_checkpoint else "random"),
-        "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
-        "checkpoint": str(checkpoint), "observation_normalization": OBS_NORMALIZATION,
-        "drivetrain_config": env.drivetrain_config}
-    atomic_json(status_path, live_status)
-    atomic_json(playback_path, {"task": task, "dt": playback_env.dt, "frames": []})
-
-    def set_vector(vector):
-        state, offset = {}, 0
-        for name, size, target in zip(names, sizes, model.state_dict().values()):
-            state[name] = vector[offset:offset + size].view_as(target)
-            offset += size
-        model.load_state_dict(state)
-
-    def save_checkpoint(generation, fitness):
-        torch.save({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
-                    "action_dim": action_dim, "action_kind": action_kind,
-                    "architecture": architecture, "observation_normalization": OBS_NORMALIZATION,
-                    "algorithm": "generational", "generation": generation,
-                    "fitness": fitness,
-                    "initialization": ("checkpoint" if initial_checkpoint else "random"),
-                                "drivetrain_config": env.drivetrain_config}, checkpoint)
-
-    def playback_frame(source_env, action, info, world_index=0, *, include_planner=True):
-        if action.ndim >= 2 and action.shape[-1] >= 2:
-            own_effort=(action[world_index, :2] * source_env.sim.speed[world_index, 0]).detach().cpu().tolist()
-        else:
-            own_effort=source_env.sim.velocity[world_index, 0, :2].detach().cpu().tolist()
-        strategic = source_env.action_mode == "strategic"
-        frame = {"robots": source_env.sim.pose[world_index].detach().cpu().tolist(),
-            "goal": None if strategic else source_env.goal[world_index].detach().cpu().tolist(),
-            "sizes": torch.stack((source_env.sim.length[world_index],
-                source_env.sim.width[world_index]), -1).reshape(-1).detach().cpu().tolist(),
-            "goal_radius": (None if strategic else float(source_env.goal_radius[world_index].item())),
-            "robot_effort_vectors": [own_effort,
-                info.get("opponent_effort_vector", torch.zeros((source_env.n, 2), device=selected))[
-                    world_index].detach().cpu().tolist()]}
-        paths = info.get("adstar_paths", []) if include_planner else []
-        path_lengths = info.get("adstar_path_lengths", [])
-        intercepts = info.get("predicted_intercepts", [])
-        intercept_times = info.get("predicted_intercept_times", [])
-        if len(paths) > world_index:
-            path_count=int(path_lengths[world_index].item()) if len(path_lengths) else paths.shape[1]
-            opponent_path = paths[world_index,:path_count].detach().cpu().tolist()
-            if strategic:
-                controlled = info.get("controlled_adstar_path", [])
-                controlled_lengths = info.get("controlled_adstar_path_lengths", [])
-                own_count = (int(controlled_lengths[world_index].item())
-                             if len(controlled_lengths) else controlled.shape[1])
-                own_path = controlled[world_index,:own_count].detach().cpu().tolist()
-                frame["adstar_paths"] = [own_path, opponent_path]
-            else:
-                frame["adstar_path"] = opponent_path
-        if len(intercepts) > world_index:
-            frame["predicted_intercept"] = intercepts[world_index].detach().cpu().tolist()
-        if len(intercept_times) > world_index:
-            frame["predicted_intercept_time"] = float(intercept_times[world_index].item())
-        for key, attribute in (("hub_active", "hub_active"),
-                               ("match_remaining", "match_remaining"), ("match_elapsed", "match_elapsed"),
-                               ("fuel_score_count", "fuel_score_count")):
-            value=getattr(source_env, attribute, None)
-            if value is not None:
-                item=value[world_index]
-                frame[key]=item.detach().cpu().tolist() if isinstance(item, torch.Tensor) else item
-        if strategic:
-            frame["hub_centers"] = source_env.hub_centers.detach().cpu().tolist()
-            active = source_env.piece_active[world_index]
-            pieces = torch.cat((source_env.piece_pos[world_index],
-                source_env.piece_owner[world_index,:,None].to(source_env.piece_pos.dtype)), -1)
-            frame["fuel_pieces"] = pieces[active].detach().cpu().tolist()
-        return frame
-
-    best_fitness = None
-    best_population_generation = None
-    best_run_score = None
-    history = []
-    best_frames = []
-    generation_playbacks = []
-    from .field import (ALLIANCE_ZONE_DEPTH, BUMP_ACCELERATION_SCALE,
-                        BUMP_SPEED_SCALE, bump_boxes, static_collision_boxes)
-    boxes = playback_env.field_boxes
-    playback_field = {"length": playback_env.sim.field_length, "width": playback_env.sim.field_width,
-        "alliance_zone_depth": ALLIANCE_ZONE_DEPTH,
-        "elements": [box.as_dict() for box in boxes],
-        "colliders": [box.as_dict() for box in static_collision_boxes(boxes)],
-        "bump_regions": [box.as_dict() for box in bump_boxes(boxes)],
-        "trench_paths": [box.as_dict() for box in boxes if "_trench_" in box.name and "_support_" not in box.name],
-        "trench_supports": [box.as_dict() for box in boxes if "_trench_support_" in box.name],
-        "bump_speed_scale": BUMP_SPEED_SCALE,
-        "bump_acceleration_scale": BUMP_ACCELERATION_SCALE}
-    for generation in range(generations):
-        stage = _curriculum_stage(generation / max(1, generations)) if curriculum else -1
-        opponent_names = generation_opponents[generation]
-        env.static_opponent_fraction = (.4 if stage == 0 else STATIC_OPPONENT_FRACTION)
-        rollout_multiplier = len(opponent_names)
-        completed_multiplier = sum(len(items) for items in generation_opponents[:generation + 1])
-        # All candidates see the same initial field layouts and randomization.
-        scenario_seed = seed + generation * 1009
-        candidate_scores = []
-        candidate_opponent_fitness = []
-        candidate_opponent_metrics = []
-        candidate_playbacks = []
-        for candidate, vector in enumerate(population):
-            set_vector(vector)
-            model.eval()
-            mode_returns = {}
-            mode_results = {}
-            frames = []
-            for opponent_index, mode in enumerate(opponent_names):
-                env.opponent = mode
-                obs = _reset_obs(env.reset(seed=scenario_seed)).to(selected, dtype=torch.float32)
-                returns = torch.zeros(num_envs, device=selected)
-                alive = torch.ones(num_envs, device=selected, dtype=torch.bool)
-                holds = torch.zeros(num_envs, device=selected)
-                score_times = torch.zeros(num_envs, device=selected)
-                frame_stride = max(1, horizon // 60)
-                sample_done = False
-                with torch.no_grad():
-                    for step_index in range(horizon):
-                        action, _, _ = model.sample(obs, deterministic=True)
-                        next_obs, reward, done, truncated, info = env.step(action)
-                        was_alive = alive
-                        returns += reward.to(selected).reshape(num_envs) * was_alive
-                        holds += info["success"].to(selected).reshape(num_envs) * was_alive
-                        score_times += info["time_to_goal"].to(selected).reshape(num_envs) * was_alive
-                        ended = done.to(selected, dtype=torch.bool).reshape(num_envs) | truncated.to(selected, dtype=torch.bool).reshape(num_envs)
-                        alive &= ~ended
-                        if mode == playback_opponent and not sample_done and step_index % frame_stride == 0:
-                            if bool(alive[0].item()):
-                                frames.append(playback_frame(env, action, info))
-                            else:
-                                sample_done = True
-                        obs = next_obs.to(selected, dtype=torch.float32)
-                mode_returns[mode] = float(returns.mean().item())
-                hold_rate = float(holds.mean().item())
-                scored_count = float((score_times > 0).sum().item())
-                mode_results[mode] = {"hold_rate": hold_rate,
-                    "score_rate": 1. - hold_rate,
-                    "mean_score_time": float(score_times.sum().item() / max(1., scored_count)) if scored_count else None}
-                completed = ((completed_multiplier - len(opponent_names)) * population_size +
-                    candidate * len(opponent_names) + opponent_index + 1) * num_envs * horizon
-                elapsed = time.perf_counter() - started
-                live_status.update({"status": "running", "generation": generation,
-                    "current_generation": generation + 1, "candidate": candidate + 1,
-                    "opponents": list(opponent_names),
-                    "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
-                    "current_opponent": mode, "completed_timesteps": completed,
-                    "elapsed_seconds": elapsed,
-                    "transitions_per_second": completed / max(elapsed, 1e-12)})
-                atomic_json(status_path, live_status)
-            weights_l2 = sum(p.square().sum() for p in model.parameters() if p.ndim > 1)
-            regularization = float((l2_coef * weights_l2).item())
-            mode_fitness = {mode: mode_returns[mode] - regularization for mode in opponent_names}
-            if "adstar" in opponent_names and len(opponent_names) > 1:
-                scripted_mean = sum(mode_fitness[mode] for mode in opponent_names if mode != "adstar") / (len(opponent_names) - 1)
-                adstar_weight=MIXED_ADSTAR_FITNESS_WEIGHT
-                fitness = (adstar_weight * mode_fitness["adstar"] +
-                           MIXED_SCRIPTED_FITNESS_WEIGHT * scripted_mean)
-            else:
-                fitness = mode_fitness[opponent]
-            candidate_scores.append(fitness)
-            candidate_opponent_fitness.append(mode_fitness)
-            candidate_opponent_metrics.append(mode_results)
-            candidate_playbacks.append(frames)
-        order = sorted(range(population_size), key=candidate_scores.__getitem__, reverse=True)
-        generation_summary = {"generation": generation + 1,
+    for generation in range(start_generation, generations):
+        generation_number = generation + 1
+        # Refresh the peer pool every generation so both role trainers see the
+        # other's newest checkpoint as well as its selected historical members.
+        peer_paths = _opponent_population_paths(task, out)
+        training_specs = [{"name": mode, "mode": mode, "checkpoint": None}
+                          for mode in fixed_baselines]
+        training_specs.extend({"name": learned_member_name(path), "mode": "learned",
+                               "checkpoint": str(path)} for path in peer_paths)
+        if opponent and opponent != "mixed" and opponent not in {item["mode"] for item in training_specs}:
+            training_specs.insert(0, {"name": opponent, "mode": _task_opponent(task, opponent),
+                                      "checkpoint": None})
+        train_spec = training_specs[rng.randrange(len(training_specs))]
+        mode_counts[train_spec["name"]] = mode_counts.get(train_spec["name"], 0) + 1
+        status_context = {
+            "algorithm": "generational", "optimizer": "PPO",
+            "generation": generation_number, "current_generation": generation_number,
+            "total_generations": generations, "population_size": population_size,
+            "elite_count": elite_count, "opponent_member": train_spec["name"],
+            "opponent_population_members": [item["name"] for item in training_specs],
+            "opponents": sorted({item["mode"] for item in training_specs}),
+            "completed_timesteps_base": generation * per_generation_steps,
+            "requested_timesteps_total": requested_timesteps,
+        }
+        ppo_result = _train_once(task=task, timesteps=per_generation_steps,
+            output=out, seed=seed + generation * 1009, num_envs=num_envs,
+            device=selected_device, opponent=train_spec["mode"],
+            initial_checkpoint=previous_checkpoint, rollout_steps=rollout_steps,
+            epochs=epochs, minibatch_size=min(minibatch_size, rollout_steps * num_envs),
+            learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
+            clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
+            max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
+            architecture=architecture, curriculum=False,
+            learned_opponent_checkpoint=train_spec["checkpoint"],
+            status_context=status_context)
+        previous_checkpoint = checkpoint
+        scenario_seed = 500_000 + generation * 1009
+        evaluation_dir = out / "generation-evaluations" / f"generation-{generation_number:04d}"
+        opponent_results: dict[str, Any] = {}
+        evaluation_specs = [{"name": mode, "mode": mode, "checkpoint": None}
+                            for mode in fixed_baselines]
+        evaluation_specs.extend({"name": learned_member_name(path), "mode": "learned",
+                                 "checkpoint": str(path)} for path in peer_paths)
+        for spec in evaluation_specs:
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", spec["name"]).strip("-")
+            metrics_path = evaluation_dir / f"{safe_name}.json"
+            try:
+                metrics = _evaluate_once(checkpoint, task, evaluation_count, scenario_seed,
+                    evaluation_count, selected_device,
+                    spec["mode"], metrics_path, horizon=horizon,
+                    opponent_checkpoint=spec["checkpoint"])
+                own_scores = float(metrics.get("mean_scores") or 0.)
+                other_scores = float(metrics.get("mean_opponent_scores") or 0.)
+                opponent_results[spec["name"]] = {
+                    "opponent": spec["mode"], "checkpoint": spec["checkpoint"],
+                    "mean_return": metrics.get("mean_return"),
+                    "success_rate": metrics.get("mean_success"),
+                    "win_rate": metrics.get("mean_success"),
+                    "score": own_scores, "score_differential": own_scores - other_scores,
+                    "fuel_acquired": metrics.get("mean_acquisitions"),
+                    "fuel_scored": metrics.get("mean_scores"),
+                    "cycle_time": metrics.get("mean_cycle_time"),
+                    "defensive_delay": metrics.get("mean_defensive_delay"),
+                    "denial_rate": metrics.get("mean_denied_objectives"),
+                    "denied_per_episode": metrics.get("mean_denied_objectives"),
+                    "pass_success": (None if metrics.get("mean_passes_attempted") in (None, 0)
+                        else float(metrics.get("mean_passes_completed") or 0.) /
+                             float(metrics["mean_passes_attempted"])),
+                    "mean_opponent_score": metrics.get("mean_opponent_scores"),
+                    "seed": scenario_seed, "episodes": evaluation_count,
+                    "horizon": metrics.get("horizon", horizon),
+                    "metrics_file": str(metrics_path)}
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                opponent_results[spec["name"]] = {"opponent": spec["mode"],
+                    "checkpoint": spec["checkpoint"], "seed": scenario_seed,
+                    "episodes": evaluation_count, "horizon": horizon,
+                    "error": str(exc)}
+        last_opponent_results = opponent_results
+        successful = [item for item in opponent_results.values() if "error" not in item]
+        fitness_values = [float(item.get("success_rate") or item.get("mean_return") or 0.)
+                          for item in successful]
+        generation_fitness = sum(fitness_values) / max(1, len(fitness_values))
+        snapshot = archive_dir / f"generation-{generation_number:04d}.pt"
+        temp_snapshot = snapshot.with_suffix(".pt.tmp")
+        shutil.copy2(checkpoint, temp_snapshot)
+        temp_snapshot.replace(snapshot)
+        archive_entries = [item for item in archive_entries
+                           if item.get("checkpoint") != str(snapshot.resolve())]
+        archive_entries.append({"generation": generation_number,
+            "checkpoint": str(snapshot.resolve()), "fitness": generation_fitness,
+            "evaluation_seed": scenario_seed,
+            "evaluated_opponents": sorted(opponent_results)})
+        kept = _select_checkpoint_population(archive_entries, population_size, elite_count)
+        kept_paths = {str(Path(item["checkpoint"]).resolve()) for item in kept}
+        for item in archive_entries:
+            path = Path(item["checkpoint"])
+            if str(path.resolve()) not in kept_paths:
+                path.unlink(missing_ok=True)
+        archive_entries = kept
+        write_json(population_path, {"task": task, "capacity": population_size,
+            "strong_elites": min(elite_count, population_size), "members": archive_entries})
+        generation_record = {"generation": generation_number,
+            "training_optimizer": "PPO", "training_opponent": train_spec["name"],
+            "training_opponent_checkpoint": train_spec["checkpoint"],
+            "ppo_timesteps": ppo_result["completed_timesteps"],
             "scenario_seed": scenario_seed,
-            "opponent_fitness_mean": {mode: sum(scores[mode] for scores in candidate_opponent_fitness) / population_size
-                                       for mode in opponent_names},
-            "candidates": [{"rank": rank + 1, "fitness": candidate_scores[candidate],
-                "opponent_fitness": candidate_opponent_fitness[candidate],
-                "opponent_metrics": candidate_opponent_metrics[candidate]}
-                for rank, candidate in enumerate(order[:5])]}
-        generation_playbacks.append(generation_summary)
-        atomic_json(out / "generation-playback" / f"generation-{generation + 1}.json", {
-            "task": task, "dt": env.dt, "field": playback_field,
-            "generation": generation + 1, "scenario_seed": scenario_seed,
-            "candidates": [{"rank": rank + 1, "fitness": candidate_scores[candidate],
-                "opponent_fitness": candidate_opponent_fitness[candidate],
-                "opponent_metrics": candidate_opponent_metrics[candidate],
-                "frames": candidate_playbacks[candidate]}
-                for rank, candidate in enumerate(order[:5])]})
-        elites = [population[i].clone() for i in order[:elite_count]]
-        parent_scores = [candidate_scores[i] for i in order[:elite_count]]
-        generation_best_fitness = parent_scores[0]
-        set_vector(elites[0])
-        # Keep one global champion. The playback score is its raw return on a
-        # fixed, single-world scenario, so it can be compared across generations.
-        became_global_best = best_fitness is None or generation_best_fitness > best_fitness
-        generation_run_score = None
-        if became_global_best:
-            obs = _reset_obs(playback_env.reset(seed=seed + 104729)).to(selected, dtype=torch.float32)
-            frames = []
-            run_return = torch.zeros(1, device=selected)
-            frame_stride = max(1, horizon // 120)
-            with torch.no_grad():
-                for step_index in range(horizon):
-                    action, _, _ = model.sample(obs, deterministic=True)
-                    obs, reward, done, truncated, info = playback_env.step(action)
-                    run_return += reward.to(selected).reshape(1)
-                    ended = bool((done.reshape(-1)[0] | truncated.reshape(-1)[0]).item())
-                    if step_index % frame_stride == 0 or ended:
-                        frames.append(playback_frame(playback_env, action, info))
-                    if ended:
-                        break
-            best_fitness = generation_best_fitness
-            best_population_generation = generation + 1
-            best_run_score = float(run_return.item())
-            generation_run_score = best_run_score
-            best_frames = frames
-            save_checkpoint(generation + 1, best_fitness)
-        atomic_json(playback_path, {"task": task, "dt": playback_env.dt,
-            "field": playback_field, "frames": best_frames,
-            "generations": generation_playbacks,
-            "best_population": {"generation": best_population_generation,
-                "fitness": best_fitness, "run_score": best_run_score},
-            "best_run_score": best_run_score, "validation_seed": seed + 104729})
-        winner_opponent_fitness = candidate_opponent_fitness[order[0]]
-        winner_opponent_metrics = candidate_opponent_metrics[order[0]]
-        history.append({"generation": generation + 1,
-                        "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
-                        "opponents": list(opponent_names),
-                        "best_fitness": generation_best_fitness,
-                        "generation_best_fitness": generation_best_fitness,
-                        "generation_best_run_score": generation_run_score,
-                        "became_global_best": became_global_best,
-                        "elite_mean_fitness": sum(parent_scores) / len(parent_scores),
-                        "population_best": max(candidate_scores),
-                        "population_mean": sum(candidate_scores) / len(candidate_scores),
-                        "opponent_fitness": winner_opponent_fitness,
-                        "opponent_metrics": winner_opponent_metrics})
+            "fitness": generation_fitness, "opponent_metrics": opponent_results,
+            "fixed_baseline_metrics": {name: opponent_results[name] for name in fixed_baselines
+                if name in opponent_results},
+            "score_differential_by_opponent": {name: item.get("score_differential")
+                for name, item in opponent_results.items()},
+            "population_members": [item["checkpoint"] for item in archive_entries],
+            "population_size": len(archive_entries)}
+        history = [item for item in history if int(item.get("generation", 0)) != generation_number]
+        history.append(generation_record)
+        write_json(history_path, {"algorithm": "ppo_opponent_population",
+            "task": task, "evaluation_seed_base": 500_000 + generation * 1009,
+            "generations": history})
         elapsed = time.perf_counter() - started
-        status = {"status": "running", "algorithm": "generational", "task": task,
-            "opponent": opponent,
-            "stationary_opponent_fraction": env.static_opponent_fraction,
-            "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
-                                  "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
-                                 if mixed_opponents else {opponent: 1.}),
-            "opponent_metrics": winner_opponent_metrics,
-            "opponent_fitness": winner_opponent_fitness,
-            "generation": generation + 1, "total_generations": generations,
-            "curriculum_stage": CURRICULUM_STAGES[stage] if stage >= 0 else "single_opponent",
-            "opponents": list(opponent_names),
-            "population_size": population_size, "elite_count": elite_count,
-            "num_envs": num_envs, "horizon": horizon,
-            "mutation_scale": mutation_scale, "l2_coefficient": l2_coef,
-            "best_fitness": best_fitness, "generation_best_fitness": generation_best_fitness,
-            "best_population_generation": best_population_generation,
-            "best_population_fitness": best_fitness, "best_run_score": best_run_score,
-            "elite_mean_fitness": history[-1]["elite_mean_fitness"],
+        final_status = {**ppo_result, "status": "running" if generation_number < generations else "completed",
+            "algorithm": "generational", "optimizer": "PPO",
+            "task": task, "policy_modes": (["INTAKE", "DELIVER"] if task == "counter_defense" else ["DEFENSE"]),
+            "generation": generation_number,
+            "current_generation": generation_number, "total_generations": generations,
+            "population_size": len(archive_entries), "population_capacity": population_size,
+            "elite_count": min(elite_count, population_size),
+            "opponent": "learned" if train_spec["mode"] == "learned" else train_spec["mode"],
+            "opponent_member": train_spec["name"],
+            "opponents": sorted({item["mode"] for item in training_specs}),
+            "opponent_population_members": [item["name"] for item in training_specs
+                if item["mode"] == "learned"],
+            "opponent_weights": mode_counts,
+            "generation_history": history, "generation_metrics": generation_record,
+            "opponent_metrics": opponent_results,
+            "fixed_baseline_metrics": generation_record["fixed_baseline_metrics"],
+            "best_fitness": max((float(item.get("fitness", -math.inf)) for item in history), default=generation_fitness),
+            "best_population_generation": max(history, key=lambda item: float(item.get("fitness", -math.inf))).get("generation"),
+            "best_population_fitness": max((float(item.get("fitness", -math.inf)) for item in history), default=generation_fitness),
             "requested_timesteps": requested_timesteps,
-            "started_at": started_at,
-            "generation_history": history, "completed_timesteps": completed_multiplier * population_size * num_envs * horizon,
-            "transitions_per_second": completed_multiplier * population_size * num_envs * horizon / max(elapsed, 1e-12),
-            "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
-            "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
+            "completed_timesteps": generation_number * per_generation_steps,
             "elapsed_seconds": elapsed,
-            "checkpoint": str(checkpoint), "architecture": architecture,
-            "action_kind": action_kind, "observation_dim": obs_dim,
-            "action_dim": action_dim, "observation_normalization": OBS_NORMALIZATION,
-            "initialization": ("checkpoint" if initial_checkpoint else "random"),
-                "drivetrain_config": env.drivetrain_config}
-        tmp = status_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(status, indent=2)); tmp.replace(status_path)
-        population = elites + [elites[i % elite_count] + torch.randn_like(base) * mutation_scale
-                               for i in range(population_size - elite_count)]
-    if selected.type == "cuda":
-        torch.cuda.synchronize(selected)
-    elapsed = time.perf_counter() - started
-    metadata = {"status": "completed", "algorithm": "generational", "task": task,
-        "architecture": architecture, "action_kind": action_kind,
-        "observation_dim": obs_dim, "action_dim": action_dim,
-        "opponent": opponent, "opponents": list(opponent_names),
-        "curriculum": list(CURRICULUM_STAGES) if curriculum else [],
-        "learned_opponent_checkpoint": getattr(env, "learned_opponent_checkpoint", None),
-        "stationary_opponent_fraction": env.static_opponent_fraction,
-        "opponent_weights": ({"adstar": MIXED_ADSTAR_FITNESS_WEIGHT,
-                              "scripted": MIXED_SCRIPTED_FITNESS_WEIGHT}
-                             if mixed_opponents else {opponent: 1.}),
-        "generations": generations, "population_size": population_size,
-        "elite_count": elite_count, "mutation_scale": mutation_scale, "l2_coefficient": l2_coef,
-        "best_fitness": best_fitness, "best_population_generation": best_population_generation,
-        "best_population_fitness": best_fitness, "best_run_score": best_run_score,
-        "opponent_metrics": history[-1]["opponent_metrics"] if history else {},
-        "opponent_fitness": history[-1]["opponent_fitness"] if history else {},
-        "generation_history": history,
-        "completed_timesteps": requested_timesteps,
+            "transitions_per_second": generation_number * per_generation_steps / max(elapsed, 1e-12),
+            "population_manifest": str(population_path), "generation_history_path": str(history_path)}
+        write_json(status_path, final_status)
+    final = {**final_status, "status": "completed", "generation_history": history,
+        "generation_history_path": str(history_path), "population_manifest": str(population_path),
+        "completed_timesteps": generations * per_generation_steps,
         "requested_timesteps": requested_timesteps,
-        "transitions_per_second": requested_timesteps / max(elapsed, 1e-12),
-        "elapsed_seconds": elapsed, "num_envs": num_envs, "horizon": horizon,
-        "started_at": started_at,
-        "device": str(selected), "device_name": torch.cuda.get_device_name(selected) if selected.type == "cuda" else "CPU",
-        "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
-        "checkpoint": str(checkpoint), "observation_normalization": OBS_NORMALIZATION,
-        "initialization": ("checkpoint" if initial_checkpoint else "random"),
-        "drivetrain_config": env.drivetrain_config}
-    (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
-    status_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
-    return metadata
-
+        "elapsed_seconds": time.perf_counter() - started,
+        "opponent_metrics": last_opponent_results,
+        "opponent_fitness": {name: values.get("success_rate", values.get("mean_return"))
+                              for name, values in last_opponent_results.items()},
+        "opponents": sorted({item["mode"] for item in training_specs}),
+        "opponent_population_members": [item["name"] for item in training_specs
+            if item["mode"] == "learned"]}
+    write_json(status_path, final)
+    write_json(out / "metadata.json", final)
+    return final
 
 def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
              episodes: int = 32, seed: int = 1000, num_envs: int = 32,
              device: str = "cuda", opponent: str = "random",
              output: str | Path = "metrics/tensor-evaluation.json",
-             horizon: int = 750) -> dict[str, Any]:
+             horizon: int = 8000) -> dict[str, Any]:
     """Run deterministic policy evaluation and write a compact JSON report."""
     if episodes < 1 or num_envs < 1 or horizon < 1:
         raise ValueError("episodes, num_envs and horizon must be positive")
@@ -1025,18 +1030,35 @@ def _wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float
 def _scripted_game_action(env, task: str) -> torch.Tensor:
     """Small game-state strategy whose navigation is delegated to simulator AD*."""
     if task == "defense":
-        # The simulator resolves class 2 to an intercept of the attacker's
-        # current motion lane; this policy never reads the scoring goal.
-        return torch.full((env.n,), 2, device=env.device, dtype=torch.long)
-    has_piece = (env.piece_active & (env.piece_owner == 0)).any(-1)
-    can_score = has_piece & env.hub_active[:, 0]
-    # Strategic class 1 routes to the hub; class 0 collects the nearest free
-    # piece (or returns to the staging approach when none are available).
-    return can_score.to(torch.long)
+        # Deny a visible loose FUEL when available; otherwise block the likely
+        # scoring lane. This strategy sees no hidden objective.
+        candidates,valid,_=env._fuel_candidates(0)
+        slot=valid.to(torch.int64).argmax(-1)
+        return torch.where(valid.any(-1),slot+1,torch.full_like(slot,5))
+    has_piece = env._own_possession(0) > 0
+    can_score = has_piece
+    candidates,valid,_=env._fuel_candidates(0)
+    collect=valid.to(torch.int64).argmax(-1)
+    # Explicit candidate rank 0..3 collects; choice 4 scores. If no loose
+    # FUEL is available, select the intermediate-objective behavior.
+    return torch.where(can_score,torch.full_like(collect,4),
+        torch.where(valid.any(-1),collect,torch.full_like(collect,6)))
+
+
+def _legacy_strategic_action(action: torch.Tensor, task: str) -> torch.Tensor:
+    """Map a historical three-class checkpoint onto the candidate action set."""
+    legacy=action.long().clamp(0,2)
+    if task=="counter_defense":  # offense: collect, score, tactical
+        return torch.where(legacy==0,torch.zeros_like(legacy),
+            torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
+    # defense: block, deny, intercept
+    return torch.where(legacy==0,torch.full_like(legacy,5),
+        torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy)))
 
 
 def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
-                   output, horizon=750, scripted_strategy=None):
+                   output, horizon=8000, scripted_strategy=None,
+                   opponent_checkpoint=None):
     payload = (torch.load(checkpoint, map_location=device, weights_only=True)
                if checkpoint is not None else None)
     architecture = (payload.get("architecture", "direct") if payload is not None
@@ -1049,16 +1071,21 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                             payload.get("action_dim", ACTION_DIM), action_kind).to(device)
         model.load_state_dict(payload["model_state_dict"])
         model.eval()
-    scenario_opponent = "adstar" if task == "defense" and opponent in MIXED_DEFENSE_OPPONENTS else opponent
+    scenario_opponent = ("learned" if opponent_checkpoint else
+        "adstar" if task == "defense" and opponent in MIXED_DEFENSE_OPPONENTS else opponent)
     env = _env(num_envs, task, device, seed, scenario_opponent, horizon,
                normalize_observations=bool(payload and
                    payload.get("observation_normalization") == OBS_NORMALIZATION),
                architecture=architecture)
+    horizon=int(env.horizon)
     # Planner routes must not determine the defender's initial position or
     # enter its policy inputs during defense evaluation.
     if task == "defense":
         env.adstar_spawn_hint = False
-    env.opponent = opponent
+    env.opponent = "learned" if opponent_checkpoint else opponent
+    if opponent_checkpoint and not _attach_historical_opponent(
+            env, task, device, opponent_checkpoint):
+        raise ValueError(f"could not load opponent checkpoint: {opponent_checkpoint}")
     checkpoint_drivetrain_config = payload.get("drivetrain_config") if payload else None
     if (checkpoint_drivetrain_config is not None and
             checkpoint_drivetrain_config != env.drivetrain_config):
@@ -1199,7 +1226,8 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
         "acquisitions", "scores", "denied_objectives", "abandoned_objectives",
         "cycle_time", "opponent_acquisitions", "opponent_scores",
         "opponent_denied_objectives", "opponent_abandoned_objectives",
-        "total_simulated_score")}
+        "total_simulated_score", "passes_attempted", "passes_completed",
+        "fuel_transferred", "failed_passes", "pass_to_score_cycle_time")}
     acquired_at = torch.zeros((num_envs, env.piece_owner.shape[1], 2), device=device)
     previous_piece_owner = env.piece_owner.clone()
     cycle_time_sum = torch.zeros((num_envs, 2), device=device)
@@ -1213,7 +1241,12 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
         if model is not None:
             inference_start=time.perf_counter()
             with torch.no_grad():
-                actions, _, _ = model.sample(obs, deterministic=True)
+                model_obs=obs[:,:model.trunk[0].in_features]
+                action_mask=(model_obs[:,-STRATEGIC_ACTION_DIM:].bool() if action_kind=="categorical" and
+                    model.actor.out_features==STRATEGIC_ACTION_DIM else None)
+                actions, _, _ = model.sample(model_obs, deterministic=True,action_mask=action_mask)
+                if env.action_mode=="strategic" and model.actor.out_features==3:
+                    actions=_legacy_strategic_action(actions,task)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             inference_latencies.append((time.perf_counter()-inference_start)*1000.)
@@ -1343,6 +1376,12 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                     float(cycle_time_sum[i, 0].item()) / cycle_n if cycle_n else None)
                 game_metric_rows["total_simulated_score"].append(
                     float(game_event_totals["fuel_scored_event"][i].sum().item()))
+                # This environment is currently 1v1 and has no allied receiver;
+                # report passing as unavailable rather than silently implying
+                # that a no-pass result is a learned behavior.
+                for name in ("passes_attempted","passes_completed","fuel_transferred",
+                             "failed_passes","pass_to_score_cycle_time"):
+                    game_metric_rows[name].append(None)
                 totals[i] = 0
                 lengths[i] = 0
                 for values in metric_totals.values():
@@ -1378,6 +1417,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     result = {"task": task, "opponent": opponent, "checkpoint": str(checkpoint) if checkpoint else None,
               "checkpoint_mtime": Path(checkpoint).stat().st_mtime if checkpoint else None,
               "episodes": episodes, "seed": seed, "device": str(device),
+              "horizon": env.horizon, "match_duration_seconds": env.horizon*env.dt,
               "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
               "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
               "drivetrain_config": env.drivetrain_config,
@@ -1400,9 +1440,15 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
         "mean_opponent_abandoned_objectives": optional_mean(game_metric_rows["opponent_abandoned_objectives"]),
         "mean_total_score": optional_mean(game_metric_rows["scores"]),
         "mean_total_simulated_score": optional_mean(game_metric_rows["total_simulated_score"]),
+        "mean_passes_attempted": optional_mean(game_metric_rows["passes_attempted"]),
+        "mean_passes_completed": optional_mean(game_metric_rows["passes_completed"]),
+        "mean_fuel_transferred": optional_mean(game_metric_rows["fuel_transferred"]),
+        "mean_failed_passes": optional_mean(game_metric_rows["failed_passes"]),
+        "mean_pass_to_score_cycle_time": optional_mean(game_metric_rows["pass_to_score_cycle_time"]),
         "score_semantics": "scored FUEL piece count; simulator does not assign official match points",
         "cycle_time_units": "simulated seconds from piece acquisition to scoring",
-        "unavailable_metrics": ["abandoned_objectives (not modeled by simulator)"],
+        "unavailable_metrics": ["abandoned_objectives (not modeled by simulator)",
+            "passing (no allied teammate entity in the current 1v1 simulator)"],
         "game_metrics_by_episode": game_metric_rows,
         "planning_latency_ms_mean": optional_mean(planning_latencies),
         "planning_latency_ms_p95": (sorted(planning_latencies)[min(len(planning_latencies)-1,
@@ -1436,7 +1482,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
 def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
         defense_checkpoint: str | Path | None = None, episodes: int = 8,
         seed: int = 4100, num_envs: int = 8, device: str = "cuda",
-        output: str | Path = "metrics/ablations.json", horizon: int = 750) -> dict[str, Any]:
+        output: str | Path = "metrics/ablations.json", horizon: int = 8000) -> dict[str, Any]:
     """Run matched strategic-policy comparisons and persist the canonical report.
 
     Scripted sides emit only the environment's semantic collect/score/intercept
@@ -1535,6 +1581,11 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
             "mean_attacker_time_to_score": (metrics.get("mean_time_to_goal")
                 if task == "defense" and metrics.get("mean_time_to_goal", 0.) > 0 else None),
             "mean_denied_objectives": metrics.get("mean_denied_objectives"),
+            "mean_passes_attempted": metrics.get("mean_passes_attempted"),
+            "mean_passes_completed": metrics.get("mean_passes_completed"),
+            "mean_fuel_transferred": metrics.get("mean_fuel_transferred"),
+            "mean_failed_passes": metrics.get("mean_failed_passes"),
+            "mean_pass_to_score_cycle_time": metrics.get("mean_pass_to_score_cycle_time"),
             "mean_abandoned_objectives": metrics.get("mean_abandoned_objectives"),
             "mean_contacts": metrics.get("mean_contact_count"),
             "mean_contact_fraction": metrics.get("mean_contact"),
@@ -1546,7 +1597,7 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
             "planning_latency_ms_mean": metrics.get("planning_latency_ms_mean"),
             "planning_calls": metrics.get("planning_calls"),
             "score_semantics": metrics.get("score_semantics"),
-            "horizon": horizon, "num_envs": matched_envs,
+            "horizon": metrics.get("horizon",horizon), "num_envs": matched_envs,
             "drivetrain_config": metrics.get("drivetrain_config"),
         })
     for group in ("offense_pair", "defense_pair"):
@@ -1593,7 +1644,7 @@ def main() -> None:
     p.add_argument("--steps", type=int, default=1_000_000)
     p.add_argument("--envs", type=int, default=256)
     p.add_argument("--rollout-steps", type=int, default=128)
-    p.add_argument("--horizon", type=int, default=750)
+    p.add_argument("--horizon", type=int, default=8000)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--opponent")
     p.add_argument("--epochs", type=int, default=4)
@@ -1601,9 +1652,10 @@ def main() -> None:
     p.add_argument("--architecture", choices=("strategic_adstar", "tactical_adstar", "direct"),
                    default="strategic_adstar")
     p.add_argument("--generations", type=int, default=20)
-    p.add_argument("--population", type=int, default=8)
-    p.add_argument("--elites", type=int, default=2)
-    p.add_argument("--mutation-scale", type=float, default=.01)
+    p.add_argument("--population", "--opponent-pool-size", dest="population", type=int, default=8,
+                   help="maximum retained strong/diverse opponent checkpoints")
+    p.add_argument("--elites", "--strong-checkpoints", dest="elites", type=int, default=2,
+                   help="number of top-scoring checkpoints guaranteed retention")
     p.add_argument("--l2-coef", type=float, default=1e-5)
     p.add_argument("--initial-checkpoint")
     p.add_argument("--output", default="checkpoints/tensor-ppo")
@@ -1612,7 +1664,7 @@ def main() -> None:
     e.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
     e.add_argument("--checkpoint", required=True)
     e.add_argument("--episodes", type=int, default=32)
-    e.add_argument("--horizon", type=int, default=750)
+    e.add_argument("--horizon", type=int, default=8000)
     e.add_argument("--envs", type=int, default=32)
     e.add_argument("--seed", type=int, default=1000)
     e.add_argument("--opponent", default="random")
@@ -1622,7 +1674,7 @@ def main() -> None:
     a.add_argument("--offense-checkpoint")
     a.add_argument("--defense-checkpoint")
     a.add_argument("--episodes", type=int, default=8)
-    a.add_argument("--horizon", type=int, default=750)
+    a.add_argument("--horizon", type=int, default=8000)
     a.add_argument("--envs", type=int, default=8)
     a.add_argument("--seed", type=int, default=4100)
     a.add_argument("--output", default="metrics/ablations.json")
@@ -1636,7 +1688,7 @@ def main() -> None:
                            initial_checkpoint=args.initial_checkpoint, horizon=args.horizon,
                            l2_coef=args.l2_coef, algorithm=args.algorithm,
                            generations=args.generations, population_size=args.population,
-                           elite_count=args.elites, mutation_scale=args.mutation_scale,
+                           elite_count=args.elites,
                            architecture=args.architecture)
         elif args.command == "evaluate":
             result = evaluate(args.checkpoint, task=args.task, episodes=args.episodes,

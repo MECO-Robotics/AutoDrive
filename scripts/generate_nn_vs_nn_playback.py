@@ -58,7 +58,7 @@ def main() -> None:
     parser.add_argument("--device",default="cuda:1")
     parser.add_argument("--seed",type=int,default=41027)
     parser.add_argument("--scenarios",type=int,default=9)
-    parser.add_argument("--horizon",type=int,default=750)
+    parser.add_argument("--horizon",type=int,default=8000)
     args=parser.parse_args()
     device=_device(args.device)
     defender,defender_payload=load_policy(args.defender,device)

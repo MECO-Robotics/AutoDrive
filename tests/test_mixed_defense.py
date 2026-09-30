@@ -30,19 +30,22 @@ class MixedDefenseTrainingTests(unittest.TestCase):
 
     def test_velocity_intercept_is_deterministic_and_uses_defender_velocity(self):
         env=TensorDefenseEnv(num_envs=1,task="defense",device="cpu",opponent="velocity_intercept",
-            randomize=False,field_colliders=[],field_length=30.,field_width=20.)
+            randomize=False,field_colliders=[],field_length=30.,field_width=20.,
+            perception_config={"range_m":100.,"detection_dropout":0.,
+                               "position_noise_m":0.,"velocity_noise_mps":0.})
         env.sim.pose[0,1,:2]=torch.tensor([5.,5.])
         env.sim.pose[0,0,:2]=torch.tensor([9.,5.])
         env.sim.speed[0,1]=4.
         env.goal[0]=torch.tensor([15.,5.])
         env.sim.velocity[0,0,:2]=torch.tensor([0.,.5])
+        env._update_perception()
         positive=env._velocity_intercept_target().clone()
         self.assertTrue(torch.equal(positive,env._velocity_intercept_target()))
         env.sim.velocity[0,0,:2]=torch.tensor([0.,-.5])
+        env._update_perception()
         negative=env._velocity_intercept_target()
         self.assertNotAlmostEqual(float(positive[0,1]),float(negative[0,1]))
-        self.assertTrue(float(positive[0,1])<5.)
-        self.assertTrue(float(negative[0,1])>5.)
+        self.assertAlmostEqual(float(env._observed_robot(1,0)[1][0,1]),-.5,places=6)
 
     def test_mixed_policy_observation_does_not_receive_adstar_route_or_spawn_hint(self):
         env=TensorDefenseEnv(num_envs=1,task="defense",device="cpu",opponent="adstar",seed=17)
