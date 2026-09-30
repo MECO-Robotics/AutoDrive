@@ -110,8 +110,11 @@ class TensorADStar:
 
     def plan(self, start, goal, heading, length, width, speed=None,
              defender=None, defender_velocity=None, dynamic_defender=False,
-             lateral_friction=None, acceleration=None):
+             lateral_friction=None, acceleration=None, active_mask=None):
         """Plan for every world and return fixed-size paths plus intercept data."""
+        active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
+                     if active_mask is None else
+                     torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
         heading = heading.reshape(self.n).to(self.dtype)
         start, goal = start.to(self.dtype), goal.to(self.dtype)
         if dynamic_defender:
@@ -183,7 +186,7 @@ class TensorADStar:
             candidate=candidate.masked_fill(~corner_clear,float("inf"))
             value=torch.minimum(value.flatten(1),candidate.amin(1)).view(self.n,self.nx,self.ny)
             value=torch.where(blocked,inf,value)
-        self.potential.copy_(value)
+        self.potential.copy_(torch.where(active_mask[:,None,None],value,self.potential))
         path = torch.zeros((self.n, self.max_points, 2), device=self.device, dtype=self.dtype)
         path[:, 0] = start
         px, py = sx.clone(), sy.clone()
@@ -220,9 +223,13 @@ class TensorADStar:
             # device synchronization on each path point.
             if k % 16 == 0 and not bool(active.any().item()):
                 break
-        self.last_path.copy_(path); self.last_lengths.copy_(lengths)
-        self.last_intercept.copy_(intercept); self.last_intercept_time.copy_(t)
-        self.last_start.copy_(start); self.last_goal.copy_(goal); self.last_heading.copy_(heading)
+        self.last_path.copy_(torch.where(active_mask[:,None,None],path,self.last_path))
+        self.last_lengths.copy_(torch.where(active_mask,lengths,self.last_lengths))
+        self.last_intercept.copy_(torch.where(active_mask[:,None],intercept,self.last_intercept))
+        self.last_intercept_time.copy_(torch.where(active_mask,t,self.last_intercept_time))
+        self.last_start.copy_(torch.where(active_mask[:,None],start,self.last_start))
+        self.last_goal.copy_(torch.where(active_mask[:,None],goal,self.last_goal))
+        self.last_heading.copy_(torch.where(active_mask,heading,self.last_heading))
         # Curvature caps and backward braking pass are computed as one batched
         # pairwise tensor operation. The resulting profile respects swerve
         # steering rate, tire lateral acceleration, and stopping distance.
@@ -251,7 +258,8 @@ class TensorADStar:
         braking=.65*accel[:,None,None]
         reachable=(caps[:,None,:].square()+2*braking*delta_station.clamp_min(0)).sqrt()
         profile=torch.where(valid,reachable,torch.full_like(reachable,float("inf"))).amin(-1)
-        self.last_speed_profile.copy_(profile)
+        self.last_speed_profile.copy_(torch.where(
+            active_mask[:,None],profile,self.last_speed_profile))
         return path, lengths, intercept, t
 
     def path_reference(self, position, velocity, speed_limit):
@@ -282,13 +290,17 @@ class TensorADStar:
         valid=(torch.arange(self.max_points,device=self.device)[None,:] < self.last_lengths[:,None])
         eligible=valid&(distance>=1.25)&(distance<=2.75)
         # Random ranks among eligible points, with an ahead-of-start fallback.
-        weights=torch.rand(eligible.shape,device=self.device,generator=generator)
+        weights=torch.zeros(eligible.shape,device=self.device)
+        count=int(mask.sum().item())
+        if count:
+            weights[mask]=torch.rand((count,self.max_points),device=self.device,generator=generator)
         weights=weights.masked_fill(~eligible,-1.)
         index=weights.argmax(-1)
         fallback=(valid&(distance>=1.1)).float().argmax(-1)
         index=torch.where(eligible.any(-1),index,fallback)
         point=self.last_path[torch.arange(self.n,device=self.device),index]
-        point=torch.where(mask[:,None],point,starts)
-        jitter=torch.rand((self.n,2),device=self.device,generator=generator)-.5
-        point=point+jitter*.18
+        jitter=torch.zeros((self.n,2),device=self.device)
+        if count:
+            jitter[mask]=torch.rand((count,2),device=self.device,generator=generator)-.5
+        point=torch.where(mask[:,None],point+jitter*.18,starts)
         return point

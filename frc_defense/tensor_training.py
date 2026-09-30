@@ -185,26 +185,6 @@ def _reset_obs(result: Any) -> torch.Tensor:
     return result[0] if isinstance(result, tuple) else result
 
 
-def _snapshot_inactive_rows(env, active: torch.Tensor):
-    """Capture vector state for rows already ended inside a held action."""
-    inactive = ~active
-    if not bool(inactive.any()):
-        return []
-    snapshots = []
-    for obj in (env, getattr(env, "sim", None)):
-        if obj is None:
-            continue
-        for _name, value in vars(obj).items():
-            if isinstance(value, torch.Tensor) and value.ndim and value.shape[0] == env.n:
-                snapshots.append((value, inactive, value[inactive].clone()))
-    return snapshots
-
-
-def _restore_inactive_rows(snapshots) -> None:
-    for value, inactive, saved in snapshots:
-        value[inactive] = saved
-
-
 def _held_action_interval(env, action: torch.Tensor, ticks: int,
                           initial_obs: torch.Tensor):
     """Advance active worlds under one action without crossing episode ends."""
@@ -216,9 +196,10 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
     complete_matches = 0
     physics_ticks = 0
     for _ in range(ticks):
-        snapshots = _snapshot_inactive_rows(env, active_this_decision)
-        next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(action)
-        _restore_inactive_rows(snapshots)
+        if not bool(active_this_decision.any()):
+            break
+        next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(
+            action, active_mask=active_this_decision)
         active_before_tick = active_this_decision
         reward += tick_reward.to(device=env.device, dtype=torch.float32) * active_before_tick
         tick_done = tick_done.to(device=env.device, dtype=torch.bool)

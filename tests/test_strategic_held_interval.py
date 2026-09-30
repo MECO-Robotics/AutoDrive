@@ -15,11 +15,13 @@ class _FakeEnv:
         self.applied_actions = torch.zeros(self.n, dtype=torch.long)
         self.reset_calls = 0
 
-    def step(self, action):
-        self.steps += 1
-        self.applied_actions += 1
+    def step(self, action, active_mask=None):
+        active_mask = (torch.ones(self.n, dtype=torch.bool) if active_mask is None
+                       else active_mask)
+        self.steps += active_mask.long()
+        self.applied_actions += active_mask.long()
         obs = self.steps[:, None].float()
-        ended = self.steps >= self.horizons
+        ended = (self.steps >= self.horizons) & active_mask
         done = ended & self.terminations
         truncated = ended & ~self.terminations
         reward = torch.ones(self.n)
