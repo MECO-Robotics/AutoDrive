@@ -284,10 +284,14 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 clip_coef: float, value_coef: float, entropy_coef: float,
                 max_grad_norm: float, l2_coef: float, horizon: int,
                 architecture: str = "direct", curriculum: bool = True,
+                strategic_rate_hz: float = 4.0,
                 learned_opponent_checkpoint: str | Path | None = None,
+                learned_opponent_checkpoints: list[str | Path] | None = None,
                 status_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if horizon < 1:
         raise ValueError("horizon must be positive")
+    if not 2. <= strategic_rate_hz <= 5.:
+        raise ValueError("strategic_rate_hz must be between 2 and 5")
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
@@ -355,6 +359,12 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     task_reward_scale = 1.
     tracking_error_ema = None
     good_tracking_updates = 0
+    strategic_phase = 0.0
+    physics_ticks = 0
+    complete_matches = 0
+    action_counts = torch.zeros(action_dim, device=device)
+    opponent_exposure: dict[str, int] = {}
+    entropy_mean = 0.0
     for update_index in range(updates):
         stage = _curriculum_stage(update_index / max(1, updates)) if curriculum else -1
         if curriculum:
@@ -362,6 +372,14 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             candidates = _curriculum_opponents(task, stage, learned_available=available)
             env.opponent = candidates[update_index % len(candidates)]
             env.static_opponent_fraction = (.4 if stage == 0 else STATIC_OPPONENT_FRACTION)
+        exposure_label = env.opponent
+        if env.opponent == "learned" and learned_opponent_checkpoints:
+            checkpoint_index = update_index % len(learned_opponent_checkpoints)
+            active_opponent_checkpoint = learned_opponent_checkpoints[checkpoint_index]
+            learned_opponent_available = _attach_historical_opponent(
+                env, task, device, active_opponent_checkpoint)
+            exposure_label = f"learned:{active_opponent_checkpoint}"
+        opponent_exposure[exposure_label] = opponent_exposure.get(exposure_label, 0) + rollout_steps * num_envs
         # AD* is evaluated at rollout boundaries for a sparse reference set.
         # The simulator and PPO tensors stay device resident during each step.
         routes = _adstar_reference(env, device) if uses_adstar_teacher else None
@@ -404,15 +422,35 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 action_mask=(obs[:,-action_dim:].bool() if action_kind=="categorical" and
                              action_dim==STRATEGIC_ACTION_DIM else None)
                 action, logprob, value = model.sample(obs,action_mask=action_mask)
+                if action_kind == "categorical":
+                    action_counts += torch.bincount(action, minlength=action_dim)
             if b_action_masks is not None:
                 b_action_masks[t]=action_mask
-            next_obs, reward, done, truncated, _info = env.step(action)
+            if architecture == "strategic_adstar":
+                strategic_phase += 50.0 / strategic_rate_hz
+                ticks_this_decision = max(1, int(strategic_phase))
+                strategic_phase -= ticks_this_decision
+            else:
+                ticks_this_decision = 1
+            reward = torch.zeros(num_envs, device=device)
+            done = torch.zeros(num_envs, device=device, dtype=torch.bool)
+            truncated = torch.zeros_like(done)
+            for _ in range(ticks_this_decision):
+                next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(action)
+                reward += tick_reward
+                done |= tick_done
+                truncated |= tick_truncated
+                physics_ticks += 1
+                if routes is not None:
+                    potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
+                    route_progress = (potential_after - potential_before).clamp(-.25, .25)
+                    reward[routes[0]] += .20 * route_progress * reference_active[routes[0]]
+                ended_tick = tick_done | tick_truncated
+                complete_matches += int(tick_done.sum().item())
+                if bool(ended_tick.any()):
+                    next_obs = env.reset_done(ended_tick)
+                    reference_active &= ~ended_tick
             reward *= task_reward_scale
-            if routes is not None:
-                potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
-                # Dense route progress complements the task reward.
-                route_progress = (potential_after - potential_before).clamp(-.25, .25)
-                reward[routes[0]] += .20 * route_progress * reference_active[routes[0]]
             if t % frame_stride == 0:
                 update_frames.append(torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
                     env.sim.length[0], env.sim.width[0], env.goal_radius[0:1])).detach().clone())
@@ -425,12 +463,9 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             with torch.no_grad():
                 b_next_values[t] = model(next_obs)[2]
             ended = done | truncated
-            reset_done = getattr(env, "reset_done", None)
-            if reset_done is None:
-                raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
-            # reset_done returns the complete observation batch with only
-            # selected worlds replaced by freshly initialized states.
-            next_obs = reset_done(ended).to(device=device, dtype=torch.float32)
+            # Worlds ending during a held-action interval were selectively reset
+            # immediately inside that interval; otherwise keep the exact state.
+            next_obs = next_obs.to(device=device, dtype=torch.float32)
             reference_active &= ~ended
             obs = next_obs
 
@@ -475,7 +510,9 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 teacher_loss = (teacher_error * teacher_rows).sum() / teacher_rows.sum().clamp_min(1.)
                 l2_norm = sum(parameter.square().sum() for parameter in model.parameters()
                               if parameter.ndim > 1)
-                loss = (pg + value_coef * value_loss - entropy_coef * entropy.mean() +
+                entropy_mean = float(entropy.mean().detach().item())
+                update_entropy_coef = entropy_coef * max(0., 1. - update_index / max(1, updates - 1))
+                loss = (pg + value_coef * value_loss - update_entropy_coef * entropy.mean() +
                         adstar_action_loss_weight * teacher_loss + l2_coef * l2_norm)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -542,7 +579,17 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             "adstar_action_loss_weight": adstar_action_loss_weight,
             "task_reward_scale": task_reward_scale,
             "good_tracking_updates": good_tracking_updates,
-            "elapsed_seconds": elapsed, "transitions_per_second": completed / max(elapsed, 1e-12),
+                "elapsed_seconds": elapsed, "transitions_per_second": completed / max(elapsed, 1e-12),
+                "strategic_rate_hz": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "strategic_decisions_per_episode": math.ceil(horizon * strategic_rate_hz / 50.)
+                    if architecture == "strategic_adstar" else horizon,
+                "strategic_decisions_per_second": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "simulated_seconds_trained": physics_ticks * env.dt * num_envs,
+                "complete_matches_observed": complete_matches,
+                "opponent_exposure_counts": opponent_exposure,
+                "entropy": entropy_mean,
+                "action_distribution": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
+                "per_action_selection_rate": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
             "checkpoint": str(checkpoint), "started_at": started_at,
             "drivetrain_config": env.drivetrain_config})
 
@@ -573,8 +620,19 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "observation_normalization": OBS_NORMALIZATION,
                 "l2_coefficient": l2_coef,
                 "elapsed_seconds": elapsed, "transitions_per_second": updates * rollout_steps * num_envs / max(elapsed, 1e-12),
+                "completed_timesteps": updates * rollout_steps * num_envs,
+                "strategic_rate_hz": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "strategic_decisions_per_episode": math.ceil(horizon * strategic_rate_hz / 50.)
+                    if architecture == "strategic_adstar" else horizon,
+                "strategic_decisions_per_second": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "simulated_seconds_trained": physics_ticks * env.dt * num_envs,
+                "complete_matches_observed": complete_matches,
+                "opponent_exposure_counts": opponent_exposure,
+                "entropy": entropy_mean,
+                "action_distribution": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
+                "per_action_selection_rate": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "started_at": started_at,
-                "completed_episodes_observed": None}
+                "completed_episodes_observed": complete_matches}
     metadata["drivetrain_config"] = env.drivetrain_config
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
     write_json(status_path, {**status_context, **metadata, "status": "completed",
@@ -589,12 +647,12 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
           num_envs: int = 2048, device: str = "cuda", opponent: str | None = None,
           initial_checkpoint: str | Path | None = None,
           rollout_steps: int = 128, epochs: int = 4, minibatch_size: int = 4096,
-          learning_rate: float = 3e-4, gamma: float = .99, gae_lambda: float = .95,
-          clip_coef: float = .2, value_coef: float = .5, entropy_coef: float = 0.,
+          learning_rate: float = 3e-4, gamma: float = .993, gae_lambda: float = .95,
+          clip_coef: float = .2, value_coef: float = .5, entropy_coef: float = .01,
           max_grad_norm: float = .5, l2_coef: float = 1e-5,
           horizon: int = 8000, algorithm: str = "generational", generations: int = 20,
           population_size: int = 8, elite_count: int = 2,
-          architecture: str = "strategic_adstar") -> dict[str, Any]:
+          architecture: str = "strategic_adstar", strategic_rate_hz: float = 4.) -> dict[str, Any]:
     """Train with PPO and a generation-managed opponent/checkpoint population."""
     if algorithm == "generational":
         return generational_train(task, generations, output, seed=seed,
@@ -604,6 +662,7 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
             rollout_steps=rollout_steps, epochs=epochs, minibatch_size=min(minibatch_size, rollout_steps*num_envs),
             learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
             clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
+            strategic_rate_hz=strategic_rate_hz,
             max_grad_norm=max_grad_norm, l2_coef=l2_coef, architecture=architecture)
     if algorithm != "ppo":
         raise ValueError("algorithm must be 'generational' or 'ppo'")
@@ -620,7 +679,8 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
                   learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
                   clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
                   max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
-                  architecture=architecture, curriculum=(opponent is None or opponent == "mixed"))
+                  architecture=architecture, curriculum=(opponent is None or opponent == "mixed"),
+                  strategic_rate_hz=strategic_rate_hz)
     return _train_once(device=selected, **kwargs)
 
 
@@ -703,11 +763,12 @@ def generational_train(task: str, generations: int, output: str | Path, *,
                        architecture: str = "strategic_adstar", curriculum: bool = True,
                        timesteps: int | None = None, rollout_steps: int = 128,
                        epochs: int = 4, minibatch_size: int = 4096,
-                       learning_rate: float = 3e-4, gamma: float = .99,
+                       learning_rate: float = 3e-4, gamma: float = .993,
                        gae_lambda: float = .95, clip_coef: float = .2,
-                       value_coef: float = .5, entropy_coef: float = 0.,
+                       value_coef: float = .5, entropy_coef: float = .01,
                        max_grad_norm: float = .5,
-                       evaluation_episodes: int = 4) -> dict[str, Any]:
+                       evaluation_episodes: int = 4,
+                       strategic_rate_hz: float = 4.) -> dict[str, Any]:
     """Run PPO generations and manage a diverse, evaluated opponent population.
 
     Each generation continues the prior PPO checkpoint. One member is sampled
@@ -770,10 +831,16 @@ def generational_train(task: str, generations: int, output: str | Path, *,
     if start_generation >= generations:
         start_generation = 0
         history = []
-    per_generation_steps = (max(num_envs * rollout_steps, timesteps // generations)
+    if not 2. <= strategic_rate_hz <= 5.:
+        raise ValueError("strategic_rate_hz must be between 2 and 5")
+    decisions_per_episode = (math.ceil(horizon * strategic_rate_hz / 50.)
+                             if architecture == "strategic_adstar" else horizon)
+    per_generation_steps = (max(num_envs * decisions_per_episode, timesteps // generations)
                             if timesteps is not None else
-                            num_envs * min(max(rollout_steps, horizon), rollout_steps * 4))
+                            num_envs * max(decisions_per_episode, rollout_steps))
     per_generation_steps = max(num_envs * rollout_steps, per_generation_steps)
+    rollout_batch = num_envs * rollout_steps
+    per_generation_steps = math.ceil(per_generation_steps / rollout_batch) * rollout_batch
     if task == "counter_defense":
         fixed_baselines = ("guard", "adstar_defender", "intercept", "lane_block",
                            "fuel_denial", "shadow", "hub_guard")
@@ -841,8 +908,11 @@ def generational_train(task: str, generations: int, output: str | Path, *,
             learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
             clip_coef=clip_coef, value_coef=value_coef, entropy_coef=entropy_coef,
             max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
-            architecture=architecture, curriculum=False,
+            architecture=architecture, curriculum=True,
+            strategic_rate_hz=strategic_rate_hz,
             learned_opponent_checkpoint=train_spec["checkpoint"],
+            learned_opponent_checkpoints=[item["checkpoint"] for item in training_specs
+                if item["mode"] == "learned"],
             status_context=status_context)
         previous_checkpoint = checkpoint
         scenario_seed = 500_000 + generation * 1009
@@ -914,6 +984,15 @@ def generational_train(task: str, generations: int, output: str | Path, *,
             "training_optimizer": "PPO", "training_opponent": train_spec["name"],
             "training_opponent_checkpoint": train_spec["checkpoint"],
             "ppo_timesteps": ppo_result["completed_timesteps"],
+            "strategic_rate_hz": ppo_result.get("strategic_rate_hz"),
+            "strategic_decisions_per_second": ppo_result.get("strategic_decisions_per_second"),
+            "strategic_decisions_per_episode": ppo_result.get("strategic_decisions_per_episode"),
+            "simulated_seconds_trained": ppo_result.get("simulated_seconds_trained"),
+            "complete_matches_observed": ppo_result.get("complete_matches_observed"),
+            "opponent_exposure_counts": ppo_result.get("opponent_exposure_counts"),
+            "entropy": ppo_result.get("entropy"),
+            "action_distribution": ppo_result.get("action_distribution"),
+            "per_action_selection_rate": ppo_result.get("per_action_selection_rate"),
             "scenario_seed": scenario_seed,
             "fitness": generation_fitness, "opponent_metrics": opponent_results,
             "fixed_baseline_metrics": {name: opponent_results[name] for name in fixed_baselines
@@ -1644,6 +1723,9 @@ def main() -> None:
     p.add_argument("--steps", type=int, default=1_000_000)
     p.add_argument("--envs", type=int, default=256)
     p.add_argument("--rollout-steps", type=int, default=128)
+    p.add_argument("--strategic-rate-hz", type=float, default=4.)
+    p.add_argument("--gamma", type=float, default=.993)
+    p.add_argument("--entropy-coef", type=float, default=.01)
     p.add_argument("--horizon", type=int, default=8000)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--opponent")
@@ -1689,7 +1771,9 @@ def main() -> None:
                            l2_coef=args.l2_coef, algorithm=args.algorithm,
                            generations=args.generations, population_size=args.population,
                            elite_count=args.elites,
-                           architecture=args.architecture)
+                           architecture=args.architecture,
+                           strategic_rate_hz=args.strategic_rate_hz,
+                           gamma=args.gamma, entropy_coef=args.entropy_coef)
         elif args.command == "evaluate":
             result = evaluate(args.checkpoint, task=args.task, episodes=args.episodes,
                               seed=args.seed, num_envs=args.envs, device=args.device,

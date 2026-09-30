@@ -1710,11 +1710,25 @@ class TensorDefenseEnv:
         elif kind=="learned" and callable(self.learned_opponent_fn):
             learned=torch.as_tensor(self.learned_opponent_fn(self._role_swapped_observation()),
                                      device=self.device,dtype=self.sim.pose.dtype)
-            learned=torch.nan_to_num(learned).clamp(-1,1)
             if self.action_mode=="strategic":
-                if learned.ndim==1 and learned.shape[0] in (3,8):learned=learned.expand(self.n,-1)
+                learned=torch.nan_to_num(learned)
+                if learned.ndim == 1 and learned.shape[0] == self.n:
+                    legacy_ids = int(getattr(self, "learned_opponent_action_dim", 8)) == 3
+                    if legacy_ids:
+                        legacy = learned.long().clamp(0, 2)
+                        action_class = (torch.where(legacy == 0, torch.zeros_like(legacy),
+                            torch.where(legacy == 1, torch.full_like(legacy, 4), torch.full_like(legacy, 6)))
+                            if self.task == "defense" else
+                            torch.where(legacy == 0, torch.full_like(legacy, 5),
+                                torch.where(legacy == 1, torch.ones_like(legacy), torch.zeros_like(legacy))))
+                    else:
+                        action_class = learned.long().clamp(0, 7)
+                elif learned.ndim == 1 and self.n == 1 and learned.shape[0] in (3, 8):
+                    learned = learned[None, :]
                 if learned.shape==(self.n,8):
-                    action_class=learned.long().clamp(0,7)
+                    mask=self.strategic_action_mask(focal=1)
+                    action_class=learned.masked_fill(
+                        ~mask,torch.finfo(learned.dtype).min).argmax(-1)
                 elif learned.shape==(self.n,3):
                     # Three-output checkpoints keep their old semantic mapping;
                     # the new 8-choice policy selects explicit candidates.
@@ -1725,15 +1739,12 @@ class TensorDefenseEnv:
                     else:
                         action_class=torch.where(legacy==0,torch.full_like(legacy,5),
                             torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy)))
-                elif learned.shape==(self.n,):
-                    legacy=learned.long().clamp(0,2)
-                    action_class=(torch.where(legacy==0,torch.zeros_like(legacy),
-                        torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
-                        if self.task=="defense" else
-                        torch.where(legacy==0,torch.full_like(legacy,5),
-                            torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy))))
-                else:
+                elif not (learned.ndim == 1 and learned.shape[0] == self.n):
                     raise ValueError(f"learned strategic opponent must return 3/8 scores or {(self.n,)} classes")
+                mask=self.strategic_action_mask(focal=1)
+                valid=mask.gather(1,action_class[:,None]).squeeze(1)
+                fallback=mask.to(torch.int64).argmax(-1)
+                action_class=torch.where(valid,action_class,fallback)
                 target=self._strategic_opponent_target(action_class)
                 oppxy=self._adstar_opponent_velocity(target)
                 dumping=(action_class==4) if self.task=="defense" else torch.zeros_like(action_class,dtype=torch.bool)
@@ -1742,6 +1753,7 @@ class TensorDefenseEnv:
                 commands=torch.stack((own,opp),dim=1)
                 self.sim.step(commands); self.steps+=1
                 return self._finish_step(goal,old_position,old_distance,a)
+            learned=torch.nan_to_num(learned).clamp(-1,1)
             if learned.shape==(3,):learned=learned.expand(self.n,3)
             if tuple(learned.shape)!=(self.n,3):
                 raise ValueError(f"learned_opponent_fn must return {(self.n,3)} normalized controls")
