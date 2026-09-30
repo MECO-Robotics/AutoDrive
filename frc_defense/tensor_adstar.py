@@ -55,7 +55,7 @@ class TensorADStar:
         self.last_goal = torch.zeros_like(self.last_start)
         self.last_heading = torch.zeros(self.n, device=self.device, dtype=self.dtype)
         self.last_speed_profile = torch.zeros((self.n,self.max_points),device=self.device,dtype=self.dtype)
-        self.potential = torch.empty((self.n, self.nx, self.ny), device=self.device,
+        self.potential = torch.zeros((self.n, self.nx, self.ny), device=self.device,
                                      dtype=self.dtype)
 
     def _blocked(self, heading, length, width, dynamic=None):
@@ -111,16 +111,28 @@ class TensorADStar:
     def plan(self, start, goal, heading, length, width, speed=None,
              defender=None, defender_velocity=None, dynamic_defender=False,
              lateral_friction=None, acceleration=None, active_mask=None):
-        """Plan for every world and return fixed-size paths plus intercept data."""
+        """Plan selected worlds and return the persistent batched route state."""
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
-        heading = heading.reshape(self.n).to(self.dtype)
-        start, goal = start.to(self.dtype), goal.to(self.dtype)
+        selected=torch.nonzero(active_mask,as_tuple=False).flatten()
+        if selected.numel()==0:
+            return self.last_path,self.last_lengths,self.last_intercept,self.last_intercept_time
+        batch_n=selected.numel()
+        heading = heading.reshape(self.n)[selected].to(self.dtype)
+        start, goal = start[selected].to(self.dtype), goal[selected].to(self.dtype)
+        length,width=length[selected],width[selected]
+        speed=None if speed is None else speed[selected]
+        defender=None if defender is None else defender[selected]
+        defender_velocity=(None if defender_velocity is None else defender_velocity[selected])
+        lateral_friction=(None if lateral_friction is None else lateral_friction[selected])
+        acceleration=None if acceleration is None else acceleration[selected]
         if dynamic_defender:
             delta = goal - start
             unit = delta / delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-            va = unit * (speed if speed is not None else 4.).reshape(self.n, 1)
+            speed_values=(torch.full((batch_n,),4.,device=self.device,dtype=self.dtype)
+                          if speed is None else speed.reshape(batch_n))
+            va = unit * speed_values[:,None]
             q = defender - start
             rel = defender_velocity - va
             a = rel.square().sum(-1).clamp_min(1e-8)
@@ -135,10 +147,10 @@ class TensorADStar:
                          (-(q*rel).sum(-1)/a).clamp_min(0))))
             t = t.clamp(max=1.5)
             intercept = defender + defender_velocity * t[:, None]
-            dynamic = torch.cat((intercept, torch.full((self.n, 2), .45, device=self.device,
+            dynamic = torch.cat((intercept, torch.full((batch_n, 2), .45, device=self.device,
                                                        dtype=self.dtype)), -1)
         else:
-            t = torch.zeros(self.n, device=self.device, dtype=self.dtype)
+            t = torch.zeros(batch_n, device=self.device, dtype=self.dtype)
             intercept = torch.zeros_like(start)
             dynamic = None
         blocked = self._blocked(heading, length, width, dynamic)
@@ -146,7 +158,7 @@ class TensorADStar:
         # targets can land on a bump while projecting an interception point;
         # move those endpoints to the nearest reachable clearance cell.
         sx, sy = self._indices(start); gx, gy = self._indices(goal)
-        batch = self._batch
+        batch = torch.arange(batch_n,device=self.device)
         if self.avoid_bumps:
             blocked_goal=blocked[batch,gx,gy]
             goal_distance=((self.xx.reshape(1,-1)-goal[:,0,None]).square()+
@@ -159,7 +171,7 @@ class TensorADStar:
             gx,gy=self._indices(goal)
         blocked[batch, sx, sy] = False
         blocked[batch, gx, gy] = False
-        bump_cost = torch.ones((self.n, self.nx, self.ny), device=self.device, dtype=self.dtype)
+        bump_cost = torch.ones((batch_n, self.nx, self.ny), device=self.device, dtype=self.dtype)
         if self._bumps.numel():
             bump_dx = (self.xx[None, None] - self._bumps[None, :, 0, None, None]).abs()
             bump_dy = (self.yy[None, None] - self._bumps[None, :, 1, None, None]).abs()
@@ -173,7 +185,7 @@ class TensorADStar:
         import torch.nn.functional as F
         blocked_neighbors=F.unfold(
             F.pad(blocked[:,None].to(self.dtype),(1,1,1,1),value=1.),3
-        ).view(self.n,9,self.nx*self.ny)>.5
+        ).view(batch_n,9,self.nx*self.ny)>.5
         corner_clear=torch.ones_like(blocked_neighbors)
         corner_clear[:,0]=~(blocked_neighbors[:,1]|blocked_neighbors[:,3])
         corner_clear[:,2]=~(blocked_neighbors[:,1]|blocked_neighbors[:,5])
@@ -181,17 +193,16 @@ class TensorADStar:
         corner_clear[:,8]=~(blocked_neighbors[:,5]|blocked_neighbors[:,7])
         for _ in range(self.sweeps):
             padded=F.pad(value[:,None],(1,1,1,1),value=1.e6)
-            neighbors=F.unfold(padded,3).view(self.n,9,self.nx*self.ny)
+            neighbors=F.unfold(padded,3).view(batch_n,9,self.nx*self.ny)
             candidate=neighbors+self._edge_cost*bump_cost.flatten(1)[:,None,:]
             candidate=candidate.masked_fill(~corner_clear,float("inf"))
-            value=torch.minimum(value.flatten(1),candidate.amin(1)).view(self.n,self.nx,self.ny)
+            value=torch.minimum(value.flatten(1),candidate.amin(1)).view(batch_n,self.nx,self.ny)
             value=torch.where(blocked,inf,value)
-        self.potential.copy_(torch.where(active_mask[:,None,None],value,self.potential))
-        path = torch.zeros((self.n, self.max_points, 2), device=self.device, dtype=self.dtype)
+        path = torch.zeros((batch_n, self.max_points, 2), device=self.device, dtype=self.dtype)
         path[:, 0] = start
         px, py = sx.clone(), sy.clone()
-        active = torch.ones(self.n, device=self.device, dtype=torch.bool)
-        lengths = torch.ones(self.n, device=self.device, dtype=torch.long)
+        active = torch.ones(batch_n, device=self.device, dtype=torch.bool)
+        lengths = torch.ones(batch_n, device=self.device, dtype=torch.long)
         rows = batch
         for k in range(1, self.max_points):
             candidates=[]
@@ -223,13 +234,14 @@ class TensorADStar:
             # device synchronization on each path point.
             if k % 16 == 0 and not bool(active.any().item()):
                 break
-        self.last_path.copy_(torch.where(active_mask[:,None,None],path,self.last_path))
-        self.last_lengths.copy_(torch.where(active_mask,lengths,self.last_lengths))
-        self.last_intercept.copy_(torch.where(active_mask[:,None],intercept,self.last_intercept))
-        self.last_intercept_time.copy_(torch.where(active_mask,t,self.last_intercept_time))
-        self.last_start.copy_(torch.where(active_mask[:,None],start,self.last_start))
-        self.last_goal.copy_(torch.where(active_mask[:,None],goal,self.last_goal))
-        self.last_heading.copy_(torch.where(active_mask,heading,self.last_heading))
+        self.potential[selected]=value
+        self.last_path[selected]=path
+        self.last_lengths[selected]=lengths
+        self.last_intercept[selected]=intercept
+        self.last_intercept_time[selected]=t
+        self.last_start[selected]=start
+        self.last_goal[selected]=goal
+        self.last_heading[selected]=heading
         # Curvature caps and backward braking pass are computed as one batched
         # pairwise tensor operation. The resulting profile respects swerve
         # steering rate, tire lateral acceleration, and stopping distance.
@@ -241,7 +253,7 @@ class TensorADStar:
         turn=torch.atan2(cross,dot).abs()
         arc=.5*(distance[:,:-1]+distance[:,1:]).clamp_min(1.e-4)
         curvature=turn/arc
-        point_curve=torch.zeros((self.n,self.max_points),device=self.device,dtype=self.dtype)
+        point_curve=torch.zeros((batch_n,self.max_points),device=self.device,dtype=self.dtype)
         point_curve[:,1:-1]=curvature
         mu=(lateral_friction if lateral_friction is not None else torch.full_like(length,1.2)).clamp_min(.1)
         accel=(acceleration if acceleration is not None else torch.full_like(length,8.)).clamp_min(.2)
@@ -251,16 +263,15 @@ class TensorADStar:
         caps=torch.minimum(vcap,torch.minimum(lateral,steer))
         caps=torch.where(point_curve>1.e-6,caps,vcap)
         caps[batch,lengths-1]=0.
-        station=torch.cat((torch.zeros((self.n,1),device=self.device,dtype=self.dtype),distance.cumsum(-1)),-1)
+        station=torch.cat((torch.zeros((batch_n,1),device=self.device,dtype=self.dtype),distance.cumsum(-1)),-1)
         delta_station=station[:,None,:]-station[:,:,None]
         future=torch.arange(self.max_points,device=self.device)[None,None,:]>=torch.arange(self.max_points,device=self.device)[None,:,None]
         valid=(torch.arange(self.max_points,device=self.device)[None,None,:]<lengths[:,None,None])&future
         braking=.65*accel[:,None,None]
         reachable=(caps[:,None,:].square()+2*braking*delta_station.clamp_min(0)).sqrt()
         profile=torch.where(valid,reachable,torch.full_like(reachable,float("inf"))).amin(-1)
-        self.last_speed_profile.copy_(torch.where(
-            active_mask[:,None],profile,self.last_speed_profile))
-        return path, lengths, intercept, t
+        self.last_speed_profile[selected]=profile
+        return self.last_path,self.last_lengths,self.last_intercept,self.last_intercept_time
 
     def path_reference(self, position, velocity, speed_limit):
         """Batched progress projection, lookahead, and speed-aware path command."""

@@ -496,8 +496,19 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
             reward *= task_reward_scale
             if t % frame_stride == 0:
-                update_frames.append(torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
-                    env.sim.length[0], env.sim.width[0], env.goal_radius[0:1])).detach().clone())
+                state = torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
+                    env.sim.length[0], env.sim.width[0], env.goal_radius[0:1])).detach().clone()
+                active_fuel = env.piece_active[0]
+                fuel_pieces = torch.cat((env.piece_pos[0],
+                    env.piece_owner[0, :, None].to(env.piece_pos.dtype)), -1)
+                update_frames.append({
+                    "state": state,
+                    "fuel_pieces": fuel_pieces[active_fuel].detach().cpu().tolist(),
+                    "hub_active": env.hub_active[0].detach().cpu().tolist(),
+                    "hub_centers": env.hub_centers.detach().cpu().tolist(),
+                    "match_remaining": float(env.match_remaining[0].item()),
+                    "fuel_score_count": env.fuel_score_count[0].detach().cpu().tolist(),
+                })
             next_obs = next_obs.to(device=device, dtype=torch.float32)
             reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
             done = done.to(device=device, dtype=torch.bool).reshape(num_envs)
@@ -584,7 +595,12 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         exported_path = routes[5][0] if routes is not None else []
         playback_frames.extend({"robots": [row[:3], row[3:6]],
             "goal": row[6:8], "sizes": row[8:12], "goal_radius":row[12],
-            "adstar_path": exported_path} for row in torch.stack(update_frames).cpu().tolist())
+            "adstar_path": exported_path, "fuel_pieces": frame["fuel_pieces"],
+            "hub_active": frame["hub_active"], "hub_centers": frame["hub_centers"],
+            "match_remaining": frame["match_remaining"],
+            "fuel_score_count": frame["fuel_score_count"]}
+            for frame in update_frames
+            for row in [frame["state"].cpu().tolist()])
         playback_frames = playback_frames[-480:]
         from .field import (ALLIANCE_ZONE_DEPTH, BUMP_ACCELERATION_SCALE,
                             BUMP_SPEED_SCALE, bump_boxes, static_collision_boxes)

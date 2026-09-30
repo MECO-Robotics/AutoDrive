@@ -810,7 +810,8 @@ class TensorDefenseEnv:
 
     def _random_active(self, active_mask, tail_shape, *, normal=False, high=None):
         count=int(active_mask.sum().item())
-        out=torch.zeros((self.n,*tail_shape),device=self.device)
+        dtype=torch.long if high is not None else self.sim.pose.dtype
+        out=torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
         if count:
             shape=(count,*tail_shape)
             if normal:
