@@ -129,6 +129,16 @@ class TensorVectorizedSimulator:
         self.module_current=torch.zeros_like(self.module_angle)
         self.module_supply_current=torch.zeros_like(self.module_angle)
         self.robot_current=torch.zeros((self.n,2),device=self.device)
+        # Module locations are drivetrain constants; broadcast them in the
+        # 50 Hz swerve step instead of rebuilding full-batch tensors per tick.
+        self._module_x_offsets=torch.tensor(
+            [-self.swerve.module_x_offset,self.swerve.module_x_offset,
+             -self.swerve.module_x_offset,self.swerve.module_x_offset],
+            device=self.device,dtype=self.pose.dtype).reshape(1,1,4)
+        self._module_y_offsets=torch.tensor(
+            [-self.swerve.module_y_offset,-self.swerve.module_y_offset,
+             self.swerve.module_y_offset,self.swerve.module_y_offset],
+            device=self.device,dtype=self.pose.dtype).reshape(1,1,4)
         self.robot_contact=torch.zeros((self.n,),device=self.device,dtype=torch.bool)
         self.opponent_contact=torch.zeros((self.n,),device=self.device,dtype=torch.bool)
         self.field_contact=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
@@ -228,7 +238,7 @@ class TensorVectorizedSimulator:
         accel=torch.minimum(self.accel,torch.minimum(motor_accel,tire_accel))
         self.accel.copy_(torch.where(mask[:,None],accel,self.accel))
 
-    def step(self, command, active_mask=None):
+    def step(self, command, active_mask=None, *, _active_nonempty=False):
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
@@ -236,7 +246,7 @@ class TensorVectorizedSimulator:
         if cmd.shape==(2,3): cmd=cmd.expand(self.n,2,3)
         if tuple(cmd.shape)!=(self.n,2,3): raise ValueError(f"command must be {(self.n,2,3)}")
         cmd=torch.nan_to_num(cmd)
-        if not bool(active_mask.any()):
+        if not _active_nonempty and not bool(active_mask.any()):
             return self.state
         self._swerve(cmd,active_mask)
         self.pose.copy_(torch.where(active_mask[:,None,None],
@@ -257,14 +267,7 @@ class TensorVectorizedSimulator:
             active_mask=torch.ones(self.n,device=self.device,dtype=torch.bool)
         p=self.swerve; th=self.pose[...,2]; c,s=th.cos(),th.sin()
         speed_limit,accel_limit=self.speed,self.accel
-        mx=torch.stack((-torch.ones_like(self.length)*self.swerve.module_x_offset,
-                        torch.ones_like(self.length)*self.swerve.module_x_offset,
-                        -torch.ones_like(self.length)*self.swerve.module_x_offset,
-                        torch.ones_like(self.length)*self.swerve.module_x_offset),-1)
-        my=torch.stack((-torch.ones_like(self.width)*self.swerve.module_y_offset,
-                        -torch.ones_like(self.width)*self.swerve.module_y_offset,
-                        torch.ones_like(self.width)*self.swerve.module_y_offset,
-                        torch.ones_like(self.width)*self.swerve.module_y_offset),-1)
+        mx,my=self._module_x_offsets,self._module_y_offsets
         wheel_x=self.pose[...,0,None]+c[...,None]*mx-s[...,None]*my
         wheel_y=self.pose[...,1,None]+s[...,None]*mx+c[...,None]*my
         wheel_grade=torch.zeros_like(wheel_x); wheel_height=torch.zeros_like(wheel_x)
@@ -616,6 +619,9 @@ class TensorDefenseEnv:
         self.match_clock_step=self.dt
         self.adstar_replan_interval=max(1,int(kwargs.pop("adstar_replan_interval",20)))
         self._planner_tick=torch.zeros((self.n,),device=self.device,dtype=torch.long)
+        self._planner_tick_scalar=self.adstar_replan_interval-1
+        self._planner_tick_aligned=False
+        self._planner_full_batch_active=False
         self.adstar_spawn_hint=bool(kwargs.pop("adstar_spawn_hint",True))
         self.randomize=bool(kwargs.pop("randomize",True))
         self.static_opponent_fraction=float(kwargs.pop("static_opponent_fraction",0.))
@@ -808,8 +814,9 @@ class TensorDefenseEnv:
         age=(self._opponent_track_age[:,focal]/max(self.perception_track_timeout,1e-6)).clamp(0.,1.)
         return torch.stack((valid,age),dim=-1)
 
-    def _random_active(self, active_mask, tail_shape, *, normal=False, high=None):
-        count=int(active_mask.sum().item())
+    def _random_active(self, active_mask, tail_shape, *, normal=False, high=None,
+                       active_count=None):
+        count=int(active_mask.sum().item()) if active_count is None else int(active_count)
         dtype=torch.long if high is not None else self.sim.pose.dtype
         out=torch.zeros((self.n,*tail_shape),device=self.device,dtype=dtype)
         if count:
@@ -823,7 +830,7 @@ class TensorDefenseEnv:
             out[active_mask]=values
         return out
 
-    def _update_perception(self, reset_mask=None, active_mask=None):
+    def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
@@ -843,10 +850,17 @@ class TensorDefenseEnv:
             pose=self.sim.pose[:,robot]
             delta=self.piece_pos-pose[:,None,:2]
             distance=delta.norm(dim=-1)
-            bearing=torch.atan2(delta[...,1],delta[...,0])
-            angle=torch.atan2(torch.sin(bearing-pose[:,None,2]),torch.cos(bearing-pose[:,None,2])).abs()
             visible=self.piece_active & (self.piece_owner < 0) & (distance <= self.perception_range)
-            visible &= angle <= math.radians(self.perception_fov)*.5
+            # A full-circle sensor has no angular rejection. Avoid computing
+            # two atan2s plus sin/cos for every catalog piece in this common
+            # case (504 pieces x 2 robots x every physics tick). Keep the
+            # original wrapped-angle path for narrower FOVs so its boundary
+            # behavior remains unchanged.
+            if self.perception_fov < 360.:
+                bearing=torch.atan2(delta[...,1],delta[...,0])
+                angle=torch.atan2(torch.sin(bearing-pose[:,None,2]),
+                                  torch.cos(bearing-pose[:,None,2])).abs()
+                visible &= angle <= math.radians(self.perception_fov)*.5
             # Circle/radius approximation keeps occlusion vectorized. It only
             # controls simulated detections; it never becomes policy input.
             occ=self.field_feature_obstacles
@@ -871,13 +885,15 @@ class TensorDefenseEnv:
             occluded=((closest-other_pos[:,None,:]).norm(dim=-1)<=other_radius[:,None]) & (t>.02) & (t<.98)
             visible &= ~occluded
             if self.perception_dropout:
-                detected=self._random_active(active_mask,visible.shape[1:])>=self.perception_dropout
+                detected=self._random_active(active_mask,visible.shape[1:],active_count=active_count)>=self.perception_dropout
                 visible &= detected
-            noise=self._random_active(active_mask,self.piece_pos.shape[1:],normal=True)*self.perception_position_noise
+            noise=self._random_active(active_mask,self.piece_pos.shape[1:],normal=True,
+                                      active_count=active_count)*self.perception_position_noise
             measured=self.piece_pos+noise
             updated_velocity=self.piece_vel.clone()
             if self.perception_velocity_noise:
-                updated_velocity += self._random_active(active_mask,self.piece_vel.shape[1:],normal=True)*self.perception_velocity_noise
+                updated_velocity += self._random_active(active_mask,self.piece_vel.shape[1:],normal=True,
+                    active_count=active_count)*self.perception_velocity_noise
             self._track_pos[:,robot]=torch.where((visible&active_mask[:,None])[...,None],measured,self._track_pos[:,robot])
             self._track_vel[:,robot]=torch.where((visible&active_mask[:,None])[...,None],updated_velocity,self._track_vel[:,robot])
             self._track_age[:,robot]=torch.where(visible&active_mask[:,None],torch.zeros_like(self._track_age[:,robot]),self._track_age[:,robot])
@@ -888,7 +904,7 @@ class TensorDefenseEnv:
             robot_bearing=torch.atan2(robot_delta[:,1],robot_delta[:,0])
             bearing_error=torch.atan2(torch.sin(robot_bearing-self.sim.pose[:,robot,2]),
                 torch.cos(robot_bearing-self.sim.pose[:,robot,2])).abs()
-            detected=(self._random_active(active_mask,())>=self.perception_dropout)
+            detected=(self._random_active(active_mask,(),active_count=active_count)>=self.perception_dropout)
             detected &= (robot_delta.norm(dim=-1)<=self.perception_range)
             detected &= bearing_error<=math.radians(self.perception_fov)*.5
             if occ.numel():
@@ -899,10 +915,12 @@ class TensorDefenseEnv:
                 blocked=((closest-occ[None,:,:2]).norm(dim=-1)<=occ[None,:,2]+.03)
                 blocked &= (t>.02)&(t<.98)
                 detected &= ~blocked.any(-1)
-            position_noise=self._random_active(active_mask,(2,),normal=True)*self.perception_position_noise
-            heading_noise=self._random_active(active_mask,(),normal=True)*min(
+            position_noise=self._random_active(active_mask,(2,),normal=True,
+                                               active_count=active_count)*self.perception_position_noise
+            heading_noise=self._random_active(active_mask,(),normal=True,active_count=active_count)*min(
                 .05,self.perception_position_noise)
-            velocity_noise=self._random_active(active_mask,(3,),normal=True)*self.perception_velocity_noise
+            velocity_noise=self._random_active(active_mask,(3,),normal=True,
+                                               active_count=active_count)*self.perception_velocity_noise
             observed_pose[:,:2]+=position_noise
             observed_pose[:,2]+=heading_noise
             observed_velocity+=velocity_noise
@@ -1331,7 +1349,7 @@ class TensorDefenseEnv:
                 raw,self.sim.field_length,self.sim.field_width,self.sim.speed,self.sim.omega_limit)
         return raw
 
-    def _obs(self, initialize_mask=None, active_mask=None):
+    def _obs(self, initialize_mask=None, active_mask=None, active_count=None):
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
         raw=self._raw_obs()
@@ -1343,10 +1361,11 @@ class TensorDefenseEnv:
             self.observation_history=torch.where(initialize_mask[:,None,None],fresh,self.observation_history)
         obs=self.observation_history.gather(1,self.observation_delay[:,None,None].expand(-1,1,self.obs_dim)).squeeze(1)
         if self.randomize and self.observation_noise>0:
-            state=obs[:,:18]+self._random_active(active_mask,(18,),normal=True)*self.observation_noise
+            state=obs[:,:18]+self._random_active(active_mask,(18,),normal=True,
+                                                active_count=active_count)*self.observation_noise
             obs=torch.cat((state,obs[:,18:]),-1)
         if self.randomize and self.observation_dropout>0:
-            keep=self._random_active(active_mask,(18,))>=self.observation_dropout
+            keep=self._random_active(active_mask,(18,),active_count=active_count)>=self.observation_dropout
             obs=torch.cat((obs[:,:18]*keep,obs[:,18:]),-1)
         return torch.where(active_mask[:,None],obs,self._last_observation)
 
@@ -1580,9 +1599,10 @@ class TensorDefenseEnv:
         self._move_adstar_defenders_to_clear_start()
         self._place_defenders_near_clear_adstar_paths()
         self._last_hub_zone.zero_(); self._last_strategic_action.zero_()
-        if (self._adstar_planners is not None or self._adstar_defender_planners is not None
-                or self._adstar_tactical_planner is not None):
-            self._planner_tick.fill_(self.adstar_replan_interval-1)
+        self._planner_tick.fill_(self.adstar_replan_interval-1)
+        self._planner_tick_scalar=self.adstar_replan_interval-1
+        self._planner_tick_aligned=True
+        self._planner_full_batch_active=False
         self.action_history.zero_()
         self.control_delay.zero_()
         if self.randomize and self.max_control_latency_steps:
@@ -1605,6 +1625,11 @@ class TensorDefenseEnv:
     def reset_done(self,mask):
         """Reset selected environment slots; return the full fresh observation batch."""
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
+        full_reset=bool(mask.all().item())
+        # Per-world reset phases may now differ; only a full-batch reset can
+        # restore the common scalar cadence.
+        self._planner_tick_aligned=full_reset
+        self._planner_full_batch_active=False
         self.sim.reset_done(mask)
         self._sample_static_opponents(mask)
         if self._adstar_planners is not None:
@@ -1638,10 +1663,10 @@ class TensorDefenseEnv:
             value.masked_fill_(mask[:,None],0)
         for value in (self.next_intake_time,self.next_score_time):
             value.masked_fill_(mask[:,None],0)
-        if (self._adstar_planners is not None or self._adstar_defender_planners is not None
-                or self._adstar_tactical_planner is not None):
-            self._planner_tick=torch.where(mask,torch.full_like(self._planner_tick,
-                self.adstar_replan_interval-1),self._planner_tick)
+        self._planner_tick=torch.where(mask,torch.full_like(self._planner_tick,
+            self.adstar_replan_interval-1),self._planner_tick)
+        if full_reset:
+            self._planner_tick_scalar=self.adstar_replan_interval-1
         radii=.3+self._random_active(mask,())*.5
         self.goal_radius=torch.where(mask,radii if self.randomize else torch.full_like(radii,self.base_goal_radius),self.goal_radius)
         self.steps=torch.where(mask,torch.zeros_like(self.steps),self.steps)
@@ -1680,11 +1705,20 @@ class TensorDefenseEnv:
             self._last_opponent_command=torch.where(active_mask[:,None],command,old)
         return command
 
-    def step(self,action,active_mask=None):
+    def step(self,action,active_mask=None,*,_active_count=None):
+        full_batch=active_mask is None
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
-        if not bool(active_mask.any()):
+        if _active_count is None:
+            active_count=self.n if full_batch else int(active_mask.sum().item())
+        else:
+            active_count=int(_active_count)
+        if active_count != self.n:
+            self._planner_tick_aligned=False
+        self._planner_full_batch_active=(self._planner_tick_aligned and
+                                         active_count == self.n)
+        if active_count == 0:
             return (self._last_observation,torch.zeros(self.n,device=self.device),
                     torch.zeros(self.n,device=self.device,dtype=torch.bool),
                     torch.zeros(self.n,device=self.device,dtype=torch.bool),{})
@@ -1774,8 +1808,8 @@ class TensorDefenseEnv:
             oppxy=self._opponent_velocity_command(self._adstar_defender_velocity(target,active_mask),active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-            return self._finish_step(goal,old_position,old_distance,a,active_mask)
+            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
         elif kind in ("adstar","offense"):
             if self.task!="defense" or self._adstar_planners is None:
                 raise ValueError("the AD* attacker is available for the defense task")
@@ -1786,10 +1820,10 @@ class TensorDefenseEnv:
             omega=self._face_hub_omega(1,carrying)
             opp=torch.cat((oppxy,omega[:,None]),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-            return self._finish_step(goal,old_position,old_distance,a,active_mask)
+            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
         elif kind=="random":
-            count=int(active_mask.sum().item())
+            count=active_count
             theta_values=torch.rand((count,),device=self.device,generator=self.generator)*(2*math.pi)
             speed_values=torch.rand((count,),device=self.device,generator=self.generator)*self.sim.speed[active_mask,1]
             theta=torch.zeros((self.n,),device=self.device).masked_scatter(active_mask,theta_values)
@@ -1798,8 +1832,8 @@ class TensorDefenseEnv:
             oppxy=self._opponent_velocity_command(oppxy,active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-            return self._finish_step(goal,old_position,old_distance,a,active_mask)
+            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
         elif kind=="learned" and callable(self.learned_opponent_fn):
             learned=torch.as_tensor(self.learned_opponent_fn(self._role_swapped_observation()),
                                      device=self.device,dtype=self.sim.pose.dtype)
@@ -1844,8 +1878,8 @@ class TensorDefenseEnv:
                 omega=self._face_hub_omega(1,dumping)
                 opp=torch.cat((oppxy,omega[:,None]),dim=-1)
                 commands=torch.stack((own,opp),dim=1)
-                self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-                return self._finish_step(goal,old_position,old_distance,a,active_mask)
+                self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+                return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
             learned=torch.nan_to_num(learned).clamp(-1,1)
             if learned.shape==(3,):learned=learned.expand(self.n,3)
             if tuple(learned.shape)!=(self.n,3):
@@ -1855,8 +1889,8 @@ class TensorDefenseEnv:
             oppxy=self._opponent_velocity_command(opp[:,:2],active_mask)
             opp=torch.cat((oppxy,opp[:,2:]),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-            return self._finish_step(goal,old_position,old_distance,a,active_mask)
+            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
         direction=target-p[:,1,:2]
         oppxy=direction/(direction.norm(dim=-1,keepdim=True).clamp_min(1e-8))*self.sim.speed[:,1,None]
         oppxy=self._opponent_velocity_command(oppxy,active_mask)
@@ -1864,8 +1898,21 @@ class TensorDefenseEnv:
         omega=self._face_hub_omega(1,carrying) if self.task=="defense" else torch.zeros((self.n,),device=self.device)
         opp=torch.cat((oppxy,omega[:,None]),dim=-1)
         commands=torch.stack((own,opp),dim=1)
-        self.sim.step(commands,active_mask); self.steps+=active_mask.long()
-        return self._finish_step(goal,old_position,old_distance,a,active_mask)
+        self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+        return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count)
+
+    def _advance_adstar_cadence(self, active_mask):
+        """Return whether to plan and the mask, avoiding a reduction when aligned."""
+        if self._planner_full_batch_active and self._planner_tick_aligned:
+            self._planner_tick_scalar += 1
+            self._planner_tick.add_(1)
+            due=self._planner_tick_scalar % self.adstar_replan_interval == 0
+            return due,None
+        self._planner_tick_aligned=False
+        self._planner_full_batch_active=False
+        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
+        replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
+        return bool(replan.any()),replan
 
     def _adstar_tactical_velocity(self, waypoint_action, active_mask=None):
         """Decode a normalized field waypoint and route robot 0 to it."""
@@ -1892,12 +1939,11 @@ class TensorDefenseEnv:
         waypoint=torch.maximum(torch.minimum(waypoint,high),low)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
-        replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
-        if bool(replan.any()):
+        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
+        if should_replan:
             planner.plan(defender[:,:2],waypoint,defender[:,2],self.sim.length[:,0],
                 self.sim.width[:,0],self.sim.speed[:,0],lateral_friction=self.sim.lateral_mu[:,0],
-                acceleration=self.sim.accel[:,0],active_mask=replan)
+                acceleration=self.sim.accel[:,0],active_mask=replan_mask)
         command,_=planner.path_reference(defender[:,:2],self.sim.velocity[:,0,:2],self.sim.speed[:,0])
         distance=(waypoint-defender[:,:2]).norm(dim=-1,keepdim=True)
         command=torch.where(distance<=.3,torch.zeros_like(command),command)
@@ -2018,13 +2064,12 @@ class TensorDefenseEnv:
         observed_defender,observed_velocity=self._observed_robot(1,0)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
-        replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
-        if bool(replan.any()):
+        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
+        if should_replan:
             planner.plan(pose[:,:2],target,pose[:,2],self.sim.length[:,1],self.sim.width[:,1],
                 self.sim.speed[:,1],observed_defender[:,:2],observed_velocity[:,:2],
                 self.task=="defense",self.sim.lateral_mu[:,1],self.sim.accel[:,1],
-                active_mask=replan)
+                active_mask=replan_mask)
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
@@ -2059,16 +2104,15 @@ class TensorDefenseEnv:
         observed_defender,_=self._observed_robot(1,0)
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
+        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
         # A host-side fixed cadence avoids the device synchronization caused by
-        # branching on per-world contact/replan masks. Contact replanning is
-        # bounded by this interval instead of synchronizing every control tick.
-        replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
-        if bool(replan.any()):
+        # checking the per-world mask. The aligned common case uses a scalar;
+        # contact replanning remains bounded by the configured cadence.
+        if should_replan:
             planner.plan(pose[:,:2],self._attacker_objective(),pose[:,2],self.sim.length[:,1],
                 self.sim.width[:,1],self.sim.speed[:,1],observed_defender[:,:2],
                 self._observed_robot(1,0)[1][:,:2],True,self.sim.lateral_mu[:,1],self.sim.accel[:,1],
-                active_mask=replan)
+                active_mask=replan_mask)
         command,_=planner.path_reference(pose[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
@@ -2132,18 +2176,18 @@ class TensorDefenseEnv:
             target=attacker+attacker_velocity*reach_time+velocity_direction*.55
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
-        replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
-        if bool(replan.any()):
+        should_replan,replan_mask=self._advance_adstar_cadence(active_mask)
+        if should_replan:
             planner.plan(defender[:,:2],target,defender[:,2],self.sim.length[:,1],
                 self.sim.width[:,1],self.sim.speed[:,1],attacker,attacker_velocity,False,
-                self.sim.lateral_mu[:,1],self.sim.accel[:,1],active_mask=replan)
+                self.sim.lateral_mu[:,1],self.sim.accel[:,1],active_mask=replan_mask)
         command,_=planner.path_reference(defender[:,:2],self.sim.velocity[:,1,:2],self.sim.speed[:,1])
         magnitude=command.norm(dim=-1,keepdim=True)
         return command*torch.minimum(torch.ones_like(magnitude),
             self.sim.speed[:,1,None]/magnitude.clamp_min(1e-6))
 
-    def _finish_step(self,goal,old_position,old_distance,action,active_mask=None):
+    def _finish_step(self,goal,old_position,old_distance,action,active_mask=None,
+                     active_count=None):
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
         opponent_velocity=torch.where(self.static_opponent_mask[:,None],
@@ -2151,7 +2195,7 @@ class TensorDefenseEnv:
         self.sim.velocity[:,1]=torch.where(active_mask[:,None],opponent_velocity,self.sim.velocity[:,1])
         p=self.sim.pose
         acquisitions,scores,denied=self._update_gamepieces(active_mask)
-        self._update_perception(active_mask=active_mask)
+        self._update_perception(active_mask=active_mask,active_count=active_count)
         d=(goal-p[:,1,:2]).norm(dim=-1)
         attacker_index=0 if self.task=="counter_defense" else 1
         if self.action_mode=="strategic":
@@ -2318,6 +2362,6 @@ class TensorDefenseEnv:
         reward=torch.where(active_mask,reward,torch.zeros_like(reward))
         terminated &= active_mask
         truncated &= active_mask
-        obs=self._obs(active_mask=active_mask)
+        obs=self._obs(active_mask=active_mask,active_count=active_count)
         self._last_observation=torch.where(active_mask[:,None],obs,self._last_observation)
         return obs,reward,terminated,truncated,info

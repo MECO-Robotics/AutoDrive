@@ -44,9 +44,11 @@ def _curriculum_stage(progress: float) -> int:
 def _curriculum_opponents(task: str, stage: int, learned_available: bool = True) -> tuple[str, ...]:
     """Expand training from easy motion to durable scripted and learned pools."""
     if task == "defense":
-        base = ("offense", "intercept", "mirror", "adstar", "velocity_intercept")
-        pools = (("offense",), ("offense", "intercept", "mirror"),
-                 ("offense", "intercept", "mirror", "adstar"), base,
+        # ``intercept`` is a counter-defense-only mode in TensorDefenseEnv;
+        # use the attacker-side cutoff policy for the defensive curriculum.
+        base = ("offense", "mirror", "adstar", "cutoff", "velocity_intercept")
+        pools = (("offense",), ("offense", "mirror"),
+                 ("offense", "mirror", "adstar"), base,
                  base + (("learned",) if learned_available else ()))
     else:
         base = ("guard", "intercept", "mirror", "adstar_defender")
@@ -193,13 +195,22 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
     truncated = torch.zeros_like(active_this_decision)
     reward = torch.zeros(env.n, dtype=torch.float32, device=env.device)
     transition_next_obs = initial_obs
-    complete_matches = 0
+    complete_matches = torch.zeros((), dtype=torch.long, device=env.device)
+    # Strategic episodes only end by horizon truncation. Pull the per-world
+    # remaining tick counts once per policy interval, then use the known
+    # schedule to avoid a GPU reduction/synchronization on every 50 Hz tick.
+    active_counts = None
+    if hasattr(env, "horizon"):
+        remaining_ticks = (int(env.horizon) - env.steps).detach().cpu()
+        active_counts = [int((remaining_ticks >= tick).sum())
+                         for tick in range(1, ticks + 1)]
     physics_ticks = 0
-    for _ in range(ticks):
-        if not bool(active_this_decision.any()):
-            break
+    for tick_index in range(ticks):
+        step_kwargs = {"active_mask": active_this_decision}
+        if active_counts is not None:
+            step_kwargs["_active_count"] = active_counts[tick_index]
         next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(
-            action, active_mask=active_this_decision)
+            action, **step_kwargs)
         active_before_tick = active_this_decision
         reward += tick_reward.to(device=env.device, dtype=torch.float32) * active_before_tick
         tick_done = tick_done.to(device=env.device, dtype=torch.bool)
@@ -209,7 +220,7 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
         transition_next_obs = torch.where(
             active_before_tick[:, None], next_obs, transition_next_obs)
         newly_ended = active_before_tick & (tick_done | tick_truncated)
-        complete_matches += int((tick_truncated & active_before_tick).sum().item())
+        complete_matches += (tick_truncated & active_before_tick).sum()
         active_this_decision &= ~newly_ended
         physics_ticks += 1
     return (reward, done, truncated, transition_next_obs, active_this_decision,
@@ -408,10 +419,53 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     good_tracking_updates = 0
     strategic_phase = 0.0
     physics_ticks = 0
-    complete_matches = 0
+    complete_matches = torch.zeros((), dtype=torch.long, device=device)
     action_counts = torch.zeros(action_dim, device=device)
     opponent_exposure: dict[str, int] = {}
     entropy_mean = 0.0
+    episode_return_accum = torch.zeros(num_envs, device=device)
+    completed_return_sum = torch.zeros((), device=device)
+    completed_episode_count = torch.zeros((), device=device)
+    timing_enabled = bool(status_context.get("timing_profile", False))
+    timing_seconds = {"environment_step_host": 0.0, "simulator_step_host": 0.0,
+                      "adstar_planning_host": 0.0,
+                      "policy_inference_host": 0.0, "ppo_update_host": 0.0,
+                      "active_mask_bookkeeping_host": 0.0}
+    timing_sync_counts = {"active_mask_count_item_reads": 0,
+                          "active_count_schedule_device_syncs": 0,
+                          "episode_end_any_item_reads": 0,
+                          "entropy_item_reads": 0, "update_device_syncs": 0}
+    update_gpu_events = []
+    if timing_enabled:
+        original_step = env.step
+        def timed_env_step(*args, **kwargs):
+            before = time.perf_counter()
+            result = original_step(*args, **kwargs)
+            timing_seconds["environment_step_host"] += time.perf_counter() - before
+            return result
+        env.step = timed_env_step
+        original_sim_step = env.sim.step
+        def timed_sim_step(*args, **kwargs):
+            before = time.perf_counter()
+            result = original_sim_step(*args, **kwargs)
+            timing_seconds["simulator_step_host"] += time.perf_counter() - before
+            return result
+        env.sim.step = timed_sim_step
+        for planner_name in ("_adstar_planners", "_adstar_defender_planners",
+                             "_adstar_tactical_planner"):
+            planner = getattr(env, planner_name, None)
+            if planner is None or not callable(getattr(planner, "plan", None)):
+                continue
+            original_plan = planner.plan
+            def timed_plan(*args, _original=original_plan, **kwargs):
+                before = time.perf_counter()
+                result = _original(*args, **kwargs)
+                timing_seconds["adstar_planning_host"] += time.perf_counter() - before
+                return result
+            try:
+                planner.plan = timed_plan
+            except (AttributeError, TypeError):
+                pass
     for update_index in range(updates):
         stage = _curriculum_stage(update_index / max(1, updates)) if curriculum else -1
         if curriculum:
@@ -451,6 +505,8 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         b_teacher_mask = torch.zeros((rollout_steps, num_envs), device=device, dtype=torch.bool)
         tracking_error_sum = torch.zeros((), device=device)
         tracking_error_count = torch.zeros((), device=device)
+        entropy_accumulator = torch.zeros((), device=device)
+        entropy_batch_count = 0
         update_frames = []
         frame_stride = max(1, rollout_steps // 24)
         for t in range(rollout_steps):
@@ -468,7 +524,10 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             with torch.no_grad():
                 action_mask=(obs[:,-action_dim:].bool() if action_kind=="categorical" and
                              action_dim==STRATEGIC_ACTION_DIM else None)
+                inference_started = time.perf_counter() if timing_enabled else 0.
                 action, logprob, value = model.sample(obs,action_mask=action_mask)
+                if timing_enabled:
+                    timing_seconds["policy_inference_host"] += time.perf_counter() - inference_started
                 if action_kind == "categorical":
                     action_counts += torch.bincount(action, minlength=action_dim)
             if b_action_masks is not None:
@@ -480,15 +539,25 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             else:
                 ticks_this_decision = 1
             if architecture == "strategic_adstar":
+                interval_started = time.perf_counter() if timing_enabled else 0.
+                step_time_before_interval = timing_seconds["environment_step_host"] if timing_enabled else 0.
                 (reward, done, truncated, next_obs, active_this_decision,
                  decision_physics_ticks, decision_matches) = _held_action_interval(
                     env, action, ticks_this_decision, obs)
+                if timing_enabled:
+                    interval_elapsed = time.perf_counter() - interval_started
+                    timing_seconds["active_mask_bookkeeping_host"] += max(
+                        0., interval_elapsed -
+                        (timing_seconds["environment_step_host"] - step_time_before_interval))
+                    timing_sync_counts["active_count_schedule_device_syncs"] += 1
                 physics_ticks += decision_physics_ticks
                 complete_matches += decision_matches
             else:
                 next_obs, reward, done, truncated, _info = env.step(action)
+                if timing_enabled:
+                    timing_sync_counts["active_mask_count_item_reads"] += 1
                 physics_ticks += 1
-                complete_matches += int(truncated.sum().item())
+                complete_matches += truncated.sum()
                 if routes is not None:
                     potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
                     route_progress = (potential_after - potential_before).clamp(-.25, .25)
@@ -513,6 +582,12 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
             done = done.to(device=device, dtype=torch.bool).reshape(num_envs)
             truncated = truncated.to(device=device, dtype=torch.bool).reshape(num_envs)
+            episode_return_accum += reward
+            ended_for_return = done | truncated
+            completed_return_sum += episode_return_accum[ended_for_return].sum()
+            completed_episode_count += ended_for_return.sum()
+            episode_return_accum = torch.where(ended_for_return,
+                torch.zeros_like(episode_return_accum), episode_return_accum)
             b_actions[t], b_logprobs[t], b_values[t] = action, logprob, value
             b_rewards[t], b_dones[t], b_truncated[t] = reward, done, truncated
             ended = done | truncated
@@ -525,7 +600,10 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             reset_done = getattr(env, "reset_done", None)
             if reset_done is None:
                 raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
-            next_obs = reset_done(ended) if bool(ended.any()) else transition_next_obs
+            ended_any = bool(ended.any())
+            if timing_enabled:
+                timing_sync_counts["episode_end_any_item_reads"] += 1
+            next_obs = reset_done(ended) if ended_any else transition_next_obs
             obs = next_obs.to(device=device, dtype=torch.float32)
 
         with torch.no_grad():
@@ -543,6 +621,11 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         flat_teacher_actions = b_teacher_actions.reshape(-1, action_dim)
         flat_reference_mask = b_teacher_mask.reshape(-1)
         batch_size = flat_obs.shape[0]
+        ppo_update_started = time.perf_counter() if timing_enabled else 0.
+        ppo_gpu_start = torch.cuda.Event(enable_timing=True) if timing_enabled and device.type == "cuda" else None
+        ppo_gpu_end = torch.cuda.Event(enable_timing=True) if timing_enabled and device.type == "cuda" else None
+        if ppo_gpu_start is not None:
+            ppo_gpu_start.record()
         for _epoch in range(epochs):
             indices = torch.randperm(batch_size, device=device)
             for idx in indices.split(minibatch_size):
@@ -556,12 +639,16 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                                    -mb_adv * torch.clamp(ratio, 1-clip_coef, 1+clip_coef)).mean()
                 value_loss = 0.5 * (new_value - flat_returns[idx]).square().mean()
                 teacher_rows = flat_reference_mask[idx].float()
-                teacher_target = torch.atanh(flat_teacher_actions[idx].clamp(-.95, .95))
-                teacher_error = (mean - teacher_target).square().mean(-1)
-                teacher_loss = (teacher_error * teacher_rows).sum() / teacher_rows.sum().clamp_min(1.)
+                if uses_adstar_teacher:
+                    teacher_target = torch.atanh(flat_teacher_actions[idx].clamp(-.95, .95))
+                    teacher_error = (mean - teacher_target).square().mean(-1)
+                    teacher_loss = (teacher_error * teacher_rows).sum() / teacher_rows.sum().clamp_min(1.)
+                else:
+                    teacher_loss = torch.zeros((), device=device)
                 l2_norm = sum(parameter.square().sum() for parameter in model.parameters()
                               if parameter.ndim > 1)
-                entropy_mean = float(entropy.mean().detach().item())
+                entropy_accumulator += entropy.mean().detach()
+                entropy_batch_count += 1
                 update_entropy_coef = entropy_coef * max(0., 1. - update_index / max(1, updates - 1))
                 loss = (pg + value_coef * value_loss - update_entropy_coef * entropy.mean() +
                         adstar_action_loss_weight * teacher_loss + l2_coef * l2_norm)
@@ -570,10 +657,21 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
 
+        if timing_enabled:
+            timing_seconds["ppo_update_host"] += time.perf_counter() - ppo_update_started
+            if ppo_gpu_end is not None:
+                ppo_gpu_end.record()
+                update_gpu_events.append((ppo_gpu_start, ppo_gpu_end))
+
         # Keep the latest policy usable for the dashboard and for recovery if
         # a long run is interrupted. Status and playback are atomically replaced.
         if device.type == "cuda":
             torch.cuda.synchronize(device)
+            if timing_enabled:
+                timing_sync_counts["update_device_syncs"] += 1
+        entropy_mean = float((entropy_accumulator / max(1, entropy_batch_count)).item())
+        if timing_enabled:
+            timing_sync_counts["entropy_item_reads"] += 1
         update_tracking_error = None
         if uses_adstar_teacher:
             update_tracking_error = float((tracking_error_sum / tracking_error_count.clamp_min(1)).item())
@@ -583,10 +681,14 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 good_tracking_updates += 1
             else:
                 good_tracking_updates = 0
-            if good_tracking_updates >= 3:
-                adstar_action_loss_weight = max(.025, adstar_action_loss_weight * .7)
-                task_reward_scale = min(2., task_reward_scale * 1.25)
-                good_tracking_updates = 0
+        if timing_enabled and update_gpu_events:
+            timing_seconds["ppo_update_device_event"] = sum(
+                start_event.elapsed_time(end_event) / 1000.
+                for start_event, end_event in update_gpu_events)
+        if uses_adstar_teacher and good_tracking_updates >= 3:
+            adstar_action_loss_weight = max(.025, adstar_action_loss_weight * .7)
+            task_reward_scale = min(2., task_reward_scale * 1.25)
+            good_tracking_updates = 0
         write_checkpoint({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
                     "action_dim": action_dim, "action_kind": action_kind,
                     "architecture": architecture, "task": task,
@@ -639,13 +741,18 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "strategic_rate_hz": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
                 "strategic_decisions_per_episode": math.ceil(horizon * strategic_rate_hz / 50.)
                     if architecture == "strategic_adstar" else horizon,
-                "strategic_decisions_per_second": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "strategic_decisions_per_second": completed / max(elapsed, 1e-12),
                 "simulated_seconds_trained": physics_ticks * env.dt * num_envs,
-                "complete_matches_observed": complete_matches,
+                "complete_matches_observed": int(complete_matches.item()),
+                "mean_return": (float((completed_return_sum / completed_episode_count.clamp_min(1)).item())
+                    if int(completed_episode_count.item()) else None),
+                "completed_episodes_observed": int(completed_episode_count.item()),
                 "opponent_exposure_counts": opponent_exposure,
                 "entropy": entropy_mean,
                 "action_distribution": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "per_action_selection_rate": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
+                "timing_profile_seconds": timing_seconds if timing_enabled else None,
+                "timing_sync_sensitive_counts": timing_sync_counts if timing_enabled else None,
             "checkpoint": str(checkpoint), "started_at": started_at,
             "drivetrain_config": env.drivetrain_config})
 
@@ -680,15 +787,19 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "strategic_rate_hz": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
                 "strategic_decisions_per_episode": math.ceil(horizon * strategic_rate_hz / 50.)
                     if architecture == "strategic_adstar" else horizon,
-                "strategic_decisions_per_second": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
+                "strategic_decisions_per_second": updates * rollout_steps * num_envs / max(elapsed, 1e-12),
                 "simulated_seconds_trained": physics_ticks * env.dt * num_envs,
-                "complete_matches_observed": complete_matches,
+                "complete_matches_observed": int(complete_matches.item()),
+                "mean_return": (float((completed_return_sum / completed_episode_count.clamp_min(1)).item())
+                    if int(completed_episode_count.item()) else None),
                 "opponent_exposure_counts": opponent_exposure,
                 "entropy": entropy_mean,
                 "action_distribution": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "per_action_selection_rate": (action_counts / action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
+                "timing_profile_seconds": timing_seconds if timing_enabled else None,
+                "timing_sync_sensitive_counts": timing_sync_counts if timing_enabled else None,
                 "started_at": started_at,
-                "completed_episodes_observed": complete_matches}
+                "completed_episodes_observed": int(complete_matches.item())}
     metadata["drivetrain_config"] = env.drivetrain_config
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
     write_json(status_path, {**status_context, **metadata, "status": "completed",
@@ -700,7 +811,7 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
 
 def train(task: str = "counter_defense", timesteps: int = 1_000_000,
           output: str | Path = "checkpoints/tensor-ppo", *, seed: int = 7,
-          num_envs: int = 2048, device: str = "cuda", opponent: str | None = None,
+          num_envs: int = 1024, device: str = "cuda", opponent: str | None = None,
           initial_checkpoint: str | Path | None = None,
           rollout_steps: int = 128, epochs: int = 4, minibatch_size: int = 4096,
           learning_rate: float = 3e-4, gamma: float = .993, gae_lambda: float = .95,
@@ -812,7 +923,7 @@ def _select_checkpoint_population(entries: list[dict[str, Any]], capacity: int,
 
 
 def generational_train(task: str, generations: int, output: str | Path, *,
-                       seed: int = 7, num_envs: int = 256, device: str = "cuda",
+                       seed: int = 7, num_envs: int = 1024, device: str = "cuda",
                        opponent: str | None = None, initial_checkpoint: str | Path | None = None,
                        horizon: int = 8000, population_size: int = 8,
                        elite_count: int = 2, l2_coef: float = 1e-5,
@@ -824,7 +935,8 @@ def generational_train(task: str, generations: int, output: str | Path, *,
                        value_coef: float = .5, entropy_coef: float = .01,
                        max_grad_norm: float = .5,
                        evaluation_episodes: int = 4,
-                       strategic_rate_hz: float = 4.) -> dict[str, Any]:
+                       strategic_rate_hz: float = 4.,
+                       timing_profile: bool = False) -> dict[str, Any]:
     """Run PPO generations and manage a diverse, evaluated opponent population.
 
     Each generation continues the prior PPO checkpoint. One member is sampled
@@ -934,6 +1046,7 @@ def generational_train(task: str, generations: int, output: str | Path, *,
 
     for generation in range(start_generation, generations):
         generation_number = generation + 1
+        generation_started = time.perf_counter()
         # Refresh the peer pool every generation so both role trainers see the
         # other's newest checkpoint as well as its selected historical members.
         peer_paths = _opponent_population_paths(task, out)
@@ -955,6 +1068,7 @@ def generational_train(task: str, generations: int, output: str | Path, *,
             "opponents": sorted({item["mode"] for item in training_specs}),
             "completed_timesteps_base": generation * per_generation_steps,
             "requested_timesteps_total": requested_timesteps,
+            "timing_profile": timing_profile,
         }
         ppo_result = _train_once(task=task, timesteps=per_generation_steps,
             output=out, seed=seed + generation * 1009, num_envs=num_envs,
@@ -985,7 +1099,8 @@ def generational_train(task: str, generations: int, output: str | Path, *,
                 metrics = _evaluate_once(checkpoint, task, evaluation_count, scenario_seed,
                     evaluation_count, selected_device,
                     spec["mode"], metrics_path, horizon=horizon,
-                    opponent_checkpoint=spec["checkpoint"])
+                    opponent_checkpoint=spec["checkpoint"],
+                    strategic_rate_hz=strategic_rate_hz, capture_playback=False)
                 own_scores = float(metrics.get("mean_scores") or 0.)
                 other_scores = float(metrics.get("mean_opponent_scores") or 0.)
                 opponent_results[spec["name"]] = {
@@ -1045,10 +1160,19 @@ def generational_train(task: str, generations: int, output: str | Path, *,
             "strategic_decisions_per_episode": ppo_result.get("strategic_decisions_per_episode"),
             "simulated_seconds_trained": ppo_result.get("simulated_seconds_trained"),
             "complete_matches_observed": ppo_result.get("complete_matches_observed"),
+            "mean_return": ppo_result.get("mean_return"),
             "opponent_exposure_counts": ppo_result.get("opponent_exposure_counts"),
             "entropy": ppo_result.get("entropy"),
             "action_distribution": ppo_result.get("action_distribution"),
             "per_action_selection_rate": ppo_result.get("per_action_selection_rate"),
+            "training_elapsed_seconds": ppo_result.get("elapsed_seconds"),
+            "generation_wall_clock_seconds": time.perf_counter() - generation_started,
+            "transitions_per_second": ppo_result.get("transitions_per_second"),
+            "physics_ticks_per_second": (
+                50. * float(ppo_result.get("simulated_seconds_trained") or 0.) /
+                max(float(ppo_result.get("elapsed_seconds") or 0.), 1e-12)),
+            "timing_profile_seconds": ppo_result.get("timing_profile_seconds"),
+            "timing_sync_sensitive_counts": ppo_result.get("timing_sync_sensitive_counts"),
             "scenario_seed": scenario_seed,
             "fitness": generation_fitness, "opponent_metrics": opponent_results,
             "fixed_baseline_metrics": {name: opponent_results[name] for name in fixed_baselines
@@ -1193,7 +1317,10 @@ def _legacy_strategic_action(action: torch.Tensor, task: str) -> torch.Tensor:
 
 def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                    output, horizon=8000, scripted_strategy=None,
-                   opponent_checkpoint=None):
+                   opponent_checkpoint=None, strategic_rate_hz=4.,
+                   capture_playback=True):
+    if not 2. <= strategic_rate_hz <= 5.:
+        raise ValueError("strategic_rate_hz must be between 2 and 5")
     payload = (torch.load(checkpoint, map_location=device, weights_only=True)
                if checkpoint is not None else None)
     architecture = (payload.get("architecture", "direct") if payload is not None
@@ -1261,7 +1388,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     # Every dashboard mode records the same seeded scenario batch. Endpoint
     # generation lives in TensorDefenseEnv, so policy and opponent modes differ
     # only in motion, never in scenario sampling.
-    playback_scenario_count = min(3, num_envs, episodes)
+    playback_scenario_count = min(3, num_envs, episodes) if capture_playback else 0
     if playback_scenario_count:
         playback_scenarios = [{"id": str(i + 1), "label": f"Scenario {i + 1}", "frames": []}
             for i in range(playback_scenario_count)]
@@ -1368,12 +1495,23 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     cycle_time_sum = torch.zeros((num_envs, 2), device=device)
     cycle_count = torch.zeros((num_envs, 2), device=device)
     inference_latencies = []
+    strategic = env.action_mode == "strategic"
+    strategic_phase = 0.0
+    strategic_ticks_remaining = 0
+    strategic_decision_due = True
+    pending_refresh = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    held_actions = None
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_playback()
+    if capture_playback:
+        write_playback()
     if is_adstar_defense:
         eval_status("evaluating")
     while len(scores) < episodes:
-        if model is not None:
+        decision_mask = active if not strategic else (
+            active if strategic_decision_due else pending_refresh & active)
+        needs_policy_decision = (not strategic or strategic_decision_due or
+                                 bool(pending_refresh.any().item()))
+        if needs_policy_decision and model is not None:
             inference_start=time.perf_counter()
             with torch.no_grad():
                 model_obs=obs[:,:model.trunk[0].in_features]
@@ -1385,11 +1523,32 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             inference_latencies.append((time.perf_counter()-inference_start)*1000.)
-        elif scripted_strategy in ("offense", "defense"):
+            if strategic:
+                if held_actions is None:
+                    held_actions = actions
+                else:
+                    selector = decision_mask.reshape((-1,) + (1,) * (actions.ndim - 1))
+                    held_actions = torch.where(selector, actions, held_actions)
+                pending_refresh &= ~decision_mask
+        elif needs_policy_decision and scripted_strategy in ("offense", "defense"):
             actions = _scripted_game_action(env, task)
-        else:
+            if strategic:
+                if held_actions is None:
+                    held_actions = actions
+                else:
+                    selector = decision_mask.reshape((-1,) + (1,) * (actions.ndim - 1))
+                    held_actions = torch.where(selector, actions, held_actions)
+                pending_refresh &= ~decision_mask
+        elif needs_policy_decision:
             raise ValueError("evaluation needs a valid checkpoint or an explicit scripted strategy")
-        next_obs, rewards, dones, truncated, info = env.step(actions)
+        if strategic:
+            actions = held_actions
+            if strategic_decision_due:
+                strategic_phase += 50. / strategic_rate_hz
+                strategic_ticks_remaining = max(1, int(strategic_phase))
+                strategic_phase -= strategic_ticks_remaining
+                strategic_decision_due = False
+        next_obs, rewards, dones, truncated, info = env.step(actions, active_mask=active)
         active_float = active.to(device=device, dtype=torch.float32)
         totals += rewards.to(device=device, dtype=torch.float32).reshape(num_envs) * active_float
         lengths += active.to(device=device, dtype=torch.long)
@@ -1536,6 +1695,8 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
         reset_mask = finished & (episode_counts < episode_quota)
         if len(scores) < episodes and bool(reset_mask.any().item()):
             active |= reset_mask
+            if strategic:
+                pending_refresh |= reset_mask
             next_obs = reset_done(reset_mask)
             totals.masked_fill_(reset_mask, 0.)
             lengths.masked_fill_(reset_mask, 0)
@@ -1547,12 +1708,18 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
             cycle_time_sum[reset_mask] = 0.
             cycle_count[reset_mask] = 0.
             previous_piece_owner[reset_mask] = env.piece_owner[reset_mask]
+        if strategic:
+            strategic_ticks_remaining -= 1
+            if strategic_ticks_remaining <= 0:
+                strategic_decision_due = True
         obs = next_obs.to(device=device, dtype=torch.float32)
-    write_playback()
+    if capture_playback:
+        write_playback()
     result = {"task": task, "opponent": opponent, "checkpoint": str(checkpoint) if checkpoint else None,
               "checkpoint_mtime": Path(checkpoint).stat().st_mtime if checkpoint else None,
               "episodes": episodes, "seed": seed, "device": str(device),
               "horizon": env.horizon, "match_duration_seconds": env.horizon*env.dt,
+              "strategic_rate_hz": strategic_rate_hz if strategic else 50.,
               "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
               "accelerator_backend": "ROCm" if torch.version.hip else ("CUDA" if torch.version.cuda else "CPU"),
               "drivetrain_config": env.drivetrain_config,
@@ -1617,7 +1784,8 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
 def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
         defense_checkpoint: str | Path | None = None, episodes: int = 8,
         seed: int = 4100, num_envs: int = 8, device: str = "cuda",
-        output: str | Path = "metrics/ablations.json", horizon: int = 8000) -> dict[str, Any]:
+        output: str | Path = "metrics/ablations.json", horizon: int = 8000,
+        strategic_rate_hz: float = 4., capture_playback: bool = True) -> dict[str, Any]:
     """Run matched strategic-policy comparisons and persist the canonical report.
 
     Scripted sides emit only the environment's semantic collect/score/intercept
@@ -1682,7 +1850,9 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
         try:
             metrics = _evaluate_once(checkpoint, task, episodes, seed, matched_envs,
                 selected, opponent, mode_output, horizon=horizon,
-                scripted_strategy=scripted_strategy)
+                scripted_strategy=scripted_strategy,
+                strategic_rate_hz=strategic_rate_hz,
+                capture_playback=capture_playback)
         except (OSError, RuntimeError, ValueError, KeyError) as exc:
             evaluations.append({"name": name, "task": task, "architecture": architecture,
                 "role": "offense" if task == "counter_defense" else "defense",
@@ -1777,7 +1947,7 @@ def main() -> None:
     p = commands.add_parser("train")
     p.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
     p.add_argument("--steps", type=int, default=1_000_000)
-    p.add_argument("--envs", type=int, default=256)
+    p.add_argument("--envs", type=int, default=1024)
     p.add_argument("--rollout-steps", type=int, default=128)
     p.add_argument("--strategic-rate-hz", type=float, default=4.)
     p.add_argument("--gamma", type=float, default=.993)
