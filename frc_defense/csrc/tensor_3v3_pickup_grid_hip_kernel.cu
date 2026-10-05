@@ -1,0 +1,133 @@
+#include <hip/hip_runtime.h>
+#include <cmath>
+#include <cstdint>
+
+namespace {
+constexpr int THREADS=512;
+__global__ void pickup_kernel(const bool* active,const float* pose,
+    const float* length,const float* width,const float* piece_pos,
+    const bool* piece_active,int64_t* owner,bool* free,const int16_t* possible_cells,
+    float* next_intake,const float* elapsed,const bool* controlled,
+    const bool* deterministic,const bool* defense_role,int64_t* acquired_event,
+    bool* track_clear_mask,int worlds,int pieces,int robot,int nx,
+    int ny,float cell_size,int capacity,bool allow_sweep) {
+  const int w=blockIdx.x, lane=threadIdx.x;
+  if(w>=worlds||!active[w])return;
+  const int64_t piece_row=static_cast<int64_t>(w)*pieces;
+  const int64_t pose_row=static_cast<int64_t>(w)*6*3;
+  const int64_t owner_row=static_cast<int64_t>(w)*6;
+  const int64_t track_row=static_cast<int64_t>(w)*6*pieces;
+  const int64_t robot_state=pose_row+robot*3;
+  __shared__ int counts[THREADS];
+  __shared__ int prefix_a[THREADS];
+  __shared__ int indices[THREADS];
+  __shared__ float distances[THREADS];
+  __shared__ int possession;
+  __shared__ int selected;
+  __shared__ int sweep_total;
+
+  counts[lane]=(lane<pieces&&owner[piece_row+lane]==robot)?1:0;
+  __syncthreads();
+  for(int offset=THREADS/2;offset>0;offset>>=1){
+    if(lane<offset)counts[lane]+=counts[lane+offset];
+    __syncthreads();
+  }
+  if(lane==0)possession=counts[0];
+  __syncthreads();
+
+  const bool sweep=allow_sweep&&deterministic[robot]&&!defense_role[robot];
+  const bool can_control=controlled[robot]||deterministic[robot];
+  const float x=pose[robot_state],y=pose[robot_state+1],heading=pose[robot_state+2];
+  const float c=cosf(heading),s=sinf(heading);
+  const float radius=sqrtf((.5f*length[owner_row+robot]+.35f)*
+                           (.5f*length[owner_row+robot]+.35f)+
+                           (.5f*width[owner_row+robot]+.075f)*
+                           (.5f*width[owner_row+robot]+.075f));
+  const int xlo=max(0,min(nx-1,static_cast<int>(floorf((x-radius)/cell_size))-1));
+  const int xhi=max(0,min(nx-1,static_cast<int>(floorf((x+radius)/cell_size))));
+  const int ylo=max(0,min(ny-1,static_cast<int>(floorf((y-radius)/cell_size))-1));
+  const int yhi=max(0,min(ny-1,static_cast<int>(floorf((y+radius)/cell_size))));
+  const float intake_low=.5f*length[owner_row+robot]-.075f;
+  const float intake_high=.5f*length[owner_row+robot]+.35f;
+  const float lateral_limit=.5f*width[owner_row+robot]+.075f;
+  const bool ready=elapsed[w]+1.0e-6f>=next_intake[owner_row+robot];
+
+  bool candidate=false;float dist=INFINITY;int index=pieces;
+  if(lane<pieces){
+    const int64_t pi=piece_row+lane;
+    bool nearby=false;
+    #pragma unroll
+    for(int k=0;k<3;k++){
+      const int id=static_cast<int>(possible_cells[(pi*3)+k]);
+      if(id>=0){const int cy=id/nx,cx=id-cy*nx;
+        nearby|=(cx>=xlo&&cx<=xhi&&cy>=ylo&&cy<=yhi);}
+    }
+    const bool is_free=free[pi]&&piece_active[pi]&&owner[pi]<0;
+    if(nearby&&is_free&&can_control){
+      const float dx=piece_pos[pi*2]-x,dy=piece_pos[pi*2+1]-y;
+      const float longitudinal=dx*c+dy*s;
+      const float lateral=fabsf(-dx*s+dy*c);
+      candidate=longitudinal>=intake_low&&longitudinal<=intake_high&&
+                lateral<=lateral_limit;
+      if(!sweep&&candidate&&ready&&possession<capacity){
+        dist=dx*dx+dy*dy;index=lane;
+      }
+    }
+    prefix_a[lane]=(sweep&&candidate)?1:0;
+  }else prefix_a[lane]=0;
+  distances[lane]=dist;indices[lane]=index;
+  __syncthreads();
+
+  if(sweep){
+    // The HIP toolchain's shared-memory scan can report a small total while
+    // leaving many lanes with rank 1. Select in lane order so the hopper cap
+    // is enforced by the same operation that assigns each piece.
+    if(lane==0){
+      const int room=max(0,capacity-possession);
+      int acquired=0;
+      for(int i=0;i<pieces&&acquired<room;i++){
+        if(prefix_a[i]){
+          const int64_t pi=piece_row+i;owner[pi]=robot;free[pi]=false;
+          track_clear_mask[pi]=true;
+          ++acquired;
+        }
+      }
+      sweep_total=acquired;
+    }
+    __syncthreads();
+  }else if(lane==0)sweep_total=0;
+
+  for(int offset=THREADS/2;offset>0;offset>>=1){
+    if(lane<offset){
+      const float other=distances[lane+offset];const int other_i=indices[lane+offset];
+      if(other<distances[lane]||(other==distances[lane]&&other_i<indices[lane])){
+        distances[lane]=other;indices[lane]=other_i;
+      }
+    }
+    __syncthreads();
+  }
+  if(lane==0){
+    selected=distances[0]<INFINITY?indices[0]:pieces;
+    acquired_event[owner_row+robot]=sweep_total;
+    if(selected<pieces){
+      const int64_t pi=piece_row+selected;owner[pi]=robot;free[pi]=false;
+      acquired_event[owner_row+robot]+=1;
+      next_intake[owner_row+robot]=elapsed[w]+.20f;
+      track_clear_mask[pi]=true;
+    }
+  }
+}
+} // namespace
+
+void pickup_grid_launch(const bool* active,const float* pose,const float* length,
+    const float* width,const float* piece_pos,const bool* piece_active,
+    int64_t* owner,bool* free,const int16_t* possible_cells,float* next_intake,
+    const float* elapsed,const bool* controlled,const bool* deterministic,
+    const bool* defense_role,int64_t* acquired_event,bool* track_mask,
+    int worlds,int pieces,int robot,int nx,int ny,
+    float cell_size,int capacity,bool allow_sweep,hipStream_t stream){
+  hipLaunchKernelGGL(pickup_kernel,dim3(worlds),dim3(THREADS),0,stream,
+      active,pose,length,width,piece_pos,piece_active,owner,free,possible_cells,
+      next_intake,elapsed,controlled,deterministic,defense_role,acquired_event,
+      track_mask,worlds,pieces,robot,nx,ny,cell_size,capacity,allow_sweep);
+}

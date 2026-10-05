@@ -3,7 +3,7 @@ import unittest
 import torch
 
 from frc_defense.tensor_sim import TensorDefenseEnv
-from frc_defense.tensor_training import _held_action_interval
+from frc_defense.tensor_training import _env, _held_action_interval
 
 
 def _world_tensor_state(env, index):
@@ -24,6 +24,198 @@ def _world_tensor_state(env, index):
 
 
 class TensorEnvActiveMaskTests(unittest.TestCase):
+    def test_deferred_intermediate_observation_preserves_interval_state(self):
+        kwargs = dict(num_envs=4, task="counter_defense", device=torch.device("cpu"),
+                      seed=1907, opponent="guard", horizon=2,
+                      architecture="strategic_adstar")
+        reference = _env(**kwargs)
+        deferred = _env(**kwargs)
+        initial_reference = reference.reset(seed=1907)[0]
+        initial_deferred = deferred.reset(seed=1907)[0]
+        torch.testing.assert_close(initial_reference, initial_deferred, rtol=0, atol=0)
+        action = torch.tensor((0, 1, 6, 7), dtype=torch.long)
+        expected = _held_action_interval(
+            reference, action, 4, initial_reference, known_remaining_ticks=2,
+            return_info=False, defer_intermediate_observation=False)
+        actual = _held_action_interval(
+            deferred, action, 4, initial_deferred, known_remaining_ticks=2,
+            return_info=False, defer_intermediate_observation=True)
+        for index, (left, right) in enumerate(zip(expected, actual)):
+            if isinstance(left, torch.Tensor):
+                torch.testing.assert_close(left, right, rtol=0, atol=0,
+                                           msg=f"held interval result {index} differs")
+        for object_name in ("env", "sim", "_adstar_planners", "_adstar_defender_planners"):
+            lhs = reference if object_name == "env" else getattr(
+                reference, "sim" if object_name == "sim" else object_name, None)
+            rhs = deferred if object_name == "env" else getattr(
+                deferred, "sim" if object_name == "sim" else object_name, None)
+            if lhs is None or rhs is None:
+                continue
+            for name, value in vars(lhs).items():
+                candidate = getattr(rhs, name, None)
+                if isinstance(value, torch.Tensor):
+                    torch.testing.assert_close(value, candidate, rtol=0, atol=0,
+                                               msg=f"{object_name}.{name} differs")
+                elif isinstance(value, tuple) and all(isinstance(v, torch.Tensor) for v in value):
+                    for item, (left, right) in enumerate(zip(value, candidate)):
+                        torch.testing.assert_close(left, right, rtol=0, atol=0,
+                            msg=f"{object_name}.{name}[{item}] differs")
+        self.assertTrue(torch.equal(reference.generator.get_state(),
+                                    deferred.generator.get_state()))
+        self.assertTrue(torch.equal(reference.sim.generator.get_state(),
+                                    deferred.sim.generator.get_state()))
+        for lhs, rhs in zip(reference._pending_strategic_own_candidates[0],
+                             deferred._pending_strategic_own_candidates[0]):
+            torch.testing.assert_close(lhs, rhs, rtol=0, atol=0)
+        torch.testing.assert_close(reference._pending_strategic_own_candidates[1],
+                                   deferred._pending_strategic_own_candidates[1],
+                                   rtol=0, atol=0)
+
+    def test_training_env_reuses_exact_strategic_observation_candidates(self):
+        strategic = _env(1, "counter_defense", torch.device("cpu"), 17, "guard",
+                         architecture="strategic_adstar")
+        direct = _env(1, "counter_defense", torch.device("cpu"), 17, "guard",
+                      architecture="direct")
+        self.assertTrue(strategic.reuse_strategic_own_candidates)
+        self.assertFalse(direct.reuse_strategic_own_candidates)
+
+    def test_role_swapped_strategic_observation_reuses_candidate_mask(self):
+        env = TensorDefenseEnv(
+            num_envs=2, task="defense", device="cpu", opponent="learned",
+            action_mode="strategic", randomize=False, seed=82,
+            observation_noise=0., observation_dropout=0.,
+            perception_config={"detection_dropout": 0., "position_noise_m": 0.,
+                               "velocity_noise_mps": 0.},
+        )
+        reference_observation = env._role_swapped_observation()
+        reference_candidates = env._fuel_candidates(1)
+        reference_mask = env.strategic_action_mask(1, _candidate_data=reference_candidates)
+        observation, candidates, action_mask = env._role_swapped_observation(
+            return_candidate_data=True)
+        torch.testing.assert_close(observation, reference_observation, rtol=0, atol=0)
+        for actual, expected in zip(candidates, reference_candidates):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(action_mask, reference_mask, rtol=0, atol=0)
+
+        candidate_calls = []
+        original_candidates = env._fuel_candidates
+
+        def count_candidates(focal):
+            candidate_calls.append(focal)
+            return original_candidates(focal)
+
+        env._fuel_candidates = count_candidates
+        env.learned_opponent_fn = lambda _obs: torch.zeros(
+            env.n, device=env.device, dtype=torch.long)
+        env.learned_opponent_action_dim = 8
+        env.step(torch.zeros(env.n, device=env.device, dtype=torch.long),
+                 _return_info=False)
+        self.assertEqual(candidate_calls.count(1), 1)
+
+    def test_own_strategic_candidate_cache_preserves_step_and_avoids_rerank(self):
+        kwargs = dict(
+            num_envs=2, task="counter_defense", device="cpu", opponent="guard",
+            action_mode="strategic", randomize=True, seed=813,
+        )
+        legacy = TensorDefenseEnv(**kwargs)
+        cached = TensorDefenseEnv(**kwargs, reuse_strategic_own_candidates=True)
+        legacy.reset(seed=813)
+        cached.reset(seed=813)
+        counts = {"legacy": 0, "cached": 0}
+        for label, env in (("legacy", legacy), ("cached", cached)):
+            original = env._fuel_candidates
+
+            def count(focal, *, _label=label, _original=original):
+                if focal == 0:
+                    counts[_label] += 1
+                return _original(focal)
+
+            env._fuel_candidates = count
+
+        action = torch.tensor([0, 7], dtype=torch.long)
+        active_masks = (torch.tensor([False, True]), torch.ones(2, dtype=torch.bool))
+        pending_before_step = tuple(value.clone() for value in
+            (*cached._pending_strategic_own_candidates[0],
+             cached._pending_strategic_own_candidates[1]))
+        for step_index, active_mask in enumerate(active_masks):
+            expected = legacy.step(action, active_mask=active_mask, _return_info=False)
+            actual = cached.step(action, active_mask=active_mask, _return_info=False)
+            for index, (left, right) in enumerate(zip(expected[:4], actual[:4])):
+                torch.testing.assert_close(left, right, rtol=0, atol=0,
+                                           msg=f"cached step {step_index} output {index} differs")
+            if step_index == 0:
+                pending_after_step = (*cached._pending_strategic_own_candidates[0],
+                                      cached._pending_strategic_own_candidates[1])
+                for before, after in zip(pending_before_step, pending_after_step):
+                    torch.testing.assert_close(after[0], before[0], rtol=0, atol=0,
+                                               msg="inactive candidate cache row changed during step")
+                pending_before_reset = tuple(value.clone() for value in pending_after_step)
+                reset_mask = torch.tensor([True, False])
+                legacy_observation = legacy.reset_done(reset_mask)
+                cached_observation = cached.reset_done(reset_mask)
+                torch.testing.assert_close(legacy_observation, cached_observation,
+                                           rtol=0, atol=0,
+                                           msg="partial reset observation differs")
+                pending_after_reset = (*cached._pending_strategic_own_candidates[0],
+                                       cached._pending_strategic_own_candidates[1])
+                for before, after in zip(pending_before_reset, pending_after_reset):
+                    torch.testing.assert_close(after[1], before[1], rtol=0, atol=0,
+                                               msg="unreset candidate cache row changed during reset")
+        self.assertEqual(counts, {"legacy": 5, "cached": 3})
+        self.assertTrue(torch.equal(legacy.generator.get_state(), cached.generator.get_state()))
+        self.assertTrue(torch.equal(legacy.sim.generator.get_state(), cached.sim.generator.get_state()))
+        for world in range(legacy.n):
+            left = _world_tensor_state(legacy, world)
+            right = _world_tensor_state(cached, world)
+            self.assertEqual(left.keys(), right.keys())
+            for name in left:
+                torch.testing.assert_close(left[name], right[name], rtol=0, atol=0,
+                                           msg=f"world {world} {name} differs")
+
+    def test_training_no_info_path_matches_normal_step(self):
+        kwargs = dict(
+            num_envs=2, task="counter_defense", device="cpu", opponent="guard",
+            action_mode="strategic", seed=321, horizon=8000,
+            observation_noise=0., observation_dropout=0.,
+            perception_config={"detection_dropout": 0., "position_noise_m": 0.,
+                               "velocity_noise_mps": 0.},
+        )
+        with_info = TensorDefenseEnv(**kwargs)
+        without_info = TensorDefenseEnv(**kwargs)
+        action = torch.tensor([0, 7], dtype=torch.long)
+        objective_calls = {"with_info": 0, "without_info": 0}
+        with_info_objective = with_info._attacker_objective
+        without_info_objective = without_info._attacker_objective
+
+        def count_with_info_objective():
+            objective_calls["with_info"] += 1
+            return with_info_objective()
+
+        def count_without_info_objective():
+            objective_calls["without_info"] += 1
+            return without_info_objective()
+
+        with_info._attacker_objective = count_with_info_objective
+        without_info._attacker_objective = count_without_info_objective
+        expected = with_info.step(action)
+        actual = without_info.step(action, _return_info=False)
+        for index, (expected_value, actual_value) in enumerate(zip(expected[:4], actual[:4])):
+            torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=0,
+                                       msg=f"step output {index} differs")
+        self.assertTrue(expected[4])
+        self.assertEqual(actual[4], {})
+        self.assertEqual(objective_calls, {"with_info": 1, "without_info": 0})
+        for name in ("pose", "velocity", "module_angle"):
+            torch.testing.assert_close(getattr(with_info.sim, name),
+                                       getattr(without_info.sim, name), rtol=0, atol=0)
+        for name in ("piece_pos", "piece_vel", "piece_active", "piece_owner",
+                     "steps", "match_elapsed", "match_remaining", "_track_pos",
+                     "_track_age", "fuel_score_count", "fuel_acquisition_count"):
+            torch.testing.assert_close(getattr(with_info, name), getattr(without_info, name),
+                                       rtol=0, atol=0)
+        torch.testing.assert_close(with_info.generator.get_state(),
+                                   without_info.generator.get_state(), rtol=0, atol=0)
+
     def test_inactive_world_state_planner_and_rng_are_untouched(self):
         env = TensorDefenseEnv(
             num_envs=2, task="defense", device="cpu", opponent="adstar",
@@ -166,8 +358,9 @@ class TensorEnvActiveMaskTests(unittest.TestCase):
                                       env.horizon - 3]))
         initial_obs = env._last_observation.clone()
         result = _held_action_interval(env, action, 6, initial_obs)
-        _, done, truncated, terminal_obs, active, _, matches = result
+        _, done, truncated, terminal_obs, active, _, active_world_ticks, matches = result
         self.assertEqual(matches, 3)
+        self.assertEqual(active_world_ticks, 6)
         self.assertFalse(bool(done.any()))
         self.assertTrue(bool(truncated.all()))
         self.assertFalse(bool(active.any()))

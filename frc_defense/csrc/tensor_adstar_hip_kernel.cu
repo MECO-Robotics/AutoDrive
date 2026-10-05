@@ -37,7 +37,7 @@ __global__ void bellman_sweeps_kernel(const float* value, const bool* blocked,
         continue;
       }
       float best = current[cell];
-      const float edge = bump[linear];
+      const float edge = bump[cell];
       #pragma unroll
       for (int dx = -1; dx <= 1; ++dx) {
         #pragma unroll

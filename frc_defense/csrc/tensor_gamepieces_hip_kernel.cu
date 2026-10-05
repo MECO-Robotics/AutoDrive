@@ -1,0 +1,244 @@
+#include <hip/hip_runtime.h>
+#include <cmath>
+
+namespace {
+__device__ __forceinline__ float wrap_abs(float a) {
+  return fabsf(atan2f(sinf(a), cosf(a)));
+}
+
+__global__ void gamepieces_kernel(const bool* active, const float* pose,
+    const float* velocity, const float* length, const float* width,
+    float* piece_pos, float* piece_vel, bool* piece_active,
+    int64_t* owner, int64_t* zone, float* elapsed, float* remaining,
+    bool* hub_active, const int64_t* hub_first, int64_t* auto_scores,
+    float* next_intake, float* next_score, bool* last_hub,
+    const int64_t* last_action, int64_t* acquisition_count,
+    int64_t* score_count, int64_t* denied_count, int64_t* abandoned_count,
+    int64_t* acquired_event, int64_t* scored_event, int64_t* denied_event,
+    int64_t* abandoned_event, const float* hub_centers,
+    const float* respawn_positions, bool* track_mask, float* track_age,
+    int worlds, int pieces,
+    float dt, float intake_interval, float score_interval, int capacity,
+    bool strategic, float field_length, float alliance_zone_depth) {
+  const int w = blockIdx.x;
+  const int lane = threadIdx.x;
+  if (w >= worlds || !active[w]) return;
+
+  // A CTA owns one world. Piece scans are cooperative and contiguous, while
+  // the two robot passes remain explicitly ordered with barriers between them.
+  __shared__ float reduce_distance[256];
+  __shared__ int reduce_index[256];
+  __shared__ int reduce_count[256];
+  __shared__ float now_shared;
+  __shared__ int picked_by_red;
+
+  const int64_t row = static_cast<int64_t>(w) * pieces;
+  const int64_t pair = static_cast<int64_t>(w) * 2;
+  const int64_t robot_state = pair * 3;
+
+  // The environment advances the match clock before intake and scoring.
+  if (lane == 0) {
+    float now = fminf(elapsed[w] + dt, 160.f);
+    now_shared = now;
+    elapsed[w] = now;
+    remaining[w] = fmaxf(160.f - now, 0.f);
+    const int64_t red_auto = auto_scores[pair];
+    const int64_t blue_auto = auto_scores[pair + 1];
+    const int first = red_auto > blue_auto ? 0 :
+                      (blue_auto > red_auto ? 1 : static_cast<int>(hub_first[w]));
+    const float teleop = fmaxf(now - 20.f, 0.f);
+    const int cycle = static_cast<int>(floorf(teleop / 30.f));
+    const int inactive = (cycle % 2) == 0 ? first : 1 - first;
+    hub_active[pair] = true;
+    hub_active[pair + 1] = true;
+    hub_active[pair + inactive] = !(now >= 20.f);
+    acquired_event[pair] = acquired_event[pair + 1] = 0;
+    scored_event[pair] = scored_event[pair + 1] = 0;
+    denied_event[pair] = denied_event[pair + 1] = 0;
+    abandoned_event[pair] = abandoned_event[pair + 1] = 0;
+    picked_by_red = -1;
+  }
+  __syncthreads();
+  const float now = now_shared;
+
+  for (int robot = 0; robot < 2; ++robot) {
+    const int64_t state = robot_state + robot * 3;
+    const float x = pose[state], y = pose[state + 1], heading = pose[state + 2];
+    const float c = cosf(heading), s = sinf(heading);
+    int possession = 0;
+    for (int i = lane; i < pieces; i += blockDim.x)
+      possession += piece_active[row + i] && owner[row + i] == robot;
+    reduce_count[lane] = possession;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (lane < offset) reduce_count[lane] += reduce_count[lane + offset];
+      __syncthreads();
+    }
+    const bool ready = now + 1.0e-6f >= next_intake[pair + robot];
+    float nearest = INFINITY;
+    int nearest_index = pieces;
+    if (reduce_count[0] < capacity && ready) {
+      for (int i = lane; i < pieces; i += blockDim.x) {
+        const int64_t pi = row + i;
+        if (!piece_active[pi] || owner[pi] >= 0 || i == picked_by_red) continue;
+        const float dx = piece_pos[pi * 2] - x;
+        const float dy = piece_pos[pi * 2 + 1] - y;
+        const float longitudinal = dx * c + dy * s;
+        const float lateral = fabsf(-dx * s + dy * c);
+        const float front = .5f * length[pair + robot];
+        const float half_width = .5f * width[pair + robot] + .075f;
+        if (!(longitudinal >= front - .075f && longitudinal <= front + .35f &&
+              lateral <= half_width)) continue;
+        const float distance = dx * dx + dy * dy;
+        // Strict comparison preserves Torch min's first-index tie behavior.
+        if (distance < nearest || (distance == nearest && i < nearest_index)) {
+          nearest = distance; nearest_index = i;
+        }
+      }
+    }
+    reduce_distance[lane] = nearest;
+    reduce_index[lane] = nearest_index;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (lane < offset) {
+        const float other_d = reduce_distance[lane + offset];
+        const int other_i = reduce_index[lane + offset];
+        if (other_d < reduce_distance[lane] ||
+            (other_d == reduce_distance[lane] && other_i < reduce_index[lane])) {
+          reduce_distance[lane] = other_d;
+          reduce_index[lane] = other_i;
+        }
+      }
+      __syncthreads();
+    }
+    if (lane == 0 && reduce_index[0] < pieces) {
+      const int selected = reduce_index[0];
+      owner[row + selected] = robot;
+      acquired_event[pair + robot] = 1;
+      next_intake[pair + robot] = now + intake_interval;
+      if (robot == 0) picked_by_red = selected;
+    }
+    __syncthreads();
+  }
+
+  // The reference applies both sequential intakes, follows all held pieces,
+  // then checks scoring in robot order.
+  for (int i = lane; i < pieces; i += blockDim.x) {
+    const int64_t pi = row + i;
+    if (!piece_active[pi]) continue;
+    const int held = static_cast<int>(owner[pi]);
+    if (held == 0 || held == 1) {
+      const int64_t state = robot_state + held * 3;
+      piece_pos[pi * 2] = pose[state];
+      piece_pos[pi * 2 + 1] = pose[state + 1];
+      piece_vel[pi * 2] = velocity[state];
+      piece_vel[pi * 2 + 1] = velocity[state + 1];
+    }
+  }
+
+  __syncthreads();
+  for (int robot = 0; robot < 2; ++robot) {
+    const int64_t state = robot_state + robot * 3;
+    const float x = pose[state], y = pose[state + 1], heading = pose[state + 2];
+    const float hx = hub_centers[robot * 2], hy = hub_centers[robot * 2 + 1];
+    const float dxh = x - hx, dyh = y - hy;
+    const float radius = .5f * sqrtf(length[pair + robot] * length[pair + robot] +
+                                    width[pair + robot] * width[pair + robot]);
+    const bool near = sqrtf(dxh * dxh + dyh * dyh) <= .595f + radius + .075f;
+    const bool in_alliance_zone = robot == 0
+        ? x <= alliance_zone_depth
+        : x >= field_length - alliance_zone_depth;
+    int has_fuel = 0;
+    for (int i = lane; i < pieces; i += blockDim.x)
+      has_fuel |= piece_active[row + i] && owner[row + i] == robot;
+    reduce_count[lane] = has_fuel;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (lane < offset) reduce_count[lane] |= reduce_count[lane + offset];
+      __syncthreads();
+    }
+    const float bearing = atan2f(hy - y, hx - x);
+    const bool aimed = wrap_abs(bearing - heading) <= 0.7853981633974483f;
+    const bool intent = !strategic || last_action[w] == 4;
+    const bool scoring_ready = near && aimed && intent;
+    const bool entering = scoring_ready && !last_hub[pair + robot];
+    const bool denied = entering && reduce_count[0] &&
+        (!hub_active[pair + robot] || !in_alliance_zone);
+    const bool score_ready = now + 1.0e-6f >= next_score[pair + robot];
+    int selected = pieces;
+    if (scoring_ready && hub_active[pair + robot] && in_alliance_zone && score_ready) {
+      // Torch argmax on the bool eligibility tensor returns the first true row.
+      for (int i = lane; i < pieces; i += blockDim.x) {
+        const int64_t pi = row + i;
+        if (piece_active[pi] && owner[pi] == robot && i < selected) selected = i;
+      }
+    }
+    reduce_index[lane] = selected;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (lane < offset)
+        reduce_index[lane] = min(reduce_index[lane], reduce_index[lane + offset]);
+      __syncthreads();
+    }
+    if (lane == 0) {
+      const bool denied_row = denied;
+      denied_event[pair + robot] = denied_row ? 1 : 0;
+      denied_count[pair + robot] += denied_row ? 1 : 0;
+    }
+    selected = reduce_index[0];
+    if (lane == 0 && selected < pieces) {
+      const int64_t pi = row + selected;
+      scored_event[pair + robot] = 1;
+      score_count[pair + robot] += 1;
+      next_score[pair + robot] = now + score_interval;
+      if (now <= 20.f + dt) auto_scores[pair + robot] += 1;
+      owner[pi] = -1;
+      zone[pi] = 0;
+      piece_pos[pi * 2] = respawn_positions[selected * 2];
+      piece_pos[pi * 2 + 1] = respawn_positions[selected * 2 + 1];
+      piece_vel[pi * 2] = 0.f;
+      piece_vel[pi * 2 + 1] = 0.f;
+      piece_active[pi] = true;
+      for (int tracker = 0; tracker < 2; ++tracker) {
+        const int64_t track = (pair + tracker) * pieces + selected;
+        track_mask[track] = false;
+        track_age[track] = INFINITY;
+      }
+    }
+    if (lane == 0) last_hub[pair + robot] = scoring_ready;
+    __syncthreads();
+  }
+
+  if (lane == 0) {
+    acquisition_count[pair] += acquired_event[pair];
+    acquisition_count[pair + 1] += acquired_event[pair + 1];
+  // These are currently zeroed on active rows above, matching the reference
+  // event reset semantics (the abandoned counter remains unchanged).
+  abandoned_count[pair] += abandoned_event[pair];
+  abandoned_count[pair + 1] += abandoned_event[pair + 1];
+  }
+}
+}  // namespace
+
+void gamepieces_launch(const bool* active, const float* pose, const float* velocity,
+    const float* length, const float* width, float* piece_pos, float* piece_vel,
+  bool* piece_active_in, int64_t* owner, int64_t* zone, float* elapsed,
+    float* remaining, bool* hub_active, const int64_t* hub_first,
+    int64_t* auto_scores, float* next_intake, float* next_score, bool* last_hub,
+    const int64_t* last_action, int64_t* acquisition_count, int64_t* score_count,
+    int64_t* denied_count, int64_t* abandoned_count, int64_t* acquired_event,
+    int64_t* scored_event, int64_t* denied_event, int64_t* abandoned_event,
+    const float* hub_centers, const float* respawn_positions,
+    bool* track_mask, float* track_age, int worlds, int pieces, float dt,
+    float intake_interval, float score_interval, int capacity, bool strategic,
+    float field_length, float alliance_zone_depth, hipStream_t stream) {
+  constexpr int threads = 256;
+  gamepieces_kernel<<<worlds, threads, 0, stream>>>(active, pose, velocity, length,
+      width, piece_pos, piece_vel, piece_active_in, owner, zone,
+      elapsed, remaining, hub_active, hub_first, auto_scores, next_intake, next_score,
+      last_hub, last_action, acquisition_count, score_count, denied_count,
+      abandoned_count, acquired_event, scored_event, denied_event, abandoned_event,
+      hub_centers, respawn_positions, track_mask, track_age, worlds, pieces, dt,
+      intake_interval, score_interval, capacity, strategic, field_length,
+      alliance_zone_depth);
+}

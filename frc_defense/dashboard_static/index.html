@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#11171d" />
+    <title>AutoDrive · Training monitor</title>
+    <link rel="stylesheet" href="/assets/dashboard.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="wordmark" href="/" aria-label="AutoDrive training monitor">
+        <span class="wordmark-mark" aria-hidden="true">AD</span>
+        <span>AutoDrive</span>
+      </a>
+      <nav class="topnav" aria-label="Main navigation">
+        <a href="#scenario">Scenario</a>
+        <a href="#training">Training</a>
+        <a href="#analysis">Analysis</a>
+        <a href="/info">Field guide</a>
+      </nav>
+      <div class="connection" id="connection" aria-live="polite">
+        <span class="connection-dot" id="connectionDot"></span>
+        <span id="state">Connecting…</span>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section
+        class="run-section"
+        id="training"
+        aria-labelledby="trainingHeading"
+      >
+        <div class="run-summary-heading">
+          <div>
+            <h2 id="trainingHeading">Current training run</h2>
+            <p id="runIdentity" class="lede">
+              Waiting for a generational PPO run.
+            </p>
+          </div>
+          <div class="run-phase" id="runPhase">Waiting</div>
+        </div>
+        <div class="run-progress">
+          <div class="progress-heading">
+            <h3 id="progressLabel">Strategic transitions</h3>
+            <output id="progress">—</output>
+          </div>
+          <progress
+            id="progressBar"
+            value="0"
+            max="1"
+            aria-label="Training progress"
+          ></progress>
+          <div class="progress-meta">
+            <span id="generationSummary">No generation reported</span>
+            <span><strong id="rate">—</strong> transitions / second</span>
+            <span id="device">—</span>
+            <span id="updated">Waiting for status</span>
+          </div>
+        </div>
+        <details class="run-details">
+          <summary>Training and opponent details</summary>
+          <dl class="detail-list">
+            <div>
+              <dt>Campaign progress</dt>
+              <dd id="trainingEpochs">—</dd>
+            </div>
+            <div>
+              <dt>Active task</dt>
+              <dd id="trainingRun">—</dd>
+            </div>
+            <div>
+              <dt>Accelerator backend</dt>
+              <dd id="backend">—</dd>
+            </div>
+            <div>
+              <dt>Training setup</dt>
+              <dd id="setup">—</dd>
+            </div>
+            <div>
+              <dt>Opponent pool</dt>
+              <dd id="opponentSummary">—</dd>
+            </div>
+            <div>
+              <dt>Current opponents</dt>
+              <dd id="opp">—</dd>
+            </div>
+            <div>
+              <dt>Drivetrain</dt>
+              <dd id="drivetrain">—</dd>
+            </div>
+            <div>
+              <dt>Training notes</dt>
+              <dd id="curriculum">—</dd>
+            </div>
+          </dl>
+        </details>
+      </section>
+
+      <section
+        class="scenario-section"
+        id="scenario"
+        aria-labelledby="scenarioHeading"
+      >
+        <div class="section-heading scenario-heading">
+          <div>
+            <h1 id="scenarioHeading">Scenario viewer</h1>
+            <p id="playbackSourceNote" class="lede">
+              Six-robot REBUILT match; choose None, NN, or Deterministic for each robot.
+            </p>
+          </div>
+          <div class="source-control">
+            <label for="playbackSource">Playback source</label>
+            <select id="playbackSource">
+              <option value="randomized">Randomized scenario</option>
+              <option value="evaluation">Recorded evaluation</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="scenario-toolbar">
+          <p class="scenario-constraint" id="matchSetup">
+            REBUILT 3v3 · randomized legal starts · 160 s match
+          </p>
+          <fieldset class="robot-control-modes" id="robotControlModes">
+            <legend>Each robot: type × role × controller · None = stationary</legend>
+            <div class="robot-control-team">
+              <span>Red alliance</span>
+              <div class="robot-control-unit"><label>Type<select id="robotType0" aria-label="Red robot 1 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Red 1<select id="robotMode0" aria-label="Red robot 1 role and control"><option value="offense_nn" selected>Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic">Defense · Det.</option><option value="none">None</option></select></label></div>
+              <div class="robot-control-unit"><label>Type<select id="robotType1" aria-label="Red robot 2 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Red 2<select id="robotMode1" aria-label="Red robot 2 role and control"><option value="offense_nn" selected>Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic">Defense · Det.</option><option value="none">None</option></select></label></div>
+              <div class="robot-control-unit"><label>Type<select id="robotType2" aria-label="Red robot 3 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Red 3<select id="robotMode2" aria-label="Red robot 3 role and control"><option value="offense_nn" selected>Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic">Defense · Det.</option><option value="none">None</option></select></label></div>
+            </div>
+            <div class="robot-control-team">
+              <span>Blue alliance</span>
+              <div class="robot-control-unit"><label>Type<select id="robotType3" aria-label="Blue robot 1 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Blue 1<select id="robotMode3" aria-label="Blue robot 1 role and control"><option value="offense_nn">Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic" selected>Defense · Det.</option><option value="none">None</option></select></label></div>
+              <div class="robot-control-unit"><label>Type<select id="robotType4" aria-label="Blue robot 2 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Blue 2<select id="robotMode4" aria-label="Blue robot 2 role and control"><option value="offense_nn">Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic" selected>Defense · Det.</option><option value="none">None</option></select></label></div>
+              <div class="robot-control-unit"><label>Type<select id="robotType5" aria-label="Blue robot 3 type"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select></label><label>Blue 3<select id="robotMode5" aria-label="Blue robot 3 role and control"><option value="offense_nn">Offense · NN</option><option value="defense_nn">Defense · NN</option><option value="offense_deterministic">Offense · Det.</option><option value="defense_deterministic" selected>Defense · Det.</option><option value="none">None</option></select></label></div>
+            </div>
+          </fieldset>
+          <fieldset class="scenario-physical-limits" id="scenarioPhysicalLimits">
+            <legend>Dumper mechanism limits</legend>
+            <label for="hopperCapacity">Hopper capacity (FUEL)
+              <input id="hopperCapacity" type="number" min="1" max="504" step="1" value="60">
+            </label>
+            <label for="scoringBps">Scoring rate limit (FUEL/s)
+              <input id="scoringBps" type="number" min="0.1" max="50" step="0.1" value="25">
+            </label>
+            <p>Turret: 40 FUEL capacity and 15 FUEL/s. Dumper uses the limits above; only Dumpers must face the firing direction.</p>
+          </fieldset>
+          <label class="intent-knowledge-toggle" for="teammateIntentKnowledge">
+            <input id="teammateIntentKnowledge" type="checkbox" checked>
+            Teammate intent knowledge
+            <span>Use teammate routes and motion to coordinate avoidance</span>
+          </label>
+          <div class="scenario-filters" id="evaluationControls" hidden>
+            <label for="gameEvaluation">Evaluation</label>
+            <select id="gameEvaluation" aria-label="Recorded game evaluation">
+              <option value="">Choose an evaluation</option>
+            </select>
+          </div>
+          <div class="transport">
+            <button id="play" type="button" disabled aria-pressed="false">
+              Play
+            </button>
+            <button id="nextScenario" class="button-secondary" type="button">
+              New scenario
+            </button>
+            <label class="speed-control"
+              >Speed
+              <select id="playbackSpeed" aria-label="Playback speed">
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <section class="scenario-progress" id="scenarioProgress" aria-live="polite" hidden>
+          <div class="scenario-progress-heading">
+            <strong id="scenarioProgressTitle">Preparing randomized match</strong>
+            <output id="scenarioProgressPercent">0%</output>
+          </div>
+          <progress id="scenarioProgressBar" max="100" value="0" aria-label="Scenario simulation progress"></progress>
+          <div class="scenario-progress-meta">
+            <span id="scenarioProgressTime">Waiting for simulator</span>
+            <span id="scenarioProgressState">Waiting for GPU time</span>
+          </div>
+        </section>
+        <select id="scenario" hidden aria-hidden="true">
+          <option value="zone">Scenario</option>
+        </select>
+
+        <p id="matchupNotice" class="notice" role="status" aria-live="polite">
+          Preparing a randomized scenario…
+        </p>
+        <div class="match-scoreboard" role="group" aria-label="Match score">
+          <div class="match-score alliance-red">
+            <span class="match-score-team">Red</span>
+            <output id="redScore" aria-label="Red score">—</output>
+          </div>
+          <div class="match-score-clock">
+            <span>Match time</span>
+            <output id="matchClock">—:—</output>
+          </div>
+          <div class="match-score alliance-blue">
+            <span class="match-score-team">Blue</span>
+            <output id="blueScore" aria-label="Blue score">—</output>
+          </div>
+        </div>
+        <div class="field-frame">
+          <canvas
+            id="field"
+            width="1100"
+            height="536"
+            role="img"
+            aria-label="Animated REBUILT field with robot and FUEL positions"
+          >
+            Field playback showing robot paths and FUEL movement.
+          </canvas>
+        </div>
+        <div class="playback-controls">
+          <label class="scrubber-label" for="frame"
+            >Match time <output id="frameCount">0 / 0</output></label
+          >
+          <input
+            id="frame"
+            type="range"
+            min="0"
+            max="0"
+            value="0"
+            disabled
+            aria-label="Scrub through match playback"
+          />
+          <div class="display-options">
+            <label><input id="showFuel" type="checkbox" checked /> FUEL</label>
+            <label><input id="showGrid" type="checkbox" /> Field grid</label>
+            <label
+              ><input id="showGhosts" type="checkbox" /> Other rollouts</label
+            >
+          </div>
+        </div>
+        <p id="scenarioCount" class="scenario-caption"></p>
+        <p id="gameState" class="game-state" aria-live="polite">
+          FUEL state appears when playback is ready.
+        </p>
+        <p class="field-legend">
+          <span><i class="legend-dot red"></i>Red alliance</span
+          ><span><i class="legend-dot blue"></i>Blue alliance</span
+          ><span><i class="legend-dot gold"></i>Loose FUEL</span
+          ><span>Dotted lines show AD* routes</span>
+        </p>
+      </section>
+
+      <section
+        class="analysis-section"
+        id="analysis"
+        aria-labelledby="analysisHeading"
+      >
+        <div class="section-heading">
+          <div>
+            <h2 id="analysisHeading">Training trends</h2>
+            <p class="lede">Metrics reported at generation boundaries.</p>
+          </div>
+          <div class="trend-controls">
+            <label class="trend-control">
+              Task
+              <select id="trendTask" aria-label="Training task">
+                <option value="offense">Offense</option>
+                <option value="defense">Defense</option>
+              </select>
+            </label>
+            <label class="trend-control">
+              Measure
+              <select id="trendMetric" aria-label="Training trend metric">
+              <option value="mean_return">Mean return</option>
+              <option value="entropy">Policy entropy</option>
+              <option value="transitions_per_second">
+                Transitions / second
+              </option>
+              <option value="physics_world_ticks_per_second">
+                Physics world-ticks / second
+              </option>
+              <option value="fuel_acquired">FUEL acquired</option>
+              <option value="fuel_scored">FUEL scored</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <p id="latestMetricsSummary" class="latest-metrics-summary" aria-live="polite">
+          Waiting for the first completed generation.
+        </p>
+        <div class="chart-frame">
+          <canvas
+            id="chart"
+            width="1100"
+            height="230"
+            role="img"
+            aria-label="Selected training metric by generation"
+          >
+            Training metric by generation.
+          </canvas>
+        </div>
+        <div class="analysis-grid">
+          <div>
+            <h3>Opponent exposure</h3>
+            <p id="exposureEmpty" class="empty-note">
+              Exposure counts appear with the first PPO update.
+            </p>
+            <ul id="opponentExposure" class="exposure-list"></ul>
+          </div>
+          <div>
+            <h3>Action selection</h3>
+            <p id="actionEmpty" class="empty-note">
+              Action rates appear with the first PPO update.
+            </p>
+            <ol id="actionDistribution" class="action-list"></ol>
+          </div>
+        </div>
+      </section>
+
+      <section class="comparison-section" aria-labelledby="comparisonHeading">
+        <div class="section-heading">
+          <div>
+            <h2 id="comparisonHeading">Controller comparison</h2>
+            <p class="lede">
+              Read outcomes with episode counts and scenario pairing.
+            </p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="ablations">
+            <thead>
+              <tr>
+                <th scope="col">Strategy</th>
+                <th scope="col">Role</th>
+                <th scope="col">Episodes</th>
+                <th scope="col">FUEL collected</th>
+                <th scope="col">FUEL scored</th>
+                <th scope="col">Cycle / delay</th>
+                <th scope="col">Pairing</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colspan="7" class="empty-note">Loading evaluations…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p id="comparisonNote" class="comparison-note">
+          — means the run did not report that metric. Scenario pairing is shown
+          with each comparison.
+        </p>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/dashboard.js"></script>
+  </body>
+</html>

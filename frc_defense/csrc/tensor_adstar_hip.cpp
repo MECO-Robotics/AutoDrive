@@ -8,10 +8,10 @@ void adstar_launch(const float* value, const bool* blocked, const float* bump,
                    int sweeps, bool stop_when_converged, hipStream_t stream);
 
 void fused_route_launch(const float*, const bool*, const float*, const float*,
-                        const int64_t*, const int64_t*, const int64_t*,
+                        const float*, const int64_t*, const int64_t*, const int64_t*,
                         const int64_t*, const float*, const float*, const float*,
-                        float*, float*, int64_t*, float*, int32_t*, int, int,
-                        int64_t, int, bool, float, hipStream_t);
+                        float*, float*, int64_t*, float*, float*, int32_t*, float, int, int,
+                        int64_t, int, bool, bool, float, hipStream_t);
 
 void adstar_bellman_sweep(torch::Tensor value, torch::Tensor blocked,
                    torch::Tensor bump_cost, torch::Tensor output,
@@ -23,6 +23,8 @@ void adstar_bellman_sweep(torch::Tensor value, torch::Tensor blocked,
   TORCH_CHECK(value.dim() == 3 && value.size(1) * value.size(2) <= 4096,
               "AD* fused HIP sweep supports grids up to 4096 cells");
   TORCH_CHECK(blocked.scalar_type() == at::kBool, "blocked grid must be bool");
+  TORCH_CHECK(bump_cost.sizes() == torch::IntArrayRef({value.size(1), value.size(2)}),
+              "AD* HIP sweep expects a field-sized bump cost grid");
   TORCH_CHECK(value.is_contiguous() && blocked.is_contiguous() &&
               bump_cost.is_contiguous() && output.is_contiguous(),
               "AD* HIP sweep expects contiguous tensors");
@@ -38,14 +40,17 @@ void adstar_bellman_sweep(torch::Tensor value, torch::Tensor blocked,
 
 void adstar_fused_route(torch::Tensor value, torch::Tensor blocked,
                         torch::Tensor bump, torch::Tensor start_xy,
+                        torch::Tensor goal_xy,
                         torch::Tensor start_x, torch::Tensor start_y,
                         torch::Tensor goal_x, torch::Tensor goal_y,
                         torch::Tensor speed, torch::Tensor friction,
                         torch::Tensor acceleration, torch::Tensor potential,
                         torch::Tensor path, torch::Tensor lengths,
-                        torch::Tensor profile, torch::Tensor active_checkpoints,
+                        torch::Tensor profile, torch::Tensor resolved_goal,
+                        torch::Tensor active_checkpoints,
+                        double steer_rate_limit,
                         int64_t sweeps, bool stop_when_converged,
-                        double resolution) {
+                        bool project_blocked_goal, double resolution) {
   TORCH_CHECK(value.is_cuda() && value.scalar_type() == at::kFloat && value.dim() == 3,
               "AD* fused route expects CUDA float32 [batch,nx,ny] values");
   TORCH_CHECK(value.size(1) * value.size(2) <= 4096,
@@ -56,15 +61,20 @@ void adstar_fused_route(torch::Tensor value, torch::Tensor blocked,
               "AD* fused route checkpoint dtype must be int32");
   TORCH_CHECK(value.is_contiguous() && blocked.is_contiguous() && bump.is_contiguous() &&
               start_xy.is_contiguous() && start_x.is_contiguous() && start_y.is_contiguous() &&
+              goal_xy.is_contiguous() && resolved_goal.is_contiguous() &&
               goal_x.is_contiguous() && goal_y.is_contiguous() && speed.is_contiguous() &&
               friction.is_contiguous() && acceleration.is_contiguous() &&
               potential.is_contiguous() && path.is_contiguous() && lengths.is_contiguous() &&
-              profile.is_contiguous() && active_checkpoints.is_contiguous(),
+              profile.is_contiguous() && resolved_goal.is_contiguous() &&
+              active_checkpoints.is_contiguous(),
               "AD* fused route expects contiguous tensors");
-  TORCH_CHECK(value.sizes() == blocked.sizes() && value.sizes() == bump.sizes() &&
-              value.sizes() == potential.sizes(), "AD* fused route grid shapes differ");
+  TORCH_CHECK(value.sizes() == blocked.sizes() && value.sizes() == potential.sizes() &&
+              bump.sizes() == torch::IntArrayRef({value.size(1), value.size(2)}),
+              "AD* fused route grid shapes differ");
   const auto batch = value.size(0);
   TORCH_CHECK(start_xy.sizes() == torch::IntArrayRef({batch, 2}) &&
+              goal_xy.sizes() == torch::IntArrayRef({batch, 2}) &&
+              resolved_goal.sizes() == torch::IntArrayRef({batch, 2}) &&
               path.sizes() == torch::IntArrayRef({batch, 72, 2}) &&
               profile.sizes() == torch::IntArrayRef({batch, 72}) &&
               lengths.sizes() == torch::IntArrayRef({batch}) &&
@@ -72,13 +82,16 @@ void adstar_fused_route(torch::Tensor value, torch::Tensor blocked,
               "AD* fused route expects batch-aligned 72-point outputs");
   c10::cuda::CUDAGuard guard(value.device());
   fused_route_launch(value.data_ptr<float>(), blocked.data_ptr<bool>(), bump.data_ptr<float>(),
-      start_xy.data_ptr<float>(), start_x.data_ptr<int64_t>(), start_y.data_ptr<int64_t>(),
+      start_xy.data_ptr<float>(), goal_xy.data_ptr<float>(),
+      start_x.data_ptr<int64_t>(), start_y.data_ptr<int64_t>(),
       goal_x.data_ptr<int64_t>(), goal_y.data_ptr<int64_t>(), speed.data_ptr<float>(),
       friction.data_ptr<float>(), acceleration.data_ptr<float>(),
       potential.data_ptr<float>(), path.data_ptr<float>(), lengths.data_ptr<int64_t>(),
-      profile.data_ptr<float>(), active_checkpoints.data_ptr<int32_t>(),
+      profile.data_ptr<float>(), resolved_goal.data_ptr<float>(),
+      active_checkpoints.data_ptr<int32_t>(), static_cast<float>(steer_rate_limit),
       static_cast<int>(value.size(1)), static_cast<int>(value.size(2)), value.numel(),
-      static_cast<int>(sweeps), stop_when_converged, static_cast<float>(resolution),
+      static_cast<int>(sweeps), stop_when_converged, project_blocked_goal,
+      static_cast<float>(resolution),
       c10::cuda::getCurrentCUDAStream(value.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

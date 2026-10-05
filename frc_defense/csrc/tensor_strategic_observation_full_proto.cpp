@@ -1,0 +1,118 @@
+#include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#include <hip/hip_runtime_api.h>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+void assemble_launch(const float* own_pose, const float* own_vel,
+    const float* other_pose, const float* other_vel, const float* opponent,
+    const float* obstacles, const float* length, const float* width,
+    const float* accel, const float* speed, const float* omega,
+    const float* path, const int64_t* path_lengths, const float* track_pos,
+    const float* track_vel, const int64_t* indices, const bool* valid,
+    const float* nearest, const float* own_count, const bool* piece_active,
+    const int64_t* piece_owner, const float* elapsed, const bool* hub_active,
+    const int64_t* scores, const float* hubs, const float* hub,
+    const bool* capture_mask, float* output, int64_t rows, int64_t pieces,
+    int64_t path_capacity, int64_t track_pos_stride, int64_t track_vel_stride,
+    float field_length, float field_width, float inv_l, float inv_w,
+    float inv_diag, float inv_max, float inv_pi, float inv_16_54,
+    float inv_8_07, int fuel_capacity, int fuel_count, bool offense,
+    bool normalize, hipStream_t stream);
+
+torch::Tensor assemble(torch::Tensor own_pose, torch::Tensor own_vel,
+    torch::Tensor other_pose, torch::Tensor other_vel, torch::Tensor opponent,
+    torch::Tensor obstacles, torch::Tensor length, torch::Tensor width,
+    torch::Tensor accel, torch::Tensor speed, torch::Tensor omega,
+    torch::Tensor path, torch::Tensor path_lengths, torch::Tensor track_pos,
+    torch::Tensor track_vel, torch::Tensor indices, torch::Tensor valid,
+    torch::Tensor nearest, torch::Tensor own_count, torch::Tensor piece_active,
+    torch::Tensor piece_owner, torch::Tensor elapsed, torch::Tensor hub_active,
+    torch::Tensor scores, torch::Tensor hubs, torch::Tensor hub,
+    torch::Tensor capture_mask, double field_length,
+    double field_width, int64_t fuel_capacity, int64_t fuel_count,
+    bool offense, bool normalize) {
+  const int64_t n = own_pose.size(0);
+  std::vector<torch::Tensor> ts = {own_pose, own_vel, other_pose, other_vel,
+      opponent, obstacles, length, width, accel, speed, omega, path,
+      path_lengths, track_pos, track_vel, indices, valid, nearest, own_count,
+      piece_active, piece_owner, elapsed, hub_active, scores, hubs, hub,
+      capture_mask};
+  TORCH_CHECK(own_pose.is_cuda() && own_pose.scalar_type() == at::kFloat,
+              "inputs must be HIP float tensors");
+  for (size_t i = 0; i < ts.size(); ++i) {
+    TORCH_CHECK(ts[i].is_cuda() && ts[i].device() == own_pose.device(),
+                "all inputs must share the same HIP device");
+    if (i != 13 && i != 14)
+      TORCH_CHECK(ts[i].is_contiguous(), "input must be contiguous: ", i);
+  }
+  TORCH_CHECK(own_pose.sizes() == torch::IntArrayRef({n, 3}) &&
+      own_vel.sizes() == torch::IntArrayRef({n, 3}) &&
+      other_pose.sizes() == torch::IntArrayRef({n, 3}) &&
+      other_vel.sizes() == torch::IntArrayRef({n, 3}) &&
+      opponent.sizes() == torch::IntArrayRef({n, 2}) &&
+      obstacles.sizes() == torch::IntArrayRef({n, 12}) &&
+      length.sizes() == torch::IntArrayRef({n, 2}) &&
+      width.sizes() == torch::IntArrayRef({n, 2}) &&
+      accel.sizes() == torch::IntArrayRef({n, 2}) &&
+      speed.sizes() == torch::IntArrayRef({n, 2}) &&
+      omega.sizes() == torch::IntArrayRef({n, 2}) &&
+      path.dim() == 3 && path.size(0) == n && path.size(2) == 2 &&
+      path_lengths.sizes() == torch::IntArrayRef({n}) &&
+      track_pos.dim() == 3 && track_pos.size(0) == n && track_pos.size(2) == 2 &&
+      track_vel.sizes() == track_pos.sizes() &&
+      indices.sizes() == torch::IntArrayRef({n, 4}) &&
+      valid.sizes() == torch::IntArrayRef({n, 4}) &&
+      nearest.sizes() == torch::IntArrayRef({n, 4}) &&
+      own_count.sizes() == torch::IntArrayRef({n}) &&
+      piece_active.dim() == 2 && piece_active.size(0) == n &&
+      piece_owner.sizes() == piece_active.sizes() &&
+      elapsed.sizes() == torch::IntArrayRef({n}) &&
+      hub_active.sizes() == torch::IntArrayRef({n, 2}) &&
+      scores.sizes() == torch::IntArrayRef({n, 2}) &&
+      hubs.sizes() == torch::IntArrayRef({4}) && hub.sizes() == torch::IntArrayRef({2}),
+      "invalid assembler input shape");
+  TORCH_CHECK(capture_mask.sizes() == torch::IntArrayRef({n}) &&
+      capture_mask.scalar_type() == at::kBool && capture_mask.is_contiguous(),
+      "capture_mask must be contiguous bool [n]");
+  for (size_t i : {size_t(0),size_t(1),size_t(2),size_t(3),size_t(4),
+       size_t(5),size_t(6),size_t(7),size_t(8),size_t(9),size_t(10),
+       size_t(11),size_t(13),size_t(14),size_t(17),size_t(18),size_t(21),
+       size_t(24),size_t(25)}) {
+    TORCH_CHECK(ts[i].scalar_type() == at::kFloat, "float input dtype mismatch: ", i);
+  }
+  TORCH_CHECK(indices.scalar_type() == at::kLong && path_lengths.scalar_type() == at::kLong &&
+      piece_owner.scalar_type() == at::kLong && scores.scalar_type() == at::kLong &&
+      valid.scalar_type() == at::kBool && piece_active.scalar_type() == at::kBool &&
+      hub_active.scalar_type() == at::kBool, "integer/bool input dtype mismatch");
+  c10::cuda::CUDAGuard guard(own_pose.device());
+  auto out = torch::empty({n, 137}, own_pose.options());
+  assemble_launch(own_pose.data_ptr<float>(), own_vel.data_ptr<float>(),
+      other_pose.data_ptr<float>(), other_vel.data_ptr<float>(), opponent.data_ptr<float>(),
+      obstacles.data_ptr<float>(), length.data_ptr<float>(), width.data_ptr<float>(),
+      accel.data_ptr<float>(), speed.data_ptr<float>(), omega.data_ptr<float>(),
+      path.data_ptr<float>(), path_lengths.data_ptr<int64_t>(),
+      track_pos.data_ptr<float>(), track_vel.data_ptr<float>(), indices.data_ptr<int64_t>(),
+      valid.data_ptr<bool>(), nearest.data_ptr<float>(), own_count.data_ptr<float>(),
+      piece_active.data_ptr<bool>(), piece_owner.data_ptr<int64_t>(), elapsed.data_ptr<float>(),
+      hub_active.data_ptr<bool>(), scores.data_ptr<int64_t>(), hubs.data_ptr<float>(),
+      hub.data_ptr<float>(),
+      capture_mask.data_ptr<bool>(), out.data_ptr<float>(), n,
+      track_pos.size(1), path.size(1), track_pos.stride(0),
+      track_vel.stride(0), static_cast<float>(field_length), static_cast<float>(field_width),
+      static_cast<float>(1.0 / field_length), static_cast<float>(1.0 / field_width),
+      static_cast<float>(1.0 / std::hypot(field_length, field_width)),
+      static_cast<float>(1.0 / std::max(field_length, field_width)),
+      static_cast<float>(1.0 / M_PI), static_cast<float>(1.0 / 16.54),
+      static_cast<float>(1.0 / 8.07),
+      static_cast<int>(fuel_capacity), static_cast<int>(fuel_count), offense, normalize,
+      c10::cuda::getCurrentCUDAStream(own_pose.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("assemble", &assemble, "Full strategic-observation HIP prototype");
+}

@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Field guide · AutoDrive</title>
+    <link rel="stylesheet" href="/assets/dashboard.css" />
+  </head>
+  <body>
+    <main class="field-guide">
+      <header>
+        <h1>Field guide</h1>
+        <a class="back" href="/">← Live dashboard</a>
+      </header>
+      <p class="lede">
+        What the training monitor simulates, how its planners work, and what the
+        playback is showing.
+      </p>
+      <section class="section">
+        <h2>What is being trained</h2>
+        <p>
+          The dashboard follows PPO training for FRC gamepiece tasks. Select
+          <strong>Offense</strong> to inspect gamepiece acquisition and scoring,
+          or <strong>Defense</strong> to inspect disruption strategies. Strategy
+          controls choose how objectives are selected; AD* plans the robot's
+          motion.
+        </p>
+        <p>
+          Episodes use randomized field state and gamepiece availability. This
+          varies the approach direction and reduces dependence on one fixed
+          route.
+        </p>
+      </section>
+      <section class="section">
+        <h2>Field and robot model</h2>
+        <p>
+          The field layout represents the 2026 REBUILT playing area, including
+          alliance zones, hubs, bumps, trench structures, towers, and depots.
+          Trench crossbars are overhead and passable; only the in-field ends of
+          the side supports block robots. The guardrail-side ends do not add
+          extra collider strips beyond the field boundary. Each bump has a
+          triangular height profile across its 44.4-inch depth and 6.513-inch
+          peak. Wheel contact heights estimate chassis pitch and load transfer,
+          while ramp grade adds or opposes gravity along the field. AD* retains
+          a smaller conservative traversal cost.
+        </p>
+        <p>
+          Robots use four-module swerve kinematics. The gamepiece intake is on
+          the robot's local +X/front side; pickup only occurs in a short capture
+          band ahead of that bumper. Playback marks the intake edge with a gold
+          bar. Drive acceleration comes from motor torque, gearing, current
+          limits, robot mass, and tire grip; module locations, steering
+          response, battery resistance, and current limits are configurable.
+          Contacts use oriented bumper geometry, frictional impulses, and
+          chassis yaw inertia, so off-center impacts can rotate the robot.
+          Training status identifies whether it uses the built-in illustrative
+          values or a robot configuration file.
+        </p>
+        <p class="note">
+          The drivetrain is not an IRL digital twin until its configuration is
+          populated from robot hardware and checked against measured drive,
+          brake, steer, and yaw traces. The fast model still approximates
+          steering motor control, tire slip, bumper deformation, suspension,
+          battery chemistry, and other robot loads.
+        </p>
+      </section>
+      <section class="section strategy-guide">
+        <h2>Deterministic offense</h2>
+        <p>
+          Each robot chooses its own next action. With its HUB active, it
+          follows a smooth raster spline through its midfield band. Together,
+          the three robots cover the field from the top edge to the bottom;
+          each sweep moves farther from its alliance zone before returning.
+          Its intake stays aligned to travel. It keeps collecting until its
+          scoring batch is ready, then scores from inside its alliance zone.
+          Robots can score at the same time. A Dumper stops
+          and turns toward the HUB; a Turret can shoot without turning.
+        </p>
+        <p>
+          When the HUB is inactive, a robot collects in midfield. A Dumper
+          turns toward its alliance zone and releases from where it is; other
+          robot types still carry FUEL to a release point. After scoring or
+          releasing FUEL, it resumes the sweep.
+        </p>
+        <figure class="state-graph">
+          <svg viewBox="0 0 760 300" role="img" aria-labelledby="offense-graph-title offense-graph-desc">
+            <title id="offense-graph-title">Deterministic offense state graph</title>
+            <desc id="offense-graph-desc">
+              Sweep between the top and bottom of midfield, then shift away
+              from the alliance zone and reverse direction along the spline.
+              With an active HUB and a ready batch, score. With an
+              inactive HUB and a ferry load, ferry into the alliance zone.
+              Scoring or ferrying returns the robot to collecting.
+            </desc>
+            <defs>
+              <marker id="offense-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                <path d="M0 0 L8 4 L0 8 Z" fill="#b4c1c9" />
+              </marker>
+            </defs>
+            <g class="graph-edge">
+              <path d="M225 73 H274" marker-end="url(#offense-arrow)" />
+              <text x="248" y="58" text-anchor="middle">batch ready · HUB on</text>
+              <path d="M120 112 V204" marker-end="url(#offense-arrow)" />
+              <text x="132" y="163">continuous sweep</text>
+              <path d="M170 204 V125" marker-end="url(#offense-arrow)" />
+              <text x="181" y="170">intake aligned</text>
+              <path d="M192 112 C250 185 505 185 568 112" marker-end="url(#offense-arrow)" />
+              <text x="380" y="177" text-anchor="middle">HUB off · ferry load ready</text>
+              <path d="M326 35 C250 2 105 2 74 35" marker-end="url(#offense-arrow)" />
+              <text x="200" y="16" text-anchor="middle">score · collect again</text>
+              <path d="M568 112 C520 260 260 278 195 112" marker-end="url(#offense-arrow)" />
+              <text x="430" y="263" text-anchor="middle">release FUEL · collect again</text>
+            </g>
+            <g class="graph-node collect-node">
+              <rect x="20" y="35" width="205" height="77" rx="10" />
+              <text x="122" y="66" text-anchor="middle" class="node-title">COLLECT</text>
+              <text x="122" y="89" text-anchor="middle">continuous midfield sweep</text>
+            </g>
+            <g class="graph-node score-node">
+              <rect x="274" y="35" width="205" height="77" rx="10" />
+              <text x="376" y="66" text-anchor="middle" class="node-title">SCORE</text>
+              <text x="376" y="89" text-anchor="middle">anywhere in alliance zone</text>
+            </g>
+            <g class="graph-node ferry-node">
+              <rect x="530" y="35" width="205" height="77" rx="10" />
+              <text x="632" y="66" text-anchor="middle" class="node-title">FERRY</text>
+              <text x="632" y="89" text-anchor="middle">dumpers release in place</text>
+            </g>
+            <g class="graph-node search-node">
+              <rect x="20" y="204" width="205" height="77" rx="10" />
+              <text x="122" y="235" text-anchor="middle" class="node-title">SWEEP</text>
+              <text x="122" y="258" text-anchor="middle">search while empty</text>
+            </g>
+          </svg>
+          <figcaption>
+            HUB status and each robot's load determine its path through the
+            states. Robots make these decisions independently.
+          </figcaption>
+        </figure>
+      </section>
+      <section class="section strategy-guide">
+        <h2>Deterministic defense</h2>
+        <p>
+          The defender protects the opponent's HUB approach. When an opponent
+          is visible, it predicts that robot's near-term position and moves to
+          contest its drive line. If tracking is lost, it returns to a standard
+          post beside the HUB approach, then resumes the intercept when an
+          opponent is seen again.
+        </p>
+        <figure class="state-graph defense-graph">
+          <svg viewBox="0 0 760 220" role="img" aria-labelledby="defense-graph-title defense-graph-desc">
+            <title id="defense-graph-title">Deterministic defense state graph</title>
+            <desc id="defense-graph-desc">
+              Hold a standard post at the opponent HUB approach while no
+              opponent is visible. When one is tracked, intercept its predicted
+              near-term position. Return to the post if tracking is lost.
+            </desc>
+            <defs>
+              <marker id="defense-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                <path d="M0 0 L8 4 L0 8 Z" fill="#b4c1c9" />
+              </marker>
+            </defs>
+            <g class="graph-edge">
+              <path d="M275 83 H485" marker-end="url(#defense-arrow)" />
+              <text x="380" y="68" text-anchor="middle">opponent tracked</text>
+              <path d="M485 125 H275" marker-end="url(#defense-arrow)" />
+              <text x="380" y="151" text-anchor="middle">tracking lost</text>
+            </g>
+            <g class="graph-node defense-node">
+              <rect x="55" y="55" width="220" height="94" rx="10" />
+              <text x="165" y="91" text-anchor="middle" class="node-title">GUARD HUB APPROACH</text>
+              <text x="165" y="117" text-anchor="middle">standard post if untracked</text>
+            </g>
+            <g class="graph-node intercept-node">
+              <rect x="485" y="55" width="220" height="94" rx="10" />
+              <text x="595" y="91" text-anchor="middle" class="node-title">INTERCEPT</text>
+              <text x="595" y="117" text-anchor="middle">contest predicted drive line</text>
+            </g>
+          </svg>
+          <figcaption>
+            The defender switches between a safe HUB-side post and a moving
+            intercept based on opponent visibility.
+          </figcaption>
+        </figure>
+      </section>
+      <section class="section">
+        <h2>AD* route planning</h2>
+        <p>
+          The reference field planner follows PathPlanner LocalADStar. Tensor
+          training uses a batched GPU grid search derived from the same
+          8-connected, clearance-aware route costs. It solves every world
+          together with parallel potential updates, accounts for a
+          velocity-predicted defender intercept, and keeps route search and
+          tracking tensors on the training device.
+        </p>
+        <p>
+          Routes use rotated rectangular bumper clearance, field boundaries,
+          trench supports, bump regions, curvature and steering-rate speed caps,
+          and a braking profile. Training replans on a fixed control-step
+          cadence to avoid device synchronization. Playback shows both
+          obstacle-aware AD* reference routes as dotted lines, tinted to match
+          the attacker and defender.
+        </p>
+      </section>
+      <section class="section">
+        <h2>Read the playback</h2>
+        <div class="legend">
+          <span><i class="dot blue"></i>Blue: defender</span
+          ><span><i class="dot red"></i>Red: attacker</span
+          ><span
+            ><i class="dot" style="background: #ff9d91"></i>Warm dotted:
+            attacker AD* route</span
+          ><span
+            ><i class="dot" style="background: #80caff"></i>Cool dotted:
+            available defender AD* route</span
+          ><span>White arrows: commanded effort on both robots</span
+          ><span>Yellow diamond: predicted intercept</span
+          ><span>Gold dots: FUEL · Hub rings: active or inactive</span
+          ><span>Robot corner letters: C collect · S score · F ferry · E explore · G guard · I intercept · D defend</span>
+        </div>
+        <p>
+          Robot colors use FIRST alliance red (#ED1C24) and blue (#0066B3).
+          Policy observations use perceived robot and gamepiece state.
+          Deterministic strategies choose objectives from that state, and AD*
+          plans motion. Dotted routes show the available AD* paths. The playback
+          slider scrubs the selected rollout and the opponent selector chooses
+          the matchup when a saved rollout exists.
+        </p>
+      </section>
+      <section>
+        <h2>Training monitor terms</h2>
+        <ul>
+          <li>
+            <strong>Progress:</strong> environment timesteps completed against
+            the configured target.
+          </li>
+          <li>
+            <strong>Throughput:</strong> simulation transitions processed per
+            second; it varies with workload and hardware utilization.
+          </li>
+          <li>
+            <strong>Accelerator:</strong> device and backend reported by the
+            running training process.
+          </li>
+          <li>
+            <strong>Checkpoint / test:</strong> latest saved policy checkpoint
+            and available evaluation summary.
+          </li>
+          <li>
+            <strong>AD* error:</strong> distance between the learned
+            action/trajectory and the planner reference during imitation-guided
+            training.
+          </li>
+        </ul>
+        <p class="note">
+          Metrics appear only when the selected run has produced the
+          corresponding status or playback data.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

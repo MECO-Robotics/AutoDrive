@@ -67,6 +67,8 @@ class ADStarPlanner:
         self._neighbors = ((1, 0, 1.), (-1, 0, 1.), (0, 1, 1.), (0, -1, 1.),
                            (1, 1, 1.41421356237), (1, -1, 1.41421356237),
                            (-1, 1, 1.41421356237), (-1, -1, 1.41421356237))
+        self.orientation_bins = 8
+        self.last_poses = []
 
     @staticmethod
     def _inside_box(x, y, box, margin):
@@ -95,9 +97,10 @@ class ADStarPlanner:
                 abs(dx * c + dy * s) <= half_l + hx * abs(c) + hy * abs(s) and
                 abs(-dx * s + dy * c) <= half_w + hx * abs(s) + hy * abs(c))
 
-    def _pose_clear(self, x, y):
-        """Exact rotated-rectangle clearance at a chassis center pose."""
-        c, s = cos(self.robot_heading), sin(self.robot_heading)
+    def _pose_clear(self, x, y, heading=None):
+        """Exact rotated-rectangle clearance at a predicted chassis pose."""
+        heading = self.robot_heading if heading is None else heading
+        c, s = cos(heading), sin(heading)
         half_l, half_w = self.robot_length / 2, self.robot_width / 2
         extent_x = half_l * abs(c) + half_w * abs(s)
         extent_y = half_l * abs(s) + half_w * abs(c)
@@ -122,18 +125,45 @@ class ADStarPlanner:
             return False
         return True
 
-    def _swept_rect_clear(self, start, end):
-        """Check a translated, fixed-heading bumper continuously along a segment."""
+    def _swept_rect_clear(self, start, end, start_heading=None, end_heading=None):
+        """Sweep the predicted oriented bumper along a trajectory segment.
+
+        When headings are omitted, predict that the chassis follows the local
+        travel tangent. Explicit headings allow callers to include rotation
+        through a corner as well as translation.
+        """
         distance = hypot(end[0] - start[0], end[1] - start[1])
+        tangent = atan2(end[1] - start[1], end[0] - start[0])
+        start_heading = tangent if start_heading is None else start_heading
+        end_heading = tangent if end_heading is None else end_heading
+        period = (0.5 * 3.141592653589793
+                  if abs(self.robot_length - self.robot_width) <= 1e-5 else
+                  3.141592653589793)
+        heading_delta = (end_heading - start_heading + period / 2) % period - period / 2
         # Small steps bound translation between exact SAT checks; route samples
         # and grid cells can otherwise skip a thin support on a long segment.
-        count = max(1, int(ceil(distance / min(.025, self.resolution / 8))))
+        count = max(1, int(ceil(max(distance, abs(heading_delta) *
+                                    hypot(self.robot_length, self.robot_width) / 2) /
+                                min(.025, self.resolution / 8))))
         for i in range(count + 1):
             t = i / count
             if not self._pose_clear(start[0] + (end[0] - start[0]) * t,
-                                    start[1] + (end[1] - start[1]) * t):
+                                    start[1] + (end[1] - start[1]) * t,
+                                    start_heading + heading_delta * t):
                 return False
         return True
+
+    def _trajectory_clear(self, points):
+        """Validate translation and predicted tangent rotation along a route."""
+        if len(points) < 2:
+            return bool(points) and self._pose_clear(*points[0])
+        headings = []
+        for i, point in enumerate(points):
+            before = points[max(0, i - 1)]
+            after = points[min(len(points) - 1, i + 1)]
+            headings.append(atan2(after[1] - before[1], after[0] - before[0]))
+        return all(self._swept_rect_clear(a, b, headings[i], headings[i + 1])
+                   for i, (a, b) in enumerate(zip(points, points[1:])))
 
     def _cell_blocked(self, ix, iy, dynamic):
         x, y = self._cell_center((ix, iy))
@@ -262,6 +292,13 @@ class ADStarPlanner:
                 continue
             if dx and dy and (self._blocked[x + dx][y] or self._blocked[x][y + dy]):
                 continue
+            # Grid-cell occupancy uses the robot's current heading. Also test
+            # each candidate move with its predicted travel heading so the
+            # long bumper corners cannot clip an obstacle on a diagonal edge.
+            source, target = self._cell_center(node), self._cell_center(nxt)
+            heading = atan2(target[1] - source[1], target[0] - source[0])
+            if not self._swept_rect_clear(source, target, heading, heading):
+                continue
             yield nxt, self._edge_time(node, nxt, distance)
 
     def _predecessors(self, node):
@@ -276,6 +313,10 @@ class ADStarPlanner:
                 continue
             if dx and dy and (self._blocked[pred[0]][y] or
                               self._blocked[x][pred[1]]):
+                continue
+            source, target = self._cell_center(pred), self._cell_center(node)
+            heading = atan2(target[1] - source[1], target[0] - source[0])
+            if not self._swept_rect_clear(source, target, heading, heading):
                 continue
             yield pred, self._edge_time(pred, node, distance)
 
@@ -335,11 +376,11 @@ class ADStarPlanner:
         if len(points) < 2:
             return list(points)
         route = self._curve_path(self._smooth_path(points))
-        if all(self._swept_rect_clear(a, b) for a, b in zip(route, route[1:])):
+        if self._trajectory_clear(route):
             return route
-        # Preserve the discrete, clearance-inflated search route if even the
-        # LOS fallback has an unsafe endpoint or shortcut.
-        return list(points)
+        # Never publish a route that failed the same predictive footprint
+        # check used by search edges. An empty route is a safe planning failure.
+        return []
 
     def _curve_path(self, points):
         """Build PathPlanner-style Bézier waypoints, then sample the curves."""
@@ -401,11 +442,11 @@ class ADStarPlanner:
         for factor in (.4, .28, .18, .1, 0.):
             curve = bezier(factor)
             if (all(self._line_is_clear(a, b) for a, b in zip(curve, curve[1:])) and
-                    all(self._swept_rect_clear(a, b) for a, b in zip(curve, curve[1:]))):
+                    self._trajectory_clear(curve)):
                 return curve
         # A smooth spline may bulge outside the AD* clearance corridor. Try
         # line-of-sight segments with the same full-body sweep validation.
-        if all(self._swept_rect_clear(a, b) for a, b in zip(points, points[1:])):
+        if self._trajectory_clear(points):
             return points
         # The caller retains the original discrete route as the final fallback.
         return points
@@ -487,70 +528,114 @@ class ADStarPlanner:
             self._push(node)
 
     def plan(self, start, goal, *, expansion_budget: int = 12000):
-        """Return the best route found while improving epsilon and repairing changes."""
-        start_cell, goal_cell = self._cell(start), self._cell(goal)
-        s = self._nearest_free(start_cell)
-        g = self._nearest_free(goal_cell)
-        if (s == g and not self._blocked[start_cell[0]][start_cell[1]] and
-                not self._blocked[goal_cell[0]][goal_cell[1]] and
-                self._line_is_clear(start, goal)):
-            return self._finalize_path([tuple(map(float, start)), tuple(map(float, goal))])
-        if self._goal != g or self._start is None:
-            self._reset_search(s, g)
-        else:
-            if self._start != s:
-                self._start = s
-                for node in self._incons:
-                    self._push(node)
-                self._incons.clear(); self._closed.clear()
-            else:
-                self._start = s
-            self._rekey_open()
-        spent = 0
-        while spent < expansion_budget:
-            expanded = self._compute_or_improve_path(expansion_budget - spent)
-            spent += expanded
-            if self._epsilon <= 1.:
+        """Plan a swept-footprint route in discretized SE(2).
+
+        Square symmetry reduces chassis orientation to a quarter-turn. Rectangular
+        footprints retain their half-turn symmetry. ``last_poses`` stores
+        (x, y, theta) samples; the return value remains the legacy XY route.
+        """
+        start = tuple(map(float, start[:2]))
+        goal = tuple(map(float, goal[:2]))
+        self.last_poses = []
+        period = (0.5 * 3.141592653589793
+                  if abs(self.robot_length - self.robot_width) <= 1e-5 else
+                  3.141592653589793)
+        step = period / self.orientation_bins
+        angle_bin = int(round((self.robot_heading % period) / step)) % self.orientation_bins
+        initial_heading = angle_bin * step
+        sc, gc = self._cell(start), self._cell(goal)
+        sx, sy = self._cell_center(sc)
+        gx, gy = self._cell_center(gc)
+        if not self._pose_clear(*start, self.robot_heading):
+            return []
+        if not self._swept_rect_clear(start, (sx, sy), self.robot_heading,
+                                      self.robot_heading):
+            return []
+        if not self._swept_rect_clear((sx, sy), (sx, sy), self.robot_heading,
+                                      initial_heading):
+            return []
+
+        origin = (sc[0], sc[1], angle_bin)
+        def heuristic(ix, iy):
+            dx, dy = abs(ix - gc[0]), abs(iy - gc[1])
+            return self.resolution * (max(dx, dy) + (1.41421356237 - 1.) * min(dx, dy))
+
+        frontier = []
+        serial = 0
+        heappush(frontier, (heuristic(sc[0], sc[1]), serial, origin))
+        costs = {origin: 0.}
+        parent = {}
+        closed = set()
+        terminal = None
+
+        expanded = 0
+        while frontier and expanded < max(1, int(expansion_budget)):
+            _, _, state = heappop(frontier)
+            if state in closed:
+                continue
+            closed.add(state)
+            ix, iy, it = state
+            x, y = self._cell_center((ix, iy))
+            theta = it * step
+            if (ix, iy) == gc and self._swept_rect_clear((x, y), goal, theta, theta):
+                terminal = state
                 break
-            if not self._open and not self._incons:
-                break
-            self._epsilon = max(1., self._epsilon - .5)
-            for node in self._incons:
-                self._push(node)
-            self._incons.clear(); self._closed.clear()
-            self._rekey_open()
-            if expanded == 0 and spent >= expansion_budget:
-                break
-        if self._g.get(s, float("inf")) == float("inf"):
-            # Never teach a direct line through a blocked structure when the
-            # search budget cannot produce a collision-free route.
-            return [tuple(map(float, start))]
-        best = [s]
-        seen = {s}
-        while best[-1] != g:
-            node = best[-1]
-            # Match PathPlanner's extractPath(): follow the neighboring node
-            # with the smallest cost-to-go (g), rather than reintroducing the
-            # local edge heuristic during extraction.
-            options = [(self._g.get(nxt, float("inf")), nxt)
-                       for nxt, _ in self._neighbors_of(node)]
-            if not options:
-                break
-            _, nxt = min(options)
-            if nxt in seen:
-                break
-            best.append(nxt); seen.add(nxt)
-        points = [self._cell_center(node) for node in best]
-        # A collision can leave the chassis center inside an inflated blocked
-        # cell. Starting the smoothed route at that invalid pose causes LOS
-        # checks to truncate it to one point. Begin at the nearest free cell
-        # center so the follower has a valid escape direction immediately.
-        if not self._blocked[start_cell[0]][start_cell[1]]:
-            points[0] = (float(start[0]), float(start[1]))
-        if (not self._blocked[goal_cell[0]][goal_cell[1]] and
-                self._line_is_clear(points[-1], goal)):
-            points[-1] = (float(goal[0]), float(goal[1]))
-        return self._finalize_path(points)
+            expanded += 1
+            transitions = []
+            for dx, dy, scale in self._neighbors:
+                nx, ny = ix + dx, iy + dy
+                if not (0 <= nx < self.nx and 0 <= ny < self.ny):
+                    continue
+                target = self._cell_center((nx, ny))
+                if not self._swept_rect_clear((x, y), target, theta, theta):
+                    continue
+                transitions.append(((nx, ny, it), self.resolution * scale))
+            for turn in (-1, 1):
+                next_it = (it + turn) % self.orientation_bins
+                next_theta = next_it * step
+                if self._swept_rect_clear((x, y), (x, y), theta, next_theta):
+                    # Rotation has a small positive cost to avoid gratuitous
+                    # spin while keeping the heuristic purely translational.
+                    transitions.append(((ix, iy, next_it), self.resolution * .2))
+            for nxt, edge_cost in transitions:
+                new_cost = costs[state] + edge_cost
+                if new_cost >= costs.get(nxt, float("inf")):
+                    continue
+                costs[nxt] = new_cost
+                parent[nxt] = state
+                serial += 1
+                heappush(frontier, (new_cost + heuristic(nxt[0], nxt[1]),
+                                    serial, nxt))
+
+        if terminal is None:
+            return []
+        states = [terminal]
+        while states[-1] != origin:
+            states.append(parent[states[-1]])
+        states.reverse()
+        poses = [(start[0], start[1], self.robot_heading)]
+        poses.append((sx, sy, initial_heading))
+        for ix, iy, it in states[1:]:
+            px, py = self._cell_center((ix, iy))
+            poses.append((px, py, it * step))
+        if hypot(poses[-1][0] - goal[0], poses[-1][1] - goal[1]) > 1e-7:
+            poses.append((goal[0], goal[1], poses[-1][2]))
+
+        # Greedy SE(2) shortcutting: interpolate both translation and angle,
+        # accepting a shortcut only after checking its complete swept square.
+        compact = [poses[0]]
+        anchor = 0
+        while anchor < len(poses) - 1:
+            chosen = anchor + 1
+            for candidate in range(len(poses) - 1, anchor, -1):
+                a, b = poses[anchor], poses[candidate]
+                if self._swept_rect_clear(a[:2], b[:2], a[2], b[2]):
+                    chosen = candidate
+                    break
+            compact.append(poses[chosen])
+            anchor = chosen
+        self.last_poses = compact
+        return [(pose[0], pose[1]) for pose in compact]
 
     @staticmethod
     def predict_intercept(attacker, goal, defender, defender_velocity,

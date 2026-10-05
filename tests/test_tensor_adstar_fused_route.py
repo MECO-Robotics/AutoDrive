@@ -145,3 +145,37 @@ def test_fused_route_matches_torch_and_preserves_inactive_rows(
         assert torch.equal(getattr(fused, name), getattr(reference, name)), name
     torch.testing.assert_close(fused.last_speed_profile, reference.last_speed_profile,
                                rtol=2e-5, atol=2e-5)
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and torch.version.hip),
+                    reason="requires the optional ROCm fused AD* kernel")
+def test_fused_full_batch_accepts_strided_simulator_start(monkeypatch):
+    extension = _hip_adstar_extension()
+    if extension is None:
+        pytest.skip("optional AD* HIP extension could not be built")
+    batch = 8
+    planner = _planner(batch, False)
+    storage = torch.zeros((batch, 3), device="cuda")
+    storage[:, 0] = torch.linspace(1.2, 2.3, batch, device="cuda")
+    storage[:, 1] = torch.linspace(1.1, 7.1, batch, device="cuda")
+    start = storage[:, :2]
+    assert not start.is_contiguous()
+    goal = torch.stack((torch.full((batch,), 14.8, device="cuda"),
+                        torch.linspace(7.1, 1.1, batch, device="cuda")), -1)
+    size = torch.full((batch,), .8, device="cuda")
+    heading = torch.zeros(batch, device="cuda")
+    calls = []
+
+    class _DispatchSpy:
+        def __getattr__(self, name):
+            return getattr(extension, name)
+
+        def fused_route(self, *args):
+            calls.append(True)
+            raise RuntimeError("fused route dispatch reached")
+
+    monkeypatch.setattr(adstar_module, "_HIP_ADSTAR_EXTENSION", _DispatchSpy())
+    monkeypatch.setattr(adstar_module, "_HIP_ADSTAR_EXTENSION_ATTEMPTED", True)
+    with pytest.raises(RuntimeError, match="fused route dispatch reached"):
+        planner.plan(start, goal, heading, size, size, active_mask=None)
+    assert calls == [True]

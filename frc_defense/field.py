@@ -21,6 +21,29 @@ BUMP_SPEED_SCALE = 0.88
 BUMP_ACCELERATION_SCALE = 0.75
 
 
+def midfield_respawn_points(count: int, field_length: float,
+                            field_width: float) -> list[tuple[float, float]]:
+    """Return stable spawn points within the central neutral-pile footprint."""
+    count = max(0, int(count))
+    if count == 0:
+        return []
+    # Scored fuel returns to the central neutral pile (72 x 206 in), rather
+    # than appearing anywhere across the full midfield corridor.
+    center_x, center_y = float(field_length) / 2, float(field_width) / 2
+    half_depth, half_length = 0.915, 2.615
+    x_min, x_max = center_x - half_depth, center_x + half_depth
+    y_min, y_max = center_y - half_length, center_y + half_length
+    span_x, span_y = x_max - x_min, y_max - y_min
+    points = []
+    for index in range(count):
+        # A deterministic low-discrepancy scatter avoids a visible grid while
+        # keeping the lookup table stable across resets and devices.
+        x = x_min + span_x * ((index * 0.6180339887498949) % 1.0)
+        y = y_min + span_y * ((index * 0.7548776662466927) % 1.0)
+        points.append((x, y))
+    return points
+
+
 @dataclass(frozen=True)
 class FieldBox:
     name: str
@@ -71,6 +94,17 @@ def rebuilt_field(length: float = 651.22 * INCH,
         FieldBox("blue_tower", length - tower_x, center_y, tower_length,
                  tower_width, "tower-blue"),
     ))
+    # Only the two tall uprights are ground-level tower obstacles. They sit at
+    # the field-facing end of the tower base, 32.25in apart across its width.
+    upright_thickness, upright_depth = 1.5 * INCH, 3.5 * INCH
+    upright_spacing = 32.25 * INCH
+    upright_x = tower_length - upright_depth / 2
+    for alliance, x in (("red", upright_x), ("blue", length - upright_x)):
+        for side, y in (("lower", center_y - upright_spacing / 2),
+                        ("upper", center_y + upright_spacing / 2)):
+            boxes.append(FieldBox(f"{alliance}_tower_upright_{side}", x, y,
+                                  upright_depth, upright_thickness,
+                                  f"tower-{alliance}"))
     # Arms run inward from the long guardrails until they meet the bumps.
     # Their 65.65in span is across the field; the 47in depth runs downfield.
     trench_x = hub_x
@@ -111,11 +145,12 @@ def rebuilt_field(length: float = 651.22 * INCH,
 
 
 def static_collision_boxes(boxes: tuple[FieldBox, ...]) -> tuple[FieldBox, ...]:
-    """Return ground-blocking structures, excluding bumps and overhead arms."""
+    """Return ground-blocking structures, excluding driveable field zones."""
     return tuple(box for box in boxes
-                 if not box.name.startswith(("red_bump", "blue_bump",
-                                             "red_trench", "blue_trench")) or
-                 "_trench_support_" in box.name)
+                 if not box.name.endswith(("_depot", "_tower")) and
+                 (not box.name.startswith(("red_bump", "blue_bump",
+                                            "red_trench", "blue_trench")) or
+                  "_trench_support_" in box.name))
 
 
 def bump_boxes(boxes: tuple[FieldBox, ...]) -> tuple[FieldBox, ...]:
