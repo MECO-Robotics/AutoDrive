@@ -116,58 +116,6 @@ class TensorDefenseOpponentMixin:
                 torch.where((action_class==4)[:,None],approach,
                     torch.where((action_class==6)[:,None],tactical,position)))
 
-    def _strategic_opponent_target(self,action_class,*,_candidate_data=None):
-        """Resolve the opponent's candidate choice to an AD* objective."""
-        position=self.sim.pose[:,1,:2]
-        candidates,valid,_=(self._fuel_candidates(1) if _candidate_data is None
-                            else _candidate_data)
-        rows=torch.arange(self.n,device=self.device)
-        if self.task=="defense":
-            side=1
-            hub=self.hub_centers[side].expand(self.n,-1)
-            direction=position-hub
-            direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            radius=.595+.5*torch.sqrt(self.sim.length[:,1].square()+self.sim.width[:,1].square())+.02
-            approach=hub+direction*radius[:,None]
-            slot=action_class.clamp(0,3)
-            points,_,_=self._perceived_fuel(1)
-            collect=points[rows,candidates[rows,slot]]
-            collect=torch.where(valid[rows,slot,None],collect,approach)
-            direction=hub-position
-            direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            return torch.where((action_class<=3)[:,None],collect,
-                torch.where((action_class==4)[:,None],approach,
-                    torch.where((action_class==6)[:,None],position+direction*1.5,position)))
-
-        attacker_pose,attacker_velocity=self._observed_robot(1,0)
-        defender=position
-        attacker=attacker_pose[:,:2]
-        attacker_velocity=attacker_velocity[:,:2]
-        speed=attacker_velocity.norm(dim=-1,keepdim=True)
-        to_defender=defender-attacker
-        fallback=to_defender/to_defender.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-        heading=torch.where(speed>.15,attacker_velocity/speed.clamp_min(.15),fallback)
-        hubs=self.hub_centers[None,:,:]-attacker[:,None,:]
-        hub_distance=hubs.norm(dim=-1).clamp_min(1e-6)
-        likely=(heading[:,None,:]*hubs/hub_distance[...,None]).sum(-1).argmax(-1)
-        route=self.hub_centers[likely]-attacker
-        route_distance=route.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-        block_lane=attacker+route/route_distance*torch.minimum(route_distance*.35,
-            torch.full_like(route_distance,.9))
-        eta=((defender-attacker).norm(dim=-1,keepdim=True)/self.sim.speed[:,1,None].clamp_min(.1)).clamp(0.,1.25)
-        intercept=attacker+attacker_velocity*eta+heading*.55
-        slot=(action_class-1).clamp(0,3)
-        points,_,_=self._perceived_fuel(1)
-        candidate=points[rows,candidates[rows,slot]]
-        deny=torch.where(valid[rows,slot,None],candidate,block_lane)
-        target=torch.where((action_class==0)[:,None],intercept,
-            torch.where(((action_class>=1)&(action_class<=4))[:,None],deny,
-                torch.where((action_class==5)[:,None],block_lane,
-                    torch.where((action_class==6)[:,None],attacker+attacker_velocity*.35,intercept))))
-        fuel_action=(action_class>=1)&(action_class<=4)
-        available=self._opponent_track_valid[:,1]|fuel_action
-        return torch.where(available[:,None],target,position)
-
     def _adstar_opponent_velocity(self,target,active_mask=None):
         """Plan robot 1's route to a game-state objective."""
         planner=(self._adstar_planners if self.task=="defense"

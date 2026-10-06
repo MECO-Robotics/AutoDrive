@@ -44,7 +44,7 @@ def test_pickup_respects_per_robot_hopper_capacity():
 def test_pickup_and_pass_clear_tracks_once_without_touching_inactive_worlds():
     env = TensorThreeVsThreeEnv(
         num_envs=2, device="cpu", seed=140, horizon=1, randomize=False,
-        fuel_count=96, control_modes=("nn", "none", "none", "none", "none", "none"),
+        fuel_count=96, control_modes=("deterministic", "none", "none", "none", "none", "none"),
         perception_dropout=0, position_noise=0, velocity_noise=0,
     )
     active = torch.tensor([True, False], device=env.device)

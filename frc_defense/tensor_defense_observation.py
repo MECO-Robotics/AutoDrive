@@ -176,25 +176,6 @@ class TensorDefenseObservationMixin:
         self._track_mask &= ~(expired&active_mask[:,None,None])
         self._opponent_track_valid &= ~((self._opponent_track_age>self.perception_track_timeout)&active_mask[:,None])
 
-    def _role_swapped_observation(self, *, return_candidate_data=False):
-        """Build robot 1's role-swapped input for direct and strategic policies."""
-        if self.action_mode=="strategic":
-            return self._strategic_observation(1,
-                return_candidate_data=return_candidate_data)
-        p,v=self.sim.pose,self.sim.velocity
-        observed_opponent,observed_velocity=self._observed_robot(1,0)
-        relative_goal=self._opponent_track_features(1)
-        radius=torch.full_like(self.goal_radius,.595)
-        raw=torch.cat((p[:,1],v[:,1],observed_opponent,observed_velocity,relative_goal,radius[:,None],
-            torch.full((self.n,1),self.sim.field_length,device=self.device),
-            torch.full((self.n,1),self.sim.field_width,device=self.device),
-            self.sim.length[:,[1,0]],self.sim.width[:,[1,0]],self.sim.accel[:,[1,0]]/10.,
-            self._obstacle_features(robot_index=1)),-1)
-        if self.normalize_observations:
-            normalize_tensor_observation_batch_in_place(raw,self.sim.field_length,self.sim.field_width,
-                self.sim.speed[:,[1,0]],self.sim.omega_limit[:,[1,0]])
-        return raw
-
     def _fuel_candidates(self, focal):
         from . import tensor_sim as _tensor_sim
         points,_,free=self._perceived_fuel(focal)

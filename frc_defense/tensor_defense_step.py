@@ -16,7 +16,7 @@ class TensorDefenseStepMixin:
     """Advance the environment and assemble per-step reward and info."""
 
     def step(self,action,active_mask=None,*,_active_count=None,_return_info=True,
-             _opponent_policy_decision=None,_capture_observation=True):
+             _capture_observation=True):
         full_batch=active_mask is None
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
@@ -33,8 +33,6 @@ class TensorDefenseStepMixin:
             return (self._last_observation,torch.zeros(self.n,device=self.device),
                     torch.zeros(self.n,device=self.device,dtype=torch.bool),
                     torch.zeros(self.n,device=self.device,dtype=torch.bool),{})
-        if _opponent_policy_decision is None:
-            _opponent_policy_decision=True
         a=torch.as_tensor(action,device=self.device,dtype=self.sim.pose.dtype)
         if self.action_mode=="strategic":
             if a.ndim==2 and a.shape[-1]==1:a=a.squeeze(-1)
@@ -168,59 +166,6 @@ class TensorDefenseStepMixin:
             oppxy=torch.stack((theta.cos()*speed,theta.sin()*speed),-1)
             oppxy=self._opponent_velocity_command(oppxy,active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
-            commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
-            return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
-                                     _return_info,_capture_observation)
-        elif kind=="learned" and callable(self.learned_opponent_fn):
-            learned_action_kind=getattr(self,"learned_opponent_action_kind","categorical")
-            if self.action_mode=="strategic" and learned_action_kind=="categorical":
-                if _opponent_policy_decision:
-                    if self.reuse_strategic_opponent_candidates:
-                        (opponent_observation,opponent_candidate_data,
-                         opponent_action_mask)=self._role_swapped_observation(
-                            return_candidate_data=True)
-                    else:
-                        opponent_observation=self._role_swapped_observation()
-                        opponent_candidate_data=self._fuel_candidates(1)
-                        opponent_action_mask=self.strategic_action_mask(
-                            focal=1,_candidate_data=opponent_candidate_data)
-                    learned=self.learned_opponent_fn(opponent_observation)
-                    action_class=self._decode_learned_strategic_action(
-                        learned,opponent_action_mask)
-                    valid=opponent_action_mask.gather(1,action_class[:,None]).squeeze(1)
-                    fallback=opponent_action_mask.to(torch.int64).argmax(-1)
-                    action_class=torch.where(valid,action_class,fallback)
-                    self._last_learned_opponent_action=torch.where(
-                        active_mask,action_class,self._last_learned_opponent_action)
-                else:
-                    opponent_candidate_data=self._fuel_candidates(1)
-                    opponent_action_mask=self.strategic_action_mask(
-                        focal=1,_candidate_data=opponent_candidate_data)
-                    action_class=self._last_learned_opponent_action
-                    valid=opponent_action_mask.gather(1,action_class[:,None]).squeeze(1)
-                    fallback=opponent_action_mask.to(torch.int64).argmax(-1)
-                    action_class=torch.where(valid,action_class,fallback)
-                target=self._strategic_opponent_target(
-                    action_class,_candidate_data=opponent_candidate_data)
-                oppxy=self._adstar_opponent_velocity(target,active_mask)
-                dumping=(action_class==4) if self.task=="defense" else torch.zeros_like(action_class,dtype=torch.bool)
-                omega=self._face_hub_omega(1,dumping)
-                opp=torch.cat((oppxy,omega[:,None]),dim=-1)
-                commands=torch.stack((own,opp),dim=1)
-                self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
-                return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
-                                         _return_info,_capture_observation)
-            learned=torch.as_tensor(self.learned_opponent_fn(self._role_swapped_observation()),
-                                     device=self.device,dtype=self.sim.pose.dtype)
-            learned=torch.nan_to_num(learned).clamp(-1,1)
-            if learned.shape==(3,):learned=learned.expand(self.n,3)
-            if tuple(learned.shape)!=(self.n,3):
-                raise ValueError(f"learned_opponent_fn must return {(self.n,3)} normalized controls")
-            opp=torch.cat((learned[:,:2]*self.sim.speed[:,1,None],
-                (learned[:,2]*self.sim.omega_limit[:,1])[:,None]),dim=-1)
-            oppxy=self._opponent_velocity_command(opp[:,:2],active_mask)
-            opp=torch.cat((oppxy,opp[:,2:]),dim=-1)
             commands=torch.stack((own,opp),dim=1)
             self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
             return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
@@ -415,12 +360,12 @@ class TensorDefenseStepMixin:
             info["controlled_adstar_path"] = self._adstar_tactical_planner.last_path
             info["controlled_adstar_path_lengths"] = self._adstar_tactical_planner.last_lengths
         opponent_kind=self.opponent.get("value","") if isinstance(self.opponent,dict) else self.opponent
-        if self._adstar_planners is not None and opponent_kind in ("adstar", "learned"):
+        if self._adstar_planners is not None and opponent_kind == "adstar":
             info["adstar_paths"]=self._adstar_planners.last_path
             info["adstar_path_lengths"]=self._adstar_planners.last_lengths
             info["predicted_intercepts"]=self._adstar_planners.last_intercept
             info["predicted_intercept_times"]=self._adstar_planners.last_intercept_time
-        elif self._adstar_defender_planners is not None and opponent_kind in ("guard", "adstar_defender", "learned"):
+        elif self._adstar_defender_planners is not None and opponent_kind in ("guard", "adstar_defender"):
             info["adstar_paths"]=self._adstar_defender_planners.last_path
             info["adstar_path_lengths"]=self._adstar_defender_planners.last_lengths
         if self._adstar_tactical_planner is not None:

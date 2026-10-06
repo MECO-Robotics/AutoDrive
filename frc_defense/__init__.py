@@ -1,11 +1,8 @@
-"""FRC learned robot defense and counter-defense toolkit."""
-from .types import (ChassisCommand, CounterDefensePolicy, DefensePolicy, Objective, Obstacle,
+"""FRC robot defense with deterministic offense simulation."""
+from .types import (ChassisCommand, DefensePolicy, Objective, Obstacle,
                     RobotParameters, RobotState, WorldState)
-from .policy import PPOPolicy, TensorPPOPolicy
 from .runtime import CommandResult, SafePolicyRunner
-from .sim import DCMotorParameters, SwerveParameters, VectorizedSimulator, make_env
 
-__all__ = ["ChassisCommand", "CounterDefensePolicy", "DefensePolicy", "Objective",
-           "RobotParameters", "RobotState", "WorldState", "Obstacle", "PPOPolicy", "CommandResult",
-           "SafePolicyRunner", "DCMotorParameters", "SwerveParameters", "VectorizedSimulator",
-           "make_env", "TensorPPOPolicy"]
+__all__ = ["ChassisCommand", "DefensePolicy", "Objective",
+           "RobotParameters", "RobotState", "WorldState", "Obstacle", "CommandResult",
+           "SafePolicyRunner"]

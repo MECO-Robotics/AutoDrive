@@ -234,7 +234,6 @@ class TensorDefenseResetMixin:
         self._move_adstar_defenders_to_clear_start()
         self._place_defenders_near_clear_adstar_paths()
         self._last_hub_zone.zero_(); self._last_strategic_action.zero_()
-        self._last_learned_opponent_action.zero_()
         self._planner_tick.fill_(self.adstar_replan_interval-1)
         self._planner_tick_scalar=self.adstar_replan_interval-1
         self._planner_tick_aligned=True
@@ -293,9 +292,6 @@ class TensorDefenseResetMixin:
         self._move_adstar_defenders_to_clear_start(mask)
         self._place_defenders_near_clear_adstar_paths(mask)
         self._last_strategic_action=torch.where(mask,torch.zeros_like(self._last_strategic_action),self._last_strategic_action)
-        self._last_learned_opponent_action=torch.where(mask,
-            torch.zeros_like(self._last_learned_opponent_action),
-            self._last_learned_opponent_action)
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
                       self.fuel_denied_event,self.fuel_abandoned_event):

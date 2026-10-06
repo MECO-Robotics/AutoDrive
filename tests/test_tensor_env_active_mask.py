@@ -79,39 +79,6 @@ class TensorEnvActiveMaskTests(unittest.TestCase):
         self.assertTrue(strategic.reuse_strategic_own_candidates)
         self.assertFalse(direct.reuse_strategic_own_candidates)
 
-    def test_role_swapped_strategic_observation_reuses_candidate_mask(self):
-        env = TensorDefenseEnv(
-            num_envs=2, task="defense", device="cpu", opponent="learned",
-            action_mode="strategic", randomize=False, seed=82,
-            observation_noise=0., observation_dropout=0.,
-            perception_config={"detection_dropout": 0., "position_noise_m": 0.,
-                               "velocity_noise_mps": 0.},
-        )
-        reference_observation = env._role_swapped_observation()
-        reference_candidates = env._fuel_candidates(1)
-        reference_mask = env.strategic_action_mask(1, _candidate_data=reference_candidates)
-        observation, candidates, action_mask = env._role_swapped_observation(
-            return_candidate_data=True)
-        torch.testing.assert_close(observation, reference_observation, rtol=0, atol=0)
-        for actual, expected in zip(candidates, reference_candidates):
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        torch.testing.assert_close(action_mask, reference_mask, rtol=0, atol=0)
-
-        candidate_calls = []
-        original_candidates = env._fuel_candidates
-
-        def count_candidates(focal):
-            candidate_calls.append(focal)
-            return original_candidates(focal)
-
-        env._fuel_candidates = count_candidates
-        env.learned_opponent_fn = lambda _obs: torch.zeros(
-            env.n, device=env.device, dtype=torch.long)
-        env.learned_opponent_action_dim = 8
-        env.step(torch.zeros(env.n, device=env.device, dtype=torch.long),
-                 _return_info=False)
-        self.assertEqual(candidate_calls.count(1), 1)
-
     def test_own_strategic_candidate_cache_preserves_step_and_avoids_rerank(self):
         kwargs = dict(
             num_envs=2, task="counter_defense", device="cpu", opponent="guard",

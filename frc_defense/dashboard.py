@@ -158,17 +158,11 @@ def create_handler(run_dir: Path):
                             continue
                         task=playback.get("task")
                         attacker=defender=None
-                        if playback.get("matchup") == "nn-vs-nn":
-                            attacker,defender="nn","nn"
-                        elif task == "adstar_attacker_defense":
+                        if task == "adstar_attacker_defense":
                             attacker,defender="adstar","nn"
-                        elif task == "counter_defense" and status.get("opponent") == "adstar_defender":
-                            attacker,defender="nn","adstar_defender"
-                        elif task == "counter_defense" and status.get("opponent","guard") == "guard":
-                            attacker,defender="nn","guard"
                         elif (task == "defense" and status.get("algorithm") == "generational"
                               and "adstar" in status.get("opponents", [])):
-                            # Mixed generational playback is recorded against AD*.
+                            # Defense training records deterministic scripted attack.
                             attacker,defender="adstar","nn"
                         if attacker is None:
                             continue
@@ -187,9 +181,7 @@ def create_handler(run_dir: Path):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/game-evaluations":
-                labels={"scripted_offense_adstar":"Scripted offense + AD*",
-                        "learned_offense_adstar":"Learned offense + AD*",
-                        "scripted_defense_adstar":"Scripted defense + AD*",
+                labels={"scripted_defense_adstar":"Scripted defense + AD*",
                         "learned_defense_adstar":"Learned defense + AD*"}
                 roots=(run_dir.parent / "metrics", run_dir.parent.parent / "metrics", run_dir / "metrics")
                 entries=[{"id":name,"label":label} for name,label in labels.items()
@@ -199,8 +191,7 @@ def create_handler(run_dir: Path):
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/game-evaluation-playback":
                 name=params.get("name",[""])[0]
-                allowed={"scripted_offense_adstar","learned_offense_adstar",
-                         "scripted_defense_adstar","learned_defense_adstar"}
+                allowed={"scripted_defense_adstar","learned_defense_adstar"}
                 if name not in allowed:
                     self.send_error(400,"unknown game evaluation")
                     return
@@ -246,7 +237,7 @@ def create_handler(run_dir: Path):
                 if scenario_task not in ("counter_defense", "defense", "3v3"):
                     self.send_error(400,"task must be 3v3")
                     return
-                control_modes=[params.get(f"robot{i}",["nn" if i < 3 else "deterministic"])[0]
+                control_modes=[params.get(f"robot{i}",["offense_deterministic" if i < 3 else "defense_deterministic"])[0]
                                for i in range(6)]
                 robot_types=[params.get(f"robot_type{i}",["dumper"])[0]
                              for i in range(6)]

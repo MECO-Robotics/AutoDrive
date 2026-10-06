@@ -23,9 +23,9 @@ def _run_case(args, root: Path, name: str, reuse: bool) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     transitions = args.num_envs * args.rollout_steps
     result = _train_once(
-        task="counter_defense", timesteps=transitions, output=output,
+        task="defense", timesteps=transitions, output=output,
         seed=args.seed, num_envs=args.num_envs, device=torch.device(args.device),
-        opponent="guard", initial_checkpoint=args.initial_checkpoint,
+        opponent="offense", initial_checkpoint=args.initial_checkpoint,
         rollout_steps=args.rollout_steps, epochs=args.epochs,
         minibatch_size=args.minibatch_size, learning_rate=3e-4, gamma=.993,
         gae_lambda=.95, clip_coef=.2, value_coef=.5, entropy_coef=.01,

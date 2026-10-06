@@ -69,9 +69,5 @@ class ChassisCommand:
     omega: float = 0.0
 
 
-class CounterDefensePolicy(Protocol):
-    def predict(self, state: WorldState, params: RobotParameters, goal: Objective) -> ChassisCommand: ...
-
-
 class DefensePolicy(Protocol):
     def predict(self, state: WorldState, params: RobotParameters, goal: Objective) -> ChassisCommand: ...

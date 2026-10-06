@@ -29,11 +29,11 @@ except ImportError as exc:  # keep the module's import error actionable
 
 from .tensor_training_runtime import (
     ACTION_DIM, OBS_DIM, OBS_NORMALIZATION, STRATEGIC_ACTION_DIM,
-    STRATEGIC_LEGACY_OBS_DIM, MIXED_DEFENSE_OPPONENTS, STATIC_OPPONENT_FRACTION,
+    MIXED_DEFENSE_OPPONENTS, STATIC_OPPONENT_FRACTION,
+    DEFENSE_TRAINING_OPPONENTS,
     CURRICULUM_STAGES, ActorCritic, _DDPScore, _curriculum_stage,
     _curriculum_opponents, _device, _env, _reset_obs, _held_action_interval,
-    _gae_advantages, _task_opponent, _adstar_reference, _reference_action,
-    _reference_potential, _reference_tracking_error,
+    _gae_advantages, _task_opponent,
 )
 from . import tensor_training_runtime as _runtime
 
@@ -51,12 +51,6 @@ def _distributed_state(device: str | torch.device) -> tuple[torch.device, int, i
         globals()["_PPO_CONTROL_GROUP_OWNED"] = _runtime._PPO_CONTROL_GROUP_OWNED
 
 
-def _attach_historical_opponent(env, task: str, device: torch.device,
-                               checkpoint_path: str | Path | None = None) -> bool:
-    return _runtime._attach_historical_opponent(
-        env, task, device, checkpoint_path, actor_critic_cls=ActorCritic)
-
-
 def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 num_envs: int, device: torch.device, opponent: str,
                 initial_checkpoint: str | Path | None,
@@ -66,8 +60,6 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 max_grad_norm: float, l2_coef: float, horizon: int,
                 architecture: str = "direct", curriculum: bool = True,
                 strategic_rate_hz: float = 4.0,
-                learned_opponent_checkpoint: str | Path | None = None,
-                learned_opponent_checkpoints: list[str | Path] | None = None,
                 capture_training_playback: bool | None = None,
                 reuse_strategic_own_candidates: bool | None = None,
                 ppo_sparse_delayed_observation_capture: bool = False,
@@ -83,8 +75,6 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
         architecture=architecture, curriculum=curriculum,
         strategic_rate_hz=strategic_rate_hz,
-        learned_opponent_checkpoint=learned_opponent_checkpoint,
-        learned_opponent_checkpoints=learned_opponent_checkpoints,
         capture_training_playback=capture_training_playback,
         reuse_strategic_own_candidates=reuse_strategic_own_candidates,
         ppo_sparse_delayed_observation_capture=ppo_sparse_delayed_observation_capture,
@@ -92,7 +82,7 @@ def _train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
 
 
 
-def train(task: str = "counter_defense", timesteps: int = 1_000_000,
+def train(task: str = "defense", timesteps: int = 1_000_000,
           output: str | Path = "checkpoints/tensor-ppo", *, seed: int = 7,
           num_envs: int = 1024, device: str = "cuda", opponent: str | None = None,
           initial_checkpoint: str | Path | None = None,
@@ -105,6 +95,10 @@ def train(task: str = "counter_defense", timesteps: int = 1_000_000,
           architecture: str = "strategic_adstar", strategic_rate_hz: float = 4.,
           evaluation_episodes: int = 4, evaluation_workers: int = 1) -> dict[str, Any]:
     """Train with PPO and a generation-managed opponent/checkpoint population."""
+    if task != "defense":
+        raise ValueError("only defense policies are trainable; offense is deterministic")
+    if opponent is not None and opponent not in (*DEFENSE_TRAINING_OPPONENTS, "mixed"):
+        raise ValueError("opponent must be a deterministic defense-training baseline")
     if int(os.environ.get("WORLD_SIZE", "1")) > 1 and algorithm != "generational":
         raise ValueError("torchrun multi-GPU training is supported only with algorithm='generational'")
     if algorithm == "generational":
@@ -161,49 +155,6 @@ def train_3v3_generation(task: str, generation: int, output: str | Path, *,
         max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
         strategic_rate_hz=strategic_rate_hz)
 
-
-
-def _opponent_population_paths(task: str, output: Path) -> list[Path]:
-    """Find current and retained checkpoints for the opposing role."""
-    peer_name = ("rebuilt-gamepiece-offense" if task == "defense"
-                 else "rebuilt-gamepiece-defense")
-    peer = output.parent / peer_name
-    roots = [peer]
-    default_roots = (("rebuilt-gamepiece-offense", "rebuilt-counter-defense")
-                     if task == "defense" else
-                     ("rebuilt-gamepiece-defense", "rebuilt-defense-generational", "rebuilt-defense"))
-    roots.extend(Path("checkpoints") / name for name in default_roots)
-    paths: list[Path] = []
-    for root in roots:
-        current = root / "policy.pt"
-        if current.is_file():
-            paths.append(current)
-        paths.extend(sorted((root / "opponent-population").glob("*.pt")))
-        paths.extend(sorted((root / "historical-opponents").glob("*.pt")))
-    # Include other explicitly role-tagged historical policies without loading
-    # unrelated checkpoint files into the opponent pool.
-    opponent_task = "defense" if task == "counter_defense" else "counter_defense"
-    for current in Path("checkpoints").glob("*/policy.pt"):
-        for metadata_path in (current.parent / "metadata.json", current.parent / "status.json"):
-            try:
-                metadata = json.loads(metadata_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if metadata.get("task") == opponent_task:
-                paths.append(current)
-                break
-    loadable: list[Path] = []
-    for path in dict.fromkeys(path.resolve() for path in paths if path.is_file()):
-        try:
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-            obs_dim = int(payload.get("obs_dim", OBS_DIM))
-            action_dim = int(payload.get("action_dim", ACTION_DIM))
-            if ("model_state_dict" in payload and obs_dim in
-                    (OBS_DIM, STRATEGIC_LEGACY_OBS_DIM, 137) and action_dim in (3, 8)):
-                loadable.append(path)
-        except (OSError, RuntimeError, KeyError, ValueError, EOFError):
-            continue
-    return loadable
 
 
 def _checkpoint_vector(path: Path) -> torch.Tensor:
@@ -322,11 +273,13 @@ def generational_train(task: str, generations: int, output: str | Path,
             # releases the local process; torchrun tears down failed peers.
             dist.destroy_process_group()
 
-def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
+def evaluate(checkpoint: str | Path, *, task: str = "defense",
              episodes: int = 32, seed: int = 1000, num_envs: int = 32,
              device: str = "cuda", opponent: str = "random",
              output: str | Path = "metrics/tensor-evaluation.json",
              horizon: int = 8000) -> dict[str, Any]:
+    if task != "defense":
+        raise ValueError("only defense checkpoints can be evaluated as learned policies")
     from . import tensor_training_evaluation as _evaluation
     _evaluation._bind_training_globals(globals())
     return _evaluation.evaluate(checkpoint, task=task, episodes=episodes, seed=seed,
@@ -345,20 +298,20 @@ def _scripted_game_action(env, task: str) -> torch.Tensor:
     return _evaluation._scripted_game_action(env, task)
 
 
-def _legacy_strategic_action(action: torch.Tensor, task: str) -> torch.Tensor:
+def _legacy_strategic_action(action: torch.Tensor) -> torch.Tensor:
     from . import tensor_training_evaluation as _evaluation
     _evaluation._bind_training_globals(globals())
-    return _evaluation._legacy_strategic_action(action, task)
+    return _evaluation._legacy_strategic_action(action)
 
 
 def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                    output, horizon=8000, scripted_strategy=None,
-                   opponent_checkpoint=None, strategic_rate_hz=4.,
+                   strategic_rate_hz=4.,
                    capture_playback=True, scenario_zone_pair=None):
     from . import tensor_training_evaluation as _evaluation
     _evaluation._bind_training_globals(globals())
     return _evaluation._evaluate_once(checkpoint, task, episodes, seed, num_envs,
-        device, opponent, output, horizon, scripted_strategy, opponent_checkpoint,
+        device, opponent, output, horizon, scripted_strategy,
         strategic_rate_hz, capture_playback, scenario_zone_pair)
 
 
@@ -371,15 +324,15 @@ def _unevaluated_ablation_row(name: str, task: str, architecture: str | None,
         group, seed, checkpoint, missing_reason)
 
 
-def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
-        defense_checkpoint: str | Path | None = None, episodes: int = 8,
+def evaluate_game_ablations(*, defense_checkpoint: str | Path | None = None,
+        episodes: int = 8,
         seed: int = 4100, num_envs: int = 8, device: str = "cuda",
         output: str | Path = "metrics/ablations.json", horizon: int = 8000,
         strategic_rate_hz: float = 4., capture_playback: bool = True) -> dict[str, Any]:
     from . import tensor_training_evaluation as _evaluation
     _evaluation._bind_training_globals(globals())
     return _evaluation.evaluate_game_ablations(
-        offense_checkpoint=offense_checkpoint, defense_checkpoint=defense_checkpoint,
+        defense_checkpoint=defense_checkpoint,
         episodes=episodes, seed=seed, num_envs=num_envs, device=device, output=output,
         horizon=horizon, strategic_rate_hz=strategic_rate_hz,
         capture_playback=capture_playback)
@@ -389,7 +342,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tensor-resident FRC defense learning")
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("train")
-    p.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
+    p.add_argument("--task", choices=("defense",), default="defense")
     p.add_argument("--steps", type=int, default=1_000_000)
     p.add_argument("--envs", type=int, default=1024)
     p.add_argument("--rollout-steps", type=int, default=128)
@@ -417,7 +370,7 @@ def main() -> None:
     p.add_argument("--output", default="checkpoints/tensor-ppo")
     p.add_argument("--device", default="cuda")
     e = commands.add_parser("evaluate")
-    e.add_argument("--task", choices=("counter_defense", "defense"), default="counter_defense")
+    e.add_argument("--task", choices=("defense",), default="defense")
     e.add_argument("--checkpoint", required=True)
     e.add_argument("--episodes", type=int, default=32)
     e.add_argument("--horizon", type=int, default=8000)
@@ -427,7 +380,6 @@ def main() -> None:
     e.add_argument("--output", default="metrics/tensor-evaluation.json")
     e.add_argument("--device", default="cuda")
     a = commands.add_parser("evaluate-game-ablations")
-    a.add_argument("--offense-checkpoint")
     a.add_argument("--defense-checkpoint")
     a.add_argument("--episodes", type=int, default=8)
     a.add_argument("--horizon", type=int, default=8000)
@@ -455,8 +407,8 @@ def main() -> None:
                               seed=args.seed, num_envs=args.envs, device=args.device,
                               opponent=args.opponent, output=args.output, horizon=args.horizon)
         else:
-            result = evaluate_game_ablations(offense_checkpoint=args.offense_checkpoint,
-                defense_checkpoint=args.defense_checkpoint, episodes=args.episodes,
+            result = evaluate_game_ablations(defense_checkpoint=args.defense_checkpoint,
+                episodes=args.episodes,
                 seed=args.seed, num_envs=args.envs, device=args.device,
                 output=args.output, horizon=args.horizon)
     except Exception as exc:

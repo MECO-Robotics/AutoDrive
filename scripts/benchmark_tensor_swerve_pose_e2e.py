@@ -88,7 +88,7 @@ def _run(env, seed, action_bank, ticks_per_decision):
     for action in action_bank:
         for _ in range(ticks_per_decision):
             obs, reward, done, truncated, info = env.step(
-                action, _return_info=False, _opponent_policy_decision=False)
+                action, _return_info=False)
             trace.append((obs.clone(), reward.clone(), done.clone(),
                           truncated.clone(), info))
     stop.record()

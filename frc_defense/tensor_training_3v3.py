@@ -22,11 +22,10 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
                          _runtime: dict[str, Any]) -> dict[str, Any]:
     """Train one 3v3 PPO generation, sharing the existing 128x128 policy.
 
-    Three robots on one alliance use the policy. The opposing alliance runs
-    the deterministic role-specific REBUILT strategy or a population policy.
-    Historical 137x8 checkpoints
-    are transferred by retaining all trained input columns and zeroing the
-    previously unused teammate-feature columns (58:78).
+    The three defenders use the policy. The opposing offense follows the
+    deterministic REBUILT strategy.
+    Defense checkpoints can continue training with all trained input columns;
+    older non-3v3 defense weights have unused teammate columns zeroed (58:78).
     """
     # These are aliases to the legacy module's live bindings, preserving the
     # established monkeypatch seam without making this module import it.
@@ -38,7 +37,6 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     _PPO_CONTROL_GROUP = _runtime["_PPO_CONTROL_GROUP"]
     _distributed_state = _runtime["_distributed_state"]
     _gae_advantages = _runtime["_gae_advantages"]
-    _opponent_population_paths = _runtime["_opponent_population_paths"]
     _reset_obs = _runtime["_reset_obs"]
     dist = _runtime["dist"]
     json = _runtime["json"]
@@ -47,8 +45,8 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     time = _runtime["time"]
     torch = _runtime["torch"]
 
-    if task not in ("offense", "defense"):
-        raise ValueError("3v3 task must be offense or defense")
+    if task != "defense":
+        raise ValueError("only defense policies are trainable; offense is deterministic")
     if min(generation, num_envs, rollout_steps, epochs, minibatch_size, horizon) < 1:
         raise ValueError("generation, environments, rollout, PPO, and horizon must be positive")
     if not 2. <= strategic_rate_hz <= 5.:
@@ -63,10 +61,8 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     torch.manual_seed(rank_seed)
     if selected_device.type == "cuda":
         torch.cuda.manual_seed_all(rank_seed)
-    nn_team = 0 if task == "offense" else 1
-    modes = (("nn", "nn", "nn", "deterministic", "deterministic", "deterministic")
-             if nn_team == 0 else
-             ("deterministic", "deterministic", "deterministic", "nn", "nn", "nn"))
+    nn_team = 1
+    modes = ("deterministic", "deterministic", "deterministic", "nn", "nn", "nn")
     from .tensor_3v3 import TensorThreeVsThreeEnv
     env = TensorThreeVsThreeEnv(num_envs=local_envs, device=selected_device,
         seed=rank_seed, control_modes=modes,
@@ -95,6 +91,8 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     if initial_checkpoint is not None and Path(initial_checkpoint).is_file():
         payload = torch.load(initial_checkpoint, map_location=selected_device,
                              weights_only=True)
+        if payload.get("task") != "defense":
+            raise ValueError("initial checkpoint must be tagged as a defense policy")
         if int(payload.get("obs_dim", -1)) == 137 and int(payload.get("action_dim", -1)) == 8:
             model.load_state_dict(payload["model_state_dict"])
             if payload.get("architecture") != "strategic_3v3":
@@ -113,47 +111,10 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     output = Path(output)
     status_path = output / "status.json"
     checkpoint = output / "policy.pt"
-    opponent_team = 1 - nn_team
-    opponent_robot_ids = torch.arange(opponent_team * 3, opponent_team * 3 + 3,
+    opponent_robot_ids = torch.arange(0, 3,
                                       device=selected_device)
-    peer_role = "defense" if task == "offense" else "offense"
-    opponent_paths = [output.parent / peer_role / "policy.pt"]
-    opponent_paths.extend(_opponent_population_paths(task, output))
-    deterministic_opponent = ("deterministic_defense" if task == "offense"
-                              else "deterministic_offense")
-    # Keep the two non-learned behaviors aligned with the opponent pool:
-    # scripted behavior uses the deterministic mask; None leaves the robots
-    # stationary while still allowing normal field collisions.
-    opponent_names = [deterministic_opponent, "stationary_none"]
-    opponent_models = [None, None]
-    loaded_paths = set()
-    for opponent_path in opponent_paths:
-        opponent_path = Path(opponent_path)
-        if not opponent_path.is_file() or opponent_path.resolve() in loaded_paths:
-            continue
-        try:
-            opponent_payload = torch.load(opponent_path, map_location=selected_device,
-                                          weights_only=True)
-            if (int(opponent_payload.get("obs_dim", -1)) != 137 or
-                    int(opponent_payload.get("action_dim", -1)) != 8):
-                continue
-            opponent_model = ActorCritic(137, STRATEGIC_ACTION_DIM,
-                                         "categorical").to(selected_device)
-            opponent_model.load_state_dict(opponent_payload["model_state_dict"])
-            if opponent_payload.get("architecture") != "strategic_3v3":
-                with torch.no_grad():
-                    opponent_model.trunk[0].weight[:, 58:78].zero_()
-            opponent_model.eval()
-            opponent_models.append(opponent_model)
-            if opponent_path.parent.name in ("offense", "defense"):
-                opponent_name=f"peer_{opponent_path.parent.name}"
-            else:
-                opponent_name=(f"{opponent_path.parent.parent.name}_"
-                               f"{opponent_path.parent.name}_{opponent_path.stem}")
-            opponent_names.append(opponent_name)
-            loaded_paths.add(opponent_path.resolve())
-        except (OSError, RuntimeError, KeyError, ValueError, EOFError):
-            continue
+    deterministic_opponent = "deterministic_offense"
+    opponent_names = [deterministic_opponent]
     opponent_exposure_counts = {name: 0 for name in opponent_names}
     generation_started_at=time.time()
     if rank == 0:
@@ -208,31 +169,23 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
         rollout_len=min(rollout_steps,decisions_per_generation-total_decisions)
         if rollout_len <= 0:
             break
-        opponent_slot=(generation-1+update) % len(opponent_names)
-        current_opponent=opponent_models[opponent_slot]
-        deterministic_rollout=opponent_slot==0
         active_nn_mask=torch.zeros(6,device=selected_device,dtype=torch.bool)
         active_nn_mask[robot_ids]=True
-        if current_opponent is not None:
-            active_nn_mask[opponent_robot_ids]=True
         active_deterministic_mask=torch.zeros_like(active_nn_mask)
-        if deterministic_rollout:
-            active_deterministic_mask[opponent_robot_ids]=True
+        active_deterministic_mask[opponent_robot_ids]=True
         env._nn_mode_mask.copy_(active_nn_mask)
         env._deterministic_mode_mask.copy_(active_deterministic_mask)
         planner_controller_ids=list(range(nn_team*3,nn_team*3+3))
-        if current_opponent is not None or deterministic_rollout:
-            planner_controller_ids.extend(range(opponent_team*3,opponent_team*3+3))
+        planner_controller_ids.extend(range(0,3))
         planner_mode_key=tuple(sorted(planner_controller_ids))
         if planner_mode_key != env._planner_controller_mode_key:
             env._planner_controller_modes_dirty=True
             env._planner_controller_mode_key=planner_mode_key
-        env._has_deterministic_offense = bool(
-            task == "defense" and deterministic_rollout)
+        env._has_deterministic_offense = True
         env.agent_train_mask.copy_(active_nn_mask)
         obs=env.observe()
         env._last_obs=obs
-        opponent_exposure_counts[opponent_names[opponent_slot]] += rollout_len*num_envs
+        opponent_exposure_counts[deterministic_opponent] += rollout_len*num_envs
         # Observations dominate rollout storage at large world batches. Keep a
         # half-precision copy on device, then restore float32 for PPO scoring;
         # policy inference and GAE continue to use the original float32 values.
@@ -272,15 +225,6 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
             sampled=sampled.reshape(local_envs,3)
             full_action=torch.full((local_envs,6),7,device=selected_device,dtype=torch.long)
             full_action[:,robot_ids]=sampled
-            if current_opponent is not None:
-                opponent_obs=obs[:,opponent_robot_ids,:].reshape(-1,137)
-                opponent_mask=opponent_obs[:,-8:].bool()
-                with torch.no_grad():
-                    opponent_logits=current_opponent(opponent_obs)[0]
-                    opponent_logits=opponent_logits.masked_fill(
-                        ~opponent_mask,torch.finfo(opponent_logits.dtype).min)
-                    opponent_action=opponent_logits.argmax(-1).reshape(local_envs,3)
-                full_action[:,opponent_robot_ids]=opponent_action
             b_obs[t]=selected_obs.to(torch.float16)
             b_actions[t]=sampled
             b_logprobs[t]=logprob.reshape(local_envs,3)

@@ -30,7 +30,7 @@ def _bind_evaluation_globals(source: dict[str, Any]) -> None:
             globals()[name] = value
 
 
-def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
+def evaluate(checkpoint: str | Path, *, task: str = "defense",
              episodes: int = 32, seed: int = 1000, num_envs: int = 32,
              device: str = "cuda", opponent: str = "random",
              output: str | Path = "metrics/tensor-evaluation.json",
@@ -38,7 +38,9 @@ def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
     """Run deterministic policy evaluation and write a compact JSON report."""
     if episodes < 1 or num_envs < 1 or horizon < 1:
         raise ValueError("episodes, num_envs and horizon must be positive")
-    if task == "defense" and opponent == "mixed":
+    if task != "defense":
+        raise ValueError("only defense checkpoints can be evaluated as learned policies")
+    if opponent == "mixed":
         root = Path(output)
         results = {}
         matched_num_envs = max(num_envs, episodes)
@@ -99,7 +101,7 @@ def _unevaluated_ablation_row(name: str, task: str, architecture: str | None,
         "name": name,
         "task": task,
         "architecture": architecture,
-        "role": "offense" if task == "counter_defense" else "defense",
+        "role": "defense",
         "opponent": opponent,
         "episodes": 0,
         "seed": seed,
@@ -113,8 +115,8 @@ def _unevaluated_ablation_row(name: str, task: str, architecture: str | None,
     }
 
 
-def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
-        defense_checkpoint: str | Path | None = None, episodes: int = 8,
+def evaluate_game_ablations(*, defense_checkpoint: str | Path | None = None,
+        episodes: int = 8,
         seed: int = 4100, num_envs: int = 8, device: str = "cuda",
         output: str | Path = "metrics/ablations.json", horizon: int = 8000,
         strategic_rate_hz: float = 4., capture_playback: bool = True) -> dict[str, Any]:
@@ -129,10 +131,6 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
     matched_envs = max(num_envs, episodes)
     output_path = Path(output)
     specs = (
-        ("scripted_offense_adstar", "counter_defense", "adstar_defender",
-         "offense", None, "offense_pair"),
-        ("learned_offense_adstar", "counter_defense", "adstar_defender",
-         None, offense_checkpoint, "offense_pair"),
         ("scripted_defense_adstar", "defense", "adstar", "defense", None,
          "defense_pair"),
         ("learned_defense_adstar", "defense", "adstar", None,
@@ -187,10 +185,9 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
                 name, task, architecture, opponent, group, seed, checkpoint,
                 f"Evaluation failed: {exc}"))
             continue
-        score_rate = (float(metrics.get("mean_success", 0.)) if task == "counter_defense"
-                      else 1. - float(metrics.get("mean_success", 0.)))
+        score_rate = 1. - float(metrics.get("mean_success", 0.))
         evaluations.append({
-            "name": name, "task": task, "role": "offense" if task == "counter_defense" else "defense",
+            "name": name, "task": task, "role": "defense",
             "architecture": architecture or "scripted_adstar", "opponent": opponent,
             "episodes": episodes, "seed": seed,
             "seeds": list(range(seed, seed + episodes)),
@@ -201,7 +198,7 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
             "metrics_file": str(mode_output),
             "success_rate": float(metrics.get("mean_success", 0.)),
             "scoring_rate": score_rate,
-            "concession_rate": score_rate if task == "defense" else None,
+            "concession_rate": score_rate,
             "mean_acquisitions": metrics.get("mean_acquisitions"),
             "mean_scores": metrics.get("mean_scores"),
             "mean_cycle_time": metrics.get("mean_cycle_time"),
@@ -209,7 +206,7 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
             # a per-step counter is not a counterfactual delay measurement.
             "mean_defensive_delay": None,
             "mean_attacker_time_to_score": (metrics.get("mean_time_to_goal")
-                if task == "defense" and metrics.get("mean_time_to_goal", 0.) > 0 else None),
+                if metrics.get("mean_time_to_goal", 0.) > 0 else None),
             "mean_denied_objectives": metrics.get("mean_denied_objectives"),
             "mean_passes_attempted": metrics.get("mean_passes_attempted"),
             "mean_passes_completed": metrics.get("mean_passes_completed"),
@@ -230,7 +227,7 @@ def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
             "horizon": metrics.get("horizon",horizon), "num_envs": matched_envs,
             "drivetrain_config": metrics.get("drivetrain_config"),
         })
-    for group in ("offense_pair", "defense_pair"):
+    for group in ("defense_pair",):
         pair = [row for row in evaluations if row["comparison_group"] == group]
         complete = len(pair) == 2 and all(row.get("evaluated") for row in pair)
         for row in pair:

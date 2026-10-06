@@ -172,8 +172,8 @@ def _ensure_zone_playback_job(run_dir: Path, run_name: str, simulation_id: str,
         return json.loads(_json_or_default(progress_path,{"status":"waiting"}))
 
 def _normalize_robot_control_selections(selections):
-    """Resolve each robot's role/controller preset while accepting legacy modes."""
-    selections=list(selections or ("offense_nn","offense_nn","offense_nn",
+    """Resolve per-robot control selections; offense always uses deterministic control."""
+    selections=list(selections or ("offense_deterministic","offense_deterministic","offense_deterministic",
                                    "defense_deterministic","defense_deterministic",
                                    "defense_deterministic"))
     if len(selections)!=6:
@@ -182,16 +182,17 @@ def _normalize_robot_control_selections(selections):
     modes=[]
     roles=[]
     for index, selection in enumerate(selections):
-        if selection in ("none", "nn", "deterministic"):
-            modes.append(selection)
-            roles.append(fallback_roles[index])
-        elif selection in ("offense_nn", "defense_nn",
-                           "offense_deterministic", "defense_deterministic"):
+        if selection == "none":
+            role, mode = fallback_roles[index], selection
+            modes.append(mode)
+            roles.append(role)
+        elif selection in ("offense_deterministic", "defense_nn",
+                           "defense_deterministic"):
             role, mode = selection.rsplit("_", 1)
             modes.append(mode)
             roles.append(role)
         else:
-            raise ValueError("each robot must select none or an offense/defense NN/deterministic controller")
+            raise ValueError("each robot must select deterministic offense, NN/deterministic defense, or none")
     return modes, roles
 
 def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
@@ -243,7 +244,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     obs=env.reset(seed=int(seed))[0]
     policies={}
     checkpoint_paths={}
-    for role in ("offense", "defense"):
+    for role in ("defense",):
         if not any(mode=="nn" and robot_role==role
                    for mode, robot_role in zip(control_modes, robot_roles)):
             continue

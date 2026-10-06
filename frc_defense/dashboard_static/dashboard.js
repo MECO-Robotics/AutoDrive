@@ -467,9 +467,11 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       ? savedJob.control_modes : [];
     const savedTypes = Array.isArray(savedJob?.robot_types)
       ? savedJob.robot_types : [];
-    const robotSetups = Array.from({ length: 6 }, (_, robot) =>
-      savedSetups[robot] || $("robotMode" + robot)?.value ||
-        (robot < 3 ? "offense_nn" : "defense_deterministic"));
+    const robotSetups = Array.from({ length: 6 }, (_, robot) => {
+      const saved = savedSetups[robot] || $("robotMode" + robot)?.value ||
+        (robot < 3 ? "offense_deterministic" : "defense_deterministic");
+      return saved === "offense_nn" ? "offense_deterministic" : saved;
+    });
     robotSetups.forEach((setup, robot) => {
       const control = $("robotMode" + robot);
       if (control) control.value = setup;

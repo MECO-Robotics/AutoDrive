@@ -6,7 +6,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=/home/brian/AutoDrive
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/bash /home/brian/AutoDrive/scripts/run_gamepiece_training.sh defense cuda:1 4027 /home/brian/AutoDrive/checkpoints/rebuilt-gamepiece-defense
+ExecStart=/usr/bin/bash /home/brian/AutoDrive/scripts/run_gamepiece_training.sh cuda:1 4027 /home/brian/AutoDrive/checkpoints/rebuilt-gamepiece-defense
 Restart=on-failure
 RestartSec=10
 

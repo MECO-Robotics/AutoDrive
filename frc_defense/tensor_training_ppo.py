@@ -16,8 +16,7 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                clip_coef: float, value_coef: float, entropy_coef: float,
                max_grad_norm: float, l2_coef: float, horizon: int,
                architecture: str = "direct", curriculum: bool = True,
-               strategic_rate_hz: float = 4.0, learned_opponent_checkpoint=None,
-               learned_opponent_checkpoints=None, capture_training_playback=None,
+               strategic_rate_hz: float = 4.0, capture_training_playback=None,
                reuse_strategic_own_candidates=None,
                ppo_sparse_delayed_observation_capture: bool = False,
                status_context=None, _runtime: dict[str, Any]) -> dict[str, Any]:
@@ -26,7 +25,6 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     torch = _runtime["torch"]
     _env = _runtime["_env"]
     STATIC_OPPONENT_FRACTION = _runtime["STATIC_OPPONENT_FRACTION"]
-    _attach_historical_opponent = _runtime["_attach_historical_opponent"]
     OBS_DIM = _runtime["OBS_DIM"]
     ACTION_DIM = _runtime["ACTION_DIM"]
     ActorCritic = _runtime["ActorCritic"]
@@ -39,15 +37,15 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     OBS_NORMALIZATION = _runtime["OBS_NORMALIZATION"]
     _curriculum_stage = _runtime["_curriculum_stage"]
     _curriculum_opponents = _runtime["_curriculum_opponents"]
-    _adstar_reference = _runtime["_adstar_reference"]
-    _reference_tracking_error = _runtime["_reference_tracking_error"]
-    _reference_potential = _runtime["_reference_potential"]
-    _reference_action = _runtime["_reference_action"]
     STRATEGIC_ACTION_DIM = _runtime["STRATEGIC_ACTION_DIM"]
     _held_action_interval = _runtime["_held_action_interval"]
     _gae_advantages = _runtime["_gae_advantages"]
     math = _runtime["math"]
     json = _runtime["json"]
+    if task != "defense":
+        raise ValueError("only defense policies are trainable; offense is deterministic")
+    if opponent not in (*DEFENSE_TRAINING_OPPONENTS, "mixed"):
+        raise ValueError("opponent must be a deterministic defense-training baseline")
     distributed = dist.is_available() and dist.is_initialized()
     rank = dist.get_rank() if distributed else 0
     world_size = dist.get_world_size() if distributed else 1
@@ -64,15 +62,14 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                architecture=architecture,
                reuse_strategic_own_candidates=reuse_strategic_own_candidates)
     horizon=int(env.horizon)
-    learned_opponent_available = _attach_historical_opponent(
-        env, task, device, learned_opponent_checkpoint)
-    uses_adstar_teacher = task != "defense" and architecture == "direct"
     obs_dim = int(getattr(env, "obs_dim", OBS_DIM))
     action_dim = int(getattr(env, "action_dim", ACTION_DIM))
     action_kind = "categorical" if architecture == "strategic_adstar" else "continuous"
     model = ActorCritic(obs_dim, action_dim, action_kind).to(device)
     if initial_checkpoint is not None:
         payload = torch.load(initial_checkpoint, map_location=device, weights_only=True)
+        if payload.get("task") != "defense":
+            raise ValueError("initial checkpoint must be tagged as a defense policy")
         if payload.get("drivetrain_config") != env.drivetrain_config:
             raise ValueError("initial checkpoint drivetrain configuration does not match this run; "
                              "retrain without that checkpoint or use its exact FRC_DRIVETRAIN_CONFIG")
@@ -138,18 +135,11 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
         "completed_timesteps": completed_timesteps_base, "updates": 0, "total_updates": updates,
-        "adstar_action_loss_weight": .25 if uses_adstar_teacher else 0., "task_reward_scale": 1.,
-        "adstar_tracking_error_m": None, "started_at": started_at,
+        "started_at": started_at,
         "capture_training_playback": capture_training_playback,
         "reuse_strategic_own_candidates": env.reuse_strategic_own_candidates,
         "drivetrain_config": env.drivetrain_config})
       write_json(playback_path, {"task": task, "dt": env.dt, "frames": []})
-    # Attacker training can use sparse route imitation; defenders learn only
-    # from task reward and the visible robot/field state.
-    adstar_action_loss_weight = .25 if uses_adstar_teacher else 0.
-    task_reward_scale = 1.
-    tracking_error_ema = None
-    good_tracking_updates = 0
     strategic_phase = 0.0
     strategic_episode_ticks = 0
     active_world_physics_ticks = 0
@@ -238,25 +228,11 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     for update_index in range(updates):
         stage = _curriculum_stage(update_index / max(1, updates)) if curriculum else -1
         if curriculum:
-            available = learned_opponent_available and stage >= 4
-            candidates = _curriculum_opponents(task, stage, learned_available=available)
+            candidates = _curriculum_opponents(task, stage)
             env.opponent = candidates[update_index % len(candidates)]
             env.static_opponent_fraction = (.4 if stage == 0 else STATIC_OPPONENT_FRACTION)
         exposure_label = env.opponent
-        if env.opponent == "learned" and learned_opponent_checkpoints:
-            checkpoint_index = update_index % len(learned_opponent_checkpoints)
-            active_opponent_checkpoint = learned_opponent_checkpoints[checkpoint_index]
-            learned_opponent_available = _attach_historical_opponent(
-                env, task, device, active_opponent_checkpoint)
-            exposure_label = f"learned:{active_opponent_checkpoint}"
         opponent_exposure[exposure_label] = opponent_exposure.get(exposure_label, 0) + rollout_steps * num_envs
-        # AD* is evaluated at rollout boundaries for a sparse reference set.
-        # The simulator and PPO tensors stay device resident during each step.
-        routes = _adstar_reference(env, device) if uses_adstar_teacher else None
-        reference_mask = torch.zeros(num_envs, device=device, dtype=torch.bool)
-        if routes is not None:
-            reference_mask[routes[0]] = True
-        reference_active = reference_mask.clone()
         action_shape = (action_dim,) if action_kind == "continuous" else ()
         action_dtype = torch.float32 if action_kind == "continuous" else torch.long
         b_obs = torch.empty((rollout_steps, num_envs, obs_dim), device=device)
@@ -270,26 +246,12 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         b_truncated = torch.empty((rollout_steps, num_envs), device=device, dtype=torch.bool)
         b_values = torch.empty((rollout_steps, num_envs), device=device)
         b_next_values = torch.empty((rollout_steps, num_envs), device=device)
-        b_teacher_actions = torch.zeros((rollout_steps, num_envs, action_dim), device=device)
-        b_teacher_mask = torch.zeros((rollout_steps, num_envs), device=device, dtype=torch.bool)
-        tracking_error_sum = torch.zeros((), device=device)
-        tracking_error_count = torch.zeros((), device=device)
         entropy_accumulator = torch.zeros((), device=device)
         entropy_batch_count = 0
         update_frames = []
         frame_stride = max(1, rollout_steps // 24)
         for t in range(rollout_steps):
             b_obs[t] = obs
-            if routes is not None:
-                pos_before = env.sim.pose[:, 0, :2]
-                tracking_error = _reference_tracking_error(routes, pos_before)
-                sampled_active = reference_active[routes[0]]
-                tracking_error_sum += (tracking_error * sampled_active.float()).sum()
-                tracking_error_count += sampled_active.sum()
-                potential_before = _reference_potential(routes, pos_before)
-                teacher = _reference_action(routes, pos_before, env.sim.pose[:, 0, 2], env.sim.speed[:, 0])
-                b_teacher_actions[t, routes[0]] = teacher
-                b_teacher_mask[t] = reference_active
             with torch.no_grad():
                 action_mask=(obs[:,-action_dim:].bool() if action_kind=="categorical" and
                              action_dim==STRATEGIC_ACTION_DIM else None)
@@ -343,12 +305,7 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                     timing_sync_counts["active_mask_count_item_reads"] += 1
                 active_world_physics_ticks += num_envs
                 complete_matches += truncated.sum()
-                if routes is not None:
-                    potential_after = _reference_potential(routes, env.sim.pose[:, 0, :2])
-                    route_progress = (potential_after - potential_before).clamp(-.25, .25)
-                    reward[routes[0]] += .20 * route_progress * reference_active[routes[0]]
             reward = reward.to(device=device, dtype=torch.float32).reshape(num_envs)
-            reward *= task_reward_scale
             if capture_training_playback and t % frame_stride == 0:
                 state = torch.cat((env.sim.pose[0].reshape(-1), env.goal[0],
                     env.sim.length[0], env.sim.width[0], env.goal_radius[0:1])).detach().clone()
@@ -391,7 +348,6 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             # Bootstrap from the terminal observation, then reset ended rows
             # before sampling the next strategic action.
             transition_next_obs = next_obs.to(device=device, dtype=torch.float32)
-            reference_active &= ~ended
             # Terminal observations cannot reuse the next policy decision's
             # value because ended worlds reset before that decision. Strategic
             # episodes end together at the known horizon; the last rollout
@@ -428,8 +384,6 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         flat_logprobs = b_logprobs.reshape(-1)
         flat_advantages = advantages.reshape(-1)
         flat_returns = returns.reshape(-1)
-        flat_teacher_actions = b_teacher_actions.reshape(-1, action_dim)
-        flat_reference_mask = b_teacher_mask.reshape(-1)
         batch_size = flat_obs.shape[0]
         ppo_update_started = time.perf_counter() if timing_enabled else 0.
         ppo_gpu_start = torch.cuda.Event(enable_timing=True) if timing_enabled and device.type == "cuda" else None
@@ -440,7 +394,7 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             indices = torch.randperm(batch_size, device=device)
             for idx in indices.split(minibatch_size):
                 action_mask=flat_action_masks[idx] if flat_action_masks is not None else None
-                new_logprob, entropy, new_value, mean = score_model(
+                new_logprob, entropy, new_value, _mean = score_model(
                     flat_obs[idx], flat_actions[idx], action_mask)
                 logratio = new_logprob - flat_logprobs[idx]
                 ratio = logratio.exp()
@@ -448,35 +402,23 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 if distributed:
                     # Match one-GPU minibatch normalization over the union of
                     # the ranks' equally sized local minibatches.
-                    teacher_rows = flat_reference_mask[idx].float()
                     stats = torch.stack((mb_adv.sum(), mb_adv.square().sum(),
-                        mb_adv.new_tensor(float(mb_adv.numel())), teacher_rows.sum()))
+                        mb_adv.new_tensor(float(mb_adv.numel()))))
                     dist.all_reduce(stats, op=dist.ReduceOp.SUM)
                     adv_mean = stats[0] / stats[2].clamp_min(1.)
                     adv_var = (stats[1] / stats[2].clamp_min(1.) - adv_mean.square()).clamp_min(0.)
                     mb_adv = (mb_adv - adv_mean) / (adv_var.sqrt() + 1e-8)
-                    global_teacher_rows = stats[3]
                 else:
                     mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std(unbiased=False) + 1e-8)
-                    teacher_rows = flat_reference_mask[idx].float()
-                    global_teacher_rows = teacher_rows.sum()
                 pg = torch.maximum(-mb_adv * ratio,
                                    -mb_adv * torch.clamp(ratio, 1-clip_coef, 1+clip_coef)).mean()
                 value_loss = 0.5 * (new_value - flat_returns[idx]).square().mean()
-                if uses_adstar_teacher:
-                    teacher_target = torch.atanh(flat_teacher_actions[idx].clamp(-.95, .95))
-                    teacher_error = (mean - teacher_target).square().mean(-1)
-                    teacher_loss = ((teacher_error * teacher_rows).sum() * world_size /
-                                    global_teacher_rows.clamp_min(1.))
-                else:
-                    teacher_loss = torch.zeros((), device=device)
                 l2_norm = sum(parameter.square().sum() for parameter in model.parameters()
                               if parameter.ndim > 1)
                 entropy_accumulator += entropy.mean().detach()
                 entropy_batch_count += 1
                 update_entropy_coef = entropy_coef * max(0., 1. - update_index / max(1, updates - 1))
-                loss = (pg + value_coef * value_loss - update_entropy_coef * entropy.mean() +
-                        adstar_action_loss_weight * teacher_loss + l2_coef * l2_norm)
+                loss = pg + value_coef * value_loss - update_entropy_coef * entropy.mean() + l2_coef * l2_norm
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -497,30 +439,17 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         entropy_mean = float((entropy_accumulator / max(1, entropy_batch_count)).item())
         if timing_enabled:
             timing_sync_counts["entropy_item_reads"] += 1
-        update_tracking_error = None
-        if uses_adstar_teacher:
-            update_tracking_error = float((tracking_error_sum / tracking_error_count.clamp_min(1)).item())
-            tracking_error_ema = (update_tracking_error if tracking_error_ema is None else
-                                  .8 * tracking_error_ema + .2 * update_tracking_error)
-            if tracking_error_ema <= .35:
-                good_tracking_updates += 1
-            else:
-                good_tracking_updates = 0
         if timing_enabled and update_gpu_events:
             timing_seconds["ppo_update_device_event"] = sum(
                 start_event.elapsed_time(end_event) / 1000.
                 for start_event, end_event in update_gpu_events)
-        if uses_adstar_teacher and good_tracking_updates >= 3:
-            adstar_action_loss_weight = max(.025, adstar_action_loss_weight * .7)
-            task_reward_scale = min(2., task_reward_scale * 1.25)
-            good_tracking_updates = 0
         write_checkpoint({"model_state_dict": model.state_dict(), "obs_dim": obs_dim,
                     "action_dim": action_dim, "action_kind": action_kind,
                     "architecture": architecture, "task": task,
                     "observation_normalization": OBS_NORMALIZATION,
                     "drivetrain_config": env.drivetrain_config})
         if capture_training_playback:
-            exported_path = routes[5][0] if routes is not None else []
+            exported_path = []
             playback_frames.extend({"robots": [row[:3], row[3:6]],
                 "goal": row[6:8], "sizes": row[8:12], "goal_radius":row[12],
                 "adstar_path": exported_path, "fuel_pieces": frame["fuel_pieces"],
@@ -603,12 +532,6 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,
             "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
             "updates": update_index + 1, "total_updates": updates,
-            "adstar_tracking_error_m": tracking_error_ema,
-            "adstar_tracking_error_update_m": update_tracking_error,
-            "adstar_tracking_target_m": .35,
-            "adstar_action_loss_weight": adstar_action_loss_weight,
-            "task_reward_scale": task_reward_scale,
-            "good_tracking_updates": good_tracking_updates,
                 "elapsed_seconds": elapsed, "transitions_per_second": global_completed / max(elapsed, 1e-12),
                 "strategic_decision_rate_hz": strategic_rate_hz if architecture == "strategic_adstar" else 50.,
                 "strategic_decisions_per_episode": math.ceil(horizon * strategic_rate_hz / 50.)
@@ -649,12 +572,6 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "opponent": opponent, "seed": seed,
                 "stationary_opponent_fraction": STATIC_OPPONENT_FRACTION,
                 "timesteps": global_completed_total, "requested_timesteps": global_timesteps,
-                "reference_planner": "ADStarPlanner" if uses_adstar_teacher else None,
-                "reference_worlds_per_update": world_size * min(64, num_envs) if uses_adstar_teacher else 0,
-                "reference_reward_scale": .20 if uses_adstar_teacher else 0.,
-                "reference_action_loss_weight_final": adstar_action_loss_weight,
-                "task_reward_scale_final": task_reward_scale,
-                "adstar_tracking_error_ema_m": tracking_error_ema,
                 "num_envs": global_num_envs, "local_num_envs": num_envs,
                 "world_size": world_size, "device": str(device), "checkpoint": str(checkpoint),
                 "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint else None,

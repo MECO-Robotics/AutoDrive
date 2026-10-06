@@ -86,6 +86,10 @@ class TensorDefenseEnv(
     def __init__(self,num_envs=1,task="counter_defense",device="cuda",seed=0,opponent="guard",**kwargs):
         _require_torch()
         if task not in ("counter_defense","defense"): raise ValueError("task must be counter_defense or defense")
+        opponent_kind = (opponent.get("value", opponent.get("mode", ""))
+                         if isinstance(opponent, dict) else opponent)
+        if isinstance(opponent_kind, str) and opponent_kind.lower() == "learned":
+            raise ValueError("learned opponents are no longer supported; use a deterministic opponent")
         # Training/evaluation can load the exact robot configuration without
         # changing the tensor hot path. A hardware config defaults to nominal
         # physics; explicitly set "randomize": true for sim-to-real variation.
@@ -117,9 +121,8 @@ class TensorDefenseEnv(
             raise ValueError("action_mode must be direct, tactical, or strategic")
         self.action_dim={"direct":3,"tactical":2,"strategic":8}[self.action_mode]
         self.obs_dim={"direct":35,"tactical":38,"strategic":137}[self.action_mode]
-        self.learned_opponent_fn=kwargs.pop("learned_opponent_fn",None)
-        self.reuse_strategic_opponent_candidates=bool(
-            kwargs.pop("reuse_strategic_opponent_candidates",True))
+        if "learned_opponent_fn" in kwargs:
+            raise TypeError("learned_opponent_fn is no longer supported")
         self.reuse_strategic_own_candidates=bool(
             kwargs.pop("reuse_strategic_own_candidates",False))
         self._pending_strategic_own_candidates=None
@@ -268,7 +271,6 @@ class TensorDefenseEnv(
         self.next_score_time=torch.zeros_like(self.next_intake_time)
         self._last_hub_zone=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
         self._last_strategic_action=torch.zeros((self.n,),device=self.device,dtype=torch.long)
-        self._last_learned_opponent_action=torch.zeros((self.n,),device=self.device,dtype=torch.long)
         self.static_opponent_mask=torch.zeros(self.n,device=self.device,dtype=torch.bool)
         self.goal=torch.zeros((self.n,2),device=self.device); self.goal_radius=torch.full((self.n,),self.base_goal_radius,device=self.device); self.previous=torch.zeros(self.n,device=self.device)
         self.last_contact=torch.zeros(self.n,device=self.device,dtype=torch.bool)
@@ -346,35 +348,3 @@ class TensorDefenseEnv(
             old=getattr(self,"_last_opponent_command",torch.zeros_like(command))
             self._last_opponent_command=torch.where(active_mask[:,None],command,old)
         return command
-
-    def _decode_learned_strategic_action(self, learned, action_mask):
-        learned=torch.nan_to_num(torch.as_tensor(
-            learned,device=self.device,dtype=self.sim.pose.dtype))
-        if learned.ndim == 1 and learned.shape[0] == self.n:
-            legacy_ids = int(getattr(self, "learned_opponent_action_dim", 8)) == 3
-            if legacy_ids:
-                legacy = learned.long().clamp(0, 2)
-                action_class = (torch.where(legacy == 0, torch.zeros_like(legacy),
-                    torch.where(legacy == 1, torch.full_like(legacy, 4), torch.full_like(legacy, 6)))
-                    if self.task == "defense" else
-                    torch.where(legacy == 0, torch.full_like(legacy, 5),
-                        torch.where(legacy == 1, torch.ones_like(legacy), torch.zeros_like(legacy))))
-            else:
-                action_class = learned.long().clamp(0, 7)
-        elif learned.ndim == 1 and self.n == 1 and learned.shape[0] in (3, 8):
-            learned = learned[None, :]
-        if learned.shape == (self.n, 8):
-            action_class=learned.masked_fill(
-                ~action_mask,torch.finfo(learned.dtype).min).argmax(-1)
-        elif learned.shape == (self.n, 3):
-            # Keep semantic compatibility for genuine three-action policies.
-            legacy=learned.argmax(-1)
-            if self.task=="defense":
-                action_class=torch.where(legacy==0,torch.zeros_like(legacy),
-                    torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
-            else:
-                action_class=torch.where(legacy==0,torch.full_like(legacy,5),
-                    torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy)))
-        elif not (learned.ndim == 1 and learned.shape[0] == self.n):
-            raise ValueError(f"learned strategic opponent must return 3/8 scores or {(self.n,)} classes")
-        return action_class

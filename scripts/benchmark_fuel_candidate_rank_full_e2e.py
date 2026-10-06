@@ -43,8 +43,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
         result = scaling.benchmark(args.envs, torch.device(args.device), args.seed,
             args.decisions, args.physics_ticks, "guard", return_info=False,
-            skip_metric_objective=True, reuse_opponent_candidates=True,
-            opponent_policy_decision_each_tick=False, profile_components=False,
+            skip_metric_objective=True, profile_components=False,
             squared_fuel_candidate_distance=False, reuse_own_candidates=True)
         result["case"] = label
         result["fused_candidate_rank_hip_enabled"] = enabled

@@ -6,17 +6,16 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.distributions import Normal
-from pathlib import Path
 from typing import Any
 
 OBS_DIM = 35
 ACTION_DIM = 3
 OBS_NORMALIZATION = "fixed_physical_scale_v1"
 MIXED_DEFENSE_OPPONENTS = ("adstar", "offense", "intercept", "velocity_intercept", "mirror")
+DEFENSE_TRAINING_OPPONENTS = ("offense", "adstar", "mirror", "cutoff", "velocity_intercept")
 STATIC_OPPONENT_FRACTION = .20
-STRATEGIC_LEGACY_OBS_DIM = 89
 STRATEGIC_ACTION_DIM = 8
-CURRICULUM_STAGES = ("static_straight", "scripted", "adstar", "mixed", "learned")
+CURRICULUM_STAGES = ("static_straight", "scripted", "adstar", "mixed")
 _PPO_CONTROL_GROUP = None
 _PPO_CONTROL_GROUP_OWNED = False
 
@@ -26,20 +25,15 @@ def _curriculum_stage(progress: float) -> int:
                max(0, int(max(0., min(.999999, progress)) * len(CURRICULUM_STAGES))))
 
 
-def _curriculum_opponents(task: str, stage: int, learned_available: bool = True) -> tuple[str, ...]:
-    """Expand training from easy motion to durable scripted and learned pools."""
-    if task == "defense":
-        # ``intercept`` is a counter-defense-only mode in TensorDefenseEnv;
-        # use the attacker-side cutoff policy for the defensive curriculum.
-        base = ("offense", "mirror", "adstar", "cutoff", "velocity_intercept")
-        pools = (("offense",), ("offense", "mirror"),
-                 ("offense", "mirror", "adstar"), base,
-                 base + (("learned",) if learned_available else ()))
-    else:
-        base = ("guard", "intercept", "mirror", "adstar_defender")
-        pools = (("guard",), ("guard", "intercept", "mirror"),
-                 ("guard", "intercept", "mirror", "adstar_defender"), base,
-                 base + (("learned",) if learned_available else ()))
+def _curriculum_opponents(task: str, stage: int) -> tuple[str, ...]:
+    """Progress defense training across deterministic attacker behaviors."""
+    if task != "defense":
+        raise ValueError("only defense training has a curriculum")
+    # ``intercept`` is a counter-defense-only mode in TensorDefenseEnv;
+    # use the attacker-side cutoff policy for defensive curriculum variants.
+    base = DEFENSE_TRAINING_OPPONENTS
+    pools = (("offense",), ("offense", "mirror"),
+             ("offense", "mirror", "adstar"), base)
     return pools[min(max(0, stage), len(pools) - 1)]
 
 
@@ -179,53 +173,6 @@ def _env(num_envs: int, task: str, device: torch.device, seed: int, opponent: st
     return env
 
 
-def _attach_historical_opponent(env, task: str, device: torch.device,
-                               checkpoint_path: str | Path | None = None,
-                               actor_critic_cls=None) -> bool:
-    """Load historical direct or 89-feature strategic policies as opponents."""
-    actor_critic_cls = actor_critic_cls or ActorCritic
-    names = (("rebuilt-gamepiece-offense", "rebuilt-counter-defense")
-             if task == "defense" else
-             ("rebuilt-gamepiece-defense", "rebuilt-defense-generational", "rebuilt-defense"))
-    checkpoint = (Path(checkpoint_path) if checkpoint_path else
-        next((Path("checkpoints") / name / "policy.pt" for name in names
-              if (Path("checkpoints") / name / "policy.pt").is_file()),None))
-    if checkpoint is None:
-        return False
-    try:
-        payload = torch.load(checkpoint, map_location=device, weights_only=True)
-        expected_obs=int(payload.get("obs_dim",OBS_DIM))
-        if expected_obs not in (OBS_DIM,STRATEGIC_LEGACY_OBS_DIM,137):
-            return False
-        model = actor_critic_cls(payload.get("obs_dim", OBS_DIM),
-                            payload.get("action_dim", ACTION_DIM),
-                            payload.get("action_kind", "continuous")).to(device)
-        model.load_state_dict(payload["model_state_dict"])
-        model.eval()
-    except (OSError, RuntimeError, KeyError, ValueError):
-        return False
-
-    @torch.no_grad()
-    def policy(observation):
-        expected_obs=int(payload.get("obs_dim",OBS_DIM))
-        obs=observation[:,:expected_obs]
-        action, _, _ = model(obs)
-        if model.action_kind == "categorical":
-            if model.actor.out_features==STRATEGIC_ACTION_DIM and observation.shape[-1]>=STRATEGIC_ACTION_DIM:
-                mask=observation[:,-STRATEGIC_ACTION_DIM:].bool()
-                action=action.masked_fill(~mask,torch.finfo(action.dtype).min)
-            return action.argmax(-1)
-        return torch.tanh(action)
-
-    env.learned_opponent_fn = policy
-    env.learned_opponent_obs_dim=expected_obs
-    env.learned_opponent_action_dim=int(payload.get("action_dim",ACTION_DIM))
-    env.learned_opponent_action_kind=payload.get("action_kind","continuous")
-    env.learned_opponent_architecture=payload.get("architecture","direct")
-    env.learned_opponent_checkpoint = str(checkpoint)
-    return True
-
-
 def _reset_obs(result: Any) -> torch.Tensor:
     """Accept Gym-style ``(obs, info)`` as well as the bare tensor contract."""
     return result[0] if isinstance(result, tuple) else result
@@ -235,7 +182,6 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
                           initial_obs: torch.Tensor,
                           known_remaining_ticks: int | None = None,
                           return_info: bool | None = None,
-                          opponent_policy_decision_each_tick: bool = False,
                           defer_intermediate_observation: bool = True,
                           coarse_delayed_observation_capture: bool = False):
     """Advance active worlds under one action without crossing episode ends."""
@@ -282,12 +228,6 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
         active_worlds_this_tick = (active_counts[tick_index] if active_counts is not None
                                    else int(active_this_decision.sum().item()))
         step_kwargs = {"active_mask": active_this_decision}
-        # Learned strategic opponents share the same policy decision cadence
-        # as the controlled policy. Their selected action is held during the
-        # remaining 50 Hz physics ticks in this interval.
-        if hasattr(env, "action_mode"):
-            step_kwargs["_opponent_policy_decision"] = (
-                tick_index == 0 or opponent_policy_decision_each_tick)
         if return_info is not None:
             # PPO consumes observations, rewards, and episode flags only. The
             # environment's detailed diagnostics are for evaluation/UI callers.
@@ -382,91 +322,8 @@ def _gae_advantages(rewards: torch.Tensor, dones: torch.Tensor,
 
 
 def _task_opponent(task: str, opponent: str | None) -> str:
-    if opponent is None:
-        return "guard" if task == "counter_defense" else "offense"
-    if task == "defense" and opponent == "guard":
+    if task != "defense":
+        raise ValueError("only defense training has an opponent policy")
+    if opponent in (None, "guard"):
         return "offense"
     return opponent
-
-
-def _adstar_reference(env, device, max_worlds: int = 64, world_indices=None,
-                      include_all_routes: bool = False):
-    """Plan sparse teacher routes with the same device-resident grid search."""
-    from .tensor_adstar import TensorADStar
-    count = min(max_worlds, env.n)
-    # Keep world zero first because it is the representative world exported to
-    # the playback recording; fill the remaining references randomly.
-    if world_indices is not None:
-        indices = torch.as_tensor(world_indices, device=device, dtype=torch.long)
-        count = int(indices.numel())
-    elif count == 1:
-        indices = torch.zeros(1, device=device, dtype=torch.long)
-    else:
-        indices = torch.cat((torch.zeros(1, device=device, dtype=torch.long),
-                             torch.randperm(env.n - 1, device=device)[:count-1] + 1))
-    starts=env.sim.pose[:,0,:2]
-    goals=env.goal.clone()
-    if env.task == "defense":
-        # Reference an intercept point on the attacker's straight-line scoring
-        # approach; the field planner routes the defender around solid elements.
-        goals=.55*env.goal+.45*env.sim.pose[:,1,:2]
-    planner=TensorADStar(env)
-    dynamic=env.task=="counter_defense"
-    padded_all,lengths_all,_,_=planner.plan(starts,goals,env.sim.pose[:,0,2],
-        env.sim.length[:,0],env.sim.width[:,0],env.sim.speed[:,0],
-        env.sim.pose[:,1,:2],torch.zeros_like(env.sim.velocity[:,1,:2]),dynamic,
-        env.sim.lateral_mu[:,0],env.sim.accel[:,0])
-    padded=padded_all[indices]
-    lengths=lengths_all[indices]
-    segments = (padded[:, 1:] - padded[:, :-1]).norm(dim=-1)
-    cumulative = torch.cat((torch.zeros((count, 1), device=device), segments.cumsum(-1)), -1)
-    total = cumulative.gather(1, (lengths - 1)[:, None]).squeeze(1)
-    # Training exports only its representative route. Evaluation playback can
-    # request one route per sampled scenario for its ghost rollouts.
-    route_count = count if include_all_routes else min(1, count)
-    routes=[padded[i,:int(lengths[i].item())].detach().cpu().tolist()
-            for i in range(route_count)]
-    return indices, padded, lengths, cumulative, total, routes
-
-
-def _reference_action(routes, positions, headings, speeds):
-    indices, points, lengths, _cumulative, _total = routes[:5]
-    pos = positions[indices]
-    d2 = (points - pos[:, None, :]).square().sum(-1)
-    valid = torch.arange(points.shape[1], device=points.device)[None, :] < lengths[:, None]
-    nearest = d2.masked_fill(~valid, float("inf")).argmin(-1)
-    target_index = torch.minimum(nearest + 1, lengths - 1)
-    target = points[torch.arange(len(indices), device=points.device), target_index]
-    delta = target - pos
-    angle = headings[indices]
-    body = torch.stack((angle.cos() * delta[:, 0] + angle.sin() * delta[:, 1],
-                        -angle.sin() * delta[:, 0] + angle.cos() * delta[:, 1]), -1)
-    return torch.cat(((body / body.norm(dim=-1, keepdim=True).clamp_min(1e-6)),
-                      torch.zeros((len(indices), 1), device=points.device)), -1)
-
-
-def _reference_potential(routes, positions):
-    indices, points, lengths, cumulative, total = routes[:5]
-    pos = positions[indices]
-    d2 = (points - pos[:, None, :]).square().sum(-1)
-    valid = torch.arange(points.shape[1], device=points.device)[None, :] < lengths[:, None]
-    nearest = d2.masked_fill(~valid, float("inf")).argmin(-1)
-    travelled = cumulative.gather(1, nearest[:, None]).squeeze(1)
-    return travelled - total
-
-
-def _reference_tracking_error(routes, positions):
-    """Distance from each sampled robot to its nearest AD* route segment."""
-    indices, points, lengths, _cumulative, _total = routes[:5]
-    pos = positions[indices]
-    if points.shape[1] == 1:
-        return (pos - points[:, 0]).norm(dim=-1)
-    start, end = points[:, :-1], points[:, 1:]
-    segment = end - start
-    fraction = ((pos[:, None] - start) * segment).sum(-1) / segment.square().sum(-1).clamp_min(1e-8)
-    projection = start + fraction.clamp(0, 1)[..., None] * segment
-    distance = (pos[:, None] - projection).square().sum(-1)
-    valid = torch.arange(points.shape[1] - 1, device=points.device)[None, :] < (lengths - 1)[:, None]
-    segment_distance = distance.masked_fill(~valid, float("inf")).min(-1).values.clamp_min(0).sqrt()
-    point_distance = (pos - points[:, 0]).norm(dim=-1)
-    return torch.where(lengths == 1, point_distance, segment_distance)

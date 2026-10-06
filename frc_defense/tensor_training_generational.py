@@ -29,10 +29,9 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                        evaluation_workers: int = 1) -> dict[str, Any]:
     """Run PPO generations and manage a diverse, evaluated opponent population.
 
-    Each generation continues the prior PPO checkpoint. One member is sampled
-    from deterministic baselines and learned opponent checkpoints for training;
-    the resulting policy is then evaluated against every fixed baseline and
-    each available learned population member on a shared seeded batch.
+    Each generation continues the prior PPO checkpoint. Training uses
+    deterministic offense; evaluation compares the defense against fixed,
+    deterministic baselines on a shared seeded batch.
     """
     # Resolve through the caller module at invocation time so monkeypatches and
     # the legacy training module's live helpers remain authoritative.
@@ -46,13 +45,12 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
     _train_once = _runtime["_train_once"]
     _evaluate_once = _runtime["_evaluate_once"]
     _task_opponent = _runtime["_task_opponent"]
-    _opponent_population_paths = _runtime["_opponent_population_paths"]
     _select_checkpoint_population = _runtime["_select_checkpoint_population"]
     _dispatch_opponent_evaluations = _runtime["_dispatch_opponent_evaluations"]
     _opponent_evaluation_paths = _runtime["_opponent_evaluation_paths"]
 
-    if task not in ("counter_defense", "defense"):
-        raise ValueError("task must be counter_defense or defense")
+    if task != "defense":
+        raise ValueError("only defense policies are trainable; offense is deterministic")
     if min(generations, num_envs, horizon, population_size, elite_count,
            rollout_steps, epochs, minibatch_size, evaluation_episodes) < 1:
         raise ValueError("generation, environment, horizon, population, PPO, and evaluation sizes must be positive")
@@ -96,22 +94,15 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
         prior_payload = None
         try:
             prior_payload = torch.load(previous_checkpoint, map_location="cpu", weights_only=True)
-            compatible = (prior_payload.get("architecture", "direct") == architecture
+            compatible = (prior_payload.get("task") == "defense"
+                and prior_payload.get("architecture", "direct") == architecture
                 and int(prior_payload.get("obs_dim", OBS_DIM)) == expected_obs
                 and int(prior_payload.get("action_dim", ACTION_DIM)) == expected_action)
         except (OSError, RuntimeError, KeyError, ValueError, EOFError):
             compatible = False
         if not compatible:
-            # Keep older strategic checkpoints as learned opponents. The new
-            # 137-input/8-action policy cannot safely load 89-input/3-action
-            # weights, so its first PPO generation starts with a fresh head.
-            historical = out / "historical-opponents"
-            if rank == 0:
-                historical.mkdir(parents=True, exist_ok=True)
-                source = Path(previous_checkpoint)
-                backup = historical / f"pre-ppo-{source.parent.name}.pt"
-                if prior_payload is not None and source.is_file() and source.resolve() != backup.resolve():
-                    shutil.copy2(source, backup)
+            # An untagged, offense, or incompatible checkpoint must never be
+            # treated as a defense initializer or retained as an opponent.
             previous_checkpoint = None
     start_generation = len(history)
     if start_generation >= generations:
@@ -132,11 +123,8 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
     global_minibatch_size = min(minibatch_size, rollout_batch)
     if global_minibatch_size % world_size:
         raise ValueError("effective global minibatch must divide evenly across ranks")
-    if task == "counter_defense":
-        fixed_baselines = ("guard", "adstar_defender", "intercept", "lane_block",
-                           "fuel_denial", "shadow", "hub_guard")
-    else:
-        fixed_baselines = ("offense", "adstar", "mirror", "cutoff", "velocity_intercept")
+    fixed_baselines = _runtime["DEFENSE_TRAINING_OPPONENTS"]
+    training_baselines = ("offense",)
     evaluation_count = max(1, min(evaluation_episodes, num_envs))
     started_at = time.time()
     started = time.perf_counter()
@@ -156,12 +144,6 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
         and Path(str(item.get("checkpoint", ""))).is_file()]
     training_specs: list[dict[str, Any]] = []
 
-    def learned_member_name(path: Path) -> str:
-        owner = path.parent.parent.name if path.parent.name in (
-            "opponent-population", "historical-opponents") else path.parent.name
-        source = path.parent.name if owner != path.parent.name else "current"
-        return f"NN · {owner} · {source} · {path.stem}"
-
     def write_json(path: Path, value: dict[str, Any]) -> None:
         temp = path.with_suffix(path.suffix + ".tmp")
         temp.write_text(json.dumps(value, indent=2, sort_keys=True))
@@ -170,16 +152,10 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
     for generation in range(start_generation, generations):
         generation_number = generation + 1
         generation_started = time.perf_counter()
-        # Refresh the peer pool every generation so both role trainers see the
-        # other's newest checkpoint as well as its selected historical members.
-        peer_paths = _opponent_population_paths(task, out)
-        training_specs = [{"name": mode, "mode": mode, "checkpoint": None}
-                          for mode in fixed_baselines]
-        training_specs.extend({"name": learned_member_name(path), "mode": "learned",
-                               "checkpoint": str(path)} for path in peer_paths)
+        training_specs = [{"name": mode, "mode": mode}
+                          for mode in training_baselines]
         if opponent and opponent != "mixed" and opponent not in {item["mode"] for item in training_specs}:
-            training_specs.insert(0, {"name": opponent, "mode": _task_opponent(task, opponent),
-                                      "checkpoint": None})
+            training_specs.insert(0, {"name": opponent, "mode": _task_opponent(task, opponent)})
         if world_size > 1:
             shared_specs = [training_specs if rank == 0 else None]
             dist.broadcast_object_list(shared_specs, src=0)
@@ -197,7 +173,6 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
             "generation": generation_number, "current_generation": generation_number,
             "total_generations": generations, "population_size": population_size,
             "elite_count": elite_count, "opponent_member": train_spec["name"],
-            "opponent_population_members": [item["name"] for item in training_specs],
             "opponents": sorted({item["mode"] for item in training_specs}),
             "completed_timesteps_base": generation * per_generation_steps,
             "requested_timesteps_total": requested_timesteps,
@@ -213,9 +188,6 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
             max_grad_norm=max_grad_norm, l2_coef=l2_coef, horizon=horizon,
             architecture=architecture, curriculum=True,
             strategic_rate_hz=strategic_rate_hz,
-            learned_opponent_checkpoint=train_spec["checkpoint"],
-            learned_opponent_checkpoints=[item["checkpoint"] for item in training_specs
-                if item["mode"] == "learned"],
             status_context=status_context)
         previous_checkpoint = checkpoint
         if world_size > 1:
@@ -231,10 +203,8 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
         scenario_seed = 500_000 + generation * 1009
         evaluation_dir = out / "generation-evaluations" / f"generation-{generation_number:04d}"
         opponent_results: dict[str, Any] = {}
-        evaluation_specs = [{"name": mode, "mode": mode, "checkpoint": None}
+        evaluation_specs = [{"name": mode, "mode": mode}
                             for mode in fixed_baselines]
-        evaluation_specs.extend({"name": learned_member_name(path), "mode": "learned",
-                                 "checkpoint": str(path)} for path in peer_paths)
         population_evaluation_started = time.perf_counter()
         def evaluate_spec(index, spec, stream):
             metrics_path, _ = _opponent_evaluation_paths(
@@ -246,8 +216,8 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                     evaluation_dir, spec, index, evaluation_workers > 1)
                 metrics = _evaluate_once(checkpoint, task, evaluation_count, scenario_seed,
                     evaluation_count, selected_device, spec["mode"], worker_path,
-                    horizon=horizon, opponent_checkpoint=spec["checkpoint"],
-                    strategic_rate_hz=strategic_rate_hz, capture_playback=False)
+                    horizon=horizon, strategic_rate_hz=strategic_rate_hz,
+                    capture_playback=False)
                 if evaluation_workers > 1:
                     write_json(metrics_path, metrics)
                 return metrics, None
@@ -262,7 +232,7 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                 evaluation_dir, spec, spec_index, evaluation_workers > 1)
             if error is not None:
                 opponent_results[spec["name"]] = {"opponent": spec["mode"],
-                    "checkpoint": spec["checkpoint"], "seed": scenario_seed,
+                    "seed": scenario_seed,
                     "episodes": evaluation_count, "horizon": horizon,
                     "error": error}
                 continue
@@ -270,7 +240,7 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                 own_scores = float(metrics.get("mean_scores") or 0.)
                 other_scores = float(metrics.get("mean_opponent_scores") or 0.)
                 opponent_results[spec["name"]] = {
-                    "opponent": spec["mode"], "checkpoint": spec["checkpoint"],
+                    "opponent": spec["mode"],
                     "mean_return": metrics.get("mean_return"),
                     "elapsed_seconds": metrics.get("elapsed_seconds"),
                     "physics_world_ticks_per_second": metrics.get("physics_world_ticks_per_second"),
@@ -292,7 +262,7 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                     "metrics_file": str(metrics_path)}
             except (OSError, RuntimeError, ValueError, KeyError) as exc:
                 opponent_results[spec["name"]] = {"opponent": spec["mode"],
-                    "checkpoint": spec["checkpoint"], "seed": scenario_seed,
+                    "seed": scenario_seed,
                     "episodes": evaluation_count, "horizon": horizon,
                     "error": str(exc)}
         population_evaluation_elapsed = time.perf_counter() - population_evaluation_started
@@ -329,7 +299,6 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
             "strong_elites": min(elite_count, population_size), "members": archive_entries})
         generation_record = {"generation": generation_number,
             "training_optimizer": "PPO", "training_opponent": train_spec["name"],
-            "training_opponent_checkpoint": train_spec["checkpoint"],
             "ppo_timesteps": ppo_result["completed_timesteps"],
             "strategic_decision_rate_hz": ppo_result.get("strategic_decision_rate_hz"),
             "strategic_transitions_per_second": ppo_result.get("strategic_transitions_per_second"),
@@ -368,16 +337,14 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
         elapsed = time.perf_counter() - started
         final_status = {**ppo_result, "status": "running" if generation_number < generations else "completed",
             "algorithm": "generational", "optimizer": "PPO",
-            "task": task, "policy_modes": (["INTAKE", "DELIVER"] if task == "counter_defense" else ["DEFENSE"]),
+            "task": task, "policy_modes": ["DEFENSE"],
             "generation": generation_number,
             "current_generation": generation_number, "total_generations": generations,
             "population_size": len(archive_entries), "population_capacity": population_size,
             "elite_count": min(elite_count, population_size),
-            "opponent": "learned" if train_spec["mode"] == "learned" else train_spec["mode"],
+            "opponent": train_spec["mode"],
             "opponent_member": train_spec["name"],
             "opponents": sorted({item["mode"] for item in training_specs}),
-            "opponent_population_members": [item["name"] for item in training_specs
-                if item["mode"] == "learned"],
             "opponent_weights": mode_counts,
             "generation_history": history, "generation_metrics": generation_record,
             "opponent_metrics": opponent_results,
@@ -409,9 +376,7 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
         "opponent_metrics": last_opponent_results,
         "opponent_fitness": {name: values.get("success_rate", values.get("mean_return"))
                               for name, values in last_opponent_results.items()},
-        "opponents": sorted({item["mode"] for item in training_specs}),
-        "opponent_population_members": [item["name"] for item in training_specs
-            if item["mode"] == "learned"]}
+        "opponents": sorted({item["mode"] for item in training_specs})}
     write_json(status_path, final)
     write_json(out / "metadata.json", final)
     if world_size > 1:

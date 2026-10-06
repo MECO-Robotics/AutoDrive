@@ -31,16 +31,13 @@ from frc_defense import tensor_adstar
 from frc_defense import tensor_collision
 from frc_defense import tensor_strategic_observation_proto
 from frc_defense.tensor_sim import TensorDefenseEnv
-from frc_defense.tensor_training import _attach_historical_opponent, _held_action_interval
+from frc_defense.tensor_training import _held_action_interval
 
 
 def benchmark(env_count: int, device: torch.device, seed: int,
               decisions: int, ticks_per_decision: int, opponent: str,
               return_info: bool = False,
               skip_metric_objective: bool = True,
-              reuse_opponent_candidates: bool = True,
-              learned_opponent_checkpoint: str | None = None,
-              opponent_policy_decision_each_tick: bool = False,
               profile_components: bool = False,
               squared_fuel_candidate_distance: bool = False,
               reuse_own_candidates: bool = False) -> dict:
@@ -53,16 +50,9 @@ def benchmark(env_count: int, device: torch.device, seed: int,
         num_envs=env_count, task="counter_defense", device=device, seed=seed,
         opponent=opponent, action_mode="strategic", horizon=8000,
         skip_strategic_offense_metric_objective=skip_metric_objective,
-        reuse_strategic_opponent_candidates=reuse_opponent_candidates,
         reuse_strategic_own_candidates=reuse_own_candidates,
         squared_fuel_candidate_distance=squared_fuel_candidate_distance,
     )
-    learned_opponent_loaded = False
-    if opponent == "learned":
-        learned_opponent_loaded = _attach_historical_opponent(
-            env, "counter_defense", device, learned_opponent_checkpoint)
-        if not learned_opponent_loaded:
-            raise RuntimeError("learned opponent checkpoint could not be loaded")
     component_host_seconds: dict[str, float] = {}
     component_calls: dict[str, int] = {}
     if profile_components:
@@ -115,7 +105,7 @@ def benchmark(env_count: int, device: torch.device, seed: int,
     warmup_started = time.perf_counter()
     _held_action_interval(env, action, ticks_per_decision, obs,
                           known_remaining_ticks=8000, return_info=return_info,
-                          opponent_policy_decision_each_tick=opponent_policy_decision_each_tick)
+                          )
     obs = env._last_observation
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -138,7 +128,7 @@ def benchmark(env_count: int, device: torch.device, seed: int,
             env, action, ticks_per_decision, obs,
             known_remaining_ticks=8000 - episode_ticks,
             return_info=return_info,
-            opponent_policy_decision_each_tick=opponent_policy_decision_each_tick)
+            )
         reward_total += rewards
         reward_trace[decision_index].copy_(rewards)
         terminal_seen |= dones
@@ -199,17 +189,13 @@ def benchmark(env_count: int, device: torch.device, seed: int,
         "warmup_seconds": warmup_elapsed,
         "returns_info": return_info,
         "skip_strategic_offense_metric_objective": skip_metric_objective,
-        "reuse_strategic_opponent_candidates": reuse_opponent_candidates,
         "reuse_strategic_own_candidates": reuse_own_candidates,
         "squared_fuel_candidate_distance": squared_fuel_candidate_distance,
-        "opponent_policy_decision_each_tick": opponent_policy_decision_each_tick,
         "component_host_seconds_nested": component_host_seconds if profile_components else None,
         "component_host_seconds_inclusive": component_host_seconds if profile_components else None,
         "component_calls": component_calls if profile_components else None,
         "component_timing_note": ("inclusive nested host wall timings; component totals overlap"
                                   if profile_components else None),
-        "learned_opponent_checkpoint": (getattr(env, "learned_opponent_checkpoint", None)
-                                        if learned_opponent_loaded else None),
         "fused_perception_requested": tensor_perception.FUSED_PERCEPTION_HIP_ENABLED,
         "fused_perception_loaded": (tensor_perception.FUSED_PERCEPTION_HIP_ENABLED and
                                     tensor_perception._hip_perception_extension() is not None),
@@ -266,14 +252,8 @@ def main() -> None:
                         help="enable the opt-in fused HIP gamepiece update")
     parser.add_argument("--keep-metric-objective", action="store_true",
                         help="compute the legacy metric-only strategic offense objective")
-    parser.add_argument("--legacy-opponent-candidates", action="store_true",
-                        help="recompute learned strategic-opponent candidates instead of reusing the observation results")
     parser.add_argument("--reuse-strategic-own-candidates", action="store_true",
                         help="reuse controlled-side FUEL candidates from the current observation in the next physics step")
-    parser.add_argument("--learned-opponent-checkpoint",
-                        help="checkpoint used when --opponent learned is selected")
-    parser.add_argument("--legacy-learned-opponent-cadence", action="store_true",
-                        help="re-run the learned opponent at each physics tick")
     parser.add_argument("--profile-step-components", action="store_true",
                         help="record nested host-side call timing by simulator step component")
     parser.add_argument("--squared-fuel-candidate-distance", action="store_true",
@@ -287,9 +267,6 @@ def main() -> None:
     results = [benchmark(n, device, args.seed, args.decisions,
                          args.physics_ticks, args.opponent, args.return_info,
                          not args.keep_metric_objective,
-                         not args.legacy_opponent_candidates,
-                         args.learned_opponent_checkpoint,
-                         args.legacy_learned_opponent_cadence,
                          args.profile_step_components,
                          args.squared_fuel_candidate_distance,
                          args.reuse_strategic_own_candidates) for n in args.envs]

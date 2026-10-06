@@ -120,11 +120,13 @@ def test_defender_tracks_active_opponent_instead_of_stationary_unassigned_slots(
 
 def test_shared_policy_infers_six_robots_and_modes_control_each_robot():
     modes = ("none", "nn", "deterministic", "nn", "none", "deterministic")
+    roles = ("offense", "defense", "offense", "defense", "defense", "defense")
     env = TensorThreeVsThreeEnv(
         num_envs=1,
         device="cpu",
         seed=91,
         control_modes=modes,
+        robot_roles=roles,
         horizon=2,
         randomize=False,
         fuel_count=96,
@@ -188,15 +190,15 @@ def test_three_vs_three_rejects_incomplete_or_unknown_robot_control_modes():
         )
 
 
-def test_alliance_can_mix_offense_and_defense_nn_and_deterministic_roles():
+def test_deterministic_offense_and_defense_nn_selection():
     from frc_defense.dashboard import _normalize_robot_control_selections
 
     selections = (
-        "offense_nn", "defense_deterministic", "none",
+        "offense_deterministic", "defense_deterministic", "none",
         "defense_nn", "offense_deterministic", "none",
     )
     modes, roles = _normalize_robot_control_selections(selections)
-    assert modes == ["nn", "deterministic", "none", "nn", "deterministic", "none"]
+    assert modes == ["deterministic", "deterministic", "none", "nn", "deterministic", "none"]
     assert roles == ["offense", "defense", "offense", "defense", "offense", "defense"]
 
     env = TensorThreeVsThreeEnv(
@@ -205,15 +207,6 @@ def test_alliance_can_mix_offense_and_defense_nn_and_deterministic_roles():
         perception_dropout=0, position_noise=0, velocity_noise=0,
     )
     assert env.robot_roles == tuple(roles)
-    assert env.agent_train_mask.tolist() == [True, False, False, True, False, False]
-    assert env._deterministic_mode_mask.tolist() == [False, True, False, False, True, False]
+    assert env.agent_train_mask.tolist() == [False, False, False, True, False, False]
+    assert env._deterministic_mode_mask.tolist() == [True, True, False, False, True, False]
     assert env._defense_role_mask.tolist() == [False, True, False, True, False, True]
-
-
-def test_legacy_robot_control_modes_keep_alliance_role_defaults():
-    from frc_defense.dashboard import _normalize_robot_control_selections
-
-    modes, roles = _normalize_robot_control_selections(
-        ("nn", "deterministic", "none", "nn", "deterministic", "none"))
-    assert modes == ["nn", "deterministic", "none", "nn", "deterministic", "none"]
-    assert roles == ["offense", "offense", "offense", "defense", "defense", "defense"]

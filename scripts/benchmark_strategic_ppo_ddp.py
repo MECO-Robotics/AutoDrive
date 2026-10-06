@@ -104,9 +104,8 @@ def main():
     p.add_argument('--minibatch-size', type=int, default=4096,
                    help='global minibatch; must divide evenly across ranks')
     p.add_argument('--seed', type=int, default=94001)
-    p.add_argument('--opponent', default='guard')
+    p.add_argument('--opponent', choices=('offense',), default='offense')
     p.add_argument('--checkpoint', type=Path)
-    p.add_argument('--task', default='counter_defense')
     p.add_argument('--horizon', type=int, default=8000)
     p.add_argument('--learning-rate', type=float, default=3e-4)
     p.add_argument('--gamma', type=float, default=.993)
@@ -134,7 +133,7 @@ def main():
     torch.manual_seed(a.seed)
     torch.cuda.manual_seed_all(a.seed)
 
-    env = _env(a.envs_per_rank, a.task, device, a.seed + rank * 1000003,
+    env = _env(a.envs_per_rank, 'defense', device, a.seed + rank * 1000003,
                a.opponent, a.horizon, architecture='strategic_adstar')
     obs = _reset_obs(env.reset()).to(device=device, dtype=torch.float32)
     obs_dim, action_dim = int(env.obs_dim), int(env.action_dim)

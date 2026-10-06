@@ -17,8 +17,8 @@ def _bind_training_globals(source: dict[str, Any]) -> None:
     names = (
         "torch", "ActorCritic", "OBS_DIM", "ACTION_DIM", "STRATEGIC_ACTION_DIM",
         "OBS_NORMALIZATION", "MIXED_DEFENSE_OPPONENTS", "_device", "_task_opponent",
-        "_evaluate_once", "_wilson_interval", "_env", "_adstar_reference",
-        "_attach_historical_opponent", "_legacy_strategic_action",
+        "_evaluate_once", "_wilson_interval", "_env",
+        "_legacy_strategic_action",
         "_scripted_game_action", "_reset_obs", "_unevaluated_ablation_row",
         "ALLIANCE_ZONE_DEPTH", "BUMP_ACCELERATION_SCALE", "BUMP_SPEED_SCALE",
         "atomic_json", "static_collision_boxes", "write_playback",
@@ -42,7 +42,7 @@ def _bind_training_globals(source: dict[str, Any]) -> None:
                 continue
             globals()[name] = value
 
-def evaluate(checkpoint: str | Path, *, task: str = "counter_defense",
+def evaluate(checkpoint: str | Path, *, task: str = "defense",
              episodes: int = 32, seed: int = 1000, num_envs: int = 32,
              device: str = "cuda", opponent: str = "random",
              output: str | Path = "metrics/tensor-evaluation.json",
@@ -67,44 +67,32 @@ def _unevaluated_ablation_row(name: str, task: str, architecture: str | None,
         group, seed, checkpoint, missing_reason)
 
 
-def evaluate_game_ablations(*, offense_checkpoint: str | Path | None = None,
-        defense_checkpoint: str | Path | None = None, episodes: int = 8,
+def evaluate_game_ablations(*, defense_checkpoint: str | Path | None = None,
+        episodes: int = 8,
         seed: int = 4100, num_envs: int = 8, device: str = "cuda",
         output: str | Path = "metrics/ablations.json", horizon: int = 8000,
         strategic_rate_hz: float = 4., capture_playback: bool = True) -> dict[str, Any]:
     from . import tensor_training_evaluation_reporting as _reporting
     _reporting._bind_evaluation_globals(globals())
     return _reporting.evaluate_game_ablations(
-        offense_checkpoint=offense_checkpoint, defense_checkpoint=defense_checkpoint,
+        defense_checkpoint=defense_checkpoint,
         episodes=episodes, seed=seed, num_envs=num_envs, device=device, output=output,
         horizon=horizon, strategic_rate_hz=strategic_rate_hz,
         capture_playback=capture_playback)
 
 
 def _scripted_game_action(env, task: str) -> torch.Tensor:
-    """Small game-state strategy whose navigation is delegated to simulator AD*."""
-    if task == "defense":
-        # Deny a visible loose FUEL when available; otherwise block the likely
-        # scoring lane. This strategy sees no hidden objective.
-        candidates,valid,_=env._fuel_candidates(0)
-        slot=valid.to(torch.int64).argmax(-1)
-        return torch.where(valid.any(-1),slot+1,torch.full_like(slot,5))
-    has_piece = env._own_possession(0) > 0
-    can_score = has_piece
-    candidates,valid,_=env._fuel_candidates(0)
-    collect=valid.to(torch.int64).argmax(-1)
-    # Explicit candidate rank 0..3 collects; choice 4 scores. If no loose
-    # FUEL is available, select the intermediate-objective behavior.
-    return torch.where(can_score,torch.full_like(collect,4),
-        torch.where(valid.any(-1),collect,torch.full_like(collect,6)))
+    """Deterministic defensive action; AD* handles resulting navigation."""
+    if task != "defense":
+        raise ValueError("scripted evaluation only supports deterministic defense")
+    candidates, valid, _ = env._fuel_candidates(0)
+    slot = valid.to(torch.int64).argmax(-1)
+    return torch.where(valid.any(-1), slot + 1, torch.full_like(slot, 5))
 
 
-def _legacy_strategic_action(action: torch.Tensor, task: str) -> torch.Tensor:
+def _legacy_strategic_action(action: torch.Tensor) -> torch.Tensor:
     """Map a historical three-class checkpoint onto the candidate action set."""
     legacy=action.long().clamp(0,2)
-    if task=="counter_defense":  # offense: collect, score, tactical
-        return torch.where(legacy==0,torch.zeros_like(legacy),
-            torch.where(legacy==1,torch.full_like(legacy,4),torch.full_like(legacy,6)))
     # defense: block, deny, intercept
     return torch.where(legacy==0,torch.full_like(legacy,5),
         torch.where(legacy==1,torch.ones_like(legacy),torch.zeros_like(legacy)))
@@ -112,12 +100,16 @@ def _legacy_strategic_action(action: torch.Tensor, task: str) -> torch.Tensor:
 
 def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                    output, horizon=8000, scripted_strategy=None,
-                   opponent_checkpoint=None, strategic_rate_hz=4.,
+                   strategic_rate_hz=4.,
                    capture_playback=True, scenario_zone_pair=None):
+    if task != "defense":
+        raise ValueError("only defense evaluation is supported")
     if not 2. <= strategic_rate_hz <= 5.:
         raise ValueError("strategic_rate_hz must be between 2 and 5")
     payload = (torch.load(checkpoint, map_location=device, weights_only=True)
                if checkpoint is not None else None)
+    if payload is not None and payload.get("task") != "defense":
+        raise ValueError("checkpoint must be tagged as a defense policy")
     architecture = (payload.get("architecture", "direct") if payload is not None
                     else "strategic_adstar")
     action_kind = (payload.get("action_kind", "continuous") if payload is not None
@@ -128,8 +120,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                             payload.get("action_dim", ACTION_DIM), action_kind).to(device)
         model.load_state_dict(payload["model_state_dict"])
         model.eval()
-    scenario_opponent = ("learned" if opponent_checkpoint else
-        "adstar" if task == "defense" and opponent in MIXED_DEFENSE_OPPONENTS else opponent)
+    scenario_opponent = ("adstar" if opponent in MIXED_DEFENSE_OPPONENTS else opponent)
     env = _env(num_envs, task, device, seed, scenario_opponent, horizon,
                normalize_observations=bool(payload and
                    payload.get("observation_normalization") == OBS_NORMALIZATION),
@@ -137,23 +128,18 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     horizon=int(env.horizon)
     # Planner routes must not determine the defender's initial position or
     # enter its policy inputs during defense evaluation.
-    if task == "defense":
-        env.adstar_spawn_hint = False
-    env.opponent = "learned" if opponent_checkpoint else opponent
-    if opponent_checkpoint and not _attach_historical_opponent(
-            env, task, device, opponent_checkpoint):
-        raise ValueError(f"could not load opponent checkpoint: {opponent_checkpoint}")
+    env.adstar_spawn_hint = False
+    env.opponent = opponent
     checkpoint_drivetrain_config = payload.get("drivetrain_config") if payload else None
     if (checkpoint_drivetrain_config is not None and
             checkpoint_drivetrain_config != env.drivetrain_config):
         raise ValueError("checkpoint drivetrain configuration does not match this simulator; "
                          "use the same FRC_DRIVETRAIN_CONFIG used during training")
-    is_adstar_defense = task == "defense" and opponent == "adstar"
+    is_adstar_defense = opponent == "adstar"
     # The traditional "guard" mode is now the same obstacle-aware AD* policy;
     # keep its public opponent name so existing training/evaluation commands
     # and dashboard links continue to work.
-    is_adstar_defender = task == "counter_defense" and opponent in ("guard", "adstar_defender")
-    uses_adstar_playback_route = is_adstar_defense or is_adstar_defender
+    uses_adstar_playback_route = is_adstar_defense
     run_dir = Path(output).parent
     status_path = run_dir / "status.json"
     playback_path = run_dir / "playback.json"
@@ -214,16 +200,6 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                  "drivetrain_config": env.drivetrain_config}
         atomic_json(status_path, value)
 
-    if is_adstar_defender:
-        atomic_json(status_path, {"status": "running", "task": task,
-            "opponent": opponent, "checkpoint": str(checkpoint),
-            "device": str(device), "device_name": torch.cuda.get_device_name(device)
-            if device.type == "cuda" else "CPU", "num_envs": num_envs,
-            "progress_unit": "episodes", "completed_timesteps": 0,
-            "requested_timesteps": episodes, "started_at": time.time(),
-            "drivetrain_config": env.drivetrain_config,
-            "checkpoint_drivetrain_config": checkpoint_drivetrain_config})
-
     reset_options = None
     if scenario_zone_pair is not None:
         start_zone, goal_zone = scenario_zone_pair
@@ -259,16 +235,10 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
             planner.plan = timed_plan
         except (AttributeError, TypeError):
             pass
-    start_robot = 0 if task == "counter_defense" else 1
     for i, scenario in enumerate(playback_scenarios):
-        scenario["start"] = env.sim.pose[i, start_robot, :2].detach().cpu().tolist()
+        scenario["start"] = env.sim.pose[i, 1, :2].detach().cpu().tolist()
         scenario["goal"] = (None if architecture == "strategic_adstar"
                              else env.goal[i].detach().cpu().tolist())
-    playback_reference_routes = []
-    if not uses_adstar_playback_route and task != "defense":
-        *_, playback_reference_routes = _adstar_reference(
-            env, device, max_worlds=playback_scenario_count,
-            world_indices=range(playback_scenario_count), include_all_routes=True)
     totals = torch.zeros(num_envs, device=device)
     lengths = torch.zeros(num_envs, dtype=torch.long, device=device)
     base_quota, extra_quota = divmod(episodes, num_envs)
@@ -334,7 +304,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                     model.actor.out_features==STRATEGIC_ACTION_DIM else None)
                 actions, _, _ = model.sample(model_obs, deterministic=True,action_mask=action_mask)
                 if env.action_mode=="strategic" and model.actor.out_features==3:
-                    actions=_legacy_strategic_action(actions,task)
+                    actions=_legacy_strategic_action(actions)
             if device.type == "cuda":
                 inference_event_end.record(timing_stream)
                 inference_device_events.append((inference_event_start, inference_event_end))
@@ -348,7 +318,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                     held_actions = torch.where(selector, actions, held_actions)
                 pending_refresh &= ~decision_mask
                 pending_refresh_any = False
-        elif needs_policy_decision and scripted_strategy in ("offense", "defense"):
+        elif needs_policy_decision and scripted_strategy == "defense":
             actions = _scripted_game_action(env, task)
             if strategic:
                 if held_actions is None:
@@ -360,11 +330,8 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                 pending_refresh_any = False
         elif needs_policy_decision:
             raise ValueError("evaluation needs a valid checkpoint or an explicit scripted strategy")
-        opponent_policy_decision = not strategic
         if strategic:
             actions = held_actions
-            if strategic_decision_due or pending_refresh_any:
-                opponent_policy_decision = True
             if strategic_decision_due:
                 strategic_phase += 50. / strategic_rate_hz
                 strategic_ticks_remaining = max(1, int(strategic_phase))
@@ -373,7 +340,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
         next_obs, rewards, dones, truncated, info = env.step(
             actions, active_mask=active,
             _active_count=active_episode_count if strategic else None,
-            _opponent_policy_decision=opponent_policy_decision)
+            )
         active_float = active.to(device=device, dtype=torch.float32)
         totals += rewards.to(device=device, dtype=torch.float32).reshape(num_envs) * active_float
         lengths += active.to(device=device, dtype=torch.long)
@@ -443,7 +410,7 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                         predicted_intercept=intercepts[i].detach().cpu().tolist() if is_adstar_defense and len(intercepts) else None
                         predicted_intercept_time=float(intercept_times[i].item()) if is_adstar_defense and len(intercept_times) else None
                     else:
-                        route=playback_reference_routes[i] if playback_reference_routes else []
+                        route=[]
                         predicted_intercept=None
                         predicted_intercept_time=None
                     pose = env.sim.pose[i].detach().cpu().tolist()
@@ -644,9 +611,4 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     path.write_text(json.dumps(result, indent=2, sort_keys=True))
     if is_adstar_defense:
         eval_status("completed")
-    elif is_adstar_defender:
-        atomic_json(status_path, {**result, "status": "completed",
-            "progress_unit": "episodes", "completed_timesteps": episodes,
-            "requested_timesteps": episodes,
-            "checkpoint_drivetrain_config": checkpoint_drivetrain_config})
     return result

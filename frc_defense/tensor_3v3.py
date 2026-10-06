@@ -88,17 +88,18 @@ class TensorThreeVsThreeEnv(
         self._planner_tick_scalar=self.replan_interval-1
         self._planner_tick_aligned=True
         self.normalize_observations = bool(normalize_observations)
-        modes = list(control_modes or ("nn", "nn", "nn", "deterministic",
-                                       "deterministic", "deterministic"))
+        modes = list(control_modes or ("deterministic",) * NUM_ROBOTS)
         if len(modes) != NUM_ROBOTS or any(mode not in CONTROL_MODES for mode in modes):
             raise ValueError("control_modes must assign none, nn, or deterministic to six robots")
         self.control_modes = tuple(modes)
         self.teammate_intent_knowledge=bool(teammate_intent_knowledge)
         self._controlled_mode_mask=torch.tensor(
             [mode!="none" for mode in modes],device=self.device,dtype=torch.bool)
-        roles = list(robot_roles or ("offense",) * NUM_ROBOTS)
+        roles = list(robot_roles or ("offense",) * 3 + ("defense",) * 3)
         if len(roles) != NUM_ROBOTS or any(role not in ("offense", "defense") for role in roles):
             raise ValueError("robot_roles must assign offense or defense to six robots")
+        if any(mode == "nn" and role != "defense" for mode, role in zip(modes, roles)):
+            raise ValueError("neural control is available only for defense-role robots")
         self.robot_roles = tuple(roles)
         types = list(robot_types or ("dumper",) * NUM_ROBOTS)
         if len(types) != NUM_ROBOTS or any(kind not in ("dumper", "turret") for kind in types):

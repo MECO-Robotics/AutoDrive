@@ -100,8 +100,7 @@ def main():
         return TensorDefenseEnv(
             num_envs=args.envs, task="counter_defense", device=device, seed=args.seed,
             opponent="guard", action_mode="strategic", horizon=8000,
-            skip_strategic_offense_metric_objective=True,
-            reuse_strategic_opponent_candidates=True)
+            skip_strategic_offense_metric_objective=True)
 
     torch_env = make_env()
     hip_env = make_env()

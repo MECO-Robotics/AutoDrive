@@ -40,7 +40,7 @@ def test_evaluation_dispatch_rejects_zero_workers():
 
 
 def test_concurrent_evaluation_uses_private_side_effect_paths_and_same_report_path():
-    spec = {"name": "NN · peer / current", "mode": "learned"}
+    spec = {"name": "adstar", "mode": "adstar"}
     canonical_serial, execution_serial = _opponent_evaluation_paths(
         Path("/eval/generation-0001"), spec, 2, False)
     canonical_parallel, execution_parallel = _opponent_evaluation_paths(

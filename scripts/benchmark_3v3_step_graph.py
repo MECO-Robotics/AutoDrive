@@ -14,7 +14,7 @@ from frc_defense.tensor_3v3 import TensorThreeVsThreeEnv
 def make_env(device: str, n: int, seed: int) -> TensorThreeVsThreeEnv:
     env = TensorThreeVsThreeEnv(
         num_envs=n, device=device, seed=seed,
-        control_modes=("nn", "nn", "nn", "deterministic", "deterministic", "deterministic"),
+        control_modes=("deterministic", "deterministic", "deterministic", "nn", "nn", "nn"),
         horizon=8000, randomize=False, perception_dropout=0.,
         position_noise=0., velocity_noise=0., fused_sensor_rng=True,
     )
