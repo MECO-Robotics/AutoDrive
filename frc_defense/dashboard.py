@@ -82,6 +82,12 @@ def create_handler(run_dir: Path):
                 body = (STATIC_DIR / "dashboard.js").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            elif parsed.path in ("/assets/field_rendering.js",
+                                 "/assets/training_rendering.js"):
+                asset_name = parsed.path.rsplit("/", 1)[-1]
+                body = (STATIC_DIR / asset_name).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
             elif parsed.path == "/api/training-status":
                 runs=[]
                 for status_path in run_dir.glob("*/status.json"):
