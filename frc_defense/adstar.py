@@ -7,7 +7,7 @@ Source: https://github.com/mjansen4857/pathplanner/tree/main/pathplannerlib-pyth
 """
 from __future__ import annotations
 
-from math import ceil, floor, sqrt
+from math import ceil, floor
 from heapq import heappop, heappush
 from math import atan2, cos, hypot, sin
 
@@ -25,9 +25,11 @@ class ADStarPlanner:
                  resolution: float = .2, robot_length: float = .9,
                  robot_width: float = .9, robot_radius: float | None = None,
                  robot_heading: float = 0.,
-                 max_speed: float = 4.5,
+                 max_speed: float = 4.8,
                  max_acceleration: float = 8., steering_rate: float = 12.,
-                 lateral_friction: float = 1.2):
+                 lateral_friction: float = 1.2,
+                 max_angular_speed: float = 8.,
+                 max_angular_acceleration: float = 18.):
         self.length, self.width = float(length), float(width)
         self.resolution = float(resolution)
         self.robot_length = max(.01, float(robot_length))
@@ -42,6 +44,8 @@ class ADStarPlanner:
         self.max_acceleration = max(.1, float(max_acceleration))
         self.steering_rate = max(.1, float(steering_rate))
         self.lateral_friction = max(.1, float(lateral_friction))
+        self.max_angular_speed = max(.1, float(max_angular_speed))
+        self.max_angular_acceleration = max(.1, float(max_angular_acceleration))
         self._blocked = [[False] * self.ny for _ in range(self.nx)]
         for ix in range(self.nx):
             x = (ix + .5) * self.resolution
@@ -67,7 +71,6 @@ class ADStarPlanner:
         self._neighbors = ((1, 0, 1.), (-1, 0, 1.), (0, 1, 1.), (0, -1, 1.),
                            (1, 1, 1.41421356237), (1, -1, 1.41421356237),
                            (-1, 1, 1.41421356237), (-1, -1, 1.41421356237))
-        self.orientation_bins = 8
         self.last_poses = []
 
     @staticmethod
@@ -107,19 +110,24 @@ class ADStarPlanner:
         if (x < extent_x or x > self.length - extent_x or
                 y < extent_y or y > self.width - extent_y):
             return False
-        # No grid padding here: the footprint is tested directly against every
-        # collider. Grid padding is useful for search, but must not stand in for
-        # checking the actual swept bumper on a smoothed trajectory.
-        dx_axis = (c, s)
-        dy_axis = (-s, c)
+        # Circumscribed and inscribed circles cheaply classify clear and
+        # definitely-colliding cases. SAT is reserved for the ambiguous band.
+        robot_outer = hypot(half_l, half_w)
+        robot_inner = min(half_l, half_w)
         for box in (*self.colliders, *self._dynamic):
             if hasattr(box, "length"):
                 cx, cy, hx, hy = box.x, box.y, box.length / 2, box.width / 2
             else:
                 cx, cy, hx, hy = box
             dx, dy = x - cx, y - cy
-            if (abs(dx) > hx + extent_x or abs(dy) > hy + extent_y or
-                    abs(dx * c + dy * s) > half_l + hx * abs(c) + hy * abs(s) or
+            nearest_x = max(abs(dx) - hx, 0.)
+            nearest_y = max(abs(dy) - hy, 0.)
+            separation = hypot(nearest_x, nearest_y)
+            if separation > robot_outer + hypot(hx, hy):
+                continue
+            if separation <= robot_inner:
+                return False
+            if (abs(dx * c + dy * s) > half_l + hx * abs(c) + hy * abs(s) or
                     abs(dx * -s + dy * c) > half_w + hx * abs(s) + hy * abs(c)):
                 continue
             return False
@@ -136,10 +144,8 @@ class ADStarPlanner:
         tangent = atan2(end[1] - start[1], end[0] - start[0])
         start_heading = tangent if start_heading is None else start_heading
         end_heading = tangent if end_heading is None else end_heading
-        period = (0.5 * 3.141592653589793
-                  if abs(self.robot_length - self.robot_width) <= 1e-5 else
-                  3.141592653589793)
-        heading_delta = (end_heading - start_heading + period / 2) % period - period / 2
+        heading_delta = atan2(sin(end_heading - start_heading),
+                              cos(end_heading - start_heading))
         # Small steps bound translation between exact SAT checks; route samples
         # and grid cells can otherwise skip a thin support on a long segment.
         count = max(1, int(ceil(max(distance, abs(heading_delta) *
@@ -154,38 +160,306 @@ class ADStarPlanner:
         return True
 
     def _trajectory_clear(self, points):
-        """Validate translation and predicted tangent rotation along a route."""
+        """Validate a path using its predicted chassis tangent at each point."""
         if len(points) < 2:
             return bool(points) and self._pose_clear(*points[0])
-        headings = []
+        return self._pose_path_clear(self._poses_for_path(points))
+
+    def _poses_for_path(self, points):
+        poses = []
         for i, point in enumerate(points):
-            before = points[max(0, i - 1)]
-            after = points[min(len(points) - 1, i + 1)]
-            headings.append(atan2(after[1] - before[1], after[0] - before[0]))
-        return all(self._swept_rect_clear(a, b, headings[i], headings[i + 1])
-                   for i, (a, b) in enumerate(zip(points, points[1:])))
+            before, after = points[max(0, i - 1)], points[min(len(points) - 1, i + 1)]
+            dx, dy = after[0] - before[0], after[1] - before[1]
+            heading = atan2(dy, dx) if hypot(dx, dy) > 1e-9 else self.robot_heading
+            poses.append((float(point[0]), float(point[1]), heading))
+        if poses:
+            poses[0] = (poses[0][0], poses[0][1], self.robot_heading)
+        return poses
+
+    def _pose_path_clear(self, poses):
+        return (bool(poses) and all(
+            self._swept_rect_clear(a[:2], b[:2], a[2], b[2])
+            for a, b in zip(poses, poses[1:])) and
+            all(self._pose_clear(*pose) for pose in poses))
+
+    def _first_collision(self, poses):
+        for i, (a, b) in enumerate(zip(poses, poses[1:])):
+            distance = hypot(b[0] - a[0], b[1] - a[1])
+            dtheta = atan2(sin(b[2] - a[2]), cos(b[2] - a[2]))
+            count = max(1, int(ceil(max(distance, abs(dtheta) *
+                                        hypot(self.robot_length, self.robot_width) / 2) /
+                                    min(.025, self.resolution / 8))))
+            for j in range(count + 1):
+                t = j / count
+                pose = (a[0] + (b[0] - a[0]) * t,
+                        a[1] + (b[1] - a[1]) * t, a[2] + dtheta * t)
+                if not self._pose_clear(*pose):
+                    return i, t, pose
+        return None
+
+    @staticmethod
+    def _motion_time(distance, speed_limit, acceleration, initial_speed=0.):
+        distance = max(0., float(distance))
+        vmax, accel = max(.1, float(speed_limit)), max(.1, float(acceleration))
+        v0 = min(vmax, max(0., float(initial_speed)))
+        accelerate_distance = max(0., (vmax * vmax - v0 * v0) / (2 * accel))
+        if distance <= accelerate_distance:
+            return (hypot(v0, (2 * accel * distance) ** .5) - v0) / accel
+        return (vmax - v0) / accel + (distance - accelerate_distance) / vmax
+
+    def _repair_heading(self, poses, collision, initial_velocity,
+                        initial_angular_velocity):
+        i, t, pose = collision
+        inserted = list(poses)
+        at = i + 1
+        base = pose[2]
+        inserted.insert(at, pose)
+        period = (1.5707963267948966 if
+                  abs(self.robot_length - self.robot_width) <= 1e-5 else
+                  3.141592653589793)
+        best = None
+        degree_step = .5
+        for step_index in range(1, int(ceil(period * 180 /
+                                            (3.141592653589793 * degree_step))) + 1):
+            degree = step_index * degree_step
+            for direction in (-1., 1.):
+                candidate = list(inserted)
+                heading = base + direction * degree * 3.141592653589793 / 180
+                candidate[at] = (pose[0], pose[1], heading)
+                lo, hi = max(0, at - 2), min(len(candidate), at + 3)
+                if not self._pose_path_clear(candidate[lo:hi]):
+                    continue
+                delta = degree * 3.141592653589793 / 180
+                rotation_time = self._motion_time(delta, self.max_angular_speed,
+                                                  self.max_angular_acceleration,
+                                                  initial_angular_velocity * direction)
+                span = hypot(candidate[at + 1][0] - candidate[at - 1][0],
+                             candidate[at + 1][1] - candidate[at - 1][1])
+                if span > 1e-9:
+                    ux = (candidate[at + 1][0] - candidate[at - 1][0]) / span
+                    uy = (candidate[at + 1][1] - candidate[at - 1][1]) / span
+                    translation_speed = max(0., initial_velocity[0] * ux +
+                                            initial_velocity[1] * uy)
+                else:
+                    translation_speed = 0.
+                translation_time = self._motion_time(
+                    span, self.max_speed, self.max_acceleration,
+                    translation_speed)
+                time = max(rotation_time, translation_time)
+                if best is None or time < best[0]:
+                    best = (time, candidate)
+            if best:
+                break
+        return best
+
+    def _repair_translation(self, points, collision, initial_velocity,
+                            initial_angular_velocity):
+        i, t, pose = collision
+        a, b = points[i], points[i + 1]
+        tangent = atan2(b[1] - a[1], b[0] - a[0])
+        normals = [(cos(tangent + sign * 1.5707963267948966),
+                    sin(tangent + sign * 1.5707963267948966)) for sign in (-1, 1)]
+        # Prefer directions away from the nearest obstacle face.
+        nearest = None
+        for box in (*self.colliders, *self._dynamic):
+            if hasattr(box, "length"):
+                cx, cy, hx, hy = box.x, box.y, box.length / 2, box.width / 2
+            else:
+                cx, cy, hx, hy = box
+            qx = max(cx - hx, min(pose[0], cx + hx))
+            qy = max(cy - hy, min(pose[1], cy + hy))
+            dx, dy = pose[0] - qx, pose[1] - qy
+            distance = hypot(dx, dy)
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, dx, dy, pose[0] - cx, pose[1] - cy, hx, hy)
+        if nearest and nearest[0] > 1e-8:
+            normals.insert(0, (nearest[1] / nearest[0], nearest[2] / nearest[0]))
+        elif nearest:
+            _, _, _, dx, dy, hx, hy = nearest
+            faces = ((hx - dx, (1., 0.)), (hx + dx, (-1., 0.)),
+                     (hy - dy, (0., 1.)), (hy + dy, (0., -1.)))
+            normals.insert(0, min(faces, key=lambda item: item[0])[1])
+        half_l, half_w = self.robot_length / 2, self.robot_width / 2
+        c, sn = cos(pose[2]), sin(pose[2])
+        ex, ey = half_l * abs(c) + half_w * abs(sn), half_l * abs(sn) + half_w * abs(c)
+        boundary_margins = ((pose[0] - ex, (1., 0.)),
+                            (self.length - ex - pose[0], (-1., 0.)),
+                            (pose[1] - ey, (0., 1.)),
+                            (self.width - ey - pose[1], (0., -1.)))
+        nearest_boundary = min(boundary_margins, key=lambda item: item[0])
+        if nearest_boundary[0] < self.robot_length:
+            normals.insert(0, nearest_boundary[1])
+        best = None
+        for normal in normals:
+            for step in range(1, 41):
+                displacement = step * .025
+                candidate_points = list(points)
+                candidate_points.insert(i + 1,
+                    (pose[0] + normal[0] * displacement,
+                     pose[1] + normal[1] * displacement))
+                candidate_poses = self._poses_for_path(candidate_points)
+                local = candidate_poses[max(0, i - 1):min(len(candidate_poses), i + 4)]
+                if not self._pose_path_clear(local):
+                    continue
+                extra = (hypot(candidate_points[i][0] - candidate_points[i + 1][0],
+                               candidate_points[i][1] - candidate_points[i + 1][1]) +
+                         hypot(candidate_points[i + 1][0] - candidate_points[i + 2][0],
+                               candidate_points[i + 1][1] - candidate_points[i + 2][1]) -
+                         hypot(candidate_points[i][0] - candidate_points[i + 2][0],
+                               candidate_points[i][1] - candidate_points[i + 2][1]))
+                segment_length = hypot(b[0] - a[0], b[1] - a[1])
+                initial_speed = (max(0., (initial_velocity[0] * (b[0] - a[0]) +
+                                          initial_velocity[1] * (b[1] - a[1])) /
+                                         segment_length)
+                                 if segment_length > 1e-9 else 0.)
+                translation_time = self._motion_time(
+                    extra, self.max_speed, self.max_acceleration, initial_speed)
+                old_poses = self._poses_for_path(points)
+                angle_changes = []
+                for candidate_index in range(max(0, i - 1),
+                                             min(len(candidate_poses), i + 4)):
+                    if candidate_index == i + 1:
+                        old_heading = pose[2]
+                    else:
+                        old_index = candidate_index - 1 if candidate_index > i + 1 else candidate_index
+                        old_heading = old_poses[min(old_index, len(old_poses) - 1)][2]
+                    new_heading = candidate_poses[candidate_index][2]
+                    angle_changes.append(atan2(sin(new_heading - old_heading),
+                                               cos(new_heading - old_heading)))
+                signed_delta = max(angle_changes, key=abs, default=0.)
+                delta = abs(signed_delta)
+                rotation_time = self._motion_time(
+                    delta, self.max_angular_speed, self.max_angular_acceleration,
+                    max(0., initial_angular_velocity * (1. if signed_delta >= 0 else -1.)))
+                time = max(translation_time, rotation_time)
+                if best is None or time < best[0]:
+                    best = (time, candidate_points, candidate_poses)
+                break
+        return best
+
+    def _local_se2_repair(self, poses, collision, expansion_budget=3500):
+        """Search a small orientation-aware patch and splice it into the route."""
+        i, _, hit = collision
+        entry_index = max(0, i - 5)
+        exit_index = min(len(poses) - 1, i + 6)
+        entry, exit = poses[entry_index], poses[exit_index]
+        radius = max(.8, 4 * self.resolution)
+        x0, y0 = self._cell(entry[:2])
+        x1, y1 = self._cell(exit[:2])
+        hc = self._cell(hit[:2])
+        cells = int(ceil(radius / self.resolution))
+        xmin = max(0, min(x0, x1, hc[0]) - cells)
+        xmax = min(self.nx - 1, max(x0, x1, hc[0]) + cells)
+        ymin = max(0, min(y0, y1, hc[1]) - cells)
+        ymax = min(self.ny - 1, max(y0, y1, hc[1]) + cells)
+        period = (1.5707963267948966 if
+                  abs(self.robot_length - self.robot_width) <= 1e-5 else
+                  3.141592653589793)
+        bins = 8
+        step = period / bins
+        start_angle = entry[2] % period
+        start_bin = int(round(start_angle / step)) % bins
+        start_theta = entry[2] + (start_bin * step - start_angle + period / 2) % period - period / 2
+        start_center = self._cell_center((x0, y0))
+        if not self._swept_rect_clear(entry[:2], start_center,
+                                      entry[2], start_theta):
+            return None
+        start_state = (x0, y0, start_bin)
+        frontier, costs, parent, closed = [], {start_state: 0.}, {}, set()
+        headings = {start_state: start_theta}
+        serial = 0
+
+        def heuristic(ix, iy):
+            dx, dy = abs(ix - x1), abs(iy - y1)
+            return self.resolution * (max(dx, dy) + .41421356237 * min(dx, dy))
+
+        heappush(frontier, (heuristic(x0, y0), serial, start_state))
+        terminal = None
+        expanded = 0
+        while frontier and expanded < expansion_budget:
+            _, _, state = heappop(frontier)
+            if state in closed:
+                continue
+            closed.add(state)
+            ix, iy, it = state
+            point = self._cell_center((ix, iy))
+            theta = headings[state]
+            if (ix, iy) == (x1, y1) and self._swept_rect_clear(point, exit[:2], theta, exit[2]):
+                terminal = state
+                break
+            expanded += 1
+            for dx, dy, scale in self._neighbors:
+                nx, ny = ix + dx, iy + dy
+                if not (xmin <= nx <= xmax and ymin <= ny <= ymax):
+                    continue
+                target = self._cell_center((nx, ny))
+                if not self._swept_rect_clear(point, target, theta, theta):
+                    continue
+                nxt, edge_cost = (nx, ny, it), scale * self.resolution
+                value = costs[state] + edge_cost
+                if value < costs.get(nxt, float("inf")):
+                    costs[nxt], parent[nxt] = value, state
+                    headings[nxt] = theta
+                    serial += 1
+                    heappush(frontier, (value + heuristic(nx, ny), serial, nxt))
+            for turn in (-1, 1):
+                next_it = (it + turn) % bins
+                next_theta = theta + turn * step
+                if not self._swept_rect_clear(point, point, theta, next_theta):
+                    continue
+                nxt, edge_cost = (ix, iy, next_it), .2 * self.resolution
+                value = costs[state] + edge_cost
+                if value < costs.get(nxt, float("inf")):
+                    costs[nxt], parent[nxt] = value, state
+                    headings[nxt] = next_theta
+                    serial += 1
+                    heappush(frontier, (value + heuristic(ix, iy), serial, nxt))
+        if terminal is None:
+            return None
+        states = [terminal]
+        while states[-1] != start_state:
+            states.append(parent[states[-1]])
+        states.reverse()
+        patch = [entry]
+        for ix, iy, it in states:
+            theta = headings[(ix, iy, it)]
+            center = self._cell_center((ix, iy))
+            if (hypot(center[0] - patch[-1][0], center[1] - patch[-1][1]) > 1e-7 or
+                    abs(theta - patch[-1][2]) > 1e-7):
+                patch.append((center[0], center[1], theta))
+        patch.append(exit)
+        candidate = poses[:entry_index] + patch + poses[exit_index + 1:]
+        return candidate if self._pose_path_clear(candidate) else None
 
     def _cell_blocked(self, ix, iy, dynamic):
         x, y = self._cell_center((ix, iy))
-        c, s = cos(self.robot_heading), sin(self.robot_heading)
-        pad = self.resolution / 2
-        ex = self.robot_length / 2 * abs(c) + self.robot_width / 2 * abs(s) + pad
-        ey = self.robot_length / 2 * abs(s) + self.robot_width / 2 * abs(c) + pad
-        return (x < ex or x > self.length - ex or y < ey or y > self.width - ey or
-                any(self._rect_hits_box(x, y, b) for b in (*self.colliders, *dynamic)))
+        radius = min(self.robot_length, self.robot_width) / 2
+        cell_pad = self.resolution / 2
+        if (x < radius or x > self.length - radius or
+                y < radius or y > self.width - radius):
+            return True
+        for box in (*self.colliders, *dynamic):
+            if hasattr(box, "length"):
+                cx, cy, hx, hy = box.x, box.y, box.length / 2, box.width / 2
+            else:
+                cx, cy, hx, hy = box
+            dx, dy = abs(x - cx), abs(y - cy)
+            nearest_x, nearest_y = max(dx - hx, 0.), max(dy - hy, 0.)
+            if nearest_x * nearest_x + nearest_y * nearest_y <= (radius + cell_pad) ** 2:
+                return True
+        return False
 
     def configure_footprint(self, robot_length, robot_width, heading):
-        """Refresh grid clearance for the current chassis size and orientation."""
-        values = (max(.01, float(robot_length)), max(.01, float(robot_width)),
-                  float(heading))
-        if values == (self.robot_length, self.robot_width, self.robot_heading):
-            return
-        self.robot_length, self.robot_width, self.robot_heading = values
-        self._blocked = [[self._cell_blocked(ix, iy, self._dynamic)
-                          for iy in range(self.ny)] for ix in range(self.nx)]
-        # The footprint changed globally; incremental edge repair is not valid.
-        if self._goal is not None:
-            self._start = self._goal = None
+        """Refresh the inexpensive inscribed-circle search map if size changed."""
+        length, width, heading = (max(.01, float(robot_length)),
+                                  max(.01, float(robot_width)), float(heading))
+        dimensions_changed = (length, width) != (self.robot_length, self.robot_width)
+        self.robot_length, self.robot_width, self.robot_heading = length, width, heading
+        if dimensions_changed:
+            self._blocked = [[self._cell_blocked(ix, iy, self._dynamic)
+                              for iy in range(self.ny)] for ix in range(self.nx)]
+            if self._goal is not None:
+                self._start = self._goal = None
 
     def _cell(self, point):
         x = max(0, min(self.nx - 1, floor(float(point[0]) / self.resolution)))
@@ -220,13 +494,18 @@ class ADStarPlanner:
         return hypot(a[0] - b[0], a[1] - b[1])
 
     def configure_kinematics(self, max_speed, max_acceleration, steering_rate=12.,
-                             lateral_friction=1.2):
+                             lateral_friction=1.2, max_angular_speed=None,
+                             max_angular_acceleration=None):
         """Set trajectory limits; geometric AD* search costs are unchanged."""
         limits = (max(.1, float(max_speed)), max(.1, float(max_acceleration)),
                   max(.1, float(steering_rate)), max(.1, float(lateral_friction)))
         if limits != (self.max_speed, self.max_acceleration, self.steering_rate,
                       self.lateral_friction):
             self.max_speed, self.max_acceleration, self.steering_rate, self.lateral_friction = limits
+        if max_angular_speed is not None:
+            self.max_angular_speed = max(.1, float(max_angular_speed))
+        if max_angular_acceleration is not None:
+            self.max_angular_acceleration = max(.1, float(max_angular_acceleration))
 
     def _speed_cap(self, node):
         # Terrain affects acceleration through grade and rolling resistance;
@@ -292,13 +571,6 @@ class ADStarPlanner:
                 continue
             if dx and dy and (self._blocked[x + dx][y] or self._blocked[x][y + dy]):
                 continue
-            # Grid-cell occupancy uses the robot's current heading. Also test
-            # each candidate move with its predicted travel heading so the
-            # long bumper corners cannot clip an obstacle on a diagonal edge.
-            source, target = self._cell_center(node), self._cell_center(nxt)
-            heading = atan2(target[1] - source[1], target[0] - source[0])
-            if not self._swept_rect_clear(source, target, heading, heading):
-                continue
             yield nxt, self._edge_time(node, nxt, distance)
 
     def _predecessors(self, node):
@@ -313,10 +585,6 @@ class ADStarPlanner:
                 continue
             if dx and dy and (self._blocked[pred[0]][y] or
                               self._blocked[x][pred[1]]):
-                continue
-            source, target = self._cell_center(pred), self._cell_center(node)
-            heading = atan2(target[1] - source[1], target[0] - source[0])
-            if not self._swept_rect_clear(source, target, heading, heading):
                 continue
             yield pred, self._edge_time(pred, node, distance)
 
@@ -371,15 +639,46 @@ class ADStarPlanner:
             anchor = target
         return smoothed
 
-    def _finalize_path(self, points):
-        """Apply the same safe LOS reduction and curve fit to every AD* route."""
-        if len(points) < 2:
-            return list(points)
+    def _finalize_path(self, points, initial_velocity=(0., 0.),
+                       initial_angular_velocity=0.):
+        """Shortcut, spline, then repair only locally against the actual chassis."""
         route = self._curve_path(self._smooth_path(points))
-        if self._trajectory_clear(route):
+        if len(route) < 2:
+            if route and not self._pose_clear(*route[0], self.robot_heading):
+                self.last_poses = []
+                return []
+            self.last_poses = self._poses_for_path(route)
             return route
-        # Never publish a route that failed the same predictive footprint
-        # check used by search edges. An empty route is a safe planning failure.
+        poses = self._poses_for_path(route)
+        for _ in range(6):
+            collision = self._first_collision(poses)
+            if collision is None:
+                self.last_poses = poses
+                return [(p[0], p[1]) for p in poses]
+            points = [(p[0], p[1]) for p in poses]
+            heading = self._repair_heading(poses, collision, initial_velocity,
+                                           initial_angular_velocity)
+            translation = self._repair_translation(points, collision,
+                                                   initial_velocity,
+                                                   initial_angular_velocity)
+            options = []
+            if heading is not None:
+                options.append((heading[0], heading[1]))
+            if translation is not None:
+                options.append((translation[0], translation[2]))
+            if options:
+                _, poses = min(options, key=lambda item: item[0])
+            else:
+                poses = self._local_se2_repair(poses, collision)
+                if poses is None:
+                    self.last_poses = []
+                    return []
+            if not self._pose_path_clear(poses):
+                continue
+        if self._first_collision(poses) is None:
+            self.last_poses = poses
+            return [(p[0], p[1]) for p in poses]
+        self.last_poses = []
         return []
 
     def _curve_path(self, points):
@@ -441,14 +740,10 @@ class ADStarPlanner:
 
         for factor in (.4, .28, .18, .1, 0.):
             curve = bezier(factor)
-            if (all(self._line_is_clear(a, b) for a, b in zip(curve, curve[1:])) and
-                    self._trajectory_clear(curve)):
+            if all(self._line_is_clear(a, b) for a, b in zip(curve, curve[1:])):
                 return curve
-        # A smooth spline may bulge outside the AD* clearance corridor. Try
-        # line-of-sight segments with the same full-body sweep validation.
-        if self._trajectory_clear(points):
-            return points
-        # The caller retains the original discrete route as the final fallback.
+        # Collision repair runs after smoothing, so return the LOS route even
+        # when the actual bumper clips it; repair is explicitly local to the hit.
         return points
 
     def _update_vertex(self, node):
@@ -527,115 +822,60 @@ class ADStarPlanner:
         for node in items:
             self._push(node)
 
-    def plan(self, start, goal, *, expansion_budget: int = 12000):
-        """Plan a swept-footprint route in discretized SE(2).
-
-        Square symmetry reduces chassis orientation to a quarter-turn. Rectangular
-        footprints retain their half-turn symmetry. ``last_poses`` stores
-        (x, y, theta) samples; the return value remains the legacy XY route.
-        """
-        start = tuple(map(float, start[:2]))
-        goal = tuple(map(float, goal[:2]))
+    def plan(self, start, goal, *, expansion_budget: int = 12000,
+             initial_velocity=(0., 0.), initial_angular_velocity=0.):
+        """Incrementally plan in 2D, then repair footprint collisions locally."""
+        start, goal = tuple(map(float, start[:2])), tuple(map(float, goal[:2]))
         self.last_poses = []
-        period = (0.5 * 3.141592653589793
-                  if abs(self.robot_length - self.robot_width) <= 1e-5 else
-                  3.141592653589793)
-        step = period / self.orientation_bins
-        angle_bin = int(round((self.robot_heading % period) / step)) % self.orientation_bins
-        initial_heading = angle_bin * step
-        sc, gc = self._cell(start), self._cell(goal)
-        sx, sy = self._cell_center(sc)
-        gx, gy = self._cell_center(gc)
-        if not self._pose_clear(*start, self.robot_heading):
-            return []
-        if not self._swept_rect_clear(start, (sx, sy), self.robot_heading,
-                                      self.robot_heading):
-            return []
-        if not self._swept_rect_clear((sx, sy), (sx, sy), self.robot_heading,
-                                      initial_heading):
-            return []
-
-        origin = (sc[0], sc[1], angle_bin)
-        def heuristic(ix, iy):
-            dx, dy = abs(ix - gc[0]), abs(iy - gc[1])
-            return self.resolution * (max(dx, dy) + (1.41421356237 - 1.) * min(dx, dy))
-
-        frontier = []
-        serial = 0
-        heappush(frontier, (heuristic(sc[0], sc[1]), serial, origin))
-        costs = {origin: 0.}
-        parent = {}
-        closed = set()
-        terminal = None
-
-        expanded = 0
-        while frontier and expanded < max(1, int(expansion_budget)):
-            _, _, state = heappop(frontier)
-            if state in closed:
-                continue
-            closed.add(state)
-            ix, iy, it = state
-            x, y = self._cell_center((ix, iy))
-            theta = it * step
-            if (ix, iy) == gc and self._swept_rect_clear((x, y), goal, theta, theta):
-                terminal = state
+        start_cell, goal_cell = self._cell(start), self._cell(goal)
+        s, g = self._nearest_free(start_cell), self._nearest_free(goal_cell)
+        if (s == g and self._line_is_clear(start, goal)):
+            return self._finalize_path([start, goal], initial_velocity,
+                                       initial_angular_velocity)
+        if self._goal != g or self._start is None:
+            self._reset_search(s, g)
+        else:
+            if self._start != s:
+                self._start = s
+                for node in self._incons:
+                    self._push(node)
+                self._incons.clear(); self._closed.clear()
+            else:
+                self._start = s
+            self._rekey_open()
+        spent = 0
+        while spent < expansion_budget:
+            expanded = self._compute_or_improve_path(expansion_budget - spent)
+            spent += expanded
+            if self._epsilon <= 1. or (not self._open and not self._incons):
                 break
-            expanded += 1
-            transitions = []
-            for dx, dy, scale in self._neighbors:
-                nx, ny = ix + dx, iy + dy
-                if not (0 <= nx < self.nx and 0 <= ny < self.ny):
-                    continue
-                target = self._cell_center((nx, ny))
-                if not self._swept_rect_clear((x, y), target, theta, theta):
-                    continue
-                transitions.append(((nx, ny, it), self.resolution * scale))
-            for turn in (-1, 1):
-                next_it = (it + turn) % self.orientation_bins
-                next_theta = next_it * step
-                if self._swept_rect_clear((x, y), (x, y), theta, next_theta):
-                    # Rotation has a small positive cost to avoid gratuitous
-                    # spin while keeping the heuristic purely translational.
-                    transitions.append(((ix, iy, next_it), self.resolution * .2))
-            for nxt, edge_cost in transitions:
-                new_cost = costs[state] + edge_cost
-                if new_cost >= costs.get(nxt, float("inf")):
-                    continue
-                costs[nxt] = new_cost
-                parent[nxt] = state
-                serial += 1
-                heappush(frontier, (new_cost + heuristic(nxt[0], nxt[1]),
-                                    serial, nxt))
-
-        if terminal is None:
+            self._epsilon = max(1., self._epsilon - .5)
+            for node in self._incons:
+                self._push(node)
+            self._incons.clear(); self._closed.clear()
+            self._rekey_open()
+            if expanded == 0 and spent >= expansion_budget:
+                break
+        if self._g.get(s, float("inf")) == float("inf"):
             return []
-        states = [terminal]
-        while states[-1] != origin:
-            states.append(parent[states[-1]])
-        states.reverse()
-        poses = [(start[0], start[1], self.robot_heading)]
-        poses.append((sx, sy, initial_heading))
-        for ix, iy, it in states[1:]:
-            px, py = self._cell_center((ix, iy))
-            poses.append((px, py, it * step))
-        if hypot(poses[-1][0] - goal[0], poses[-1][1] - goal[1]) > 1e-7:
-            poses.append((goal[0], goal[1], poses[-1][2]))
-
-        # Greedy SE(2) shortcutting: interpolate both translation and angle,
-        # accepting a shortcut only after checking its complete swept square.
-        compact = [poses[0]]
-        anchor = 0
-        while anchor < len(poses) - 1:
-            chosen = anchor + 1
-            for candidate in range(len(poses) - 1, anchor, -1):
-                a, b = poses[anchor], poses[candidate]
-                if self._swept_rect_clear(a[:2], b[:2], a[2], b[2]):
-                    chosen = candidate
-                    break
-            compact.append(poses[chosen])
-            anchor = chosen
-        self.last_poses = compact
-        return [(pose[0], pose[1]) for pose in compact]
+        best, seen = [s], {s}
+        while best[-1] != g:
+            node = best[-1]
+            options = [(self._g.get(nxt, float("inf")), nxt)
+                       for nxt, _ in self._neighbors_of(node)]
+            if not options:
+                break
+            _, nxt = min(options)
+            if nxt in seen:
+                break
+            best.append(nxt); seen.add(nxt)
+        if best[-1] != g:
+            return []
+        points = [self._cell_center(node) for node in best]
+        points[0] = start
+        points[-1] = goal
+        return self._finalize_path(points, initial_velocity,
+                                   initial_angular_velocity)
 
     @staticmethod
     def predict_intercept(attacker, goal, defender, defender_velocity,
@@ -676,13 +916,17 @@ class ADStarPlanner:
     def plan_attacker(self, attacker, goal, defender, defender_velocity,
                       attacker_speed: float, *, attacker_acceleration: float = 8.,
                       steering_rate: float = 12., lateral_friction: float = 1.2,
+                      max_angular_speed: float = 8.,
+                      max_angular_acceleration: float = 18.,
                       attacker_heading: float | None = None,
                       attacker_length: float | None = None,
                       attacker_width: float | None = None,
+                      attacker_velocity=None, attacker_angular_velocity: float = 0.,
                       expansion_budget: int = 4500):
         """Replan an attack route around the defender's velocity-predicted intercept."""
         self.configure_kinematics(attacker_speed, attacker_acceleration, steering_rate,
-                                  lateral_friction)
+                                  lateral_friction, max_angular_speed,
+                                  max_angular_acceleration)
         self.configure_footprint(attacker_length or self.robot_length,
                                  attacker_width or self.robot_width,
                                  self.robot_heading if attacker_heading is None else attacker_heading)
@@ -691,20 +935,29 @@ class ADStarPlanner:
         half_extent = .45
         dynamic = (intercept[0], intercept[1], half_extent, half_extent)
         self.set_dynamic_obstacles((dynamic,))
-        path = self.plan(attacker, goal, expansion_budget=expansion_budget)
+        path = self.plan(attacker, goal, expansion_budget=expansion_budget,
+                         initial_velocity=((0., 0.) if attacker_velocity is None
+                                           else attacker_velocity),
+                         initial_angular_velocity=attacker_angular_velocity)
         # If the moving intercept closes the start/goal corridor completely,
         # do not return a stationary one-cell route. Fall back to static-field
         # avoidance and let the next velocity update choose a new intercept.
         if len(path) <= 1 and hypot(float(goal[0]) - float(attacker[0]),
                                     float(goal[1]) - float(attacker[1])) > .75:
             self.set_dynamic_obstacles(())
-            path = self.plan(attacker, goal, expansion_budget=max(12000, expansion_budget * 3))
+            path = self.plan(attacker, goal, expansion_budget=max(12000, expansion_budget * 3),
+                             initial_velocity=((0., 0.) if attacker_velocity is None
+                                               else attacker_velocity),
+                             initial_angular_velocity=attacker_angular_velocity)
             if len(path) <= 1:
                 # Dynamic-map repair can leave an incomplete incremental search
                 # when its budget is exhausted. Reinitialize against the static
                 # map before returning a one-point route that commands a stop.
                 self._start = self._goal = None
-                path = self.plan(attacker, goal, expansion_budget=max(24000, expansion_budget * 6))
+                path = self.plan(attacker, goal, expansion_budget=max(24000, expansion_budget * 6),
+                                 initial_velocity=((0., 0.) if attacker_velocity is None
+                                                   else attacker_velocity),
+                                 initial_angular_velocity=attacker_angular_velocity)
         return path, intercept, intercept_time
 
     def speed_profile(self, path, initial_velocity=(0., 0.), module_angles=None):

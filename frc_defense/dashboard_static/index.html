@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#11171d" />
     <title>AutoDrive · Training monitor</title>
-    <link rel="stylesheet" href="/assets/dashboard.css" />
+    <link rel="stylesheet" href="/assets/dashboard.css?v=focused-cache-22" />
   </head>
   <body>
     <header class="topbar">
@@ -19,6 +19,13 @@
         <a href="#analysis">Analysis</a>
         <a href="/info">Field guide</a>
       </nav>
+      <button class="dashboard-refresh" id="dashboardRefresh" type="button"
+        aria-label="Refresh dashboard" title="Refresh dashboard">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+          <path d="M16.2 7.2A6.7 6.7 0 0 0 4.5 5.5L3 7m0 0V3.8M3 7h3.2M3.8 12.8a6.7 6.7 0 0 0 11.7 1.7L17 13m0 0v3.2M17 13h-3.2" />
+        </svg>
+        <span>Refresh</span>
+      </button>
       <div class="connection" id="connection" aria-live="polite">
         <span class="connection-dot" id="connectionDot"></span>
         <span id="state">Connecting…</span>
@@ -109,7 +116,7 @@
               Six-robot REBUILT match; choose None, NN, or Deterministic for each robot.
             </p>
           </div>
-          <div class="source-control">
+          <div class="source-control" id="playbackSourceControl">
             <label for="playbackSource">Playback source</label>
             <select id="playbackSource">
               <option value="randomized">Randomized scenario</option>
@@ -147,10 +154,46 @@
             </label>
             <p>Turret: 40 FUEL capacity and 15 FUEL/s. Dumper uses the limits above; only Dumpers must face the firing direction.</p>
           </fieldset>
+          <div class="scenario-filters" id="behaviorModeControl">
+            <label for="behaviorMode">Focused HUB test · one robot · 30 seconds</label>
+            <select id="behaviorMode">
+              <option value="match" selected>Full match · 160 seconds</option>
+              <option value="collect_active">Focused HUB Active · 30 seconds</option>
+              <option value="collect_inactive">Focused HUB Inactive · 30 seconds</option>
+            </select>
+            <span>Select a behavior to load its default replay. Changing robot type loads the matching Dumper or Turret replay.</span>
+          </div>
+          <fieldset class="scenario-physical-limits" id="focusedRobotControls" hidden>
+            <legend>Focused robot · 30 seconds</legend>
+            <label for="focusedRobotType">Robot type
+              <select id="focusedRobotType"><option value="dumper" selected>Dumper</option><option value="turret">Turret</option></select>
+            </label>
+            <label for="focusedHopperCapacity">Hopper capacity (FUEL)
+              <input id="focusedHopperCapacity" type="number" min="1" max="504" step="1" value="60">
+            </label>
+            <label for="focusedScoringBps">Scoring rate limit (FUEL/s)
+              <input id="focusedScoringBps" type="number" min="0.1" max="50" step="0.1" value="25">
+            </label>
+            <label class="intent-knowledge-toggle" for="focusedRandomPlacement">
+              <input id="focusedRandomPlacement" type="checkbox">
+              Random initial FUEL placement
+              <span>Scatter test FUEL randomly with no overlaps</span>
+            </label>
+          </fieldset>
+          <label class="intent-knowledge-toggle dual-gpu-toggle" for="dualGpuMode">
+            <input id="dualGpuMode" type="checkbox" checked>
+            Dual GPU mode
+            <span>Run up to two queued simulations at once, one per GPU. Training pauses until both finish.</span>
+          </label>
           <label class="intent-knowledge-toggle" for="teammateIntentKnowledge">
             <input id="teammateIntentKnowledge" type="checkbox" checked>
             Teammate intent knowledge
             <span>Use teammate routes and motion to coordinate avoidance</span>
+          </label>
+          <label class="intent-knowledge-toggle" for="sweepingEnabled">
+            <input id="sweepingEnabled" type="checkbox">
+            Continuous midfield sweeping
+            <span>Turn off to use direct fuel targets while collecting</span>
           </label>
           <div class="scenario-filters" id="evaluationControls" hidden>
             <label for="gameEvaluation">Evaluation</label>
@@ -159,11 +202,17 @@
             </select>
           </div>
           <div class="transport">
+            <label class="scenario-seed-control" for="scenarioSeed">
+              Match seed
+              <input id="scenarioSeed" type="number" min="0" max="2147483647"
+                step="1" inputmode="numeric" placeholder="Random seed" aria-describedby="scenarioSeedHelp">
+              <span id="scenarioSeedHelp">Enter a seed to replay it; clear for a random seed.</span>
+            </label>
             <button id="play" type="button" disabled aria-pressed="false">
               Play
             </button>
             <button id="nextScenario" class="button-secondary" type="button">
-              New scenario
+              <span id="newScenarioLabel">New scenario</span>
             </button>
             <label class="speed-control"
               >Speed
@@ -196,7 +245,7 @@
         </p>
         <div class="match-scoreboard" role="group" aria-label="Match score">
           <div class="match-score alliance-red">
-            <span class="match-score-team">Red</span>
+            <span class="match-score-team" id="redScoreLabel">Red</span>
             <output id="redScore" aria-label="Red score">—</output>
           </div>
           <div class="match-score-clock">
@@ -204,7 +253,7 @@
             <output id="matchClock">—:—</output>
           </div>
           <div class="match-score alliance-blue">
-            <span class="match-score-team">Blue</span>
+            <span class="match-score-team" id="blueScoreLabel">Blue</span>
             <output id="blueScore" aria-label="Blue score">—</output>
           </div>
         </div>
@@ -234,6 +283,11 @@
           />
           <div class="display-options">
             <label><input id="showFuel" type="checkbox" checked /> FUEL</label>
+            <label class="cluster-boundary-toggle">
+              <input id="showClusterBoundary" type="checkbox" checked />
+              <span class="cluster-boundary-swatch" aria-hidden="true"></span>
+              Target cluster boundary
+            </label>
             <label><input id="showGrid" type="checkbox" /> Field grid</label>
             <label
               ><input id="showGhosts" type="checkbox" /> Other rollouts</label
@@ -244,11 +298,25 @@
         <p id="gameState" class="game-state" aria-live="polite">
           FUEL state appears when playback is ready.
         </p>
+        <section class="robot-audit" aria-label="Selected robot audit">
+          <label for="auditRobot">Inspect robot</label>
+          <select id="auditRobot" aria-label="Robot to inspect">
+            <option value="0">Red 1</option><option value="1">Red 2</option>
+            <option value="2">Red 3</option><option value="3">Blue 1</option>
+            <option value="4">Blue 2</option><option value="5">Blue 3</option>
+          </select>
+          <output id="robotAudit" aria-live="polite">Load a playback to inspect its control state.</output>
+        </section>
         <p class="field-legend">
           <span><i class="legend-dot red"></i>Red alliance</span
           ><span><i class="legend-dot blue"></i>Blue alliance</span
-          ><span><i class="legend-dot gold"></i>Loose FUEL</span
-          ><span>Dotted lines show AD* routes</span>
+          ><span><i class="legend-dot fuel-real"></i>Real FUEL</span
+          ><span><i class="legend-dot fuel-detected"></i>Detected</span
+          ><span><i class="legend-dot fuel-history"></i>Detection history</span
+          ><span><i class="legend-line adstar"></i>AD* route waypoints (gray)</span
+          ><span><i class="legend-line selected-fuel"></i>Selected FUEL (mint F)</span
+          ><span><i class="legend-line route-goal"></i>AD* route destination (orange A)</span
+          ><span><i class="legend-line drive"></i>Current motion (white arrow)</span>
         </p>
       </section>
 
@@ -355,6 +423,6 @@
       </section>
     </main>
 
-    <script type="module" src="/assets/dashboard.js"></script>
+    <script type="module" src="/assets/dashboard.js?v=focused-cache-22"></script>
   </body>
 </html>

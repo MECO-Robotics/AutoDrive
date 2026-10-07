@@ -11,57 +11,57 @@ from ._tensor_3v3_constants import TEAM_IDS
 class TensorThreeVsThreeNavigationMixin:
     """Build and advance each robot's deterministic sweep route."""
     def _build_raster_spline_points(self, sample_count=256):
-        """Build closed, smooth serpentine midfield routes for each robot."""
-        field_width=float(self.sim.field_width)
-        y_bands = ((.9, 2.65), (2.65, 5.42),
-                   (5.42, field_width-.9))
-        x_min = self.alliance_zone_depth + 1.45
-        x_max = self.field_length - self.alliance_zone_depth - 1.45
-        column_count = 4
-        column_spacing = (x_max - x_min) / (column_count - 1)
+        """Build long, full-height raster loops with broad end turns.
+
+        The two straight passes span almost the whole field height and the
+        full available midfield depth. Rounded U-turns shift the next pass
+        toward midfield without the tight, multi-axis cornering of the old
+        compact serpentine route.
+        """
+        field_width = float(self.sim.field_width)
+        y_min, y_max = .65, field_width - .65
+        turn_radius = .32
+        x_start = self.alliance_zone_depth + .55
+        x_mid = self.field_length * .5
+        x_end = x_mid - .35
         paths = []
 
         for robot, team in enumerate(TEAM_IDS):
-            lane = robot % 3
-            y_min, y_max = y_bands[lane]
-            order = (0, 1, 2, 3, 2, 1, 0)
-            x_at = lambda column: (x_min + column * column_spacing
-                                   if team == 0 else
-                                   x_max - column * column_spacing)
-            start = (x_at(order[0]), y_min)
-            control = [start]
-            current_y = y_min
-            end_y = y_max
-            for column in order:
-                x = x_at(column)
-                if abs(control[-1][0] - x) > 1e-6:
-                    control.append((x, current_y))
-                control.append((x, end_y))
-                current_y = end_y
-                end_y = y_min if end_y == y_max else y_max
-            if hypot(control[-1][0] - start[0], control[-1][1] - start[1]) > 1e-6:
-                control.append(start)
+            # Keep each alliance in its own midfield half. The full x range
+            # is used by every route so each robot sweeps the complete field
+            # height while progressively moving farther from its alliance.
+            if team == 1:
+                x1, x2 = (self.field_length-x_start-turn_radius,
+                          self.field_length-x_end+turn_radius)
             else:
-                control.pop()
-
+                x1, x2 = x_start+turn_radius, x_end-turn_radius
+            # Two Bezier U-turns join full-height straight passes. Their
+            # horizontal tangents distribute heading change over distance.
+            top_a, top_b = (x1, y_max-turn_radius), (x2, y_max-turn_radius)
+            bot_a, bot_b = (x2, y_min+turn_radius), (x1, y_min+turn_radius)
             dense = []
-            count = len(control)
-            for i in range(count):
-                p0, p1 = control[(i - 1) % count], control[i]
-                p2, p3 = control[(i + 1) % count], control[(i + 2) % count]
-                chord = hypot(p2[0] - p1[0], p2[1] - p1[1])
-                samples = max(3, ceil(chord / .25))
-                for sample in range(samples):
-                    t = sample / samples
-                    t2, t3 = t * t, t * t * t
-                    point = []
-                    h00, h10 = 2.*t3-3.*t2+1., t3-2.*t2+t
-                    h01, h11 = -2.*t3+3.*t2, t3-t2
-                    for axis in range(2):
-                        m1=.2*(p2[axis]-p0[axis])
-                        m2=.2*(p3[axis]-p1[axis])
-                        point.append(h00*p1[axis]+h10*m1+h01*p2[axis]+h11*m2)
-                    dense.append(tuple(point))
+
+            def line(a, b):
+                count = max(2, ceil(hypot(b[0]-a[0], b[1]-a[1])/.10))
+                for i in range(count):
+                    t = i/count
+                    dense.append((a[0]+(b[0]-a[0])*t,
+                                  a[1]+(b[1]-a[1])*t))
+
+            def bezier(a, c1, c2, b):
+                count = max(8, ceil(hypot(b[0]-a[0], b[1]-a[1])/.04))
+                for i in range(count):
+                    t = i/count
+                    u = 1.-t
+                    dense.append((u**3*a[0]+3*u*u*t*c1[0]+3*u*t*t*c2[0]+t**3*b[0],
+                                  u**3*a[1]+3*u*u*t*c1[1]+3*u*t*t*c2[1]+t**3*b[1]))
+
+            line((x1, y_min+turn_radius), top_a)
+            bezier(top_a, (x1, y_max+turn_radius*.55),
+                   (x2, y_max+turn_radius*.55), top_b)
+            line(top_b, bot_a)
+            bezier(bot_a, (x2, y_min-turn_radius*.55),
+                   (x1, y_min-turn_radius*.55), bot_b)
             dense.append(dense[0])
             cumulative = [0.]
             for a, b in zip(dense, dense[1:]):

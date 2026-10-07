@@ -4,6 +4,7 @@
 #include <hip/hip_runtime_api.h>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 
 void piece_occlusion_launch(const float* pose_xy, const float* segment,
                             const float* obstacles, const bool* eligible,
@@ -23,6 +24,41 @@ void visibility_3v3_launch(const float* pose, const float* pieces_xy,
                            const float* robot_radius, bool* output, int worlds,
                            int robots, int pieces, int obstacle_count, float range_m,
                            float half_fov, bool full_fov, hipStream_t stream);
+void angular_cluster_launch(const float* pose,const float* positions,
+                            const float* velocities,const bool* visible,
+                            const float* input_fraction,const float* input_spatial,
+                            const float* input_angular,const bool* input_merged,
+                            bool fuse_only,
+                            float* out_pos,float* out_vel,bool* out_valid,
+                            float* out_fraction,float* out_spatial,
+                            float* out_angular,bool* out_merged,int rows,
+                            int pieces,float diameter,float half_fov,
+                            hipStream_t stream);
+void angular_cluster_cameras_launch(const float* camera_pose,
+    const float* positions,const float* velocities,const bool* visible,
+    float* out_pos,float* out_vel,bool* out_valid,float* out_fraction,
+    float* out_spatial,float* out_angular,bool* out_merged,int worlds,
+    int robots,int cameras,int pieces,float diameter,float half_fov,
+    hipStream_t stream);
+void stereo_pair_fusion_launch(const float* pose,const float* positions,
+    const float* velocities,const bool* visible,const float* confidence,
+    const float* spatial,const float* angular,const bool* merged,
+    float* out_pos,float* out_vel,bool* out_valid,float* out_confidence,
+    float* out_spatial,float* out_angular,bool* out_merged,int worlds,
+    int pieces,hipStream_t stream);
+void pack_stereo_detections_launch(const float* pose,const float* pair_pos,
+    const float* pair_vel,const bool* pair_valid,const float* pair_confidence,
+    const float* pair_spatial,const float* pair_angular,const bool* pair_merged,
+    float* out_pos,float* out_vel,bool* out_valid,float* out_confidence,
+    float* out_spatial,float* out_angular,bool* out_merged,int worlds,
+    int pieces,hipStream_t stream);
+void stereo_fusion_pack_launch(const float* pose,const float* camera_pos,
+    const float* camera_vel,const bool* camera_valid,const float* camera_conf,
+    const float* camera_spatial,const float* camera_angular,const bool* camera_merged,
+    float* pair_pos,float* pair_vel,bool* pair_valid,float* pair_conf,
+    float* pair_spatial,float* pair_angular,bool* pair_merged,float* out_pos,
+    float* out_vel,bool* out_valid,float* out_conf,float* out_spatial,
+    float* out_angular,bool* out_merged,int worlds,int pieces,hipStream_t stream);
 void perception_commit_3v3_launch(const bool* visible, const bool* active,
                                  const int64_t* ticks, const float* piece_pos,
                                  const float* piece_vel, float* track_pos,
@@ -30,7 +66,18 @@ void perception_commit_3v3_launch(const bool* visible, const bool* active,
                                  bool* track_mask, uint32_t seed, int worlds,
                                  int robots, int pieces, float dt, float dropout,
                                  float position_noise, float velocity_noise,
+                                 float track_timeout,
                                  hipStream_t stream);
+void anonymous_track_update_launch(
+    const float* observer,const float* detections,const float* velocities,
+    const bool* detected,const float* confidence,const float* spatial,
+    const float* angular,const bool* merged,const bool* active,
+    const int64_t* ticks,float* track_pos,float* track_vel,float* track_age,
+    bool* track_mask,float* quality_state,float* track_confidence,
+    float* track_spatial,float* track_angular,bool* track_merged,
+    bool* current_visibility,uint32_t seed,int worlds,int slots,float dt,
+    float dropout,float position_noise,float velocity_noise,float timeout,
+    float gate,float ball_diameter,hipStream_t stream);
 void opponent_tracks_3v3_launch(const float* pose, const float* length,
                                 const float* width, const float* acceleration,
                                 const float* robot_radius, const float* obstacles,
@@ -184,13 +231,188 @@ torch::Tensor visibility_mask_3v3(torch::Tensor pose, torch::Tensor pieces_xy,
   return output;
 }
 
+std::tuple<torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,
+           torch::Tensor,torch::Tensor,torch::Tensor>
+angular_cluster(torch::Tensor pose,torch::Tensor positions,
+                torch::Tensor velocities,torch::Tensor visible,
+                double diameter,double half_fov) {
+  TORCH_CHECK(pose.is_cuda() && positions.is_cuda() && velocities.is_cuda() &&
+              visible.is_cuda(),"angular cluster inputs must be device tensors");
+  TORCH_CHECK(pose.scalar_type()==at::kFloat && positions.scalar_type()==at::kFloat &&
+              velocities.scalar_type()==at::kFloat && visible.scalar_type()==at::kBool,
+              "angular cluster input dtype mismatch");
+  TORCH_CHECK(pose.dim()==2 && pose.size(1)==3 && positions.dim()==3 &&
+              positions.size(0)==pose.size(0) && positions.size(2)==2 &&
+              velocities.sizes()==positions.sizes() && visible.dim()==2 &&
+              visible.size(0)==pose.size(0) && visible.size(1)==positions.size(1),
+              "angular cluster input shape mismatch");
+  TORCH_CHECK(pose.device()==positions.device() && pose.device()==velocities.device() &&
+              pose.device()==visible.device(),"angular cluster inputs must share a device");
+  TORCH_CHECK(pose.is_contiguous() && positions.is_contiguous() &&
+              velocities.is_contiguous() && visible.is_contiguous(),
+              "angular cluster inputs must be contiguous");
+  c10::cuda::CUDAGuard guard(pose.device());
+  auto out_pos=torch::empty_like(positions);
+  auto out_vel=torch::empty_like(velocities);
+  auto out_valid=torch::empty_like(visible);
+  auto out_fraction=torch::empty(visible.sizes(),positions.options());
+  auto out_spatial=torch::empty_like(positions);
+  auto out_angular=torch::empty(visible.sizes(),positions.options());
+  auto out_merged=torch::empty_like(visible);
+  angular_cluster_launch(pose.data_ptr<float>(),positions.data_ptr<float>(),
+      velocities.data_ptr<float>(),visible.data_ptr<bool>(),nullptr,nullptr,
+      nullptr,nullptr,false,out_pos.data_ptr<float>(),
+      out_vel.data_ptr<float>(),out_valid.data_ptr<bool>(),out_fraction.data_ptr<float>(),
+      out_spatial.data_ptr<float>(),out_angular.data_ptr<float>(),out_merged.data_ptr<bool>(),
+      static_cast<int>(pose.size(0)),static_cast<int>(positions.size(1)),
+      static_cast<float>(diameter),static_cast<float>(half_fov),
+      c10::cuda::getCurrentCUDAStream(pose.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out_pos,out_vel,out_valid,out_fraction,out_spatial,out_angular,out_merged};
+}
+
+std::tuple<torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,
+           torch::Tensor,torch::Tensor,torch::Tensor>
+angular_cluster_cameras(torch::Tensor pose,torch::Tensor positions,
+                        torch::Tensor velocities,torch::Tensor visible,
+                        torch::Tensor out_pos,torch::Tensor out_vel,
+                        torch::Tensor out_valid,torch::Tensor out_fraction,
+                        torch::Tensor out_spatial,torch::Tensor out_angular,
+                        torch::Tensor out_merged,double diameter,double half_fov) {
+  TORCH_CHECK(pose.is_cuda() && positions.is_cuda() && velocities.is_cuda() &&
+              visible.is_cuda(),"camera cluster inputs must be device tensors");
+  TORCH_CHECK(pose.scalar_type()==at::kFloat && positions.scalar_type()==at::kFloat &&
+              velocities.scalar_type()==at::kFloat && visible.scalar_type()==at::kBool,
+              "camera cluster input dtype mismatch");
+  TORCH_CHECK(pose.dim()==4 && pose.size(2)==4 && pose.size(3)==3 &&
+              positions.dim()==3 && positions.size(0)==pose.size(0) &&
+              positions.size(2)==2 && velocities.sizes()==positions.sizes() &&
+              visible.dim()==4 && visible.size(0)==pose.size(0) &&
+              visible.size(1)==pose.size(1) && visible.size(2)==4 &&
+              visible.size(3)==positions.size(1),"camera cluster input shape mismatch");
+  TORCH_CHECK(pose.is_contiguous() && positions.is_contiguous() &&
+              velocities.is_contiguous() && visible.is_contiguous(),
+              "camera cluster inputs must be contiguous");
+  c10::cuda::CUDAGuard guard(pose.device());
+  const std::vector<int64_t> output_shape={pose.size(0),pose.size(1),4,positions.size(1)};
+  TORCH_CHECK(out_pos.sizes()==at::IntArrayRef({pose.size(0),pose.size(1),4,positions.size(1),2}) &&
+              out_vel.sizes()==out_pos.sizes() && out_spatial.sizes()==out_pos.sizes() &&
+              out_valid.sizes()==at::IntArrayRef(output_shape) &&
+              out_fraction.sizes()==out_valid.sizes() && out_angular.sizes()==out_valid.sizes() &&
+              out_merged.sizes()==out_valid.sizes(),"camera cluster output shape mismatch");
+  TORCH_CHECK(out_pos.is_contiguous() && out_vel.is_contiguous() && out_spatial.is_contiguous() &&
+              out_valid.is_contiguous() && out_fraction.is_contiguous() &&
+              out_angular.is_contiguous() && out_merged.is_contiguous(),
+              "camera cluster outputs must be contiguous");
+  angular_cluster_cameras_launch(pose.data_ptr<float>(),positions.data_ptr<float>(),
+      velocities.data_ptr<float>(),visible.data_ptr<bool>(),out_pos.data_ptr<float>(),
+      out_vel.data_ptr<float>(),out_valid.data_ptr<bool>(),out_fraction.data_ptr<float>(),
+      out_spatial.data_ptr<float>(),out_angular.data_ptr<float>(),out_merged.data_ptr<bool>(),
+      static_cast<int>(pose.size(0)),static_cast<int>(pose.size(1)),4,
+      static_cast<int>(positions.size(1)),static_cast<float>(diameter),
+      static_cast<float>(half_fov),c10::cuda::getCurrentCUDAStream(pose.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out_pos,out_vel,out_valid,out_fraction,out_spatial,out_angular,out_merged};
+}
+
+std::tuple<torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,
+           torch::Tensor,torch::Tensor,torch::Tensor>
+fuse_camera_clusters(torch::Tensor pose,torch::Tensor positions,
+                     torch::Tensor velocities,torch::Tensor visible,
+                     torch::Tensor confidence,torch::Tensor spatial,
+                     torch::Tensor angular,torch::Tensor merged,
+                     double diameter,double half_fov) {
+  TORCH_CHECK(pose.is_cuda() && positions.is_cuda() && velocities.is_cuda() &&
+              visible.is_cuda() && confidence.is_cuda() && spatial.is_cuda() &&
+              angular.is_cuda() && merged.is_cuda(),"cluster inputs must be device tensors");
+  TORCH_CHECK(pose.dim()==2 && pose.size(1)==3 && positions.dim()==3 &&
+              positions.size(0)==pose.size(0) && positions.size(2)==2 &&
+              velocities.sizes()==positions.sizes() && visible.dim()==2 &&
+              visible.size(0)==pose.size(0) && visible.size(1)==positions.size(1) &&
+              confidence.sizes()==visible.sizes() && spatial.sizes()==positions.sizes() &&
+              angular.sizes()==visible.sizes() && merged.sizes()==visible.sizes(),
+              "camera cluster metadata shape mismatch");
+  TORCH_CHECK(pose.scalar_type()==at::kFloat && positions.scalar_type()==at::kFloat &&
+              velocities.scalar_type()==at::kFloat && confidence.scalar_type()==at::kFloat &&
+              spatial.scalar_type()==at::kFloat && angular.scalar_type()==at::kFloat &&
+              visible.scalar_type()==at::kBool && merged.scalar_type()==at::kBool,
+              "camera cluster metadata dtype mismatch");
+  TORCH_CHECK(pose.device()==positions.device() && pose.device()==velocities.device() &&
+              pose.device()==visible.device() && pose.device()==confidence.device() &&
+              pose.device()==spatial.device() && pose.device()==angular.device() &&
+              pose.device()==merged.device(),"cluster inputs must share a device");
+  TORCH_CHECK(pose.is_contiguous() && positions.is_contiguous() &&
+              velocities.is_contiguous() && visible.is_contiguous() &&
+              confidence.is_contiguous() && spatial.is_contiguous() &&
+              angular.is_contiguous() && merged.is_contiguous(),
+              "camera cluster inputs must be contiguous");
+  c10::cuda::CUDAGuard guard(pose.device());
+  auto out_pos=torch::empty_like(positions); auto out_vel=torch::empty_like(positions);
+  auto out_valid=torch::empty_like(visible); auto out_fraction=torch::empty_like(confidence);
+  auto out_spatial=torch::empty_like(spatial); auto out_angular=torch::empty_like(angular);
+  auto out_merged=torch::empty_like(merged);
+  angular_cluster_launch(pose.data_ptr<float>(),positions.data_ptr<float>(),
+      velocities.data_ptr<float>(),visible.data_ptr<bool>(),confidence.data_ptr<float>(),
+      spatial.data_ptr<float>(),angular.data_ptr<float>(),merged.data_ptr<bool>(),true,
+      out_pos.data_ptr<float>(),out_vel.data_ptr<float>(),out_valid.data_ptr<bool>(),
+      out_fraction.data_ptr<float>(),out_spatial.data_ptr<float>(),
+      out_angular.data_ptr<float>(),out_merged.data_ptr<bool>(),
+      static_cast<int>(pose.size(0)),static_cast<int>(positions.size(1)),
+      static_cast<float>(diameter),static_cast<float>(half_fov),
+      c10::cuda::getCurrentCUDAStream(pose.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out_pos,out_vel,out_valid,out_fraction,out_spatial,out_angular,out_merged};
+}
+
+void stereo_fusion_pack(torch::Tensor pose,torch::Tensor camera_pos,
+    torch::Tensor camera_vel,torch::Tensor camera_valid,torch::Tensor camera_conf,
+    torch::Tensor camera_spatial,torch::Tensor camera_angular,
+    torch::Tensor camera_merged,torch::Tensor pair_pos,torch::Tensor pair_vel,
+    torch::Tensor pair_valid,torch::Tensor pair_conf,torch::Tensor pair_spatial,
+    torch::Tensor pair_angular,torch::Tensor pair_merged,torch::Tensor out_pos,
+    torch::Tensor out_vel,torch::Tensor out_valid,torch::Tensor out_conf,
+    torch::Tensor out_spatial,torch::Tensor out_angular,torch::Tensor out_merged) {
+  TORCH_CHECK(pose.is_cuda() && camera_pos.is_cuda() && pair_pos.is_cuda() &&
+              out_pos.is_cuda(),"stereo fusion tensors must be device tensors");
+  const int worlds=static_cast<int>(pose.size(0));
+  const int pieces=static_cast<int>(camera_valid.size(3));
+  TORCH_CHECK(pose.dim()==3 && pose.size(1)==6 && pose.size(2)==3 &&
+      camera_pos.dim()==5 && camera_pos.size(0)==worlds && camera_pos.size(1)==6 &&
+      camera_pos.size(2)==4 && camera_pos.size(3)==pieces && camera_pos.size(4)==2 &&
+      camera_vel.sizes()==camera_pos.sizes() && camera_spatial.sizes()==camera_pos.sizes() &&
+      camera_valid.dim()==4 && camera_conf.sizes()==camera_valid.sizes() &&
+      camera_angular.sizes()==camera_valid.sizes() && camera_merged.sizes()==camera_valid.sizes() &&
+      out_pos.sizes()==torch::IntArrayRef({worlds,6,pieces,2}) &&
+      out_vel.sizes()==out_pos.sizes() && out_spatial.sizes()==out_pos.sizes() &&
+      out_valid.sizes()==torch::IntArrayRef({worlds,6,pieces}) &&
+      out_conf.sizes()==out_valid.sizes() && out_angular.sizes()==out_valid.sizes() &&
+      out_merged.sizes()==out_valid.sizes(),"stereo fusion tensor shape mismatch");
+  if(pieces>512) TORCH_CHECK(
+      pair_pos.sizes()==torch::IntArrayRef({worlds,6,2,pieces,2}) &&
+      pair_vel.sizes()==pair_pos.sizes() && pair_spatial.sizes()==pair_pos.sizes() &&
+      pair_valid.sizes()==torch::IntArrayRef({worlds,6,2,pieces}) &&
+      pair_conf.sizes()==pair_valid.sizes() && pair_angular.sizes()==pair_valid.sizes() &&
+      pair_merged.sizes()==pair_valid.sizes(),"stereo pair scratch shape mismatch");
+  c10::cuda::CUDAGuard guard(pose.device());
+  auto stream=c10::cuda::getCurrentCUDAStream(pose.get_device());
+  stereo_fusion_pack_launch(pose.data_ptr<float>(),camera_pos.data_ptr<float>(),
+      camera_vel.data_ptr<float>(),camera_valid.data_ptr<bool>(),camera_conf.data_ptr<float>(),
+      camera_spatial.data_ptr<float>(),camera_angular.data_ptr<float>(),camera_merged.data_ptr<bool>(),
+      pair_pos.data_ptr<float>(),pair_vel.data_ptr<float>(),pair_valid.data_ptr<bool>(),
+      pair_conf.data_ptr<float>(),pair_spatial.data_ptr<float>(),pair_angular.data_ptr<float>(),
+      pair_merged.data_ptr<bool>(),out_pos.data_ptr<float>(),out_vel.data_ptr<float>(),
+      out_valid.data_ptr<bool>(),out_conf.data_ptr<float>(),out_spatial.data_ptr<float>(),
+      out_angular.data_ptr<float>(),out_merged.data_ptr<bool>(),worlds,pieces,stream);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void perception_commit_3v3(torch::Tensor visible, torch::Tensor active,
                            torch::Tensor ticks, torch::Tensor piece_pos,
                            torch::Tensor piece_vel, torch::Tensor track_pos,
                            torch::Tensor track_vel, torch::Tensor track_age,
                            torch::Tensor track_mask, int64_t seed, double dt,
                            double dropout, double position_noise,
-                           double velocity_noise) {
+                           double velocity_noise, double track_timeout) {
   TORCH_CHECK(visible.is_cuda() && active.is_cuda() && ticks.is_cuda() &&
               piece_pos.is_cuda() && piece_vel.is_cuda() && track_pos.is_cuda() &&
               track_vel.is_cuda() && track_age.is_cuda() && track_mask.is_cuda(),
@@ -230,8 +452,41 @@ void perception_commit_3v3(torch::Tensor visible, torch::Tensor active,
       track_mask.data_ptr<bool>(), static_cast<uint32_t>(seed), static_cast<int>(worlds),
       static_cast<int>(robots), static_cast<int>(pieces), static_cast<float>(dt),
       static_cast<float>(dropout), static_cast<float>(position_noise),
-      static_cast<float>(velocity_noise),
+      static_cast<float>(velocity_noise), static_cast<float>(track_timeout),
       c10::cuda::getCurrentCUDAStream(visible.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void anonymous_track_update(torch::Tensor observer,torch::Tensor detections,
+    torch::Tensor velocities,torch::Tensor detected,torch::Tensor confidence,
+    torch::Tensor spatial,torch::Tensor angular,torch::Tensor merged,
+    torch::Tensor active,torch::Tensor ticks,torch::Tensor track_pos,
+    torch::Tensor track_vel,torch::Tensor track_age,torch::Tensor track_mask,
+    torch::Tensor quality_state,torch::Tensor track_confidence,
+    torch::Tensor track_spatial,torch::Tensor track_angular,
+    torch::Tensor track_merged,torch::Tensor current_visibility,
+    int64_t seed,double dt,double dropout,double position_noise,
+    double velocity_noise,double timeout,double gate,double ball_diameter) {
+  TORCH_CHECK(observer.is_cuda() && detections.is_cuda() && velocities.is_cuda() &&
+      detected.is_cuda() && confidence.is_cuda() && spatial.is_cuda() && angular.is_cuda() &&
+      merged.is_cuda() && active.is_cuda() && ticks.is_cuda(),
+      "anonymous perception inputs must be device tensors");
+  const int worlds=static_cast<int>(observer.size(0));
+  const int slots=static_cast<int>(detections.size(2));
+  c10::cuda::CUDAGuard guard(observer.device());
+  anonymous_track_update_launch(observer.data_ptr<float>(),detections.data_ptr<float>(),
+      velocities.data_ptr<float>(),detected.data_ptr<bool>(),confidence.data_ptr<float>(),
+      spatial.data_ptr<float>(),angular.data_ptr<float>(),merged.data_ptr<bool>(),
+      active.data_ptr<bool>(),ticks.data_ptr<int64_t>(),track_pos.data_ptr<float>(),
+      track_vel.data_ptr<float>(),track_age.data_ptr<float>(),track_mask.data_ptr<bool>(),
+      quality_state.data_ptr<float>(),track_confidence.data_ptr<float>(),
+      track_spatial.data_ptr<float>(),track_angular.data_ptr<float>(),
+      track_merged.data_ptr<bool>(),current_visibility.data_ptr<bool>(),
+      static_cast<uint32_t>(seed),worlds,slots,static_cast<float>(dt),
+      static_cast<float>(dropout),static_cast<float>(position_noise),
+      static_cast<float>(velocity_noise),static_cast<float>(timeout),
+      static_cast<float>(gate),static_cast<float>(ball_diameter),
+      c10::cuda::getCurrentCUDAStream(observer.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -309,8 +564,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused deterministic FUEL visibility mask (HIP)");
   m.def("visibility_mask_3v3", &visibility_mask_3v3,
         "Fused six-robot FUEL visibility mask with chassis occlusion (HIP)");
+  m.def("angular_cluster", &angular_cluster,
+        "Fused angular occlusion and connected FUEL clustering (HIP)");
+  m.def("angular_cluster_cameras", &angular_cluster_cameras,
+        "Cluster stereo views from shared per-world FUEL geometry (HIP)");
+  m.def("fuse_camera_clusters", &fuse_camera_clusters,
+        "Fuse per-camera FUEL clusters while preserving metadata (HIP)");
+  m.def("stereo_fusion_pack", &stereo_fusion_pack,
+        "Fuse stereo clusters and pack detections for anonymous tracking (HIP)");
   m.def("perception_commit_3v3", &perception_commit_3v3,
         "Fused counter-based sensor noise and six-robot track update (HIP)");
+  m.def("anonymous_track_update", &anonymous_track_update,
+        "Fused anonymous gated association, sensor quality and track update (HIP)");
   m.def("opponent_tracks_3v3", &opponent_tracks_3v3,
         "Fused opponent visibility and six-robot sensor track update (HIP)");
 }

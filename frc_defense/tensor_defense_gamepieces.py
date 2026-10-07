@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from .field import ALLIANCE_ZONE_DEPTH
+from .field import ALLIANCE_ZONE_DEPTH, grid_array_points
 
 try:
     import torch
@@ -22,6 +22,24 @@ else:
 
 class TensorDefenseGamepieceMixin:
     """Manage staged FUEL, match timing, pickup, and HUB scoring."""
+    def _clear_intersected_fuel_tracks(self, active_mask=None):
+        """Forget fuel observations inside a robot's contact/intake envelope."""
+        delta=self._track_pos[:,:,:,None,:]-self.sim.pose[:,None,None,:,:2]
+        forward=torch.stack((self.sim.pose[:,:,2].cos(),
+                             self.sim.pose[:,:,2].sin()),-1)
+        left=torch.stack((-forward[...,1],forward[...,0]),-1)
+        longitudinal=(delta*forward[:,None,None,:,:]).sum(-1)
+        lateral=(delta*left[:,None,None,:,:]).sum(-1).abs()
+        contact_envelope=(
+            (longitudinal>=-self.sim.length[:,None,None,:]*.5-.0825)&
+            (longitudinal<=self.sim.length[:,None,None,:]*.5+.35+.0825)&
+            (lateral<=self.sim.width[:,None,None,:]*.5+.075+.0825))
+        intersected=contact_envelope.any(-1)
+        if active_mask is not None:
+            intersected &= active_mask[:,None,None]
+        self._track_mask.masked_fill_(intersected,False)
+        self._track_age.masked_fill_(intersected,float("inf"))
+
     def release_outpost_fuel(self, alliance, position, count=1, mask=None):
         """Model a human-player fuel release at a caller-supplied chute opening.
 
@@ -81,9 +99,9 @@ class TensorDefenseGamepieceMixin:
                    torch.full((self.n,),self.preloaded_per_robot,device=self.device,dtype=torch.long))
         neutral_count=count-96-6*per_robot
         half_ball=.075
-        def sample_rect(num,x0,x1,y0,y1):
-            rand=self._random_active(mask,(num,2))
-            return torch.stack((x0+rand[...,0]*(x1-x0),y0+rand[...,1]*(y1-y0)),-1)
+        def grid_rect(num,x0,x1,y0,y1):
+            return torch.tensor(grid_array_points(num,x0,x1,y0,y1),
+                                device=self.device,dtype=positions.dtype).reshape(num,2).expand(self.n,-1,2)
         depots={getattr(box,"name",""):box for box in self.field_boxes}
         red_depot=depots.get("red_depot")
         blue_depot=depots.get("blue_depot")
@@ -97,7 +115,7 @@ class TensorDefenseGamepieceMixin:
             x,y,length,width=rect
             # Stage within/along the low DEPOT footprint; the planar solver
             # treats these FUEL pieces as non-colliding objects.
-            dep_pos=sample_rect(24,max(half_ball,x-length/2),min(self.sim.field_length-half_ball,x+length/2),
+            dep_pos=grid_rect(24,max(half_ball,x-length/2),min(self.sim.field_length-half_ball,x+length/2),
                                 max(half_ball,y-width/2),min(self.sim.field_width-half_ball,y+width/2))
             positions[:,first:first+24]=dep_pos
             zone[:,first:first+24]=1 if front==1 else 2
@@ -109,8 +127,8 @@ class TensorDefenseGamepieceMixin:
         neutral_start=96
         neutral_max=count-96
         # Official neutral pile: 206 x 72 in (~5.23 x 1.83 m), roughly split
-        # across the center line; random scatter avoids a perfect grid.
-        neutral=sample_rect(neutral_max,
+        # across the center line in a regular grid array.
+        neutral=grid_rect(neutral_max,
             max(half_ball,self.sim.field_length/2-.915),
             min(self.sim.field_length-half_ball,self.sim.field_length/2+.915),
             max(half_ball,center_y-2.615),min(self.sim.field_width-half_ball,center_y+2.615))
@@ -136,6 +154,25 @@ class TensorDefenseGamepieceMixin:
             active[rr,cc]=True
             zone[rr,cc]=5
             owner[rr,cc]=robot
+        if getattr(self, "random_gamepiece_placement", False):
+            # Scatter all active fuel across the field with ball-diameter spacing.
+            min_distance=2*half_ball
+            for row in range(self.n):
+                active_indices=torch.nonzero(active[row],as_tuple=False).flatten().tolist()
+                accepted=[]
+                attempts=0
+                while len(accepted)<len(active_indices) and attempts<max(10000,len(active_indices)*1000):
+                    attempts+=1
+                    candidate=(half_ball+float(self._random((1,))[0].item())*(self.sim.field_length-2*half_ball),
+                               half_ball+float(self._random((1,))[0].item()*(self.sim.field_width-2*half_ball)))
+                    if all((candidate[0]-x)**2+(candidate[1]-y)**2 >= min_distance**2
+                           for x,y in accepted):
+                        accepted.append(candidate)
+                if len(accepted)!=len(active_indices):
+                    raise RuntimeError("could not place non-overlapping random gamepieces")
+                if accepted:
+                    positions[row,active_indices]=torch.tensor(accepted,device=self.device,
+                                                                  dtype=positions.dtype)
         active[:,:48]=True
         active[:,neutral_start:neutral_start+neutral_max]|=neutral_slots
         kind[:,:count]=0
@@ -182,6 +219,7 @@ class TensorDefenseGamepieceMixin:
                      else active_mask)
         if (_update_gamepieces_hip is not None and FUSED_GAMEPIECES_HIP_ENABLED and
                 _update_gamepieces_hip(self,active_mask)):
+            self._clear_intersected_fuel_tracks(active_mask)
             return (self.fuel_acquired_event,self.fuel_scored_event,
                     self.fuel_denied_event)
         return self._update_gamepieces_torch(active_mask)
@@ -218,9 +256,17 @@ class TensorDefenseGamepieceMixin:
             possession=(self.piece_active&(self.piece_owner==robot)).sum(-1)
             ready=self.match_elapsed+1e-6>=self.next_intake_time[:,robot]
             can_intake=(possession<self.fuel_capacity)&ready&active_mask
+            team=self._team_ids_host[robot]
+            piece_in_alliance=(self.piece_pos[...,0]<=ALLIANCE_ZONE_DEPTH
+                if team==0 else
+                self.piece_pos[...,0]>=self.sim.field_length-ALLIANCE_ZONE_DEPTH)
+            allowed_zone=torch.where(self.hub_active[:,team,None],
+                                     torch.ones_like(piece_in_alliance),
+                                     ~piece_in_alliance)
             # Only the nearest eligible piece matters, so squared distance is
             # order preserving and avoids sqrt over every piece each tick.
-            distance=delta.square().sum(-1).masked_fill(~(free&intake&can_intake[:,None]),float("inf"))
+            distance=delta.square().sum(-1).masked_fill(
+                ~(free&allowed_zone&intake&can_intake[:,None]),float("inf"))
             nearest,index=distance.min(-1)
             picked=torch.isfinite(nearest)
             selected_owner=self.piece_owner[rows,index]
@@ -291,8 +337,7 @@ class TensorDefenseGamepieceMixin:
                     self.piece_owner,out=self.piece_owner)
         torch.where(newly_scored,torch.zeros_like(self.piece_zone),
                     self.piece_zone,out=self.piece_zone)
-        self._track_mask.masked_fill_(newly_scored[:,None,:],False)
-        self._track_age.masked_fill_(newly_scored[:,None,:],float("inf"))
+        self._clear_intersected_fuel_tracks(active_mask)
         self.fuel_acquisition_count+=self.fuel_acquired_event*active_mask[:,None]
         self.fuel_abandoned_count+=self.fuel_abandoned_event*active_mask[:,None]
         return self.fuel_acquired_event,self.fuel_scored_event,self.fuel_denied_event

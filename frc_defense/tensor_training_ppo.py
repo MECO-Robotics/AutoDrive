@@ -30,6 +30,7 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
     ActorCritic = _runtime["ActorCritic"]
     _DDPScore = _runtime["_DDPScore"]
     nn = _runtime["nn"]
+    DEFENSE_TRAINING_OPPONENTS = _runtime["DEFENSE_TRAINING_OPPONENTS"]
     _reset_obs = _runtime["_reset_obs"]
     time = _runtime["time"]
     Path = _runtime["Path"]

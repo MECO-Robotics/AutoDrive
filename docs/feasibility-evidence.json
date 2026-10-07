@@ -1,0 +1,182 @@
+{
+  "canonical_build_sources": {
+    "tensor_strategic_observation_full_proto.py": [
+      "tensor_strategic_observation_full_proto.cpp",
+      "tensor_strategic_observation_full_proto_kernel.cu"
+    ],
+    "tensor_collision_multi_hip.py": [
+      "tensor_collision_multi_hip.cpp",
+      "tensor_collision_multi_hip_kernel.cu"
+    ],
+    "tensor_perception.py": [
+      "tensor_perception_hip.cpp",
+      "tensor_perception_hip_kernel.cu"
+    ],
+    "tensor_collision.py": [
+      "tensor_collision_hip.cpp",
+      "tensor_collision_hip_kernel.cu"
+    ],
+    "tensor_adstar.py": [
+      "tensor_adstar_hip.cpp",
+      "tensor_adstar_hip_kernel.cu",
+      "tensor_adstar_occupancy_hip.cpp",
+      "tensor_adstar_occupancy_hip_kernel.cu",
+      "tensor_adstar_reference_hip.cpp",
+      "tensor_adstar_reference_kernel.cu",
+      "tensor_adstar_route_kernel.cu"
+    ],
+    "tensor_perception_commit_proto.py": [
+      "tensor_perception_commit_proto.cpp",
+      "tensor_perception_commit_proto_kernel.cu"
+    ],
+    "tensor_swerve_pose_hip.py": [
+      "tensor_swerve_pose_hip.cpp",
+      "tensor_swerve_pose_kernel.cu"
+    ],
+    "tensor_3v3_pickup_grid_hip.py": [
+      "tensor_3v3_pickup_grid_hip.cpp",
+      "tensor_3v3_pickup_grid_hip_kernel.cu"
+    ],
+    "tensor_fuel_candidate_rank.py": [
+      "tensor_fuel_candidate_rank.cpp",
+      "tensor_fuel_candidate_rank_kernel.cu"
+    ],
+    "tensor_gamepieces.py": [
+      "tensor_gamepieces_hip.cpp",
+      "tensor_gamepieces_hip_kernel.cu"
+    ],
+    "tensor_strategic_observation_proto.py": [
+      "tensor_strategic_observation_proto.cpp",
+      "tensor_strategic_observation_proto_kernel.cu"
+    ],
+    "tensor_collision_pipeline.py": [
+      "tensor_collision_pipeline_hip.cpp",
+      "tensor_collision_pipeline_hip_kernel.cu"
+    ]
+  },
+  "canonical_lines": 5217,
+  "changed_since_inventory": [
+    "frc_defense/_tensor_3v3_gamepieces.py",
+    "frc_defense/dashboard.py",
+    "frc_defense/dashboard_simulation.py",
+    "frc_defense/dashboard_static/dashboard.js",
+    "frc_defense/dashboard_static/index.html",
+    "frc_defense/field.py",
+    "frc_defense/tensor_3v3.py",
+    "frc_defense/tensor_defense_gamepieces.py"
+  ],
+  "baseline_buckets": {
+    "python_runtime": 14069,
+    "noncanonical": 3229,
+    "canonical": 5217,
+    "frontend": 3485,
+    "scripts": 6559,
+    "tests": 2637
+  },
+  "verified_current_source_lines": 35310,
+  "hipify_reproduction": {
+    "scratch": "/home/brian/Projects/autodrive-feasibility-d0z4_ch9",
+    "checked": [
+      {
+        "path": "tensor_fuel_candidate_rank_kernel.hip",
+        "matches": true,
+        "lines": 72
+      },
+      {
+        "path": "tensor_perception_hip_hip.cpp",
+        "matches": true,
+        "lines": 317
+      },
+      {
+        "path": "tensor_adstar_reference_hip_hip.cpp",
+        "matches": true,
+        "lines": 58
+      },
+      {
+        "path": "tensor_collision_multi_hip_kernel.hip",
+        "matches": true,
+        "lines": 552
+      },
+      {
+        "path": "tensor_3v3_pickup_grid_hip_kernel.hip",
+        "matches": true,
+        "lines": 303
+      },
+      {
+        "path": "tensor_swerve_pose_hip_hip.cpp",
+        "matches": true,
+        "lines": 103
+      },
+      {
+        "path": "tensor_strategic_observation_proto_hip.cpp",
+        "matches": true,
+        "lines": 149
+      },
+      {
+        "path": "tensor_perception_commit_proto_hip.cpp",
+        "matches": true,
+        "lines": 90
+      },
+      {
+        "path": "tensor_collision_hip_hip.cpp",
+        "matches": true,
+        "lines": 53
+      },
+      {
+        "path": "tensor_3v3_pickup_grid_hip_hip.cpp",
+        "matches": true,
+        "lines": 83
+      },
+      {
+        "path": "tensor_fuel_candidate_rank_hip.cpp",
+        "matches": true,
+        "lines": 38
+      },
+      {
+        "path": "tensor_collision_pipeline_hip_hip.cpp",
+        "matches": true,
+        "lines": 64
+      },
+      {
+        "path": "tensor_gamepieces_hip_kernel.hip",
+        "matches": true,
+        "lines": 245
+      },
+      {
+        "path": "tensor_gamepieces_hip_hip.cpp",
+        "matches": true,
+        "lines": 78
+      },
+      {
+        "path": "tensor_strategic_observation_full_proto_hip.cpp",
+        "matches": true,
+        "lines": 119
+      },
+      {
+        "path": "tensor_adstar_occupancy_hip_hip.cpp",
+        "matches": true,
+        "lines": 54
+      },
+      {
+        "path": "tensor_adstar_hip_hip.cpp",
+        "matches": true,
+        "lines": 111
+      }
+    ],
+    "generated_results": 29,
+    "compiled": false
+  },
+  "tests": {
+    "command": ".venv/bin/python -m pytest -q tests/test_focused_playback_setup.py tests/test_strategic_held_interval.py tests/test_tensor_training_eval_dispatch.py",
+    "passed": 11,
+    "seconds": 2.88
+  },
+  "hardware": {
+    "torch": "2.14.0+rocm10.2.0a20260927",
+    "hip": "7.17.26385",
+    "gpu_devices": [
+      "AMD Radeon Pro WX 9100",
+      "AMD Radeon Pro WX 9100"
+    ]
+  }
+}

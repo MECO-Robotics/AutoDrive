@@ -5,6 +5,8 @@ const field = $("field");
 const fx = field.getContext("2d");
 const initialRun = new URLSearchParams(location.search).get("run");
 const scenarioJobStorageKey = "autodrive.activeScenarioJob";
+const focusedSettingsStorageKey = "autodrive.focusedTestSettings";
+const dualGpuStorageKey = "autodrive.dualGpuMode";
 const defaultWorld = {
   length: 16.54,
   width: 8.07,
@@ -44,19 +46,25 @@ function showScenarioProgress(progress) {
   const progressPercent = $("scenarioProgressPercent");
   if (progressPercent) progressPercent.textContent = `${percent.toFixed(1)}%`;
   const simulated = Number(progress.simulated_seconds) || 0;
-  const duration = Number(progress.match_seconds) || 160;
+  const behaviorMode = progress.behavior_mode || $("behaviorMode")?.value || "match";
+  const behaviorProbe = behaviorMode !== "match";
+  const duration = Number(progress.match_seconds) || (behaviorProbe ? 30 : 160);
   const progressTime = $("scenarioProgressTime");
   if (progressTime) progressTime.textContent =
     `${simulated.toFixed(1)} / ${duration.toFixed(1)} simulated seconds`;
   const status = progress.status || "waiting";
+  const [probeBehavior, probeHubState] = behaviorProbe ? behaviorMode.split("_") : [];
+  const playbackLabel = behaviorProbe
+    ? `Focused HUB ${probeHubState}`
+    : "Randomized match";
   const progressTitle = $("scenarioProgressTitle");
   if (progressTitle) progressTitle.textContent = ["completed", "ready"].includes(status)
-    ? "Randomized match ready"
+    ? `${playbackLabel} ready`
     : status === "error"
       ? "Scenario simulation failed"
       : status === "waiting"
-        ? "Match queued for simulator"
-        : "Simulating randomized match";
+        ? behaviorProbe ? "Behavior probe queued for simulator" : "Match queued for simulator"
+        : behaviorProbe ? "Simulating isolated behavior" : "Simulating randomized match";
   const progressState = $("scenarioProgressState");
   if (progressState) progressState.textContent = status === "waiting"
     ? "Waiting for GPU time"
@@ -387,6 +395,36 @@ function renderComparisonRecords(records) {
   });
 }
 
+function updateRobotAudit() {
+  const panel = $("robotAudit");
+  if (!panel) return;
+  const robot = Number($("auditRobot").value);
+  const frame = frames[index];
+  if (!frame?.robots?.[robot]) {
+    panel.textContent = "Load a playback to inspect its control state.";
+    return;
+  }
+  const pose = frame.robots[robot];
+  const fuel = frame.robot_fuel_targets?.[robot];
+  const target = frame.robot_targets?.[robot];
+  const routeGoal = frame.robot_route_goals?.[robot];
+  const action = Number(frame.robot_actions?.[robot]);
+  const actionNames = ["Approach fuel", "Approach fuel", "Approach fuel", "Approach fuel",
+    "Score", "Defend", "Seek fuel / ferry", "Idle"];
+  const point = (value) => Array.isArray(value) && value.length >= 2
+    ? `${Number(value[0]).toFixed(2)}, ${Number(value[1]).toFixed(2)} m` : "—";
+  const close = Array.isArray(fuel) && Array.isArray(routeGoal) &&
+    Math.hypot(fuel[0] - routeGoal[0], fuel[1] - routeGoal[1]) < 0.2;
+  const collecting = frame.robot_collecting?.[robot] === true;
+  const state = collecting ? "Collecting" : action === 4 ? "Scoring"
+    : action === 5 ? "Defending" : action === 6 ? "Searching / ferrying" : "Approaching fuel";
+  const clusterCount = frame.robot_cluster_counts?.[robot];
+  panel.textContent = `${["Red 1", "Red 2", "Red 3", "Blue 1", "Blue 2", "Blue 3"][robot]} · ${state} · ${actionNames[action] || "Unknown"}` +
+    ` · cluster tracks ${clusterCount ?? "—"} · pose ${point(pose)}` +
+    ` · selected FUEL ${point(fuel)} · behavior aim before AD* ${point(target)} (not the drive target)` +
+    ` · AD* route destination ${point(routeGoal)}${close ? " (near selected FUEL)" : " (may be a staging waypoint)"}`;
+}
+
 function drawField() {
   renderField({
     canvas: field,
@@ -405,16 +443,21 @@ function drawField() {
       showGrid: $("showGrid"),
       redScore: $("redScore"),
       blueScore: $("blueScore"),
+      redScoreLabel: $("redScoreLabel"),
+      blueScoreLabel: $("blueScoreLabel"),
       matchClock: $("matchClock"),
       showFuel: $("showFuel"),
+      showClusterBoundary: $("showClusterBoundary"),
       gameState: $("gameState"),
       showGhosts: $("showGhosts"),
       scenario: $("scenario"),
       frame: $("frame"),
       frameCount: $("frameCount"),
+      auditRobot: $("auditRobot"),
     },
     integer,
   });
+  updateRobotAudit();
 }
 
 function setPlaybackControls() {
@@ -438,84 +481,158 @@ function setNotice(message, state = "") {
   $("matchupNotice").dataset.state = state;
 }
 
+function saveFocusedTestSettings() {
+  if ($("behaviorMode").value === "match") {
+    localStorage.removeItem(focusedSettingsStorageKey);
+    return;
+  }
+  localStorage.setItem(focusedSettingsStorageKey, JSON.stringify({
+    behavior_mode: $("behaviorMode").value,
+    robot_type: $("focusedRobotType").value,
+    hopper_capacity: Number($("focusedHopperCapacity").value),
+    scoring_bps: Number($("focusedScoringBps").value),
+    random_gamepiece_placement: $("focusedRandomPlacement").checked,
+  }));
+}
+
 async function loadZonePlayback({ autoplay = true, resumeJob = null,
-                                  newScenario = false } = {}) {
+                                  newScenario = false, batchMode = null,
+                                  batchPosition = null,
+                                  skipPreparedCache = false } = {}) {
+  const requestedBehavior = batchMode || $("behaviorMode")?.value || "match";
+  const focusedType = $("focusedRobotType")?.value || "dumper";
+  const defaultFocusedCapacity = focusedType === "turret" ? 40 : 60;
+  const defaultFocusedRate = focusedType === "turret" ? 15 : 25;
+  if (!skipPreparedCache && !resumeJob && requestedBehavior !== "match" &&
+      !$("focusedRandomPlacement")?.checked &&
+      Number($("focusedHopperCapacity")?.value) === defaultFocusedCapacity &&
+      Number($("focusedScoringBps")?.value) === defaultFocusedRate) {
+    return loadFocusedReplay();
+  }
+  const seedInput = $("scenarioSeed");
+  const enteredSeed = seedInput.value.trim();
+  if (enteredSeed &&
+      (!/^\d+$/.test(enteredSeed) || Number(enteredSeed) > 2147483647)) {
+    seedInput.setCustomValidity("Enter a whole-number seed from 0 to 2147483647.");
+    seedInput.reportValidity();
+    return;
+  }
+  seedInput.setCustomValidity("");
   activeRequest?.abort();
   const controller = new AbortController();
   activeRequest = controller;
   const revision = ++requestRevision;
   let savedJob = resumeJob;
-  if (!savedJob && !newScenario) {
+  if (!savedJob && !newScenario && !batchMode) {
     try { savedJob = JSON.parse(localStorage.getItem(scenarioJobStorageKey) || "null"); }
     catch (_) { savedJob = null; }
   }
+  if (savedJob && enteredSeed && Number(enteredSeed) !== Number(savedJob.seed)) {
+    savedJob = null;
+  }
+  let behaviorMode = batchMode || savedJob?.behavior_mode || $("behaviorMode")?.value || "match";
+  if (behaviorMode === "collect") behaviorMode = "collect_active";
+  const behaviorProbe = behaviorMode !== "match";
+  const [, probeHubState] = behaviorProbe ? behaviorMode.split("_") : [];
+  const behaviorControl = $("behaviorMode");
+  if (behaviorControl) behaviorControl.value = behaviorMode;
   const start = savedJob?.start || "red";
   const goal = savedJob?.goal || "blue";
   const task = savedJob?.task || "3v3";
-  const seed = savedJob?.seed || Math.floor(Math.random() * 2147483647);
-  const simulationId = savedJob?.simulation_id || `${seed}-${Date.now()}`;
+  const seed = savedJob
+    ? Number(savedJob.seed)
+    : enteredSeed
+      ? Number(enteredSeed)
+      : Math.floor(Math.random() * 2147483647);
+  seedInput.value = String(seed);
+  const simulationId = `${behaviorProbe ? "focused" : "scenario"}-${seed}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  renderFocusedControls();
   zoneLoading = true;
   playing = false;
   setPlaybackControls();
-  setNotice(
-    "Requesting GPU time for a randomized six-robot match. PPO will yield while it simulates.",
-  );
-  showScenarioProgress({ status: "waiting", tick: 0, total_ticks: 8000,
-    simulated_seconds: 0, match_seconds: 160, percent: 0 });
+  setNotice(behaviorProbe
+    ? `Requesting the 30-second focused HUB ${probeHubState} test.`
+    : "Requesting GPU time for a randomized six-robot match. PPO will yield while it simulates.");
+  const requestedTicks = behaviorProbe ? 1500 : 8000;
+  const requestedSeconds = behaviorProbe ? 30 : 160;
+  showScenarioProgress({ status: "waiting", tick: 0, total_ticks: requestedTicks,
+    simulated_seconds: 0, match_seconds: requestedSeconds, percent: 0 });
   try {
     const savedSetups = Array.isArray(savedJob?.control_modes)
       ? savedJob.control_modes : [];
     const savedTypes = Array.isArray(savedJob?.robot_types)
       ? savedJob.robot_types : [];
-    const robotSetups = Array.from({ length: 6 }, (_, robot) => {
+    const selectedSetups = Array.from({ length: 6 }, (_, robot) => {
       const saved = savedSetups[robot] || $("robotMode" + robot)?.value ||
         (robot < 3 ? "offense_deterministic" : "defense_deterministic");
       return saved === "offense_nn" ? "offense_deterministic" : saved;
     });
-    robotSetups.forEach((setup, robot) => {
+    const robotSetups = behaviorProbe
+      ? ["offense_deterministic", "none", "none", "none", "none", "none"]
+      : selectedSetups;
+    if (!behaviorProbe) robotSetups.forEach((setup, robot) => {
       const control = $("robotMode" + robot);
       if (control) control.value = setup;
     });
-    const robotTypes = Array.from({ length: 6 }, (_, robot) =>
+    const robotTypes = behaviorProbe ? [$("focusedRobotType")?.value || "dumper", ...Array(5).fill("dumper")] : Array.from({ length: 6 }, (_, robot) =>
       savedTypes[robot] || $("robotType" + robot)?.value || "dumper");
-    robotTypes.forEach((type, robot) => {
+    if (behaviorProbe && $("focusedRobotType")) $("focusedRobotType").value = robotTypes[0];
+    if (!behaviorProbe) robotTypes.forEach((type, robot) => {
       const control = $("robotType" + robot);
       if (control) control.value = type;
     });
-    const hopperControl = $("hopperCapacity");
-    const scoringControl = $("scoringBps");
-    const hopperCapacity = Number(savedJob?.hopper_capacity ?? hopperControl?.value ?? 60);
-    const scoringBps = Number(savedJob?.scoring_bps ?? scoringControl?.value ?? 25);
-    const teammateIntentKnowledge = Boolean(
+    const hopperControl = $(behaviorProbe ? "focusedHopperCapacity" : "hopperCapacity");
+    const scoringControl = $(behaviorProbe ? "focusedScoringBps" : "scoringBps");
+    const hopperCapacity = behaviorProbe
+      ? Number(hopperControl?.value ?? (robotTypes[0] === "turret" ? 40 : 60))
+      : Number(savedJob?.hopper_capacity ?? hopperControl?.value ?? 60);
+    const scoringBps = behaviorProbe
+      ? Number(scoringControl?.value ?? (robotTypes[0] === "turret" ? 15 : 25))
+      : Number(savedJob?.scoring_bps ?? scoringControl?.value ?? 25);
+    const teammateIntentKnowledge = behaviorProbe ? false : Boolean(
       savedJob?.teammate_intent_knowledge ?? $("teammateIntentKnowledge")?.checked ?? true,
+    );
+    const sweepingEnabled = behaviorProbe ? false : Boolean(
+      savedJob?.sweeping_enabled ?? $("sweepingEnabled")?.checked ?? false,
     );
     const intentControl = $("teammateIntentKnowledge");
     if (intentControl) intentControl.checked = teammateIntentKnowledge;
+    const sweepingControl = $("sweepingEnabled");
+    if (sweepingControl) sweepingControl.checked = sweepingEnabled;
     if (hopperControl) hopperControl.value = String(hopperCapacity);
     if (scoringControl) scoringControl.value = String(scoringBps);
     const matchSetup = $("matchSetup");
-    if (matchSetup) matchSetup.textContent =
-      `REBUILT 3v3 · 160 s · Dumper ${hopperCapacity} FUEL / ${scoringBps} FUEL/s · Turret 40 / 15`;
+    if (matchSetup) matchSetup.textContent = behaviorProbe
+      ? `Focused HUB ${probeHubState} · 30 s · One ${robotTypes[0]} · ${hopperCapacity} FUEL · ${scoringBps} FUEL/s`
+      : `REBUILT 3v3 · 160 s · Dumper ${hopperCapacity} FUEL / ${scoringBps} FUEL/s · Turret 40 / 15`;
     const query = new URLSearchParams({
       task,
       start,
       goal,
       seed: String(seed),
       simulation_id: simulationId,
+      behavior_mode: behaviorMode,
       hopper_capacity: String(hopperCapacity),
       scoring_bps: String(scoringBps),
+      random_gamepiece_placement: String(Boolean(behaviorProbe && $("focusedRandomPlacement")?.checked)),
       teammate_intent_knowledge: String(teammateIntentKnowledge),
+      sweeping_enabled: String(sweepingEnabled),
+      dual_gpu: String(Boolean($("dualGpuMode")?.checked)),
     });
-    robotTypes.forEach((type, robot) => {
+    if (!behaviorProbe) robotTypes.forEach((type, robot) => {
       query.set(`robot_type${robot}`, type);
     });
     robotSetups.forEach((setup, robot) => {
       query.set(`robot${robot}`, setup);
     });
     const job = { simulation_id: simulationId, seed, start, goal, task,
+      behavior_mode: behaviorMode,
       control_modes: robotSetups, hopper_capacity: hopperCapacity,
       scoring_bps: scoringBps, robot_types: robotTypes,
-      teammate_intent_knowledge: teammateIntentKnowledge };
+      teammate_intent_knowledge: teammateIntentKnowledge,
+      sweeping_enabled: sweepingEnabled,
+      random_gamepiece_placement: behaviorProbe && Boolean($("focusedRandomPlacement")?.checked),
+      dual_gpu: Boolean($("dualGpuMode")?.checked) };
     localStorage.setItem(scenarioJobStorageKey, JSON.stringify(job));
     let record;
     if (savedJob) {
@@ -549,8 +666,15 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       localStorage.setItem(scenarioJobStorageKey,
         JSON.stringify({ ...saved, robot_types: robotTypes }));
     }
-    showScenarioProgress({ status: "completed", tick: 8000, total_ticks: 8000,
-      simulated_seconds: 160, match_seconds: 160, percent: 100 });
+    const scenarioTicks = Number(record.simulation_ticks) || requestedTicks;
+    const simulatedSeconds = Number(record.simulated_seconds) || requestedSeconds;
+    const playedBehaviorMode = record.behavior_mode || behaviorMode;
+    const playedProbe = playedBehaviorMode !== "match";
+    const [playedProbeBehavior, playedHubState] = playedProbe
+      ? playedBehaviorMode.split("_") : [];
+    showScenarioProgress({ status: "completed", tick: scenarioTicks, total_ticks: scenarioTicks,
+      simulated_seconds: simulatedSeconds, match_seconds: simulatedSeconds, percent: 100,
+      behavior_mode: playedBehaviorMode });
     playbackTask = record.task || task;
     playbackRobotTypes = robotTypes.slice();
     playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot ||
@@ -559,21 +683,27 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     loadedScenarios = record.scenarios || [];
     const scenario = loadedScenarios[0];
     frames = scenario?.frames || record.frames || [];
-    index = 0;
+    // A direct scenario link is used to inspect a specific completed match.
+    // Open it on the final score so the result is visible immediately; the
+    // user can still scrub or replay from the beginning with the controls.
+    const requestedScenario = new URLSearchParams(location.search).get("scenario");
+    index = requestedScenario === simulationId ? Math.max(0, frames.length - 1) : 0;
     ensurePlaybackClock();
     playing =
       autoplay &&
       frames.length > 0 &&
       !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    $("scenarioCount").textContent =
-      `${labelRole(task)} · randomized REBUILT match · seed ${seed} · ${frames.length.toLocaleString()} frames`;
-    $("playbackSourceNote").textContent =
-      `Six-robot match · Red ${robotSetups.slice(0, 3).map((setup, i) => `${robotTypes[i]} ${describeRobotSetup(setup)}`).join(" / ")} · Blue ${robotSetups.slice(3).map((setup, i) => `${robotTypes[i + 3]} ${describeRobotSetup(setup)}`).join(" / ")}.`;
+    $("scenarioCount").textContent = playedProbe
+      ? `${playedProbeBehavior[0].toUpperCase()}${playedProbeBehavior.slice(1)} probe · HUB ${playedHubState} · ${simulatedSeconds.toFixed(0)} simulated seconds · ${frames.length.toLocaleString()} frames`
+      : `${labelRole(task)} · randomized REBUILT match · seed ${seed} · ${frames.length.toLocaleString()} frames`;
+    $("playbackSourceNote").textContent = playedProbe
+      ? `Isolated behavior probe · Red robot 1 (${robotTypes[0]}) · HUB ${playedHubState} · ${playedProbeBehavior}.`
+      : `Six-robot match · Red ${robotSetups.slice(0, 3).map((setup, i) => `${robotTypes[i]} ${describeRobotSetup(setup)}`).join(" / ")} · Blue ${robotSetups.slice(3).map((setup, i) => `${robotTypes[i + 3]} ${describeRobotSetup(setup)}`).join(" / ")}.`;
     setNotice(
       frames.length
         ? record.compute_scheduling === "reserved"
-          ? "Randomized scenario ready. PPO has resumed."
-          : "Randomized scenario ready."
+          ? playedProbe ? "Behavior probe ready. PPO has resumed." : "Randomized scenario ready. PPO has resumed."
+          : playedProbe ? "Behavior probe ready." : "Randomized scenario ready."
         : "Scenario simulation returned no frames.",
       frames.length ? "success" : "error",
     );
@@ -584,10 +714,87 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       const progressState = $("scenarioProgressState");
       if (progressState) progressState.textContent = error.message;
       setNotice(
-        `Could not create the scenario: ${error.message}. Choose New scenario to retry.`,
+        `Could not create the scenario: ${error.message}. Choose ${behaviorProbe ? "Generate test" : "New scenario"} to retry.`,
         "error",
       );
     }
+  } finally {
+    if (revision === requestRevision) {
+      zoneLoading = false;
+      activeRequest = null;
+      setPlaybackControls();
+      renderFocusedControls();
+    }
+  }
+}
+
+async function loadFocusedReplay() {
+  const mode = $("behaviorMode").value;
+  const type = $("focusedRobotType").value;
+  const defaultCapacity = type === "turret" ? 40 : 60;
+  const defaultRate = type === "turret" ? 15 : 25;
+  const matchesPreparedSettings = !$("focusedRandomPlacement")?.checked &&
+    Number($("focusedHopperCapacity")?.value) === defaultCapacity &&
+    Number($("focusedScoringBps")?.value) === defaultRate;
+  const revision = ++requestRevision;
+  activeRequest?.abort();
+  const controller = new AbortController();
+  activeRequest = controller;
+  zoneLoading = true;
+  playing = false;
+  $("scenarioProgress").hidden = true;
+  setPlaybackControls();
+  setNotice(`Loading the ${type} ${mode.replace("_", " · HUB ")} replay.`);
+  const url = `/api/focused-playback?behavior_mode=${encodeURIComponent(mode)}&robot_type=${encodeURIComponent(type)}&dual_gpu=${Boolean($("dualGpuMode")?.checked)}`;
+  let record;
+  try {
+  while (revision === requestRevision) {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (response.status === 202) {
+      const job = await response.json();
+      const progressResponse = await fetch(`/api/zone-playback-progress?simulation_id=${encodeURIComponent(job.simulation_id)}`, { cache: "no-store", signal: controller.signal });
+      const progress = await progressResponse.json();
+      if (progress.behavior_mode == null) progress.behavior_mode = mode;
+      showScenarioProgress(progress);
+      if (progress.status === "error") throw new Error(progress.error || "Focused replay generation failed");
+      if (progress.status !== "ready") {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+      const resultResponse = await fetch(`/api/zone-playback-result?simulation_id=${encodeURIComponent(job.simulation_id)}`, { cache: "no-store", signal: controller.signal });
+      record = await resultResponse.json();
+      if (!resultResponse.ok) throw new Error(record.error || "Focused replay could not be loaded");
+      break;
+    }
+    if (!response.ok) throw new Error(`Prepared replay unavailable (${response.status})`);
+    record = await response.json();
+    break;
+  }
+  if (!record || revision !== requestRevision) return;
+  if (!matchesPreparedSettings) {
+    return loadZonePlayback({ newScenario: true, batchMode: mode,
+      skipPreparedCache: true });
+  }
+  showScenarioProgress({ status: "completed", tick: 1500, total_ticks: 1500,
+    simulated_seconds: 30, match_seconds: 30, percent: 100,
+    behavior_mode: mode });
+  playbackTask = record.task || "3v3";
+  playbackRobotTypes = record.robot_types || [type];
+  playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot || [];
+  world = record.field || { ...defaultWorld };
+  loadedScenarios = record.scenarios || [];
+  frames = loadedScenarios[0]?.frames || record.frames || [];
+  index = 0;
+  ensurePlaybackClock();
+  playing = false;
+  $("scenarioCount").textContent = `${mode.replaceAll("_", " ")} · ${type} · prepared replay · ${frames.length.toLocaleString()} frames`;
+  $("playbackSourceNote").textContent = `Prepared 30 second one-robot ${type} ${mode.replace("_", " · HUB ")}.`;
+  setNotice("Prepared focused replay ready.", "success");
+  setPlaybackControls();
+  drawField();
+  } catch (error) {
+    if (error.name !== "AbortError" && revision === requestRevision)
+      setNotice(`Could not load focused replay: ${error.message}`, "error");
   } finally {
     if (revision === requestRevision) {
       zoneLoading = false;
@@ -670,14 +877,36 @@ async function loadGameEvaluation() {
   }
 }
 
+function renderFocusedControls() {
+  const randomized = $("playbackSource").value === "randomized";
+  const focused = randomized && $("behaviorMode").value !== "match";
+  $("playbackSourceControl").hidden = focused;
+  $("playbackSourceNote").hidden = focused;
+  $("matchSetup").hidden = !randomized || focused;
+  $("robotControlModes").hidden = !randomized || focused;
+  $("scenarioPhysicalLimits").hidden = !randomized || focused;
+  $("focusedRobotControls").hidden = !randomized || !focused;
+  for (const id of ["teammateIntentKnowledge", "sweepingEnabled", "scenarioSeed"]) {
+    $(id).closest("label").hidden = !randomized || focused;
+  }
+  $("nextScenario").hidden = !randomized;
+  $("newScenarioLabel").textContent = focused ? "Generate test" : "New scenario";
+  $("auditRobot").hidden = focused;
+  document.querySelector('label[for="auditRobot"]').hidden = focused;
+  if (focused) $("auditRobot").value = "0";
+}
+
 function renderSource() {
   const randomized = $("playbackSource").value === "randomized";
   $("robotControlModes").hidden = !randomized;
   $("scenarioPhysicalLimits").hidden = !randomized;
-  $("matchSetup").hidden = !randomized;
+  $("behaviorModeControl").hidden = !randomized;
+  $("matchSetup").hidden = !randomized || $("behaviorMode").value !== "match";
   $("evaluationControls").hidden = randomized;
-  $("nextScenario").hidden = !randomized;
-  if (randomized) loadZonePlayback();
+  $("nextScenario").hidden = !randomized || $("behaviorMode").value !== "match";
+  renderFocusedControls();
+  if (randomized && $("behaviorMode").value === "match") loadZonePlayback();
+  else if (randomized) loadFocusedReplay();
   else setNotice("Choose a recorded evaluation to load its playback.");
   setPlaybackControls();
 }
@@ -753,17 +982,44 @@ $("play").addEventListener("click", () => {
   playing = !playing;
   setPlaybackControls();
 });
-$("nextScenario").addEventListener("click", () =>
-  loadZonePlayback({ newScenario: true }),
+$("dashboardRefresh").addEventListener("click", () => window.location.reload());
+$("dualGpuMode").addEventListener("change", () =>
+  localStorage.setItem(dualGpuStorageKey, String($("dualGpuMode").checked)),
 );
+$("nextScenario").addEventListener("click", () => {
+  if ($("behaviorMode").value !== "match") {
+    saveFocusedTestSettings();
+    loadZonePlayback({ newScenario: true, batchMode: $("behaviorMode").value,
+      skipPreparedCache: true });
+  } else {
+    loadZonePlayback({ newScenario: true });
+  }
+});
+$("focusedRobotType").addEventListener("change", (event) => {
+  const turret = event.target.value === "turret";
+  $("focusedHopperCapacity").value = turret ? "40" : "60";
+  $("focusedScoringBps").value = turret ? "15" : "25";
+  saveFocusedTestSettings();
+  if ($("behaviorMode").value !== "match" && $("playbackSource").value === "randomized")
+    loadFocusedReplay();
+});
+$("focusedRandomPlacement").addEventListener("change", () => {
+  saveFocusedTestSettings();
+  if ($("behaviorMode").value !== "match") loadFocusedReplay();
+});
+$("focusedHopperCapacity").addEventListener("change", saveFocusedTestSettings);
+$("focusedScoringBps").addEventListener("change", saveFocusedTestSettings);
+$("scenarioSeed").addEventListener("input", (event) => {
+  event.target.setCustomValidity("");
+});
 function robotModeChanged() {
   frames = [];
   loadedScenarios = [];
   index = 0;
   playing = false;
   ensurePlaybackClock();
-  $("scenarioCount").textContent = "Robot setup changed · choose New scenario to simulate it.";
-  setNotice("Robot types, roles and controllers are ready. Choose New scenario to apply all six selections.");
+  $("scenarioCount").textContent = "Scenario settings changed · choose New scenario to simulate them.";
+  setNotice("Scenario settings are ready. Choose New scenario to apply them.");
   setPlaybackControls();
   drawField();
 }
@@ -771,6 +1027,16 @@ for (let robot = 0; robot < 6; robot++) {
   $("robotMode" + robot).addEventListener("change", robotModeChanged);
   $("robotType" + robot).addEventListener("change", robotModeChanged);
 }
+$("sweepingEnabled").addEventListener("change", robotModeChanged);
+$("behaviorMode").addEventListener("change", () => {
+  robotModeChanged();
+  saveFocusedTestSettings();
+  renderFocusedControls();
+  if ($("behaviorMode").value === "match")
+    loadZonePlayback({ newScenario: true });
+  else
+    loadFocusedReplay();
+});
 $("playbackSource").addEventListener("change", renderSource);
 $("gameEvaluation").addEventListener("change", loadGameEvaluation);
 $("playbackSpeed").addEventListener("change", (event) => {
@@ -782,16 +1048,45 @@ $("frame").addEventListener("input", (event) => {
   setPlaybackControls();
   drawField();
 });
+$("auditRobot").addEventListener("change", drawField);
 $("trendMetric").addEventListener("change", drawTrainingChart);
 $("trendTask").addEventListener("change", () => {
   trendTaskChosen = true;
   if (latestTraining) renderTraining(latestTraining);
 });
-for (const id of ["showFuel", "showGrid", "showGhosts"])
+for (const id of ["showFuel", "showClusterBoundary", "showGrid", "showGhosts"])
   $(id).addEventListener("change", drawField);
 window.addEventListener("resize", drawField);
 
 async function initializeDashboard() {
+  const initialParams = new URLSearchParams(location.search);
+  const requestedBehavior = initialParams.get("behavior_mode");
+  let initialSavedJob = null;
+  try { initialSavedJob = JSON.parse(localStorage.getItem(scenarioJobStorageKey) || "null"); }
+  catch (_) { localStorage.removeItem(scenarioJobStorageKey); }
+  let focusedSettings = null;
+  try { focusedSettings = JSON.parse(localStorage.getItem(focusedSettingsStorageKey) || "null"); }
+  catch (_) { localStorage.removeItem(focusedSettingsStorageKey); }
+  const savedDualGpu = localStorage.getItem(dualGpuStorageKey);
+  if (savedDualGpu !== null) $("dualGpuMode").checked = savedDualGpu === "true";
+  if (["collect_active", "collect_inactive"].includes(requestedBehavior)) {
+    $("behaviorMode").value = requestedBehavior;
+    const requestedType = initialParams.get("robot_type");
+    if (["dumper", "turret"].includes(requestedType))
+      $("focusedRobotType").value = requestedType;
+  } else if (focusedSettings?.behavior_mode || initialSavedJob?.behavior_mode) {
+    const savedFocused = focusedSettings || initialSavedJob;
+    $("behaviorMode").value = savedFocused.behavior_mode;
+    const savedType = savedFocused.robot_type || savedFocused.robot_types?.[0];
+    if (["dumper", "turret"].includes(savedType))
+      $("focusedRobotType").value = savedType;
+    if (Number.isFinite(Number(savedFocused.hopper_capacity)))
+      $("focusedHopperCapacity").value = String(savedFocused.hopper_capacity);
+    if (Number.isFinite(Number(savedFocused.scoring_bps)))
+      $("focusedScoringBps").value = String(savedFocused.scoring_bps);
+    $("focusedRandomPlacement").checked = Boolean(savedFocused.random_gamepiece_placement);
+  }
+  renderFocusedControls();
   drawField();
   drawTrainingChart();
   setPlaybackControls();
@@ -829,6 +1124,9 @@ async function initializeDashboard() {
     catch (_) { localStorage.removeItem(scenarioJobStorageKey); }
     const requestedScenario = new URLSearchParams(location.search).get("scenario");
     if (requestedScenario && /^[a-zA-Z0-9_-]{1,80}$/.test(requestedScenario)) {
+      // A deep link names one exact match. Never let a stale localStorage job
+      // or the dashboard's generic active job silently replace it.
+      if (savedJob?.simulation_id !== requestedScenario) savedJob = null;
       try {
         const response = await fetch("/api/zone-playback-active", { cache: "no-store" });
         const active = response.ok ? await response.json() : null;
@@ -839,7 +1137,7 @@ async function initializeDashboard() {
         // Keep the locally saved job if the requested scenario lookup fails.
       }
     }
-    if (savedJob?.simulation_id) {
+    if (savedJob?.simulation_id && !savedJob.behavior_mode) {
       try {
         const response = await fetch(
           `/api/zone-playback-progress?simulation_id=${encodeURIComponent(savedJob.simulation_id)}`,
@@ -854,7 +1152,7 @@ async function initializeDashboard() {
         // Keep the saved ID and reconnect through the regular retry loop.
       }
     }
-    if (!savedJob) {
+    if (!savedJob && !requestedScenario && $("behaviorMode").value === "match") {
       try {
         const response = await fetch("/api/zone-playback-active", { cache: "no-store" });
         if (response.ok) savedJob = (await response.json()).job || null;
@@ -862,14 +1160,34 @@ async function initializeDashboard() {
         // A missing connection should not create a second match automatically.
       }
     }
-    if (savedJob) {
+    if ($("behaviorMode").value !== "match" && !requestedScenario) {
+      // Focused probes first ask the stable prepared-replay endpoint. The old
+      // localStorage job is only relevant when the focused settings are custom.
+      const type = $("focusedRobotType").value;
+      const defaultCapacity = type === "turret" ? 40 : 60;
+      const defaultRate = type === "turret" ? 15 : 25;
+      const usesPreparedDefaults = !$("focusedRandomPlacement").checked &&
+        Number($("focusedHopperCapacity").value) === defaultCapacity &&
+        Number($("focusedScoringBps").value) === defaultRate;
+      if (usesPreparedDefaults) {
+        loadFocusedReplay();
+      } else if (savedJob) {
+        localStorage.setItem(scenarioJobStorageKey, JSON.stringify(savedJob));
+        loadZonePlayback({ autoplay: true, resumeJob: savedJob });
+      } else {
+        loadZonePlayback({ newScenario: true, batchMode: $("behaviorMode").value });
+      }
+    } else if (savedJob) {
       localStorage.setItem(scenarioJobStorageKey, JSON.stringify(savedJob));
       loadZonePlayback({ autoplay: true, resumeJob: savedJob });
     } else {
       setNotice(
-        "REBUILT field ready. Choose Generate & play to simulate a randomized match.",
+        $("behaviorMode").value === "match"
+          ? "REBUILT field ready. Choose Generate & play to simulate a randomized match."
+          : "Loading the selected focused replay…",
         "success",
       );
+      if ($("behaviorMode").value !== "match") loadFocusedReplay();
     }
   }
   requestAnimationFrame(renderProgressFrame);

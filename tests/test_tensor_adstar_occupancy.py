@@ -143,3 +143,34 @@ def test_fused_occupancy_preserves_full_plan_and_command_outputs():
     hip_command, hip_tangent = hip_planner.path_reference(position, velocity, speed)
     assert torch.equal(hip_command, torch_command)
     assert torch.equal(hip_tangent, torch_tangent)
+
+
+def test_trajectory_validation_catches_rotation_that_start_heading_misses():
+    planner = _planner(1, torch.device("cpu"), avoid_bumps=True,
+                       with_circles=False)
+    planner._boxes = torch.tensor([[5.0, 5.0, .045, .019]])
+    path = torch.tensor([[[5.0, 5.6], [5.001, 5.601]]])
+    heading = torch.tensor([0.])
+    length = width = torch.tensor([.9])
+
+    assert not planner._footprint_path_clear(path, heading, length, width).item()
+
+    clear_path = torch.tensor([[[5.0, 5.75], [5.001, 5.751]]])
+    assert planner._footprint_path_clear(clear_path, heading, length, width).item()
+
+
+@pytest.mark.parametrize(("start", "goal"), [
+    ((2.0, 3.0), (.8, 3.6)),
+    ((2.0, 5.0), (.8, 4.5)),
+])
+def test_routes_around_tower_uprights_validate_the_rotated_chassis(start, goal):
+    planner = _planner(1, torch.device("cpu"), avoid_bumps=True,
+                       with_circles=False)
+    heading = torch.tensor([0.])
+    size = torch.tensor([.9])
+    planner.plan(torch.tensor([start]), torch.tensor([goal]), heading, size, size,
+                 speed=torch.tensor([4.8]))
+
+    route = planner.last_path
+    assert (route[0] - route[0, :1]).norm(dim=-1).max() > .2
+    assert planner._footprint_path_clear(route, heading, size, size).all()

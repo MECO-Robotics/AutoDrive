@@ -195,12 +195,13 @@ class TensorDefenseEnv(
             field_colliders=list(field_colliders)
         self.sim=TensorVectorizedSimulator(self.n,device,seed,dt=self.dt,obstacles=kwargs.pop("obstacles",()),
             field_colliders=field_colliders or (),**kwargs)
+        self._team_ids_host=self.sim._team_ids_host
         self.sim.randomize=self.randomize
         if drivetrain_config is None:
             drivetrain_config = {"name": "built-in illustrative defaults",
                 "randomize": self.randomize,
                 "mass": 55.0, "robot_length": .9, "robot_width": .9,
-                "max_speed": 4.5, "max_acceleration": 8.0,
+                "max_speed": 4.8, "max_acceleration": 8.0,
                 "max_omega": 8.0, "max_alpha": 18.0,
                 "swerve": asdict(self.sim.swerve)}
         self.drivetrain_config = drivetrain_config

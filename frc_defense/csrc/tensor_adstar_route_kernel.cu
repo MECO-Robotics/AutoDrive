@@ -35,7 +35,8 @@ __device__ __forceinline__ bool line_of_sight_clear(
 }
 
 __global__ void fused_bellman_route_kernel(
-    const float* value_in, const bool* blocked, const float* bump,
+    const bool* blocked, const float* bump,
+    const bool* route_active,
     const float* start_xy, const float* goal_xy,
     const int64_t* start_x, const int64_t* start_y,
     const int64_t* goal_x, const int64_t* goal_y,
@@ -47,6 +48,10 @@ __global__ void fused_bellman_route_kernel(
     bool project_blocked_goal, float resolution) {
   const int b = blockIdx.x;
   const int lane = threadIdx.x;
+  if (!route_active[b]) {
+    if (lane == 0) active_checkpoints[b] = 0;
+    return;
+  }
   extern __shared__ float shared_values[];
   float* current = shared_values;
   float* next = shared_values + cells;
@@ -110,7 +115,7 @@ __global__ void fused_bellman_route_kernel(
   const int target_cell = target_x * ny + target_y;
   const int source_cell = source_x * ny + source_y;
   for (int cell = lane; cell < cells; cell += blockDim.x) {
-    float initial = value_in[base + cell];
+    float initial = kInfinity;
     if (cell == target_cell) initial = 0.f;
     else if (cell == source_cell || blocked[base + cell]) initial = kInfinity;
     current[cell] = initial;
@@ -346,7 +351,8 @@ __global__ void cleanup_batch_path_kernel(float* path, const int32_t* active_che
 }
 }  // namespace
 
-void fused_route_launch(const float* value, const bool* blocked, const float* bump,
+void fused_route_launch(const bool* blocked, const float* bump,
+                        const bool* route_active,
                         const float* start_xy, const float* goal_xy,
                         const int64_t* start_x,
                         const int64_t* start_y, const int64_t* goal_x,
@@ -360,10 +366,10 @@ void fused_route_launch(const float* value, const bool* blocked, const float* bu
                         float resolution, hipStream_t stream) {
   const int cells = nx * ny;
   const int batch = static_cast<int>(total / cells);
-  constexpr int threads = 256;
+  constexpr int threads = 768;
   const size_t shared_bytes = static_cast<size_t>(2 * cells + 5 * kMaxPoints) * sizeof(float);
   hipLaunchKernelGGL(fused_bellman_route_kernel, dim3(batch), dim3(threads), shared_bytes,
-                     stream, value, blocked, bump, start_xy, goal_xy, start_x, start_y,
+                     stream, blocked, bump, route_active, start_xy, goal_xy, start_x, start_y,
                      goal_x, goal_y, speed, friction, acceleration, potential,
                      path, lengths, profile, resolved_goal, active_checkpoints,
                      steer_rate_limit,

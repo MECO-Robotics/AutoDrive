@@ -1,8 +1,10 @@
 """Zone playback simulation and durable background-job support."""
 from __future__ import annotations
 
-import fcntl
+import hashlib
 import json
+import gzip
+import math
 import os
 import re
 import subprocess
@@ -11,10 +13,51 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-ZONE_SCENARIO_TICKS = 1300
+ZONE_SCENARIO_TICKS = 8000  # 160 seconds at the dashboard match's 20 ms timestep
+BEHAVIOR_PROBE_TICKS = 1500  # 30 seconds at the dashboard physics timestep
+ZONE_PLAYBACK_DT = .02
+ZONE_PLAYBACK_TICKS = math.ceil(ZONE_SCENARIO_TICKS * .02 / ZONE_PLAYBACK_DT)
 PPO_CAMPAIGN_UNIT = "frc-defense-ppo-campaign.service"
 _SCENARIO_JOB_IDS: set[str] = set()
 _SCENARIO_JOB_LOCK = threading.Lock()
+_SIMULATION_SLOT_CONDITION = threading.Condition()
+_ACTIVE_SIMULATION_SLOTS: dict[int, bool] = {}
+_SIMULATION_CAMPAIGN_PAUSED = False
+
+
+def _dashboard_gpu_count() -> int:
+    """Return the number of GPUs visible to the project runtime."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return int(torch.cuda.device_count())
+    except ImportError:
+        pass
+    interpreter=Path.cwd()/".venv"/"bin"/"python"
+    if not interpreter.is_file():
+        return 0
+    try:
+        result=subprocess.run([str(interpreter),"-c",
+            "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)"],
+            cwd=Path.cwd(),capture_output=True,text=True,timeout=30)
+        if result.returncode == 0:
+            return max(0,int(result.stdout.strip().splitlines()[-1]))
+    except (OSError,ValueError,subprocess.SubprocessError):
+        pass
+    return 0
+
+
+def focused_playback_simulation_id(mode: str, robot_type: str) -> str:
+    """Key focused replay caches to the current simulator/controller sources."""
+    source_root=Path(__file__).parent
+    digest=hashlib.sha256()
+    suffixes={".py", ".cpp", ".cu", ".hip"}
+    for path in sorted(path for path in source_root.rglob("*")
+                       if path.is_file() and path.suffix in suffixes):
+        digest.update(path.relative_to(source_root).as_posix().encode())
+        digest.update(path.read_bytes())
+    revision=digest.hexdigest()[:12]
+    return f"focused-{revision}-{mode}-{robot_type}"
 
 def _json_or_default(path: Path, default: dict) -> bytes:
     try:
@@ -23,36 +66,62 @@ def _json_or_default(path: Path, default: dict) -> bytes:
         return json.dumps(default).encode()
 
 
-def _dashboard_simulation_slot(run_dir: Path, *, campaign_unit: str = PPO_CAMPAIGN_UNIT):
-    """Serialize dashboard rollouts and yield both GPUs to an active PPO run."""
-    lock_path = run_dir / ".dashboard-simulation.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        state = subprocess.run(
-            ["systemctl", "--user", "show", "--property=ActiveState", "--value",
-             campaign_unit],
-            capture_output=True, text=True, check=False, timeout=10,
-        )
-        paused_training = False
-        if state.returncode == 0 and state.stdout.strip() == "active":
-            paused = subprocess.run(
-                ["systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGSTOP",
-                 campaign_unit],
-                capture_output=True, text=True, check=False, timeout=10,
-            )
-            if paused.returncode != 0:
-                raise RuntimeError("could not reserve GPU time for the requested simulation")
-            paused_training = True
-        try:
-            yield paused_training
-        finally:
-            if paused_training:
-                subprocess.run(
-                    ["systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGCONT",
-                     campaign_unit],
-                    capture_output=True, text=True, check=False, timeout=10,
-                )
+@contextmanager
+def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False,
+                               campaign_unit: str = PPO_CAMPAIGN_UNIT):
+    """Reserve one GPU, or two concurrent slots when dual mode is enabled."""
+    global _SIMULATION_CAMPAIGN_PAUSED
+    if dual_gpu:
+        available_gpus=_dashboard_gpu_count()
+        if available_gpus < 1:
+            raise RuntimeError("Dual simulation mode requires a visible GPU")
+        gpu_count=min(2,available_gpus)
+    else:
+        gpu_count=1
+    use_dual=gpu_count > 1
+    with _SIMULATION_SLOT_CONDITION:
+        while True:
+            compatible=(not _ACTIVE_SIMULATION_SLOTS or
+                (use_dual and all(_ACTIVE_SIMULATION_SLOTS.values())))
+            if compatible and len(_ACTIVE_SIMULATION_SLOTS) < gpu_count:
+                if not _ACTIVE_SIMULATION_SLOTS:
+                    state = subprocess.run(
+                        ["systemctl", "--user", "show", "--property=ActiveState", "--value",
+                         campaign_unit],
+                        capture_output=True, text=True, check=False, timeout=10,
+                    )
+                    paused_training = False
+                    if state.returncode == 0 and state.stdout.strip() == "active":
+                        paused = subprocess.run(
+                            ["systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGSTOP",
+                             campaign_unit],
+                            capture_output=True, text=True, check=False, timeout=10,
+                        )
+                        if paused.returncode != 0:
+                            raise RuntimeError("could not reserve GPU time for the requested simulation")
+                        paused_training = True
+                    _SIMULATION_CAMPAIGN_PAUSED=paused_training
+                device_index=next(index for index in range(gpu_count)
+                                  if index not in _ACTIVE_SIMULATION_SLOTS)
+                _ACTIVE_SIMULATION_SLOTS[device_index]=use_dual
+                slot={"device_index":device_index,
+                      "training_paused":_SIMULATION_CAMPAIGN_PAUSED}
+                break
+            _SIMULATION_SLOT_CONDITION.wait()
+    try:
+        yield slot
+    finally:
+        with _SIMULATION_SLOT_CONDITION:
+            _ACTIVE_SIMULATION_SLOTS.pop(slot["device_index"],None)
+            if not _ACTIVE_SIMULATION_SLOTS:
+                if _SIMULATION_CAMPAIGN_PAUSED:
+                    subprocess.run(
+                        ["systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGCONT",
+                         campaign_unit],
+                        capture_output=True, text=True, check=False, timeout=10,
+                    )
+                _SIMULATION_CAMPAIGN_PAUSED=False
+            _SIMULATION_SLOT_CONDITION.notify_all()
 
 
 def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
@@ -60,25 +129,50 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                       control_modes=None, robot_types=None,
                       progress_path: Path | None = None,
                       hopper_capacity: int = 60, scoring_bps: float = 25.,
-                      teammate_intent_knowledge: bool = True, _generate_fn=None) -> dict:
-    """Use the dashboard runtime when possible, otherwise the project venv."""
+                      random_gamepiece_placement: bool = False,
+                      teammate_intent_knowledge: bool = True,
+                      sweeping_enabled: bool = False, behavior_mode: str = "match",
+                      device: str | None = None,
+                      _generate_fn=None) -> dict:
+    """Run dashboard rollouts on an available GPU runtime."""
     try:
-        import torch  # noqa: F401
+        import torch
+        gpu_available=torch.cuda.is_available()
     except ImportError:
+        torch=None
+        gpu_available=False
+    if not gpu_available:
         interpreter=Path.cwd()/".venv"/"bin"/"python"
         if not interpreter.is_file():
-            raise RuntimeError("PyTorch is unavailable and the project virtual environment was not found")
+            raise RuntimeError("GPU scenario generation requires the project GPU virtual environment")
+        gpu_probe=subprocess.run([str(interpreter),"-c",
+            "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)"],
+            cwd=Path.cwd(),capture_output=True,text=True,timeout=30)
+        try:
+            gpu_count=int(gpu_probe.stdout.strip().splitlines()[-1])
+        except (ValueError,IndexError):
+            gpu_count=0
+        if gpu_probe.returncode or gpu_count < 1:
+            raise RuntimeError("GPU scenario generation requires CUDA/HIP-enabled PyTorch in .venv")
+        selected_device=device or "cuda:0"
+        selected_index=int(selected_device.split(":")[1]) if ":" in selected_device else 0
+        if selected_index >= gpu_count:
+            raise RuntimeError(f"Requested simulation device {selected_device} is unavailable")
         source=("import json,sys; from pathlib import Path; from frc_defense.dashboard import generate_zone_playback; "
                 "print(json.dumps(generate_zone_playback(Path(sys.argv[1]),sys.argv[2],sys.argv[3],"
                 "sys.argv[4],int(sys.argv[5]),task=sys.argv[6],control_modes=json.loads(sys.argv[7]),"
                 "robot_types=json.loads(sys.argv[8]),progress_path=Path(sys.argv[9]) if sys.argv[9] else None,"
                 "hopper_capacity=int(sys.argv[10]),scoring_bps=float(sys.argv[11]),"
-                "teammate_intent_knowledge=sys.argv[12]=='true'),"
+                "teammate_intent_knowledge=sys.argv[12]=='true',"
+                "sweeping_enabled=sys.argv[13]=='true',behavior_mode=sys.argv[14],"
+                "random_gamepiece_placement=sys.argv[15]=='true',device=sys.argv[16]),"
                 "separators=(',',':')))")
         result=subprocess.run([str(interpreter),"-c",source,str(run_dir.resolve()),run_name,
             start_zone,goal_zone,str(seed),task or "",json.dumps(control_modes),
             json.dumps(robot_types or ["dumper"]*6),str(progress_path or ""),
-            str(hopper_capacity),str(scoring_bps),str(bool(teammate_intent_knowledge)).lower()],
+            str(hopper_capacity),str(scoring_bps),str(bool(teammate_intent_knowledge)).lower(),
+            str(bool(sweeping_enabled)).lower(),behavior_mode,
+            str(bool(random_gamepiece_placement)).lower(),selected_device],
             cwd=Path.cwd(),capture_output=True,text=True,timeout=1800)
         if result.returncode:
             raise RuntimeError(result.stderr.strip()[-1200:] or "zone rollout process failed")
@@ -90,38 +184,64 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                                   progress_path=progress_path,
                                   hopper_capacity=hopper_capacity,
                                   scoring_bps=scoring_bps,
-                                  teammate_intent_knowledge=teammate_intent_knowledge)
+                                  teammate_intent_knowledge=teammate_intent_knowledge,
+                                  sweeping_enabled=sweeping_enabled,
+                                  random_gamepiece_placement=random_gamepiece_placement,
+                                  behavior_mode=behavior_mode,device=device)
 
 def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
                            goal_zone: str, seed: int, task: str,
                            control_modes: list[str], robot_types: list[str],
                            hopper_capacity: int,
                            scoring_bps: float, teammate_intent_knowledge: bool,
+                           sweeping_enabled: bool,
                            progress_path: Path,
-                           simulation_id: str, *, _slot_fn=None, _run_fn=None, _write_fn=None, _job_ids=None, _job_lock=None) -> None:
+                           simulation_id: str, behavior_mode: str = "match",
+                           dual_gpu: bool = False, *,
+                           _slot_fn=None, _run_fn=None, _write_fn=None, _job_ids=None, _job_lock=None) -> None:
     """Run a long scenario outside the HTTP request and publish its result."""
     try:
         slot_fn = _slot_fn or _dashboard_simulation_slot
         run_fn = _run_fn or run_zone_playback
         write_fn = _write_fn or _write_scenario_progress
-        with slot_fn(run_dir) as training_paused:
+        slot_context=(slot_fn(run_dir,dual_gpu=True) if dual_gpu
+                      else slot_fn(run_dir))
+        with slot_context as slot:
+            if isinstance(slot,dict):
+                device_index=int(slot.get("device_index",0))
+                training_paused=bool(slot.get("training_paused",False))
+            else:
+                device_index=0
+                training_paused=bool(slot)
+            run_kwargs={}
+            if device_index:
+                run_kwargs["device"]=f"cuda:{device_index}"
             record=run_fn(run_dir,run_name,start_zone,goal_zone,seed,
                 task=task,control_modes=control_modes,robot_types=robot_types,
                 progress_path=progress_path,
                 hopper_capacity=hopper_capacity,scoring_bps=scoring_bps,
-                teammate_intent_knowledge=teammate_intent_knowledge)
+                teammate_intent_knowledge=teammate_intent_knowledge,
+                sweeping_enabled=sweeping_enabled,behavior_mode=behavior_mode,
+                **run_kwargs)
+        record["simulation_id"]=simulation_id
         record["compute_scheduling"]="reserved" if training_paused else "shared"
+        record["simulation_device"]=f"cuda:{device_index}"
         result_path=progress_path.with_name(progress_path.stem+".result.json")
         temporary=result_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record,separators=(",",":")))
+        serialized=json.dumps(record,separators=(",",":" )).encode()
+        temporary.write_bytes(serialized)
         os.replace(temporary,result_path)
+        compressed_path=result_path.with_suffix(result_path.suffix+".gz")
+        compressed_temporary=compressed_path.with_suffix(compressed_path.suffix+".tmp")
+        compressed_temporary.write_bytes(gzip.compress(serialized,compresslevel=6,mtime=0))
+        os.replace(compressed_temporary,compressed_path)
         progress=json.loads(_json_or_default(progress_path,{}))
-        write_fn(progress_path,progress.get("total_ticks",ZONE_SCENARIO_TICKS),
-            progress.get("total_ticks",ZONE_SCENARIO_TICKS),"ready")
+        write_fn(progress_path,progress.get("total_ticks",ZONE_PLAYBACK_TICKS),
+            progress.get("total_ticks",ZONE_PLAYBACK_TICKS),"ready")
     except Exception as exc:
         progress=json.loads(_json_or_default(progress_path,{}))
         write_fn(progress_path,progress.get("tick",0),
-            progress.get("total_ticks",ZONE_SCENARIO_TICKS),"error",str(exc))
+            progress.get("total_ticks",ZONE_PLAYBACK_TICKS),"error",str(exc))
     finally:
         with (_job_lock or _SCENARIO_JOB_LOCK):
             (_job_ids if _job_ids is not None else _SCENARIO_JOB_IDS).discard(simulation_id)
@@ -133,8 +253,9 @@ def _write_scenario_progress(path: Path | None, tick: int, total_ticks: int,
     path.parent.mkdir(parents=True, exist_ok=True)
     payload={"status":status,"tick":int(tick),"total_ticks":int(total_ticks),
              "percent":round(100*int(tick)/max(1,int(total_ticks)),1),
-             "simulated_seconds":round(int(tick)*.02,2),
-             "match_seconds":round(int(total_ticks)*.02,2),"updated_at":time.time()}
+             "simulated_seconds":round(int(tick)*ZONE_PLAYBACK_DT,2),
+             "match_seconds":round(int(total_ticks)*ZONE_PLAYBACK_DT,2),
+             "updated_at":time.time()}
     if error:
         payload["error"]=error
     temporary=path.with_suffix(".tmp")
@@ -157,8 +278,9 @@ def _ensure_zone_playback_job(run_dir: Path, run_name: str, simulation_id: str,
             return current
         if simulation_id not in job_ids and not result_path.is_file():
             initial_tick=(current.get("tick",0) if current.get("status")=="waiting" else 0)
+            requested_ticks=int(request.get("total_ticks",ZONE_SCENARIO_TICKS))
             write_fn(progress_path,initial_tick,
-                current.get("total_ticks",ZONE_SCENARIO_TICKS),"waiting")
+                current.get("total_ticks",requested_ticks),"waiting")
             job_ids.add(simulation_id)
             worker=threading.Thread(target=job_fn,
                 args=(run_dir,run_name,request["start_zone"],request["goal_zone"],
@@ -167,7 +289,10 @@ def _ensure_zone_playback_job(run_dir: Path, run_name: str, simulation_id: str,
                     int(request.get("hopper_capacity",60)),
                     float(request.get("scoring_bps",25.)),
                     bool(request.get("teammate_intent_knowledge",True)),
-                    progress_path,simulation_id),daemon=True)
+                    bool(request.get("sweeping_enabled",False)),
+                    progress_path,simulation_id,
+                    request.get("behavior_mode","match"),
+                    bool(request.get("dual_gpu",False))),daemon=True)
             worker.start()
         return json.loads(_json_or_default(progress_path,{"status":"waiting"}))
 
@@ -198,11 +323,22 @@ def _normalize_robot_control_selections(selections):
 def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            goal_zone: str, seed: int, *, task: str | None = None,
                            control_modes=None, horizon: int = ZONE_SCENARIO_TICKS,
+                           behavior_mode: str = "match",
                            robot_types=None,
                            teammate_intent_knowledge: bool = True,
-                           capture_stride: int = 16,
+                           sweeping_enabled: bool = False,
+                           random_gamepiece_placement: bool = False,
+                           capture_stride: int = 64,
+                           physics_dt: float = ZONE_PLAYBACK_DT,
+                           perception_interval: int = 1,
+                           contact_iterations: int = 1,
+                           planner_replan_interval: int | None = None,
                            hopper_capacity: int = 60, scoring_bps: float = 25.,
-                           progress_path: Path | None = None, _write_fn=None, _normalize_fn=None) -> dict:
+                           device=None, cuda_graph: bool | None = None,
+                           fused_sensor_rng: bool = True,
+                           field_sweep_spacing: float = .02,
+                           progress_path: Path | None = None, _write_fn=None,
+                           _normalize_fn=None) -> dict:
     """Simulate one seeded, six-robot FRC match for dashboard playback."""
     zones = {"red", "center", "blue"}
     if start_zone not in zones or goal_zone not in zones or start_zone == goal_zone:
@@ -224,24 +360,73 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     normalize_fn = _normalize_fn or _normalize_robot_control_selections
     control_modes, robot_roles = normalize_fn(control_modes)
     robot_types=list(robot_types or ["dumper"]*6)
+    if behavior_mode == "collect":
+        behavior_mode="collect_active"
+    if behavior_mode not in ("match", "collect_active", "collect_inactive"):
+        raise ValueError("behavior_mode must be match or a collect/HUB probe")
     if len(robot_types)!=6 or any(kind not in ("dumper","turret") for kind in robot_types):
         raise ValueError("robot_types must assign dumper or turret to six robots")
-    if horizon < 1 or capture_stride < 1:
-        raise ValueError("horizon and capture_stride must be positive")
+    behavior_probe_robot=0
+    behavior_probe=None if behavior_mode=="match" else behavior_mode.split("_")[0]
+    behavior_probe_hub_active=(behavior_mode.endswith("_active")
+                               if behavior_probe else True)
+    if behavior_probe:
+        selected_type=robot_types[behavior_probe_robot]
+        robot_types=[selected_type]+["dumper"]*5
+        hopper_capacity=int(hopper_capacity)
+        scoring_bps=float(scoring_bps)
+        teammate_intent_knowledge=False
+        # Isolate one red offense robot and exercise one behavior/state for 30 s.
+        control_modes=["deterministic","none","none","none","none","none"]
+        robot_roles=["offense"]*6
+        horizon=BEHAVIOR_PROBE_TICKS
+        capture_stride=10
+        sweeping_enabled=False
+    if (horizon < 1 or capture_stride < 1 or not math.isfinite(physics_dt) or
+            physics_dt <= 0):
+        raise ValueError("horizon, capture_stride, and physics_dt must be positive")
+    if planner_replan_interval is not None and int(planner_replan_interval) < 1:
+        raise ValueError("planner_replan_interval must be positive")
+    simulated_seconds = horizon * .02
+    simulation_ticks = max(1, int(math.ceil(simulated_seconds / physics_dt)))
+    simulation_dt = simulated_seconds / simulation_ticks
+    simulation_capture_stride = max(1, int(round(capture_stride * .02 / simulation_dt)))
     # Mark the job active before environment setup so the UI reports progress
     # while the one-world CPU rollout initializes and starts.
-    write_fn(progress_path, 0, horizon, "running")
-    # A one-world dashboard rollout is too small to use the GPU efficiently.
-    # Launching its many small HIP kernels and compiling optional extensions
-    # costs more than running these 26 simulated seconds on the CPU.
-    device = torch.device("cpu")
+    write_fn(progress_path, 0, simulation_ticks, "running")
+    # Match playback must use the same 20 ms physics step as training so fuel
+    # pickup and scoring contacts are not skipped by coarse integration.
+    device = torch.device(device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA scenario generation was requested, but no CUDA/HIP device is available")
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    fuel_count=504
+    planner_replan_ticks=(max(1,int(math.ceil(.2/simulation_dt)))
+                          if behavior_probe=="collect" else
+                          max(1,int(math.ceil(.4/simulation_dt))))
     env=TensorThreeVsThreeEnv(num_envs=1,device=device,seed=int(seed),
         control_modes=control_modes,robot_roles=robot_roles,
         robot_types=robot_types,
         teammate_intent_knowledge=teammate_intent_knowledge,
-        horizon=horizon,dt=.02,randomize=True,
-        max_fuel_capacity=hopper_capacity,max_scoring_bps=scoring_bps)
+        horizon=simulation_ticks,dt=simulation_dt,randomize=True,
+        sweeping_enabled=sweeping_enabled,
+        replan_interval=(planner_replan_ticks
+                         if planner_replan_interval is None else
+                         int(planner_replan_interval)),
+        perception_interval=perception_interval,
+        contact_iterations=contact_iterations,
+        max_fuel_capacity=hopper_capacity,max_scoring_bps=scoring_bps,
+        fuel_count=fuel_count,behavior_probe=behavior_probe,
+        random_gamepiece_placement=(bool(random_gamepiece_placement) and behavior_probe is not None),
+        fused_sensor_rng=fused_sensor_rng,
+        field_sweep_spacing=field_sweep_spacing,
+        behavior_probe_robot=behavior_probe_robot,
+        behavior_probe_hub_active=behavior_probe_hub_active)
     obs=env.reset(seed=int(seed))[0]
+    if behavior_probe:
+        # Unused fixed tensor slots stay outside the field and cannot obstruct the test.
+        env.sim.pose[:,1:,:2]=-100.
     policies={}
     checkpoint_paths={}
     for role in ("defense",):
@@ -264,55 +449,151 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         model.eval()
         policies[role]=model
         checkpoint_paths[role]=str(checkpoint)
+    all_deterministic=all(mode=="deterministic" for mode in control_modes)
+    if cuda_graph is None:
+        cuda_graph=(device.type=="cuda" and all_deterministic and not policies)
+    if cuda_graph and (device.type!="cuda" or not all_deterministic or policies):
+        raise ValueError("CUDA graph playback requires a CUDA device and six deterministic controllers")
 
     actions=torch.full((1,6),7,device=device,dtype=torch.long)
     # Keep playback captures on the simulation device. Copying each frame to
     # Python here synchronizes the GPU hundreds of times during a match; one
     # batched copy after the rollout lets simulation stay asynchronous.
-    frame_snapshots=[]
-    phase=0.
-    next_decision=0
-    interval=12
     robot_teams=[0,0,0,1,1,1]
-    for tick in range(horizon):
-        if tick==next_decision:
-            obs=env.observe()
-            env._last_obs=obs
-            for role,model in policies.items():
-                robot_ids=torch.tensor([robot for robot in range(6)
-                    if control_modes[robot]=="nn" and robot_roles[robot]==role],
-                    device=device,dtype=torch.long)
-                policy_obs=obs[:,robot_ids,:].reshape(-1,137)
-                mask=policy_obs[:,-8:].bool()
-                with torch.no_grad():
-                    logits=model(policy_obs)[0].masked_fill(~mask,torch.finfo(obs.dtype).min)
-                    actions[:,robot_ids]=logits.argmax(-1).reshape(1,-1)
-            phase+=50./4.
-            interval=max(1,int(phase))
-            phase-=interval
-            next_decision=tick+interval
-        # Dashboard playback does not consume per-tick training/event info.
-        # Building its cloned tensors every step launches needless work and
-        # holds up this single-world scenario rollout.
-        env.step(actions,active_mask=None,capture_observation=False,
-                 capture_info=False)
-        if tick == 0 or (tick+1) % 100 == 0 or tick+1 == horizon:
-            write_fn(progress_path,tick+1,horizon)
-        if (tick+1)%capture_stride and tick+1<horizon:
-            continue
-        path_tensor=env.planner.last_path.reshape(1,6,-1,2)
-        path_lengths=env.planner.last_lengths.reshape(1,6)
-        snapshot=torch.cat((env.sim.pose[0].reshape(-1),env.sim.velocity[0,:,:2].reshape(-1),
-            torch.stack((env.sim.length[0],env.sim.width[0]),-1).reshape(-1),
-            path_tensor[0].reshape(-1),path_lengths[0].to(env.sim.pose.dtype),
-            env.piece_pos[0].reshape(-1),env.piece_owner[0].to(env.sim.pose.dtype),
-            env.piece_active[0].to(env.sim.pose.dtype),env.hub_centers.reshape(-1),
-            env.hub_active[0].to(env.sim.pose.dtype),
-            env.fuel_score_count[0].to(env.sim.pose.dtype),
-            env.match_elapsed[0:1],env.match_remaining[0:1],
-            env.last_actions[0].to(env.sim.pose.dtype),
-            env.opponent_valid[0].to(env.sim.pose.dtype))).detach()
-        frame_snapshots.append(snapshot)
+    path_capacity=env.planner.last_path.shape[1]*2
+    frame_snapshots=[]
+    @torch.inference_mode()
+    def simulate_ticks():
+        phase=0.
+        next_decision=0
+        interval=max(1, int(1. / (simulation_dt * 4.)))
+        step_graph=None
+        graph_audit_outputs=None
+        planner_graph=None
+        planner_graph_audit_outputs=None
+
+        def build_snapshot():
+            path_tensor=env.planner.last_path.reshape(1,6,-1,2)
+            path_lengths=env.planner.last_lengths.reshape(1,6)
+            return torch.cat((env.sim.pose[0].reshape(-1),env.sim.velocity[0,:,:2].reshape(-1),
+                torch.stack((env.sim.length[0],env.sim.width[0]),-1).reshape(-1),
+                path_tensor[0].reshape(-1),path_lengths[0].to(env.sim.pose.dtype),
+                env.piece_pos[0].reshape(-1),env.piece_owner[0].to(env.sim.pose.dtype),
+                env.piece_active[0].to(env.sim.pose.dtype),
+                env.track_pos[0].permute(1,0,2).reshape(-1),
+                env.track_age[0].transpose(0,1).reshape(-1),
+                env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype),
+                env.hub_centers.reshape(-1),
+                env.hub_active[0].to(env.sim.pose.dtype),
+                env.fuel_score_count[0].to(env.sim.pose.dtype),
+                env.fuel_acquisition_count[0].to(env.sim.pose.dtype),
+                env.match_elapsed[0:1],env.match_remaining[0:1],
+                env.last_actions[0].to(env.sim.pose.dtype),
+                env.opponent_valid[0].to(env.sim.pose.dtype),
+                env.opponent_pose[0,:,:2].reshape(-1),
+                env.opponent_age[0],
+                env.track_pos[0].permute(1,0,2).reshape(-1),
+                env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype),
+                env._last_audit_targets[0].reshape(-1),
+                env._last_audit_fuel_targets[0].reshape(-1),
+                env.planner.last_goal.reshape(1,6,2)[0].reshape(-1),
+                env._target_collecting[0].to(env.sim.pose.dtype),
+                env._last_audit_cluster_count[0].to(env.sim.pose.dtype))).detach()
+
+        def capture_frame(tick):
+            frame_snapshots.append(build_snapshot())
+
+        if cuda_graph:
+            # Resolve lazy HIP extensions before graph capture. The first
+            # planner tick is now captured, so extension compilation itself
+            # must stay outside the captured region.
+            from .tensor_adstar import (_hip_adstar_extension,
+                                        _hip_path_reference_extension)
+            _hip_adstar_extension()
+            _hip_path_reference_extension()
+        tick=0
+        while tick < simulation_ticks:
+            if policies and tick==next_decision:
+                obs=env.observe()
+                env._last_obs=obs
+                for role,model in policies.items():
+                    robot_ids=torch.tensor([robot for robot in range(6)
+                        if control_modes[robot]=="nn" and robot_roles[robot]==role],
+                        device=device,dtype=torch.long)
+                    policy_obs=obs[:,robot_ids,:].reshape(-1,137)
+                    mask=policy_obs[:,-8:].bool()
+                    with torch.no_grad():
+                        logits=model(policy_obs)[0].masked_fill(~mask,torch.finfo(obs.dtype).min)
+                        actions[:,robot_ids]=logits.argmax(-1).reshape(1,-1)
+                phase+=1. / (simulation_dt * 4.)
+                if phase < 1.:
+                    interval=1
+                    phase=0.
+                else:
+                    interval=int(phase)
+                    phase-=interval
+                next_decision=tick+interval
+            # Keep planner calls eager at their existing cadence. The static
+            # full-batch step between replans is captured once and replayed on
+            # the simulation stream; CUDA graph replays do not execute Python
+            # counter updates, so advance the aligned host counter alongside.
+            planner_replan_due=(
+                (env._planner_tick_scalar+1)%env.replan_interval==0 or
+                env._planner_controller_modes_dirty)
+            if cuda_graph and planner_replan_due:
+                if planner_graph is None:
+                    planner_graph=torch.cuda.CUDAGraph()
+                    env._capture_planner_retries=True
+                    try:
+                        with torch.cuda.graph(planner_graph):
+                            env.step(actions,active_mask=None,capture_observation=False,
+                                     capture_info=False)
+                    finally:
+                        env._capture_planner_retries=False
+                    planner_graph_audit_outputs=(env._last_audit_targets,
+                        env._last_audit_fuel_targets,env._last_audit_cluster_count)
+                    # Capture records the tick but does not advance the
+                    # simulation. Replay it now so this graph branch executes
+                    # exactly one step, matching the eager and steady paths.
+                    planner_graph.replay()
+                    (env._last_audit_targets,env._last_audit_fuel_targets,
+                     env._last_audit_cluster_count)=planner_graph_audit_outputs
+                else:
+                    # Replays do not update this Python cadence counter.
+                    env._planner_tick_scalar+=1
+                    planner_graph.replay()
+                    (env._last_audit_targets,env._last_audit_fuel_targets,
+                     env._last_audit_cluster_count)=planner_graph_audit_outputs
+            elif cuda_graph:
+                if step_graph is None:
+                    step_graph=torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(step_graph):
+                        env.step(actions,active_mask=None,capture_observation=False,
+                                 capture_info=False)
+                    graph_audit_outputs=(env._last_audit_targets,
+                                         env._last_audit_fuel_targets,
+                                         env._last_audit_cluster_count)
+                else:
+                    # A replay repeats device work but does not rerun Python.
+                    env._planner_tick_scalar+=1
+                step_graph.replay()
+                # Eager replan ticks rebind these Python attributes to fresh
+                # tensors. The graph still updates the output buffers captured
+                # earlier, so restore those live buffers for the next planner
+                # call and for playback snapshots.
+                (env._last_audit_targets,env._last_audit_fuel_targets,
+                 env._last_audit_cluster_count)=graph_audit_outputs
+            else:
+                env.step(actions,active_mask=None,capture_observation=False,
+                         capture_info=False)
+            if tick == 0 or (tick+1) % 100 == 0 or tick+1 == simulation_ticks:
+                write_fn(progress_path,tick+1,simulation_ticks)
+            if (tick+1)%simulation_capture_stride and tick+1<simulation_ticks:
+                tick+=1
+                continue
+            capture_frame(tick+1)
+            tick+=1
+    simulate_ticks()
     snapshot_rows=torch.stack(frame_snapshots).cpu().tolist() if frame_snapshots else []
     frames=[]
     for snapshot in snapshot_rows:
@@ -325,9 +606,8 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         pose=[take(3) for _ in range(6)]
         effort=[take(2) for _ in range(6)]
         sizes=take(12)
-        path_values=take(6*path_tensor.shape[2]*2)
+        path_values=take(6*path_capacity)
         route_lengths=[int(x) for x in take(6)]
-        path_capacity=path_tensor.shape[2]*2
         paths=[]
         for robot,length in enumerate(route_lengths):
             points=path_values[robot*path_capacity:(robot+1)*path_capacity]
@@ -335,24 +615,74 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         piece_positions=take(env.fuel_count*2)
         piece_owners=take(env.fuel_count)
         piece_active=take(env.fuel_count)
-        pieces=[[piece_positions[i*2],piece_positions[i*2+1],piece_owners[i]]
-                for i in range(env.fuel_count) if piece_active[i]>.5]
+        track_positions=take(env.fuel_count*6*2)
+        track_ages=take(env.fuel_count*6)
+        current_visibility=take(env.fuel_count*6)
+        pieces=[]
+        for i in range(env.fuel_count):
+            if piece_active[i] <= .5:
+                continue
+            pieces.append([piece_positions[i*2], piece_positions[i*2+1],
+                           piece_owners[i]])
         hub_centers=take(4)
         hub_active=[bool(x) for x in take(2)]
         scores=[int(x) for x in take(2)]
+        fuel_acquisition_count=[int(x) for x in take(6)]
         match_elapsed=take(1)[0]
         match_remaining=take(1)[0]
         robot_actions=[int(x) for x in take(6)]
         robot_opponent_visible=[bool(x) for x in take(6)]
+        opponent_positions=take(12)
+        opponent_ages=take(6)
+        detected_fuel_positions=take(env.fuel_count*6*2)
+        detected_fuel_visible=take(env.fuel_count*6)
+        robot_targets=[take(2) for _ in range(6)]
+        robot_fuel_targets=[take(2) for _ in range(6)]
+        robot_route_goals=[take(2) for _ in range(6)]
+        robot_collecting=[bool(x) for x in take(6)]
+        robot_cluster_counts=[int(x) for x in take(6)]
         if cursor!=len(snapshot):
             raise RuntimeError("3v3 playback snapshot layout is inconsistent")
         frames.append({
             "robots":pose,
+            "behavior_mode":behavior_mode,
             "robot_teams":robot_teams,
             "robot_control_modes":control_modes,
             "robot_roles":robot_roles,
             "robot_actions":robot_actions,
             "robot_opponent_visible":robot_opponent_visible,
+            "robot_detected_opponents":[
+                [opponent_positions[i*2],opponent_positions[i*2+1],opponent_ages[i]]
+                if robot_opponent_visible[i] else None for i in range(6)],
+            "robot_detected_fuel":[[
+                [detected_fuel_positions[(piece*6+robot)*2],
+                 detected_fuel_positions[(piece*6+robot)*2+1]]
+                for piece in range(env.fuel_count)
+                if detected_fuel_visible[piece*6+robot] > .5
+            ] for robot in range(6)],
+            # Track slots are anonymous. Keep stale positions separate from
+            # physical FUEL entries so the renderer cannot attach history to a
+            # ground-truth ball by matching array indices.
+            "robot_fuel_history":[[
+                [track_positions[(slot*6+robot)*2],
+                 track_positions[(slot*6+robot)*2+1],
+                 track_ages[slot*6+robot]]
+                for slot in range(env.fuel_count)
+                if track_ages[slot*6+robot] < env.perception_track_timeout and
+                   detected_fuel_visible[slot*6+robot] <= .5
+            ] for robot in range(6)],
+            "perception_track_timeout_s":env.perception_track_timeout,
+            "camera_layout":{"height_m":0.508,"horizontal_fov_degrees":120,
+                             "stereo_baseline_m":0.0635,
+                             "mounts":["intake","opposite"]},
+            "robot_targets":robot_targets,
+            "robot_fuel_targets":robot_fuel_targets,
+            "robot_route_goals":robot_route_goals,
+            "robot_collecting":robot_collecting,
+            "perception_fov_degrees":env.perception_fov_degrees,
+            "perception_range":env.perception_range,
+
+            "robot_cluster_counts":robot_cluster_counts,
             "robot_effort_vectors":effort,
             "sizes":sizes,
             "adstar_paths":paths,
@@ -360,27 +690,50 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
             "hub_centers":[hub_centers[i:i+2] for i in (0,2)],
             "hub_active":hub_active,
             "fuel_score_count":scores,
+            "fuel_acquisition_count":fuel_acquisition_count,
             "match_elapsed":match_elapsed,
             "match_remaining":match_remaining,
         })
+    if behavior_probe:
+        for frame in frames:
+            for key in ("robots", "robot_teams", "robot_control_modes", "robot_roles",
+                        "robot_actions", "robot_opponent_visible", "robot_targets",
+                        "robot_fuel_targets", "robot_route_goals", "robot_collecting",
+                        "robot_cluster_counts", "robot_effort_vectors", "adstar_paths",
+                        "fuel_acquisition_count"):
+                frame[key]=frame[key][:1]
+            frame["sizes"]=frame["sizes"][:2]
     field_length=float(env.sim.field_length);field_width=float(env.sim.field_width)
     field={"length":field_length,"width":field_width,"alliance_zone_depth":4.028,
            "elements":[box.as_dict() for box in env.field_boxes]}
-    scenario={"id":"3v3","label":f"Randomized REBUILT scenario · {horizon*.02:g} s",
+    scenario_label=(f"{behavior_probe.title()} probe · HUB "
+                    f"{'active' if behavior_probe_hub_active else 'inactive'} · "
+                    f"{simulated_seconds:g} s" if behavior_probe else
+                    f"Randomized REBUILT scenario · {simulated_seconds:g} s")
+    scenario={"id":"3v3","label":scenario_label,
               "start_zone":start_zone,"goal_zone":goal_zone,"frames":frames}
-    write_fn(progress_path,horizon,horizon,"completed")
-    return {"task":sim_task,"matchup":"six-robot-scenario","architecture":"strategic_3v3",
+    write_fn(progress_path,simulation_ticks,simulation_ticks,"completed")
+    return {"task":sim_task,"matchup":("focused-single-robot" if behavior_probe else "six-robot-scenario"),"architecture":"strategic_3v3",
+        "behavior_mode":behavior_mode,
         "seed":int(seed),"scenario_seed":int(seed),"device":str(device),"field":field,
-        "control_modes":control_modes,"robot_roles":robot_roles,
-        "robot_types":robot_types,
+        "control_modes":control_modes[:1] if behavior_probe else control_modes,
+        "robot_roles":robot_roles[:1] if behavior_probe else robot_roles,
+        "robot_types":robot_types[:1] if behavior_probe else robot_types,
         "teammate_intent_knowledge":bool(teammate_intent_knowledge),
+        "sweeping_enabled":bool(sweeping_enabled),
         "policy_checkpoints":checkpoint_paths,
         "simulation_constraints":{"max_fuel_per_robot":list(env.robot_fuel_capacity_values),
                                   "max_scoring_bps_per_robot":[
                                       round(1./interval,3)
                                       for interval in env.robot_score_interval_values]},
-        "robot_teams":robot_teams,"robots_per_alliance":3,"simulated_seconds":horizon*.02,
-        "dt":.02,"capture_stride":capture_stride,"scenarios":[scenario],"frames":frames}
+        "robot_teams":robot_teams[:1] if behavior_probe else robot_teams,
+        "robot_count":1 if behavior_probe else 6,"robots_per_alliance":1 if behavior_probe else 3,
+        "simulated_seconds":simulated_seconds,"simulation_ticks":simulation_ticks,
+        "dt":simulation_dt,"capture_stride":simulation_capture_stride,
+        "planner_replan_interval_ticks":env.replan_interval,
+        "perception_interval":perception_interval,
+        "contact_iterations":contact_iterations,
+        "scenarios":[scenario],"frames":frames}
 
 
 
@@ -443,3 +796,29 @@ def _complete_playback_adstar_paths(record: dict) -> None:
             if defense_task:
                 paths[defender_index] = []
             frame["adstar_paths"] = paths
+
+
+def prepare_focused_playbacks(run_dir: Path) -> None:
+    """Prepare default dumper/turret replays for collect HUB states."""
+    progress_dir=run_dir / ".scenario-progress"
+    progress_dir.mkdir(parents=True, exist_ok=True)
+    for behavior in ("collect",):
+        for state in ("active", "inactive"):
+            mode=f"{behavior}_{state}"
+            for robot_type,capacity,scoring_bps in (("dumper",60,25.),("turret",40,15.)):
+                simulation_id=focused_playback_simulation_id(mode,robot_type)
+                progress_path=progress_dir / f"{simulation_id}.json"
+                result_path=progress_dir / f"{simulation_id}.result.json"
+                if result_path.is_file():
+                    continue
+                request={"start_zone":"red","goal_zone":"blue","seed":0,
+                    "task":"3v3","control_modes":["offense_deterministic"]+["none"]*5,
+                    "behavior_mode":mode,"total_ticks":BEHAVIOR_PROBE_TICKS,
+                        "robot_types":[robot_type]+["dumper"]*5,
+                        "teammate_intent_knowledge":False,"sweeping_enabled":False,
+                        "dual_gpu":True,
+                        "hopper_capacity":capacity,"scoring_bps":scoring_bps}
+                request_path=progress_path.with_name(progress_path.stem+".request.json")
+                if not request_path.is_file():
+                    request_path.write_text(json.dumps(request))
+                _ensure_zone_playback_job(run_dir,"focused",simulation_id,request)

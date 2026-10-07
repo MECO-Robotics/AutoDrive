@@ -1,26 +1,71 @@
 #include <hip/hip_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
-__global__ void candidate_distance_kernel(const float* points, const float* robot,
-    const bool* free, float* distances, int64_t n, int64_t p) {
-  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int64_t total = n * p;
-  if (i >= total) return;
-  const int64_t row = i / p;
-  const int64_t piece = i - row * p;
-  if (!free[i]) {
-    distances[i] = INFINITY;
-    return;
+__global__ void candidate_rank_kernel(
+    const float* points, const float* robot, const bool* free,
+    int64_t* indices, bool* valid, float* nearest,
+    int64_t n, int64_t p) {
+  const int64_t row = blockIdx.x;
+  const int lane = threadIdx.x;
+  __shared__ float shared_distance[256];
+  __shared__ int64_t shared_index[256];
+  __shared__ int64_t selected_index;
+  float local_distance[4] = {INFINITY, INFINITY, INFINITY, INFINITY};
+  int64_t local_index[4] = {p, p, p, p};
+  int cursor = 0;
+  for (int64_t piece = lane; piece < p; piece += blockDim.x) {
+    float distance = INFINITY;
+    if (free[row * p + piece]) {
+      const float dx = points[2 * (row * p + piece)] - robot[2 * row];
+      const float dy = points[2 * (row * p + piece) + 1] - robot[2 * row + 1];
+      distance = sqrtf(dx * dx + dy * dy);
+    }
+    for (int slot = 0; slot < 4; ++slot) {
+      if (distance < local_distance[slot] ||
+          (distance == local_distance[slot] && piece < local_index[slot])) {
+        for (int move = 3; move > slot; --move) {
+          local_distance[move] = local_distance[move - 1];
+          local_index[move] = local_index[move - 1];
+        }
+        local_distance[slot] = distance;
+        local_index[slot] = piece;
+        break;
+      }
+    }
   }
-  const float dx = points[2 * i] - robot[2 * row];
-  const float dy = points[2 * i + 1] - robot[2 * row + 1];
-  distances[i] = sqrtf(dx * dx + dy * dy);
+
+  for (int rank = 0; rank < 4; ++rank) {
+    shared_distance[lane] = local_distance[cursor];
+    shared_index[lane] = local_index[cursor];
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (lane < stride) {
+        const float other_distance = shared_distance[lane + stride];
+        const int64_t other_index = shared_index[lane + stride];
+        if (other_distance < shared_distance[lane] ||
+            (other_distance == shared_distance[lane] &&
+             other_index < shared_index[lane])) {
+          shared_distance[lane] = other_distance;
+          shared_index[lane] = other_index;
+        }
+      }
+      __syncthreads();
+    }
+    if (lane == 0) {
+      selected_index = shared_index[0];
+      indices[row * 4 + rank] = selected_index;
+      nearest[row * 4 + rank] = shared_distance[0];
+      valid[row * 4 + rank] = isfinite(shared_distance[0]);
+    }
+    __syncthreads();
+    if (local_index[cursor] == selected_index && cursor < 3) ++cursor;
+  }
 }
 
-void candidate_distance_launch(const float* points, const float* robot,
-    const bool* free, float* distances, int64_t n, int64_t p, hipStream_t stream) {
-  constexpr int threads = 256;
-  const int64_t total = n * p;
-  candidate_distance_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
-      points, robot, free, distances, n, p);
+void candidate_rank_launch(const float* points, const float* robot,
+    const bool* free, int64_t* indices, bool* valid, float* nearest,
+    int64_t n, int64_t p, hipStream_t stream) {
+  candidate_rank_kernel<<<static_cast<unsigned>(n), 256, 0, stream>>>(
+      points, robot, free, indices, valid, nearest, n, p);
 }

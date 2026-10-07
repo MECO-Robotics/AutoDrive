@@ -84,6 +84,42 @@ def test_pickup_and_pass_clear_tracks_once_without_touching_inactive_worlds():
     assert (env.fuel_passed_event[1] == 9).all()
 
 
+@pytest.mark.parametrize(("hub_active", "fuel_x", "should_collect"), [
+    (True, 2.4, True),       # Active HUB: friendly zone is valid collection area.
+    (False, 2.4, False),     # Inactive HUB: friendly zone is prohibited.
+    (False, 8.0, True),      # Inactive HUB: neutral field remains collectible.
+])
+def test_deterministic_collector_zone_eligibility(hub_active, fuel_x,
+                                                    should_collect):
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=141, horizon=1, randomize=False,
+        fuel_count=96, control_modes=("deterministic", "none", "none",
+                                      "none", "none", "none"),
+        robot_roles=("offense",) * 6,
+        perception_dropout=0, position_noise=0, velocity_noise=0,
+    )
+    env.piece_active.zero_()
+    env.piece_owner.fill_(-1)
+    env.piece_active[0, 0] = True
+    env.piece_pos[0, 0] = torch.tensor([fuel_x, 2.0])
+    env.track_mask.zero_()
+    env.track_mask[0, :, 0] = True
+    env.track_pos[0, :, 0] = torch.tensor([fuel_x, 2.0])
+    env.track_age.fill_(float("inf"))
+    env.track_age[0, :, 0] = 0.
+    env.sim.pose[0, 0] = torch.tensor([fuel_x - .55, 2.0, 0.0])
+    env.hub_active[0, 0] = hub_active
+    env.match_elapsed.fill_(1.)
+    env.next_intake.zero_()
+    active = torch.ones(1, dtype=torch.bool, device=env.device)
+
+    _, _, _, _ = env._target_for_actions(torch.full((1, 6), 7), active)
+
+    env._update_fuel(active, torch.zeros((1, 6), dtype=torch.bool,
+                                         device=env.device))
+    assert (env.piece_owner[0, 0].item() == 0) is should_collect
+
+
 def test_scoring_respects_configured_balls_per_second_limit():
     env = TensorThreeVsThreeEnv(
         num_envs=1, device="cpu", seed=15, horizon=1, randomize=False,
@@ -110,6 +146,30 @@ def test_scoring_respects_configured_balls_per_second_limit():
     env.match_elapsed.fill_(1.2)
     env._update_fuel(active, score_intent)
     assert env.fuel_score_count[0, 0].item() == 2
+
+
+def test_collect_probe_scores_full_hopper_and_resets_balls_to_midfield():
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=151, horizon=1, randomize=False,
+        behavior_probe="collect", behavior_probe_robot=0,
+        control_modes=("deterministic", "none", "none", "none", "none", "none"),
+        robot_roles=("offense",) * 6, max_fuel_capacity=2,
+        perception_dropout=0, position_noise=0, velocity_noise=0,
+    )
+    env.piece_active.zero_()
+    env.piece_owner.fill_(-1)
+    env.piece_active[0, :2] = True
+    env.piece_owner[0, :2] = 0
+    env.match_elapsed.fill_(25.)
+    active = torch.ones(1, dtype=torch.bool, device=env.device)
+
+    env._update_fuel(active, torch.zeros((1, 6), dtype=torch.bool,
+                                         device=env.device))
+
+    assert env.fuel_score_count[0, 0].item() == 2
+    assert env.fuel_scored_event[0, 0].item() == 2
+    assert torch.equal(env.piece_pos[0, :2], env._midfield_respawn_positions[:2])
+    assert (env.piece_owner[0, :2] == -1).all()
 
 
 def test_robot_finishes_scoring_hopper_before_leaving_hub():
@@ -175,26 +235,118 @@ def test_ferry_action_drops_carried_fuel_as_spread_alliance_zone_pieces():
     )
     active = torch.ones(1, dtype=torch.bool, device=env.device)
     env.piece_active.zero_()
+    env.track_mask.zero_()
     env.piece_active[0, :6] = True
     env.piece_owner[0, :3] = 0
     env.piece_owner[0, 3:6] = 3
+    env.hub_active[0, :2] = False
     env.sim.pose[0, 0, :2] = env.ferry_targets[0]
     env.sim.pose[0, 3, :2] = env.ferry_targets[3]
+    for robot, team in ((0, 0), (3, 1)):
+        home_x = (env.alliance_zone_depth * .5 if team == 0 else
+                  env.field_length - env.alliance_zone_depth * .5)
+        delta = torch.tensor([home_x, env.hub_centers[team, 1]],
+                             device=env.device) - env.sim.pose[0, robot, :2]
+        env.sim.pose[0, robot, 2] = torch.atan2(delta[1], delta[0])
+    env.match_elapsed.fill_(1.)
     _, actions, _, _ = env._target_for_actions(
         torch.tensor([[6, 7, 7, 7, 7, 7]]), active)
     assert actions[0, 0].item() == 6
+    env.last_actions[0, 0] = 6
     env.last_actions[0, 3] = 6
 
     env._update_fuel(active, torch.zeros((1, 6), dtype=torch.bool, device=env.device))
 
-    assert env.fuel_passed_event[0, 0].item() == 3
-    assert env.fuel_passed_event[0, 3].item() == 3
-    assert env.piece_owner[0, :6].tolist() == [-1] * 6
+    assert env.fuel_passed_event[0, 0].item() == 1
+    assert env.fuel_passed_event[0, 3].item() == 1
+    assert env.piece_owner[0, :6].tolist() == [-1, 0, 0, -1, 3, 3]
     assert env.piece_active[0, :6].all()
-    assert (env.piece_pos[0, :3, 0] < env.sim.field_length / 2).all()
-    assert (env.piece_pos[0, 3:6, 0] > env.sim.field_length / 2).all()
-    assert torch.unique(env.piece_pos[0, :6], dim=0).shape[0] == 6
+    assert env.piece_pos[0, 0, 0].item() < env.sim.field_length / 2
+    assert env.piece_pos[0, 3, 0].item() > env.sim.field_length / 2
+    assert torch.unique(env.piece_pos[0, [0, 3]], dim=0).shape[0] == 2
     assert env.fuel_score_count[0, 0].item() == 0
+
+
+def test_collect_active_probe_uses_shoot_action_for_full_hopper():
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=19, horizon=1, randomize=False,
+        fuel_count=504, control_modes=("deterministic", "none", "none",
+                                       "none", "none", "none"),
+        robot_roles=("offense",) * 6, behavior_probe="collect",
+        behavior_probe_hub_active=True, perception_dropout=0,
+        position_noise=0, velocity_noise=0,
+    )
+    assert env._probe_respawn_capacity == 0
+    env.piece_active.zero_()
+    env.piece_owner.fill_(-1)
+    env.piece_active[0, :60] = True
+    env.piece_owner[0, :60] = 0
+    env.sim.pose[0, 0, :2] = env.ferry_targets[0]
+    home = env.hub_centers[0].clone()
+    home[0] = env.alliance_zone_depth * .5
+    delta = home - env.sim.pose[0, 0, :2]
+    env.sim.pose[0, 0, 2] = torch.atan2(delta[1], delta[0])
+    env.match_elapsed.fill_(1.)
+    _, actions, _, _ = env._target_for_actions(
+        torch.full((1, 6), 7, dtype=torch.long, device=env.device),
+        torch.ones(1, dtype=torch.bool, device=env.device))
+    assert actions[0, 0].item() == 4
+
+    # The dumper keeps shooting after the first ball leaves the full hopper.
+    env.piece_owner[0, 0] = -1
+    _, actions, _, _ = env._target_for_actions(
+        torch.full((1, 6), 7, dtype=torch.long, device=env.device),
+        torch.ones(1, dtype=torch.bool, device=env.device))
+    assert actions[0, 0].item() == 4
+
+    env._update_fuel(torch.ones(1, dtype=torch.bool, device=env.device),
+                     torch.zeros((1, 6), dtype=torch.bool, device=env.device))
+
+    assert env.fuel_passed_event[0, 0].item() == 0
+    assert env.piece_owner[0, :60].eq(0).all()
+
+
+def test_collect_inactive_probe_latches_ferry_until_hopper_is_empty():
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=20, horizon=1, randomize=False,
+        fuel_count=504, control_modes=("deterministic", "none", "none",
+                                       "none", "none", "none"),
+        robot_roles=("offense",) * 6, behavior_probe="collect",
+        behavior_probe_hub_active=False, perception_dropout=0,
+        position_noise=0, velocity_noise=0,
+    )
+    env.piece_active.zero_()
+    env.piece_owner.fill_(-1)
+    env.piece_active[0, :61] = True
+    env.piece_owner[0, :60] = 0
+    env.piece_pos[0, 60] = torch.tensor([8.0, 4.0])
+    env.track_mask.zero_()
+    env.track_age.fill_(float("inf"))
+    env.track_mask[0, 0, 60] = True
+    env.track_pos[0, 0, 60] = env.piece_pos[0, 60]
+    env.hub_active[0, 0] = False
+    env.sim.pose[0, 0] = torch.tensor([6.0, 4.0, math.pi])
+    env.next_ferry.zero_()
+    env.match_elapsed.fill_(1.)
+    active = torch.ones(1, dtype=torch.bool, device=env.device)
+    no_action = torch.full((1, 6), 7, dtype=torch.long, device=env.device)
+    no_score = torch.zeros((1, 6), dtype=torch.bool, device=env.device)
+
+    _, actions, _, _ = env._target_for_actions(no_action, active)
+    assert actions[0, 0].item() == 6
+    assert env._ferry_committed[0, 0]
+
+    env._update_fuel(active, no_score)
+    assert env.fuel_passed_event[0, 0].item() == 1
+    assert (env.piece_owner[0] == 0).sum().item() == 59
+    _, actions, _, _ = env._target_for_actions(no_action, active)
+    assert actions[0, 0].item() == 6
+    assert env._ferry_committed[0, 0]
+
+    env.piece_owner[0, env.piece_owner[0] == 0] = -1
+    _, actions, _, _ = env._target_for_actions(no_action, active)
+    assert actions[0, 0].item() == 0
+    assert not env._ferry_committed[0, 0]
 
 
 @pytest.mark.parametrize("lane_y,initial_heading", [

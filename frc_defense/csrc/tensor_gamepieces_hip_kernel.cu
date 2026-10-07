@@ -81,7 +81,12 @@ __global__ void gamepieces_kernel(const bool* active, const float* pose,
       for (int i = lane; i < pieces; i += blockDim.x) {
         const int64_t pi = row + i;
         if (!piece_active[pi] || owner[pi] >= 0 || i == picked_by_red) continue;
-        const float dx = piece_pos[pi * 2] - x;
+        const float piece_x=piece_pos[pi*2];
+        const bool piece_in_alliance=robot==0
+            ? piece_x<=alliance_zone_depth
+            : piece_x>=field_length-alliance_zone_depth;
+        if (!hub_active[pair+robot] && piece_in_alliance) continue;
+        const float dx = piece_x - x;
         const float dy = piece_pos[pi * 2 + 1] - y;
         const float longitudinal = dx * c + dy * s;
         const float lateral = fabsf(-dx * s + dy * c);

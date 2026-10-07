@@ -54,7 +54,7 @@ def _extension():
             flags.append(f"--rocm-device-lib-path={device_lib}")
         try:
             _EXT = cpp_extension.load(
-                name="autodrive_3v3_pickup_grid_hip_v4",
+                name="autodrive_3v3_pickup_grid_hip_v5",
                 sources=[str(src / "tensor_3v3_pickup_grid_hip.cpp"),
                          str(src / "tensor_3v3_pickup_grid_hip_kernel.cu")],
                 with_cuda=True, extra_cflags=["-O3"], extra_cuda_cflags=flags,
@@ -87,3 +87,30 @@ def pickup_robot(*, active, pose, length, width, piece_pos, piece_active,
         defense_role.contiguous(), acquired_event, track_clear_mask,
         int(robot), int(nx), int(ny), float(cell_size), int(capacity),
         bool(allow_sweep))
+
+
+def pickup_all_robots(*, active, pose, length, width, piece_pos, piece_active,
+                      piece_owner, free, possible_cells, next_intake, elapsed,
+                      controlled, deterministic, defense_role, hub_active,
+                      capacities, acquired_event, track_clear_mask,
+                      nx, ny, cell_size, alliance_depth, field_length):
+    """Resolve all six robots in one ordered kernel, preserving slot priority."""
+    ext = _extension()
+    if ext is None:
+        raise RuntimeError("HIP 3v3 pickup extension is unavailable")
+    ext.pickup_all(active.contiguous(), pose.contiguous(), length.contiguous(),
+        width.contiguous(), piece_pos.contiguous(), piece_active.contiguous(),
+        piece_owner, free, possible_cells.contiguous(), next_intake, elapsed,
+        controlled.contiguous(), deterministic.contiguous(),
+        defense_role.contiguous(), hub_active.contiguous(),
+        capacities.contiguous(), acquired_event, track_clear_mask,
+        int(nx), int(ny), float(cell_size), float(alliance_depth),
+        float(field_length))
+
+
+def possession_counts(piece_owner):
+    """Count owned pieces for six robot slots in one HIP kernel launch."""
+    ext=_extension()
+    if ext is None or not hasattr(ext,"possession_counts"):
+        raise RuntimeError("HIP 3v3 pickup extension is unavailable")
+    return ext.possession_counts(piece_owner.contiguous())

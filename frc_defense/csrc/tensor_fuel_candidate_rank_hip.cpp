@@ -5,8 +5,8 @@
 #include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime_api.h>
 
-void candidate_distance_launch(const float*, const float*, const bool*, float*,
-    int64_t, int64_t, hipStream_t);
+void candidate_rank_launch(const float*, const float*, const bool*, int64_t*,
+    bool*, float*, int64_t, int64_t, hipStream_t);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> candidates(
     torch::Tensor points, torch::Tensor robot_xy, torch::Tensor free) {
@@ -22,20 +22,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> candidates(
       free.device() == points.device(), "free must be contiguous HIP bool [N,P]");
   TORCH_CHECK(p >= 4, "at least four candidate positions are required");
   c10::cuda::CUDAGuard guard(points.device());
-  auto distances = torch::empty({n, p}, points.options());
-  candidate_distance_launch(points.data_ptr<float>(), robot_xy.data_ptr<float>(),
-      free.data_ptr<bool>(), distances.data_ptr<float>(), n, p,
+  auto indices = torch::empty({n, 4}, points.options().dtype(at::kLong));
+  auto valid = torch::empty({n, 4}, points.options().dtype(at::kBool));
+  auto nearest = torch::empty({n, 4}, points.options());
+  candidate_rank_launch(points.data_ptr<float>(), robot_xy.data_ptr<float>(),
+      free.data_ptr<bool>(), indices.data_ptr<int64_t>(), valid.data_ptr<bool>(),
+      nearest.data_ptr<float>(), n, p,
       c10::cuda::getCurrentCUDAStream(points.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  // Delegate selection to ATen. Tie-index order is backend-specific and may
-  // vary across calls, especially for equal finite distances or +inf entries.
-  auto result = at::topk(distances, 4, -1, false, true);
-  auto nearest = std::get<0>(result);
-  auto indices = std::get<1>(result);
-  auto valid = at::isfinite(nearest);
   return {indices, valid, nearest};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("candidates", &candidates, "Fused fuel-candidate distance/mask plus exact ATen topk");
+  m.def("candidates", &candidates, "Fused fuel-candidate distance and top-four ranking");
 }

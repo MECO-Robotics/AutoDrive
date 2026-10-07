@@ -6,12 +6,12 @@
 void path_reference_launch(const float*, const int64_t*, const float*,
                            const float*, const float*, int64_t,
                            const float*, int64_t, const float*, int64_t,
-                           float*, float*, int, hipStream_t);
+                           float*, float*, float*, int, hipStream_t);
 
 std::tuple<torch::Tensor, torch::Tensor> path_reference(
     torch::Tensor path, torch::Tensor lengths, torch::Tensor goal,
     torch::Tensor speed_profile, torch::Tensor position, torch::Tensor velocity,
-    torch::Tensor speed_limit) {
+    torch::Tensor speed_limit, torch::Tensor progress_state) {
   TORCH_CHECK(path.is_cuda() && path.scalar_type() == at::kFloat && path.dim() == 3 &&
               path.size(1) == 72 && path.size(2) == 2,
               "AD* path reference expects CUDA float32 [N,72,2] path");
@@ -24,7 +24,11 @@ std::tuple<torch::Tensor, torch::Tensor> path_reference(
               velocity.sizes() == torch::IntArrayRef({n, 2}) &&
               speed_limit.sizes() == torch::IntArrayRef({n}),
               "AD* path reference input shape mismatch");
-  for (const auto& t : {path, goal, speed_profile, position, velocity, speed_limit})
+  TORCH_CHECK(progress_state.sizes() == torch::IntArrayRef({n}) &&
+              progress_state.scalar_type() == at::kFloat &&
+              progress_state.device() == path.device() && progress_state.is_contiguous(),
+              "AD* progress state must be contiguous float32 [N]");
+  for (const auto& t : {path, goal, speed_profile, position, velocity, speed_limit, progress_state})
     TORCH_CHECK(t.is_cuda() && t.scalar_type() == at::kFloat &&
                 t.device() == path.device(),
                 "AD* path reference float inputs must use one device and float32");
@@ -40,7 +44,7 @@ std::tuple<torch::Tensor, torch::Tensor> path_reference(
   path_reference_launch(path.data_ptr<float>(), lengths.data_ptr<int64_t>(),
       goal.data_ptr<float>(), speed_profile.data_ptr<float>(), position.data_ptr<float>(),
       position.stride(0), velocity.data_ptr<float>(), velocity.stride(0),
-      speed_limit.data_ptr<float>(), speed_limit.stride(0), command.data_ptr<float>(),
+      speed_limit.data_ptr<float>(), speed_limit.stride(0), progress_state.data_ptr<float>(), command.data_ptr<float>(),
       tangent.data_ptr<float>(), static_cast<int>(n),
       c10::cuda::getCurrentCUDAStream(path.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();

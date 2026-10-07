@@ -21,6 +21,7 @@ from typing import Any
 try:
     import torch
     import torch.distributed as dist
+    from torch import nn
 except ImportError as exc:  # keep the module's import error actionable
     raise ImportError(
         "Tensor PPO requires PyTorch. Install a Torch build for your platform, "
@@ -248,7 +249,8 @@ def _generational_train_impl(task: str, generations: int, output: str | Path, *,
                        evaluation_workers: int = 1) -> dict[str, Any]:
     from . import tensor_training_generational
     options = {key: value for key, value in locals().items()
-               if key not in ("task", "generations", "output")}
+               if key not in ("task", "generations", "output",
+                              "tensor_training_generational")}
     return tensor_training_generational._generational_train_impl(
         task, generations, output, _runtime=globals(), **options)
 

@@ -33,15 +33,19 @@ def midfield_respawn_points(count: int, field_length: float,
     half_depth, half_length = 0.915, 2.615
     x_min, x_max = center_x - half_depth, center_x + half_depth
     y_min, y_max = center_y - half_length, center_y + half_length
-    span_x, span_y = x_max - x_min, y_max - y_min
-    points = []
-    for index in range(count):
-        # A deterministic low-discrepancy scatter avoids a visible grid while
-        # keeping the lookup table stable across resets and devices.
-        x = x_min + span_x * ((index * 0.6180339887498949) % 1.0)
-        y = y_min + span_y * ((index * 0.7548776662466927) % 1.0)
-        points.append((x, y))
-    return points
+    return grid_array_points(count, x_min, x_max, y_min, y_max)
+
+
+def grid_array_points(count: int, x_min: float, x_max: float,
+                      y_min: float, y_max: float) -> list[tuple[float, float]]:
+    """Place pieces at evenly spaced cell centers in a rectangular array."""
+    if count <= 0:
+        return []
+    columns = max(1, math.ceil(math.sqrt(count * (x_max-x_min) / (y_max-y_min))))
+    rows = math.ceil(count / columns)
+    return [(x_min + (index % columns + .5) * (x_max-x_min) / columns,
+             y_min + (index // columns + .5) * (y_max-y_min) / rows)
+            for index in range(count)]
 
 
 @dataclass(frozen=True)

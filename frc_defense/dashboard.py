@@ -18,7 +18,10 @@ from .dashboard_api import field_layout_payload
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
 from .dashboard_simulation import (
     PPO_CAMPAIGN_UNIT,
+    BEHAVIOR_PROBE_TICKS,
     ZONE_SCENARIO_TICKS,
+    focused_playback_simulation_id,
+    ZONE_PLAYBACK_TICKS,
     _SCENARIO_JOB_IDS,
     _SCENARIO_JOB_LOCK,
 )
@@ -52,15 +55,18 @@ def load_ablation_records(run_dir: Path) -> list[dict]:
 
 
 @contextmanager
-def _dashboard_simulation_slot(run_dir: Path):
-    """Compatibility hook for serialized dashboard simulation scheduling."""
+def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False):
+    """Pass dashboard jobs to the single or dual GPU scheduler."""
     from .dashboard_simulation import _dashboard_simulation_slot as simulation_slot
-    yield from simulation_slot(run_dir, campaign_unit=PPO_CAMPAIGN_UNIT)
+    with simulation_slot(run_dir, dual_gpu=dual_gpu,
+                         campaign_unit=PPO_CAMPAIGN_UNIT) as slot:
+        yield slot
 
 
 def create_handler(run_dir: Path):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            content_encoding=None
             parsed=urlparse(self.path)
             params=parse_qs(parsed.query)
             run=params.get("run",[""])[0]
@@ -237,11 +243,15 @@ def create_handler(run_dir: Path):
                 goal_zone=params.get("goal",[""])[0]
                 seed_text=params.get("seed",[""])[0]
                 scenario_task=params.get("task",["counter_defense"])[0]
+                behavior_mode=params.get("behavior_mode",["match"])[0]
                 if start_zone not in ("red","center","blue") or goal_zone not in ("red","center","blue") or start_zone==goal_zone:
                     self.send_error(400,"start and goal must be distinct red, center, or blue zones")
                     return
                 if scenario_task not in ("counter_defense", "defense", "3v3"):
                     self.send_error(400,"task must be 3v3")
+                    return
+                if behavior_mode not in ("match", "collect_active", "collect_inactive", "collect"):
+                    self.send_error(400,"behavior_mode must be match or a collect/HUB probe")
                     return
                 control_modes=[params.get(f"robot{i}",["offense_deterministic" if i < 3 else "defense_deterministic"])[0]
                                for i in range(6)]
@@ -252,6 +262,16 @@ def create_handler(run_dir: Path):
                     self.send_error(400,"teammate_intent_knowledge must be true or false")
                     return
                 teammate_intent_knowledge=intent_text=="true"
+                sweeping_text=params.get("sweeping_enabled",["false"])[0].lower()
+                if sweeping_text not in ("true","false"):
+                    self.send_error(400,"sweeping_enabled must be true or false")
+                    return
+                sweeping_enabled=sweeping_text=="true"
+                dual_gpu_text=params.get("dual_gpu",["false"])[0].lower()
+                if dual_gpu_text not in ("true","false"):
+                    self.send_error(400,"dual_gpu must be true or false")
+                    return
+                dual_gpu=dual_gpu_text=="true"
                 if any(kind not in ("dumper","turret") for kind in robot_types):
                     self.send_error(400,"each robot type must be dumper or turret")
                     return
@@ -269,13 +289,25 @@ def create_handler(run_dir: Path):
                 if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
                     self.send_error(400,"simulation_id is required")
                     return
+                if behavior_mode == "collect":
+                    behavior_mode="collect_active"
+                if behavior_mode != "match":
+                    if not control_modes or control_modes[0] not in ("offense_deterministic",):
+                        control_modes[0]="offense_deterministic"
+                    control_modes[1:]=["none"]*5
+                    robot_types[1:]=["dumper"]*5
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 seed=int(seed_text) if seed_text.isdigit() else secrets.randbits(31)
                 request={"start_zone":start_zone,"goal_zone":goal_zone,"seed":seed,
                          "task":scenario_task,"control_modes":control_modes,
+                         "behavior_mode":behavior_mode,
+                         "total_ticks":(BEHAVIOR_PROBE_TICKS if behavior_mode!="match" else ZONE_SCENARIO_TICKS),
                          "robot_types":robot_types,
                          "teammate_intent_knowledge":teammate_intent_knowledge,
-                         "hopper_capacity":hopper_capacity,"scoring_bps":scoring_bps}
+                         "sweeping_enabled":sweeping_enabled,
+                         "random_gamepiece_placement":(params.get("random_gamepiece_placement",["false"])[0].lower()=="true"),
+                         "hopper_capacity":hopper_capacity,"scoring_bps":scoring_bps,
+                         "dual_gpu":dual_gpu}
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if not request_path.is_file():
                     request_path.write_text(json.dumps(request))
@@ -288,6 +320,64 @@ def create_handler(run_dir: Path):
                         "status":current.get("status","waiting")}).encode()
                     self.send_response(202)
                 self.send_header("Content-Type","application/json")
+            elif parsed.path == "/api/focused-playback":
+                mode=params.get("behavior_mode",[""])[0]
+                robot_type=params.get("robot_type",[""])[0]
+                dual_gpu_text=params.get("dual_gpu",["false"])[0].lower()
+                if dual_gpu_text not in ("true","false"):
+                    self.send_error(400,"dual_gpu must be true or false")
+                    return
+                dual_gpu=dual_gpu_text=="true"
+                if mode not in ("collect_active","collect_inactive"):
+                    self.send_error(400,"unknown focused replay")
+                    return
+                if robot_type not in ("dumper","turret"):
+                    self.send_error(400,"robot_type must be dumper or turret")
+                    return
+                simulation_id=focused_playback_simulation_id(mode,robot_type)
+                path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
+                compressed=path.with_suffix(path.suffix+".gz")
+                if not path.is_file():
+                    progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
+                    request={"start_zone":"red","goal_zone":"blue","seed":0,
+                        "task":"3v3","control_modes":["offense_deterministic"]+["none"]*5,
+                        "behavior_mode":mode,"total_ticks":BEHAVIOR_PROBE_TICKS,
+                        "robot_types":[robot_type]+["dumper"]*5,
+                        "teammate_intent_knowledge":False,"sweeping_enabled":False,
+                        "dual_gpu":dual_gpu,
+                        "hopper_capacity":40 if robot_type=="turret" else 60,
+                        "scoring_bps":15. if robot_type=="turret" else 25.}
+                    request_path=progress_path.with_name(progress_path.stem+".request.json")
+                    progress_path.parent.mkdir(parents=True,exist_ok=True)
+                    if not request_path.is_file():
+                        request_path.write_text(json.dumps(request))
+                    current=_ensure_zone_playback_job(run_dir,"focused",simulation_id,request)
+                    if current.get("status") in ("error","cancelled"):
+                        self.send_error(500,current.get("error","focused replay generation failed"))
+                        return
+                    body=json.dumps({"simulation_id":simulation_id,
+                        "status":current.get("status","waiting")}).encode()
+                    self.send_response(202)
+                    self.send_header("Content-Type","application/json")
+                    self.send_header("Content-Length",str(len(body)))
+                    self.send_header("Cache-Control","no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    try:
+                        use_gzip="gzip" in self.headers.get("Accept-Encoding","") and compressed.is_file()
+                        body=compressed.read_bytes() if use_gzip else path.read_bytes()
+                    except OSError:
+                        self.send_error(500,"could not read focused replay")
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type","application/json")
+                    if use_gzip:
+                        self.send_header("Content-Encoding","gzip")
+                    self.send_header("Content-Length",str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                return
             elif parsed.path == "/api/zone-playback-result":
                 simulation_id=params.get("simulation_id",[""])[0]
                 if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
@@ -306,7 +396,13 @@ def create_handler(run_dir: Path):
                 else:
                     result_path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
                     try:
-                        body=result_path.read_bytes()
+                        compressed_path=result_path.with_suffix(result_path.suffix+".gz")
+                        if ("gzip" in self.headers.get("Accept-Encoding","") and
+                                compressed_path.is_file()):
+                            body=compressed_path.read_bytes()
+                            content_encoding="gzip"
+                        else:
+                            body=result_path.read_bytes()
                     except OSError:
                         body=json.dumps({"error":"scenario result is unavailable"}).encode()
                         self.send_response(500)
@@ -320,7 +416,7 @@ def create_handler(run_dir: Path):
                     self.send_error(400,"invalid simulation_id")
                     return
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
-                body=_json_or_default(progress_path,{"status":"waiting","tick":0,"total_ticks":ZONE_SCENARIO_TICKS,"percent":0})
+                body=_json_or_default(progress_path,{"status":"waiting","tick":0,"total_ticks":ZONE_PLAYBACK_TICKS,"percent":0})
                 progress=json.loads(body)
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if progress.get("status") in ("waiting","running") and request_path.is_file():
@@ -419,6 +515,9 @@ def create_handler(run_dir: Path):
                 self.send_error(404)
                 return
             self.send_header("Content-Length", str(len(body)))
+            if content_encoding:
+                self.send_header("Content-Encoding",content_encoding)
+                self.send_header("Vary","Accept-Encoding")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
@@ -446,7 +545,11 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                       control_modes=None, robot_types=None,
                       progress_path: Path | None = None,
                       hopper_capacity: int = 60, scoring_bps: float = 25.,
-                      teammate_intent_knowledge: bool = True) -> dict:
+                      teammate_intent_knowledge: bool = True,
+                      sweeping_enabled: bool = False,
+                      random_gamepiece_placement: bool = False,
+                      behavior_mode: str = "match",
+                      device: str | None = None) -> dict:
     """Use the dashboard runtime when possible, otherwise the project venv."""
     from . import dashboard_simulation as simulation
     return simulation.run_zone_playback(
@@ -455,6 +558,10 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         progress_path=progress_path, hopper_capacity=hopper_capacity,
         scoring_bps=scoring_bps,
         teammate_intent_knowledge=teammate_intent_knowledge,
+        sweeping_enabled=sweeping_enabled,
+        random_gamepiece_placement=random_gamepiece_placement,
+        behavior_mode=behavior_mode,
+        device=device,
         _generate_fn=generate_zone_playback)
 
 
@@ -489,9 +596,12 @@ def _normalize_robot_control_selections(selections):
 def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            goal_zone: str, seed: int, *, task: str | None = None,
                            control_modes=None, horizon: int = ZONE_SCENARIO_TICKS,
+                           behavior_mode: str = "match",
                            robot_types=None,
                            teammate_intent_knowledge: bool = True,
-                           capture_stride: int = 16,
+                           sweeping_enabled: bool = False,
+                           random_gamepiece_placement: bool = False,
+                           capture_stride: int = 64, device: str | None = None,
                            hopper_capacity: int = 60, scoring_bps: float = 25.,
                            progress_path: Path | None = None) -> dict:
     """Simulate one seeded, six-robot FRC match for dashboard playback."""
@@ -499,7 +609,11 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     return simulation.generate_zone_playback(
         run_dir, run_name, start_zone, goal_zone, seed, task=task,
         control_modes=control_modes, horizon=horizon, robot_types=robot_types,
+        behavior_mode=behavior_mode,
         teammate_intent_knowledge=teammate_intent_knowledge,
+        sweeping_enabled=sweeping_enabled,
+        random_gamepiece_placement=random_gamepiece_placement,
+        device=device,
         capture_stride=capture_stride, hopper_capacity=hopper_capacity,
         scoring_bps=scoring_bps, progress_path=progress_path,
         _write_fn=_write_scenario_progress,

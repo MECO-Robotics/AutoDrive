@@ -97,3 +97,82 @@ def test_fused_contact_pipeline_matches_complete_physics_tick():
                  "module_steer_rate", "module_drive_speed", "module_current",
                  "module_supply_current", "robot_current"):
         assert torch.equal(getattr(candidate, name), getattr(reference, name)), name
+
+
+def test_six_robot_field_sweep_blocks_fast_translation_and_rotation():
+    from frc_defense.tensor_sim import TensorVectorizedSimulator
+
+    sim = TensorVectorizedSimulator(num_envs=1, device="cpu", dt=.2,
+        num_robots=6, robot_length=.4, robot_width=.4, randomize=False,
+        field_colliders=[[1., 1., .02, .15]])
+    sim.pose[0, :, :2] = torch.tensor([
+        [.5, 1.], [4., 1.], [5., 1.], [6., 1.], [7., 1.], [8., 1.]])
+    sim.velocity.zero_()
+    sim.velocity[0, 0, 0] = 10.
+    active = torch.ones(1, dtype=torch.bool)
+    sim._field_sweep_torch(active, 20, .01)
+    assert sim.field_contact[0, 0]
+    assert sim.pose[0, 0, 0] < .8
+
+    sim.field_contact.zero_()
+    sim.pose[0, 0] = torch.tensor([1., 1.42, 0.])
+    sim.velocity.zero_()
+    sim.velocity[0, 0, 2] = 10.
+    sim._field_sweep_torch(active, 20, .01)
+    assert sim.field_contact[0, 0]
+
+
+def test_six_robot_fused_contact_gates_are_independent(monkeypatch):
+    from frc_defense import tensor_collision_multi_hip
+    from frc_defense.tensor_sim import TensorVectorizedSimulator
+
+    sim = TensorVectorizedSimulator(num_envs=1, device="cpu", num_robots=6,
+        randomize=False, field_colliders=[[1., 1., .1, .1]])
+    calls = []
+    monkeypatch.setattr(tensor_collision_multi_hip, "robot_contacts",
+                        lambda *_: calls.append("robot") or True)
+    monkeypatch.setattr(tensor_collision_multi_hip, "field_contacts",
+                        lambda *_: calls.append("field") or True)
+    monkeypatch.setattr(tensor_collision_multi_hip, "field_sweep_contacts",
+                        lambda *_: calls.append("sweep") or True)
+    active = torch.ones(1, dtype=torch.bool)
+
+    sim._fused_robot_collision_multi_hip_enabled = True
+    sim._fused_field_collision_multi_hip_enabled = False
+    sim._robot_collision_multi(active)
+    sim._fused_robot_collision_multi_hip_enabled = False
+    sim._fused_field_collision_multi_hip_enabled = True
+    sim._field_collision(active)
+    assert sim._field_sweep_collision(active, 2, .01)
+    assert calls == ["robot", "field", "sweep"]
+
+
+def test_fused_field_sweep_matches_torch_reference():
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("fused field sweep requires a HIP device")
+    from frc_defense import tensor_collision_multi_hip
+    from frc_defense.tensor_sim import TensorVectorizedSimulator
+
+    if tensor_collision_multi_hip._extension() is None:
+        pytest.skip("six-robot HIP collision extension is unavailable")
+    device = torch.device("cuda:0")
+    args = dict(num_envs=1, dt=.2, num_robots=6, robot_length=.4,
+                robot_width=.4, randomize=False,
+                field_colliders=[[1., 1., .02, .15]])
+    reference = TensorVectorizedSimulator(device="cpu", **args)
+    candidate = TensorVectorizedSimulator(device=device, **args)
+    pose = torch.tensor([[[.5, 1., 0.], [4., 1., 0.], [5., 1., 0.],
+                          [6., 1., 0.], [7., 1., 0.], [8., 1., 0.]]])
+    velocity = torch.zeros_like(pose)
+    velocity[0, 0, 0] = 10.
+    active_cpu = torch.ones(1, dtype=torch.bool)
+    for sim in (reference, candidate):
+        sim.pose.copy_(pose.to(sim.device))
+        sim.velocity.copy_(velocity.to(sim.device))
+    reference._field_sweep_torch(active_cpu, 20, .01)
+    assert tensor_collision_multi_hip.field_sweep_contacts(
+        candidate, active_cpu.to(device), 20, .01)
+    torch.cuda.synchronize(device)
+    assert torch.allclose(candidate.pose.cpu(), reference.pose, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(candidate.velocity.cpu(), reference.velocity, atol=1e-5, rtol=1e-5)
+    assert torch.equal(candidate.field_contact.cpu(), reference.field_contact)

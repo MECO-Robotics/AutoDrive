@@ -9,6 +9,137 @@ function robotAllianceColor(frame, robot, fallbackAttacker = 0) {
   return team === 0 ? "#ED1C24" : "#0066B3";
 }
 
+function drawDottedFuel(context, x, y, alpha = 1) {
+  context.save();
+  context.globalAlpha = alpha;
+  context.fillStyle = "#ffc542";
+  for (let dot = 0; dot < 8; dot++) {
+    const angle = dot * Math.PI / 4;
+    context.beginPath();
+    context.arc(x + Math.cos(angle) * 6, y + Math.sin(angle) * 6, 1.5, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.restore();
+}
+
+function targetFuelCluster(frame, robot, target, world) {
+  if (!Array.isArray(target) || !Array.isArray(frame.robots?.[robot])) return null;
+  const detected = frame.robot_detected_fuel?.[robot] || [];
+  const history = frame.robot_fuel_history?.[robot] || [];
+  const timeout = Number(frame.perception_track_timeout_s) || 2;
+  const points = [];
+  const seen = new Set();
+  const team = Number(frame.robot_teams?.[robot] ?? (robot < 3 ? 0 : 1));
+  const inactiveHub = frame.hub_active?.[team] === false;
+  const inactiveProbe = frame.behavior_mode === "collect_inactive";
+  const depotBoxes = (world.elements || world.colliders || []).filter((box) =>
+    box.name === "red_depot" || box.name === "blue_depot");
+  const eligible = (point) => {
+    if (!inactiveHub && !inactiveProbe) return true;
+    const friendlyZone = team === 0
+      ? point[0] <= (world.alliance_zone_depth || 4.028)
+      : point[0] >= world.length - (world.alliance_zone_depth || 4.028);
+    if (friendlyZone) return false;
+    if (inactiveProbe && depotBoxes.some((box) =>
+      Math.abs(point[0] - box.x) <= box.length / 2 &&
+      Math.abs(point[1] - box.y) <= box.width / 2)) return false;
+    return true;
+  };
+  const addPoint = (point) => {
+    if (!Array.isArray(point) || point.length < 2 || !eligible(point)) return;
+    const key = `${Math.round(point[0] * 100)}:${Math.round(point[1] * 100)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    points.push([Number(point[0]), Number(point[1])]);
+  };
+  for (const point of detected) addPoint(point);
+  for (const [x, y, age] of history) {
+    if (Number.isFinite(Number(age)) && age >= 0 && age < timeout) addPoint([x, y]);
+  }
+  if (!points.length) return null;
+
+  const sizeIndex = frame.sizes?.length === 2 ? 1 : robot * 2 + 1;
+  const intakeWidth = Number(frame.sizes?.[sizeIndex]) || 0.75;
+  const linkDistance = Math.max(0.35, intakeWidth);
+  const cellSize = linkDistance;
+  const buckets = new Map();
+  const bucketKey = (x, y) => `${x}:${y}`;
+  points.forEach((point, index) => {
+    const bx = Math.floor(point[0] / cellSize), by = Math.floor(point[1] / cellSize);
+    const key = bucketKey(bx, by);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(index);
+  });
+  let seed = -1, seedDistance = Infinity;
+  points.forEach((point, index) => {
+    const distance = Math.hypot(point[0] - target[0], point[1] - target[1]);
+    if (distance < seedDistance) { seed = index; seedDistance = distance; }
+  });
+  if (seed < 0 || seedDistance > linkDistance * 1.5) return null;
+  const included = new Set([seed]), queue = [seed];
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const point = points[queue[cursor]];
+    const bx = Math.floor(point[0] / cellSize), by = Math.floor(point[1] / cellSize);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      for (const candidate of buckets.get(bucketKey(bx + dx, by + dy)) || []) {
+        if (included.has(candidate)) continue;
+        const other = points[candidate];
+        if (Math.hypot(point[0] - other[0], point[1] - other[1]) <= linkDistance) {
+          included.add(candidate); queue.push(candidate);
+        }
+      }
+    }
+  }
+  return [...included].map((index) => points[index]);
+}
+
+function drawTargetClusterBoundary(context, points, originX, scale, py) {
+  if (!Array.isArray(points) || points.length < 2) return;
+  const cell = 0.06;
+  const fillRadius = 0.23;
+  const occupied = new Set();
+  const key = (x, y) => `${x}:${y}`;
+  for (const point of points) {
+    const minX = Math.floor((point[0] - fillRadius) / cell);
+    const maxX = Math.floor((point[0] + fillRadius) / cell);
+    const minY = Math.floor((point[1] - fillRadius) / cell);
+    const maxY = Math.floor((point[1] + fillRadius) / cell);
+    for (let x = minX; x <= maxX; x++) for (let y = minY; y <= maxY; y++) {
+      const dx = (x + 0.5) * cell - point[0];
+      const dy = (y + 0.5) * cell - point[1];
+      if (dx * dx + dy * dy <= fillRadius * fillRadius) occupied.add(key(x, y));
+    }
+  }
+  context.save();
+  context.beginPath();
+  for (const item of occupied) {
+    const [x, y] = item.split(":").map(Number);
+    context.rect(originX + x * cell * scale, py((y + 1) * cell), cell * scale, cell * scale);
+  }
+  context.fillStyle = "rgba(66, 218, 255, 0.10)";
+  context.fill();
+  context.beginPath();
+  for (const item of occupied) {
+    const [x, y] = item.split(":").map(Number);
+    const x0 = originX + x * cell * scale, x1 = x0 + cell * scale;
+    const y0 = py((y + 1) * cell), y1 = py(y * cell);
+    if (!occupied.has(key(x, y + 1))) { context.moveTo(x0, y0); context.lineTo(x1, y0); }
+    if (!occupied.has(key(x + 1, y))) { context.moveTo(x1, y0); context.lineTo(x1, y1); }
+    if (!occupied.has(key(x, y - 1))) { context.moveTo(x1, y1); context.lineTo(x0, y1); }
+    if (!occupied.has(key(x - 1, y))) { context.moveTo(x0, y1); context.lineTo(x0, y0); }
+  }
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  context.setLineDash([6, 4]);
+  context.strokeStyle = "rgba(8, 22, 30, 0.95)";
+  context.lineWidth = 6;
+  context.stroke();
+  context.strokeStyle = "#55e6ff";
+  context.lineWidth = 3;
+  context.stroke();
+  context.restore();
+}
+
 function drawAdstarRoutes(context, frame, attackerIndex, opacity, ox, scale, py) {
   if (!frame?.robots) return;
   const paths =
@@ -28,8 +159,10 @@ function drawAdstarRoutes(context, frame, attackerIndex, opacity, ox, scale, py)
     });
     context.setLineDash([2, 7]);
     context.lineCap = "round";
-    context.strokeStyle = robotAllianceColor(frame, robot, attackerIndex);
-    context.lineWidth = 3;
+    // AD* paths are navigation waypoints, not the controller's selected fuel
+    // target. Draw them as thin neutral gray to keep the target overlays clear.
+    context.strokeStyle = "#a9b5c0";
+    context.lineWidth = 2;
     context.stroke();
     context.restore();
   }
@@ -227,8 +360,53 @@ export function renderField({
       playbackTask === "defense" || playbackTask === "adstar_attacker_defense",
     attackerIndex = defensePlayback ? 1 : 0,
     defenderIndex = 1 - attackerIndex;
-  drawAdstarRoutes(fx, f, attackerIndex, 1, ox, s, py);
-
+  const auditedRobot = Number(elements.auditRobot?.value);
+  const observer = f.robots?.[auditedRobot];
+  const fov = Number(f.camera_layout?.horizontal_fov_degrees || 120);
+  // This replay's camera assumption is capped at 6 m. Clamp old cached
+  // playback frames (which may still report the prior 18 m sensor range).
+  const range = Math.min(Number(f.perception_range) || 6, 6);
+  if (observer && Number.isFinite(fov) && Number.isFinite(range) && range > 0) {
+    const cx = ox + observer[0] * s, cy = py(observer[1]);
+    fx.save();
+    // Keep the finite camera footprint inside the playable field. A 6 m
+    // radius is wider than the field, so otherwise the wedges look unbounded.
+    fx.beginPath();
+    fx.rect(ox, oy, world.length * s, world.width * s);
+    fx.clip();
+    // Opposed camera pairs: one looks toward the intake, one toward the rear.
+    // In this top-down view both cameras are shown as 120° horizontal wedges.
+    for (const heading of [observer[2], observer[2] + Math.PI]) {
+      const half = Math.min(180, Math.max(0, fov)) * Math.PI / 360;
+      const start = -heading - half, end = -heading + half;
+      fx.beginPath(); fx.moveTo(cx, cy); fx.arc(cx, cy, range * s, start, end); fx.closePath();
+      fx.fillStyle = "rgba(96, 210, 255, 0.08)"; fx.fill();
+      fx.strokeStyle = "rgba(96, 210, 255, 0.72)"; fx.lineWidth = 1.5;
+      fx.setLineDash([5, 5]); fx.stroke();
+    }
+    fx.restore();
+    fx.save();
+    fx.fillStyle = "#9fe9ff";
+    fx.font = "bold 10px system-ui";
+    fx.textAlign = "left";
+    fx.fillText(`Camera FOV · max ${range.toFixed(0)} m`, ox + 8, oy + 34);
+    fx.restore();
+  }
+  const detectedFuel = f.robot_detected_fuel?.[auditedRobot] || [];
+  const fuelHistory = f.robot_fuel_history?.[auditedRobot] || [];
+  const historyTimeout = Number(f.perception_track_timeout_s) || 2;
+  const detectedRobot=f.robot_detected_opponents?.[auditedRobot];
+  if (observer && detectedRobot) {
+    const x=ox+detectedRobot[0]*s, y=py(detectedRobot[1]);
+    fx.save(); fx.strokeStyle="#ff70d5"; fx.lineWidth=2.5;
+    fx.setLineDash([6,4]); fx.beginPath(); fx.arc(x,y,13,0,Math.PI*2); fx.stroke();
+    fx.setLineDash([]); fx.fillStyle="#ffc5ee"; fx.font="bold 10px system-ui";
+    fx.textAlign="center"; fx.fillText("DETECTED ROBOT",x,y-18); fx.restore();
+  }
+  const auditedTarget = f.robot_targets?.[auditedRobot];
+  const auditedFuel = f.robot_fuel_targets?.[auditedRobot];
+  const auditedRouteGoal = f.robot_route_goals?.[auditedRobot];
+  const auditedPose = f.robots?.[auditedRobot];
   if (Array.isArray(f.hub_centers)) {
     for (let i = 0; i < f.hub_centers.length; i++) {
       const hub = f.hub_centers[i],
@@ -297,10 +475,26 @@ export function renderField({
       hopperLoads[owner]++;
   }
   const scores = Array.isArray(f.fuel_score_count) ? f.fuel_score_count : [];
-  elements.redScore.textContent = Number.isFinite(Number(scores[0]))
-    ? integer(scores[0]) : "—";
-  elements.blueScore.textContent = Number.isFinite(Number(scores[1]))
-    ? integer(scores[1]) : "—";
+  if (f.behavior_mode?.startsWith("collect")) {
+    const acquisitionCount=Array.isArray(f.fuel_acquisition_count)
+      ? f.fuel_acquisition_count[0] : f.fuel_acquisition_count;
+    const collected = Number(acquisitionCount);
+    elements.redScoreLabel.textContent = "Collected";
+    elements.redScore.textContent = Number.isFinite(collected) ? integer(collected) : "—";
+    elements.redScore.setAttribute("aria-label", "FUEL balls collected");
+    elements.blueScoreLabel.textContent = "HUB";
+    elements.blueScore.textContent = f.hub_active?.[0] ? "Active" : "Inactive";
+    elements.blueScore.setAttribute("aria-label", "Red HUB state");
+  } else {
+    elements.redScoreLabel.textContent = "Red";
+    elements.redScore.textContent = Number.isFinite(Number(scores[0]))
+      ? integer(scores[0]) : "—";
+    elements.redScore.setAttribute("aria-label", "Red score");
+    elements.blueScoreLabel.textContent = "Blue";
+    elements.blueScore.textContent = Number.isFinite(Number(scores[1]))
+      ? integer(scores[1]) : "—";
+    elements.blueScore.setAttribute("aria-label", "Blue score");
+  }
   const elapsed = Number(f.match_elapsed);
   if (Number.isFinite(elapsed)) {
     const seconds = Math.max(0, Math.floor(elapsed));
@@ -321,11 +515,25 @@ export function renderField({
     if (!elements.showFuel.checked) continue;
     fx.beginPath();
     fx.arc(ox + piece[0] * s, py(piece[1]), held ? 5.2 : 4.4, 0, Math.PI * 2);
-    fx.fillStyle = owner < 0 ? "#ffd84d" : robotAllianceColor(f, owner);
+    fx.fillStyle = "#8a949c";
     fx.fill();
-    fx.strokeStyle = "#18222a";
-    fx.lineWidth = 1.5;
+    fx.strokeStyle = held ? robotAllianceColor(f, owner) : "#26313a";
+    fx.lineWidth = held ? 2 : 1.5;
     fx.stroke();
+  }
+  if (observer && elements.showFuel.checked) {
+    for (const [x, y, ageValue] of fuelHistory) {
+      const age = Number(ageValue);
+      if (!Number.isFinite(age) || age < 0 || age >= historyTimeout) continue;
+      drawDottedFuel(fx, ox + x * s, py(y), Math.max(0.08, 1 - age / historyTimeout));
+    }
+    for (const point of detectedFuel) {
+      drawDottedFuel(fx, ox + point[0] * s, py(point[1]));
+    }
+  }
+  if (elements.showClusterBoundary?.checked && observer && Array.isArray(auditedFuel)) {
+    const targetCluster = targetFuelCluster(f, auditedRobot, auditedFuel, world);
+    drawTargetClusterBoundary(fx, targetCluster, ox, s, py);
   }
   elements.gameState.textContent =
     `FUEL in frame: ${pieces.length} active · loose ${loose} · held Red ${heldRed} / Blue ${heldBlue}${f.match_remaining != null ? ` · ${Number(f.match_remaining).toFixed(1)} s remaining` : ""}`;
@@ -550,7 +758,9 @@ export function renderField({
       else if (action === 6) {
         const deterministicOffense = f.robot_control_modes?.[k] === "deterministic" &&
           f.robot_roles?.[k] === "offense";
-        behavior = hopperLoads[k] > 0 || !deterministicOffense ? "F" : "E";
+        behavior = f.behavior_mode?.startsWith("collect")
+          ? "C"
+          : hopperLoads[k] > 0 || !deterministicOffense ? "F" : "E";
       }
     }
     if (behavior) {
@@ -579,6 +789,34 @@ export function renderField({
     fx.stroke();
     fx.restore();
   });
+  // Put route overlays above gamepieces and robot bodies, with dark halos to
+  // preserve contrast where a route crosses a dense FUEL cluster.
+  drawAdstarRoutes(fx, f, attackerIndex, 1, ox, s, py);
+  if (auditedPose && (Array.isArray(auditedFuel) || Array.isArray(auditedRouteGoal))) {
+    fx.save();
+    const mark = (point, color, radius) => {
+      if (!Array.isArray(point)) return;
+      fx.beginPath();
+      fx.arc(ox + point[0] * s, py(point[1]), radius, 0, Math.PI * 2);
+      fx.strokeStyle = "#10151b"; fx.lineWidth = 6; fx.stroke();
+      fx.strokeStyle = color; fx.lineWidth = 3; fx.stroke();
+    };
+    const label = (point, text, color, dx, dy) => {
+      if (!Array.isArray(point)) return;
+      const x = ox + point[0] * s + dx, y = py(point[1]) + dy;
+      fx.beginPath(); fx.arc(x, y, 7, 0, Math.PI * 2);
+      fx.fillStyle = "#11171d"; fx.fill();
+      fx.strokeStyle = "#f2f5f5"; fx.lineWidth = 1.5; fx.stroke();
+      fx.fillStyle = color; fx.font = "bold 9px system-ui";
+      fx.textAlign = "center"; fx.textBaseline = "middle";
+      fx.fillText(text, x, y);
+    };
+    mark(auditedFuel, "#5ff0c5", 5);
+    mark(auditedRouteGoal, "#ff9d57", 9);
+    label(auditedFuel, "F", "#5ff0c5", -8, -9);
+    label(auditedRouteGoal, "A", "#ff9d57", 0, 11);
+    fx.restore();
+  }
   elements.frame.max = Math.max(0, frames.length - 1);
   elements.frame.value = index;
   elements.frameCount.textContent = frames.length

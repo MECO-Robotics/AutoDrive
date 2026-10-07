@@ -7,6 +7,12 @@ void pickup_grid_launch(const bool*, const float*, const float*, const float*,
     const float*, const bool*, int64_t*, bool*, const int16_t*, float*,
     const float*, const bool*, const bool*, const bool*, int64_t*, bool*, int,
     int, int, int, int, float, int, bool, hipStream_t);
+void pickup_all_launch(const bool*, const float*, const float*, const float*,
+    const float*, const bool*, int64_t*, bool*, const int16_t*, float*,
+    const float*, const bool*, const bool*, const bool*, const bool*,
+    const int64_t*, int64_t*, bool*, int, int, int, int, float, float, float,
+    hipStream_t);
+void possession_counts_launch(const int64_t*, int64_t*, int, int, hipStream_t);
 
 void pickup_grid(torch::Tensor active, torch::Tensor pose, torch::Tensor length,
     torch::Tensor width, torch::Tensor piece_pos, torch::Tensor piece_active,
@@ -30,6 +36,47 @@ void pickup_grid(torch::Tensor active, torch::Tensor pose, torch::Tensor length,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void pickup_all(torch::Tensor active, torch::Tensor pose, torch::Tensor length,
+    torch::Tensor width, torch::Tensor piece_pos, torch::Tensor piece_active,
+    torch::Tensor piece_owner, torch::Tensor free, torch::Tensor possible_cells,
+    torch::Tensor next_intake, torch::Tensor elapsed, torch::Tensor controlled,
+    torch::Tensor deterministic, torch::Tensor defense_role,
+    torch::Tensor hub_active, torch::Tensor capacities,
+    torch::Tensor acquired_event, torch::Tensor track_mask,
+    int64_t nx, int64_t ny, double cell_size, double alliance_depth,
+    double field_length) {
+  pickup_all_launch(active.data_ptr<bool>(), pose.data_ptr<float>(),
+      length.data_ptr<float>(), width.data_ptr<float>(),
+      piece_pos.data_ptr<float>(), piece_active.data_ptr<bool>(),
+      piece_owner.data_ptr<int64_t>(), free.data_ptr<bool>(),
+      possible_cells.data_ptr<int16_t>(), next_intake.data_ptr<float>(),
+      elapsed.data_ptr<float>(), controlled.data_ptr<bool>(),
+      deterministic.data_ptr<bool>(), defense_role.data_ptr<bool>(),
+      hub_active.data_ptr<bool>(), capacities.data_ptr<int64_t>(),
+      acquired_event.data_ptr<int64_t>(), track_mask.data_ptr<bool>(),
+      active.size(0), piece_active.size(1), static_cast<int>(nx),
+      static_cast<int>(ny), static_cast<float>(cell_size),
+      static_cast<float>(alliance_depth), static_cast<float>(field_length),
+      c10::cuda::getCurrentCUDAStream(active.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+torch::Tensor possession_counts(torch::Tensor piece_owner) {
+  TORCH_CHECK(piece_owner.is_cuda() && piece_owner.scalar_type() == at::kLong &&
+              piece_owner.dim() == 2 && piece_owner.is_contiguous(),
+              "piece_owner must be contiguous HIP int64 [world,piece]");
+  const auto worlds=piece_owner.size(0), pieces=piece_owner.size(1);
+  auto counts=torch::empty({worlds,6},piece_owner.options());
+  possession_counts_launch(piece_owner.data_ptr<int64_t>(),
+      counts.data_ptr<int64_t>(),static_cast<int>(worlds),
+      static_cast<int>(pieces),c10::cuda::getCurrentCUDAStream(piece_owner.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return counts;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pickup", &pickup_grid, "Fused spatially-filtered 3v3 FUEL pickup (HIP)");
+  m.def("pickup_all", &pickup_all, "Fused ordered six-robot FUEL pickup (HIP)");
+  m.def("possession_counts", &possession_counts,
+        "Fused six-robot piece ownership counts (HIP)");
 }

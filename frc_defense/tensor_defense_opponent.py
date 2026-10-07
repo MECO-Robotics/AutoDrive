@@ -38,7 +38,8 @@ class TensorDefenseOpponentMixin:
         bearing=torch.atan2(delta[:,1],delta[:,0])
         error=torch.atan2(torch.sin(bearing-pose[:,2]),torch.cos(bearing-pose[:,2]))
         rate=swerve_heading_rate(error,self.sim.omega_limit[:,robot],
-                                 self.sim.alpha[:,robot])
+                                 self.sim.alpha[:,robot],
+                                 self.sim.velocity[:,robot,2],self.sim.dt)
         return torch.where(intent,rate,torch.zeros_like(rate))
 
     def _adstar_target_velocity(self, waypoint, active_mask=None):

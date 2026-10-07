@@ -1,8 +1,11 @@
 """Batched device-resident grid planner for tensor simulation rollouts.
 
 The planner uses parallel Bellman sweeps on a clearance-inflated 8-connected
-grid, then follows the resulting potential with batched greedy extraction.
-It intentionally keeps all search state on the selected torch device.
+grid, then applies PathPlanner LocalADStar-style line-of-sight reduction and
+Bézier path shaping before calculating a drivetrain speed profile. The route
+search stays batched and device-resident. Path shaping is adapted from the MIT-
+licensed PathPlanner implementation:
+https://github.com/mjansen4857/pathplanner/tree/main/pathplannerlib-python/pathplannerlib/pathfinders.py
 """
 from __future__ import annotations
 
@@ -246,6 +249,9 @@ class TensorADStar:
         self.device = env.device
         self.dtype = env.sim.pose.dtype
         self.n = env.n
+        self._sim = env.sim
+        self._all_active = torch.ones((self.n,), device=self.device,
+                                      dtype=torch.bool)
         self.resolution = float(resolution)
         self.nx = int(math.ceil(env.sim.field_length / resolution))
         self.ny = int(math.ceil(env.sim.field_width / resolution))
@@ -253,6 +259,7 @@ class TensorADStar:
         self.sweeps = int(sweeps)
         self.early_convergence = bool(early_convergence)
         self.avoid_bumps = bool(avoid_bumps)
+        self.footprint_clearance = 0.
         self.length = env.sim.field_length
         self.width = env.sim.field_width
         self.steer_rate_limit=float(getattr(getattr(env.sim,"swerve",None),
@@ -302,6 +309,7 @@ class TensorADStar:
         self.last_start = torch.zeros((self.n, 2), device=self.device, dtype=self.dtype)
         self.last_goal = torch.zeros_like(self.last_start)
         self.last_heading = torch.zeros(self.n, device=self.device, dtype=self.dtype)
+        self.last_progress = torch.zeros(self.n, device=self.device, dtype=self.dtype)
         self.last_trench_alignment = torch.zeros(self.n, device=self.device,
                                                  dtype=torch.bool)
         self.last_speed_profile = torch.zeros((self.n,self.max_points),device=self.device,dtype=self.dtype)
@@ -314,7 +322,8 @@ class TensorADStar:
             extension = _hip_occupancy_extension()
             if extension is not None:
                 dynamic_tensor = self._empty_dynamic if dynamic is None else dynamic
-                grid_clearance = 0. if self.avoid_bumps else self.resolution * .72
+                grid_clearance = (0. if self.avoid_bumps else self.resolution * .72)
+                grid_clearance += self.footprint_clearance
                 return extension.blocked_grid(
                     heading.contiguous(), length.contiguous(), width.contiguous(),
                     self.x, self.y, self._boxes, self._bumps, self._extra_circles,
@@ -323,7 +332,8 @@ class TensorADStar:
         c, s = heading.cos().abs(), heading.sin().abs()
         # Narrow bump-to-wall lanes can be one grid row wide. The robot
         # footprint itself remains inflated; avoid an extra cell pad there.
-        grid_clearance=0. if self.avoid_bumps else self.resolution*.72
+        grid_clearance=(0. if self.avoid_bumps else self.resolution*.72)
+        grid_clearance += self.footprint_clearance
         ex = (length * c + width * s)[:, None, None] * .5 + grid_clearance
         ey = (length * s + width * c)[:, None, None] * .5 + grid_clearance
         blocked = ((self.xx[None] < ex) | (self.xx[None] > self.length-ex) |
@@ -336,8 +346,8 @@ class TensorADStar:
             # Oriented-rectangle SAT against each axis-aligned field collider.
             forward = dx * heading.cos()[:, None, None, None] + dy * heading.sin()[:, None, None, None]
             lateral = -dx * heading.sin()[:, None, None, None] + dy * heading.cos()[:, None, None, None]
-            sat_f = length[:, None, None, None] * .5 + self._boxes[None, :, 2, None, None] * heading.cos().abs()[:, None, None, None] + self._boxes[None, :, 3, None, None] * heading.sin().abs()[:, None, None, None]
-            sat_l = width[:, None, None, None] * .5 + self._boxes[None, :, 2, None, None] * heading.sin().abs()[:, None, None, None] + self._boxes[None, :, 3, None, None] * heading.cos().abs()[:, None, None, None]
+            sat_f = length[:, None, None, None] * .5 + self._boxes[None, :, 2, None, None] * heading.cos().abs()[:, None, None, None] + self._boxes[None, :, 3, None, None] * heading.sin().abs()[:, None, None, None] + grid_clearance
+            sat_l = width[:, None, None, None] * .5 + self._boxes[None, :, 2, None, None] * heading.sin().abs()[:, None, None, None] + self._boxes[None, :, 3, None, None] * heading.cos().abs()[:, None, None, None] + grid_clearance
             hit = ((dx.abs() <= hx) & (dy.abs() <= hy) &
                    (forward.abs() <= sat_f) & (lateral.abs() <= sat_l))
             blocked |= hit.any(dim=1)
@@ -372,7 +382,7 @@ class TensorADStar:
             radii=robot_obstacles[offset:end,:,2]
             dx=self.xx[None,None]-centers[...,0,None,None]
             dy=self.yy[None,None]-centers[...,1,None,None]
-            moving_radius=.5*torch.sqrt(length[offset:end].square()+width[offset:end].square())
+            moving_radius=.5*torch.minimum(length[offset:end],width[offset:end])
             clearance=moving_radius[:,None]+radii.clamp_min(0.)
             blocked[offset:end] |= (((dx.square()+dy.square()) <=
                 clearance[...,None,None].square()) &
@@ -384,37 +394,422 @@ class TensorADStar:
         iy = (points[:, 1] / self.resolution).floor().long().clamp(0, self.ny - 1)
         return ix, iy
 
-    def _shortcut_path(self, path, lengths, blocked):
-        """Greedily remove grid turns when the straight segment stays clear."""
-        if path.device.type != "cpu":
-            return path, lengths
-        for row in range(path.shape[0]):
-            count=int(lengths[row])
-            if count < 3:
+    def _footprint_path_clear(self, path, heading, length, width):
+        """Check a predicted tangent-heading trajectory against field boxes."""
+        if not self._boxes.numel():
+            return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
+        return torch.cat([
+            self._footprint_path_clear_chunk(path[offset:offset+8],
+                heading[offset:offset+8],length[offset:offset+8],width[offset:offset+8],
+                self.footprint_clearance)
+            for offset in range(0,path.shape[0],8)])
+
+    def _footprint_path_clear_chunk(self,path,heading,length,width,clearance):
+        """Bound peak temporary memory while checking batched path segments."""
+        batch_n,point_count=path.shape[:2]
+        delta=path[:,1:]-path[:,:-1]
+        segment_heading=torch.atan2(delta[...,1],delta[...,0])
+        headings=torch.cat((heading[:,None],segment_heading),-1)
+        heading_delta=torch.atan2(torch.sin(headings[:,1:]-headings[:,:-1]),
+                                  torch.cos(headings[:,1:]-headings[:,:-1]))
+        # Keep both translation and corner rotation increments below 2 cm.
+        outer=.5*torch.sqrt(length.square()+width.square())
+        steps=torch.ceil(torch.maximum(delta.norm(dim=-1),
+                    heading_delta.abs()*outer[:,None])/.02).long().clamp_min(1)
+        sample_index=torch.arange(1,65,device=path.device,dtype=path.dtype)
+        fraction=sample_index[None,None,:]/steps.clamp_max(64)[...,None].to(path.dtype)
+        positions=(path[:,:-1,None,:]+delta[:,:,None,:]*fraction[...,None])
+        angles=(headings[:,:-1,None]+heading_delta[:,:,None]*fraction)
+        valid_sample=sample_index[None,None,:]<=steps.clamp_max(64)[...,None]
+        c,s=angles.cos(),angles.sin()
+        boxes=self._boxes
+        dx=positions[...,None,0]-boxes[None,None,None,:,0]
+        dy=positions[...,None,1]-boxes[None,None,None,:,1]
+        hx=boxes[None,None,None,:,2]; hy=boxes[None,None,None,:,3]
+        nearest_x=(dx.abs()-hx).clamp_min(0.)
+        nearest_y=(dy.abs()-hy).clamp_min(0.)
+        separation=torch.sqrt(nearest_x.square()+nearest_y.square())
+        robot_outer=.5*torch.sqrt(length.square()+width.square())
+        box_outer=torch.sqrt(hx.square()+hy.square())
+        broad_clear=separation>robot_outer[:,None,None,None]+box_outer+clearance
+        robot_inner=.5*torch.minimum(length,width)
+        definite_hit=separation<=robot_inner[:,None,None,None]+clearance
+
+        ambiguous=~broad_clear&~definite_hit
+        hit=definite_hit.clone()
+        capturing=(path.device.type=="cuda" and
+                   torch.cuda.is_current_stream_capturing())
+        if capturing:
+            hl=length[:,None,None,None]*.5; hw=width[:,None,None,None]*.5
+            signed=torch.stack((dx,dy,dx*c[...,None]+dy*s[...,None],
+                                -dx*s[...,None]+dy*c[...,None]),-1)
+            robot_radius=torch.stack((
+                (c[...,None].abs()*hl+s[...,None].abs()*hw).expand_as(signed[...,0]),
+                (s[...,None].abs()*hl+c[...,None].abs()*hw).expand_as(signed[...,0]),
+                hl.expand_as(signed[...,0]),hw.expand_as(signed[...,0])),-1)
+            box_radius=torch.stack((hx.expand_as(signed[...,0]),hy.expand_as(signed[...,0]),
+                hx*c[...,None].abs()+hy*s[...,None].abs(),
+                hx*s[...,None].abs()+hy*c[...,None].abs()),-1)
+            sat_hit=(robot_radius+box_radius-signed.abs()+clearance).amin(-1)>=0.
+            hit|=ambiguous&sat_hit
+        elif bool(ambiguous.any().item()):
+            indices=torch.nonzero(ambiguous,as_tuple=False)
+            bi,si,ti,oi=indices.unbind(-1)
+            dx_a,dy_a=dx[bi,si,ti,oi],dy[bi,si,ti,oi]
+            c_a,s_a=c[bi,si,ti],s[bi,si,ti]
+            hl_a,hw_a=length[bi]*.5,width[bi]*.5
+            hx_a,hy_a=boxes[oi,2],boxes[oi,3]
+            penetration=torch.stack((
+                c_a.abs()*hl_a+s_a.abs()*hw_a+hx_a-dx_a.abs(),
+                s_a.abs()*hl_a+c_a.abs()*hw_a+hy_a-dy_a.abs(),
+                hl_a+hx_a*c_a.abs()+hy_a*s_a.abs()-
+                    (dx_a*c_a+dy_a*s_a).abs(),
+                hw_a+hx_a*s_a.abs()+hy_a*c_a.abs()-
+                    (-dx_a*s_a+dy_a*c_a).abs()),-1) + clearance
+            hit[bi,si,ti,oi]=penetration.amin(-1)>=0.
+        path_hit=(hit&valid_sample[...,None]).any(dim=(1,2,3))
+        ex=.5*(length[:,None,None]*c.abs()+width[:,None,None]*s.abs())
+        ey=.5*(length[:,None,None]*s.abs()+width[:,None,None]*c.abs())
+        outside=((positions[...,0]<ex)|(positions[...,0]>self.length-ex)|
+                 (positions[...,1]<ey)|(positions[...,1]>self.width-ey))
+        wall_hit=(outside&valid_sample).any(dim=(1,2))
+        return ~(path_hit|wall_hit)
+
+    def _repair_paths_locally(self,path,lengths,heading,length,width,blocked,
+                              speed,acceleration):
+        """Use the existing local SE(2) repair only for failed route rows."""
+        from .adstar import ADStarPlanner
+
+        repaired=path.clone()
+        failed=torch.nonzero(lengths>1,as_tuple=False).flatten().tolist()
+        if not failed:
+            return repaired
+        boxes=self._boxes.detach().cpu().tolist()
+        omega=getattr(self._sim,"omega_limit",None)
+        alpha=getattr(self._sim,"alpha",None)
+        def row_limit(values,row,default):
+            if values is None:
+                return default
+            flat=values.reshape(-1)
+            if flat.numel()==path.shape[0]:
+                index=row
+            else:
+                pose=getattr(self._sim,"pose",None)
+                robots=(int(pose.shape[1]) if pose is not None and pose.ndim>=2
+                        else 1)
+                index=min(row//max(robots,1),flat.numel()-1)
+            value=flat[index]
+            if value.ndim:
+                value=value.max()
+            return float(value.item())
+        for row in failed:
+            route_length=int(lengths[row].item())
+            points=path[row,:route_length].detach().cpu().tolist()
+            colliders=list(boxes)
+            planner=ADStarPlanner(self.length,self.width,colliders,
+                resolution=self.resolution,robot_length=float(length[row].item()),
+                robot_width=float(width[row].item()),
+                robot_heading=float(heading[row].item()),
+                max_speed=float(speed[row].item()) if speed is not None else 4.8,
+                max_acceleration=(float(acceleration[row].item())
+                                  if acceleration is not None else 8.),
+                max_angular_speed=row_limit(omega,row,8.),
+                max_angular_acceleration=row_limit(alpha,row,18.))
+            sim_velocity=getattr(self._sim,"velocity",None)
+            if sim_velocity is not None and sim_velocity.reshape(-1,3).shape[0]==path.shape[0]:
+                current=sim_velocity.reshape(-1,3)[row]
+            elif sim_velocity is not None:
+                world=min(row,sim_velocity.shape[0]-1)
+                nearest=(self._sim.pose[world,:,:2]-path[row,0]).square().sum(-1).argmin()
+                current=sim_velocity[world,nearest]
+            else:
+                current=None
+            initial_velocity=((float(current[0].item()),float(current[1].item()))
+                              if current is not None else (0.,0.))
+            initial_angular_velocity=(float(current[2].item())
+                                      if current is not None else 0.)
+            candidate=planner._finalize_path(
+                points,initial_velocity,initial_angular_velocity)
+            if len(candidate)<2:
+                repaired[row]=path[row,0]
                 continue
-            source=path[row,:count].clone()
-            result=[source[0]]
-            anchor=0
-            while anchor < count-1:
-                chosen=anchor+1
-                for candidate in range(count-1,anchor+1,-1):
-                    a,b=source[anchor],source[candidate]
-                    steps=max(1,int(torch.maximum((b[0]-a[0]).abs(),
-                        (b[1]-a[1]).abs()).item()/(self.resolution*.5))+1)
-                    t=torch.arange(1,steps,device=path.device,dtype=path.dtype)/steps
-                    points=a[None]+(b-a)[None]*t[:,None]
-                    ix,iy=self._indices(points)
-                    if not bool(blocked[row,ix,iy].any()):
-                        chosen=candidate
-                        break
-                result.append(source[chosen])
-                anchor=chosen
-            new_count=len(result)
-            path[row,0]=result[0]
-            path[row,1:new_count]=torch.stack(result[1:])
-            path[row,new_count:]=result[-1]
-            lengths[row]=new_count
+            stations=[0.]
+            for a,b in zip(candidate,candidate[1:]):
+                stations.append(stations[-1]+math.hypot(b[0]-a[0],b[1]-a[1]))
+            total=stations[-1]
+            if total<=1.e-8:
+                repaired[row]=path[row,0]
+                continue
+            sampled=[]; segment=0
+            for i in range(path.shape[1]):
+                target=total*i/(path.shape[1]-1)
+                while segment<len(stations)-2 and stations[segment+1]<target:
+                    segment+=1
+                span=max(stations[segment+1]-stations[segment],1.e-8)
+                t=(target-stations[segment])/span
+                sampled.append((candidate[segment][0]+(candidate[segment+1][0]-candidate[segment][0])*t,
+                                candidate[segment][1]+(candidate[segment+1][1]-candidate[segment][1])*t))
+            repaired[row]=torch.tensor(sampled,device=path.device,dtype=path.dtype)
+        return repaired
+
+    def _shortcut_path(self, path, lengths, blocked, heading, length, width,
+                       speed=None, acceleration=None):
+        """Apply PathPlanner's LOS simplification and Bézier corner smoothing.
+
+        Keep normal route operations batched; only failed footprint checks
+        enter the host-side local repair path.
+        """
+        batch_n, point_count = path.shape[:2]
+        source=path.clone()
+        simplified=torch.zeros_like(path)
+        simplified[:,0]=source[:,0]
+        simple_length=(lengths>0).long()
+        anchor_index=torch.zeros_like(lengths)
+        sample_count=max(2,int(math.ceil(math.hypot(self.length,self.width)/
+                                         (self.resolution*.5)))+1)
+        sample_index=torch.arange(1,sample_count+1,device=path.device)
+        blocked_flat=blocked.reshape(batch_n,-1)
+
+        # PathPlanner appends a grid point only when the last retained point
+        # cannot see the following point through free cells.
+        for index in range(1,point_count-1):
+            active=index < (lengths-1)
+            anchor=source.gather(1,anchor_index[:,None,None].expand(-1,1,2)).squeeze(1)
+            endpoint=source[:,index+1]
+            delta=endpoint-anchor
+            steps=torch.ceil(torch.maximum(delta[:,0].abs(),delta[:,1].abs())/
+                             (self.resolution*.5)).long().clamp(1,sample_count)
+            fraction=(sample_index[None].to(path.dtype)/steps[:,None].to(path.dtype))
+            points=anchor[:,None,:]+delta[:,None,:]*fraction[:,:,None]
+            ix=(points[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+            iy=(points[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+            cell=blocked_flat.gather(1,(ix*self.ny+iy).reshape(batch_n,-1)).view(
+                batch_n,sample_count)
+            line_blocked=(cell & (sample_index[None]<=steps[:,None])).any(-1)
+            append=active & line_blocked
+            slot=simple_length.clamp_max(point_count-1)
+            simplified.scatter_(1,slot[:,None,None].expand(-1,1,2),
+                                torch.where(append[:,None],source[:,index],
+                                            torch.zeros_like(source[:,index]))[:,None])
+            anchor_index=torch.where(append,torch.full_like(anchor_index,index),anchor_index)
+            simple_length+=append.long()
+
+        final_index=(lengths-1).clamp_min(0)
+        final=source.gather(1,final_index[:,None,None].expand(-1,1,2)).squeeze(1)
+        has_route=lengths>1
+        simplified.scatter_(1,simple_length.clamp_max(point_count-1)[:,None,None].expand(-1,1,2),
+                            torch.where(has_route[:,None],final,torch.zeros_like(final))[:,None])
+        simple_length+=has_route.long()
+        simple_length=torch.where(lengths>0,simple_length,lengths)
+        simple_length=torch.where(has_route,simple_length,torch.ones_like(simple_length))
+        simple_length=simple_length.clamp_max(point_count)
+        simple_last=simplified.gather(
+            1,(simple_length-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
+        pad_index=torch.arange(point_count,device=path.device)[None]
+        simplified=torch.where((pad_index>=simple_length[:,None])[:,:,None],
+                               simple_last[:,None,:],simplified)
+
+        # PathPlanner converts each corner to an incoming/outgoing pose pair.
+        pose_count=torch.where(has_route,2*simple_length-2,torch.ones_like(simple_length))
+        pose_slots=2*point_count-2
+        poses=torch.zeros((batch_n,pose_slots,2),device=path.device,dtype=path.dtype)
+        headings=torch.zeros((batch_n,pose_slots),device=path.device,dtype=path.dtype)
+        poses[:,0]=simplified[:,0]
+        first_delta=simplified[:,1]-simplified[:,0]
+        first_heading=torch.atan2(first_delta[:,1],first_delta[:,0])
+        headings[:,0]=first_heading
+        if point_count>2:
+            previous=simplified[:,:-2]
+            corner=simplified[:,1:-1]
+            following=simplified[:,2:]
+            incoming=corner-previous
+            outgoing=following-corner
+            corner_slots=torch.arange(1,point_count-1,device=path.device)
+            valid_corner=corner_slots[None] < (simple_length[:,None]-1)
+            incoming_heading=torch.atan2(incoming[...,1],incoming[...,0])
+            outgoing_heading=torch.atan2(outgoing[...,1],outgoing[...,0])
+            incoming_anchor=previous+.8*incoming
+            outgoing_anchor=corner+.2*outgoing
+            odd_slots=(2*corner_slots-1)[None,:,None].expand(batch_n,-1,2)
+            even_slots=(2*corner_slots)[None,:,None].expand(batch_n,-1,2)
+            poses.scatter_(1,odd_slots,torch.where(valid_corner[...,None],incoming_anchor,
+                                                   simple_last[:,None,:]))
+            poses.scatter_(1,even_slots,torch.where(valid_corner[...,None],outgoing_anchor,
+                                                    simple_last[:,None,:]))
+            headings.scatter_(1,(2*corner_slots-1)[None].expand(batch_n,-1),
+                              torch.where(valid_corner,incoming_heading,first_heading[:,None]))
+            headings.scatter_(1,(2*corner_slots)[None].expand(batch_n,-1),
+                              torch.where(valid_corner,outgoing_heading,first_heading[:,None]))
+        previous_index=(simple_length-2).clamp_min(0)
+        previous=simplified.gather(1,previous_index[:,None,None].expand(-1,1,2)).squeeze(1)
+        final_delta=simple_last-previous
+        final_heading=torch.atan2(final_delta[:,1],final_delta[:,0])
+        end_slot=(pose_count-1).clamp_min(0)
+        poses.scatter_(1,end_slot[:,None,None].expand(-1,1,2),simple_last[:,None,:])
+        headings.scatter_(1,end_slot[:,None],final_heading[:,None])
+        pose_index=torch.arange(pose_slots,device=path.device)[None]
+        poses=torch.where((pose_index>=pose_count[:,None])[:,:,None],
+                          simple_last[:,None,:],poses)
+        headings=torch.where(pose_index>=pose_count[:,None],final_heading[:,None],headings)
+
+        # Sample PathPlanner's cubic segments, validate the smoothed route
+        # against the inflated occupancy grid, and retry shorter handles when
+        # a curve clips an obstacle. This mirrors adstar.py's .4 -> .1 search.
+        curve_samples=8
+        t=torch.arange(1,curve_samples+1,device=path.device,dtype=path.dtype)/curve_samples
+        segment_delta=poses[:,1:]-poses[:,:-1]
+        segment_distance=segment_delta.norm(dim=-1)
+        unit_heading=torch.stack((headings.cos(),headings.sin()),-1)
+        curve_count=(pose_count-1).clamp_min(0)
+        segment_index=torch.arange(pose_slots-1,device=path.device)[None]
+        valid_segment=segment_index<curve_count[:,None]
+        p0=poses[:,:-1]
+        p3=poses[:,1:]
+        resolved=torch.zeros((batch_n,),device=path.device,dtype=torch.bool)
+
+        def resample(points, point_lengths):
+            delta=points[:,1:]-points[:,:-1]
+            distance=delta.norm(dim=-1)
+            index=torch.arange(points.shape[1]-1,device=path.device)[None]
+            distance=torch.where(index<(point_lengths-1)[:,None],distance,0.)
+            station=torch.cat((torch.zeros((batch_n,1),device=path.device,dtype=path.dtype),
+                               distance.cumsum(-1)),-1)
+            total=station[:,-1]
+            target=total[:,None]*torch.linspace(0.,1.,point_count,device=path.device,
+                                                dtype=path.dtype)[None]
+            hi=torch.searchsorted(station.contiguous(),target.contiguous(),right=True).clamp(
+                1,points.shape[1]-1)
+            lo=hi-1
+            a=station.gather(1,lo); b=station.gather(1,hi)
+            fraction=(target-a)/(b-a).clamp_min(1.e-8)
+            first=points.gather(1,lo[:,:,None].expand(-1,-1,2))
+            second=points.gather(1,hi[:,:,None].expand(-1,-1,2))
+            sampled=first+(second-first)*fraction[:,:,None]
+            return sampled,total
+
+        # The unsmoothed LOS polyline is the safe fallback, also sampled at
+        # equal arc-length spacing so route tracking remains well conditioned.
+        line_path,_=resample(simplified,simple_length)
+        line_ix=(line_path[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+        line_iy=(line_path[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+        line_cells=blocked_flat.gather(1,(line_ix*self.ny+line_iy).reshape(batch_n,-1)).view(
+            batch_n,point_count)
+        line_clear=~line_cells.any(-1)
+        line_clear &= self._footprint_path_clear(line_path,heading,length,width)
+        raw_path,_=resample(source,lengths.clamp_min(1))
+        # Keep the lattice route as a fallback when the denser, equal-arc
+        # resampling lands in an adjacent inflated grid cell. The route kernel
+        # already checked its lattice segments against occupancy; rechecking
+        # sampled points can reject a valid path at cell boundaries. Retain
+        # the continuous chassis sweep check here so field geometry remains
+        # the final safety constraint.
+        raw_clear=self._footprint_path_clear(raw_path,heading,length,width)
+        fallback=torch.where(line_clear[:,None,None],line_path,
+                             torch.where(raw_clear[:,None,None],raw_path,
+                                         source[:,0:1].expand(-1,point_count,-1)))
+        selected_curve=torch.where(has_route[:,None,None],fallback,
+                                   source[:,0:1].expand(-1,point_count,-1))
+        resolved=~has_route
+        for control_factor in (.4,.28,.18,.1,0.):
+            next_control=p0+unit_heading[:,:-1]*(control_factor*segment_distance)[...,None]
+            prev_control=p3-unit_heading[:,1:]*(control_factor*segment_distance)[...,None]
+            tt=t[None,None,:,None]
+            u=1.-tt
+            curve=(u.pow(3)*p0[:,:,None,:] + 3*u.square()*tt*next_control[:,:,None,:] +
+                   3*u*tt.square()*prev_control[:,:,None,:] + tt.pow(3)*p3[:,:,None,:])
+            curve=torch.where(valid_segment[:,:,None,None],curve,
+                              simple_last[:,None,None,:])
+            curve=torch.cat((poses[:,:1],curve.reshape(batch_n,-1,2)),1)
+            curve_length=1+curve_count*curve_samples
+            curve_end=curve.gather(1,(curve_length-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
+            curve_index=torch.arange(curve.shape[1],device=path.device)[None]
+            curve=torch.where((curve_index>=curve_length[:,None])[:,:,None],
+                              curve_end[:,None,:],curve)
+            curve_ix=(curve[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+            curve_iy=(curve[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+            curve_cells=blocked_flat.gather(
+                1,(curve_ix*self.ny+curve_iy).reshape(batch_n,-1)).view(batch_n,-1)
+            curve_valid=torch.arange(curve.shape[1],device=path.device)[None] < curve_length[:,None]
+            curve_clear=~(curve_cells & curve_valid).any(-1)
+            sampled,_=resample(curve,curve_length)
+            ix=(sampled[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+            iy=(sampled[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+            cells=blocked_flat.gather(1,(ix*self.ny+iy).reshape(batch_n,-1)).view(
+                batch_n,point_count)
+            clear=curve_clear & ~cells.any(-1)
+            clear &= self._footprint_path_clear(sampled,heading,length,width)
+            use=has_route & ~resolved & clear
+            selected_curve=torch.where(use[:,None,None],sampled,selected_curve)
+            resolved |= use
+
+        selected_curve=torch.where(has_route[:,None,None],selected_curve,
+                                   source[:,0:1].expand(-1,point_count,-1))
+        unresolved=has_route&~resolved&~line_clear&~raw_clear
+        can_repair=(path.device.type=="cpu" or
+                    not torch.cuda.is_current_stream_capturing())
+        if can_repair and bool(unresolved.any().item()):
+            repair_source=source.clone()
+            repair_lengths=torch.where(unresolved,lengths,torch.ones_like(lengths))
+            repaired=self._repair_paths_locally(
+                repair_source,repair_lengths,heading,length,width,blocked,speed,acceleration)
+            repair_delta=repaired[:,1:]-repaired[:,:-1]
+            repair_t=torch.arange(1,9,device=path.device,dtype=path.dtype)/8
+            dense_repair=(repaired[:,:-1,None]+repair_delta[:,:,None]*repair_t[None,None,:,None])
+            dense_repair=torch.cat((repaired[:,:1],dense_repair.reshape(batch_n,-1,2)),1)
+            rx=(dense_repair[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+            ry=(dense_repair[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+            repaired_clear=self._footprint_path_clear(
+                repaired,heading,length,width)
+            selected_curve=torch.where((unresolved&repaired_clear)[:,None,None],
+                                       repaired,selected_curve)
+            failed=unresolved&~repaired_clear
+            selected_curve=torch.where(failed[:,None,None],
+                source[:,0:1].expand(-1,point_count,-1),selected_curve)
+        # Keep a single-point route as a stop command; valid multi-point routes
+        # use all slots after resampling their PathPlanner-style spline.
+        out_lengths=torch.where(has_route,torch.full_like(lengths,point_count),
+                                torch.where(lengths>0,torch.ones_like(lengths),lengths))
+        out_lengths=torch.where(lengths>0,out_lengths,torch.zeros_like(out_lengths))
+        path.copy_(selected_curve)
+        lengths.copy_(out_lengths)
         return path,lengths
+
+    def _speed_profile(self, path, lengths, speed, lateral_friction, acceleration):
+        """PathPlanner-style curvature caps and backward braking envelope."""
+        batch_n=path.shape[0]
+        delta=path[:,1:]-path[:,:-1]
+        distance=delta.norm(dim=-1)
+        direction=delta/distance[...,None].clamp_min(1.e-6)
+        cross=direction[:,:-1,0]*direction[:,1:,1]-direction[:,:-1,1]*direction[:,1:,0]
+        dot=(direction[:,:-1]*direction[:,1:]).sum(-1)
+        turn=torch.atan2(cross,dot).abs()
+        arc=.5*(distance[:,:-1]+distance[:,1:]).clamp_min(1.e-4)
+        curvature=turn/arc
+        point_curve=torch.zeros((batch_n,path.shape[1]),device=self.device,dtype=self.dtype)
+        point_curve[:,1:-1]=curvature
+        mu=(lateral_friction if lateral_friction is not None else
+            torch.full((batch_n,),1.2,device=self.device,dtype=self.dtype)).clamp_min(.1)
+        accel=(acceleration if acceleration is not None else
+               torch.full((batch_n,),8.,device=self.device,dtype=self.dtype)).clamp_min(.2)
+        vcap=(speed if speed is not None else
+              torch.full((batch_n,),4.8,device=self.device,dtype=self.dtype)).clamp_min(.1)[:,None]
+        lateral=(.65*mu[:,None]*9.81/point_curve.clamp_min(1.e-6)).sqrt()
+        steer=self.steer_rate_limit/point_curve.clamp_min(1.e-6)
+        caps=torch.minimum(vcap,torch.minimum(lateral,steer))
+        caps=torch.where(point_curve>1.e-6,caps,vcap)
+        endpoint=(lengths-1).clamp_min(0)[:,None]
+        endpoint_mask=(torch.arange(path.shape[1],device=path.device)[None,:] == endpoint)
+        caps=torch.where(endpoint_mask,torch.zeros_like(caps),caps)
+        station=torch.cat((torch.zeros((batch_n,1),device=self.device,dtype=self.dtype),
+                           distance.cumsum(-1)),-1)
+        delta_station=station[:,None,:]-station[:,:,None]
+        indices=torch.arange(path.shape[1],device=self.device)
+        future=indices[None,None,:]>=indices[None,:,None]
+        valid=(indices[None,None,:]<lengths[:,None,None])&future
+        braking=.65*accel[:,None,None]
+        reachable=(caps[:,None,:].square()+2*braking*delta_station.clamp_min(0)).sqrt()
+        return torch.where(valid,reachable,
+                           torch.full_like(reachable,float("inf"))).amin(-1)
 
     def plan_waypoints(self, start, waypoints, waypoint_indices, heading,
                        length, width, *, lookahead=0, fallback_goal=None,
@@ -451,27 +846,39 @@ class TensorADStar:
     def plan(self, start, goal, heading, length, width, speed=None,
              defender=None, defender_velocity=None, dynamic_defender=False,
              lateral_friction=None, acceleration=None, active_mask=None,
-             robot_obstacles=None):
+             robot_obstacles=None, static_active_mask=False):
         """Plan selected worlds and return the persistent batched route state."""
         full_batch = active_mask is None
         selected = None
+        masked_full_batch = False
         if full_batch:
             batch_n = self.n
         else:
             active_mask = torch.as_tensor(active_mask, device=self.device,
                                           dtype=torch.bool).reshape(self.n)
-            selected = torch.nonzero(active_mask, as_tuple=False).flatten()
-            batch_n = selected.numel()
+            if static_active_mask:
+                # CUDA graph replay needs a fixed batch shape. Compute all six
+                # routes and mask persistent writes so inactive rows retain
+                # exactly the same cached planner state.
+                batch_n = self.n
+                masked_full_batch = True
+            else:
+                selected = torch.nonzero(active_mask, as_tuple=False).flatten()
+                batch_n = selected.numel()
         if batch_n == 0:
             return self.last_path,self.last_lengths,self.last_intercept,self.last_intercept_time
         def select_rows(value):
             if value is None:
                 return None
-            return value if full_batch else value[selected]
+            return value if (full_batch or masked_full_batch) else value[selected]
 
         def write_rows(destination, values):
             if full_batch:
                 destination.copy_(values)
+            elif masked_full_batch:
+                destination.copy_(torch.where(active_mask.reshape(
+                    (self.n,) + (1,) * (destination.ndim - 1)),
+                    values, destination))
             else:
                 destination[selected] = values
 
@@ -540,17 +947,30 @@ class TensorADStar:
             self.max_points == 72 and self.nx * self.ny <= 4096 and
             shared_memory_limit >= route_shared_bytes and blocked.is_contiguous()
         )
-        # Do not let conservative inflation trap a route's source. AD* defender
-        # targets can land on a bump while projecting an interception point;
-        # move those endpoints to the nearest reachable clearance cell.
+        # Targets can sit in a footprint-clearance strip at the field edge
+        # (notably FUEL staged inside a DEPOT). Project blocked goals to the
+        # nearest reachable cell so AD* does not command into the boundary.
         sx, sy = self._indices(start); gx, gy = self._indices(goal)
         batch = torch.arange(batch_n,device=self.device)
-        if self.avoid_bumps and not fused_route_supported:
-            blocked_goal=blocked[batch,gx,gy]
-            # Only blocked goals need projection. The dense all-row distance
-            # matrix scales as [robots, grid_cells] and can exceed a gigabyte
-            # for large PPO batches. Chunk the affected rows so peak memory is
-            # bounded while preserving the same nearest-clear-cell argmin.
+        blocked_goal=blocked[batch,gx,gy]
+        # Only blocked goals need projection. The dense all-row distance
+        # matrix scales as [robots, grid_cells] and can exceed a gigabyte
+        # for large PPO batches. Chunk the affected rows so peak memory is
+        # bounded while preserving the same nearest-clear-cell argmin.
+        if batch_n <= 64:
+            # Scenario rollouts plan only six robots. Compacting blocked rows
+            # with nonzero forces a device-to-host sync on every replan; the
+            # dense six-row projection is small and keeps the decision on GPU.
+            row_goal_distance=(
+                (self.xx.reshape(1,-1)-goal[:,0,None]).square()+
+                (self.yy.reshape(1,-1)-goal[:,1,None]).square())
+            row_goal_distance.masked_fill_(blocked.flatten(1),float("inf"))
+            nearest=row_goal_distance.argmin(-1)
+            projected=torch.stack((self.x[nearest//self.ny],
+                                   self.y[nearest%self.ny]),-1)
+            goal=torch.where(blocked_goal[:,None],projected,goal)
+            gx,gy=self._indices(goal)
+        else:
             blocked_rows=torch.nonzero(blocked_goal,as_tuple=False).flatten()
             if blocked_rows.numel():
                 goal=goal.clone()
@@ -567,21 +987,21 @@ class TensorADStar:
                     projected=torch.stack((self.x[nearest_x],self.y[nearest_y]),-1)
                     goal[rows]=projected
                 gx,gy=self._indices(goal)
-        if not fused_route_supported:
-            blocked[batch, sx, sy] = False
-            blocked[batch, gx, gy] = False
+        blocked[batch,sx,sy]=False
+        blocked[batch,gx,gy]=False
         # Both the HIP kernels and the Torch fallback broadcast this one
         # field-static grid across worlds without constructing [B, nx, ny].
         bump_cost = self._bump_cost
-        inf = torch.full((batch_n, self.nx, self.ny), 1.e6,
-                         device=self.device, dtype=self.dtype)
-        value = torch.where(blocked, inf, inf.clone())
-        value[batch, gx, gy] = torch.zeros_like(gx, dtype=self.dtype)
+        if not fused_route_supported:
+            inf = torch.full((batch_n, self.nx, self.ny), 1.e6,
+                             device=self.device, dtype=self.dtype)
+            value = torch.where(blocked, inf, inf.clone())
+            value[batch, gx, gy] = torch.zeros_like(gx, dtype=self.dtype)
         # Jacobi Bellman sweeps are parallel across both cells and worlds.
         import torch.nn.functional as F
         if fused_route_supported:
             speed_profile_limit = (speed.reshape(batch_n) if speed is not None else
-                                   torch.full((batch_n,), 4.5, device=self.device, dtype=self.dtype))
+                                   torch.full((batch_n,), 4.8, device=self.device, dtype=self.dtype))
             friction_profile = (lateral_friction.reshape(batch_n) if lateral_friction is not None else
                                 torch.full((batch_n,), 1.2, device=self.device, dtype=self.dtype))
             acceleration_profile = (acceleration.reshape(batch_n) if acceleration is not None else
@@ -589,14 +1009,20 @@ class TensorADStar:
             # The fused kernel can write the converged potential directly to
             # its persistent cache for the full-batch path. This avoids a
             # dense temporary plus a full cache copy on every replan.
-            out_value = self.potential if full_batch else torch.empty_like(value)
+            out_value = (self.potential if full_batch else
+                         torch.empty((batch_n,self.nx,self.ny),
+                                     device=self.device,dtype=self.dtype))
             out_path = torch.empty((batch_n, 72, 2), device=self.device, dtype=self.dtype)
             out_lengths = torch.empty((batch_n,), device=self.device, dtype=torch.long)
             out_profile = torch.empty((batch_n, 72), device=self.device, dtype=self.dtype)
             out_goal = torch.empty((batch_n, 2), device=self.device, dtype=self.dtype)
             checkpoints = torch.empty((batch_n,), device=self.device, dtype=torch.int32)
+            route_active = (self._all_active if full_batch else
+                            active_mask if masked_full_batch else
+                            torch.ones((batch_n,), device=self.device, dtype=torch.bool))
             hip_extension.fused_route(
-                value, blocked.contiguous(), bump_cost.contiguous(), start.contiguous(),
+                blocked.contiguous(), bump_cost.contiguous(), route_active,
+                start.contiguous(),
                 goal.contiguous(),
                 sx.contiguous(), sy.contiguous(), gx.contiguous(), gy.contiguous(),
                 speed_profile_limit.contiguous(), friction_profile.contiguous(),
@@ -604,9 +1030,23 @@ class TensorADStar:
                 out_profile, out_goal, checkpoints, self.steer_rate_limit,
                 self.sweeps, self.early_convergence,
                 self.avoid_bumps, self.resolution)
+            # The fused kernel cleanup zeroes unused path slots, while the
+            # shared Torch shortcutter expects each row to repeat its endpoint
+            # through max_points. Pad active rows before resampling; otherwise
+            # the zero tail creates a fictitious return through the origin and
+            # rejects otherwise valid routes.
+            tail=torch.arange(72,device=self.device)[None] >= out_lengths[:,None]
+            endpoint=out_path.gather(
+                1,(out_lengths-1).clamp_min(0)[:,None,None].expand(-1,1,2))
+            out_path=torch.where(tail[:,:,None],endpoint,out_path)
+            out_path,out_lengths=self._shortcut_path(
+                out_path,out_lengths,blocked,heading,length,width,speed,acceleration)
+            out_profile=self._speed_profile(
+                out_path,out_lengths,speed,lateral_friction,acceleration)
             if out_value is not self.potential:
                 write_rows(self.potential, out_value)
             write_rows(self.last_path, out_path)
+            write_rows(self.last_progress, torch.zeros_like(self.last_progress[:batch_n]))
             write_rows(self.last_lengths, out_lengths)
             write_rows(self.last_intercept, intercept)
             write_rows(self.last_intercept_time, t)
@@ -676,85 +1116,72 @@ class TensorADStar:
             if k % 16 == 0 and not bool(active.any().item()):
                 break
         write_rows(self.potential, value)
-        path,lengths=self._shortcut_path(path,lengths,blocked)
+        path,lengths=self._shortcut_path(
+            path,lengths,blocked,heading,length,width,speed,acceleration)
         write_rows(self.last_path, path)
+        write_rows(self.last_progress, torch.zeros_like(self.last_progress[:batch_n]))
         write_rows(self.last_lengths, lengths)
         write_rows(self.last_intercept, intercept)
         write_rows(self.last_intercept_time, t)
         write_rows(self.last_start, start)
         write_rows(self.last_goal, goal)
         write_rows(self.last_heading, heading)
-        # Curvature caps and backward braking pass are computed as one batched
-        # pairwise tensor operation. The resulting profile respects swerve
-        # steering rate, tire lateral acceleration, and stopping distance.
-        delta=path[:,1:]-path[:,:-1]
-        distance=delta.norm(dim=-1)
-        direction=delta/distance[...,None].clamp_min(1.e-6)
-        cross=direction[:,:-1,0]*direction[:,1:,1]-direction[:,:-1,1]*direction[:,1:,0]
-        dot=(direction[:,:-1]*direction[:,1:]).sum(-1)
-        turn=torch.atan2(cross,dot).abs()
-        arc=.5*(distance[:,:-1]+distance[:,1:]).clamp_min(1.e-4)
-        curvature=turn/arc
-        point_curve=torch.zeros((batch_n,self.max_points),device=self.device,dtype=self.dtype)
-        point_curve[:,1:-1]=curvature
-        mu=(lateral_friction if lateral_friction is not None else torch.full_like(length,1.2)).clamp_min(.1)
-        accel=(acceleration if acceleration is not None else torch.full_like(length,8.)).clamp_min(.2)
-        vcap=(speed if speed is not None else torch.full_like(length,4.5)).clamp_min(.1)[:,None]
-        lateral=(.65*mu[:,None]*9.81/point_curve.clamp_min(1.e-6)).sqrt()
-        steer=self.steer_rate_limit/point_curve.clamp_min(1.e-6)
-        caps=torch.minimum(vcap,torch.minimum(lateral,steer))
-        caps=torch.where(point_curve>1.e-6,caps,vcap)
-        caps[batch,lengths-1]=0.
-        station=torch.cat((torch.zeros((batch_n,1),device=self.device,dtype=self.dtype),distance.cumsum(-1)),-1)
-        delta_station=station[:,None,:]-station[:,:,None]
-        future=torch.arange(self.max_points,device=self.device)[None,None,:]>=torch.arange(self.max_points,device=self.device)[None,:,None]
-        valid=(torch.arange(self.max_points,device=self.device)[None,None,:]<lengths[:,None,None])&future
-        braking=.65*accel[:,None,None]
-        reachable=(caps[:,None,:].square()+2*braking*delta_station.clamp_min(0)).sqrt()
-        profile=torch.where(valid,reachable,torch.full_like(reachable,float("inf"))).amin(-1)
+        profile=self._speed_profile(path,lengths,speed,lateral_friction,acceleration)
         write_rows(self.last_speed_profile, profile)
         return self.last_path,self.last_lengths,self.last_intercept,self.last_intercept_time
 
-    def path_reference(self, position, velocity, speed_limit):
+    def path_reference(self, position, velocity, speed_limit, *, lookahead=None):
         """Batched progress projection, lookahead, and speed-aware path command."""
         path=self.last_path
-        hip_extension = (_hip_path_reference_extension() if _HIP_PATH_REFERENCE_ENABLED and
+        hip_extension = (_hip_path_reference_extension() if lookahead is None and _HIP_PATH_REFERENCE_ENABLED and
                          self.device.type == "cuda" else None)
         if (hip_extension is not None and self.max_points == 72 and
                 path.dtype == torch.float32 and
                 path.is_contiguous() and position.dtype == torch.float32 and
                 velocity.dtype == torch.float32 and speed_limit.dtype == torch.float32 and
-                self.last_goal.is_contiguous() and self.last_speed_profile.is_contiguous()):
+                self.last_goal.is_contiguous() and self.last_speed_profile.is_contiguous() and
+                self.last_progress.is_contiguous()):
             return hip_extension.path_reference(
                 path, self.last_lengths, self.last_goal, self.last_speed_profile,
-                position, velocity, speed_limit)
-        d2=(path-position[:,None,:]).square().sum(-1)
-        idx=d2.argmin(-1)
-        next_idx=(idx+1).clamp_max(self.max_points-1)
+                position, velocity, speed_limit, self.last_progress)
         batch=torch.arange(self.n,device=self.device)
-        here=path[batch,idx]
-        segments=(path[:,1:]-path[:,:-1]).norm(dim=-1)
+        segments=path[:,1:]-path[:,:-1]
+        distance=segments.norm(dim=-1)
         station=torch.cat((torch.zeros((self.n,1),device=self.device,dtype=path.dtype),
-                           segments.cumsum(-1)),-1)
-        lookahead=.7+.12*speed_limit.clamp(max=4.5)
-        target_station=station[batch,idx]+lookahead
-        path_index=torch.arange(self.max_points,device=self.device)[None]
-        target_valid=((path_index>=idx[:,None]) &
-                      (path_index<self.last_lengths[:,None]) &
-                      (station>=target_station[:,None]))
-        target_idx=torch.where(target_valid,path_index,self.max_points).amin(-1)
-        target_idx=torch.where(target_idx==self.max_points,
-                               (self.last_lengths-1).clamp_min(0),target_idx)
-        target=path[batch,target_idx]
-        # Pure-pursuit lookahead follows a curve through grid corners rather
-        # than switching direction abruptly at each 8-connected waypoint.
-        tangent=target-position
-        tangent=tangent/tangent.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+                           distance.cumsum(-1)),-1)
+        segment_index=torch.arange(self.max_points-1,device=self.device)[None,:]
+        valid=segment_index<(self.last_lengths-1)[:,None]
+        fraction=(((position[:,None,:]-path[:,:-1])*segments).sum(-1)/
+                  distance.square().clamp_min(1.e-12)).clamp(0.,1.)
+        projection=path[:,:-1]+fraction[...,None]*segments
+        squared=(projection-position[:,None,:]).square().sum(-1)
+        eligible=valid & (station[:,1:]>= (self.last_progress-.08).clamp_min(0.)[:,None])
+        squared=squared.masked_fill(~eligible,float("inf"))
+        idx=squared.argmin(-1)
+        chosen_fraction=fraction[batch,idx]
+        chosen_length=distance[batch,idx]
+        progress=station[batch,idx]+chosen_fraction*chosen_length
+        progress=torch.maximum(progress,self.last_progress).minimum(station[batch,-1])
+        projection=path[batch,idx]+chosen_fraction[:,None]*segments[batch,idx]
+        self.last_progress.copy_(progress)
+        lookahead=((.7+.12*speed_limit.clamp(max=4.5)).clamp_min(.12)
+                   if lookahead is None else
+                   torch.full_like(speed_limit,float(lookahead)))
+        target_station=(progress+lookahead).minimum(station[batch,-1])
+        target_segment=(station[:,1:]<target_station[:,None]).sum(-1).clamp_max(self.max_points-2)
+        target_distance=distance[batch,target_segment]
+        target_fraction=((target_station-station[batch,target_segment])/
+                         target_distance.clamp_min(1.e-8)).clamp(0.,1.)
+        target=path[batch,target_segment]+target_fraction[:,None]*segments[batch,target_segment]
+        tangent=segments[batch,target_segment]/target_distance[:,None].clamp_min(1.e-6)
         normal=torch.stack((-tangent[:,1],tangent[:,0]),-1)
-        cross=((position-here)*normal).sum(-1)
+        cross=((position-projection)*normal).sum(-1)
         cross_v=(velocity*normal).sum(-1)
         lateral=(-3.*cross-4.*cross_v).clamp(-.75,.75)
-        planned=self.last_speed_profile[batch,idx].clamp(max=speed_limit).clamp_min(.2)
+        target_next=(target_segment+1).clamp_max(self.max_points-1)
+        planned=(self.last_speed_profile[batch,target_segment]*(1.-target_fraction)+
+                 self.last_speed_profile[batch,target_next]*target_fraction)
+        planned=planned.clamp(max=speed_limit).clamp_min(0.)
         current=velocity.norm(dim=-1)
         target=(planned-.55*(current-planned).clamp_min(0)).clamp_min(0)
         command=tangent*target[:,None]+normal*lateral[:,None]

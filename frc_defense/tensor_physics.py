@@ -25,11 +25,21 @@ def _require_torch():
         raise RuntimeError("Tensor simulation requires PyTorch; install torch first")
 
 
-def swerve_heading_rate(error, omega_limit, angular_acceleration):
-    """Return a fast, overshoot-resistant yaw rate with a braking envelope."""
+def swerve_heading_rate(error, omega_limit, angular_acceleration,
+                        current_rate=None, control_dt=None):
+    """Return a yaw-rate target with stopping-distance and rate feedback."""
+    if control_dt is not None:
+        # Coarse playback steps cannot safely track the drivetrain's full yaw
+        # rate. Limit per-step heading change while leaving 50 Hz control alone.
+        omega_limit=torch.minimum(omega_limit,torch.full_like(omega_limit,
+                                      .6/max(float(control_dt),1e-6)))
     max_rate=torch.sqrt((2.*angular_acceleration*error.abs()).clamp_min(0.))
-    rate=torch.minimum(omega_limit,max_rate)
-    return error.sign()*rate
+    desired=error.sign()*torch.minimum(omega_limit,max_rate)
+    if current_rate is None:
+        return desired
+    # The stopping envelope alone assumes zero angular speed. Feed back the
+    # measured rate so inertia brakes the chassis before it crosses the target.
+    return (desired-1.5*(current_rate-desired)).clamp(-omega_limit,omega_limit)
 
 
 
@@ -72,12 +82,13 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
     """
     def __init__(self, num_envs=1, device="cuda", seed=0, dt=.02,
                  field_length=16.54, field_width=8.21, robot_length=.9,
-                 robot_width=.9, max_speed=4.5, max_acceleration=8.,
+                 robot_width=.9, max_speed=4.8, max_acceleration=8.,
                  max_omega=8., max_alpha=18., mass=55., bumper_friction=.65,
                  field_friction=.7, lateral_friction=1.2,
                  yaw_inertia_multiplier=1.5, current_limit=None, swerve=None,
                  num_robots=2, team_ids=None,
-                 obstacles=(), field_colliders=(), bump_regions=(), contact_iterations=3, randomize=False, **kwargs):
+                 obstacles=(), field_colliders=(), bump_regions=(), contact_iterations=3, randomize=False,
+                 field_sweep_spacing=.02, **kwargs):
         _require_torch()
         if num_envs < 1 or dt <= 0: raise ValueError("num_envs and dt must be positive")
         requested = torch.device(device)
@@ -102,11 +113,19 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.generator = torch.Generator(device=self.device).manual_seed(int(seed or 0))
         self.field_length, self.field_width = float(field_length), float(field_width)
         self.contact_iterations = max(1, int(contact_iterations))
+        self.field_sweep_spacing = float(field_sweep_spacing)
+        if not math.isfinite(self.field_sweep_spacing) or self.field_sweep_spacing <= 0:
+            raise ValueError("field_sweep_spacing must be finite and positive")
         self._fused_robot_collision_multi_hip_used = False
+        self._fused_field_collision_multi_hip_used = False
         self._fused_robot_collision_multi_hip_enabled = (
             self.num_robots == 6 and
             os.environ.get("AUTODRIVE_FUSED_ROBOT_COLLISION_6_HIP", "1") != "0" and
             self.device.type == "cuda" and torch.version.hip is not None
+        )
+        self._fused_field_collision_multi_hip_enabled = (
+            self._fused_robot_collision_multi_hip_enabled and
+            os.environ.get("AUTODRIVE_FUSED_FIELD_COLLISION_6_HIP", "1") != "0"
         )
         self.swerve = swerve or TensorSwerveParameters()
         self.randomize = bool(randomize)
@@ -359,11 +378,14 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         cmd=torch.nan_to_num(cmd)
         omega=cmd[...,2].clamp(-self.omega_limit,self.omega_limit)
         translation_speed=cmd[...,:2].norm(dim=-1).clamp_min(1e-8)
-        translation_budget=(self.speed-omega.abs()*self._module_radius).clamp_min(0.)
-        translation_scale=(translation_budget/translation_speed).clamp(max=1.)
+        # Do not subtract the worst-case rotational wheel speed from chassis
+        # translation here. Swerve desaturation below scales the four actual
+        # module velocity vectors and preserves feasible combined motion.
+        translation_scale=(self.speed/translation_speed).clamp(max=1.)
         cmd=torch.cat((cmd[...,:2]*translation_scale[...,None],omega[...,None]),-1)
         if not _active_nonempty and not bool(active_mask.any()):
             return self.state
+        field_sweep_pose=(self.pose.clone() if self.field_colliders.shape[0] else None)
         fused_swerve_pose = False
         if (self.num_robots in (2, 6) and _use_compiled_swerve and self._fused_swerve_pose_hip_enabled and
                 not self._fused_swerve_pose_hip_failed):
@@ -388,14 +410,29 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
                 self._swerve(cmd,active_mask)
             else:
                 self._swerve_eager(cmd,active_mask)
-            self.pose.copy_(torch.where(active_mask[:,None,None],
-                self.pose+self.velocity*self.dt,self.pose))
-            wrapped=torch.remainder(self.pose[...,2]+math.pi,2*math.pi)-math.pi
-            self.pose[...,2].copy_(torch.where(active_mask[:,None],wrapped,self.pose[...,2]))
+            if field_sweep_pose is None:
+                self.pose.copy_(torch.where(active_mask[:,None,None],
+                    self.pose+self.velocity*self.dt,self.pose))
+                wrapped=torch.remainder(self.pose[...,2]+math.pi,2*math.pi)-math.pi
+                self.pose[...,2].copy_(torch.where(active_mask[:,None],wrapped,self.pose[...,2]))
         self.robot_contact &= ~active_mask
         self.opponent_contact &= ~active_mask
         self.field_contact &= ~active_mask[:,None]
         self.wall_contact &= ~active_mask[:,None,None]
+        if field_sweep_pose is not None:
+            # Endpoint-only SAT misses thin field structures when a chassis
+            # crosses them in one physics tick. Integrate the solved chassis
+            # velocity in small swept increments and resolve each contact
+            # before advancing farther through the structure.
+            max_robot_radius=.5*math.hypot(
+                self._base["length"]*1.2,self._base["width"]*1.2)
+            max_motion=(self._base["speed"]*1.3+
+                        self._base["omega"]*1.3*max_robot_radius)*self.dt
+            sweep_steps=max(1,math.ceil(max_motion/self.field_sweep_spacing))
+            substep=self.dt/sweep_steps
+            self.pose.copy_(field_sweep_pose)
+            if not self._field_sweep_collision(active_mask,sweep_steps,substep):
+                self._field_sweep_torch(active_mask,sweep_steps,substep)
         fused_contacts = False
         if (self.num_robots == 2 and self._fused_contact_pipeline_hip_enabled and
                 _contact_pipeline_hip is not None):
@@ -513,6 +550,9 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         reverse=delta.abs()>math.pi/2; angle=torch.where(reverse,angle+math.pi,angle); target=torch.where(reverse,-target,target)
         angle=torch.remainder(angle+math.pi,2*math.pi)-math.pi
         delta=torch.remainder(angle-self.module_angle+math.pi,2*math.pi)-math.pi
+        # Reduce drive demand while the azimuth motor is still rotating toward
+        # its target. This avoids sideways scrub at large steering errors.
+        target*=delta.cos().clamp_min(0.)
         steer_target=(8*delta).clamp(-p.steer_rate_limit,p.steer_rate_limit)
         se=steer_target-self.module_steer_rate
         steer_current=(2*se.abs()).clamp(max=p.steer_current_limit)

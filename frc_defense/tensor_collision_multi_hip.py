@@ -87,3 +87,90 @@ def robot_contacts(sim, active_mask):
                        sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
                        sim.robot_contact, sim.opponent_contact)
     return True
+
+
+def field_contacts(sim, active_mask):
+    """Resolve six robots against field boxes in one HIP kernel."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6 or not sim.field_colliders.numel()):
+        return False
+    active = torch.as_tensor(active_mask, device=sim.device,
+                             dtype=torch.bool).reshape(sim.n).contiguous()
+    tensors = (sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
+               sim.yaw_inertia_multiplier, sim.wall_mu, sim.field_colliders,
+               active, sim.field_contact)
+    if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
+        return False
+    ext = _extension()
+    if ext is None or not hasattr(ext, "field_contacts"):
+        return False
+    ext.field_contacts(sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
+                       sim.yaw_inertia_multiplier, sim.wall_mu,
+                       sim.field_colliders, active, sim.field_contact)
+    sim.robot_contact |= sim.field_contact.any(-1)
+    return True
+
+
+def field_sweep_contacts(sim, active_mask, sweep_steps, substep_dt):
+    """Integrate and resolve a full six-robot field sweep in one HIP launch."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6 or not sim.field_colliders.numel()):
+        return False
+    active = torch.as_tensor(active_mask, device=sim.device,
+                             dtype=torch.bool).reshape(sim.n).contiguous()
+    tensors = (sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
+               sim.yaw_inertia_multiplier, sim.wall_mu, sim.field_colliders,
+               active, sim.field_contact, sim.robot_contact)
+    if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
+        return False
+    ext = _extension()
+    if ext is None or not hasattr(ext, "field_sweep_contacts"):
+        return False
+    ext.field_sweep_contacts(
+        sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
+        sim.yaw_inertia_multiplier, sim.wall_mu, sim.field_colliders,
+        active, sim.field_contact, int(sweep_steps), float(substep_dt))
+    sim.robot_contact |= sim.field_contact.any(-1)
+    return True
+
+
+def safe_score_targets(sim, score_target, robot_radius, x_min, x_max,
+                       boxes, grid_points, grid_clear):
+    """Choose the nearest legal score pose for six robots in one HIP launch."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6 or not boxes.numel()):
+        return None
+    tensors=(sim.pose,score_target,robot_radius,x_min,x_max,boxes,
+             grid_points,grid_clear)
+    if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
+        return None
+    ext=_extension()
+    if ext is None or not hasattr(ext,"safe_score_targets"):
+        return None
+    return ext.safe_score_targets(
+        sim.pose,score_target,robot_radius,x_min,x_max,boxes,
+        grid_points,grid_clear,float(sim.field_width))
+
+
+def avoid_robot_contention(sim, command, targets, active, winner, controlled,
+                           teammate_intent_knowledge):
+    """Fuse all 15 pair checks and per-robot avoidance reductions on HIP."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6):
+        return None
+    active = torch.as_tensor(active, device=sim.device,
+                             dtype=torch.bool).reshape(sim.n).contiguous()
+    tensors = (sim.pose, command, targets, sim.length, sim.width, sim.speed,
+               controlled, sim.team_ids, active, winner)
+    if any(t.device != sim.pose.device for t in tensors):
+        return None
+    command = command.contiguous()
+    targets = targets.contiguous()
+    controlled = controlled.contiguous()
+    ext = _extension()
+    if ext is None or not hasattr(ext, "avoid_robot_contention"):
+        return None
+    return ext.avoid_robot_contention(
+        sim.pose, command, targets, sim.length, sim.width, sim.speed,
+        controlled, sim.team_ids, active, winner,
+        bool(teammate_intent_knowledge))

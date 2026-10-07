@@ -38,7 +38,7 @@ class WorldState:
 class RobotParameters:
     length: float = 0.9
     width: float = 0.9
-    max_speed: float = 4.5
+    max_speed: float = 4.8
     max_acceleration: float = 8.0
     max_omega: float = 8.0
     max_alpha: float = 18.0

@@ -1,6 +1,9 @@
 """Robot, wall, obstacle, and field contact resolution for the tensor simulator."""
 from __future__ import annotations
 
+import math
+import numpy as np
+
 try:
     import torch
 except ImportError:  # Keep package imports usable without the training extra.
@@ -254,7 +257,35 @@ class TensorPhysicsCollisionMixin:
         if active_mask is None: active_mask=torch.ones(self.n,device=self.device,dtype=torch.bool)
         """Resolve the most penetrating oriented-robot/field-box pair per robot."""
         if not self.field_colliders.shape[0]: return
+        if self._fused_field_collision_multi_hip_enabled:
+            from . import tensor_collision_multi_hip
+            if tensor_collision_multi_hip.field_contacts(self,active_mask):
+                self._fused_field_collision_multi_hip_used = True
+                return
         boxes=self.field_colliders; center,half=boxes[:,:2],boxes[:,2:]
+        if self.device.type == "cpu":
+            # The chassis AABB gives a conservative broadphase for the exact
+            # OBB-vs-AABB SAT calculation below. Most swept
+            # substeps are nowhere near a field element, and the remaining
+            # substeps generally touch only one or two boxes.
+            pose=self.pose.detach().numpy()
+            theta=pose[...,2]
+            half_length=.5*self.length.detach().numpy()
+            half_width=.5*self.width.detach().numpy()
+            abs_cos=np.abs(np.cos(theta)); abs_sin=np.abs(np.sin(theta))
+            extent_x=abs_cos*half_length+abs_sin*half_width
+            extent_y=abs_sin*half_length+abs_cos*half_width
+            box_values=boxes.detach().numpy()
+            delta=np.abs(pose[:,:,:2][:,:,None,:]-box_values[None,None,:,:2])
+            possible=((delta[...,0] <= extent_x[:,:,None]+box_values[None,None,:,2]+1.e-6) &
+                      (delta[...,1] <= extent_y[:,:,None]+box_values[None,None,:,3]+1.e-6))
+            possible &= active_mask.detach().numpy()[:,None,None]
+            box_mask=possible.any(axis=(0,1))
+            if not box_mask.any():
+                return
+            if not box_mask.all():
+                boxes=boxes.index_select(0,torch.from_numpy(np.flatnonzero(box_mask)))
+                center,half=boxes[:,:2],boxes[:,2:]
         theta=self.pose[...,2]; c,s=theta.cos(),theta.sin(); ac,ass=c.abs(),s.abs()
         axes=torch.stack((torch.stack((torch.ones_like(c),torch.zeros_like(c)),-1),
             torch.stack((torch.zeros_like(c),torch.ones_like(c)),-1),
@@ -302,3 +333,20 @@ class TensorPhysicsCollisionMixin:
         self._apply_static_contact_impulse(point,normal,contact,self.wall_mu[:,None])
         self.robot_contact|=contact.any(-1)
         self.field_contact|=contact
+
+    def _field_sweep_collision(self,active_mask,sweep_steps,substep_dt):
+        """Try the single-launch six-robot field sweep implementation."""
+        if not self._fused_field_collision_multi_hip_enabled:
+            return False
+        from . import tensor_collision_multi_hip
+        return tensor_collision_multi_hip.field_sweep_contacts(
+            self,active_mask,sweep_steps,substep_dt)
+
+    def _field_sweep_torch(self,active_mask,sweep_steps,substep_dt):
+        """Torch reference for the HIP field-sweep position/contact loop."""
+        for _ in range(sweep_steps):
+            self.pose.copy_(torch.where(active_mask[:,None,None],
+                self.pose+self.velocity*substep_dt,self.pose))
+            wrapped=torch.remainder(self.pose[...,2]+math.pi,2*math.pi)-math.pi
+            self.pose[...,2].copy_(torch.where(active_mask[:,None],wrapped,self.pose[...,2]))
+            self._field_collision(active_mask)
