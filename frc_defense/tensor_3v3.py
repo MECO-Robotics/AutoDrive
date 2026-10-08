@@ -747,7 +747,8 @@ class TensorThreeVsThreeEnv(
         direct_path=torch.stack((start,targets.reshape(-1,2)),dim=1)
         direct_clear=self.planner._footprint_path_clear(
             direct_path,heading,lengths,widths).reshape(self.n,NUM_ROBOTS)
-        stalled_collector=(pickup_active & (distance[...,0]>.03) &
+        stalled_collector=(pickup_active & ~trench_alignment &
+            (distance[...,0]>.03) &
             ((distance[...,0]<1.6) | (command.norm(dim=-1)<.05)) & direct_clear)
         command=torch.where(stalled_collector[...,None],direct_command,command)
         # Rotate into the AD* travel tangent before taking the last step to a
@@ -787,9 +788,25 @@ class TensorThreeVsThreeEnv(
                                   torch.where(deterministic_picker, 0., .3))
         command=torch.where(distance<=stop_radius[...,None],torch.zeros_like(command),command)
         command=torch.where((action==7)[...,None],torch.zeros_like(command),command)
+        trench_route_length=self.planner.last_lengths.reshape(self.n,6)
+        trench_route_goal=self.planner.last_goal.reshape(self.n,6,2)
+        trench_forward=torch.stack((trench_heading.cos(),trench_heading.sin()),-1)
+        trench_remaining=((trench_route_goal-self.sim.pose[:,:,:2]) *
+                          trench_forward).sum(-1).clamp_min(0.)
+        trench_cross_speed=torch.minimum(self.sim.speed,
+                                          trench_remaining*6.)
+        trench_cross_command=trench_forward*trench_cross_speed[...,None]
+        trench_crossing=(trench_alignment & (trench_error.abs()<=.25) &
+                         (trench_route_length>1))
+        command=torch.where(trench_crossing[...,None],trench_cross_command,command)
         # Keep following the route while the chassis turns to align the
         # intake; waiting for perfect alignment stalls starts and turnarounds.
         command=self._avoid_robot_contention(command,targets,active)
+        # Contention avoidance may add a sidestep, but trench alignment is a
+        # stationary rotation maneuver. Keep translation stopped until the
+        # chassis is aligned so the sidestep cannot push it into a trench arm.
+        command=torch.where((trench_alignment & (trench_error.abs()>.25))[...,None],
+                            torch.zeros_like(command),command)
         commands=torch.cat((command,omega[...,None]),-1)
         enabled=self._controlled_mode_mask
         commands=commands*enabled[None,:,None]

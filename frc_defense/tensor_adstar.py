@@ -280,14 +280,17 @@ class TensorADStar:
             sorted({b.x for b in env.field_boxes
                     if getattr(b, "name", "").endswith("_trench_lower")}),
             device=self.device, dtype=self.dtype)
-        lower_trenches=[b for b in env.field_boxes
-                        if getattr(b,"name","").endswith("_trench_lower")]
-        upper_trenches=[b for b in env.field_boxes
-                        if getattr(b,"name","").endswith("_trench_upper")]
-        self._trench_opening_low=max(
-            (b.y+b.width/2 for b in lower_trenches),default=0.)
-        self._trench_opening_high=min(
-            (b.y-b.width/2 for b in upper_trenches),default=self.width)
+        # The arm bodies are overhead and do not block the robot. The ground
+        # supports leave a drive lane between each field edge and the support;
+        # cache the lane center limits for the chassis when it is aligned to x.
+        lower_supports=[b for b in env.field_boxes
+                        if getattr(b,"name","").endswith("_trench_support_lower")]
+        upper_supports=[b for b in env.field_boxes
+                        if getattr(b,"name","").endswith("_trench_support_upper")]
+        self._trench_lane_low=max(
+            (b.y-b.width/2 for b in lower_supports),default=0.)
+        self._trench_lane_high=min(
+            (b.y+b.width/2 for b in upper_supports),default=self.width)
         # Bump traversal cost depends only on the fixed field geometry. Keep
         # one grid instead of rebuilding and materializing the same grid for
         # every world on every replan.
@@ -997,8 +1000,10 @@ class TensorADStar:
                             (self._trench_xs[None]<=high_x)).any(-1)
             half_width=width*.5+self.footprint_clearance
             within_opening=(
-                (start[:,1]>=self._trench_opening_low+half_width) &
-                (start[:,1]<=self._trench_opening_high-half_width))
+                (start[:,1]>=half_width) &
+                (start[:,1]<=self._trench_lane_low-half_width)) | (
+                (start[:,1]>=self._trench_lane_high+half_width) &
+                (start[:,1]<=self.width-half_width))
             trench_alignment=crosses_trench&within_opening
             # Align horizontally only once the chassis reaches a clear trench
             # opening. Earlier in the approach, path tracking must be free to

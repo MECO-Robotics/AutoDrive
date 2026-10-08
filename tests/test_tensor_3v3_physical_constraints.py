@@ -364,6 +364,9 @@ def test_deterministic_offense_rotates_then_intakes_through_trench(
     env.sim.length[0, 0] = 1.1
     env.sim.width[0, 0] = .7
     env.sim.pose[0, 0] = torch.tensor([3., lane_y, initial_heading])
+    env.sim.pose[0, 1:, :2] = torch.tensor([
+        [8., 2.], [8., 4.], [12., 2.], [12., 4.], [12., 6.],
+    ])
     env.piece_active.zero_()
     env.piece_owner.fill_(-1)
     env.piece_active[0, 0] = True
@@ -378,8 +381,9 @@ def test_deterministic_offense_rotates_then_intakes_through_trench(
 
     env.step(actions, capture_observation=False)
     used_trench_alignment = bool(env.planner.last_trench_alignment[0])
-    assert env.sim.pose[0, 0, :2].tolist() == pytest.approx([3., lane_y])
-    assert abs(float(env.sim.pose[0, 0, 2])) < abs(initial_heading)
+    initial_heading_error = abs(float(env.sim.pose[0, 0, 2]))
+    assert used_trench_alignment
+    assert initial_heading_error < abs(initial_heading)
     crossed = False
     for _ in range(180):
         env.step(actions, capture_observation=False)

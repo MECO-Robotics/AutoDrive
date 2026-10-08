@@ -83,14 +83,14 @@ def test_fused_blocked_grid_matches_torch_exactly(
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.parametrize("lane_y", [.6, 7.47])
+@pytest.mark.parametrize("lane_y", [.8, 7.27])
 def test_trench_route_plans_with_travel_aligned_footprint(lane_y):
     planner = _planner(1, torch.device("cpu"), avoid_bumps=True,
                        with_circles=False)
     trench_x = planner._trench_xs[0].item()
     start = torch.tensor([[3.0, lane_y]])
     goal = torch.tensor([[6.0, lane_y]])
-    planner.plan(start, goal, torch.tensor([math.pi / 4]),
+    planner.plan(start, goal, torch.tensor([0.]),
                  torch.tensor([1.1]), torch.tensor([.7]),
                  speed=torch.tensor([4.5]))
 
@@ -99,6 +99,31 @@ def test_trench_route_plans_with_travel_aligned_footprint(lane_y):
     assert planner.last_heading[0].item() == pytest.approx(0.)
     assert route.shape[0] > 1
     assert route[:, 0].min() < trench_x < route[:, 0].max()
+
+
+@pytest.mark.parametrize("lane_y", [.8, 7.27])
+def test_trench_lane_alignment_enables_diagonal_chassis(lane_y):
+    planner = _planner(1, torch.device("cpu"), avoid_bumps=True,
+                       with_circles=False)
+    planner.plan(torch.tensor([[3.0, lane_y]]),
+                 torch.tensor([[6.0, lane_y]]),
+                 torch.tensor([math.pi / 4]), torch.tensor([1.1]),
+                 torch.tensor([.7]), speed=torch.tensor([4.5]))
+
+    assert planner.last_trench_alignment[0]
+    assert planner.last_heading[0].item() == pytest.approx(0.)
+
+
+@pytest.mark.parametrize("lane_y", [1.0, 7.0])
+def test_trench_alignment_rejects_centers_overlapping_support(lane_y):
+    planner = _planner(1, torch.device("cpu"), avoid_bumps=True,
+                       with_circles=False)
+    planner.plan(torch.tensor([[3.0, lane_y]]),
+                 torch.tensor([[6.0, lane_y]]), torch.tensor([0.]),
+                 torch.tensor([1.1]), torch.tensor([.7]),
+                 speed=torch.tensor([4.5]))
+
+    assert not planner.last_trench_alignment[0]
 
 
 def test_fused_occupancy_preserves_full_plan_and_command_outputs():
