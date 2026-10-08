@@ -21,6 +21,8 @@ from .dashboard_simulation import (
     BEHAVIOR_PROBE_TICKS,
     ZONE_SCENARIO_TICKS,
     focused_playback_simulation_id,
+    replay_code_state,
+    prune_scenario_replays,
     ZONE_PLAYBACK_TICKS,
     _SCENARIO_JOB_IDS,
     _SCENARIO_JOB_LOCK,
@@ -443,6 +445,58 @@ def create_handler(run_dir: Path):
                             "simulation_id":simulation_id,"progress":progress}))
                 job=max(jobs,key=lambda item:item[0])[1] if jobs else None
                 body=json.dumps({"job":job},separators=(",",":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type","application/json")
+            elif parsed.path == "/api/scenario-replays":
+                progress_dir=run_dir/".scenario-progress"
+                current=replay_code_state()
+                prune_scenario_replays(progress_dir,current_state=current)
+                replays=[]
+                if progress_dir.is_dir():
+                    for metadata_path in progress_dir.glob("*.result.meta.json"):
+                        try:
+                            record=json.loads(metadata_path.read_text())
+                        except (OSError,json.JSONDecodeError):
+                            continue
+                        if not isinstance(record,dict):
+                            continue
+                        simulation_id=record.get("simulation_id") or metadata_path.name.removesuffix(".result.meta.json")
+                        if not str(simulation_id).startswith(("scenario-", "focused-")):
+                            continue
+                        saved=record.get("code_state") or {}
+                        outdated=(saved.get("commit") != current.get("commit") or
+                            saved.get("dirty_files",[]) != current.get("dirty_files",[]))
+                        replays.append({"simulation_id":simulation_id,
+                            "label":record.get("label") or simulation_id,
+                            "seed":record.get("seed"),"behavior_mode":record.get("behavior_mode","match"),
+                            "robot_types":record.get("robot_types",[]),"code_state":saved,
+                            "outdated":outdated,
+                            "updated_at":metadata_path.stat().st_mtime})
+                    # Legacy replay results can be large; only open a bounded
+                    # header window to extract the scalar fields we need.
+                    for result_path in progress_dir.glob("*.result.json"):
+                        if result_path.with_suffix(".meta.json").exists():
+                            continue
+                        simulation_id=result_path.name.removesuffix(".result.json")
+                        if not simulation_id.startswith(("scenario-", "focused-")):
+                            continue
+                        try:
+                            with result_path.open("rb") as replay_file:
+                                header=replay_file.read(16384).decode("utf-8",errors="ignore")
+                            seed_match=re.search(r'"seed"\s*:\s*(-?\d+)',header)
+                            behavior_match=re.search(r'"behavior_mode"\s*:\s*"([^"]+)"',header)
+                            types_match=re.search(r'"robot_types"\s*:\s*(\[[^]]*\])',header)
+                            types=json.loads(types_match.group(1)) if types_match else []
+                        except (OSError,json.JSONDecodeError):
+                            seed_match=behavior_match=None
+                            types=[]
+                        replays.append({"simulation_id":simulation_id,"label":simulation_id,
+                            "seed":int(seed_match.group(1)) if seed_match else None,
+                            "behavior_mode":behavior_match.group(1) if behavior_match else "match",
+                            "robot_types":types,"code_state":{},"outdated":True,
+                            "updated_at":result_path.stat().st_mtime})
+                replays.sort(key=lambda item:item["updated_at"],reverse=True)
+                body=json.dumps({"current_code_state":current,"replays":replays},separators=(",",":")).encode()
                 self.send_response(200)
                 self.send_header("Content-Type","application/json")
             elif parsed.path == "/api/playback":

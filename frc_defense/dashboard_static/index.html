@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#11171d" />
     <title>AutoDrive · Training monitor</title>
-    <link rel="stylesheet" href="/assets/dashboard.css?v=focused-cache-22" />
+    <link rel="stylesheet" href="/assets/dashboard.css?v=replay-picker-24" />
   </head>
   <body>
     <header class="topbar">
@@ -202,6 +202,15 @@
             </select>
           </div>
           <div class="transport">
+            <label class="scenario-seed-control" for="scenarioReplay">
+              Saved replay
+              <select id="scenarioReplay" aria-label="Saved scenario replay">
+                <option value="">Choose a saved replay</option>
+              </select>
+              <span id="scenarioReplayStatus">Choose a replay to load it.</span>
+            </label>
+            <button id="loadScenarioReplay" class="button-secondary" type="button">Load replay</button>
+            <button id="regenerateScenarioReplay" class="button-secondary" type="button">Regenerate replay</button>
             <label class="scenario-seed-control" for="scenarioSeed">
               Match seed
               <input id="scenarioSeed" type="number" min="0" max="2147483647"
@@ -423,6 +432,6 @@
       </section>
     </main>
 
-    <script type="module" src="/assets/dashboard.js?v=focused-cache-22"></script>
+    <script type="module" src="/assets/dashboard.js?v=replay-picker-24"></script>
   </body>
 </html>

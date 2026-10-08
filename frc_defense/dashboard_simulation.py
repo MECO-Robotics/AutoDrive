@@ -10,6 +10,7 @@ import re
 import subprocess
 import threading
 import time
+import datetime
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -58,6 +59,85 @@ def focused_playback_simulation_id(mode: str, robot_type: str) -> str:
         digest.update(path.read_bytes())
     revision=digest.hexdigest()[:12]
     return f"focused-{revision}-{mode}-{robot_type}"
+
+
+def replay_code_state() -> dict:
+    """Describe the checkout used to create a replay and the current checkout."""
+    root = Path(__file__).resolve().parent.parent
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+            check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
+        changed = sorted({line[3:].split(" -> ")[-1] for line in dirty if len(line) > 3})
+        return {"commit": commit, "dirty_files": changed}
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "dirty_files": []}
+
+
+def replay_commit_age(saved_commit: str | None, current_commit: str | None,
+                      *, cwd: Path | None = None) -> int | None:
+    """Return commits since saved_commit, or None when ancestry is unknown."""
+    if not saved_commit or not current_commit:
+        return None
+    try:
+        result=subprocess.run(["git","rev-list","--count",f"{saved_commit}..{current_commit}"],
+            cwd=cwd or Path(__file__).resolve().parent.parent,
+            check=True,capture_output=True,text=True,timeout=5)
+        return max(0,int(result.stdout.strip()))
+    except (OSError,ValueError,subprocess.SubprocessError):
+        return None
+
+
+def prune_scenario_replays(progress_dir: Path, *, now: float | None = None,
+                           current_state: dict | None = None) -> list[str]:
+    """Remove scenario replay artifacts older than two days or commits."""
+    if not progress_dir.is_dir():
+        return []
+    now=time.time() if now is None else now
+    current_state=current_state or replay_code_state()
+    pruned=[]
+    active_ids=set(_SCENARIO_JOB_IDS)
+    root=Path(__file__).resolve().parent.parent
+    for metadata_path in progress_dir.glob("*.result.meta.json"):
+        try:
+            metadata=json.loads(metadata_path.read_text())
+            simulation_id=str(metadata.get("simulation_id") or "")
+            if not simulation_id.startswith(("scenario-","focused-")) or simulation_id in active_ids:
+                continue
+            age_days=max(0.,now-metadata_path.stat().st_mtime)/86400.
+            code_state=metadata.get("code_state") or {}
+            commits=replay_commit_age(code_state.get("commit"),current_state.get("commit"),cwd=root)
+            if age_days <= 2 and (commits is None or commits <= 2):
+                continue
+        except (OSError,json.JSONDecodeError,AttributeError):
+            continue
+        for path in progress_dir.glob(f"{simulation_id}.*"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        pruned.append(simulation_id)
+    # Legacy scenario results have no sidecar provenance. Age is the only
+    # reliable signal available for those files.
+    for result_path in progress_dir.glob("*.result.json"):
+        simulation_id=result_path.name.removesuffix(".result.json")
+        if (result_path.with_suffix(".meta.json").exists() or
+                not simulation_id.startswith(("scenario-","focused-")) or
+                simulation_id in active_ids or simulation_id in pruned):
+            continue
+        try:
+            if now-result_path.stat().st_mtime <= 2*86400:
+                continue
+        except OSError:
+            continue
+        for path in progress_dir.glob(f"{simulation_id}.*"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        pruned.append(simulation_id)
+    return pruned
 
 def _json_or_default(path: Path, default: dict) -> bytes:
     try:
@@ -224,6 +304,7 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
                 sweeping_enabled=sweeping_enabled,behavior_mode=behavior_mode,
                 **run_kwargs)
         record["simulation_id"]=simulation_id
+        record["code_state"]=replay_code_state()
         record["compute_scheduling"]="reserved" if training_paused else "shared"
         record["simulation_device"]=f"cuda:{device_index}"
         result_path=progress_path.with_name(progress_path.stem+".result.json")
@@ -231,6 +312,15 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
         serialized=json.dumps(record,separators=(",",":" )).encode()
         temporary.write_bytes(serialized)
         os.replace(temporary,result_path)
+        metadata={key:record.get(key) for key in (
+            "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state")}
+        scenarios=record.get("scenarios") or []
+        metadata["label"]=(scenarios[0].get("label") if scenarios and isinstance(scenarios[0],dict)
+                            else simulation_id)
+        metadata_path=result_path.with_suffix(".meta.json")
+        metadata_temporary=metadata_path.with_suffix(".tmp")
+        metadata_temporary.write_text(json.dumps(metadata,separators=(",",":")))
+        os.replace(metadata_temporary,metadata_path)
         compressed_path=result_path.with_suffix(result_path.suffix+".gz")
         compressed_temporary=compressed_path.with_suffix(compressed_path.suffix+".tmp")
         compressed_temporary.write_bytes(gzip.compress(serialized,compresslevel=6,mtime=0))

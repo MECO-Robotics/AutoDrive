@@ -35,6 +35,30 @@ let pollDelay = 1500;
 let latestTraining = null;
 let lastScenarioGeneration = null;
 let trendTaskChosen = false;
+let scenarioReplays = [];
+
+async function refreshScenarioReplays() {
+  const select = $("scenarioReplay");
+  if (!select) return;
+  try {
+    const response = await fetch("/api/scenario-replays", { cache: "no-store" });
+    if (!response.ok) throw new Error(`Replay list failed (${response.status})`);
+    const data = await response.json();
+    scenarioReplays = data.replays || [];
+    select.replaceChildren(new Option("Choose a saved replay", ""),
+      ...scenarioReplays.map((replay) => new Option(
+        `${replay.outdated ? "⚠ Outdated · " : ""}${replay.label} · seed ${replay.seed ?? "—"}`,
+        replay.simulation_id,
+      )));
+    const status = $("scenarioReplayStatus");
+    if (status) status.textContent = scenarioReplays.length
+      ? `${scenarioReplays.length} saved replay${scenarioReplays.length === 1 ? "" : "s"}. Outdated means the commit or dirty files differ from this checkout.`
+      : "No saved replays yet. Generate one when you are ready.";
+  } catch (error) {
+    const status = $("scenarioReplayStatus");
+    if (status) status.textContent = `Could not list saved replays: ${error.message}`;
+  }
+}
 
 function showScenarioProgress(progress) {
   const panel = $("scenarioProgress");
@@ -501,14 +525,6 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
                                   skipPreparedCache = false } = {}) {
   const requestedBehavior = batchMode || $("behaviorMode")?.value || "match";
   const focusedType = $("focusedRobotType")?.value || "dumper";
-  const defaultFocusedCapacity = focusedType === "turret" ? 40 : 60;
-  const defaultFocusedRate = focusedType === "turret" ? 15 : 25;
-  if (!skipPreparedCache && !resumeJob && requestedBehavior !== "match" &&
-      !$("focusedRandomPlacement")?.checked &&
-      Number($("focusedHopperCapacity")?.value) === defaultFocusedCapacity &&
-      Number($("focusedScoringBps")?.value) === defaultFocusedRate) {
-    return loadFocusedReplay();
-  }
   const seedInput = $("scenarioSeed");
   const enteredSeed = seedInput.value.trim();
   if (enteredSeed &&
@@ -709,6 +725,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     );
     setPlaybackControls();
     drawField();
+    refreshScenarioReplays();
   } catch (error) {
     if (error.name !== "AbortError" && revision === requestRevision) {
       const progressState = $("scenarioProgressState");
@@ -905,11 +922,40 @@ function renderSource() {
   $("evaluationControls").hidden = randomized;
   $("nextScenario").hidden = !randomized || $("behaviorMode").value !== "match";
   renderFocusedControls();
-  if (randomized && $("behaviorMode").value === "match") loadZonePlayback();
-  else if (randomized) loadFocusedReplay();
+  if (randomized) setNotice("Choose a saved replay or generate a new scenario.");
   else setNotice("Choose a recorded evaluation to load its playback.");
   setPlaybackControls();
 }
+
+$("loadScenarioReplay").addEventListener("click", async () => {
+  const replay = scenarioReplays.find((item) => item.simulation_id === $("scenarioReplay").value);
+  if (!replay) return;
+  const response = await fetch(`/api/zone-playback-result?simulation_id=${encodeURIComponent(replay.simulation_id)}`, { cache: "no-store" });
+  const record = await response.json();
+  if (!response.ok) { setNotice(record.error || "Replay could not be loaded.", "error"); return; }
+  playbackTask = record.task || "3v3";
+  playbackRobotTypes = record.robot_types || [];
+  playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot || [];
+  world = record.field || { ...defaultWorld };
+  loadedScenarios = record.scenarios || [];
+  frames = loadedScenarios[0]?.frames || record.frames || [];
+  index = 0; playing = false; ensurePlaybackClock();
+  $("scenarioCount").textContent = `${record.behavior_mode || "match"} · seed ${record.seed ?? "—"} · ${frames.length.toLocaleString()} frames`;
+  const state = scenarioReplays.find((item) => item.simulation_id === replay.simulation_id);
+  $("scenarioReplayStatus").textContent = state?.outdated
+    ? `Outdated: created at commit ${state.code_state?.commit || "unknown"}; current code differs.`
+    : `Current code: ${state?.code_state?.commit || "unknown"}.`;
+  setNotice("Saved replay loaded.", "success"); setPlaybackControls(); drawField();
+});
+$("regenerateScenarioReplay").addEventListener("click", () => {
+  const selected = scenarioReplays.find((item) => item.simulation_id === $("scenarioReplay").value);
+  const mode = selected?.behavior_mode || $("behaviorMode").value;
+  if (mode !== "match") $("behaviorMode").value = mode;
+  if (selected?.robot_types?.[0] && $("focusedRobotType"))
+    $("focusedRobotType").value = selected.robot_types[0];
+  if (selected?.seed != null && mode === "match") $("scenarioSeed").value = String(selected.seed);
+  loadZonePlayback({ newScenario: true, batchMode: mode, skipPreparedCache: true });
+});
 
 function renderProgressFrame() {
   if (playing && frames.length && playbackTimes.length) {
@@ -946,14 +992,6 @@ async function pollTraining() {
           ? "running"
           : status.status || "waiting";
     const generation = status.current_generation ?? status.generation;
-    if (
-      generation != null &&
-      lastScenarioGeneration != null &&
-      generation !== lastScenarioGeneration &&
-      $("playbackSource").value === "randomized"
-    ) {
-      loadZonePlayback();
-    }
     if (generation != null) lastScenarioGeneration = generation;
     pollDelay = 1500;
   } catch (error) {
@@ -969,12 +1007,7 @@ async function pollTraining() {
 }
 
 $("play").addEventListener("click", () => {
-  if (!frames.length) {
-    if ($("playbackSource").value === "randomized" && !zoneLoading) {
-      loadZonePlayback({ autoplay: true });
-    }
-    return;
-  }
+  if (!frames.length) return;
   if (!playing && index >= frames.length - 1) {
     index = 0;
     ensurePlaybackClock();
@@ -989,10 +1022,9 @@ $("dualGpuMode").addEventListener("change", () =>
 $("nextScenario").addEventListener("click", () => {
   if ($("behaviorMode").value !== "match") {
     saveFocusedTestSettings();
-    loadZonePlayback({ newScenario: true, batchMode: $("behaviorMode").value,
-      skipPreparedCache: true });
+    setNotice("Focused settings are ready. Choose Regenerate replay when ready.");
   } else {
-    loadZonePlayback({ newScenario: true });
+    setNotice("Choose Regenerate replay when you are ready to simulate.");
   }
 });
 $("focusedRobotType").addEventListener("change", (event) => {
@@ -1001,11 +1033,12 @@ $("focusedRobotType").addEventListener("change", (event) => {
   $("focusedScoringBps").value = turret ? "15" : "25";
   saveFocusedTestSettings();
   if ($("behaviorMode").value !== "match" && $("playbackSource").value === "randomized")
-    loadFocusedReplay();
+    setNotice("Robot type changed. Choose a saved replay or regenerate when ready.");
 });
 $("focusedRandomPlacement").addEventListener("change", () => {
   saveFocusedTestSettings();
-  if ($("behaviorMode").value !== "match") loadFocusedReplay();
+  if ($("behaviorMode").value !== "match")
+    setNotice("Focused settings are ready. Choose Regenerate replay when ready.");
 });
 $("focusedHopperCapacity").addEventListener("change", saveFocusedTestSettings);
 $("focusedScoringBps").addEventListener("change", saveFocusedTestSettings);
@@ -1032,10 +1065,7 @@ $("behaviorMode").addEventListener("change", () => {
   robotModeChanged();
   saveFocusedTestSettings();
   renderFocusedControls();
-  if ($("behaviorMode").value === "match")
-    loadZonePlayback({ newScenario: true });
-  else
-    loadFocusedReplay();
+  setNotice("Scenario settings are ready. Choose Generate test or New scenario when ready.");
 });
 $("playbackSource").addEventListener("change", renderSource);
 $("gameEvaluation").addEventListener("change", loadGameEvaluation);
@@ -1086,10 +1116,15 @@ async function initializeDashboard() {
       $("focusedScoringBps").value = String(savedFocused.scoring_bps);
     $("focusedRandomPlacement").checked = Boolean(savedFocused.random_gamepiece_placement);
   }
+  if (!initialParams.has("scenario")) {
+    // A reload restores user preferences, never a generation request.
+    initialSavedJob = null;
+  }
   renderFocusedControls();
   drawField();
   drawTrainingChart();
   setPlaybackControls();
+  await refreshScenarioReplays();
   pollTraining();
   try {
     const response = await fetch("/api/field-layout", { cache: "no-store" });
@@ -1152,42 +1187,16 @@ async function initializeDashboard() {
         // Keep the saved ID and reconnect through the regular retry loop.
       }
     }
-    if (!savedJob && !requestedScenario && $("behaviorMode").value === "match") {
-      try {
-        const response = await fetch("/api/zone-playback-active", { cache: "no-store" });
-        if (response.ok) savedJob = (await response.json()).job || null;
-      } catch (_) {
-        // A missing connection should not create a second match automatically.
-      }
-    }
-    if ($("behaviorMode").value !== "match" && !requestedScenario) {
-      // Focused probes first ask the stable prepared-replay endpoint. The old
-      // localStorage job is only relevant when the focused settings are custom.
-      const type = $("focusedRobotType").value;
-      const defaultCapacity = type === "turret" ? 40 : 60;
-      const defaultRate = type === "turret" ? 15 : 25;
-      const usesPreparedDefaults = !$("focusedRandomPlacement").checked &&
-        Number($("focusedHopperCapacity").value) === defaultCapacity &&
-        Number($("focusedScoringBps").value) === defaultRate;
-      if (usesPreparedDefaults) {
-        loadFocusedReplay();
-      } else if (savedJob) {
-        localStorage.setItem(scenarioJobStorageKey, JSON.stringify(savedJob));
-        loadZonePlayback({ autoplay: true, resumeJob: savedJob });
-      } else {
-        loadZonePlayback({ newScenario: true, batchMode: $("behaviorMode").value });
-      }
-    } else if (savedJob) {
+    if (requestedScenario && savedJob?.simulation_id === requestedScenario) {
       localStorage.setItem(scenarioJobStorageKey, JSON.stringify(savedJob));
       loadZonePlayback({ autoplay: true, resumeJob: savedJob });
+    } else if (requestedScenario) {
+      if (scenarioReplays.some((item) => item.simulation_id === requestedScenario)) {
+        $("scenarioReplay").value = requestedScenario;
+        $("loadScenarioReplay").click();
+      }
     } else {
-      setNotice(
-        $("behaviorMode").value === "match"
-          ? "REBUILT field ready. Choose Generate & play to simulate a randomized match."
-          : "Loading the selected focused replay…",
-        "success",
-      );
-      if ($("behaviorMode").value !== "match") loadFocusedReplay();
+      setNotice("Choose a saved replay to load it, or generate a new one when ready.", "success");
     }
   }
   requestAnimationFrame(renderProgressFrame);
