@@ -402,7 +402,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     if device.type == "cuda":
         torch.cuda.set_device(device)
     fuel_count=504
-    planner_replan_ticks=(max(1,int(math.ceil(.2/simulation_dt)))
+    planner_replan_ticks=(max(1,int(math.ceil(.1/simulation_dt)))
                           if behavior_probe=="collect" else
                           max(1,int(math.ceil(.4/simulation_dt))))
     env=TensorThreeVsThreeEnv(num_envs=1,device=device,seed=int(seed),
@@ -451,7 +451,12 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         checkpoint_paths[role]=str(checkpoint)
     all_deterministic=all(mode=="deterministic" for mode in control_modes)
     if cuda_graph is None:
-        cuda_graph=(device.type=="cuda" and all_deterministic and not policies)
+        # PyTorch exposes HIP devices through the CUDA API, but planner graph
+        # capture is not reliable on ROCm (a failed capture invalidates the
+        # stream and aborts scenario creation). Keep graph playback enabled
+        # on CUDA and run the same simulation eagerly on HIP.
+        cuda_graph=(device.type=="cuda" and torch.version.hip is None and
+                    all_deterministic and not policies)
     if cuda_graph and (device.type!="cuda" or not all_deterministic or policies):
         raise ValueError("CUDA graph playback requires a CUDA device and six deterministic controllers")
 

@@ -79,10 +79,16 @@ __global__ void path_reference_kernel(const float* path, const int64_t* lengths,
     progress = progress_state[world];
     float target_x = path[path_base + (lengths[world] - 1) * 2];
     float target_y = path[path_base + (lengths[world] - 1) * 2 + 1];
-    const float lookahead = 0.7f + 0.12f * fminf(speed_limit[static_cast<int64_t>(world) * speed_stride], 4.5f);
+    const float vx = velocity[static_cast<int64_t>(world) * velocity_stride];
+    const float vy = velocity[static_cast<int64_t>(world) * velocity_stride + 1];
+    const float current = sqrtf(__fadd_rn(__fmul_rn(vx, vx), __fmul_rn(vy, vy)));
+    const float lookahead = fminf(fmaxf(.2f + .20f * fminf(current, 4.5f), .2f), 1.2f);
     const float target_station = fminf(cumulative, progress + fmaxf(.12f, lookahead));
     float traversed = 0.f, target_fraction = 0.f;
     int target_index = lengths[world] - 2;
+    float speed_traversed = 0.f, speed_fraction = 0.f;
+    int speed_index = lengths[world] - 2;
+    bool speed_found = false;
     for (int i = 0; i < lengths[world] - 1; ++i) {
       const float ax = path[path_base + i * 2];
       const float ay = path[path_base + i * 2 + 1];
@@ -90,6 +96,14 @@ __global__ void path_reference_kernel(const float* path, const int64_t* lengths,
       const float by = path[path_base + (i + 1) * 2 + 1];
       const float dx = bx - ax, dy = by - ay;
       const float segment = sqrtf(__fadd_rn(__fmul_rn(dx, dx), __fmul_rn(dy, dy)));
+      if (!speed_found && speed_traversed + segment >= progress) {
+        speed_fraction = fminf(fmaxf((progress - speed_traversed) /
+                                      fmaxf(segment, 1.0e-6f), 0.f), 1.f);
+        speed_index = i;
+        speed_found = true;
+      } else if (!speed_found) {
+        speed_traversed += segment;
+      }
       if (traversed + segment >= target_station) {
         const float fraction = fminf(fmaxf((target_station - traversed) /
                                            fmaxf(segment, 1.0e-6f), 0.f), 1.f);
@@ -115,13 +129,10 @@ __global__ void path_reference_kernel(const float* path, const int64_t* lengths,
         __fmul_rn(velocity[static_cast<int64_t>(world) * velocity_stride + 1], ny));
     const float lateral = fminf(fmaxf(__fadd_rn(__fmul_rn(-3.f, cross),
                                                __fmul_rn(-4.f, cross_velocity)), -.75f), .75f);
-    const float v0 = profile[static_cast<int64_t>(world) * 72 + target_index];
-    const float v1 = profile[static_cast<int64_t>(world) * 72 + target_index + 1];
-    const float planned = fmaxf(fminf(v0 + (v1 - v0) * target_fraction,
+    const float v0 = profile[static_cast<int64_t>(world) * 72 + speed_index];
+    const float v1 = profile[static_cast<int64_t>(world) * 72 + speed_index + 1];
+    const float planned = fmaxf(fminf(v0 + (v1 - v0) * speed_fraction,
                                       speed_limit[static_cast<int64_t>(world) * speed_stride]), 0.f);
-    const float vx = velocity[static_cast<int64_t>(world) * velocity_stride];
-    const float vy = velocity[static_cast<int64_t>(world) * velocity_stride + 1];
-    const float current = sqrtf(__fadd_rn(__fmul_rn(vx, vx), __fmul_rn(vy, vy)));
     const float excess = fmaxf(current - planned, 0.f);
     const float target = fmaxf(__fadd_rn(planned, __fmul_rn(-.55f, excess)), 0.f);
     command[world * 2] = __fadd_rn(__fmul_rn(tx, target), __fmul_rn(nx, lateral));

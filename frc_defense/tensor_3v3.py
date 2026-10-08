@@ -219,6 +219,7 @@ class TensorThreeVsThreeEnv(
             randomize=(randomize and behavior_probe is None),
             robot_length=(.6096 if behavior_probe else .9),
             robot_width=(.6096 if behavior_probe else .9),
+            max_speed=9.6, max_omega=16.0,
             obstacles=obstacles, field_colliders=colliders,
             bump_regions=bumps, contact_iterations=contact_iterations,
             field_sweep_spacing=field_sweep_spacing)
@@ -232,6 +233,8 @@ class TensorThreeVsThreeEnv(
                                                   device=self.device,dtype=torch.float32)
         self._target_fuel_index=torch.full((self.n,NUM_ROBOTS),-1,
                                             device=self.device,dtype=torch.long)
+        self._target_fuel_selected_step=torch.full((self.n,NUM_ROBOTS),-1,
+                                                    device=self.device,dtype=torch.long)
         self._target_turn_anchor=torch.zeros((self.n,NUM_ROBOTS,2),
                                              device=self.device,dtype=torch.float32)
         self._target_collecting=torch.zeros((self.n,NUM_ROBOTS),
@@ -247,11 +250,14 @@ class TensorThreeVsThreeEnv(
         self.randomize = bool(randomize and behavior_probe is None)
         self.drivetrain_config={"name":"built-in illustrative defaults",
             "randomize":self.randomize,"mass":55.0,"robot_length":.9,"robot_width":.9,
-            "max_speed":4.8,"max_acceleration":8.0,"max_omega":8.0,"max_alpha":18.0,
+            "max_speed":9.6,"max_acceleration":8.0,"max_omega":16.0,"max_alpha":18.0,
             "swerve":self.sim.swerve.__dict__.copy()}
         self.field_feature_obstacles = torch.tensor(
             [(b.x, b.y, box_observation_radius(b)) for b in self.field_feature_boxes],
             device=self.device, dtype=torch.float32).reshape(-1, 3)
+        self.field_occlusion_boxes = torch.tensor(
+            [(b.x,b.y,b.length/2,b.width/2) for b in solids],
+            device=self.device,dtype=torch.float32).reshape(-1,4)
 
         by_name = {b.name: b for b in self.field_boxes}
         self.hub_centers = torch.tensor(
@@ -331,6 +337,7 @@ class TensorThreeVsThreeEnv(
         self.next_ferry = torch.zeros_like(self.next_intake)
         self._ferry_committed = torch.zeros(
             (self.n,NUM_ROBOTS),device=self.device,dtype=torch.bool)
+        self._score_committed = torch.zeros_like(self._ferry_committed)
         self.last_hub_zone = torch.zeros_like(self.next_intake, dtype=torch.bool)
         self.last_actions = torch.full((self.n, NUM_ROBOTS), 7, device=self.device,
                                        dtype=torch.long)
@@ -346,10 +353,6 @@ class TensorThreeVsThreeEnv(
         proxy = SimpleNamespace(n=self.n * NUM_ROBOTS, device=self.device, sim=self.sim,
                                 field_boxes=self.field_boxes)
         self.planner = TensorADStar(proxy, avoid_bumps=True)
-        if behavior_probe == "collect":
-            # Allow small tracking error around narrow hardware while keeping
-            # exact square-footprint collision checks.
-            self.planner.footprint_clearance=.04
         self._planner_controller_mode_key=tuple(
             i for i,mode in enumerate(modes) if mode!="none")
         self._planner_controller_modes_dirty=False
@@ -410,6 +413,7 @@ class TensorThreeVsThreeEnv(
             self.sim.omega_limit.clamp_(max=.3/self.dt)
         self._target_collect_heading.copy_(self.sim.pose[:,:,2])
         self._target_fuel_index.fill_(-1)
+        self._target_fuel_selected_step.fill_(-1)
         self._target_turn_anchor.copy_(self.sim.pose[:,:,:2])
         self._target_collecting.zero_()
         self._target_cluster_empty_ticks.zero_()
@@ -423,7 +427,7 @@ class TensorThreeVsThreeEnv(
                        self.fuel_acquired_event, self.fuel_scored_event,
                        self.fuel_passed_event, self.fuel_denied_event,
                        self.next_intake, self.next_score, self.next_ferry,
-                       self._ferry_committed,
+                       self._ferry_committed,self._score_committed,
                        self._avoidance_winner,
                        self.last_hub_zone):
             tensor.zero_()
@@ -455,6 +459,7 @@ class TensorThreeVsThreeEnv(
         self._target_collect_heading.copy_(torch.where(
             mask[:,None],self.sim.pose[:,:,2],self._target_collect_heading))
         self._target_fuel_index.masked_fill_(mask[:,None],-1)
+        self._target_fuel_selected_step.masked_fill_(mask[:,None],-1)
         self._target_turn_anchor.copy_(torch.where(
             mask[:,None,None],self.sim.pose[:,:,:2],self._target_turn_anchor))
         self._target_collecting.masked_fill_(mask[:,None],False)
@@ -480,7 +485,7 @@ class TensorThreeVsThreeEnv(
                        self.fuel_denied_count, self.fuel_acquired_event, self.fuel_scored_event,
                        self.fuel_passed_event, self.fuel_denied_event,
                        self.next_intake, self.next_score, self.next_ferry,
-                       self._ferry_committed,
+                       self._ferry_committed,self._score_committed,
                        self._avoidance_winner,
                        self.last_hub_zone):
             tensor[mask] = 0
@@ -640,18 +645,28 @@ class TensorThreeVsThreeEnv(
         adstar_tangent=None
         if not self.sweeping_enabled and self._has_deterministic_offense:
             adstar_command,adstar_tangent=self.planner.path_reference(
-                start,self.sim.velocity[:,:,:2].reshape(-1,2),speeds,
-                lookahead=(.25 if self.behavior_probe=="collect" else None))
+                start,self.sim.velocity[:,:,:2].reshape(-1,2),speeds)
             adstar_tangent=adstar_tangent.reshape(self.n,NUM_ROBOTS,2)
         hub=self.hub_centers[self.team_ids][None]
         hub_delta=hub-self.sim.pose[:,:,:2]
         hub_bearing=torch.atan2(hub_delta[...,1],hub_delta[...,0])
         angle_error=torch.atan2(torch.sin(hub_bearing-self.sim.pose[:,:,2]),
                                 torch.cos(hub_bearing-self.sim.pose[:,:,2]))
-        omega=swerve_heading_rate(angle_error,self.sim.omega_limit,self.sim.alpha,
+        deterministic_offense=(self._deterministic_mode_mask &
+                                ~self._defense_role_mask)[None]
+        robot_hub_active=self.hub_active[:,self.team_ids]
+        scoring_dumper=(action==4)&carrying&self._dumper_mask[None]
+        score_centered=scoring_dumper&(angle_error.abs()<=math.radians(5.))
+        aim_error=torch.where(score_centered,torch.zeros_like(angle_error),angle_error)
+        omega=swerve_heading_rate(aim_error,self.sim.omega_limit,self.sim.alpha,
                                   self.sim.velocity[:,:,2],self.dt)
-        omega=torch.where((action==4)&carrying&self._dumper_mask[None],omega,
-                          torch.zeros_like(omega))
+        score_fine_aim=scoring_dumper&(angle_error.abs()<=math.radians(15.))
+        fine_error=torch.where(score_centered,torch.zeros_like(angle_error),angle_error)
+        fine_omega=(3.*fine_error-1.5*self.sim.velocity[:,:,2]).clamp(
+            -self.sim.omega_limit,self.sim.omega_limit)
+        fine_omega=torch.where(score_centered,torch.zeros_like(fine_omega),fine_omega)
+        omega=torch.where(score_fine_aim,fine_omega,omega)
+        omega=torch.where(scoring_dumper,omega,torch.zeros_like(omega))
         home_zone_center=hub.clone()
         home_zone_center[...,0]=torch.where(
             self.team_ids[None,:]==0,self.alliance_zone_depth*.5,
@@ -661,13 +676,8 @@ class TensorThreeVsThreeEnv(
         ferry_error=torch.atan2(torch.sin(ferry_bearing-self.sim.pose[:,:,2]),
                                 torch.cos(ferry_bearing-self.sim.pose[:,:,2]))
         ferrying=(action==6)&carrying&self._dumper_mask[None]
-        collect_braking_to_ferry=torch.zeros_like(ferrying)
-        if (self.behavior_probe=="collect" and
-                not self.behavior_probe_hub_active):
-            collect_possession=(self.piece_owner[:,None,:]==
-                torch.arange(NUM_ROBOTS,device=self.device)[None,:,None]).sum(-1)
-            collect_braking_to_ferry=((action==7)&carrying&self._dumper_mask[None]&
-                (collect_possession>=self.robot_fuel_capacities[None]))
+        collect_braking_to_ferry=((action==7)&carrying&self._dumper_mask[None]&
+                                  ~robot_hub_active)
         ferry_omega=swerve_heading_rate(ferry_error,self.sim.omega_limit,self.sim.alpha,
                                         self.sim.velocity[:,:,2],self.dt)
         omega=torch.where(ferrying|collect_braking_to_ferry,ferry_omega,omega)
@@ -676,18 +686,28 @@ class TensorThreeVsThreeEnv(
                                 ~self._defense_role_mask)[None]
         pickup_active=(deterministic_offense &
                        ((action<4)|((action==6)&~carrying)))
+        pickup_fuel_delta=(self._last_audit_fuel_targets-
+                           self.sim.pose[:,:,:2])
+        pickup_fuel_distance=pickup_fuel_delta.norm(dim=-1)
         pickup_direction=fuel_delta
         if adstar_tangent is not None:
             target_based_picker=pickup_active & (not self.sweeping_enabled)
             tangent_norm=adstar_tangent.norm(dim=-1,keepdim=True)
-            target_based_tangent=torch.where(tangent_norm>.5,adstar_tangent,
+            fallback_direction=torch.where((action<4)[...,None],fuel_delta,
                 targets-self.sim.pose[:,:,:2])
+            target_based_tangent=torch.where(tangent_norm>.5,adstar_tangent,
+                fallback_direction)
+            # Follow AD* through the route, then aim the intake at its chosen
+            # piece for the final approach. A route tangent can run along a
+            # field boundary while the fuel lies just inside it.
+            final_intake_approach=(~self._target_collecting &
+                                   (pickup_fuel_distance<=.9))
+            target_based_tangent=torch.where(
+                final_intake_approach[...,None],fuel_delta,target_based_tangent)
             pickup_direction=torch.where(target_based_picker[...,None],
                                          target_based_tangent,pickup_direction)
-        if self.behavior_probe=="collect":
-            pickup_direction=torch.where(
-                (pickup_active & (action<4))[...,None],
-                fuel_delta,pickup_direction)
+        # While tracing a cluster, fuel_delta can point toward its inward
+        # normal; keep following the route tangent until entering final pickup.
         pickup_bearing=torch.atan2(pickup_direction[...,1],pickup_direction[...,0])
         pickup_error=torch.atan2(torch.sin(pickup_bearing-self.sim.pose[:,:,2]),
                                  torch.cos(pickup_bearing-self.sim.pose[:,:,2]))
@@ -708,33 +728,58 @@ class TensorThreeVsThreeEnv(
         if adstar_command is None:
             command,_=self.planner.path_reference(
                 start,self.sim.velocity[:,:,:2].reshape(-1,2),
-                available_speed.reshape(-1),
-                lookahead=(.25 if self.behavior_probe=="collect" else None))
+                available_speed.reshape(-1))
         else:
             command=adstar_command
         command=command.reshape(self.n,6,2)
         command=torch.where((trench_alignment & (trench_error.abs()>.25))[...,None],
                             torch.zeros_like(command),command)
         distance=(targets-self.sim.pose[:,:,:2]).norm(dim=-1,keepdim=True)
-        if self.behavior_probe=="collect":
-            # A short staging route can leave AD*'s lookahead near its zero-
-            # speed endpoint while the intake target is still distant. Bridge
-            # that final approach instead of waiting for speed to recover,
-            # but only when the direct chassis path is footprint-clear.
-            direct=(targets-self.sim.pose[:,:,:2])
-            direct=direct/direct.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            direct_speed=torch.minimum(self.sim.speed,
-                                       (distance[...,0]*3.).clamp(max=4.8))
-            direct_command=direct*direct_speed[...,None]
-            direct_path=torch.stack((start,targets.reshape(-1,2)),dim=1)
-            direct_clear=self.planner._footprint_path_clear(
-                direct_path,heading,lengths,widths).reshape(self.n,NUM_ROBOTS)
-            stalled_picker=(pickup_active & (action<4) & (distance[...,0]>.03) &
-                ((distance[...,0]<1.6) | (command.norm(dim=-1)<.05)) & direct_clear)
-            command=torch.where(stalled_picker[...,None],direct_command,command)
+        # AD* can return a near-zero lookahead command at short intake staging
+        # goals even when the straight chassis path is clear. Bridge that
+        # final approach for every deterministic collector, not only audit
+        # probes; retain planner routing whenever the direct path is blocked.
+        direct=(targets-self.sim.pose[:,:,:2])
+        direct=direct/direct.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        direct_speed=torch.minimum(self.sim.speed,
+                                   (distance[...,0]*6.))
+        direct_command=direct*direct_speed[...,None]
+        direct_path=torch.stack((start,targets.reshape(-1,2)),dim=1)
+        direct_clear=self.planner._footprint_path_clear(
+            direct_path,heading,lengths,widths).reshape(self.n,NUM_ROBOTS)
+        stalled_collector=(pickup_active & (distance[...,0]>.03) &
+            ((distance[...,0]<1.6) | (command.norm(dim=-1)<.05)) & direct_clear)
+        command=torch.where(stalled_collector[...,None],direct_command,command)
+        # Rotate into the AD* travel tangent before taking the last step to a
+        # fuel target; this keeps lateral chassis motion out of the intake
+        # approach while preserving efficient swerve travel between targets.
+        chassis_forward=torch.stack((torch.cos(self.sim.pose[:,:,2]),
+                                     torch.sin(self.sim.pose[:,:,2])),-1)
+        chassis_right=torch.stack((torch.sin(self.sim.pose[:,:,2]),
+                                   -torch.cos(self.sim.pose[:,:,2])),-1)
+        forward_speed=(command*chassis_forward).sum(-1,keepdim=True)
+        nonholonomic_command=chassis_forward*forward_speed
+        lateral_velocity=(self.sim.velocity[:,:,:2]*chassis_right).sum(-1)
+        nonholonomic_pickup=(deterministic_offense & pickup_active &
+            (self.sweeping_enabled | (pickup_fuel_distance<=.7)))
+        command=torch.where(nonholonomic_pickup[...,None],
+                            nonholonomic_command,command)
+        pickup_turning=(nonholonomic_pickup &
+            ((pickup_error.abs()>.25)|(lateral_velocity.abs()>.15)))
+        command=torch.where(pickup_turning[...,None],torch.zeros_like(command),command)
         deterministic_scorer = ((self._deterministic_mode_mask &
                                  ~self._defense_role_mask)[None] &
                                 (action == 4) & carrying)
+        score_zone_x=self.sim.pose[:,:,0]
+        in_score_zone=torch.where(self.team_ids[None,:]==0,
+            score_zone_x<=self.alliance_zone_depth,
+            score_zone_x>=self.field_length-self.alliance_zone_depth)
+        score_staging=(deterministic_scorer & in_score_zone &
+                       self._robots_clear_of_bumps(self.sim.pose[:,:,:2]))
+        # The scoring gate accepts any stationary, bump-clear pose in the
+        # alliance zone. Stop at the first such pose along the AD* route so a
+        # detour around a hub bump does not continue back across the zone.
+        command=torch.where(score_staging[...,None],torch.zeros_like(command),command)
         deterministic_picker = pickup_active
         # Raster spline targets stay ahead of the robot, so collectors keep
         # following through waypoint arrival instead of stopping.

@@ -16,24 +16,6 @@ __device__ __forceinline__ bool cell_blocked(const bool* blocked, int b,
           blocked[(static_cast<int64_t>(b) * nx + x) * ny + y]);
 }
 
-__device__ __forceinline__ bool line_of_sight_clear(
-    const bool* blocked, int b, float x0, float y0, float x1, float y1,
-    int nx, int ny, float resolution, int start_x, int start_y,
-    int goal_x, int goal_y) {
-  const float dx=x1-x0, dy=y1-y0;
-  int steps=static_cast<int>(ceilf(
-      fmaxf(fabsf(dx),fabsf(dy))/(resolution*.5f)));
-  if (steps < 1) steps=1;
-  for (int step=1; step<steps; ++step) {
-    const float t=static_cast<float>(step)/steps;
-    const int x=static_cast<int>(floorf((x0+dx*t)/resolution));
-    const int y=static_cast<int>(floorf((y0+dy*t)/resolution));
-    if (cell_blocked(blocked,b,x,y,nx,ny,start_x,start_y,goal_x,goal_y))
-      return false;
-  }
-  return true;
-}
-
 __global__ void fused_bellman_route_kernel(
     const bool* blocked, const float* bump,
     const bool* route_active,
@@ -228,27 +210,11 @@ __global__ void fused_bellman_route_kernel(
       }
       if (k % 16 == 0 && active) local_checkpoint_mask |= 1 << (k / 16 - 1);
     }
-    // Greedily shortcut the 8-connected route wherever a swept-cell line of
-    // sight is clear. Keep the occupancy inflation, so shortcuts retain robot
-    // clearance around walls, robots, and other hard obstacles.
-    int anchor=0, output_length=1;
-    while (anchor < length-1) {
-      int chosen=anchor+1;
-      for (int candidate=length-1; candidate>anchor+1; --candidate) {
-        if (line_of_sight_clear(blocked,b,path_x[anchor],path_y[anchor],
-              path_x[candidate],path_y[candidate],nx,ny,resolution,
-              source_x,source_y,gx,gy)) {
-          chosen=candidate;
-          break;
-        }
-      }
-      if (output_length != chosen+1) {
-        path_x[output_length]=path_x[chosen];
-        path_y[output_length]=path_y[chosen];
-      }
-      ++output_length;
-      anchor=chosen;
-    }
+    // Keep the full lattice route here. Cell-only line of sight can cut
+    // corners that the continuous chassis-footprint check rejects later.
+    // The shared Python shortcutter applies that footprint check before it
+    // removes any waypoints.
+    const int output_length=length;
     for (int k=output_length;k<kMaxPoints;++k) {
       path_x[k]=path_x[output_length-1];
       path_y[k]=path_y[output_length-1];

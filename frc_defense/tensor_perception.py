@@ -93,6 +93,24 @@ def _hip_perception_extension():
 
 def piece_occlusion_mask_torch(pose_xy, segment, obstacles, eligible):
     """Reference predicate, skipping pieces already known to be invisible."""
+    if obstacles.shape[-1] == 4:
+        origin=pose_xy[:,None,None,:]
+        direction=segment[:,:,None,:]
+        center=obstacles[None,None,:,:2]
+        half=obstacles[None,None,:,2:4]+.03
+        parallel=direction.abs()<1e-8
+        outside_parallel=(origin-center).abs()>half
+        safe_direction=torch.where(parallel,torch.ones_like(direction),direction)
+        first=(center-half-origin)/safe_direction
+        second=(center+half-origin)/safe_direction
+        near=torch.minimum(first,second)
+        far=torch.maximum(first,second)
+        near=torch.where(parallel,float("-inf"),near)
+        far=torch.where(parallel,float("inf"),far)
+        enters=near.amax(-1).clamp_min(.02)
+        exits=far.amin(-1).clamp_max(.98)
+        intersects=(exits>=enters)&~(parallel&outside_parallel).any(-1)
+        return intersects.any(-1)&eligible
     denom = segment.square().sum(-1).clamp_min(1e-8)
     rel = obstacles[None, None, :, :2] - pose_xy[:, None, None, :]
     t = (rel * segment[:, :, None, :]).sum(-1) / denom[:, :, None]
@@ -138,7 +156,8 @@ def piece_occlusion_mask(pose_xy, segment, obstacles, eligible):
     is opt-in through AUTODRIVE_FUSED_PERCEPTION_HIP=1.
     """
     extension = _hip_perception_extension() if _HIP_PERCEPTION_ENABLED else None
-    if (extension is not None and pose_xy.is_cuda and pose_xy.dtype == torch.float32
+    if (extension is not None and obstacles.shape[-1] == 3 and
+            pose_xy.is_cuda and pose_xy.dtype == torch.float32
             and segment.dtype == torch.float32 and obstacles.dtype == torch.float32
             and pose_xy.is_contiguous() and segment.is_contiguous()
             and obstacles.is_contiguous() and eligible.dtype == torch.bool
@@ -175,7 +194,8 @@ def visibility_mask_3v3(pose, pieces_xy, piece_active, piece_owner, active,
     extension = _hip_perception_extension() if _HIP_PERCEPTION_ENABLED else None
     tensors = (pose, pieces_xy, piece_active, piece_owner, active, obstacles,
                robot_radius)
-    if (extension is not None and pose.is_cuda and pose.dtype == torch.float32 and
+    if (extension is not None and obstacles.shape[-1] == 3 and
+            pose.is_cuda and pose.dtype == torch.float32 and
             all(t.is_contiguous() and t.device == pose.device for t in tensors) and
             piece_active.dtype == torch.bool and piece_owner.dtype == torch.long and
             active.dtype == torch.bool and obstacles.dtype == torch.float32 and

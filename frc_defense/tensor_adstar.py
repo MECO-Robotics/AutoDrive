@@ -280,6 +280,14 @@ class TensorADStar:
             sorted({b.x for b in env.field_boxes
                     if getattr(b, "name", "").endswith("_trench_lower")}),
             device=self.device, dtype=self.dtype)
+        lower_trenches=[b for b in env.field_boxes
+                        if getattr(b,"name","").endswith("_trench_lower")]
+        upper_trenches=[b for b in env.field_boxes
+                        if getattr(b,"name","").endswith("_trench_upper")]
+        self._trench_opening_low=max(
+            (b.y+b.width/2 for b in lower_trenches),default=0.)
+        self._trench_opening_high=min(
+            (b.y-b.width/2 for b in upper_trenches),default=self.width)
         # Bump traversal cost depends only on the fixed field geometry. Keep
         # one grid instead of rebuilding and materializing the same grid for
         # every world on every replan.
@@ -322,18 +330,14 @@ class TensorADStar:
             extension = _hip_occupancy_extension()
             if extension is not None:
                 dynamic_tensor = self._empty_dynamic if dynamic is None else dynamic
-                grid_clearance = (0. if self.avoid_bumps else self.resolution * .72)
-                grid_clearance += self.footprint_clearance
+                grid_clearance = self.footprint_clearance
                 return extension.blocked_grid(
                     heading.contiguous(), length.contiguous(), width.contiguous(),
                     self.x, self.y, self._boxes, self._bumps, self._extra_circles,
                     dynamic_tensor.contiguous(), self.length, self.width,
                     grid_clearance, self.avoid_bumps)
         c, s = heading.cos().abs(), heading.sin().abs()
-        # Narrow bump-to-wall lanes can be one grid row wide. The robot
-        # footprint itself remains inflated; avoid an extra cell pad there.
-        grid_clearance=(0. if self.avoid_bumps else self.resolution*.72)
-        grid_clearance += self.footprint_clearance
+        grid_clearance=self.footprint_clearance
         ex = (length * c + width * s)[:, None, None] * .5 + grid_clearance
         ey = (length * s + width * c)[:, None, None] * .5 + grid_clearance
         blocked = ((self.xx[None] < ex) | (self.xx[None] > self.length-ex) |
@@ -394,8 +398,73 @@ class TensorADStar:
         iy = (points[:, 1] / self.resolution).floor().long().clamp(0, self.ny - 1)
         return ix, iy
 
+    def _nearest_visible_start_cell(self,points,blocked,original_x,original_y):
+        """Project a blocked start to the nearest free cell visible from it."""
+        flat_blocked=blocked.flatten(1)
+        candidate_count=min(256,flat_blocked.shape[1])
+        dx=self.xx.reshape(1,-1)-points[:,0,None]
+        dy=self.yy.reshape(1,-1)-points[:,1,None]
+        distance=dx.square()+dy.square()
+        nearest=distance.masked_fill(flat_blocked,float("inf")).topk(
+            candidate_count,dim=-1,largest=False).indices
+        target=torch.stack((self.xx.reshape(-1)[nearest],
+                            self.yy.reshape(-1)[nearest]),-1)
+        delta=target-points[:,None,:]
+        steps=torch.ceil(torch.maximum(delta[...,0].abs(),delta[...,1].abs())/
+                         (self.resolution*.5)).long().clamp_min(1)
+        sample=torch.arange(1,33,device=points.device)
+        fraction=sample[None,None,:].to(points.dtype)/steps[...,None].to(points.dtype)
+        locations=points[:,None,None,:]+delta[:,:,None,:]*fraction[...,None]
+        ix=(locations[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+        iy=(locations[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+        cell=flat_blocked.gather(1,(ix*self.ny+iy).reshape(points.shape[0],-1)).view(
+            points.shape[0],candidate_count,32)
+        start_cell=(ix==original_x[:,None,None])&(iy==original_y[:,None,None])
+        sample_valid=sample[None,None,:]<=steps[...,None]
+        visible=~(cell&sample_valid&~start_cell).any(-1)
+        visible &= steps<=32
+        candidate_distance=distance.gather(1,nearest).masked_fill(~visible,float("inf"))
+        visible_found=torch.isfinite(candidate_distance.amin(-1))
+        selected=candidate_distance.argmin(-1)
+        nearest_cell=nearest.gather(1,selected[:,None]).squeeze(1)
+        fallback=distance.masked_fill(flat_blocked,float("inf")).argmin(-1)
+        nearest_cell=torch.where(visible_found,nearest_cell,fallback)
+        return nearest_cell//self.ny,nearest_cell%self.ny
+
+    def _nearest_visible_endpoint(self,points,blocked):
+        """Project a blocked boundary endpoint along a clear grid ray."""
+        flat_blocked=blocked.flatten(1)
+        dx=self.xx.reshape(1,-1)-points[:,0,None]
+        dy=self.yy.reshape(1,-1)-points[:,1,None]
+        distance=dx.square()+dy.square()
+        nearest=distance.masked_fill(flat_blocked,float("inf")).topk(
+            min(256,flat_blocked.shape[1]),dim=-1,largest=False).indices
+        target=torch.stack((self.xx.reshape(-1)[nearest],
+                            self.yy.reshape(-1)[nearest]),-1)
+        delta=target-points[:,None,:]
+        steps=torch.ceil(torch.maximum(delta[...,0].abs(),delta[...,1].abs())/
+                         (self.resolution*.5)).long().clamp_min(1)
+        sample=torch.arange(1,33,device=points.device)
+        fraction=sample[None,None,:].to(points.dtype)/steps[...,None].to(points.dtype)
+        locations=points[:,None,None,:]+delta[:,:,None,:]*fraction[...,None]
+        ix=(locations[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
+        iy=(locations[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
+        cell=flat_blocked.gather(1,(ix*self.ny+iy).reshape(points.shape[0],-1)).view(
+            points.shape[0],nearest.shape[1],32)
+        sample_valid=sample[None,None,:]<=steps[...,None]
+        visible=~(cell&sample_valid).any(-1)
+        visible &= steps<=32
+        candidate_distance=distance.gather(1,nearest).masked_fill(~visible,float("inf"))
+        selected=candidate_distance.argmin(-1)
+        nearest_cell=nearest.gather(1,selected[:,None]).squeeze(1)
+        fallback=distance.masked_fill(flat_blocked,float("inf")).argmin(-1)
+        nearest_cell=torch.where(torch.isfinite(candidate_distance.amin(-1)),
+                                 nearest_cell,fallback)
+        return torch.stack((self.xx.reshape(-1)[nearest_cell],
+                            self.yy.reshape(-1)[nearest_cell]),-1)
+
     def _footprint_path_clear(self, path, heading, length, width):
-        """Check a predicted tangent-heading trajectory against field boxes."""
+        """Check a fixed-chassis-heading route against field boxes."""
         if not self._boxes.numel():
             return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
         return torch.cat([
@@ -407,9 +476,22 @@ class TensorADStar:
     def _footprint_path_clear_chunk(self,path,heading,length,width,clearance):
         """Bound peak temporary memory while checking batched path segments."""
         batch_n,point_count=path.shape[:2]
+        # A route may begin at contact with an obstacle. The first segment is
+        # the escape maneuver: still enforce the physical chassis footprint,
+        # but do not enforce the planner's optional extra clearance buffer
+        # until the robot has left its starting contact.
+        segment_clearance=torch.full((batch_n,point_count-1),float(clearance),
+                                     device=path.device,dtype=path.dtype)
+        if point_count>1:
+            segment_clearance[:,0]=0.
+        sample_clearance=segment_clearance[:,:,None,None]
         delta=path[:,1:]-path[:,:-1]
-        segment_heading=torch.atan2(delta[...,1],delta[...,0])
-        headings=torch.cat((heading[:,None],segment_heading),-1)
+        # AD* occupancy is rasterized using the robot's current chassis
+        # heading. Keep the footprint at that same heading along the route:
+        # drive direction can be lateral while the chassis aims independently
+        # (for example, at the hub while scoring). Pickup steering aligns the
+        # chassis with its route tangent separately in the action controller.
+        headings=heading[:,None].expand(-1,point_count)
         heading_delta=torch.atan2(torch.sin(headings[:,1:]-headings[:,:-1]),
                                   torch.cos(headings[:,1:]-headings[:,:-1]))
         # Keep both translation and corner rotation increments below 2 cm.
@@ -431,9 +513,9 @@ class TensorADStar:
         separation=torch.sqrt(nearest_x.square()+nearest_y.square())
         robot_outer=.5*torch.sqrt(length.square()+width.square())
         box_outer=torch.sqrt(hx.square()+hy.square())
-        broad_clear=separation>robot_outer[:,None,None,None]+box_outer+clearance
+        broad_clear=separation>robot_outer[:,None,None,None]+box_outer+sample_clearance
         robot_inner=.5*torch.minimum(length,width)
-        definite_hit=separation<=robot_inner[:,None,None,None]+clearance
+        definite_hit=separation<=robot_inner[:,None,None,None]+sample_clearance
 
         ambiguous=~broad_clear&~definite_hit
         hit=definite_hit.clone()
@@ -450,7 +532,8 @@ class TensorADStar:
             box_radius=torch.stack((hx.expand_as(signed[...,0]),hy.expand_as(signed[...,0]),
                 hx*c[...,None].abs()+hy*s[...,None].abs(),
                 hx*s[...,None].abs()+hy*c[...,None].abs()),-1)
-            sat_hit=(robot_radius+box_radius-signed.abs()+clearance).amin(-1)>=0.
+            sat_hit=(robot_radius+box_radius-signed.abs()+
+                     sample_clearance[:,:,None,:]).amin(-1)>=0.
             hit|=ambiguous&sat_hit
         elif bool(ambiguous.any().item()):
             indices=torch.nonzero(ambiguous,as_tuple=False)
@@ -465,7 +548,7 @@ class TensorADStar:
                 hl_a+hx_a*c_a.abs()+hy_a*s_a.abs()-
                     (dx_a*c_a+dy_a*s_a).abs(),
                 hw_a+hx_a*s_a.abs()+hy_a*c_a.abs()-
-                    (-dx_a*s_a+dy_a*c_a).abs()),-1) + clearance
+                    (-dx_a*s_a+dy_a*c_a).abs()),-1) + segment_clearance[bi,si,None]
             hit[bi,si,ti,oi]=penetration.amin(-1)>=0.
         path_hit=(hit&valid_sample[...,None]).any(dim=(1,2,3))
         ex=.5*(length[:,None,None]*c.abs()+width[:,None,None]*s.abs())
@@ -744,9 +827,15 @@ class TensorADStar:
 
         selected_curve=torch.where(has_route[:,None,None],selected_curve,
                                    source[:,0:1].expand(-1,point_count,-1))
+        # A route that fails both continuous footprint checks is unsafe even
+        # when its sampled spline happens to pass the cell-only checks above.
+        # GPU graph capture cannot enter the local CPU repair path, so keep a
+        # stop command in that case and allow the next planning update to try
+        # again from the new state.
         unresolved=has_route&~resolved&~line_clear&~raw_clear
         can_repair=(path.device.type=="cpu" or
                     not torch.cuda.is_current_stream_capturing())
+        failed=unresolved
         if can_repair and bool(unresolved.any().item()):
             repair_source=source.clone()
             repair_lengths=torch.where(unresolved,lengths,torch.ones_like(lengths))
@@ -758,17 +847,25 @@ class TensorADStar:
             dense_repair=torch.cat((repaired[:,:1],dense_repair.reshape(batch_n,-1,2)),1)
             rx=(dense_repair[...,0]/self.resolution).floor().long().clamp(0,self.nx-1)
             ry=(dense_repair[...,1]/self.resolution).floor().long().clamp(0,self.ny-1)
-            repaired_clear=self._footprint_path_clear(
-                repaired,heading,length,width)
+            repaired_clear=self._footprint_path_clear(repaired,heading,length,width)
+            expected_endpoint=repair_source.gather(
+                1,(repair_lengths-1).clamp_min(0)[:,None,None].expand(-1,1,2)).squeeze(1)
+            endpoint_error=(repaired[:,-1]-expected_endpoint).norm(dim=-1)
+            repaired_clear &= endpoint_error <= self.resolution*.5
             selected_curve=torch.where((unresolved&repaired_clear)[:,None,None],
                                        repaired,selected_curve)
             failed=unresolved&~repaired_clear
             selected_curve=torch.where(failed[:,None,None],
                 source[:,0:1].expand(-1,point_count,-1),selected_curve)
+        else:
+            selected_curve=torch.where(unresolved[:,None,None],
+                source[:,0:1].expand(-1,point_count,-1),selected_curve)
         # Keep a single-point route as a stop command; valid multi-point routes
         # use all slots after resampling their PathPlanner-style spline.
-        out_lengths=torch.where(has_route,torch.full_like(lengths,point_count),
+        out_lengths=torch.where(failed,torch.ones_like(lengths),
+            torch.where(has_route,torch.full_like(lengths,point_count),
                                 torch.where(lengths>0,torch.ones_like(lengths),lengths))
+            )
         out_lengths=torch.where(lengths>0,out_lengths,torch.zeros_like(out_lengths))
         path.copy_(selected_curve)
         lengths.copy_(out_lengths)
@@ -793,7 +890,7 @@ class TensorADStar:
                torch.full((batch_n,),8.,device=self.device,dtype=self.dtype)).clamp_min(.2)
         vcap=(speed if speed is not None else
               torch.full((batch_n,),4.8,device=self.device,dtype=self.dtype)).clamp_min(.1)[:,None]
-        lateral=(.65*mu[:,None]*9.81/point_curve.clamp_min(1.e-6)).sqrt()
+        lateral=(1.0*mu[:,None]*9.81/point_curve.clamp_min(1.e-6)).sqrt()
         steer=self.steer_rate_limit/point_curve.clamp_min(1.e-6)
         caps=torch.minimum(vcap,torch.minimum(lateral,steer))
         caps=torch.where(point_curve>1.e-6,caps,vcap)
@@ -806,7 +903,7 @@ class TensorADStar:
         indices=torch.arange(path.shape[1],device=self.device)
         future=indices[None,None,:]>=indices[None,:,None]
         valid=(indices[None,None,:]<lengths[:,None,None])&future
-        braking=.65*accel[:,None,None]
+        braking=accel[:,None,None]
         reachable=(caps[:,None,:].square()+2*braking*delta_station.clamp_min(0)).sqrt()
         return torch.where(valid,reachable,
                            torch.full_like(reachable,float("inf"))).amin(-1)
@@ -884,6 +981,7 @@ class TensorADStar:
 
         heading = select_rows(heading.reshape(self.n)).to(self.dtype)
         start, goal = select_rows(start).to(self.dtype), select_rows(goal).to(self.dtype)
+        start_heading=heading.clone()
         length,width=select_rows(length),select_rows(width)
         speed=select_rows(speed)
         defender=select_rows(defender)
@@ -897,14 +995,17 @@ class TensorADStar:
             high_x=torch.maximum(start[:,0],goal[:,0])[:,None]
             crosses_trench=((self._trench_xs[None]>=low_x) &
                             (self._trench_xs[None]<=high_x)).any(-1)
-            trench_alignment=crosses_trench
-            # The clear openings are at the field edges. A horizontal chassis
-            # footprint can route sideways to either opening, cross the trench,
-            # then continue toward a center-field goal without clipping corners.
+            half_width=width*.5+self.footprint_clearance
+            within_opening=(
+                (start[:,1]>=self._trench_opening_low+half_width) &
+                (start[:,1]<=self._trench_opening_high-half_width))
+            trench_alignment=crosses_trench&within_opening
+            # Align horizontally only once the chassis reaches a clear trench
+            # opening. Earlier in the approach, path tracking must be free to
+            # move toward that opening instead of holding the crossing heading.
             cross_heading=torch.where(goal[:,0]>=start[:,0],
                 torch.zeros_like(heading),torch.full_like(heading,math.pi))
             heading=torch.where(trench_alignment,cross_heading,heading)
-        write_rows(self.last_trench_alignment,trench_alignment)
         if dynamic_defender:
             delta = goal - start
             unit = delta / delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -931,7 +1032,10 @@ class TensorADStar:
             t = torch.zeros(batch_n, device=self.device, dtype=self.dtype)
             intercept = torch.zeros_like(start)
             dynamic = None
-        blocked = self._blocked(heading, length, width, dynamic)
+        # Use the measured chassis pose for collision inflation as well as the
+        # continuous footprint validation. Trench alignment is a route hint;
+        # snapping its heading must not shrink the actual occupied footprint.
+        blocked = self._blocked(start_heading, length, width, dynamic)
         blocked = self._block_robot_obstacles(blocked,length,width,robot_obstacles)
         hip_extension = _hip_adstar_extension() if self.device.type == "cuda" else None
         route_shared_bytes = (2 * self.nx * self.ny + 5 * 72) * 4
@@ -947,48 +1051,47 @@ class TensorADStar:
             self.max_points == 72 and self.nx * self.ny <= 4096 and
             shared_memory_limit >= route_shared_bytes and blocked.is_contiguous()
         )
-        # Targets can sit in a footprint-clearance strip at the field edge
-        # (notably FUEL staged inside a DEPOT). Project blocked goals to the
-        # nearest reachable cell so AD* does not command into the boundary.
+        # A footprint-valid boundary pose can still map to a blocked raster
+        # cell because occupancy is sampled at cell centers. Search from a
+        # nearby visible free cell for blocked starts and project blocked goals
+        # onto the nearest visible free cell.
         sx, sy = self._indices(start); gx, gy = self._indices(goal)
         batch = torch.arange(batch_n,device=self.device)
+        blocked_start=blocked[batch,sx,sy]
+        write_rows(self.last_trench_alignment,trench_alignment)
         blocked_goal=blocked[batch,gx,gy]
-        # Only blocked goals need projection. The dense all-row distance
-        # matrix scales as [robots, grid_cells] and can exceed a gigabyte
-        # for large PPO batches. Chunk the affected rows so peak memory is
-        # bounded while preserving the same nearest-clear-cell argmin.
         if batch_n <= 64:
-            # Scenario rollouts plan only six robots. Compacting blocked rows
-            # with nonzero forces a device-to-host sync on every replan; the
-            # dense six-row projection is small and keeps the decision on GPU.
-            row_goal_distance=(
-                (self.xx.reshape(1,-1)-goal[:,0,None]).square()+
-                (self.yy.reshape(1,-1)-goal[:,1,None]).square())
-            row_goal_distance.masked_fill_(blocked.flatten(1),float("inf"))
-            nearest=row_goal_distance.argmin(-1)
-            projected=torch.stack((self.x[nearest//self.ny],
-                                   self.y[nearest%self.ny]),-1)
-            goal=torch.where(blocked_goal[:,None],projected,goal)
-            gx,gy=self._indices(goal)
+            if bool(blocked_start.any().item()):
+                start_projection=self._nearest_visible_endpoint(start,blocked)
+                start=torch.where(blocked_start[:,None],start_projection,start)
+            if bool(blocked_goal.any().item()):
+                goal_projection=self._nearest_visible_endpoint(goal,blocked)
+                goal=torch.where(blocked_goal[:,None],goal_projection,goal)
+            sx,sy=self._indices(start); gx,gy=self._indices(goal)
         else:
+            blocked_rows=torch.nonzero(blocked_start,as_tuple=False).flatten()
+            if blocked_rows.numel():
+                start=start.clone()
+                for offset in range(0,blocked_rows.numel(),8192):
+                    rows=blocked_rows[offset:offset+8192]
+                    row_start=start[rows]
+                    row_blocked=blocked.index_select(0,rows).flatten(1)
+                    ix,iy=sx[rows],sy[rows]
+                    nx,ny=self._nearest_visible_start_cell(
+                        row_start,row_blocked,ix,iy)
+                    start[rows]=torch.stack((self.x[nx],self.y[ny]),-1)
+                sx,sy=self._indices(start)
             blocked_rows=torch.nonzero(blocked_goal,as_tuple=False).flatten()
             if blocked_rows.numel():
                 goal=goal.clone()
-                projection_chunk=8192
-                for offset in range(0,blocked_rows.numel(),projection_chunk):
-                    rows=blocked_rows[offset:offset+projection_chunk]
+                for offset in range(0,blocked_rows.numel(),8192):
+                    rows=blocked_rows[offset:offset+8192]
                     row_goal=goal[rows]
                     row_blocked=blocked.index_select(0,rows).flatten(1)
-                    goal_distance=((self.xx.reshape(1,-1)-row_goal[:,0,None]).square()+
-                                   (self.yy.reshape(1,-1)-row_goal[:,1,None]).square())
-                    nearest=goal_distance.masked_fill(row_blocked,float("inf")).argmin(-1)
-                    nearest_x=nearest//self.ny
-                    nearest_y=nearest%self.ny
-                    projected=torch.stack((self.x[nearest_x],self.y[nearest_y]),-1)
-                    goal[rows]=projected
+                    goal[rows]=self._nearest_visible_endpoint(row_goal,row_blocked)
                 gx,gy=self._indices(goal)
-        blocked[batch,sx,sy]=False
         blocked[batch,gx,gy]=False
+        blocked[batch,sx,sy]=False
         # Both the HIP kernels and the Torch fallback broadcast this one
         # field-static grid across worlds without constructing [B, nx, ny].
         bump_cost = self._bump_cost
@@ -1040,7 +1143,7 @@ class TensorADStar:
                 1,(out_lengths-1).clamp_min(0)[:,None,None].expand(-1,1,2))
             out_path=torch.where(tail[:,:,None],endpoint,out_path)
             out_path,out_lengths=self._shortcut_path(
-                out_path,out_lengths,blocked,heading,length,width,speed,acceleration)
+                out_path,out_lengths,blocked,start_heading,length,width,speed,acceleration)
             out_profile=self._speed_profile(
                 out_path,out_lengths,speed,lateral_friction,acceleration)
             if out_value is not self.potential:
@@ -1117,7 +1220,7 @@ class TensorADStar:
                 break
         write_rows(self.potential, value)
         path,lengths=self._shortcut_path(
-            path,lengths,blocked,heading,length,width,speed,acceleration)
+            path,lengths,blocked,start_heading,length,width,speed,acceleration)
         write_rows(self.last_path, path)
         write_rows(self.last_progress, torch.zeros_like(self.last_progress[:batch_n]))
         write_rows(self.last_lengths, lengths)
@@ -1164,7 +1267,8 @@ class TensorADStar:
         progress=torch.maximum(progress,self.last_progress).minimum(station[batch,-1])
         projection=path[batch,idx]+chosen_fraction[:,None]*segments[batch,idx]
         self.last_progress.copy_(progress)
-        lookahead=((.7+.12*speed_limit.clamp(max=4.5)).clamp_min(.12)
+        current=velocity.norm(dim=-1)
+        lookahead=((.2+.20*current.clamp(max=4.5)).clamp(.2,1.2)
                    if lookahead is None else
                    torch.full_like(speed_limit,float(lookahead)))
         target_station=(progress+lookahead).minimum(station[batch,-1])
@@ -1179,10 +1283,14 @@ class TensorADStar:
         cross_v=(velocity*normal).sum(-1)
         lateral=(-3.*cross-4.*cross_v).clamp(-.75,.75)
         target_next=(target_segment+1).clamp_max(self.max_points-1)
-        planned=(self.last_speed_profile[batch,target_segment]*(1.-target_fraction)+
-                 self.last_speed_profile[batch,target_next]*target_fraction)
+        speed_segment=(station[:,1:]<progress[:,None]).sum(-1).clamp_max(
+            self.max_points-2)
+        speed_distance=distance[batch,speed_segment]
+        speed_fraction=((progress-station[batch,speed_segment])/
+                        speed_distance.clamp_min(1.e-8)).clamp(0.,1.)
+        planned=(self.last_speed_profile[batch,speed_segment]*(1.-speed_fraction)+
+                 self.last_speed_profile[batch,speed_segment+1]*speed_fraction)
         planned=planned.clamp(max=speed_limit).clamp_min(0.)
-        current=velocity.norm(dim=-1)
         target=(planned-.55*(current-planned).clamp_min(0)).clamp_min(0)
         command=tangent*target[:,None]+normal*lateral[:,None]
         # A one-point route means no collision-free step was found. Driving

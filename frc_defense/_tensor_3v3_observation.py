@@ -126,22 +126,22 @@ class TensorThreeVsThreeObservationMixin:
             visible_intake_left=tensor_perception.visibility_mask_3v3(
                 intake_left.contiguous(), self.piece_pos.contiguous(), self.piece_active,
                 self.piece_owner, active, self.perception_range,
-                self.perception_fov_degrees, self.field_feature_obstacles,
+                self.perception_fov_degrees, self.field_occlusion_boxes,
                 self._robot_occlusion_radius)
             visible_intake_right=tensor_perception.visibility_mask_3v3(
                 intake_right.contiguous(), self.piece_pos.contiguous(), self.piece_active,
                 self.piece_owner, active, self.perception_range,
-                self.perception_fov_degrees, self.field_feature_obstacles,
+                self.perception_fov_degrees, self.field_occlusion_boxes,
                 self._robot_occlusion_radius)
             visible_opposite_left=tensor_perception.visibility_mask_3v3(
                 opposite_left.contiguous(), self.piece_pos.contiguous(), self.piece_active,
                 self.piece_owner, active, self.perception_range,
-                self.perception_fov_degrees, self.field_feature_obstacles,
+                self.perception_fov_degrees, self.field_occlusion_boxes,
                 self._robot_occlusion_radius)
             visible_opposite_right=tensor_perception.visibility_mask_3v3(
                 opposite_right.contiguous(), self.piece_pos.contiguous(), self.piece_active,
                 self.piece_owner, active, self.perception_range,
-                self.perception_fov_degrees, self.field_feature_obstacles,
+                self.perception_fov_degrees, self.field_occlusion_boxes,
                 self._robot_occlusion_radius)
             camera_poses=torch.stack((intake_left,intake_right,
                                       opposite_left,opposite_right),dim=2)
@@ -171,11 +171,11 @@ class TensorThreeVsThreeObservationMixin:
                     torch.cos(bearing - pose[:, :, None, 2])).abs()
                 visible &= ((error <= self.perception_fov) |
                             (error >= math.pi-self.perception_fov))
-            if self.field_feature_obstacles.numel():
+            if self.field_occlusion_boxes.numel():
                 blocked = tensor_perception.piece_occlusion_mask(
                     own_xy.reshape(self.n * NUM_ROBOTS, 2).contiguous(),
-                    delta.reshape(self.n * NUM_ROBOTS, self.fuel_count, 2),
-                    self.field_feature_obstacles.contiguous(),
+                    delta.reshape(self.n * NUM_ROBOTS, self.fuel_count, 2).contiguous(),
+                    self.field_occlusion_boxes.contiguous(),
                     visible.reshape(self.n * NUM_ROBOTS, self.fuel_count).contiguous(),
                 ).reshape(self.n, NUM_ROBOTS, self.fuel_count)
                 visible &= ~blocked
@@ -429,10 +429,10 @@ class TensorThreeVsThreeObservationMixin:
                                             torch.cos(bearing - own[:, None, 2])).abs()
                         visible &= ((error <= self.perception_fov) |
                                     (error >= math.pi-self.perception_fov))
-                    if self.field_feature_obstacles.numel():
+                    if self.field_occlusion_boxes.numel():
                         blocked = tensor_perception.piece_occlusion_mask(
                             own[:, :2].contiguous(), delta,
-                            self.field_feature_obstacles.contiguous(),
+                            self.field_occlusion_boxes.contiguous(),
                             (visible & active[:, None]).contiguous())
                         visible &= ~blocked
                     # Evaluate all other chassis together; the old inner robot loop
@@ -552,10 +552,10 @@ class TensorThreeVsThreeObservationMixin:
             if self.robot_roles[robot]=="defense":
                 in_view &= self._controlled_mode_mask[enemy_ids][None]
             in_view &= active[:, None]
-            if self.field_feature_obstacles.numel():
+            if self.field_occlusion_boxes.numel():
                 from .tensor_perception import piece_occlusion_mask
                 in_view &= ~piece_occlusion_mask(own[:,:2].contiguous(),enemy_delta,
-                    self.field_feature_obstacles.contiguous(),in_view.contiguous())
+                    self.field_occlusion_boxes.contiguous(),in_view.contiguous())
             # For each of the three enemy tracks, test all six possible robot
             # occluders together. Exclude the observing robot and the tracked
             # enemy chassis itself, matching the original visibility rule.

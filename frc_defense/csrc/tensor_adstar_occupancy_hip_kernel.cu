@@ -43,11 +43,10 @@ __global__ void blocked_grid_kernel(const float* heading, const float* length,
 
   // Bumps are traversable terrain. The planner adds their traversal cost in
   // the route solver, so occupancy must not turn them into hard obstacles.
-  const float inflate = fmaxf(ex, ey);
   for (int i = 0; i < circle_count && !blocked; ++i) {
     const float dx = gx - circles[i * 3];
     const float dy = gy - circles[i * 3 + 1];
-    const float r = circles[i * 3 + 2] + inflate;
+    const float r = circles[i * 3 + 2] + fmaxf(ex, ey);
     blocked = dx * dx + dy * dy <= r * r;
   }
 

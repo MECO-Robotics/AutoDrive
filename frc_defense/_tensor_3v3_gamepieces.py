@@ -369,15 +369,15 @@ class TensorThreeVsThreeGamepieceMixin:
             held=(self.piece_active[:,None,:]&
                   (self.piece_owner[:,None,:]==self._robot_owner_ids[None,:,None])&
                   active[:,None,None])
-            hub=self.hub_centers[self.team_ids][None]
+            hub=self.hub_centers[self.team_ids][None].expand(self.n,-1,-1)
             delta=hub-self.sim.pose[:,:,:2]
             bearing=torch.atan2(delta[...,1],delta[...,0])
             error=torch.atan2(torch.sin(bearing-self.sim.pose[:,:,2]),
                               torch.cos(bearing-self.sim.pose[:,:,2])).abs()
-            stationary=(self.sim.velocity[:,:,:2].norm(dim=-1)<=.10)&(
-                self.sim.velocity[:,:,2].abs()<=.10)
+            stationary=(self.sim.velocity[:,:,:2].norm(dim=-1)<=.20)&(
+                self.sim.velocity[:,:,2].abs()<=.20)
             aimed=torch.where(self._dumper_mask[None],
-                              (error<=math.pi/18)&stationary,
+                              (error<=math.pi/9)&stationary,
                               torch.ones_like(stationary))
             robot_x=self.sim.pose[:,:,0]
             in_alliance_zone=torch.where(self.team_ids[None,:]==0,
@@ -419,14 +419,15 @@ class TensorThreeVsThreeGamepieceMixin:
                     continue
                 team=TEAM_IDS[robot]
                 held=self.piece_active&(self.piece_owner==robot)&active[:,None]
-                hub=self.hub_centers[team]; delta=hub-self.sim.pose[:,robot,:2]
+                hub=self.hub_centers[team]
+                delta=hub-self.sim.pose[:,robot,:2]
                 bearing=torch.atan2(delta[:,1],delta[:,0])
                 error=torch.atan2(torch.sin(bearing-self.sim.pose[:,robot,2]),
                                   torch.cos(bearing-self.sim.pose[:,robot,2])).abs()
                 if self.robot_types[robot]=="dumper":
-                    stationary=(self.sim.velocity[:,robot,:2].norm(dim=-1)<=.10)&(
-                        self.sim.velocity[:,robot,2].abs()<=.10)
-                    aimed=(error<=math.pi/18)&stationary
+                    stationary=(self.sim.velocity[:,robot,:2].norm(dim=-1)<=.20)&(
+                        self.sim.velocity[:,robot,2].abs()<=.20)
+                    aimed=(error<=math.pi/9)&stationary
                 else:
                     aimed=torch.ones_like(error,dtype=torch.bool)
                 robot_x=self.sim.pose[:,robot,0]
