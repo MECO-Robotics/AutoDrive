@@ -44,6 +44,21 @@ def test_focused_chassis_stays_twenty_four_inches_after_reset():
         assert env._controlled_mode_mask.sum().item() == 1
 
 
+def test_dumper_intake_deployment_is_blocked_by_hub_geometry():
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", behavior_probe="collect",
+        control_modes=["deterministic"] + ["none"] * 5,
+        robot_roles=["offense"] * 6,
+    )
+    env.reset(seed=0)
+    hub = next(box for box in env.field_boxes if box.name == "red_hub")
+    env.sim.pose[0, 0] = torch.tensor([hub.x - .7, hub.y, 0.])
+    assert not env._intake_deployment_clear()[0, 0].item()
+
+    env.sim.pose[0, 0] = torch.tensor([hub.x - 1.4, hub.y, 0.])
+    assert env._intake_deployment_clear()[0, 0].item()
+
+
 def test_inactive_collect_planner_projects_touching_support_start():
     env = TensorThreeVsThreeEnv(
         num_envs=1, device="cpu", seed=0, randomize=False,

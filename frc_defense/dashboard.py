@@ -69,6 +69,7 @@ def create_handler(run_dir: Path):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             content_encoding=None
+            playback_decoded_size=None
             parsed=urlparse(self.path)
             params=parse_qs(parsed.query)
             run=params.get("run",[""])[0]
@@ -398,11 +399,16 @@ def create_handler(run_dir: Path):
                 else:
                     result_path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
                     try:
-                        compressed_path=result_path.with_suffix(result_path.suffix+".gz")
+                        playback_view=params.get("view",["0"])[0]=="1"
+                        view_path=result_path.with_suffix(".view.json.gz")
+                        compressed_path=(view_path if playback_view and view_path.is_file()
+                            else result_path.with_suffix(result_path.suffix+".gz"))
                         if ("gzip" in self.headers.get("Accept-Encoding","") and
                                 compressed_path.is_file()):
                             body=compressed_path.read_bytes()
                             content_encoding="gzip"
+                            if playback_view and compressed_path == view_path and len(body) >= 4:
+                                playback_decoded_size=int.from_bytes(body[-4:],"little")
                         else:
                             body=result_path.read_bytes()
                     except OSError:
@@ -464,13 +470,20 @@ def create_handler(run_dir: Path):
                         if not str(simulation_id).startswith(("scenario-", "focused-")):
                             continue
                         saved=record.get("code_state") or {}
+                        saved_dirty=sorted(path for path in saved.get("dirty_files",[])
+                            if Path(path).suffix in {".py", ".cpp", ".cu", ".hip", ".json"}
+                            or path == "pyproject.toml")
                         outdated=(saved.get("commit") != current.get("commit") or
-                            saved.get("dirty_files",[]) != current.get("dirty_files",[]))
+                            saved_dirty != current.get("dirty_files",[]))
+                        view_path=progress_dir/f"{simulation_id}.result.view.json.gz"
                         replays.append({"simulation_id":simulation_id,
                             "label":record.get("label") or simulation_id,
                             "seed":record.get("seed"),"behavior_mode":record.get("behavior_mode","match"),
                             "robot_types":record.get("robot_types",[]),"code_state":saved,
                             "outdated":outdated,
+                            "playback_size_bytes":(view_path.stat().st_size if view_path.is_file()
+                                else (progress_dir/f"{simulation_id}.result.json.gz").stat().st_size
+                                if (progress_dir/f"{simulation_id}.result.json.gz").is_file() else 0),
                             "updated_at":metadata_path.stat().st_mtime})
                     # Legacy replay results can be large; only open a bounded
                     # header window to extract the scalar fields we need.
@@ -572,6 +585,8 @@ def create_handler(run_dir: Path):
             if content_encoding:
                 self.send_header("Content-Encoding",content_encoding)
                 self.send_header("Vary","Accept-Encoding")
+            if playback_decoded_size is not None:
+                self.send_header("X-Playback-Decoded-Length",str(playback_decoded_size))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
@@ -655,7 +670,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            teammate_intent_knowledge: bool = True,
                            sweeping_enabled: bool = False,
                            random_gamepiece_placement: bool = False,
-                           capture_stride: int = 64, device: str | None = None,
+                           capture_stride: int = 10, device: str | None = None,
                            hopper_capacity: int = 60, scoring_bps: float = 25.,
                            progress_path: Path | None = None) -> dict:
     """Simulate one seeded, six-robot FRC match for dashboard playback."""

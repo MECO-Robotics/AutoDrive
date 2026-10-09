@@ -345,6 +345,18 @@ def test_collect_inactive_probe_latches_ferry_until_hopper_is_empty():
 
     env.piece_owner[0, env.piece_owner[0] == 0] = -1
     _, actions, _, _ = env._target_for_actions(no_action, active)
+    # The pass invalidated the only sensed track, so the empty robot searches
+    # from its ferry waypoint until another legal target is observed.
+    assert actions[0, 0].item() == 6
+    assert not env._ferry_committed[0, 0]
+
+    env.piece_active[0, 61] = True
+    env.piece_owner[0, 61] = -1
+    env.piece_pos[0, 61] = torch.tensor([8.0, 4.0])
+    env.track_mask[0, 0, 61] = True
+    env.track_age[0, 0, 61] = 0.
+    env.track_pos[0, 0, 61] = env.piece_pos[0, 61]
+    _, actions, _, _ = env._target_for_actions(no_action, active)
     assert actions[0, 0].item() == 0
     assert not env._ferry_committed[0, 0]
 

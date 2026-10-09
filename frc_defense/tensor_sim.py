@@ -133,6 +133,7 @@ class TensorDefenseEnv(
         gamepiece_config=kwargs.pop("gamepiece_config",{})
         if not isinstance(gamepiece_config,dict):
             raise ValueError("gamepiece_config must be a mapping")
+        fuel_physics_config=kwargs.pop("fuel_physics",gamepiece_config.get("physics",True))
         # These are configurable robot assumptions, not REBUILT regulation limits.
         self.fuel_capacity=max(0,int(kwargs.pop("max_fuel_capacity",gamepiece_config.get("max_capacity",8))))
         self.intake_interval=float(kwargs.pop("intake_interval",gamepiece_config.get("intake_interval_s",.20)))
@@ -244,6 +245,8 @@ class TensorDefenseEnv(
         self.piece_vel=torch.zeros_like(self.piece_pos)
         self.piece_active=torch.zeros((self.n,self.fuel_count),device=self.device,dtype=torch.bool)
         self.piece_owner=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
+        from .fuel_physics_runtime import initialize_fuel_physics
+        initialize_fuel_physics(self,fuel_physics_config)
         self.piece_zone=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
         self.piece_type=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
         self._midfield_respawn_positions=torch.tensor(

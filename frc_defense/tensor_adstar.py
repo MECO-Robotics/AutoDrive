@@ -467,7 +467,7 @@ class TensorADStar:
                             self.yy.reshape(-1)[nearest_cell]),-1)
 
     def _footprint_path_clear(self, path, heading, length, width):
-        """Check a fixed-chassis-heading route against field boxes."""
+        """Check the supplied robot footprint against field boxes."""
         if not self._boxes.numel():
             return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
         return torch.cat([

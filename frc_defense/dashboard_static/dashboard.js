@@ -7,6 +7,7 @@ const initialRun = new URLSearchParams(location.search).get("run");
 const scenarioJobStorageKey = "autodrive.activeScenarioJob";
 const focusedSettingsStorageKey = "autodrive.focusedTestSettings";
 const dualGpuStorageKey = "autodrive.dualGpuMode";
+const replayCacheDatabase = "autodrive-replay-cache";
 const defaultWorld = {
   length: 16.54,
   width: 8.07,
@@ -37,6 +38,54 @@ let lastScenarioGeneration = null;
 let trendTaskChosen = false;
 let scenarioReplays = [];
 
+function openReplayCache() {
+  if (!window.indexedDB) return Promise.reject(new Error("Local replay storage is unavailable"));
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(replayCacheDatabase, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains("replays"))
+        request.result.createObjectStore("replays", { keyPath: "key" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open local replay storage"));
+    request.onblocked = () => reject(new Error("Local replay storage is blocked"));
+  });
+}
+
+async function getCachedScenarioReplay(replay) {
+  const db = await openReplayCache();
+  try {
+    const entry = await new Promise((resolve, reject) => {
+      const request = db.transaction("replays", "readonly").objectStore("replays").get("current");
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error("Could not read local replay storage"));
+    });
+    return entry?.simulation_id === replay.simulation_id &&
+      entry.updated_at === replay.updated_at ? entry.record : null;
+  } finally {
+    db.close();
+  }
+}
+
+async function cacheScenarioReplay(replay, record, revision) {
+  const db = await openReplayCache();
+  try {
+    if (revision !== requestRevision) return;
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("replays", "readwrite");
+      transaction.objectStore("replays").put({
+        key: "current", simulation_id: replay.simulation_id,
+        updated_at: replay.updated_at, record,
+      });
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("Could not cache replay"));
+      transaction.onabort = () => reject(transaction.error || new Error("Replay cache write was aborted"));
+    });
+  } finally {
+    db.close();
+  }
+}
+
 async function refreshScenarioReplays() {
   const select = $("scenarioReplay");
   if (!select) return;
@@ -47,9 +96,10 @@ async function refreshScenarioReplays() {
     scenarioReplays = data.replays || [];
     select.replaceChildren(new Option("Choose a saved replay", ""),
       ...scenarioReplays.map((replay) => new Option(
-        `${replay.outdated ? "⚠ Outdated · " : ""}${replay.label} · seed ${replay.seed ?? "—"}`,
+        `${replay.outdated ? "⚠ Outdated · " : ""}${replay.label} · seed ${replay.seed ?? "—"} · ${Math.max(0.1, (replay.playback_size_bytes || 0) / 1048576).toFixed(1)} MB`,
         replay.simulation_id,
       )));
+    setPlaybackControls();
     const status = $("scenarioReplayStatus");
     if (status) status.textContent = scenarioReplays.length
       ? `${scenarioReplays.length} saved replay${scenarioReplays.length === 1 ? "" : "s"}. Outdated means the commit or dirty files differ from this checkout.`
@@ -486,15 +536,15 @@ function drawField() {
 
 function setPlaybackControls() {
   const ready = frames.length > 0;
-  const canGenerate = $("playbackSource").value === "randomized";
-  $("play").disabled = !ready && (!canGenerate || zoneLoading);
+  $("play").disabled = !ready || zoneLoading;
+  $("loadScenarioReplay").disabled = zoneLoading || !$("scenarioReplay").value;
   $("play").textContent = ready
     ? playing
       ? "Pause"
       : "Play"
     : zoneLoading
-      ? "Simulating…"
-      : "Generate & play";
+      ? "Loading replay…"
+      : "Play";
   $("play").setAttribute("aria-pressed", String(playing));
   $("frame").disabled = !ready;
   $("nextScenario").disabled = zoneLoading;
@@ -927,26 +977,133 @@ function renderSource() {
   setPlaybackControls();
 }
 
-$("loadScenarioReplay").addEventListener("click", async () => {
+async function loadSelectedScenarioReplay() {
   const replay = scenarioReplays.find((item) => item.simulation_id === $("scenarioReplay").value);
-  if (!replay) return;
-  const response = await fetch(`/api/zone-playback-result?simulation_id=${encodeURIComponent(replay.simulation_id)}`, { cache: "no-store" });
-  const record = await response.json();
-  if (!response.ok) { setNotice(record.error || "Replay could not be loaded.", "error"); return; }
-  playbackTask = record.task || "3v3";
-  playbackRobotTypes = record.robot_types || [];
-  playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot || [];
-  world = record.field || { ...defaultWorld };
-  loadedScenarios = record.scenarios || [];
-  frames = loadedScenarios[0]?.frames || record.frames || [];
-  index = 0; playing = false; ensurePlaybackClock();
-  $("scenarioCount").textContent = `${record.behavior_mode || "match"} · seed ${record.seed ?? "—"} · ${frames.length.toLocaleString()} frames`;
-  const state = scenarioReplays.find((item) => item.simulation_id === replay.simulation_id);
-  $("scenarioReplayStatus").textContent = state?.outdated
-    ? `Outdated: created at commit ${state.code_state?.commit || "unknown"}; current code differs.`
-    : `Current code: ${state?.code_state?.commit || "unknown"}.`;
-  setNotice("Saved replay loaded.", "success"); setPlaybackControls(); drawField();
-});
+  if (!replay) {
+    setNotice("Choose a saved replay first.", "error");
+    return;
+  }
+  activeRequest?.abort();
+  const controller = new AbortController();
+  activeRequest = controller;
+  const revision = ++requestRevision;
+  zoneLoading = true;
+  playing = false;
+  setPlaybackControls();
+  const replaySize = Math.max(0.1, (replay.playback_size_bytes || 0) / 1048576).toFixed(1);
+  $("scenarioReplayStatus").textContent = `Loading ${replaySize} MB of replay data…`;
+  const progressPanel = $("scenarioProgress");
+  const progressBar = $("scenarioProgressBar");
+  progressPanel.hidden = false;
+  progressBar.setAttribute("aria-label", "Replay download progress");
+  $("scenarioProgressTitle").textContent = "Loading saved replay";
+  $("scenarioProgressPercent").textContent = "0%";
+  progressBar.value = 0;
+  $("scenarioProgressTime").textContent = `0.0 / ${replaySize} MB received`;
+  $("scenarioProgressState").textContent = "Waiting for replay data";
+  setNotice("Loading the selected replay…");
+  try {
+    let record = null;
+    let fromCache = false;
+    try {
+      record = await getCachedScenarioReplay(replay);
+      fromCache = Boolean(record);
+    } catch (_) {
+      // Storage can be unavailable in private browsing; network loading still works.
+    }
+    let receivedBytes = 0;
+    if (fromCache) {
+      progressBar.value = 97;
+      $("scenarioProgressPercent").textContent = "97%";
+      $("scenarioProgressState").textContent = "Restoring replay from local cache";
+      $("scenarioProgressTime").textContent = "Using locally cached replay";
+    } else {
+      const response = await fetch(`/api/zone-playback-result?simulation_id=${encodeURIComponent(replay.simulation_id)}&view=1`, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) {
+        const errorRecord = await response.json();
+        throw new Error(errorRecord.error || `Replay request failed (${response.status})`);
+      }
+      const expectedBytes = Number(response.headers.get("X-Playback-Decoded-Length")) || 0;
+      const reader = response.body.getReader();
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        receivedBytes += value.byteLength;
+        const percent = expectedBytes
+          ? Math.min(95, 95 * receivedBytes / expectedBytes)
+          : 0;
+        progressBar.value = percent;
+        $("scenarioProgressPercent").textContent = `${percent.toFixed(0)}%`;
+        $("scenarioProgressTime").textContent = `${(receivedBytes / 1048576).toFixed(1)} / ${expectedBytes ? (expectedBytes / 1048576).toFixed(1) : "?"} MB received`;
+        $("scenarioProgressState").textContent = "Downloading and decompressing replay";
+      }
+      if (revision !== requestRevision) return;
+      progressBar.value = 97;
+      $("scenarioProgressPercent").textContent = "97%";
+      $("scenarioProgressState").textContent = "Parsing playback frames";
+      const bytes = new Uint8Array(receivedBytes);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      record = JSON.parse(new TextDecoder().decode(bytes));
+    }
+    if (revision !== requestRevision) return;
+    playbackTask = record.task || "3v3";
+    playbackRobotTypes = record.robot_types || [];
+    playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot || [];
+    world = record.field || { ...defaultWorld };
+    loadedScenarios = record.scenarios || [];
+    frames = loadedScenarios[0]?.frames || record.frames || [];
+    index = 0; playing = false; ensurePlaybackClock();
+    $("scenarioCount").textContent = `${record.behavior_mode || "match"} · seed ${record.seed ?? "—"} · ${frames.length.toLocaleString()} frames`;
+    const state = scenarioReplays.find((item) => item.simulation_id === replay.simulation_id);
+    $("scenarioReplayStatus").textContent = state?.outdated
+      ? `Outdated: created at commit ${state.code_state?.commit || "unknown"}; current code differs.`
+      : `Current code: ${state?.code_state?.commit || "unknown"}.`;
+    if (!frames.length) throw new Error("This replay contains no playback frames.");
+    if (!fromCache) {
+      progressBar.value = 98;
+      $("scenarioProgressPercent").textContent = "98%";
+      $("scenarioProgressState").textContent = "Saving replay to local cache";
+      try {
+        await cacheScenarioReplay(replay, record, revision);
+        if (revision !== requestRevision) return;
+        $("scenarioReplayStatus").textContent += " · cached locally";
+      } catch (_) {
+        $("scenarioReplayStatus").textContent += " · local cache unavailable";
+      }
+    } else {
+      $("scenarioReplayStatus").textContent += " · loaded from local cache";
+    }
+    progressBar.value = 100;
+    $("scenarioProgressPercent").textContent = "100%";
+    $("scenarioProgressTime").textContent = fromCache
+      ? "Loaded from local cache"
+      : `${(receivedBytes / 1048576).toFixed(1)} MB loaded`;
+    $("scenarioProgressState").textContent = "Replay ready";
+    $("scenarioProgressTitle").textContent = "Saved replay ready";
+    progressBar.setAttribute("aria-label", "Scenario simulation progress");
+    setNotice("Saved replay loaded. Press Play to start.", "success");
+    drawField();
+  } catch (error) {
+    if (error.name !== "AbortError" && revision === requestRevision) {
+      $("scenarioReplayStatus").textContent = `Could not load replay: ${error.message}`;
+      $("scenarioProgressState").textContent = error.message;
+      progressBar.setAttribute("aria-label", "Scenario simulation progress");
+      setNotice(`Could not load replay: ${error.message}`, "error");
+    }
+  } finally {
+    if (revision === requestRevision) {
+      zoneLoading = false;
+      activeRequest = null;
+      setPlaybackControls();
+    }
+  }
+}
+
+$("loadScenarioReplay").addEventListener("click", loadSelectedScenarioReplay);
+$("scenarioReplay").addEventListener("change", loadSelectedScenarioReplay);
 $("regenerateScenarioReplay").addEventListener("click", () => {
   const selected = scenarioReplays.find((item) => item.simulation_id === $("scenarioReplay").value);
   const mode = selected?.behavior_mode || $("behaviorMode").value;
@@ -1193,7 +1350,7 @@ async function initializeDashboard() {
     } else if (requestedScenario) {
       if (scenarioReplays.some((item) => item.simulation_id === requestedScenario)) {
         $("scenarioReplay").value = requestedScenario;
-        $("loadScenarioReplay").click();
+        loadSelectedScenarioReplay();
       }
     } else {
       setNotice("Choose a saved replay to load it, or generate a new one when ready.", "success");

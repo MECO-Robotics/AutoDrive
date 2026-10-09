@@ -68,14 +68,29 @@ class TensorDefenseObservationMixin:
     def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""
         from . import tensor_sim as _tensor_sim
+        active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
+                     else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
+        dt=self.dt
+        advance_mask=(active_mask if reset_mask is None else
+                      torch.zeros_like(active_mask))
+        # Tracks are estimates at the current time, not frozen last-seen
+        # positions. Propagate them even when the next camera update is missed.
+        tracked=advance_mask[:,None,None]&self._track_mask
+        self._track_pos.add_(torch.where(
+            tracked[...,None],self._track_vel*dt,torch.zeros_like(self._track_vel)))
+        opponent_tracked=advance_mask[:,None]&self._opponent_track_valid
+        self._opponent_track_pose[..., :2].add_(torch.where(
+            opponent_tracked[...,None],
+            self._opponent_track_velocity[..., :2]*dt,
+            torch.zeros_like(self._opponent_track_pose[..., :2])))
+        self._opponent_track_pose[..., 2].add_(torch.where(
+            opponent_tracked,self._opponent_track_velocity[..., 2]*dt,
+            torch.zeros_like(self._opponent_track_pose[..., 2])))
         if (reset_mask is None and _tensor_sim._perception_commit_proto is not None and
                 _tensor_sim._perception_commit_proto.fused_commit_available(self.device)):
             _tensor_sim._perception_commit_proto.update_perception(
                 self, active_mask=active_mask, active_count=active_count)
             return
-        active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
-                     else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
-        dt=self.dt
         if reset_mask is None:
             self._track_age=torch.where(active_mask[:,None,None]&self._track_mask,
                 self._track_age+dt,self._track_age)
@@ -126,9 +141,16 @@ class TensorDefenseObservationMixin:
                 detected=self._random_active(active_mask,visible.shape[1:],active_count=active_count)>=self.perception_dropout
                 visible &= detected
             noise=self._random_active(active_mask,self.piece_pos.shape[1:],normal=True,
-                                      active_count=active_count)*self.perception_position_noise
+                                      active_count=active_count)*(self.perception_position_noise *
+                                      (1.+delta.norm(dim=-1)/8.)[...,None])
             measured=self.piece_pos+noise
-            updated_velocity=self.piece_vel.clone()
+            prior_position=self._track_pos[:,robot].clone()
+            prior_velocity=self._track_vel[:,robot].clone()
+            prior_age=self._track_age[:,robot].clone().clamp_min(dt)
+            prior_valid=self._track_mask[:,robot].clone()
+            estimated_velocity=prior_velocity+.5*(measured-prior_position)/prior_age[...,None]
+            updated_velocity=torch.where(prior_valid[...,None],estimated_velocity,
+                                         torch.zeros_like(estimated_velocity))
             if self.perception_velocity_noise:
                 updated_velocity += self._random_active(active_mask,self.piece_vel.shape[1:],normal=True,
                     active_count=active_count)*self.perception_velocity_noise
@@ -137,7 +159,6 @@ class TensorDefenseObservationMixin:
             self._track_age[:,robot]=torch.where(visible&active_mask[:,None],torch.zeros_like(self._track_age[:,robot]),self._track_age[:,robot])
             self._track_mask[:,robot] |= visible&active_mask[:,None]
             observed_pose=self.sim.pose[:,1-robot].clone()
-            observed_velocity=self.sim.velocity[:,1-robot].clone()
             robot_delta=observed_pose[:,:2]-self.sim.pose[:,robot,:2]
             robot_bearing=torch.atan2(robot_delta[:,1],robot_delta[:,0])
             bearing_error=torch.atan2(torch.sin(robot_bearing-self.sim.pose[:,robot,2]),
@@ -155,16 +176,29 @@ class TensorDefenseObservationMixin:
                          ((closest-occ[None,:,:2]).square().sum(-1)<=obstacle_radius.square()))
                 blocked &= (t>.02)&(t<.98)
                 detected &= ~blocked.any(-1)
+            opponent_range=robot_delta.norm(dim=-1)
             position_noise=self._random_active(active_mask,(2,),normal=True,
-                                               active_count=active_count)*self.perception_position_noise
+                active_count=active_count)*(self.perception_position_noise *
+                (1.+opponent_range/8.)[:,None])
             heading_noise=self._random_active(active_mask,(),normal=True,active_count=active_count)*min(
                 .05,self.perception_position_noise)
             velocity_noise=self._random_active(active_mask,(3,),normal=True,
                                                active_count=active_count)*self.perception_velocity_noise
             observed_pose[:,:2]+=position_noise
             observed_pose[:,2]+=heading_noise
-            observed_velocity+=velocity_noise
             detected &= active_mask
+            old_pose=self._opponent_track_pose[:,robot].clone()
+            old_velocity=self._opponent_track_velocity[:,robot].clone()
+            elapsed=self._opponent_track_age[:,robot].clone().clamp_min(dt)
+            had_prior=self._opponent_track_valid[:,robot].clone()
+            position_delta=observed_pose[:,:2]-old_pose[:,:2]
+            heading_delta=torch.atan2(torch.sin(observed_pose[:,2]-old_pose[:,2]),
+                                      torch.cos(observed_pose[:,2]-old_pose[:,2]))
+            observed_velocity=old_velocity.clone()
+            observed_velocity[:,:2]+=.5*position_delta/elapsed[:,None]
+            observed_velocity[:,2]+=.5*heading_delta/elapsed
+            observed_velocity=torch.where(had_prior[:,None],observed_velocity,
+                                          torch.zeros_like(observed_velocity))+velocity_noise
             self._opponent_track_pose[:,robot]=torch.where(detected[:,None],observed_pose,
                 self._opponent_track_pose[:,robot])
             self._opponent_track_velocity[:,robot]=torch.where(detected[:,None],observed_velocity,

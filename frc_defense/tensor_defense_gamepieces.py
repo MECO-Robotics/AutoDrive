@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from .fuel_physics_runtime import launch_fuel, shooter_respawn_targets
 
 from .field import ALLIANCE_ZONE_DEPTH, grid_array_points
 
@@ -217,7 +218,7 @@ class TensorDefenseGamepieceMixin:
         """
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else active_mask)
-        if (_update_gamepieces_hip is not None and FUSED_GAMEPIECES_HIP_ENABLED and
+        if (self.fuel_physics is None and _update_gamepieces_hip is not None and FUSED_GAMEPIECES_HIP_ENABLED and
                 _update_gamepieces_hip(self,active_mask)):
             self._clear_intersected_fuel_tracks(active_mask)
             return (self.fuel_acquired_event,self.fuel_scored_event,
@@ -233,8 +234,11 @@ class TensorDefenseGamepieceMixin:
                       self.fuel_denied_event,self.fuel_abandoned_event):
             event.copy_(torch.where(active_mask[:,None],torch.zeros_like(event),event))
         newly_scored=torch.zeros_like(self.piece_active)
+        score_origins=torch.zeros_like(self.piece_pos)
         rows=torch.arange(self.n,device=self.device)
         free=self.piece_active&(self.piece_owner<0)
+        if self.fuel_physics is not None:
+            free &= self.fuel_physics.pos[...,2]<=.20
         # Intake is on the robot's local +X/front side. Its capture band starts
         # just inside the front bumper and extends 0.35 m ahead, across the
         # bumper width plus a small game-piece margin. Rear/side contacts do
@@ -316,6 +320,8 @@ class TensorDefenseGamepieceMixin:
             selected=eligible&(eligible_distance==eligible.to(torch.int64).argmax(-1,keepdim=True))
             scored=selected
             newly_scored|=scored
+            if self.fuel_physics is not None:
+                score_origins=torch.where(scored[...,None],center,score_origins)
             score_count=scored.sum(-1)
             self.fuel_scored_event[:,robot]=torch.where(
                 active_mask,score_count,self.fuel_scored_event[:,robot])
@@ -330,9 +336,14 @@ class TensorDefenseGamepieceMixin:
             self._last_hub_zone[:,robot]=torch.where(
                 active_mask,scoring_ready,self._last_hub_zone[:,robot])
         newly_scored &= active_mask[:,None]
-        torch.where(newly_scored[...,None],self._midfield_respawn_positions[None],
-                    self.piece_pos,out=self.piece_pos)
-        self.piece_vel.masked_fill_(newly_scored[...,None],0.)
+        if self.fuel_physics is None:
+            torch.where(newly_scored[...,None],self._midfield_respawn_positions[None],
+                        self.piece_pos,out=self.piece_pos)
+            self.piece_vel.masked_fill_(newly_scored[...,None],0.)
+        else:
+            launch_fuel(self,newly_scored,shooter_respawn_targets(self,score_origins),
+                        origins=score_origins,height=1.83,flight_time=1.,
+                        horizontal_velocity_scale=.1)
         torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
                     self.piece_owner,out=self.piece_owner)
         torch.where(newly_scored,torch.zeros_like(self.piece_zone),

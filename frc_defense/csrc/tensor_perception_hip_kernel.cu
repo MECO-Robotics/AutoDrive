@@ -901,10 +901,16 @@ __global__ void anonymous_track_update_kernel(
     const float vx=perception_detection_normal(seed,tick,world,robot,i,2u)*velocity_noise;
     const float vy=perception_detection_normal(seed,tick,world,robot,i,3u)*velocity_noise;
     const int64_t out=track_base+slot;
-    track_pos[out*2]=detections[idx*2]+nx;
-    track_pos[out*2+1]=detections[idx*2+1]+ny;
-    track_vel[out*2]=velocities[idx*2]+vx;
-    track_vel[out*2+1]=velocities[idx*2+1]+vy;
+    const bool had_prior=track_mask[out] && track_age[out]<=timeout;
+    const float elapsed=fmaxf(track_age[out],dt);
+    const float measured_x=detections[idx*2]+nx;
+    const float measured_y=detections[idx*2+1]+ny;
+    const float old_x=track_pos[out*2], old_y=track_pos[out*2+1];
+    const float old_vx=track_vel[out*2], old_vy=track_vel[out*2+1];
+    track_pos[out*2]=measured_x;
+    track_pos[out*2+1]=measured_y;
+    track_vel[out*2]=(had_prior?old_vx+0.5f*(measured_x-old_x)/elapsed:0.0f)+vx;
+    track_vel[out*2+1]=(had_prior?old_vy+0.5f*(measured_y-old_y)/elapsed:0.0f)+vy;
     track_age[out]=0.0f; track_mask[out]=true;
     track_confidence[out]=quality[i];
     track_spatial[out*2]=spatial[idx*2];
@@ -956,7 +962,13 @@ __global__ void opponent_tracks_3v3_kernel(
   const int64_t track_index = static_cast<int64_t>(world) * 6 + robot_id;
   const float* own = pose + pose_base + robot_id * 3;
   float age = opponent_age[track_index];
-  if (opponent_valid[track_index]) age = __fadd_rn(age, dt);
+  if (opponent_valid[track_index]) {
+    age = __fadd_rn(age, dt);
+    const int64_t base = track_index * 3;
+    opponent_pose[base] += opponent_velocity[base] * dt;
+    opponent_pose[base + 1] += opponent_velocity[base + 1] * dt;
+    opponent_pose[base + 2] += opponent_velocity[base + 2] * dt;
+  }
 
   int selected = -1;
   float selected_distance = HUGE_VALF;
@@ -1012,20 +1024,32 @@ __global__ void opponent_tracks_3v3_kernel(
   }
   if (observed) {
     const float* enemy = pose + pose_base + selected * 3;
-    const float px = perception_normal(seed, tick, world, robot_id, 17u, 18u) * position_noise;
-    const float py = perception_normal(seed, tick, world, robot_id, 19u, 20u) * position_noise;
+    const float position_scale = position_noise * (1.0f + selected_distance / 8.0f);
+    const float px = perception_normal(seed, tick, world, robot_id, 17u, 18u) * position_scale;
+    const float py = perception_normal(seed, tick, world, robot_id, 19u, 20u) * position_scale;
     const float heading = perception_normal(seed, tick, world, robot_id, 21u, 22u) *
                           fminf(0.05f, position_noise);
     const float vx = perception_normal(seed, tick, world, robot_id, 23u, 24u) * velocity_noise;
     const float vy = perception_normal(seed, tick, world, robot_id, 25u, 26u) * velocity_noise;
     const float omega = perception_normal(seed, tick, world, robot_id, 27u, 28u) * velocity_noise;
     const int64_t base = track_index * 3;
-    opponent_pose[base] = __fadd_rn(enemy[0], px);
-    opponent_pose[base + 1] = __fadd_rn(enemy[1], py);
-    opponent_pose[base + 2] = __fadd_rn(enemy[2], heading);
-    opponent_velocity[base] = __fadd_rn(pose[pose_base + selected * 3], vx);
-    opponent_velocity[base + 1] = __fadd_rn(pose[pose_base + selected * 3 + 1], vy);
-    opponent_velocity[base + 2] = __fadd_rn(pose[pose_base + selected * 3 + 2], omega);
+    const bool had_prior=opponent_valid[track_index] && age<=1.0f;
+    const float elapsed=fmaxf(age,dt);
+    const float measured_x=__fadd_rn(enemy[0],px);
+    const float measured_y=__fadd_rn(enemy[1],py);
+    const float measured_heading=__fadd_rn(enemy[2],heading);
+    const float old_x=opponent_pose[base], old_y=opponent_pose[base+1];
+    const float old_heading=opponent_pose[base+2];
+    const float old_vx=opponent_velocity[base], old_vy=opponent_velocity[base+1];
+    const float old_omega=opponent_velocity[base+2];
+    opponent_pose[base]=measured_x;
+    opponent_pose[base + 1]=measured_y;
+    opponent_pose[base + 2]=measured_heading;
+    opponent_velocity[base]= (had_prior?old_vx+0.5f*(measured_x-old_x)/elapsed:0.0f)+vx;
+    opponent_velocity[base+1]=(had_prior?old_vy+0.5f*(measured_y-old_y)/elapsed:0.0f)+vy;
+    const float heading_delta=atan2f(sinf(measured_heading-old_heading),
+                                     cosf(measured_heading-old_heading));
+    opponent_velocity[base+2]=(had_prior?old_omega+0.5f*heading_delta/elapsed:0.0f)+omega;
     opponent_size[base] = length[track_index - robot_id + selected];
     opponent_size[base + 1] = width[track_index - robot_id + selected];
     opponent_size[base + 2] = acceleration[track_index - robot_id + selected] / 10.0f;

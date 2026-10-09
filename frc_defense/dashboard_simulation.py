@@ -69,10 +69,48 @@ def replay_code_state() -> dict:
             check=True, capture_output=True, text=True, timeout=5).stdout.strip()
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root,
             check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
-        changed = sorted({line[3:].split(" -> ")[-1] for line in dirty if len(line) > 3})
+        behavior_suffixes={".py", ".cpp", ".cu", ".hip", ".json"}
+        changed = sorted({path for line in dirty if len(line) > 3
+            for path in [line[3:].split(" -> ")[-1]]
+            if Path(path).suffix in behavior_suffixes or path == "pyproject.toml"})
         return {"commit": commit, "dirty_files": changed}
     except (OSError, subprocess.SubprocessError):
         return {"commit": None, "dirty_files": []}
+
+
+_PLAYBACK_FRAME_KEYS = frozenset({
+    "robots", "behavior_mode", "robot_teams", "robot_control_modes", "robot_roles",
+    "robot_actions", "robot_opponent_visible", "robot_detected_opponents",
+    "robot_detected_fuel", "robot_fuel_history", "perception_track_timeout_s",
+    "camera_layout", "robot_targets", "robot_fuel_targets", "robot_route_goals",
+    "robot_collecting", "perception_fov_degrees", "perception_range",
+    "robot_cluster_counts", "robot_effort_vectors", "chassis_effort_vector", "sizes",
+    "adstar_paths", "fuel_pieces", "hub_centers", "hub_active", "fuel_score_count",
+    "fuel_acquisition_count", "match_elapsed", "match_remaining", "predicted_intercept",
+    "predicted_intercept_time",
+})
+
+
+def scenario_playback_view(record: dict, *, max_frames: int = 240) -> dict:
+    """Return the renderer data without duplicated frames or excess samples."""
+    top_level_keys=("task", "matchup", "architecture", "behavior_mode", "seed",
+        "scenario_seed", "field", "robot_types", "simulation_constraints", "robot_teams",
+        "robot_count", "robots_per_alliance", "simulated_seconds", "simulation_ticks", "dt")
+    view={key:record[key] for key in top_level_keys if key in record}
+    scenarios=[]
+    for scenario in record.get("scenarios",[]) or []:
+        frames=scenario.get("frames",[]) or []
+        if len(frames)>max_frames:
+            stride=math.ceil((len(frames)-1)/max(1,max_frames-1))
+            frames=frames[::stride]
+            if scenario["frames"][-1] is not frames[-1]:
+                frames.append(scenario["frames"][-1])
+        compact_frames=[{key:frame[key] for key in _PLAYBACK_FRAME_KEYS if key in frame}
+                        for frame in frames]
+        scenarios.append({key:scenario[key] for key in ("id","label","start_zone","goal_zone")
+                          if key in scenario} | {"frames":compact_frames})
+    view["scenarios"]=scenarios
+    return view
 
 
 def replay_commit_age(saved_commit: str | None, current_commit: str | None,
@@ -325,6 +363,11 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
         compressed_temporary=compressed_path.with_suffix(compressed_path.suffix+".tmp")
         compressed_temporary.write_bytes(gzip.compress(serialized,compresslevel=6,mtime=0))
         os.replace(compressed_temporary,compressed_path)
+        view_path=result_path.with_suffix(".view.json.gz")
+        view_serialized=json.dumps(scenario_playback_view(record),separators=(",",":" )).encode()
+        view_temporary=view_path.with_suffix(".tmp")
+        view_temporary.write_bytes(gzip.compress(view_serialized,compresslevel=1,mtime=0))
+        os.replace(view_temporary,view_path)
         progress=json.loads(_json_or_default(progress_path,{}))
         write_fn(progress_path,progress.get("total_ticks",ZONE_PLAYBACK_TICKS),
             progress.get("total_ticks",ZONE_PLAYBACK_TICKS),"ready")
@@ -418,9 +461,9 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            teammate_intent_knowledge: bool = True,
                            sweeping_enabled: bool = False,
                            random_gamepiece_placement: bool = False,
-                           capture_stride: int = 64,
+                           capture_stride: int = 10,
                            physics_dt: float = ZONE_PLAYBACK_DT,
-                           perception_interval: int = 1,
+                           perception_interval: int = 2,
                            contact_iterations: int = 1,
                            planner_replan_interval: int | None = None,
                            hopper_capacity: int = 60, scoring_bps: float = 25.,

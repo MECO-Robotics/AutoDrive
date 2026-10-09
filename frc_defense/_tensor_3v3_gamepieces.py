@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+from .fuel_physics_runtime import (launch_fuel, shooter_respawn_targets,
+                                  ferry_aim_targets, ferry_respawn_targets)
 
 import torch
 
@@ -156,12 +158,28 @@ class TensorThreeVsThreeGamepieceMixin:
         self.fuel_acquired_event[active]=0; self.fuel_scored_event[active]=0
         self.fuel_passed_event[active]=0; self.fuel_denied_event[active]=0
         free = self.piece_active & (self.piece_owner < 0)
+        # Pickup bins must follow physical motion, rather than initial and
+        # planned landing cells. Airborne fuel cannot enter a floor intake.
+        intake_active=self.piece_active
+        if self.fuel_physics is not None:
+            x=(self.piece_pos[...,0]/self._pickup_grid_cell_size).floor().long().clamp_(0,self._pickup_grid_nx-1)
+            y=(self.piece_pos[...,1]/self._pickup_grid_cell_size).floor().long().clamp_(0,self._pickup_grid_ny-1)
+            cell=(y*self._pickup_grid_nx+x).to(self._pickup_possible_cells.dtype)
+            self._pickup_possible_cells.copy_(torch.where(
+                active[:,None,None],cell[...,None].expand_as(self._pickup_possible_cells),
+                self._pickup_possible_cells))
+            intake_active=self.piece_active & (
+                (self.piece_owner>=0) | (self.fuel_physics.pos[...,2]<=.20))
+            free &= intake_active
+        # Turret intake stays deployed. Dumper intake follows its action and
+        # only reaches FUEL while the robot is actively collecting.
+        intake_extended=(self._turret_mask[None] | self._intake_collecting)
         # Track invalidation is based on the intake contact region, not a
         # presumed one-to-one mapping between observed tracks and fuel IDs.
         track_clear_mask = torch.zeros_like(free)
         # Fixed six-robot loop; all worlds and all 504 pieces stay tensorized.
         all_robots_controlled=all(mode!="none" for mode in self.control_modes)
-        fused_all_pickup=(all_robots_controlled and self.fuel_count<=512 and
+        fused_all_pickup=(all_robots_controlled and bool(intake_extended.all()) and self.fuel_count<=512 and
                           _pickup_grid_hip.integrated_available(self.device))
         if fused_all_pickup:
             # One HIP block per world processes robot slots in the same order
@@ -169,7 +187,7 @@ class TensorThreeVsThreeGamepieceMixin:
             _pickup_grid_hip.pickup_all_robots(
                 active=active, pose=self.sim.pose, length=self.sim.length,
                 width=self.sim.width, piece_pos=self.piece_pos,
-                piece_active=self.piece_active, piece_owner=self.piece_owner,
+                piece_active=intake_active, piece_owner=self.piece_owner,
                 free=free, possible_cells=self._pickup_possible_cells,
                 next_intake=self.next_intake, elapsed=self.match_elapsed,
                 controlled=self._controlled_mode_mask,
@@ -191,12 +209,14 @@ class TensorThreeVsThreeGamepieceMixin:
             lateral=(all_delta*left[:,:,None]).sum(-1).abs()
             all_intake=(
                 (longitudinal>=self.sim.length[:,:,None]*.5-.075-self._fuel_radius)&
-                (longitudinal<=self.sim.length[:,:,None]*.5+.35+self._fuel_radius)&
+                (longitudinal<=self.sim.length[:,:,None]*.5+.35+
+                 intake_extended[:,:,None]*.3048+self._fuel_radius)&
                 (lateral<=self.sim.width[:,:,None]*.5+.075+self._fuel_radius))
             all_distance_squared=all_delta.square().sum(-1)
         for robot in (() if fused_all_pickup else range(6)):
             if self.control_modes[robot] == "none":
                 continue
+            extended=intake_extended[:,robot]
             deterministic_offense = (
                 self.control_modes[robot] == "deterministic" and
                 self.robot_roles[robot] == "offense")
@@ -214,12 +234,12 @@ class TensorThreeVsThreeGamepieceMixin:
                     ~piece_in_alliance)
                 policy_blocked = free & ~allowed_zone
                 free &= allowed_zone
-            if (self.fuel_count <= 512 and
+            if (bool(extended.all()) and self.fuel_count <= 512 and
                     _pickup_grid_hip.integrated_available(self.device)):
                 _pickup_grid_hip.pickup_robot(
                     active=active, pose=self.sim.pose, length=self.sim.length,
                     width=self.sim.width, piece_pos=self.piece_pos,
-                    piece_active=self.piece_active, piece_owner=self.piece_owner,
+                    piece_active=intake_active, piece_owner=self.piece_owner,
                     free=free, possible_cells=self._pickup_possible_cells,
                     next_intake=self.next_intake, elapsed=self.match_elapsed,
                     controlled=self._controlled_mode_mask,
@@ -235,7 +255,7 @@ class TensorThreeVsThreeGamepieceMixin:
                 continue
             if all_robots_controlled:
                 delta=all_delta[:,robot]
-                intake=all_intake[:,robot]
+                intake=all_intake[:,robot]&extended[:,None]
             else:
                 pose = self.sim.pose[:,robot]
                 delta = self.piece_pos-pose[:,None,:2]
@@ -243,7 +263,7 @@ class TensorThreeVsThreeGamepieceMixin:
                 left=torch.stack((-pose[:,2].sin(),pose[:,2].cos()),-1)
                 longitudinal=(delta*forward[:,None]).sum(-1)
                 lateral=(delta*left[:,None]).sum(-1).abs()
-                intake=(longitudinal>=self.sim.length[:,robot,None]*.5-.075-self._fuel_radius)&(longitudinal<=self.sim.length[:,robot,None]*.5+.35+self._fuel_radius)&(lateral<=self.sim.width[:,robot,None]*.5+.075+self._fuel_radius)
+                intake=(longitudinal>=self.sim.length[:,robot,None]*.5-.075-self._fuel_radius)&(longitudinal<=self.sim.length[:,robot,None]*.5+.35+extended[:,None]*.3048+self._fuel_radius)&(lateral<=self.sim.width[:,robot,None]*.5+.075+self._fuel_radius)&extended[:,None]
             possession=(self.piece_owner==robot).sum(-1)
             robot_controlled=(self._nn_mode_mask[robot] |
                               self._deterministic_mode_mask[robot])
@@ -294,11 +314,9 @@ class TensorThreeVsThreeGamepieceMixin:
 
         at_ferry = ((self.sim.pose[:,:,:2] - self.ferry_targets[None]).norm(dim=-1)
                     <= .35)
-        home_zone_center=self.hub_centers[self.team_ids].clone()
-        home_zone_center[:,0]=torch.where(
-            self.team_ids==0,self.alliance_zone_depth*.5,
-            self.field_length-self.alliance_zone_depth*.5)
-        ferry_vector=home_zone_center[None]-self.sim.pose[:,:,:2]
+        home_zone_center=ferry_aim_targets(
+            self,self.sim.pose[:,:,:2],self.team_ids[None].expand(self.n,-1))
+        ferry_vector=home_zone_center-self.sim.pose[:,:,:2]
         ferry_bearing=torch.atan2(ferry_vector[...,1],ferry_vector[...,0])
         ferry_heading_error=torch.atan2(
             torch.sin(ferry_bearing-self.sim.pose[:,:,2]),
@@ -315,25 +333,34 @@ class TensorThreeVsThreeGamepieceMixin:
         selected_for_pass=(self._fuel_indices==first_held_piece.gather(
             1,safe_owner))
         passed = held & selected_for_pass & robot_pass.gather(1, safe_owner)
-        # Draw a fresh landing point for each robot each physics tick. Only
-        # robots that actually pass this tick use their sample. Reusing a
-        # fixed location per FUEL id caused repeated ferry cycles to stack at
-        # the same points.
-        pass_random=torch.rand((self.n,NUM_ROBOTS,2),device=self.device,
-                               generator=self.generator)
-        outer_depth=self.alliance_zone_depth-1.3
-        margin=.28
-        pass_x_unit=pass_random[...,0]
-        pass_x_fraction=_edge_biased_unit(pass_x_unit)
-        pass_x_near=margin+(outer_depth-margin)*pass_x_fraction
-        pass_y_fraction=_edge_biased_unit(pass_random[...,1])
-        pass_y=margin+(self.sim.field_width-2.*margin)*pass_y_fraction
-        pass_x=torch.where(self.team_ids[None]==0,pass_x_near,
-                           self.sim.field_length-pass_x_near)
-        pass_destinations=torch.stack((pass_x,pass_y),-1)
+        pass_destinations,backer_hit=ferry_respawn_targets(
+            self,self.sim.pose[:,:,:2],self.team_ids[None].expand(self.n,-1),
+            return_backer_hits=True)
+        hit_for_robot=backer_hit
+        hit_for_piece=hit_for_robot.gather(1,safe_owner)
+        ordinary_pass=passed & ~hit_for_piece
+        backer_pass=passed & hit_for_piece
+        passed=ordinary_pass|backer_pass
         pass_positions=pass_destinations[self._world_indices[:,None],safe_owner]
-        torch.where(passed[...,None], pass_positions, self.piece_pos,
-                    out=self.piece_pos)
+        if self.fuel_physics is None:
+            torch.where(passed[...,None], pass_positions, self.piece_pos,
+                        out=self.piece_pos)
+        else:
+            launch_fuel(self,ordinary_pass,pass_positions,horizontal_velocity_scale=.1,
+                        respawn_at_destination=True)
+            # A HUB backer return follows the scored-ball ballistic launch
+            # settings, starting from its resolved midfield respawn point.
+            pass_teams=self.team_ids[safe_owner]
+            hub_origins=self.hub_centers[pass_teams]
+            shot_targets=shooter_respawn_targets(self,hub_origins)
+            shot_vectors=shot_targets-hub_origins
+            shot_distances=shot_vectors.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+            shot_vectors=shot_vectors/shot_distances
+            backer_origins=pass_positions
+            backer_targets=backer_origins+shot_vectors*shot_distances
+            launch_fuel(self,backer_pass,backer_targets,origins=backer_origins,
+                        height=1.83,flight_time=1.,horizontal_velocity_scale=.1,
+                        spawn_positions=backer_origins)
         pass_cell_size=self._pickup_grid_cell_size
         pass_cell_x=(pass_positions[...,0]/pass_cell_size).floor().long().clamp_(
             0,self._pickup_grid_nx-1)
@@ -346,9 +373,14 @@ class TensorThreeVsThreeGamepieceMixin:
         old_cell=self._pickup_possible_cells[world_index,piece_index,pass_slot]
         self._pickup_possible_cells[world_index,piece_index,pass_slot]=torch.where(
             passed,pass_cell.to(old_cell.dtype),old_cell)
-        self.piece_vel.masked_fill_(passed[...,None], 0.)
+        if self.fuel_physics is None:
+            self.piece_vel.masked_fill_(passed[...,None], 0.)
         self.piece_owner.masked_fill_(passed, -1)
-        home_zone=self.team_ids[safe_owner]+1
+        pass_team=self.team_ids[safe_owner]
+        in_home=torch.where(pass_team==0,
+                            pass_positions[...,0]<=self.alliance_zone_depth,
+                            pass_positions[...,0]>=self.sim.field_length-self.alliance_zone_depth)
+        home_zone=torch.where(in_home,pass_team+1,torch.zeros_like(pass_team))
         torch.where(passed,home_zone,self.piece_zone,out=self.piece_zone)
         passed_counts = torch.zeros_like(self.fuel_passed_event)
         passed_counts.scatter_add_(1, safe_owner,
@@ -469,9 +501,16 @@ class TensorThreeVsThreeGamepieceMixin:
         intersected=contact_envelope.any(-1)&active[:,None,None]
         self.track_mask.masked_fill_(intersected,False)
         self.track_age.masked_fill_(intersected,float("inf"))
-        torch.where(newly_scored[...,None],self._midfield_respawn_positions[None],
-                    self.piece_pos,out=self.piece_pos)
-        self.piece_vel.masked_fill_(newly_scored[...,None],0.)
+        if self.fuel_physics is None:
+            torch.where(newly_scored[...,None],self._midfield_respawn_positions[None],
+                        self.piece_pos,out=self.piece_pos)
+            self.piece_vel.masked_fill_(newly_scored[...,None],0.)
+        else:
+            team=self.team_ids[self.piece_owner.clamp(0,5)]
+            origins=self.hub_centers[team]
+            launch_fuel(self,newly_scored,shooter_respawn_targets(self,origins),
+                        origins=origins,height=1.83,flight_time=1.,
+                        horizontal_velocity_scale=.1)
         torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
                     self.piece_owner,out=self.piece_owner)
         torch.where(newly_scored,torch.zeros_like(self.piece_zone),

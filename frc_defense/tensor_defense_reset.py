@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from .fuel_physics_runtime import reset_fuel_physics
 
 from .field import ALLIANCE_ZONE_DEPTH
 
@@ -230,6 +231,7 @@ class TensorDefenseResetMixin:
         for value in (self.next_intake_time,self.next_score_time):
             value.zero_()
         self._initialize_gamepieces()
+        reset_fuel_physics(self)
         self._update_perception(torch.ones((self.n,),device=self.device,dtype=torch.bool))
         self._move_adstar_defenders_to_clear_start()
         self._place_defenders_near_clear_adstar_paths()
@@ -288,6 +290,7 @@ class TensorDefenseResetMixin:
         self.auto_fuel_scores=torch.where(mask[:,None],torch.zeros_like(self.auto_fuel_scores),self.auto_fuel_scores)
         self._last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self._last_hub_zone),self._last_hub_zone)
         self._initialize_gamepieces(mask)
+        reset_fuel_physics(self,mask)
         self._update_perception(mask,active_mask=mask)
         self._move_adstar_defenders_to_clear_start(mask)
         self._place_defenders_near_clear_adstar_paths(mask)

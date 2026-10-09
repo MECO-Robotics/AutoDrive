@@ -10,6 +10,27 @@ from . import tensor_3v3_pickup_grid_hip as _pickup_grid_hip
 class TensorThreeVsThreeActionMixin:
     """Methods that translate strategic actions into robot targets."""
 
+    def _intake_deployment_clear(self):
+        """Return rows where a deployed dumper intake clears field geometry."""
+        intake_length=.3048
+        pose=self.sim.pose
+        c,s=pose[:,:,2].cos(),pose[:,:,2].sin()
+        center=pose[:,:,:2]+(self.sim.length*.5+intake_length*.5)[...,None]*torch.stack((c,s),-1)
+        extent_x=.5*(intake_length*c.abs()+self.sim.width*s.abs())
+        extent_y=.5*(intake_length*s.abs()+self.sim.width*c.abs())
+        clear=((center[...,0]-extent_x>=0.) &
+               (center[...,0]+extent_x<=self.field_length) &
+               (center[...,1]-extent_y>=0.) &
+               (center[...,1]+extent_y<=self.sim.field_width))
+        if self.sim.field_colliders.numel():
+            boxes=self.sim.field_colliders
+            overlaps=((center[...,None,0]-boxes[None,None,:,0]).abs() <
+                      (extent_x[...,None]+boxes[None,None,:,2])) & (
+                      (center[...,None,1]-boxes[None,None,:,1]).abs() <
+                      (extent_y[...,None]+boxes[None,None,:,3]))
+            clear &= ~overlaps.any(-1)
+        return clear
+
     def _prepare_score_grid(self):
         """Cache fixed-field score points and their chassis-clearance mask."""
         robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
@@ -184,7 +205,18 @@ class TensorThreeVsThreeActionMixin:
             action = action.clamp(0, 7)
             action = torch.where(masks.gather(-1, action[...,None]).squeeze(-1), action,
                                  masks.to(torch.int64).argmax(-1))
+        collecting=(action<4)
+        # A dumper intake deploys 12 inches ahead of the bumper. Refuse the
+        # collection action when that rectangle would overlap a solid field
+        # element or cross the field boundary. Once deployed, planner lengths
+        # include this same extension so AD* routes the full robot footprint.
+        # Turret intakes are fixed in the deployed position. This gate applies
+        # only to controllable dumper deployment actions.
+        can_deploy=self._intake_deployment_clear() | self._turret_mask[None]
+        collecting &= can_deploy
         self.last_actions.copy_(torch.where(active[:,None],action,self.last_actions))
+        self._intake_collecting.copy_(torch.where(
+            active[:,None],collecting,self._intake_collecting))
         score_intent = action == 4
         if self._has_deterministic_offense:
             deterministic_offense_mode=(self._deterministic_mode_mask &
@@ -265,6 +297,16 @@ class TensorThreeVsThreeActionMixin:
             active[:,None],next_selected_step,self._target_fuel_selected_step))
         fuel_target = self.track_pos.gather(
             2,selected[...,None,None].expand(-1,-1,1,2)).squeeze(2)
+        if self.fuel_physics is not None:
+            # Intercept the observed motion; target selection never consults
+            # hidden ground-truth fuel velocity.
+            fuel_velocity=self.track_vel.gather(
+                2,selected[...,None,None].expand(-1,-1,1,2)).squeeze(2)
+            travel_time=((fuel_target-p[:,:,:2]).norm(dim=-1)/
+                         self.sim.speed.clamp_min(.1)).clamp(max=.5)
+            fuel_target=fuel_target+fuel_velocity*travel_time[...,None]
+            fuel_target[...,0].clamp_(.075,self.sim.field_length-.075)
+            fuel_target[...,1].clamp_(.075,self.sim.field_width-.075)
         self._last_audit_cluster_count=torch.zeros_like(selected)
         possession_now = possession > 0
         hub = self.hub_centers[self.team_ids][None].expand(self.n,-1,-1)

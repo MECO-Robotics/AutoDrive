@@ -23,17 +23,24 @@ BUMP_ACCELERATION_SCALE = 0.75
 
 def midfield_respawn_points(count: int, field_length: float,
                             field_width: float) -> list[tuple[float, float]]:
-    """Return stable spawn points within the central neutral-pile footprint."""
+    """Return stable, equal-density spawn points across the midfield band."""
     count = max(0, int(count))
     if count == 0:
         return []
-    # Scored fuel returns to the central neutral pile (72 x 206 in), rather
-    # than appearing anywhere across the full midfield corridor.
+    # Keep scored fuel in the central midfield corridor, with the same density
+    # in each half of the field, rather than concentrating it in the initial pile.
     center_x, center_y = float(field_length) / 2, float(field_width) / 2
-    half_depth, half_length = 0.915, 2.615
+    half_depth, half_length = 1.65, 2.615
     x_min, x_max = center_x - half_depth, center_x + half_depth
     y_min, y_max = center_y - half_length, center_y + half_length
-    return grid_array_points(count, x_min, x_max, y_min, y_max)
+    if count == 1:
+        return [(center_x, center_y)]
+    # Stratify by x so every equal-sized midfield slice has equal expected
+    # density, and use a deterministic low-discrepancy y sequence to avoid a grid.
+    golden_ratio = (math.sqrt(5.) - 1.) / 2.
+    return [(x_min + (index + .5) * (x_max - x_min) / count,
+             y_min + ((index * golden_ratio) % 1.) * (y_max - y_min))
+            for index in range(count)]
 
 
 def grid_array_points(count: int, x_min: float, x_max: float,

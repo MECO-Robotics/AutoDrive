@@ -153,6 +153,13 @@ class TensorThreeVsThreeObservationMixin:
             fused_visible=None
         fused_tracks = False
 
+        # Predict every retained track to this sensor update time. The sensor
+        # update may be slower than physics, so the step loop advances tracks
+        # on skipped sensor ticks as well.
+        self.track_pos.add_(torch.where(
+            (active[:, None, None] & self.track_mask)[..., None],
+            self.track_vel * self.dt, torch.zeros_like(self.track_vel)))
+
         # The dashboard's one-world CPU rollout was doing six separate
         # [world, piece] visibility passes here. Flatten the observer dimension
         # for static-feature occlusion, then evaluate robot-to-robot occlusion
@@ -403,6 +410,14 @@ class TensorThreeVsThreeObservationMixin:
         batch_opponent_commit=(piece_tracks_batched and has_controlled_defender and
                                not fused_opponents)
         if has_controlled_defender and not fused_opponents:
+            self.opponent_pose[..., :2].add_(torch.where(
+                (active[:, None] & self.opponent_valid)[..., None],
+                self.opponent_velocity[..., :2] * self.dt,
+                torch.zeros_like(self.opponent_pose[..., :2])))
+            self.opponent_pose[..., 2].add_(torch.where(
+                active[:, None] & self.opponent_valid,
+                self.opponent_velocity[..., 2] * self.dt,
+                torch.zeros_like(self.opponent_pose[..., 2])))
             self.opponent_age.copy_(torch.where(
                 active[:, None] & self.opponent_valid,
                 self.opponent_age + self.dt, self.opponent_age))
@@ -508,10 +523,17 @@ class TensorThreeVsThreeObservationMixin:
                         own,self.perception_track_timeout,
                         .35+self.position_noise*4.)
                     rows=torch.arange(self.n,device=self.device)[:,None].expand_as(target)
-                    self.track_pos[rows[accepted],robot,target[accepted]]=\
-                        (observed_positions+noise)[accepted]
+                    old_velocity=self.track_vel[rows[accepted],robot,target[accepted]].clone()
+                    elapsed=self.track_age[rows[accepted],robot,target[accepted]].clamp_min(self.dt)
+                    had_prior=(self.track_mask[rows[accepted],robot,target[accepted]] &
+                               (self.track_age[rows[accepted],robot,target[accepted]] <
+                                self.perception_track_timeout))
+                    measured=(observed_positions+noise)[accepted]
+                    predicted=self.track_pos[rows[accepted],robot,target[accepted]].clone()
+                    estimated=old_velocity+.5*(measured-predicted)/elapsed[:,None]
+                    self.track_pos[rows[accepted],robot,target[accepted]]=measured
                     self.track_vel[rows[accepted],robot,target[accepted]]=\
-                        (observed_velocities+vnoise)[accepted]
+                        torch.where(had_prior[:,None],estimated,torch.zeros_like(estimated)) + vnoise[accepted]
                     self.track_age[rows[accepted],robot,target[accepted]]=0.
                     self.track_mask[rows[accepted],robot,target[accepted]]=True
                     spatial=(anonymous_spatial_extent[:,robot]
@@ -574,11 +596,12 @@ class TensorThreeVsThreeObservationMixin:
             chosen = enemy_pose[self._world_indices, nearest]
             if self.perception_dropout:
                 has_enemy &= self._random_active(active,(),active_count=active_count) >= self.perception_dropout
-            pn = self._random_active(active,(2,),normal=True,active_count=active_count) * self.position_noise
+            range_scale=1.+enemy_distance[self._world_indices,nearest]/8.
+            pn = (self._random_active(active,(2,),normal=True,active_count=active_count) *
+                  (self.position_noise*range_scale[:,None]))
             hn = self._random_active(active,(),normal=True,active_count=active_count) * min(.05, self.position_noise)
             vn = self._random_active(active,(3,),normal=True,active_count=active_count) * self.velocity_noise
             chosen = chosen.clone(); chosen[:, :2] += pn; chosen[:, 2] += hn
-            chosen_velocity = enemy_pose[self._world_indices, nearest].clone() + vn
             enemy_size = torch.stack((self.sim.length[:, enemy_ids],
                                       self.sim.width[:, enemy_ids],
                                       self.sim.accel[:, enemy_ids] / 10.), -1)
@@ -587,9 +610,20 @@ class TensorThreeVsThreeObservationMixin:
                 opponent_robot_rows.append(robot)
                 opponent_has_rows.append(has_enemy)
                 opponent_pose_rows.append(chosen)
-                opponent_velocity_rows.append(chosen_velocity)
+                opponent_velocity_rows.append(vn)
                 opponent_size_rows.append(chosen_size)
             else:
+                prior_pose=self.opponent_pose[:,robot].clone()
+                prior_velocity=self.opponent_velocity[:,robot].clone()
+                elapsed=self.opponent_age[:,robot].clamp_min(self.dt)
+                had_prior=self.opponent_valid[:,robot] & (self.opponent_age[:,robot] < 1.)
+                estimated_velocity=prior_velocity.clone()
+                estimated_velocity[:,:2] += .5*(chosen[:,:2]-prior_pose[:,:2])/elapsed[:,None]
+                estimated_velocity[:,2] += .5*torch.atan2(
+                    torch.sin(chosen[:,2]-prior_pose[:,2]),
+                    torch.cos(chosen[:,2]-prior_pose[:,2]))/elapsed
+                chosen_velocity=torch.where(had_prior[:,None],estimated_velocity,
+                                            torch.zeros_like(estimated_velocity)) + vn
                 self.opponent_pose[:, robot] = torch.where(has_enemy[:, None], chosen,
                                                            self.opponent_pose[:, robot])
                 self.opponent_velocity[:, robot] = torch.where(has_enemy[:, None], chosen_velocity,
@@ -610,10 +644,17 @@ class TensorThreeVsThreeObservationMixin:
             old_size=self.opponent_size[:,rows]
             old_age=self.opponent_age[:,rows]
             old_valid=self.opponent_valid[:,rows]
+            elapsed=old_age.clamp_min(self.dt)
+            measured_velocity=.5*(chosen-old_pose)/elapsed[...,None]
+            measured_velocity[...,2]=.5*torch.atan2(
+                torch.sin(chosen[...,2]-old_pose[...,2]),
+                torch.cos(chosen[...,2]-old_pose[...,2]))/elapsed
+            estimated_velocity=torch.where(old_valid[...,None] & (old_age[...,None]<1.),
+                old_velocity+measured_velocity,torch.zeros_like(old_velocity))
             self.opponent_pose.index_copy_(1,rows,torch.where(
                 has_enemy[...,None],chosen,old_pose))
             self.opponent_velocity.index_copy_(1,rows,torch.where(
-                has_enemy[...,None],chosen_velocity,old_velocity))
+                has_enemy[...,None],estimated_velocity+chosen_velocity,old_velocity))
             self.opponent_size.index_copy_(1,rows,torch.where(
                 has_enemy[...,None],chosen_size,old_size))
             self.opponent_age.index_copy_(1,rows,torch.where(

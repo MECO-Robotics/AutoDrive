@@ -39,7 +39,29 @@ python3 -m frc_defense.tensor_training train --task defense --algorithm generati
 - The match lasts 160 s (20 s autonomous plus 140 s teleop). Both HUBs are active in autonomous; in teleop, their active state alternates every 30 s based on the autonomous FUEL result. This is the requested training schedule, simplified from the official shift timing. A dumper scores only while facing its HUB within a 45-degree cone.
 - Scoring, possession, pickup, and legal field contact update the simulation and the training reward. Game evaluations report acquisitions, scores, cycle time, defensive delay, denied/abandoned objectives, contacts, and total simulated score.
 
-The model keeps gamepiece motion lightweight. HUB scoring is a planar proximity surrogate for FUEL passing through the regulation opening; it does not simulate launch trajectories, height, or the sensor array. Drivetrain parameters are illustrative unless populated from robot hardware and checked against measured traces. See the [official 2026 REBUILT manual](https://firstfrc.blob.core.windows.net/frc2026/Manual/HTML/2026GameManual.htm) and [FIRST field drawings](https://firstfrc.blob.core.windows.net/frc2026/FieldAssets/2026-field-dimension-dwgs.pdf).
+Free FUEL uses individual 3D spheres with gravity, compliant contacts, sliding friction, rolling resistance, and equal/opposite robot contact impulses. Robot and fuel physics advance together with a baseline of ten 2 ms substeps per 20 ms controller tick, refined for fast motion; observations retain their existing planar position/velocity interface. Fuel follows the same triangular bump terrain profile as the drivetrain. The 3v3 collector predicts short intercepts using observed fuel velocity, and its pickup bins follow moving fuel. Ferry passes respawn moving balls at resolved ground landings; scored-fuel returns use illustrative ballistic settings. HUB score detection remains a game-rule surrogate, rather than a sensor-array simulation.
+
+Fuel contact coefficients and launch settings require calibration against measured roll, bounce, and pile-pushing traces. The rolling resistance and impact damping defaults are tuned to settle free FUEL and dissipate most collision energy on the modeled carpet. Robot chassis dynamics remain planar: wheel climbing over fuel, chassis lift, suspension, and detailed foam deformation are not resolved. Drivetrain parameters are also illustrative unless populated from robot hardware and checked against measured traces. See the [official 2026 REBUILT manual](https://firstfrc.blob.core.windows.net/frc2026/Manual/HTML/2026GameManual.htm) and [FIRST field drawings](https://firstfrc.blob.core.windows.net/frc2026/FieldAssets/2026-field-dimension-dwgs.pdf).
+
+### Fuel physics configuration
+
+Ferry releases and scored-fuel returns use 10% of the nominal horizontal respawn velocity, giving 1% of the nominal horizontal kinetic energy. Ferry fuel appears on the terrain at its landing point with this residual speed. Scored-fuel returns retain their flight timing. Floor friction and rolling resistance continue slowing the fuel after contact.
+
+Scored-fuel returns sample fresh directions in a 45° total cone (±22.5°) centered from their HUB toward midfield. This changes direction while preserving the reduced release speed.
+
+Ferry landings sample a 10° total cone (±5°) toward a safe point in the friendly alliance zone. They spawn on the terrain with low residual velocity away from the robot. Out-of-bounds landings appear at the first field edge crossed, inset by the fuel radius. A path crossing the friendly HUB's midfield-facing edge between the two bumps returns fuel to midfield with the scored-ball ballistic launch settings.
+
+Both tensor environments accept `fuel_physics=True` (default), `False` for the previous static-fuel behavior, or a dictionary of `FuelPhysicsConfig` options. For example:
+
+```python
+env = TensorThreeVsThreeEnv(
+    num_envs=24, device="cuda:0",
+    fuel_physics={"substeps": 10, "broadphase": "grid", "cache": True,
+                  "contact_mode": "fused", "solver": "jacobi", "sleep": True},
+)
+```
+
+The two-robot environment also accepts `gamepieces.physics` in `FRC_DRIVETRAIN_CONFIG`. The all-pairs path is a collision reference; cached grid neighbors retain conservative motion margins and never silently drop contacts on capacity overflow. Robot contacts default to scanning the small robot set, which measured faster than `robot_broadphase="grid"` at six robots and 504 fuel pieces on both GPUs. `sleep_islands=True` enables sleeping and waking connected supported fuel groups. Adaptive substeps use one host speed reduction per controller tick; graph comparisons use an explicitly fixed timestep and a checked motion envelope. Backend and variant comparisons, quality diagnostics, and measured device timings are recorded in `docs/FUEL_PHYSICS_BENCHMARKS.md` by `scripts/benchmark_fuel_physics.py`.
 
 ### Swerve physics assumptions
 

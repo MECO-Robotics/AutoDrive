@@ -8,4 +8,7 @@ checkpoints/
 metrics/
 evaluations/
 logs/
+outputs/fuel_physics/
+frc_defense/csrc/fuel_physics_hip_kernel.hip
+frc_defense/csrc/fuel_sleep_hip_kernel.hip
 graphify-out/

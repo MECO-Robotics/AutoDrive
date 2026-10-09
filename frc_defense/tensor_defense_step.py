@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from .fuel_physics_runtime import advance_with_fuel
 
 try:
     import torch
@@ -141,7 +142,7 @@ class TensorDefenseStepMixin:
             oppxy=self._opponent_velocity_command(self._adstar_defender_velocity(target,active_mask),active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            advance_with_fuel(self,commands,active_mask); self.steps+=active_mask.long()
             return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
                                      _return_info,_capture_observation)
         elif kind in ("adstar","offense"):
@@ -154,7 +155,7 @@ class TensorDefenseStepMixin:
             omega=self._face_hub_omega(1,carrying)
             opp=torch.cat((oppxy,omega[:,None]),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            advance_with_fuel(self,commands,active_mask); self.steps+=active_mask.long()
             return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
                                      _return_info,_capture_observation)
         elif kind=="random":
@@ -167,7 +168,7 @@ class TensorDefenseStepMixin:
             oppxy=self._opponent_velocity_command(oppxy,active_mask)
             opp=torch.cat((oppxy,torch.zeros((self.n,1),device=self.device)),dim=-1)
             commands=torch.stack((own,opp),dim=1)
-            self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+            advance_with_fuel(self,commands,active_mask); self.steps+=active_mask.long()
             return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
                                      _return_info,_capture_observation)
         direction=target-p[:,1,:2]
@@ -177,7 +178,7 @@ class TensorDefenseStepMixin:
         omega=self._face_hub_omega(1,carrying) if self.task=="defense" else torch.zeros((self.n,),device=self.device)
         opp=torch.cat((oppxy,omega[:,None]),dim=-1)
         commands=torch.stack((own,opp),dim=1)
-        self.sim.step(commands,active_mask,_active_nonempty=True); self.steps+=active_mask.long()
+        advance_with_fuel(self,commands,active_mask); self.steps+=active_mask.long()
         return self._finish_step(goal,old_position,old_distance,a,active_mask,active_count,
                                  _return_info,_capture_observation)
 

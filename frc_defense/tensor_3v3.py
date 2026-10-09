@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import torch
 
 from .tensor_sim import TensorVectorizedSimulator, swerve_heading_rate
+from .fuel_physics_runtime import (initialize_fuel_physics, reset_fuel_physics,
+                                  advance_with_fuel)
 from .field import ALLIANCE_ZONE_DEPTH, midfield_respawn_points
 from ._tensor_3v3_actions import TensorThreeVsThreeActionMixin
 from ._tensor_3v3_constants import TEAM_IDS
@@ -44,7 +46,7 @@ class TensorThreeVsThreeEnv(
                  preloaded_per_robot=0, max_fuel_capacity=60,
                  max_scoring_bps=25.0, turret_fuel_capacity=40,
                  turret_scoring_bps=15.0,
-                 perception_interval=1, contact_iterations=3,
+                 perception_interval=2, contact_iterations=3,
                  teammate_intent_knowledge=True,
                  sweeping_enabled=False,
                  perception_range=6., perception_fov=120.,
@@ -57,7 +59,7 @@ class TensorThreeVsThreeEnv(
                  behavior_probe_hub_active=True,
                  random_gamepiece_placement=False,
                  field_length=16.54,
-                 field_width=8.07, obstacles=()):
+                 field_width=8.07, obstacles=(), fuel_physics=True):
         self.n = int(num_envs)
         if self.n < 1:
             raise ValueError("num_envs must be positive")
@@ -155,6 +157,8 @@ class TensorThreeVsThreeEnv(
         self._dumper_mask=torch.tensor([kind=="dumper" for kind in types],
                                        device=self.device,dtype=torch.bool)
         self._turret_mask=~self._dumper_mask
+        self._intake_collecting=torch.zeros((self.n,NUM_ROBOTS),device=self.device,
+                                             dtype=torch.bool)
         self._defense_role_mask = torch.tensor(
             [role == "defense" for role in roles], device=self.device, dtype=torch.bool)
         self.agent_train_mask = torch.tensor([mode == "nn" for mode in modes],
@@ -283,6 +287,7 @@ class TensorThreeVsThreeEnv(
                                         dtype=torch.bool)
         self.piece_owner = torch.full((self.n, self.fuel_count), -1,
                                       device=self.device, dtype=torch.long)
+        initialize_fuel_physics(self,fuel_physics)
         self.piece_zone = torch.full_like(self.piece_owner, -1)
         self._probe_respawn_cursor=torch.zeros(
             self.n,device=self.device,dtype=torch.long)
@@ -416,6 +421,7 @@ class TensorThreeVsThreeEnv(
         self._target_fuel_selected_step.fill_(-1)
         self._target_turn_anchor.copy_(self.sim.pose[:,:,:2])
         self._target_collecting.zero_()
+        self._intake_collecting.zero_()
         self._target_cluster_empty_ticks.zero_()
         self._raster_cursor.copy_(self._closest_raster_indices(self.sim.pose[:,:,:2]))
         self._raster_reanchor.fill_(True)
@@ -434,6 +440,7 @@ class TensorThreeVsThreeEnv(
         self._avoidance_winner.fill_(-1)
         self._randomize_pass_zone_positions()
         self._initialize_fuel()
+        reset_fuel_physics(self)
         self.track_mask.zero_(); self.track_age.fill_(float("inf"))
         self.perception_quality_state.zero_()
         self.track_confidence.zero_(); self.track_spatial_extent.zero_()
@@ -493,6 +500,7 @@ class TensorThreeVsThreeEnv(
         self.hub_active[mask] = True
         self._randomize_pass_zone_positions(mask)
         self._initialize_fuel(mask)
+        reset_fuel_physics(self,mask)
         self.track_mask[mask] = False; self.track_age[mask] = float("inf")
         self.perception_quality_state[mask] = 0.
         self.track_confidence[mask] = 0.; self.track_spatial_extent[mask] = 0.
@@ -501,6 +509,7 @@ class TensorThreeVsThreeEnv(
         self.opponent_size[mask] = 0.
         self._update_perception(mask)
         self.last_actions[mask] = 7
+        self._intake_collecting[mask] = False
         self._last_score_intent[mask] = False
         self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
         return self._last_obs
@@ -562,7 +571,14 @@ class TensorThreeVsThreeEnv(
             replan_due=bool(flat_active.any())
         start=self.sim.pose[:,:,:2].reshape(-1,2); goal=targets.reshape(-1,2)
         heading=self.sim.pose[:,:,2].reshape(-1)
-        lengths=self.sim.length.reshape(-1); widths=self.sim.width.reshape(-1)
+        # Plan with the intake extended whenever collection is requested,
+        # including while the deployment guard keeps it retracted to clear a
+        # nearby field element. This makes AD* route the escape safely.
+        intake_extended=(self._turret_mask[None] | (self.last_actions < 4))
+        # The intake projects 12in beyond the bumper, so the centered AD*
+        # rectangle needs 24in extra total length to cover that forward reach.
+        planner_lengths=(self.sim.length + intake_extended.to(self.sim.length.dtype)*.6096)
+        lengths=planner_lengths.reshape(-1); widths=self.sim.width.reshape(-1)
         speeds=self.sim.speed.reshape(-1); accel=self.sim.accel.reshape(-1)
         lateral=self.sim.lateral_mu.reshape(-1)
         if replan_due:
@@ -667,10 +683,9 @@ class TensorThreeVsThreeEnv(
         fine_omega=torch.where(score_centered,torch.zeros_like(fine_omega),fine_omega)
         omega=torch.where(score_fine_aim,fine_omega,omega)
         omega=torch.where(scoring_dumper,omega,torch.zeros_like(omega))
-        home_zone_center=hub.clone()
-        home_zone_center[...,0]=torch.where(
-            self.team_ids[None,:]==0,self.alliance_zone_depth*.5,
-            self.field_length-self.alliance_zone_depth*.5)
+        from .fuel_physics_runtime import ferry_aim_targets
+        home_zone_center=ferry_aim_targets(
+            self,self.sim.pose[:,:,:2],self.team_ids[None,:].expand(self.n,-1))
         ferry_vector=home_zone_center-self.sim.pose[:,:,:2]
         ferry_bearing=torch.atan2(ferry_vector[...,1],ferry_vector[...,0])
         ferry_error=torch.atan2(torch.sin(ferry_bearing-self.sim.pose[:,:,2]),
@@ -811,8 +826,8 @@ class TensorThreeVsThreeEnv(
         enabled=self._controlled_mode_mask
         commands=commands*enabled[None,:,None]
         stationary_pose=(self.sim.pose.clone() if "none" in self.control_modes else None)
-        self.sim.step(commands,active_mask=None if full_batch else active,
-                      _active_nonempty=active_count>0)
+        advance_with_fuel(self,commands,None if full_batch else active,
+                          active_nonempty=active_count>0)
         if stationary_pose is not None:
             stationary=active[:,None]&~enabled[None,:]
             self.sim.pose.copy_(torch.where(
@@ -835,6 +850,9 @@ class TensorThreeVsThreeEnv(
                 self.track_age = torch.where(
                     aging_active[:, None, None] & self.track_mask,
                     self.track_age + self.dt, self.track_age)
+                self.track_pos.add_(torch.where(
+                    (aging_active[:, None, None] & self.track_mask)[..., None],
+                    self.track_vel * self.dt, torch.zeros_like(self.track_vel)))
                 self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
                                      aging_active[:, None, None])
                 self.opponent_age = torch.where(

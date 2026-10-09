@@ -12,13 +12,12 @@ function robotAllianceColor(frame, robot, fallbackAttacker = 0) {
 function drawDottedFuel(context, x, y, alpha = 1) {
   context.save();
   context.globalAlpha = alpha;
-  context.fillStyle = "#ffc542";
-  for (let dot = 0; dot < 8; dot++) {
-    const angle = dot * Math.PI / 4;
-    context.beginPath();
-    context.arc(x + Math.cos(angle) * 6, y + Math.sin(angle) * 6, 1.5, 0, Math.PI * 2);
-    context.fill();
-  }
+  context.strokeStyle = "#ffc542";
+  context.lineWidth = 1;
+  context.setLineDash([6, 2]);
+  context.beginPath();
+  context.arc(x, y, 6, 0, Math.PI * 2);
+  context.stroke();
   context.restore();
 }
 
@@ -130,12 +129,12 @@ function drawTargetClusterBoundary(context, points, originX, scale, py) {
   }
   context.lineJoin = "round";
   context.lineCap = "round";
-  context.setLineDash([6, 4]);
+  context.setLineDash([6, 2]);
   context.strokeStyle = "rgba(8, 22, 30, 0.95)";
-  context.lineWidth = 6;
+  context.lineWidth = 4;
   context.stroke();
   context.strokeStyle = "#55e6ff";
-  context.lineWidth = 3;
+  context.lineWidth = 1.5;
   context.stroke();
   context.restore();
 }
@@ -705,6 +704,16 @@ export function renderField({
     fx.save();
     fx.translate(ox + x * s, py(y));
     fx.rotate(-t);
+    // Dumpers retract their intake outside collection; Turrets keep theirs
+    // extended through ferrying and shooting. Draw in local chassis coordinates.
+    if (playbackRobotTypes[k] === "turret" || Number(f.robot_actions?.[k]) < 4) {
+      const extension = 0.3048 * s;
+      fx.fillStyle = "#f2c14e";
+      fx.fillRect((l * s) / 2, (-b * s) / 2, extension, b * s);
+      fx.strokeStyle = "#10151b";
+      fx.lineWidth = 2;
+      fx.strokeRect((l * s) / 2, (-b * s) / 2, extension, b * s);
+    }
     fx.fillStyle = robotAllianceColor(f, k, attackerIndex);
     fx.fillRect((-l * s) / 2, (-b * s) / 2, l * s, b * s);
     fx.lineJoin = "round";
