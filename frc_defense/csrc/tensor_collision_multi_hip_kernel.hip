@@ -610,8 +610,8 @@ __global__ void avoid_contention_kernel(const float* pose,const float* command,
     const bool i_closer=sqrtf(dix*dix+diy*diy)<=sqrtf(djx*djx+djy*djy);
     const int preferred=(same_team&&teammate_intent)?(i_closer?i:j):(i<j?i:j);
     int priority=preferred;
-    if(controlled[i]&&!controlled[j])priority=j;
-    if(!controlled[i]&&controlled[j])priority=i;
+    if((!same_team||teammate_intent)&&controlled[i]&&!controlled[j])priority=j;
+    if((!same_team||teammate_intent)&&!controlled[i]&&controlled[j])priority=i;
     conflict=conflict&&(controlled[i]||controlled[j]);
     const int old=static_cast<int>(winner[world*15+lane]);
     const bool retained=old>=0&&current_dist<clearance+.35f&&

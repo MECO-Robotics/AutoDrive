@@ -784,10 +784,13 @@ class TensorThreeVsThreeActionMixin:
         preferred_winner=torch.where(use_intent[None],intent_winner,stable_winner)
         i_controlled=self._controlled_mode_mask[pair_i]
         j_controlled=self._controlled_mode_mask[pair_j]
+        controller_priority=(~teammate_pair | self.teammate_intent_knowledge)
         preferred_winner=torch.where(
-            (i_controlled&~j_controlled)[None],pair_j[None],preferred_winner)
+            (i_controlled&~j_controlled&controller_priority)[None],
+            pair_j[None],preferred_winner)
         preferred_winner=torch.where(
-            (~i_controlled&j_controlled)[None],pair_i[None],preferred_winner)
+            (~i_controlled&j_controlled&controller_priority)[None],
+            pair_i[None],preferred_winner)
         conflict &= (i_controlled|j_controlled)[None]
         retained = ((self._avoidance_winner >= 0) &
                     (current_distance < clearance + .35) &
