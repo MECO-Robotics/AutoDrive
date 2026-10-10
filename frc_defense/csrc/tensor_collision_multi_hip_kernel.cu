@@ -564,7 +564,7 @@ void safe_score_targets_launch(const float* pose, const float* score_target,
 __global__ void avoid_contention_kernel(const float* pose,const float* command,
     const float* targets,const float* length,const float* width,const float* speed,
     const bool* controlled,const int64_t* teams,const bool* active,
-    int64_t* winner,float* adjusted,int n,bool teammate_intent) {
+    int64_t* winner,float* adjusted,int n,bool teammate_coordination) {
   const int world=blockIdx.x, lane=threadIdx.x;
   if(world>=n)return;
   __shared__ int pair_i[15],pair_j[15],pair_winner[15],pair_loser[15],pair_conflict[15];
@@ -600,21 +600,21 @@ __global__ void avoid_contention_kernel(const float* pose,const float* command,
     const bool same_team=teams[i]==teams[j];
     bool conflict=((closing>.0225f&&closest_dist<clearance)||
                    current_dist<clearance-.08f);
-    if(!teammate_intent&&same_team)
+    if(!teammate_coordination&&same_team)
       conflict=current_dist<clearance+.05f;
     const float dix=targets[xybase+i*2]-pose[pi];
     const float diy=targets[xybase+i*2+1]-pose[pi+1];
     const float djx=targets[xybase+j*2]-pose[pj];
     const float djy=targets[xybase+j*2+1]-pose[pj+1];
     const bool i_closer=sqrtf(dix*dix+diy*diy)<=sqrtf(djx*djx+djy*djy);
-    const int preferred=(same_team&&teammate_intent)?(i_closer?i:j):(i<j?i:j);
+    const int preferred=(same_team&&teammate_coordination)?(i_closer?i:j):(i<j?i:j);
     int priority=preferred;
-    if((!same_team||teammate_intent)&&controlled[i]&&!controlled[j])priority=j;
-    if((!same_team||teammate_intent)&&!controlled[i]&&controlled[j])priority=i;
+    if((!same_team||teammate_coordination)&&controlled[i]&&!controlled[j])priority=j;
+    if((!same_team||teammate_coordination)&&!controlled[i]&&controlled[j])priority=i;
     conflict=conflict&&(controlled[i]||controlled[j]);
     const int old=static_cast<int>(winner[world*15+lane]);
     const bool retained=old>=0&&current_dist<clearance+.35f&&
-                        (!same_team||teammate_intent);
+                        (!same_team||teammate_coordination);
     const int selected=retained?old:(conflict?priority:-1);
     pair_winner[lane]=selected;pair_conflict[lane]=conflict?1:0;
     if(active[world])winner[world*15+lane]=selected;
@@ -662,9 +662,9 @@ __global__ void avoid_contention_kernel(const float* pose,const float* command,
 void avoidance_launch(const float* pose,const float* command,const float* targets,
     const float* length,const float* width,const float* speed,
     const bool* controlled,const int64_t* teams,const bool* active,
-    int64_t* winner,float* adjusted,int n,bool teammate_intent,hipStream_t stream){
+    int64_t* winner,float* adjusted,int n,bool teammate_coordination,hipStream_t stream){
   avoid_contention_kernel<<<dim3(n),dim3(32),0,stream>>>(pose,command,targets,
-      length,width,speed,controlled,teams,active,winner,adjusted,n,teammate_intent);
+      length,width,speed,controlled,teams,active,winner,adjusted,n,teammate_coordination);
 }
 
 __global__ void invalidate_tracks_kernel(const float* pose, const float* length,

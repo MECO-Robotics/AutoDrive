@@ -199,7 +199,7 @@ def footprint_path_clear(path, heading, length, width, boxes,
 
 
 def avoid_robot_contention(sim, command, targets, active, winner, controlled,
-                           teammate_intent_knowledge):
+                           teammate_coordination_enabled):
     """Fuse all 15 pair checks and per-robot avoidance reductions on HIP."""
     if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
             sim.num_robots != 6):
@@ -219,4 +219,4 @@ def avoid_robot_contention(sim, command, targets, active, winner, controlled,
     return ext.avoid_robot_contention(
         sim.pose, command, targets, sim.length, sim.width, sim.speed,
         controlled, sim.team_ids, active, winner,
-        bool(teammate_intent_knowledge))
+        bool(teammate_coordination_enabled))

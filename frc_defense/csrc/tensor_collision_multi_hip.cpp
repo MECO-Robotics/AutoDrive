@@ -190,7 +190,7 @@ torch::Tensor safe_score_targets(torch::Tensor pose,
 torch::Tensor avoid_robot_contention(torch::Tensor pose, torch::Tensor command,
     torch::Tensor targets, torch::Tensor length, torch::Tensor width,
     torch::Tensor speed, torch::Tensor controlled, torch::Tensor team_ids,
-    torch::Tensor active, torch::Tensor winner, bool teammate_intent) {
+    torch::Tensor active, torch::Tensor winner, bool teammate_coordination) {
   const auto n = pose.size(0);
   TORCH_CHECK(pose.sizes() == torch::IntArrayRef({n, 6, 3}) &&
               command.sizes() == torch::IntArrayRef({n, 6, 2}) &&
@@ -212,7 +212,7 @@ torch::Tensor avoid_robot_contention(torch::Tensor pose, torch::Tensor command,
       speed.data_ptr<float>(), controlled.data_ptr<bool>(),
       team_ids.data_ptr<int64_t>(), active.data_ptr<bool>(),
       winner.data_ptr<int64_t>(), adjusted.data_ptr<float>(),
-      static_cast<int>(n), teammate_intent,
+      static_cast<int>(n), teammate_coordination,
       c10::cuda::getCurrentCUDAStream(pose.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return adjusted;
