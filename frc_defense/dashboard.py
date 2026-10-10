@@ -260,7 +260,7 @@ def create_handler(run_dir: Path):
                                for i in range(6)]
                 robot_types=[params.get(f"robot_type{i}",["dumper"])[0]
                              for i in range(6)]
-                intent_text=params.get("teammate_intent_knowledge",["true"])[0].lower()
+                intent_text=params.get("teammate_intent_knowledge",["false"])[0].lower()
                 if intent_text not in ("true","false"):
                     self.send_error(400,"teammate_intent_knowledge must be true or false")
                     return
@@ -699,7 +699,7 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                       control_modes=None, robot_types=None,
                       progress_path: Path | None = None,
                       hopper_capacity: int = 60, scoring_bps: float = 25.,
-                      teammate_intent_knowledge: bool = True,
+                      teammate_intent_knowledge: bool = False,
                       sweeping_enabled: bool = False,
                       random_gamepiece_placement: bool = False,
                       behavior_mode: str = "match",
@@ -752,7 +752,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            control_modes=None, horizon: int = ZONE_SCENARIO_TICKS,
                            behavior_mode: str = "match",
                            robot_types=None,
-                           teammate_intent_knowledge: bool = True,
+                           teammate_intent_knowledge: bool = False,
                            sweeping_enabled: bool = False,
                            random_gamepiece_placement: bool = False,
                            capture_stride: int = 10, device: str | None = None,

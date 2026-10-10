@@ -717,7 +717,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       ? Number(scoringControl?.value ?? (robotTypes[0] === "turret" ? 15 : 25))
       : Number(savedJob?.scoring_bps ?? scoringControl?.value ?? 25);
     const teammateIntentKnowledge = behaviorProbe ? false : Boolean(
-      savedJob?.teammate_intent_knowledge ?? $("teammateIntentKnowledge")?.checked ?? true,
+      savedJob?.teammate_intent_knowledge ?? $("teammateIntentKnowledge")?.checked ?? false,
     );
     const sweepingEnabled = behaviorProbe ? false : Boolean(
       savedJob?.sweeping_enabled ?? $("sweepingEnabled")?.checked ?? false,

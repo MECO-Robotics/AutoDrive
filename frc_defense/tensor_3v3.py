@@ -48,7 +48,7 @@ class TensorThreeVsThreeEnv(
                  max_scoring_bps=25.0, turret_fuel_capacity=40,
                  turret_scoring_bps=15.0,
                  perception_interval=2, contact_iterations=3,
-                 teammate_intent_knowledge=True,
+                 teammate_intent_knowledge=False,
                  sweeping_enabled=False,
                  perception_range=6., perception_fov=120.,
                  stereo_baseline=.0635, fuel_ball_diameter=.15,
@@ -206,14 +206,15 @@ class TensorThreeVsThreeEnv(
              for enemy in [i for i, team in enumerate(TEAM_IDS)
                            if team != TEAM_IDS[robot]]],
             device=self.device,dtype=torch.bool) for robot in range(NUM_ROBOTS))
-        # Ferry shots launch from midfield, with a separate lane per robot to
-        # keep the three carriers on each alliance from converging on one spot.
+        # Coordinated ferry/search uses a preassigned lane per robot slot.
+        # Siloed fallback search instead projects each robot's own lateral
+        # motion toward midfield without a teammate lane assignment.
         midfield_x=float(field_length)/2
         ferry_x=midfield_x+torch.where(self.team_ids==0,-.45,.45)
         ferry_lane=torch.tensor((1.35,4.035,6.72,6.72,4.035,1.35),
                                 device=self.device,dtype=torch.float32)
         self.ferry_targets=torch.stack((ferry_x,ferry_lane),-1)
-        self.field_search_lanes=ferry_lane
+        self.field_search_lanes=self.ferry_targets[:,1]
         self._raster_waypoint_lookahead=20
         piece_ids=torch.arange(self.fuel_count,device=self.device)
         self._fuel_indices=piece_ids[None]

@@ -186,9 +186,9 @@
             <span>Run up to two queued simulations at once, one per GPU. Training pauses until both finish.</span>
           </label>
           <label class="intent-knowledge-toggle" for="teammateIntentKnowledge">
-            <input id="teammateIntentKnowledge" type="checkbox" checked>
-            Teammate intent knowledge
-            <span>Use teammate routes and motion to coordinate avoidance</span>
+            <input id="teammateIntentKnowledge" type="checkbox">
+            Teammate coordination knowledge
+            <span>Enable all coordination that depends on teammate intent: share teammate possession and controller state, reserve teammate fuel targets, assign search and ferry lanes, and use intent-based collision priority. Teammate motion and the FMS hub schedule remain observable when this is off; staging and scoring timing use each robot's own state.</span>
           </label>
           <label class="intent-knowledge-toggle" for="sweepingEnabled">
             <input id="sweepingEnabled" type="checkbox">

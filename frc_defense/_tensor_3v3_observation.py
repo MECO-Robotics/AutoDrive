@@ -787,18 +787,24 @@ class TensorThreeVsThreeObservationMixin:
             self._field_scales,
             local_fuel_vel / self.sim.speed[:, :, None, None].clamp_min(.1),
             valid[..., None].to(p.dtype)), -1).reshape(self.n,6,20)
-        teammate = torch.cat(((team_pose[..., :2]-p[:, :, None, :2]) /
+        teammate_motion=torch.cat(((team_pose[..., :2]-p[:, :, None, :2]) /
             self._field_scales,
             team_vel[..., :2] / self.sim.speed[:, :, None, None].clamp_min(.1),
-            team_pose[..., 2:3].sin(), team_pose[..., 2:3].cos(),
+            team_pose[..., 2:3].sin(), team_pose[..., 2:3].cos()), -1)
+        teammate_shared=torch.cat((
             teammate_possession[...,None].to(p.dtype) /
                 max(self.fuel_capacity,1),
-            self.agent_train_mask[team_idx].to(p.dtype)[...,None],
+            self.agent_train_mask[team_idx].to(p.dtype)[...,None]), -1)
+        if not self.teammate_intent_knowledge:
+            teammate_shared.zero_()
+        teammate = torch.cat((teammate_motion, teammate_shared,
             torch.ones((self.n,6,2,2),device=self.device)), -1).reshape(self.n,6,20)
         own_count = possession.to(p.dtype) / max(self.fuel_capacity,1)
         same_team_float=same_team.to(p.dtype)
         teammate_count=(torch.einsum("ij,nj->ni",same_team_float,possession.to(p.dtype)) /
                         (2*max(self.fuel_capacity,1)))
+        if not self.teammate_intent_knowledge:
+            teammate_count.zero_()
         possession_feat = torch.stack((own_count, teammate_count), -1)
         team_scores = self.fuel_score_count / max(self.fuel_count,1)
         relative_hubs = ((self.hub_centers[None,None] - p[:, :, None, :2]) /

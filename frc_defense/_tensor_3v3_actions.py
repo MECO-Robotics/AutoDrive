@@ -341,7 +341,8 @@ class TensorThreeVsThreeActionMixin:
                 wants_fuel = deterministic_offense[:, robot] & (action[:, robot] < 4)
                 available = intake_eligible[:, robot].clone()
                 for prior_robot, prior_index, prior_active in assigned:
-                    same_alliance = self.team_ids[robot] == self.team_ids[prior_robot]
+                    same_alliance = ((self.team_ids[robot] == self.team_ids[prior_robot]) &
+                                     self.teammate_intent_knowledge)
                     destination = self.track_pos[
                         self._world_indices,prior_robot,
                         prior_index.clamp(0,self.fuel_count-1)]
@@ -497,8 +498,21 @@ class TensorThreeVsThreeActionMixin:
         defense_intercept=guarded_score_pose
         intercept=torch.where(self._defense_role_mask[None,:,None],
                               defense_intercept,nearest_enemy_pose[...,:2])
-        # Empty robots follow their indexed spline raster through midfield.
-        ferry_target=self.ferry_targets[None].expand(self.n,-1,-1)
+        # Coordinated robots use preassigned search/ferry lanes. A siloed
+        # robot projects only its own lateral motion toward midfield, so it
+        # does not need a teammate lane assignment or intent signal.
+        if self.teammate_intent_knowledge:
+            ferry_target=self.ferry_targets[None].expand(self.n,-1,-1)
+        else:
+            ferry_x=self.ferry_targets[None,:,0].expand(self.n,-1)
+            midfield_distance=(ferry_x-p[:,:,0]).abs()
+            forward_speed=self.sim.speed.clamp_min(.1)
+            projected_y=(p[:,:,1] + self.sim.velocity[:,:,1] /
+                          forward_speed * midfield_distance)
+            robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
+            projected_y=projected_y.clamp(robot_radius,
+                                           self.sim.field_width-robot_radius)
+            ferry_target=torch.stack((ferry_x,projected_y),-1)
         dumper_ferry=(self._dumper_mask[None]&possession_now&~robot_hub_active)
         action_six_target=torch.where(dumper_ferry[...,None],p[:,:,:2],ferry_target)
         deterministic_offense=(self._deterministic_mode_mask &
@@ -589,9 +603,8 @@ class TensorThreeVsThreeActionMixin:
                                  (action==6) & ~no_alliance_fuel_search)
             # Keep no-track searchers on separate field lanes instead of
             # converging all empty robots at the exact same field midpoint.
-            search_target=self.ferry_targets[None].expand(self.n,-1,-1)
-            target=torch.where(target_based_search[...,None],search_target,target)
-            target=torch.where(no_alliance_fuel_search[...,None],search_target,target)
+            target=torch.where(target_based_search[...,None],ferry_target,target)
+            target=torch.where(no_alliance_fuel_search[...,None],ferry_target,target)
 
             # Trace the local fuel-cloud edge with the intake's right side.
             # A smoothed density gradient estimates the inward normal; its
