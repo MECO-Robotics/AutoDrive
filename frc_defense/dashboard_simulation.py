@@ -653,9 +653,12 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                 env.last_actions[0].to(env.sim.pose.dtype),
                 env.opponent_valid[0].to(env.sim.pose.dtype),
                 env.opponent_pose[0,:,:2].reshape(-1),
-                env.opponent_age[0],
-                env.track_pos[0].permute(1,0,2).reshape(-1),
-                env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype),
+                env.opponent_age[0]))
+            if include_tracks:
+                fields.extend((
+                    env.track_pos[0].permute(1,0,2).reshape(-1),
+                    env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype)))
+            fields.extend((
                 env._last_audit_targets[0].reshape(-1),
                 env._last_audit_fuel_targets[0].reshape(-1),
                 env.planner.last_goal.reshape(1,6,2)[0].reshape(-1),
