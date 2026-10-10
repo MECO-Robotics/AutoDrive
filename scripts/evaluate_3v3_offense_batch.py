@@ -34,6 +34,12 @@ def _revision() -> dict[str, str | bool | None]:
 
 
 def evaluate(args: argparse.Namespace) -> dict:
+    device = torch.device(args.device)
+    if device.type == "cuda" and device.index is not None:
+        # HIP extension launches use the current device stream. Match it to
+        # the requested tensor device before importing the simulator's lazy
+        # native extensions or constructing the environment.
+        torch.cuda.set_device(device.index)
     modes = ("deterministic",) * 6
     env = TensorThreeVsThreeEnv(
         num_envs=args.envs,
