@@ -20,7 +20,9 @@ class TensorThreeVsThreeActionMixin:
     """Methods that translate strategic actions into robot targets."""
 
     def _ferry_targets_for_current_motion(self):
-        """Return assigned ferry lanes or lanes inferred from own motion."""
+        """Use assigned search lanes only with coordination; otherwise infer
+        each robot's ferry lane from its own observed motion.
+        """
         if self.teammate_coordination_enabled:
             return self.ferry_targets[None].expand(self.n,-1,-1)
 

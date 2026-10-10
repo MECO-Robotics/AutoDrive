@@ -121,10 +121,11 @@ class TensorThreeVsThreeEnv(
         if len(modes) != NUM_ROBOTS or any(mode not in CONTROL_MODES for mode in modes):
             raise ValueError("control_modes must assign none, nn, or deterministic to six robots")
         self.control_modes = tuple(modes)
-        # Preserve the legacy constructor/config name for saved jobs and
-        # callers, while using one runtime switch for every intentional team
-        # coordination behavior. Physical teammate observations remain
-        # available to model onboard sensing.
+        # This gates every behavior that uses teammate strategy or intent:
+        # assigned search/ferry lanes, shared possession/training features,
+        # target-based right-of-way, and predicted teammate traffic avoidance.
+        # Physical teammate pose and velocity remain observable to model
+        # onboard sensing and local collision response.
         if teammate_coordination_enabled is None:
             teammate_coordination_enabled=teammate_intent_knowledge
         self.teammate_coordination_enabled=bool(teammate_coordination_enabled)

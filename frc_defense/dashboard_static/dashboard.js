@@ -718,13 +718,13 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       : Number(savedJob?.scoring_bps ?? scoringControl?.value ?? 25);
     const teammateCoordinationEnabled = behaviorProbe ? false : Boolean(
       savedJob?.teammate_coordination_enabled ?? savedJob?.teammate_intent_knowledge ??
-      $("teammateIntentKnowledge")?.checked ?? false,
+      $("teammateCoordination")?.checked ?? $("teammateIntentKnowledge")?.checked ?? false,
     );
     const sweepingEnabled = behaviorProbe ? false : Boolean(
       savedJob?.sweeping_enabled ?? $("sweepingEnabled")?.checked ?? false,
     );
-    const intentControl = $("teammateIntentKnowledge");
-    if (intentControl) intentControl.checked = teammateCoordinationEnabled;
+    const coordinationControl = $("teammateCoordination") ?? $("teammateIntentKnowledge");
+    if (coordinationControl) coordinationControl.checked = teammateCoordinationEnabled;
     const sweepingControl = $("sweepingEnabled");
     if (sweepingControl) sweepingControl.checked = sweepingEnabled;
     if (hopperControl) hopperControl.value = String(hopperCapacity);
@@ -1023,7 +1023,7 @@ function renderFocusedControls() {
   $("robotControlModes").hidden = !randomized || focused;
   $("scenarioPhysicalLimits").hidden = !randomized || focused;
   $("focusedRobotControls").hidden = !randomized || !focused;
-  for (const id of ["teammateIntentKnowledge", "sweepingEnabled", "scenarioSeed"]) {
+  for (const id of ["teammateCoordination", "sweepingEnabled", "scenarioSeed"]) {
     $(id).closest("label").hidden = !randomized || focused;
   }
   $("nextScenario").hidden = !randomized;

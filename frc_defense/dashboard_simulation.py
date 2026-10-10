@@ -249,10 +249,13 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                       hopper_capacity: int = 60, scoring_bps: float = 25.,
                       random_gamepiece_placement: bool = False,
                       teammate_intent_knowledge: bool = False,
+                      teammate_coordination_enabled: bool | None = None,
                       sweeping_enabled: bool = False, behavior_mode: str = "match",
                       device: str | None = None,
                       _generate_fn=None) -> dict:
     """Run dashboard rollouts on an available GPU runtime."""
+    if teammate_coordination_enabled is None:
+        teammate_coordination_enabled=teammate_intent_knowledge
     try:
         import torch
         gpu_available=torch.cuda.is_available()
@@ -281,14 +284,14 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                 "sys.argv[4],int(sys.argv[5]),task=sys.argv[6],control_modes=json.loads(sys.argv[7]),"
                 "robot_types=json.loads(sys.argv[8]),progress_path=Path(sys.argv[9]) if sys.argv[9] else None,"
                 "hopper_capacity=int(sys.argv[10]),scoring_bps=float(sys.argv[11]),"
-                "teammate_intent_knowledge=sys.argv[12]=='true',"
+                "teammate_coordination_enabled=sys.argv[12]=='true',"
                 "sweeping_enabled=sys.argv[13]=='true',behavior_mode=sys.argv[14],"
                 "random_gamepiece_placement=sys.argv[15]=='true',device=sys.argv[16]),"
                 "separators=(',',':')))")
         result=subprocess.run([str(interpreter),"-c",source,str(run_dir.resolve()),run_name,
             start_zone,goal_zone,str(seed),task or "",json.dumps(control_modes),
             json.dumps(robot_types or ["dumper"]*6),str(progress_path or ""),
-            str(hopper_capacity),str(scoring_bps),str(bool(teammate_intent_knowledge)).lower(),
+            str(hopper_capacity),str(scoring_bps),str(bool(teammate_coordination_enabled)).lower(),
             str(bool(sweeping_enabled)).lower(),behavior_mode,
             str(bool(random_gamepiece_placement)).lower(),selected_device],
             cwd=Path.cwd(),capture_output=True,text=True,timeout=1800)
@@ -302,7 +305,7 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                                   progress_path=progress_path,
                                   hopper_capacity=hopper_capacity,
                                   scoring_bps=scoring_bps,
-                                  teammate_intent_knowledge=teammate_intent_knowledge,
+                                  teammate_coordination_enabled=teammate_coordination_enabled,
                                   sweeping_enabled=sweeping_enabled,
                                   random_gamepiece_placement=random_gamepiece_placement,
                                   behavior_mode=behavior_mode,device=device)
@@ -311,7 +314,7 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
                            goal_zone: str, seed: int, task: str,
                            control_modes: list[str], robot_types: list[str],
                            hopper_capacity: int,
-                           scoring_bps: float, teammate_intent_knowledge: bool,
+                           scoring_bps: float, teammate_coordination_enabled: bool,
                            sweeping_enabled: bool,
                            progress_path: Path,
                            simulation_id: str, behavior_mode: str = "match",
@@ -338,7 +341,7 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
                 task=task,control_modes=control_modes,robot_types=robot_types,
                 progress_path=progress_path,
                 hopper_capacity=hopper_capacity,scoring_bps=scoring_bps,
-                teammate_intent_knowledge=teammate_intent_knowledge,
+                teammate_coordination_enabled=teammate_coordination_enabled,
                 sweeping_enabled=sweeping_enabled,behavior_mode=behavior_mode,
                 **run_kwargs)
         record["simulation_id"]=simulation_id
@@ -460,6 +463,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            behavior_mode: str = "match",
                            robot_types=None,
                            teammate_intent_knowledge: bool = False,
+                           teammate_coordination_enabled: bool | None = None,
                            sweeping_enabled: bool = False,
                            random_gamepiece_placement: bool = False,
                            capture_stride: int = 10,
@@ -474,6 +478,8 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                            progress_path: Path | None = None, _write_fn=None,
                            _normalize_fn=None) -> dict:
     """Simulate one seeded, six-robot FRC match for dashboard playback."""
+    if teammate_coordination_enabled is None:
+        teammate_coordination_enabled=teammate_intent_knowledge
     zones = {"red", "center", "blue"}
     if start_zone not in zones or goal_zone not in zones or start_zone == goal_zone:
         raise ValueError("start and goal must be different legal zones")
@@ -509,7 +515,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         robot_types=[selected_type]+["dumper"]*5
         hopper_capacity=int(hopper_capacity)
         scoring_bps=float(scoring_bps)
-        teammate_intent_knowledge=False
+        teammate_coordination_enabled=False
         # Isolate one red offense robot and exercise one behavior/state for 30 s.
         control_modes=["deterministic","none","none","none","none","none"]
         robot_roles=["offense"]*6
@@ -542,7 +548,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     env=TensorThreeVsThreeEnv(num_envs=1,device=device,seed=int(seed),
         control_modes=control_modes,robot_roles=robot_roles,
         robot_types=robot_types,
-        teammate_intent_knowledge=teammate_intent_knowledge,
+        teammate_coordination_enabled=teammate_coordination_enabled,
         horizon=simulation_ticks,dt=simulation_dt,randomize=True,
         sweeping_enabled=sweeping_enabled,
         replan_interval=(planner_replan_ticks
@@ -969,7 +975,8 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         "control_modes":control_modes[:1] if behavior_probe else control_modes,
         "robot_roles":robot_roles[:1] if behavior_probe else robot_roles,
         "robot_types":robot_types[:1] if behavior_probe else robot_types,
-        "teammate_intent_knowledge":bool(teammate_intent_knowledge),
+        "teammate_coordination_enabled":bool(teammate_coordination_enabled),
+        "teammate_intent_knowledge":bool(teammate_coordination_enabled),
         "sweeping_enabled":bool(sweeping_enabled),
         "policy_checkpoints":checkpoint_paths,
         "simulation_constraints":simulation_constraints,
@@ -1061,10 +1068,11 @@ def prepare_focused_playbacks(run_dir: Path) -> None:
                 request={"start_zone":"red","goal_zone":"blue","seed":0,
                     "task":"3v3","control_modes":["offense_deterministic"]+["none"]*5,
                     "behavior_mode":mode,"total_ticks":BEHAVIOR_PROBE_TICKS,
-                        "robot_types":[robot_type]+["dumper"]*5,
-                        "teammate_intent_knowledge":False,"sweeping_enabled":False,
-                        "dual_gpu":True,
-                        "hopper_capacity":capacity,"scoring_bps":scoring_bps}
+                    "robot_types":[robot_type]+["dumper"]*5,
+                    "teammate_coordination_enabled":False,
+                    "teammate_intent_knowledge":False,"sweeping_enabled":False,
+                    "dual_gpu":True,
+                    "hopper_capacity":capacity,"scoring_bps":scoring_bps}
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if not request_path.is_file():
                     request_path.write_text(json.dumps(request))
