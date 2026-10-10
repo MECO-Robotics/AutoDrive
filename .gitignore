@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Local training outputs and generated analysis data are reproducible artifacts.
 checkpoints/
@@ -9,6 +14,17 @@ metrics/
 evaluations/
 logs/
 outputs/fuel_physics/
+
+# Local native-extension and package build products.
+build/
+dist/
+*.so
+*.o
+*.a
+.ninja_deps
+.ninja_log
+
+# These HIP sources are generated from maintained CUDA sources by hipify.
 frc_defense/csrc/fuel_physics_hip_kernel.hip
 frc_defense/csrc/fuel_sleep_hip_kernel.hip
 graphify-out/
