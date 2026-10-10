@@ -578,9 +578,9 @@ class TensorThreeVsThreeActionMixin:
                                      (possession>0))
             target_based_search=(target_based_collect & ~self._target_collecting &
                                  (action==6) & ~no_alliance_fuel_search)
-            search_target=torch.zeros_like(p[:,:,:2])
-            search_target[...,0]=self.field_length*.5
-            search_target[...,1]=self.sim.field_width*.5
+            # Keep no-track searchers on separate field lanes instead of
+            # converging all empty robots at the exact same field midpoint.
+            search_target=self.ferry_targets[None].expand(self.n,-1,-1)
             target=torch.where(target_based_search[...,None],search_target,target)
             target=torch.where(no_alliance_fuel_search[...,None],search_target,target)
 
