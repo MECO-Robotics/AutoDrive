@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#11171d" />
     <title>AutoDrive · Training monitor</title>
-    <link rel="stylesheet" href="/assets/dashboard.css?v=replay-picker-24" />
+    <link rel="stylesheet" href="/assets/dashboard.css?v=replay-delete-1" />
   </head>
   <body>
     <header class="topbar">
@@ -211,6 +211,8 @@
             </label>
             <button id="loadScenarioReplay" class="button-secondary" type="button">Load replay</button>
             <button id="regenerateScenarioReplay" class="button-secondary" type="button">Regenerate replay</button>
+            <button id="deleteScenarioReplay" class="button-danger" type="button" disabled>Delete replay</button>
+            <button id="deleteAllScenarioReplays" class="button-danger" type="button" disabled>Delete all</button>
             <label class="scenario-seed-control" for="scenarioSeed">
               Match seed
               <input id="scenarioSeed" type="number" min="0" max="2147483647"
@@ -432,6 +434,6 @@
       </section>
     </main>
 
-    <script type="module" src="/assets/dashboard.js?v=replay-picker-31"></script>
+    <script type="module" src="/assets/dashboard.js?v=replay-delete-1"></script>
   </body>
 </html>

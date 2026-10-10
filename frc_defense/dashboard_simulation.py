@@ -600,6 +600,28 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
     robot_teams=[0,0,0,1,1,1]
     path_capacity=env.planner.last_path.shape[1]*2
     frame_snapshots=[]
+    live_frame_snapshots=[]
+    live_stream_path=(progress_path.with_suffix(".stream.jsonl")
+                      if progress_path is not None else None)
+    field_record={"length":float(env.sim.field_length),"width":float(env.sim.field_width),
+                  "alliance_zone_depth":4.028,
+                  "elements":[box.as_dict() for box in env.field_boxes]}
+    simulation_constraints={"max_fuel_per_robot":list(env.robot_fuel_capacity_values),
+        "max_scoring_bps_per_robot":[round(1./interval,3)
+            for interval in env.robot_score_interval_values]}
+    if live_stream_path is not None:
+        live_stream_path.parent.mkdir(parents=True,exist_ok=True)
+        live_metadata={"type":"metadata","task":sim_task,"field":field_record,
+            "robot_types":robot_types[:1] if behavior_probe else robot_types,
+            "robot_roles":robot_roles[:1] if behavior_probe else robot_roles,
+            "control_modes":control_modes[:1] if behavior_probe else control_modes,
+            "robot_teams":robot_teams[:1] if behavior_probe else robot_teams,
+            "simulation_ticks":simulation_ticks,"simulated_seconds":simulated_seconds,
+            "behavior_mode":behavior_mode,"simulation_constraints":simulation_constraints,
+            "perception_range":env.perception_range,
+            "perception_fov_degrees":env.perception_fov_degrees,
+            "perception_track_timeout_s":env.perception_track_timeout}
+        live_stream_path.write_text(json.dumps(live_metadata,separators=(",",":"))+"\n")
     @torch.inference_mode()
     def simulate_ticks():
         phase=0.
@@ -610,17 +632,19 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         planner_graph=None
         planner_graph_audit_outputs=None
 
-        def build_snapshot():
+        def build_snapshot(*, include_tracks=True):
             path_tensor=env.planner.last_path.reshape(1,6,-1,2)
             path_lengths=env.planner.last_lengths.reshape(1,6)
-            return torch.cat((env.sim.pose[0].reshape(-1),env.sim.velocity[0,:,:2].reshape(-1),
+            fields = [env.sim.pose[0].reshape(-1),env.sim.velocity[0,:,:2].reshape(-1),
                 torch.stack((env.sim.length[0],env.sim.width[0]),-1).reshape(-1),
                 path_tensor[0].reshape(-1),path_lengths[0].to(env.sim.pose.dtype),
                 env.piece_pos[0].reshape(-1),env.piece_owner[0].to(env.sim.pose.dtype),
-                env.piece_active[0].to(env.sim.pose.dtype),
-                env.track_pos[0].permute(1,0,2).reshape(-1),
-                env.track_age[0].transpose(0,1).reshape(-1),
-                env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype),
+                env.piece_active[0].to(env.sim.pose.dtype)]
+            if include_tracks:
+                fields.extend((env.track_pos[0].permute(1,0,2).reshape(-1),
+                    env.track_age[0].transpose(0,1).reshape(-1),
+                    env._current_fuel_visibility[0].transpose(0,1).reshape(-1).to(env.sim.pose.dtype)))
+            fields.extend((
                 env.hub_centers.reshape(-1),
                 env.hub_active[0].to(env.sim.pose.dtype),
                 env.fuel_score_count[0].to(env.sim.pose.dtype),
@@ -636,10 +660,95 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                 env._last_audit_fuel_targets[0].reshape(-1),
                 env.planner.last_goal.reshape(1,6,2)[0].reshape(-1),
                 env._target_collecting[0].to(env.sim.pose.dtype),
-                env._last_audit_cluster_count[0].to(env.sim.pose.dtype))).detach()
+                env._last_audit_cluster_count[0].to(env.sim.pose.dtype)))
+            return torch.cat(fields).detach()
+
+        def write_live_frames(force=False):
+            if live_stream_path is None or not live_frame_snapshots:
+                return
+            if not force and len(live_frame_snapshots)<5:
+                return
+            rows=torch.stack(live_frame_snapshots).cpu().tolist()
+            stream_lines=[]
+            for row in rows:
+                cursor=0
+                def take(count):
+                    nonlocal cursor
+                    values=row[cursor:cursor+count]
+                    cursor+=count
+                    return values
+                pose=[take(3) for _ in range(6)]
+                effort=[take(2) for _ in range(6)]
+                sizes=take(12)
+                path_values=take(6*path_capacity)
+                route_lengths=[int(x) for x in take(6)]
+                paths=[]
+                for robot,length in enumerate(route_lengths):
+                    points=path_values[robot*path_capacity:(robot+1)*path_capacity]
+                    paths.append([points[i:i+2] for i in range(0,length*2,2)])
+                piece_positions=take(env.fuel_count*2)
+                piece_owners=take(env.fuel_count)
+                piece_active=take(env.fuel_count)
+                pieces=[[piece_positions[i*2],piece_positions[i*2+1],int(piece_owners[i])]
+                    for i in range(env.fuel_count) if piece_active[i]>.5]
+                hub_centers=take(4)
+                hub_active=[bool(x) for x in take(2)]
+                scores=[int(x) for x in take(2)]
+                acquisitions=[int(x) for x in take(6)]
+                match_elapsed=take(1)[0]
+                match_remaining=take(1)[0]
+                actions=[int(x) for x in take(6)]
+                opponent_visible=[bool(x) for x in take(6)]
+                opponent_positions=take(12)
+                opponent_ages=take(6)
+                targets=[take(2) for _ in range(6)]
+                fuel_targets=[take(2) for _ in range(6)]
+                route_goals=[take(2) for _ in range(6)]
+                collecting=[bool(x) for x in take(6)]
+                clusters=[int(x) for x in take(6)]
+                if cursor!=len(row):
+                    raise RuntimeError("live 3v3 frame layout is inconsistent")
+                if behavior_probe:
+                    pose,effort,sizes,paths=(pose[:1],effort[:1],sizes[:2],paths[:1])
+                    actions=actions[:1]
+                    opponent_visible=opponent_visible[:1]
+                    opponent_positions=opponent_positions[:2]
+                    opponent_ages=opponent_ages[:1]
+                    targets,fuel_targets,route_goals=(targets[:1],fuel_targets[:1],route_goals[:1])
+                    collecting,clusters=collecting[:1],clusters[:1]
+                    frame_teams,frame_modes,frame_roles=robot_teams[:1],control_modes[:1],robot_roles[:1]
+                    acquisitions=acquisitions[:1]
+                else:
+                    frame_teams,frame_modes,frame_roles=robot_teams,control_modes,robot_roles
+                frame={"robots":pose,"robot_teams":frame_teams,
+                    "robot_control_modes":frame_modes,"robot_roles":frame_roles,
+                    "robot_actions":actions,"robot_opponent_visible":opponent_visible,
+                    "robot_detected_opponents":[
+                        [opponent_positions[i*2],opponent_positions[i*2+1],opponent_ages[i]]
+                        if opponent_visible[i] else None for i in range(len(opponent_visible))],
+                    "robot_targets":targets,"robot_fuel_targets":fuel_targets,
+                    "robot_route_goals":route_goals,"robot_collecting":collecting,
+                    "robot_cluster_counts":clusters,"robot_effort_vectors":effort,
+                    "sizes":sizes,"adstar_paths":paths,"fuel_pieces":pieces,
+                    "hub_centers":[hub_centers[i:i+2] for i in (0,2)],
+                    "hub_active":hub_active,"fuel_score_count":scores,
+                    "fuel_acquisition_count":acquisitions,
+                    "match_elapsed":match_elapsed,"match_remaining":match_remaining,
+                    "behavior_mode":behavior_mode,"perception_range":env.perception_range,
+                    "perception_fov_degrees":env.perception_fov_degrees,
+                    "perception_track_timeout_s":env.perception_track_timeout}
+                stream_lines.append(json.dumps({"type":"frame","frame":frame},
+                                               separators=(",",":")))
+            with live_stream_path.open("a") as stream_file:
+                stream_file.write("\n".join(stream_lines)+"\n")
+                stream_file.flush()
+            live_frame_snapshots.clear()
 
         def capture_frame(tick):
             frame_snapshots.append(build_snapshot())
+            if live_stream_path is not None:
+                live_frame_snapshots.append(build_snapshot(include_tracks=False))
+                write_live_frames()
 
         if cuda_graph:
             # Resolve lazy HIP extensions before graph capture. The first
@@ -731,6 +840,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                 continue
             capture_frame(tick+1)
             tick+=1
+        write_live_frames(force=True)
     simulate_ticks()
     snapshot_rows=torch.stack(frame_snapshots).cpu().tolist() if frame_snapshots else []
     frames=[]
@@ -841,9 +951,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                         "fuel_acquisition_count"):
                 frame[key]=frame[key][:1]
             frame["sizes"]=frame["sizes"][:2]
-    field_length=float(env.sim.field_length);field_width=float(env.sim.field_width)
-    field={"length":field_length,"width":field_width,"alliance_zone_depth":4.028,
-           "elements":[box.as_dict() for box in env.field_boxes]}
+    field=field_record
     scenario_label=(f"{behavior_probe.title()} probe · HUB "
                     f"{'active' if behavior_probe_hub_active else 'inactive'} · "
                     f"{simulated_seconds:g} s" if behavior_probe else
@@ -860,10 +968,7 @@ def generate_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         "teammate_intent_knowledge":bool(teammate_intent_knowledge),
         "sweeping_enabled":bool(sweeping_enabled),
         "policy_checkpoints":checkpoint_paths,
-        "simulation_constraints":{"max_fuel_per_robot":list(env.robot_fuel_capacity_values),
-                                  "max_scoring_bps_per_robot":[
-                                      round(1./interval,3)
-                                      for interval in env.robot_score_interval_values]},
+        "simulation_constraints":simulation_constraints,
         "robot_teams":robot_teams[:1] if behavior_probe else robot_teams,
         "robot_count":1 if behavior_probe else 6,"robots_per_alliance":1 if behavior_probe else 3,
         "simulated_seconds":simulated_seconds,"simulation_ticks":simulation_ticks,

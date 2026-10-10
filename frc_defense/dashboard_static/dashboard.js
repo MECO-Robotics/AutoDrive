@@ -29,6 +29,7 @@ let playbackSpeed = 1;
 let playbackRobotTypes = [];
 let playbackFuelCapacities = [];
 let zoneLoading = false;
+let liveStreamActive = false;
 let activeRequest = null;
 let requestRevision = 0;
 let pollTimer = null;
@@ -90,6 +91,7 @@ async function refreshScenarioReplays() {
   const select = $("scenarioReplay");
   if (!select) return;
   try {
+    const selectedId = select.value;
     const response = await fetch("/api/scenario-replays", { cache: "no-store" });
     if (!response.ok) throw new Error(`Replay list failed (${response.status})`);
     const data = await response.json();
@@ -99,8 +101,12 @@ async function refreshScenarioReplays() {
         `${replay.outdated ? "⚠ Outdated · " : ""}${replay.label} · seed ${replay.seed ?? "—"} · ${Math.max(0.1, (replay.playback_size_bytes || 0) / 1048576).toFixed(1)} MB`,
         replay.simulation_id,
       )));
+    if (scenarioReplays.some((replay) => replay.simulation_id === selectedId))
+      select.value = selectedId;
     setPlaybackControls();
     const status = $("scenarioReplayStatus");
+    const deleteAllButton = $("deleteAllScenarioReplays");
+    if (deleteAllButton) deleteAllButton.disabled = zoneLoading || scenarioReplays.length === 0;
     if (status) status.textContent = scenarioReplays.length
       ? `${scenarioReplays.length} saved replay${scenarioReplays.length === 1 ? "" : "s"}. Outdated means the commit or dirty files differ from this checkout.`
       : "No saved replays yet. Generate one when you are ready.";
@@ -146,12 +152,55 @@ function showScenarioProgress(progress) {
       ? "Complete"
       : status === "error"
         ? (progress.error || "Simulation failed")
-        : `Physics tick ${integer(progress.tick)} / ${integer(progress.total_ticks)}`;
+        : liveStreamActive
+          ? `Streaming ${integer(frames.length)} frames · physics tick ${integer(progress.tick)} / ${integer(progress.total_ticks)}`
+          : `Physics tick ${integer(progress.tick)} / ${integer(progress.total_ticks)}`;
+}
+
+function appendLiveScenarioFrames(payload, options) {
+  if (payload.metadata && !liveStreamActive) {
+    const metadata = payload.metadata;
+    liveStreamActive = true;
+    playbackTask = metadata.task || "3v3";
+    playbackRobotTypes = metadata.robot_types || Array(6).fill("dumper");
+    playbackFuelCapacities = metadata.simulation_constraints?.max_fuel_per_robot ||
+      playbackRobotTypes.map((type) => type === "turret" ? 40 : 60);
+    world = metadata.field || { ...defaultWorld };
+    loadedScenarios = [{ id: "live", label: "Live 3v3 simulation", frames: [] }];
+    frames = loadedScenarios[0].frames;
+    playbackTimes = [];
+    playbackSimTime = 0;
+    frameAlpha = 0;
+    index = 0;
+    playing = false;
+    $("scenarioCount").textContent = "Live 3v3 simulation · waiting for frames";
+    $("playbackSourceNote").textContent = "Live simulator stream · frames appear while the match runs.";
+  }
+  const nextFrames = Array.isArray(payload.frames) ? payload.frames : [];
+  if (!nextFrames.length) return;
+  const oldTime = playbackSimTime;
+  const hadFrames = frames.length > 0;
+  frames.push(...nextFrames);
+  playbackTimes = frames.map((frame, i) =>
+    finite(frame.match_elapsed) ? Number(frame.match_elapsed) : i * 0.2);
+  for (let i = 1; i < playbackTimes.length; i++)
+    playbackTimes[i] = Math.max(playbackTimes[i], playbackTimes[i - 1]);
+  if (!hadFrames) {
+    setPlaybackTime(playbackTimes[0]);
+    playing = Boolean(options.autoplay) &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } else {
+    setPlaybackTime(Math.min(oldTime, playbackTimes.at(-1)));
+  }
+  $("scenarioCount").textContent = `Live 3v3 simulation · ${integer(frames.length)} frames streamed`;
+  setPlaybackControls();
+  drawField();
 }
 
 async function waitForZonePlayback(simulationId, revision, signal, query,
-                                   ensureStart = false) {
+                                   ensureStart = false, liveOptions = {}) {
   let retryDelay = 1000;
+  let streamOffset = 0;
   while (revision === requestRevision) {
     try {
       if (ensureStart) {
@@ -169,6 +218,15 @@ async function waitForZonePlayback(simulationId, revision, signal, query,
       );
       if (!response.ok) throw new Error(`Progress request failed (${response.status})`);
       const progress = await response.json();
+      showScenarioProgress(progress);
+      const streamResponse = await fetch(
+        `/api/zone-playback-stream?simulation_id=${encodeURIComponent(simulationId)}&offset=${streamOffset}`,
+        { cache: "no-store", signal },
+      );
+      if (!streamResponse.ok) throw new Error(`Live stream request failed (${streamResponse.status})`);
+      const stream = await streamResponse.json();
+      streamOffset = Number(stream.next_offset) || streamOffset;
+      appendLiveScenarioFrames(stream, liveOptions);
       showScenarioProgress(progress);
       if (progress.status === "ready") {
         const resultResponse = await fetch(
@@ -536,8 +594,10 @@ function drawField() {
 
 function setPlaybackControls() {
   const ready = frames.length > 0;
-  $("play").disabled = !ready || zoneLoading;
+  $("play").disabled = !ready || (zoneLoading && !liveStreamActive);
   $("loadScenarioReplay").disabled = zoneLoading || !$("scenarioReplay").value;
+  $("deleteScenarioReplay").disabled = zoneLoading || !$("scenarioReplay").value;
+  $("deleteAllScenarioReplays").disabled = zoneLoading || scenarioReplays.length === 0;
   $("play").textContent = ready
     ? playing
       ? "Pause"
@@ -588,6 +648,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
   const controller = new AbortController();
   activeRequest = controller;
   const revision = ++requestRevision;
+  liveStreamActive = false;
   let savedJob = resumeJob;
   if (!savedJob && !newScenario && !batchMode) {
     try { savedJob = JSON.parse(localStorage.getItem(scenarioJobStorageKey) || "null"); }
@@ -703,7 +764,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     let record;
     if (savedJob) {
       record = await waitForZonePlayback(simulationId, revision,
-        controller.signal, query, true);
+        controller.signal, query, true, { autoplay });
     } else {
       try {
         const response = await fetch(`/api/zone-playback?${query}`, {
@@ -713,11 +774,11 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
         if (!response.ok && response.status !== 202)
           throw new Error(startRecord.error || `Scenario request failed (${response.status})`);
         record = await waitForZonePlayback(simulationId, revision,
-          controller.signal, query, false);
+          controller.signal, query, false, { autoplay });
       } catch (error) {
         if (!(error instanceof TypeError) && !/fetch|network/i.test(error.message)) throw error;
         record = await waitForZonePlayback(simulationId, revision,
-          controller.signal, query, true);
+          controller.signal, query, true, { autoplay });
       }
     }
     if (revision !== requestRevision) return;
@@ -745,6 +806,8 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     playbackRobotTypes = robotTypes.slice();
     playbackFuelCapacities = record.simulation_constraints?.max_fuel_per_robot ||
       robotTypes.map((type) => type === "turret" ? 40 : hopperCapacity);
+    const livePlaybackTime = liveStreamActive ? playbackSimTime : null;
+    liveStreamActive = false;
     world = record.field || { ...defaultWorld };
     loadedScenarios = record.scenarios || [];
     const scenario = loadedScenarios[0];
@@ -755,6 +818,8 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     const requestedScenario = new URLSearchParams(location.search).get("scenario");
     index = requestedScenario === simulationId ? Math.max(0, frames.length - 1) : 0;
     ensurePlaybackClock();
+    if (livePlaybackTime != null && requestedScenario !== simulationId)
+      setPlaybackTime(livePlaybackTime);
     playing =
       autoplay &&
       frames.length > 0 &&
@@ -787,6 +852,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     }
   } finally {
     if (revision === requestRevision) {
+      liveStreamActive = false;
       zoneLoading = false;
       activeRequest = null;
       setPlaybackControls();
@@ -864,6 +930,7 @@ async function loadFocusedReplay() {
       setNotice(`Could not load focused replay: ${error.message}`, "error");
   } finally {
     if (revision === requestRevision) {
+      liveStreamActive = false;
       zoneLoading = false;
       activeRequest = null;
       setPlaybackControls();
@@ -937,6 +1004,7 @@ async function loadGameEvaluation() {
       setNotice(`Could not load evaluation: ${error.message}`, "error");
   } finally {
     if (revision === requestRevision) {
+      liveStreamActive = false;
       zoneLoading = false;
       activeRequest = null;
       setPlaybackControls();
@@ -1095,6 +1163,7 @@ async function loadSelectedScenarioReplay() {
     }
   } finally {
     if (revision === requestRevision) {
+      liveStreamActive = false;
       zoneLoading = false;
       activeRequest = null;
       setPlaybackControls();
@@ -1104,6 +1173,92 @@ async function loadSelectedScenarioReplay() {
 
 $("loadScenarioReplay").addEventListener("click", loadSelectedScenarioReplay);
 $("scenarioReplay").addEventListener("change", loadSelectedScenarioReplay);
+async function deleteSelectedScenarioReplay() {
+  const select = $("scenarioReplay");
+  const simulationId = select.value;
+  const replay = scenarioReplays.find((item) => item.simulation_id === simulationId);
+  if (!replay || zoneLoading) return;
+  if (!window.confirm(`Delete “${replay.label}” (seed ${replay.seed ?? "—"}) and its saved replay files?`))
+    return;
+  const button = $("deleteScenarioReplay");
+  button.disabled = true;
+  const status = $("scenarioReplayStatus");
+  status.textContent = "Deleting saved replay…";
+  try {
+    const response = await fetch(`/api/scenario-replay?simulation_id=${encodeURIComponent(simulationId)}`, {
+      method: "DELETE", cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Delete failed (${response.status})`);
+    try {
+      const db = await openReplayCache();
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction("replays", "readwrite");
+        const store = transaction.objectStore("replays");
+        const request = store.get("current");
+        request.onsuccess = () => {
+          if (request.result?.simulation_id === simulationId) store.delete("current");
+        };
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error("Could not clear replay cache"));
+        transaction.onabort = () => reject(transaction.error || new Error("Replay cache cleanup was aborted"));
+      });
+      db.close();
+    } catch (_) {
+      // The saved replay is deleted on the server even when local storage is unavailable.
+    }
+    if (select.value === simulationId) select.value = "";
+    await refreshScenarioReplays();
+    status.textContent = "Saved replay deleted.";
+    setPlaybackControls();
+  } catch (error) {
+    status.textContent = `Could not delete replay: ${error.message}`;
+    setPlaybackControls();
+  }
+}
+$("deleteScenarioReplay").addEventListener("click", deleteSelectedScenarioReplay);
+async function deleteAllScenarioReplays() {
+  if (zoneLoading || !scenarioReplays.length) return;
+  const replays = [...scenarioReplays];
+  if (!window.confirm(`Delete all ${replays.length} saved replays and their files?`)) return;
+  const button = $("deleteAllScenarioReplays");
+  button.disabled = true;
+  const status = $("scenarioReplayStatus");
+  let deleted = 0;
+  try {
+    for (const replay of replays) {
+      status.textContent = `Deleting saved replays… (${deleted}/${replays.length})`;
+      const response = await fetch(`/api/scenario-replay?simulation_id=${encodeURIComponent(replay.simulation_id)}`, {
+        method: "DELETE", cache: "no-store",
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(`${replay.label}: ${result.error || `Delete failed (${response.status})`}`);
+      deleted += 1;
+    }
+    try {
+      const db = await openReplayCache();
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction("replays", "readwrite");
+        transaction.objectStore("replays").clear();
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error("Could not clear replay cache"));
+        transaction.onabort = () => reject(transaction.error || new Error("Replay cache cleanup was aborted"));
+      });
+      db.close();
+    } catch (_) {
+      // Server-side replays are deleted even when local storage is unavailable.
+    }
+    $("scenarioReplay").value = "";
+    await refreshScenarioReplays();
+    status.textContent = `Deleted all ${deleted} saved replays.`;
+  } catch (error) {
+    await refreshScenarioReplays();
+    status.textContent = `Deleted ${deleted} of ${replays.length} saved replays. ${error.message}`;
+  } finally {
+    setPlaybackControls();
+  }
+}
+$("deleteAllScenarioReplays").addEventListener("click", deleteAllScenarioReplays);
 $("regenerateScenarioReplay").addEventListener("click", () => {
   const selected = scenarioReplays.find((item) => item.simulation_id === $("scenarioReplay").value);
   const mode = selected?.behavior_mode || $("behaviorMode").value;
@@ -1122,9 +1277,11 @@ function renderProgressFrame() {
     renderProgressFrame.lastTime = now;
     if (playbackSimTime + delta >= playbackTimes.at(-1)) {
       setPlaybackTime(playbackTimes.at(-1));
-      playing = false;
-      renderProgressFrame.lastTime = 0;
-      setPlaybackControls();
+      if (!liveStreamActive) {
+        playing = false;
+        renderProgressFrame.lastTime = 0;
+        setPlaybackControls();
+      }
     } else setPlaybackTime(playbackSimTime + delta);
     drawField();
   } else {

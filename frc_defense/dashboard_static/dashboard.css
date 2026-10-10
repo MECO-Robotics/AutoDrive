@@ -607,6 +607,15 @@ dd {
 .button-secondary {
   background: transparent;
 }
+.button-danger {
+  border-color: #a9564e;
+  color: #ffc2b8;
+  background: #35201f;
+}
+.button-danger:hover:not(:disabled) {
+  border-color: #e18a7e;
+  background: #482723;
+}
 .notice {
   min-height: 22px;
   margin: 10px 0;

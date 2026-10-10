@@ -149,6 +149,9 @@ def test_collect_probe_uses_real_fuel_and_does_not_synthesize_scores(behavior_mo
     frames = record["scenarios"][0]["frames"]
     assert record["simulated_seconds"] == pytest.approx(30.0)
     assert frames[9]["match_elapsed"] == pytest.approx(2.0, abs=.03)
+    assert frames[-1]["hub_active"] == ([True, False]
+                                         if behavior_mode == "collect_active"
+                                         else [False, True])
     assert frames[-1]["fuel_acquisition_count"][0] > 0
     if behavior_mode == "collect_active":
         assert frames[-1]["fuel_score_count"][0] > 24

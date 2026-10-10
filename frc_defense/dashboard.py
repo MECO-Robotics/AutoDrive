@@ -288,7 +288,7 @@ def create_handler(run_dir: Path):
                 except ValueError as exc:
                     self.send_error(400,str(exc))
                     return
-                simulation_id=params.get("simulation_id",[""])[0]
+                simulation_id = params.get("simulation_id", [""])[0]
                 if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
                     self.send_error(400,"simulation_id is required")
                     return
@@ -381,6 +381,54 @@ def create_handler(run_dir: Path):
                     self.end_headers()
                     self.wfile.write(body)
                 return
+            elif parsed.path == "/api/zone-playback-stream":
+                simulation_id=params.get("simulation_id",[""])[0]
+                if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
+                    self.send_error(400,"invalid simulation_id")
+                    return
+                try:
+                    offset = max(0, int(params.get("offset", ["0"])[0]))
+                except (TypeError,ValueError):
+                    self.send_error(400,"offset must be a non-negative integer")
+                    return
+                progress_path = run_dir / ".scenario-progress" / f"{simulation_id}.json"
+                progress = json.loads(_json_or_default(progress_path, {}))
+                stream_path = run_dir / ".scenario-progress" / f"{simulation_id}.stream.jsonl"
+                metadata = None
+                frames = []
+                next_offset = offset
+                try:
+                    if stream_path.is_file():
+                        size = stream_path.stat().st_size
+                        if offset>size:
+                            offset=0
+                        with stream_path.open("rb") as stream_file:
+                            stream_file.seek(offset)
+                            chunk = stream_file.read(1_000_000)
+                        newline = chunk.rfind(b"\n")
+                        if newline>=0:
+                            complete = chunk[:newline + 1]
+                            next_offset = offset + len(complete)
+                            for line in complete.splitlines():
+                                if not line:
+                                    continue
+                                item = json.loads(line)
+                                if item.get("type")=="metadata":
+                                    metadata=item
+                                elif item.get("type")=="frame":
+                                    frame = item.get("frame")
+                                    if isinstance(frame,dict):
+                                        frames.append(frame)
+                except (OSError,ValueError,TypeError,json.JSONDecodeError):
+                    self.send_error(500,"could not read live scenario frames")
+                    return
+                body = json.dumps({"simulation_id": simulation_id,
+                    "metadata": metadata, "frames": frames,
+                    "next_offset": next_offset,
+                    "status": progress.get("status", "waiting")},
+                    separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type","application/json")
             elif parsed.path == "/api/zone-playback-result":
                 simulation_id=params.get("simulation_id",[""])[0]
                 if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
@@ -473,7 +521,8 @@ def create_handler(run_dir: Path):
                         saved_dirty=sorted(path for path in saved.get("dirty_files",[])
                             if Path(path).suffix in {".py", ".cpp", ".cu", ".hip", ".json"}
                             or path == "pyproject.toml")
-                        outdated=(saved.get("commit") != current.get("commit") or
+                        outdated=(bool(record.get("outdated")) or
+                            saved.get("commit") != current.get("commit") or
                             saved_dirty != current.get("dirty_files",[]))
                         view_path=progress_dir/f"{simulation_id}.result.view.json.gz"
                         replays.append({"simulation_id":simulation_id,
@@ -593,6 +642,42 @@ def create_handler(run_dir: Path):
 
         def log_message(self, fmt, *args):
             pass
+
+        def do_DELETE(self):
+            parsed=urlparse(self.path)
+            params=parse_qs(parsed.query)
+            simulation_id=params.get("simulation_id",[""])[0]
+            def respond(status,payload):
+                body=json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type","application/json")
+                self.send_header("Content-Length",str(len(body)))
+                self.send_header("Cache-Control","no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            if (parsed.path != "/api/scenario-replay" or
+                    not re.fullmatch(r"(?:scenario|focused)-[a-zA-Z0-9_-]{1,80}",simulation_id)):
+                respond(400,{"error":"invalid saved scenario replay"})
+                return
+            if simulation_id in _SCENARIO_JOB_IDS:
+                respond(409,{"error":"this replay is still being generated"})
+                return
+            progress_dir=run_dir/".scenario-progress"
+            paths=list(progress_dir.glob(f"{simulation_id}.*"))
+            removed=0
+            try:
+                for path in paths:
+                    if path.is_file():
+                        path.unlink()
+                        removed+=1
+            except OSError:
+                respond(500,{"error":"could not remove all files for this replay"})
+                return
+            if not removed:
+                respond(404,{"error":"saved replay was not found"})
+                return
+            respond(200,{"simulation_id":simulation_id,"deleted_files":removed})
     return Handler
 
 
