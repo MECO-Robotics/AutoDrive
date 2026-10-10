@@ -216,10 +216,19 @@ class TensorThreeVsThreeActionMixin:
             # While our HUB is active, favor returning home: ferried fuel is
             # likely waiting in the alliance zone. Make an exception for a
             # nearby midfield piece so we do not pass up an easy collection.
-            if nearby_midfield_fuel is None:
-                midfield_piece=(eligible_tracks & ~piece_in_alliance)
-                midfield_distance=(self.track_pos-p[:,:,:2][:,:,None,:]).norm(dim=-1)
-                nearby_midfield_fuel=(midfield_piece & (midfield_distance<=2.0)).any(-1)
+            # Treat a midfield pickup as worth the detour in proportion to
+            # the robot's remaining capacity.  An emptier robot can justify
+            # ranging farther from home; as its load grows, require fuel to
+            # be closer before delaying a return to score.  Compute this here
+            # even when the fused ranker is enabled, since its fixed 2 m
+            # proximity flag cannot express the load-dependent tradeoff.
+            midfield_piece=(eligible_tracks & ~piece_in_alliance)
+            midfield_distance=(self.track_pos-p[:,:,:2][:,:,None,:]).norm(dim=-1)
+            remaining_fraction=(
+                1.-possession.float()/self.robot_fuel_capacities[None].clamp_min(1))
+            pickup_detour_limit=2.0+4.0*remaining_fraction.clamp(0.,1.)
+            nearby_midfield_fuel=(midfield_piece &
+                (midfield_distance<=pickup_detour_limit[...,None])).any(-1)
             active_hub_return=(robot_hub_active & ~nearby_midfield_fuel &
                                ~positioned_to_score)
             hub_bearing=torch.atan2(hub[...,1]-p[...,1],hub[...,0]-p[...,0])
