@@ -30,17 +30,23 @@ def compare(baseline: dict, candidate: dict) -> dict:
             raise ValueError("scenario order differs; paired comparison is invalid")
         old_diff = old["score_differential_team0_minus_team1"]
         new_diff = new["score_differential_team0_minus_team1"]
+        old_fuel = sum(old["fuel_acquisitions_by_robot"][:3])
+        new_fuel = sum(new["fuel_acquisitions_by_robot"][:3])
         rows.append({
             "scenario_id": old["scenario_id"],
             "baseline_score_by_team": old["score_by_team"],
             "candidate_score_by_team": new["score_by_team"],
             "team0_score_gain": new["score_by_team"][0] - old["score_by_team"][0],
             "score_differential_gain": new_diff - old_diff,
+            "baseline_team0_fuel_acquisitions": old_fuel,
+            "candidate_team0_fuel_acquisitions": new_fuel,
+            "team0_fuel_acquisition_gain": new_fuel - old_fuel,
         })
 
     count = len(rows)
     gains = [row["score_differential_gain"] for row in rows]
     team0_gains = [row["team0_score_gain"] for row in rows]
+    fuel_gains = [row["team0_fuel_acquisition_gain"] for row in rows]
     return {
         "schema_version": 1,
         "scenario": baseline["scenario"],
@@ -54,6 +60,14 @@ def compare(baseline: dict, candidate: dict) -> dict:
             "candidate_win_count": sum(gain > 0 for gain in gains),
             "tie_count": sum(gain == 0 for gain in gains),
             "candidate_loss_count": sum(gain < 0 for gain in gains),
+            "baseline_team0_fuel_acquisitions": sum(
+                row["baseline_team0_fuel_acquisitions"] for row in rows),
+            "candidate_team0_fuel_acquisitions": sum(
+                row["candidate_team0_fuel_acquisitions"] for row in rows),
+            "mean_team0_fuel_acquisition_gain": sum(fuel_gains) / count,
+            "fuel_gain_world_count": sum(gain > 0 for gain in fuel_gains),
+            "fuel_tie_world_count": sum(gain == 0 for gain in fuel_gains),
+            "fuel_loss_world_count": sum(gain < 0 for gain in fuel_gains),
         },
         "per_match": rows,
     }
