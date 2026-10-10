@@ -19,6 +19,22 @@ FUSED_TOP4_CANDIDATE_RANK_ENABLED = (
 class TensorThreeVsThreeActionMixin:
     """Methods that translate strategic actions into robot targets."""
 
+    def _ferry_targets_for_current_motion(self):
+        """Return assigned ferry lanes or lanes inferred from own motion."""
+        if self.teammate_intent_knowledge:
+            return self.ferry_targets[None].expand(self.n,-1,-1)
+
+        position=self.sim.pose[:,:,:2]
+        ferry_x=self.ferry_targets[None,:,0].expand(self.n,-1)
+        midfield_distance=(ferry_x-position[...,0]).abs()
+        forward_speed=self.sim.speed.clamp_min(.1)
+        projected_y=(position[...,1] + self.sim.velocity[:,:,1] /
+                      forward_speed * midfield_distance)
+        robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
+        projected_y=projected_y.clamp(robot_radius,
+                                       self.sim.field_width-robot_radius)
+        return torch.stack((ferry_x,projected_y),-1)
+
     def _intake_deployment_clear(self):
         """Return rows where a deployed dumper intake clears field geometry."""
         intake_length=.3048
@@ -498,21 +514,8 @@ class TensorThreeVsThreeActionMixin:
         defense_intercept=guarded_score_pose
         intercept=torch.where(self._defense_role_mask[None,:,None],
                               defense_intercept,nearest_enemy_pose[...,:2])
-        # Coordinated robots use preassigned search/ferry lanes. A siloed
-        # robot projects only its own lateral motion toward midfield, so it
-        # does not need a teammate lane assignment or intent signal.
-        if self.teammate_intent_knowledge:
-            ferry_target=self.ferry_targets[None].expand(self.n,-1,-1)
-        else:
-            ferry_x=self.ferry_targets[None,:,0].expand(self.n,-1)
-            midfield_distance=(ferry_x-p[:,:,0]).abs()
-            forward_speed=self.sim.speed.clamp_min(.1)
-            projected_y=(p[:,:,1] + self.sim.velocity[:,:,1] /
-                          forward_speed * midfield_distance)
-            robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
-            projected_y=projected_y.clamp(robot_radius,
-                                           self.sim.field_width-robot_radius)
-            ferry_target=torch.stack((ferry_x,projected_y),-1)
+        # Use the same lane calculation for navigation and ferry release.
+        ferry_target=self._ferry_targets_for_current_motion()
         dumper_ferry=(self._dumper_mask[None]&possession_now&~robot_hub_active)
         action_six_target=torch.where(dumper_ferry[...,None],p[:,:,:2],ferry_target)
         deterministic_offense=(self._deterministic_mode_mask &

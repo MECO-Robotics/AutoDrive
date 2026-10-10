@@ -174,8 +174,10 @@ def update_fuel_actions(self, active, score_intent):
     torch.where(held[...,None], carried_pose, self.piece_pos,
                 out=self.piece_pos)
 
-    at_ferry = ((self.sim.pose[:,:,:2] - self.ferry_targets[None]).norm(dim=-1)
-                <= .35)
+    ferry_targets=(self._ferry_targets_for_current_motion()
+                   if hasattr(self,"_ferry_targets_for_current_motion") else
+                   self.ferry_targets[None].expand(self.n,-1,-1))
+    at_ferry = ((self.sim.pose[:,:,:2] - ferry_targets).norm(dim=-1) <= .35)
     home_zone_center=ferry_aim_targets(
         self,self.sim.pose[:,:,:2],self.team_ids[None].expand(self.n,-1))
     ferry_vector=home_zone_center-self.sim.pose[:,:,:2]
