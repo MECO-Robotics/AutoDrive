@@ -1,0 +1,53 @@
+{
+  "objective": "Run an individual full 3v3 simulation at real-time speed and stream render frames to the dashboard; retain batch throughput improvements.",
+  "device": "cuda:0 (ROCm/HIP)",
+  "single_world_live_dashboard_evaluation": {
+    "simulation_id": "scenario-realtime-20261010-stream-v3",
+    "seed": 64821,
+    "task": "3v3",
+    "ticks": 8000,
+    "simulated_seconds": 160.0,
+    "dt_seconds": 0.02,
+    "request_created_epoch": 1791608960,
+    "result_created_epoch": 1791609090,
+    "request_to_result_wall_seconds": 130,
+    "end_to_end_real_time_factor": 1.2308,
+    "capture_stride_ticks": 10,
+    "saved_frames": 800,
+    "stream_sidecar_lines_including_metadata": 801,
+    "live_stream_observation_before_completion": {
+      "status": "running",
+      "metadata_received": true,
+      "frames_received": 27,
+      "first_frame_simulated_seconds": 0.2,
+      "last_frame_simulated_seconds": 5.4,
+      "progress_tick_at_observation": 1400
+    },
+    "timed_progress_windows": [
+      {"ticks": 2800, "wall_seconds": 36, "ticks_per_second": 77.78},
+      {"ticks": 2500, "wall_seconds": 34, "ticks_per_second": 73.53},
+      {"ticks": 1300, "wall_seconds": 22, "ticks_per_second": 59.09}
+    ],
+    "final_score_by_team": [477, 0],
+    "fuel_acquisitions_by_robot": [393, 328, 233, 0, 0, 0],
+    "result_status": "ready",
+    "replay_outdated": false,
+    "dashboard_services_active": true,
+    "dashboard_endpoints_responded": true,
+    "served_js_matches_checkout": true,
+    "served_css_matches_checkout": true
+  },
+  "batch_throughput_reference": {
+    "artifact": "20261010-batch-scaling-8-vs-16.json",
+    "batch_8_world_equivalent_full_match_seconds": 25.650807358761085,
+    "batch_16_world_equivalent_full_match_seconds": 20.882349065623202,
+    "batch_16_world_tick_throughput_improvement_vs_8": 0.228,
+    "note": "Equivalent per-world throughput projection; a batch of matches completes together and is not an individual-world wall latency measurement."
+  },
+  "verification": {
+    "python_compile": "passed for dashboard.py and dashboard_simulation.py",
+    "javascript_syntax_check": "passed with node --check",
+    "impeccable_detector": "no findings",
+    "unit_tests_run": false
+  }
+}

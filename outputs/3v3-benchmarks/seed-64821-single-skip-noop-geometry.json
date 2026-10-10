@@ -1,0 +1,52 @@
+{
+  "envs": 1,
+  "ticks": 8000,
+  "seed": 64821,
+  "controllers": true,
+  "fuel_physics": true,
+  "replan_interval": 20,
+  "perception_interval": 2,
+  "setup_seconds": 186.9000626240013,
+  "elapsed_seconds": 119.15524070498941,
+  "seconds_per_full_match_projection": 119.15524070498941,
+  "world_ticks_per_second": 67.13930459682261,
+  "score_by_team": [
+    [
+      151,
+      0
+    ]
+  ],
+  "fuel_acquisitions_by_robot": [
+    [
+      41,
+      310,
+      254,
+      0,
+      0,
+      0
+    ]
+  ],
+  "fuel_backend": "hip",
+  "physics_graph_enabled": true,
+  "speedup_vs_previous_single_seconds": 1.0583981148780375,
+  "previous_single_elapsed_seconds": 126.11368213999958,
+  "dashboard_replay_id": "scenario-perf-20261010-noopgeometry-v1",
+  "dashboard_replay_seed": 64821,
+  "dashboard_replay_ticks": 8000,
+  "dashboard_replay_frames": 800,
+  "dashboard_replay_score_by_team": [
+    380,
+    0
+  ],
+  "dashboard_replay_acquisitions_by_robot": [
+    211,
+    338,
+    378,
+    0,
+    0,
+    0
+  ],
+  "dashboard_stack_current": true,
+  "goal_seconds": 30.0,
+  "goal_met": false
+}

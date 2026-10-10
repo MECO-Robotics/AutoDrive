@@ -1,0 +1,115 @@
+{
+  "envs": 8,
+  "ticks": 800,
+  "seed": 64821,
+  "controllers": true,
+  "fuel_physics": true,
+  "replan_interval": 20,
+  "perception_interval": 2,
+  "setup_seconds": 5.061879544999101,
+  "elapsed_seconds": 23.852391253996757,
+  "seconds_per_full_match_projection": 238.52391253996757,
+  "world_ticks_per_second": 268.31691346365966,
+  "score_by_team": [
+    [
+      24,
+      0
+    ],
+    [
+      24,
+      0
+    ],
+    [
+      24,
+      0
+    ],
+    [
+      40,
+      0
+    ],
+    [
+      38,
+      0
+    ],
+    [
+      23,
+      0
+    ],
+    [
+      86,
+      0
+    ],
+    [
+      5,
+      0
+    ]
+  ],
+  "fuel_acquisitions_by_robot": [
+    [
+      26,
+      60,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      51,
+      16,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      40,
+      60,
+      7,
+      0,
+      0,
+      0
+    ],
+    [
+      25,
+      16,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      31,
+      7,
+      35,
+      0,
+      0,
+      0
+    ],
+    [
+      39,
+      60,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      36,
+      61,
+      69,
+      0,
+      0,
+      0
+    ],
+    [
+      24,
+      5,
+      1,
+      0,
+      0,
+      0
+    ]
+  ],
+  "fuel_backend": "hip",
+  "physics_graph_enabled": true
+}

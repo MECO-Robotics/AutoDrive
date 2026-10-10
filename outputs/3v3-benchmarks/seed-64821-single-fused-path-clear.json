@@ -1,0 +1,57 @@
+{
+  "envs": 1,
+  "ticks": 8000,
+  "seed": 64821,
+  "controllers": true,
+  "fuel_physics": true,
+  "replan_interval": 20,
+  "perception_interval": 2,
+  "setup_seconds": 5.236251992013422,
+  "elapsed_seconds": 118.69998381000187,
+  "seconds_per_full_match_projection": 118.69998381000187,
+  "world_ticks_per_second": 67.39680784460145,
+  "score_by_team": [
+    [
+      392,
+      0
+    ]
+  ],
+  "fuel_acquisitions_by_robot": [
+    [
+      384,
+      166,
+      410,
+      0,
+      0,
+      0
+    ]
+  ],
+  "fuel_backend": "hip",
+  "physics_graph_enabled": true,
+  "dashboard_replay_id": "scenario-perf-20261010-pathclearhip-v1",
+  "dashboard_replay_seed": 64821,
+  "dashboard_replay_ticks": 8000,
+  "dashboard_replay_frames": 800,
+  "dashboard_replay_score_by_team": [
+    140,
+    0
+  ],
+  "dashboard_replay_acquisitions_by_robot": [
+    305,
+    128,
+    142,
+    0,
+    0,
+    0
+  ],
+  "dashboard_stack_current": true,
+  "goal_seconds": 30.0,
+  "goal_met": false,
+  "fused_path_clear_exact_on": "live direct and planned paths plus 64 randomized direct paths",
+  "fused_path_clear_direct_100_calls_seconds": {
+    "torch": 0.1374,
+    "hip": 0.0218
+  },
+  "previous_single_seconds": 119.15524070498941,
+  "previous_batch8_800_seconds": 21.533458586010966
+}

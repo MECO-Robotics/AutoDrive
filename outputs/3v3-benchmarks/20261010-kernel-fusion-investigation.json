@@ -1,0 +1,234 @@
+{
+  "seed": 64821,
+  "scenario": "full-scale deterministic 3v3, fuel physics enabled, output capture disabled",
+  "ticks_per_diagnostic": 400,
+  "full_match_ticks": 8000,
+  "batch_scaling_current_checkout": {
+    "n1": {
+      "elapsed_seconds": 5.237318838990177,
+      "projected_seconds_per_world_match": 104.74637677980354,
+      "physics_graph_enabled": true
+    },
+    "n8": {
+      "elapsed_seconds": 10.326313638011925,
+      "projected_seconds_per_world_match": 25.815784095029812,
+      "physics_graph_enabled": true
+    },
+    "n16": {
+      "elapsed_seconds": 17.51604876499914,
+      "projected_seconds_per_world_match": 21.895060956248926,
+      "physics_graph_enabled": false
+    }
+  },
+  "integrate_detect_fusion_experiment": {
+    "description": "Fuse per-particle vertical integration and broadphase cache invalidation detection into one kernel.",
+    "n1_projected_seconds_per_world_match": 104.94472585996846,
+    "n8_projected_seconds_per_world_match": 26.01683972752653,
+    "decision": "Reverted; no improvement in either path."
+  },
+  "torch_compile_sim_step_experiment": {
+    "description": "Attempt to enable existing full-step torch.compile path for six-robot physics.",
+    "result": "Dynamo fullgraph compilation fails at the existing pybind field_sweep_contacts call; eager fallback works.",
+    "decision": "Reverted the six-robot gate expansion and kept physics CUDA graph defaults."
+  },
+  "torch_compile_target_selection_experiment": {
+    "description": "Compile the target-selection tensor function with fullgraph=false and disable the outer target CUDA graph for the diagnostic rollout.",
+    "result": "Inductor failed while compiling an AMD Triton kernel (PassManager::run failed); no usable timing was produced.",
+    "decision": "No simulator integration retained."
+  },
+  "deterministic_offense_clearance_row_reduction": {
+    "description": "Restrict direct-path footprint collision checks to deterministic offense robots; those are the only rows that consume the result. Avoid cloning the full command tensor when applying the selected rows.",
+    "selected_clearance_rows_match_full_query": true,
+    "paired_400_tick_seed_64821": {
+      "single_world": {
+        "baseline_median_seconds": 6.1231700944990735,
+        "optimized_median_seconds": 5.750239025001065,
+        "speedup": 1.064854881314771,
+        "projected_baseline_full_match_seconds": 122.46340188998147,
+        "projected_optimized_full_match_seconds": 115.0047805000213
+      },
+      "batch_8": {
+        "baseline_median_seconds": 10.904541900992626,
+        "optimized_median_seconds": 10.598899949000042,
+        "speedup": 1.0288371390864408,
+        "projected_baseline_seconds_per_world": 27.261354752481566,
+        "projected_optimized_seconds_per_world": 26.497249872500106
+      }
+    },
+    "full_match_dashboard_replay": {
+      "simulation_id": "scenario-perf-20261010-offense-clearance-v2",
+      "seed": 64821,
+      "ticks": 8000,
+      "simulated_seconds": 160.0,
+      "frames": 800,
+      "final_score_by_team": [
+        806,
+        0
+      ],
+      "fuel_acquisitions_by_robot": [
+        524,
+        240,
+        428,
+        0,
+        0,
+        0
+      ],
+      "dashboard_services_restarted_and_active": true,
+      "served_frontend_assets_match_checkout": true,
+      "provenance_matches_current_checkout": true,
+      "outdated": false
+    }
+  },
+  "profile_40_ticks": {
+    "self_device_ms": 454.107,
+    "self_cpu_ms": 680.327,
+    "hip_launch_kernel_calls": 31893,
+    "hip_launch_kernel_self_cpu_ms": 206.165,
+    "hip_graph_launch_calls": 440,
+    "hip_graph_launch_self_cpu_ms": 56.505,
+    "hip_memcpy_with_stream_self_cpu_ms": 49.251,
+    "top_device_kernel_calls": [
+      {
+        "name": "ATen vectorized elementwise kernel group 1",
+        "calls": 8706,
+        "self_device_ms": 32.313
+      },
+      {
+        "name": "ATen reduce kernel group 1",
+        "calls": 3603,
+        "self_device_ms": 20.894
+      },
+      {
+        "name": "ATen vectorized elementwise kernel group 2",
+        "calls": 4328,
+        "self_device_ms": 16.0
+      },
+      {
+        "name": "ATen manual-unroll elementwise kernel group 1",
+        "calls": 3759,
+        "self_device_ms": 15.446
+      },
+      {
+        "name": "swerve_pose_kernel",
+        "calls": 400,
+        "self_device_ms": 13.512
+      },
+      {
+        "name": "field_contacts_kernel",
+        "calls": 1600,
+        "self_device_ms": 12.816
+      },
+      {
+        "name": "robot_contacts_single_world_parallel_kernel",
+        "calls": 1200,
+        "self_device_ms": 10.633
+      }
+    ]
+  },
+  "next_experiment": "Fuse pure tensor subgraphs in the 3v3 action/perception/update pipeline, keeping custom pybind kernels as graph boundaries.",
+  "offense_only_candidate_ranking": {
+    "change": "Rank candidate FUEL targets only for deterministic offense robot rows when num_envs == 1; retain all six rows for batches because batch-eight did not improve.",
+    "seed": 64821,
+    "ticks_per_trial": 200,
+    "two_trials_each": true,
+    "single_world": {
+      "baseline_median_seconds": 4.555131131499365,
+      "optimized_median_seconds": 3.959302746501635,
+      "speedup": 1.150488210461853,
+      "projected_baseline_seconds": 182.20524525997462,
+      "projected_optimized_seconds": 158.3721098600654,
+      "score_and_acquisitions_match": true
+    },
+    "batch_8": {
+      "baseline_median_seconds": 5.14707559125236,
+      "optimized_median_seconds": 5.20283701425069,
+      "speedup": 0.9892824966752566,
+      "score_and_acquisitions_match": true,
+      "decision": "disabled for batches"
+    },
+    "full_match_dashboard_replay": {
+      "simulation_id": "scenario-perf-20261010-offense-rank-v1",
+      "seed": 64821,
+      "ticks": 8000,
+      "simulated_seconds": 160.0,
+      "frames": 800,
+      "final_score_by_team": [
+        699,
+        0
+      ],
+      "fuel_acquisitions_by_robot": [
+        319,
+        441,
+        476,
+        0,
+        0,
+        0
+      ],
+      "dashboard_services_restarted_and_active": true,
+      "endpoints_responded": true,
+      "served_frontend_assets_match_checkout": true,
+      "provenance_matches_current_checkout": true,
+      "outdated": false
+    }
+  },
+  "outer_step_graph_diagnostic": {
+    "capture_parity": "exact tensor equality",
+    "scope": "no-replan interval only; graph not integrated into production step path",
+    "single_world_8_ticks": {
+      "eager_seconds": 0.11291997399530374,
+      "graph_seconds": 0.0960780620080186,
+      "speedup": 1.1752940435651118
+    },
+    "single_world_16_ticks": {
+      "eager_seconds": 0.22291148800286464,
+      "graph_seconds": 0.19195087399566546,
+      "speedup": 1.1612944674995245
+    },
+    "batch_8_16_ticks": {
+      "eager_seconds": 0.23259385899291374,
+      "graph_seconds": 0.2636939720105147,
+      "speedup": 0.8820598257120537
+    },
+    "capture_constraints_found": "Tuple-based advanced indexing with CPU indices is not capturable on ROCm; changed offense subset gather/scatter to device-indexed operations."
+  },
+  "fused_offense_top4_candidate_kernel": {
+    "approach": "Compute age-adjusted top-four FUEL candidates and nearby-midfield presence in one HIP block per ranked robot; avoid writing full cost and nearby arrays followed by ATen topk/reduction.",
+    "randomized_kernel_input_parity": {
+      "valid_indices_equal": true,
+      "nearest_distances_exact": true,
+      "nearby_flags_equal": true,
+      "valid_candidates_checked": 12
+    },
+    "paired_200_tick_seed_64821": {
+      "single_world": {
+        "baseline_trials_seconds": [
+          2.6413706805033144,
+          2.756718907992763
+        ],
+        "fused_trials_seconds": [
+          2.5993038344968227,
+          2.668658400492859
+        ],
+        "baseline_median_seconds": 2.6990447942480387,
+        "fused_median_seconds": 2.633981117494841,
+        "speedup": 1.0247016488922591,
+        "projected_fused_full_match_seconds": 105.35924469979363
+      },
+      "batch_8": {
+        "baseline_trials_seconds": [
+          3.8108247819982353,
+          3.795616155497555
+        ],
+        "fused_trials_seconds": [
+          4.0167009419965325,
+          3.784994490997633
+        ],
+        "baseline_median_seconds": 3.803220468747895,
+        "fused_median_seconds": 3.9008477164970827,
+        "speedup": 0.9749728123617049,
+        "decision": "disabled for batches due to slight regression"
+      }
+    },
+    "score_and_acquisition_counters": "Not usable from this timing script because it reset the environment after the last timed block; full match replay below is the behavior evaluation."
+  }
+}

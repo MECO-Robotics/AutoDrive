@@ -1,0 +1,122 @@
+{
+  "envs": 8,
+  "ticks": 800,
+  "seed": 64821,
+  "controllers": true,
+  "fuel_physics": true,
+  "replan_interval": 20,
+  "perception_interval": 2,
+  "setup_seconds": 4.046574189997045,
+  "elapsed_seconds": 15.952673636988038,
+  "seconds_per_full_match_projection": 159.52673636988038,
+  "world_ticks_per_second": 401.1866691211492,
+  "score_by_team": [
+    [
+      25,
+      0
+    ],
+    [
+      24,
+      0
+    ],
+    [
+      30,
+      0
+    ],
+    [
+      37,
+      0
+    ],
+    [
+      30,
+      0
+    ],
+    [
+      23,
+      0
+    ],
+    [
+      44,
+      0
+    ],
+    [
+      27,
+      0
+    ]
+  ],
+  "fuel_acquisitions_by_robot": [
+    [
+      28,
+      60,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      35,
+      60,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      50,
+      34,
+      6,
+      0,
+      0,
+      0
+    ],
+    [
+      28,
+      15,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      31,
+      6,
+      4,
+      0,
+      0,
+      0
+    ],
+    [
+      48,
+      1,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      59,
+      5,
+      60,
+      0,
+      0,
+      0
+    ],
+    [
+      24,
+      63,
+      2,
+      0,
+      0,
+      0
+    ]
+  ],
+  "fuel_backend": "hip",
+  "physics_graph_enabled": true,
+  "previous_batch8_800_seconds": 21.533458586010966,
+  "speedup_vs_previous_batch": 1.3498338319968672,
+  "single_full_match_elapsed_seconds": 118.69998381000187,
+  "dashboard_replay_id": "scenario-perf-20261010-pathclearhip-v1",
+  "dashboard_replay_seed": 64821,
+  "goal_seconds": 30.0,
+  "individual_goal_met": false
+}

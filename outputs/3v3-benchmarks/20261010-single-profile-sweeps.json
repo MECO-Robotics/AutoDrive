@@ -1,0 +1,259 @@
+{
+  "device": "cuda:0",
+  "seed": 64821,
+  "scenario": "full-scale 3v3 deterministic match, diagnostic 800 ticks",
+  "full_match_ticks": 8000,
+  "diagnostic_ticks": 800,
+  "baseline_replan_interval_20": {
+    "elapsed_seconds": 12.350030831992626,
+    "projected_full_match_seconds": 123.50030831992626,
+    "score_by_team": [
+      [
+        76,
+        0
+      ]
+    ],
+    "acquisitions_by_robot": [
+      [
+        30,
+        60,
+        60,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "replan_sweep": [
+    {
+      "interval": 20,
+      "elapsed_seconds": 12.350030831992626,
+      "projected_full_match_seconds": 123.50030831992626,
+      "score_by_team": [
+        [
+          76,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          30,
+          60,
+          60,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "interval": 40,
+      "elapsed_seconds": 11.028877218996058,
+      "projected_full_match_seconds": 110.28877218996058,
+      "score_by_team": [
+        [
+          24,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          32,
+          60,
+          20,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "interval": 80,
+      "elapsed_seconds": 10.18824650598981,
+      "projected_full_match_seconds": 101.8824650598981,
+      "score_by_team": [
+        [
+          37,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          34,
+          6,
+          60,
+          0,
+          0,
+          0
+        ]
+      ]
+    }
+  ],
+  "perception_sweep": [
+    {
+      "interval": 2,
+      "elapsed_seconds": 11.821506305001094,
+      "projected_full_match_seconds": 118.21506305001094,
+      "score_by_team": [
+        [
+          80,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          27,
+          60,
+          50,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "interval": 4,
+      "elapsed_seconds": 11.598574963994906,
+      "projected_full_match_seconds": 115.98574963994906,
+      "score_by_team": [
+        [
+          26,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          25,
+          46,
+          60,
+          0,
+          0,
+          0
+        ]
+      ]
+    }
+  ],
+  "contact_iteration_sweep": [
+    {
+      "iterations": 3,
+      "elapsed_seconds": 11.188604451002902,
+      "projected_full_match_seconds": 111.88604451002902,
+      "score_by_team": [
+        [
+          80,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          27,
+          60,
+          55,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "iterations": 1,
+      "elapsed_seconds": 10.506585680996068,
+      "projected_full_match_seconds": 105.06585680996068,
+      "score_by_team": [
+        [
+          24,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          25,
+          60,
+          56,
+          0,
+          0,
+          0
+        ]
+      ]
+    }
+  ],
+  "adaptive_substep_distance_sweep": [
+    {
+      "max_translation_per_substep": null,
+      "elapsed_seconds": 11.447288369003218,
+      "projected_full_match_seconds": 114.47288369003218
+    },
+    {
+      "max_translation_per_substep": 0.15,
+      "elapsed_seconds": 11.718429109998397,
+      "projected_full_match_seconds": 117.18429109998397
+    },
+    {
+      "max_translation_per_substep": 0.3,
+      "elapsed_seconds": 11.607254438000382,
+      "projected_full_match_seconds": 116.07254438000382
+    }
+  ],
+  "profiler": {
+    "ticks": 40,
+    "self_device_ms": 457.882,
+    "top_kernel": "robot_contacts_kernel",
+    "top_kernel_self_device_ms": 51.24,
+    "cpu_hipLaunchKernel_calls": 37653,
+    "cpu_hipLaunchKernel_ms": 242.84
+  },
+  "interpretation": "Interval and contact changes affect outcomes; substep limit did not improve speed. No defaults changed.",
+  "adaptive_substeps_vs_fixed5": {
+    "seed": 64821,
+    "ticks": 800,
+    "adaptive_elapsed_seconds": 12.29733415300143,
+    "fixed5_elapsed_seconds": 11.203773714005365,
+    "fixed5_speedup": 1.0976064375192665,
+    "adaptive_substep_histogram": {
+      "5": 786,
+      "6": 9,
+      "8": 5
+    },
+    "adaptive_score": [
+      [
+        24,
+        0
+      ]
+    ],
+    "fixed5_score": [
+      [
+        74,
+        0
+      ]
+    ],
+    "adaptive_acquisitions": [
+      [
+        25,
+        60,
+        54,
+        0,
+        0,
+        0
+      ]
+    ],
+    "fixed5_acquisitions": [
+      [
+        26,
+        60,
+        60,
+        0,
+        0,
+        0
+      ]
+    ],
+    "max_abs_state_deltas_pose_velocity_piecepos_piecevel_score_acquisitions": [
+      5.5459980964660645,
+      1.4874471426010132,
+      5.309182643890381,
+      2.4778902530670166,
+      50.0,
+      6.0
+    ],
+    "decision": "Do not replace adaptive substeps with fixed 5; the measured speed gain comes with substantial trajectory drift."
+  }
+}

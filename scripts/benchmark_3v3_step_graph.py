@@ -17,8 +17,15 @@ def make_env(device: str, n: int, seed: int) -> TensorThreeVsThreeEnv:
         control_modes=("deterministic", "deterministic", "deterministic", "nn", "nn", "nn"),
         horizon=8000, randomize=False, perception_dropout=0.,
         position_noise=0., velocity_noise=0., fused_sensor_rng=True,
+        perception_interval=1,
     )
     env.reset(seed=seed)
+    # The outer-step capture probe uses a fixed five-substep physics schedule.
+    # Adaptive substeps call .item() and the normal inner physics graph cannot
+    # be nested inside the graph being measured.
+    if env.fuel_physics is not None:
+        env.fuel_physics.config.adaptive_substeps = False
+    env._physics_graph_enabled = False
     return env
 
 
@@ -53,13 +60,17 @@ def tensor_snapshot(env: TensorThreeVsThreeEnv) -> dict[str, torch.Tensor]:
         if hasattr(obj, "__dict__"):
             seen.add(id(obj))
             for key, value in vars(obj).items():
-                if key in ("generator", "_compiled_step"):
+                if key in ("generator", "generator_state", "_compiled_step",
+                           "_target_action_graph_actions",
+                           "_target_action_graph_active",
+                           "_target_action_graph_outputs",
+                           "_target_action_graph_audit",
+                           "_physics_graph_command", "_physics_graph_active",
+                           "_hip"):
                     continue
                 visit(value, f"{prefix}.{key}", depth + 1)
 
     visit(env, "env", 0)
-    if hasattr(env, "generator"):
-        snapshot["env.generator_state"] = env.generator.get_state().clone()
     return snapshot
 
 
@@ -121,6 +132,8 @@ def main() -> int:
     # Capture records operations without applying their tensor updates; the
     # first replay performs the same tick as one eager call.
     graph.replay()
+    graphed._planner_tick_scalar = 1
+    graphed._full_batch_step_scalar = 1
     step(eager, actions[0])
     if graphed._planner_tick_scalar != eager._planner_tick_scalar:
         raise AssertionError("planner host counters differ after graph capture")
@@ -136,6 +149,7 @@ def main() -> int:
         action_storage.copy_(actions[t])
         graph.replay()
         graphed._planner_tick_scalar += 1
+        graphed._full_batch_step_scalar += 1
         if graphed._planner_tick_scalar != eager._planner_tick_scalar:
             raise AssertionError("planner host counters differ during replay")
     torch.cuda.synchronize(device)
@@ -155,10 +169,11 @@ def main() -> int:
     torch.cuda.synchronize(device)
     eager_seconds = time.perf_counter() - start
     start = time.perf_counter()
-    for action in actions:
+    for t, action in enumerate(actions):
         action_storage.copy_(action)
         graph.replay()
         graphed._planner_tick_scalar += 1
+        graphed._full_batch_step_scalar += 1
     torch.cuda.synchronize(device)
     graph_seconds = time.perf_counter() - start
     difference = first_difference(tensor_snapshot(eager), tensor_snapshot(graphed))

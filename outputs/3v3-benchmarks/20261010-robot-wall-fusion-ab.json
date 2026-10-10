@@ -1,0 +1,91 @@
+{
+  "seed": 64821,
+  "ticks_per_case": 8000,
+  "single_full_match_paired": {
+    "separate_robot_and_wall_kernels": {
+      "elapsed_seconds": 119.36022471399338,
+      "score_by_team": [
+        [
+          77,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          26,
+          77,
+          140,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "fused_robot_wall_kernel": {
+      "elapsed_seconds": 121.41669800800446,
+      "score_by_team": [
+        [
+          173,
+          0
+        ]
+      ],
+      "acquisitions_by_robot": [
+        [
+          329,
+          175,
+          203,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "fused_speedup": 0.9830626814289126,
+    "decision": "remove fusion: 1.7% slower in paired full-match timing"
+  },
+  "single_short_diagnostic": {
+    "ticks": 800,
+    "separate_seconds": 12.616235196997877,
+    "fused_seconds": 12.13360692599963,
+    "fused_speedup": 1.0397761583955785,
+    "note": "short-run gain did not carry over to full match"
+  },
+  "batch8_diagnostic": {
+    "ticks": 800,
+    "separate_seconds": 30.76202280500729,
+    "fused_seconds": 32.91136944400205,
+    "fused_speedup": 0.9346928834835687,
+    "note": "fused path regressed batch throughput and was gated away before final evaluation"
+  },
+  "contact_state_parity": {
+    "pose_exact": true,
+    "velocity_exact": true,
+    "robot_contact_exact": true,
+    "opponent_contact_exact": true,
+    "wall_contact_exact": true,
+    "field_contact_exact": true
+  },
+  "dashboard_replay": {
+    "simulation_id": "scenario-perf-20261010-robotwallfuse-review-v1",
+    "seed": 64821,
+    "task": "3v3",
+    "ticks": 8000,
+    "simulated_seconds": 160.0,
+    "device": "cuda:0",
+    "final_score_by_team": [
+      236,
+      0
+    ],
+    "fuel_acquisition_count_by_robot": [
+      160,
+      248,
+      272,
+      0,
+      0,
+      0
+    ],
+    "dashboard_services_current": true,
+    "frontend_assets_match": true
+  },
+  "result": "Optimization reverted; current checkout uses separate HIP kernels."
+}

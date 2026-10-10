@@ -1,0 +1,332 @@
+{
+  "scenario": "full-scale 3v3 deterministic match",
+  "seed": 64821,
+  "device": "cuda:0",
+  "ticks": 8000,
+  "controllers": true,
+  "fuel_physics": true,
+  "replan_interval": 20,
+  "perception_interval": 2,
+  "setup_seconds": 44.65030820600077,
+  "elapsed_seconds": 264.7831020509984,
+  "seconds_per_full_match_projection": 264.7831020509984,
+  "world_ticks_per_second": 30.213408401187035,
+  "fuel_backend": "hip",
+  "score_by_team": [
+    [
+      215,
+      0
+    ]
+  ],
+  "fuel_acquisitions_by_robot": [
+    [
+      185,
+      293,
+      256,
+      0,
+      0,
+      0
+    ]
+  ],
+  "batch_comparison": {
+    "envs": 4,
+    "ticks": 100,
+    "elapsed_seconds": 3.645483392996539,
+    "world_ticks_per_second": 109.72481750114498,
+    "per_world_ticks_per_second": 27.431204375286246,
+    "seconds_per_full_match_projection_per_world": 291.6386714397231,
+    "fuel_acquisitions_by_robot": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        21,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "pickup_parity_100_tick": {
+    "seed": 64821,
+    "reference_ms_per_tick": 35.7519203999982,
+    "hip_ms_per_tick": 33.141784019971965,
+    "owner_exact": true,
+    "owner_mismatches": 0,
+    "reference_acquisitions": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "hip_acquisitions": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "dashboard_replay_id": "scenario-3v3-perf-20261009-seed64821-v5",
+  "dashboard_replay_ticks": 150,
+  "dashboard_replay_frames": 15,
+  "dashboard_replay_acquisitions": [
+    24,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "dashboard_replay_scores": [
+    0,
+    0
+  ],
+  "goal_seconds": 30.0,
+  "goal_met": false,
+  "batch_scaling_100_tick": [
+    {
+      "envs": 1,
+      "elapsed_seconds": 3.08415,
+      "aggregate_world_ticks_per_second": 32.4238,
+      "per_world_ticks_per_second": 32.4238,
+      "projected_seconds_per_world": 246.732
+    },
+    {
+      "envs": 4,
+      "elapsed_seconds": 3.645483392996539,
+      "aggregate_world_ticks_per_second": 109.72481750114498,
+      "per_world_ticks_per_second": 27.431204375286246,
+      "projected_seconds_per_world": 291.6386714397231
+    },
+    {
+      "envs": 8,
+      "elapsed_seconds": 4.93323,
+      "aggregate_world_ticks_per_second": 162.1656,
+      "per_world_ticks_per_second": 20.2707,
+      "projected_seconds_per_world": 394.658
+    },
+    {
+      "envs": 16,
+      "elapsed_seconds": 6.0559,
+      "aggregate_world_ticks_per_second": 264.2052,
+      "per_world_ticks_per_second": 16.5128,
+      "projected_seconds_per_world": 484.472
+    },
+    {
+      "envs": 32,
+      "elapsed_seconds": 12.30682,
+      "aggregate_world_ticks_per_second": 260.0185,
+      "per_world_ticks_per_second": 8.12558,
+      "projected_seconds_per_world": 984.545
+    },
+    {
+      "envs": 64,
+      "elapsed_seconds": 18.66441,
+      "aggregate_world_ticks_per_second": 342.8986,
+      "per_world_ticks_per_second": 5.35779,
+      "projected_seconds_per_world": 1493.153
+    },
+    {
+      "envs": 128,
+      "elapsed_seconds": 33.45245,
+      "aggregate_world_ticks_per_second": 382.6326,
+      "per_world_ticks_per_second": 2.98932,
+      "projected_seconds_per_world": 2676.196
+    }
+  ],
+  "batch_scaling_note": "Each entry is a warmed 100-tick diagnostic; projected full-match seconds are elapsed_seconds * 8000 / 100 / envs and are estimates, not full-match results. A 256-env run was interrupted during planner repair and yielded no timing.",
+  "optimization_followups": [
+    {
+      "change": "Cache immutable ADStarPlanner static blocked and bump grids by field, footprint, and collider geometry.",
+      "uncached_planner_constructor_ms": 3.755453,
+      "cached_planner_constructor_ms": 0.004788,
+      "constructor_microbenchmark": "one cold construction then eleven warm constructions; 16.54 x 8.07 m field at 0.2 m resolution, three colliders.",
+      "full_match": {
+        "seed": 64821,
+        "ticks": 8000,
+        "controllers": true,
+        "fuel_physics": true,
+        "setup_seconds": 133.5871435529989,
+        "elapsed_seconds": 265.23159454200504,
+        "world_ticks_per_second": 30.162319137786696,
+        "score_by_team": [
+          [
+            267,
+            0
+          ]
+        ],
+        "fuel_acquisitions_by_robot": [
+          [
+            267,
+            209,
+            202,
+            0,
+            0,
+            0
+          ]
+        ],
+        "fuel_backend": "hip"
+      },
+      "baseline_elapsed_seconds": 264.7831020509984,
+      "baseline_delta_seconds": 0.44849249100664,
+      "goal_met": false
+    }
+  ],
+  "dashboard_replay_final_frame": {
+    "score_count": [
+      0,
+      0
+    ],
+    "acquisition_count": [
+      24,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "robot_0_pose": [
+      0.9045928716659546,
+      1.6614545583724976,
+      1.5952322483062744
+    ],
+    "robot_0_collecting": true
+  },
+  "dashboard_replay_seed": 64821,
+  "dashboard_replay_code_state": {
+    "commit": "522b21e",
+    "dirty_files": [
+      "frc_defense/_tensor_3v3_actions.py",
+      "frc_defense/_tensor_3v3_gamepieces.py",
+      "frc_defense/adstar.py",
+      "frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.cu",
+      "frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.hip",
+      "frc_defense/dashboard.py",
+      "frc_defense/field.py",
+      "frc_defense/fuel_physics.py",
+      "frc_defense/fuel_physics_runtime.py",
+      "frc_defense/gamepiece_actions.py",
+      "frc_defense/tensor_3v3.py",
+      "frc_defense/tensor_3v3_pickup_grid_hip.py",
+      "frc_defense/tensor_defense_gamepieces.py",
+      "frc_defense/tensor_defense_observation.py",
+      "frc_defense/tensor_defense_opponent.py",
+      "frc_defense/tensor_defense_reset.py",
+      "frc_defense/tensor_defense_step.py",
+      "frc_defense/tensor_sim.py",
+      "scripts/benchmark_3v3_full_match.py",
+      "tests/test_focused_playback_setup.py",
+      "tests/test_fuel_physics_integration.py",
+      "tests/test_tensor_3v3_physical_constraints.py"
+    ]
+  },
+  "experiments": [
+    {
+      "name": "6-robot contact dispatch pipeline",
+      "parity_check": {
+        "physics_ticks": 64,
+        "max_abs_state_difference": 0.0,
+        "non_exact_tensor_fields": []
+      },
+      "warmed_microbenchmark": {
+        "repeats": 3,
+        "legacy_seconds": [
+          0.327034755,
+          0.243099667,
+          0.177485907
+        ],
+        "pipeline_seconds": [
+          0.297490131,
+          0.257824277,
+          0.168893604
+        ],
+        "median_speedup": 0.9428889701
+      },
+      "full_match_seed64821": {
+        "ticks": 8000,
+        "elapsed_seconds": 265.34643394800514,
+        "setup_seconds": 4.51426147899474,
+        "score_by_team": [
+          [
+            616,
+            0
+          ]
+        ],
+        "fuel_acquisitions_by_robot": [
+          [
+            329,
+            460,
+            349,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "prior_same_seed_elapsed_seconds": 265.23159454200504,
+      "result": "No measurable speedup; experimental wrapper removed from source."
+    }
+  ],
+  "graph_capture_probe": {
+    "command": "scripts/benchmark_3v3_step_graph.py --envs 1 --ticks 8 --device cuda:0 --seed 64821",
+    "status": "blocked",
+    "capture_error": "FuelPhysics.required_substeps calls speed.item() during HIP stream capture."
+  },
+  "latest_full_match": {
+    "seed": 64821,
+    "ticks": 8000,
+    "device": "cuda:0",
+    "fuel_backend": "hip",
+    "setup_seconds": 4.51426147899474,
+    "elapsed_seconds": 265.34643394800514,
+    "world_ticks_per_second": 30.149265173722316,
+    "score_by_team": [
+      [
+        616,
+        0
+      ]
+    ],
+    "fuel_acquisitions_by_robot": [
+      [
+        329,
+        460,
+        349,
+        0,
+        0,
+        0
+      ]
+    ],
+    "status": "experimental six-robot dispatch pipeline; source pipeline was removed after neutral timing."
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "scenario": "full-scale deterministic 3v3",
+  "seed": 64821,
+  "device": "cuda:0",
+  "optimization": "For one-world HIP batches, resolve the 15 robot pairs in parallel within one block; retain the serial kernel for multi-world batches and allow AUTODRIVE_PARALLEL_3V3_ROBOT_CONTACTS=0 for fallback.",
+  "paired_rollout_benchmark": {
+    "ticks_per_case": 800,
+    "baseline_serial_seconds": [
+      12.657408347004093,
+      13.120983760003583
+    ],
+    "parallel_seconds": [
+      10.591192261010292,
+      11.422163723997073
+    ],
+    "baseline_median_seconds": 12.889196053503838,
+    "parallel_median_seconds": 11.006677992503683,
+    "median_speedup": 1.1710341723708353,
+    "projected_full_match_seconds": {
+      "serial": 128.89196053503838,
+      "parallel": 110.06677992503683
+    }
+  },
+  "contact_state_parity": {
+    "randomized_crowded_scenes": 64,
+    "scenes_with_contact": 64,
+    "pose_velocity_allclose_atol_rtol_1e-5": true,
+    "robot_and_opponent_contact_flags_exact": true,
+    "max_absolute_delta_pose_velocity": 0.0
+  },
+  "profile_30_ticks": {
+    "serial_robot_contact_kernel_self_device_ms": 72.445,
+    "parallel_robot_contact_kernel_self_device_ms": 8.085,
+    "calls_each": 900
+  },
+  "full_simulator_replay": {
+    "simulation_id": "scenario-perf-20261010-parallel-contacts-v1",
+    "seed": 64821,
+    "ticks": 8000,
+    "simulated_seconds": 160.0,
+    "frames": 800,
+    "score_by_team": [
+      744,
+      0
+    ],
+    "fuel_acquisitions_by_robot": [
+      443,
+      434,
+      490,
+      0,
+      0,
+      0
+    ],
+    "dashboard_provenance_matches_current_checkout": true,
+    "outdated": false
+  },
+  "batch_context": {
+    "paired_batch8_seconds_per_world_equivalent": 25.650807358761085,
+    "paired_batch16_seconds_per_world_equivalent": 20.882349065623202,
+    "batch16_wall_projection_seconds": 334.11758504997124,
+    "batch16_uses_existing_serial_multi_world_contact_kernel": true
+  },
+  "tests_run": []
+}
