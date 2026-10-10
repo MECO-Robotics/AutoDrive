@@ -133,15 +133,132 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
   opponent_contact[world] = opponent_contact[world] || any_opponent;
 }
 
+__global__ void robot_contacts_single_world_parallel_kernel(
+    float* pose, float* velocity, const float* length, const float* width,
+    const float* mass, const float* yaw_mult, const float* friction,
+    const bool* active, const int64_t* team_ids, bool* robot_contact,
+    bool* opponent_contact) {
+  const int lane = threadIdx.x;
+  if (!active[0]) return;
+  __shared__ float pair_delta[15][10];
+  __shared__ int any_robot, any_opponent;
+  const int pair_i[15] = {0,0,0,0,0,1,1,1,1,2,2,2,3,3,4};
+  const int pair_j[15] = {1,2,3,4,5,2,3,4,5,3,4,5,4,5,5};
+  if (lane == 0) { any_robot = 0; any_opponent = 0; }
+  __syncthreads();
+
+  if (lane < 15) {
+    const int i = pair_i[lane], j = pair_j[lane];
+    const int pi = i * 3, pj = j * 3;
+    const float pxi = pose[pi], pyi = pose[pi + 1], thi = pose[pi + 2];
+    const float pxj = pose[pj], pyj = pose[pj + 1], thj = pose[pj + 2];
+    const float vxi = velocity[pi], vyi = velocity[pi + 1], wi = velocity[pi + 2];
+    const float vxj = velocity[pj], vyj = velocity[pj + 1], wj = velocity[pj + 2];
+    const float li = length[i], wi_robot = width[i];
+    const float lj = length[j], wj_robot = width[j];
+    const float hi_l = li * .5f, hi_w = wi_robot * .5f;
+    const float hj_l = lj * .5f, hj_w = wj_robot * .5f;
+    const float inv_i = 1.f / mass[i], inv_j = 1.f / mass[j];
+    const float inertia_i = fmaxf((mass[i] * (li * li + wi_robot * wi_robot) / 12.f) * yaw_mult[i], 1.e-8f);
+    const float inertia_j = fmaxf((mass[j] * (lj * lj + wj_robot * wj_robot) / 12.f) * yaw_mult[j], 1.e-8f);
+    float si, ci, sj, cj;
+    __sincosf(thi, &si, &ci); __sincosf(thj, &sj, &cj);
+    const float uix=ci, uiy=si, lix=-si, liy=ci;
+    const float ujx=cj, ujy=sj, ljx=-sj, ljy=cj;
+    float ax[4]={uix,lix,ujx,ljx}, ay[4]={uiy,liy,ujy,ljy};
+    const float dx=pxj-pxi, dy=pyj-pyi;
+    float overlap[4], signed_axis[4];
+    #pragma unroll
+    for (int k=0;k<4;++k) {
+      const float pu=fabsf(ax[k]*uix+ay[k]*uiy), pv=fabsf(ax[k]*lix+ay[k]*liy);
+      const float qu=fabsf(ax[k]*ujx+ay[k]*ujy), qv=fabsf(ax[k]*ljx+ay[k]*ljy);
+      overlap[k]=pu*hi_l+pv*hi_w+qu*hj_l+qv*hj_w-fabsf(ax[k]*dx+ay[k]*dy);
+      signed_axis[k]=ax[k]*dx+ay[k]*dy;
+    }
+    int axis=0; float depth=overlap[0];
+    #pragma unroll
+    for (int k=1;k<4;++k) if (overlap[k]<depth) { depth=overlap[k]; axis=k; }
+    const bool valid=depth>0.f;
+    if (valid) {
+      atomicExch(&any_robot,1);
+      if (team_ids[i]!=team_ids[j]) atomicExch(&any_opponent,1);
+    }
+    const float sign=signed_axis[axis]>=0.f?1.f:-1.f;
+    const float nx=ax[axis]*sign, ny=ay[axis]*sign;
+    const float total=fmaxf(inv_i+inv_j,1.e-8f);
+    const float correction=valid?fmaxf(depth,0.f)+1.e-4f:0.f;
+    float dxi=-nx*(correction*inv_i/total), dyi=-ny*(correction*inv_i/total);
+    float dxj= nx*(correction*inv_j/total), dyj= ny*(correction*inv_j/total);
+    const float sui=sign_ref(nx*uix+ny*uiy), svi=sign_ref(nx*lix+ny*liy);
+    const float suj=sign_ref(nx*ujx+ny*ujy), svj=sign_ref(nx*ljx+ny*ljy);
+    const float six=(pxi+sui*uix*hi_l)+svi*lix*hi_w;
+    const float siy=(pyi+sui*uiy*hi_l)+svi*liy*hi_w;
+    const float sjx=(pxj-suj*ujx*hj_l)-svj*ljx*hj_w;
+    const float sjy=(pyj-suj*ujy*hj_l)-svj*ljy*hj_w;
+    const float cpx=.5f*(six+sjx), cpy=.5f*(siy+sjy);
+    const float rix=cpx-pxi, riy=cpy-pyi, rjx=cpx-pxj, rjy=cpy-pyj;
+    const float cvix=vxi-wi*riy, cviy=vyi+wi*rix;
+    const float cvjx=vxj-wj*rjy, cvjy=vyj+wj*rjx;
+    const float vn=(cvjx-cvix)*nx+(cvjy-cviy)*ny;
+    const float rn_i=cross_ref(rix,riy,nx,ny), rn_j=cross_ref(rjx,rjy,nx,ny);
+    const float eff=total+rn_i*rn_i/inertia_i+rn_j*rn_j/inertia_j;
+    const float jn=(valid&&vn<0.f)?(-1.05f*vn)/fmaxf(eff,1.e-8f):0.f;
+    const float tx=-ny, ty=nx;
+    const float vt=(cvjx-cvix)*tx+(cvjy-cviy)*ty;
+    const float rt_i=cross_ref(rix,riy,tx,ty), rt_j=cross_ref(rjx,rjy,tx,ty);
+    const float eff_t=total+rt_i*rt_i/inertia_i+rt_j*rt_j/inertia_j;
+    float jt=-vt/fmaxf(eff_t,1.e-8f);
+    const float limit=sqrtf(fmaxf(friction[0],0.f))*jn;
+    jt=fminf(fmaxf(jt,-limit),limit);
+    const float ix=jn*nx+jt*tx, iy=jn*ny+jt*ty;
+    pair_delta[lane][0]=dxi; pair_delta[lane][1]=dyi;
+    pair_delta[lane][2]=-ix*inv_i; pair_delta[lane][3]=-iy*inv_i;
+    pair_delta[lane][4]=-(jn*rn_i+jt*rt_i)/inertia_i;
+    pair_delta[lane][5]=dxj; pair_delta[lane][6]=dyj;
+    pair_delta[lane][7]= ix*inv_j; pair_delta[lane][8]= iy*inv_j;
+    pair_delta[lane][9]=(jn*rn_j+jt*rt_j)/inertia_j;
+  }
+  __syncthreads();
+
+  if (lane < 6) {
+    float delta[5]={0.f,0.f,0.f,0.f,0.f};
+    // Sum in the same lexicographic pair order as the reference resolver.
+    for (int pair=0;pair<15;++pair) {
+      if (pair_i[pair]==lane) {
+        #pragma unroll
+        for (int k=0;k<5;++k) delta[k]+=pair_delta[pair][k];
+      } else if (pair_j[pair]==lane) {
+        #pragma unroll
+        for (int k=0;k<5;++k) delta[k]+=pair_delta[pair][k+5];
+      }
+    }
+    const int p=lane*3;
+    pose[p]+=delta[0]; pose[p+1]+=delta[1];
+    velocity[p]+=delta[2]; velocity[p+1]+=delta[3]; velocity[p+2]+=delta[4];
+  }
+  __syncthreads();
+  if (lane==0) {
+    robot_contact[0]=robot_contact[0]||any_robot;
+    opponent_contact[0]=opponent_contact[0]||any_opponent;
+  }
+}
+
 void robot_contacts_launch(float* pose, float* velocity, const float* length,
     const float* width, const float* mass, const float* yaw_mult,
     const float* friction, const bool* active, const int64_t* team_ids,
-    bool* robot_contact, bool* opponent_contact, int n, hipStream_t stream) {
-  constexpr int threads = 128;
-  const int blocks = (n + threads - 1) / threads;
-  hipLaunchKernelGGL(robot_contacts_kernel, dim3(blocks), dim3(threads), 0, stream,
-      pose, velocity, length, width, mass, yaw_mult, friction, active, team_ids,
-      robot_contact, opponent_contact, n);
+    bool* robot_contact, bool* opponent_contact, int n,
+    bool parallel_single_world, hipStream_t stream) {
+  if (n == 1 && parallel_single_world) {
+    hipLaunchKernelGGL(robot_contacts_single_world_parallel_kernel,
+        dim3(1), dim3(32), 0, stream, pose, velocity, length, width, mass,
+        yaw_mult, friction, active, team_ids, robot_contact, opponent_contact);
+  } else {
+    constexpr int threads = 128;
+    const int blocks = (n + threads - 1) / threads;
+    hipLaunchKernelGGL(robot_contacts_kernel, dim3(blocks), dim3(threads), 0, stream,
+        pose, velocity, length, width, mass, yaw_mult, friction, active, team_ids,
+        robot_contact, opponent_contact, n);
+  }
 }
 
 __global__ void field_contacts_kernel(float* pose, float* velocity,
@@ -548,4 +665,126 @@ void avoidance_launch(const float* pose,const float* command,const float* target
     int64_t* winner,float* adjusted,int n,bool teammate_intent,hipStream_t stream){
   avoid_contention_kernel<<<dim3(n),dim3(32),0,stream>>>(pose,command,targets,
       length,width,speed,controlled,teams,active,winner,adjusted,n,teammate_intent);
+}
+
+__global__ void invalidate_tracks_kernel(const float* pose, const float* length,
+    const float* width, const float* track_pos, bool* track_mask,
+    float* track_age, const bool* active, int n, int pieces,
+    float fuel_radius) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = static_cast<int64_t>(n) * 6 * pieces;
+  if (linear >= total) return;
+  const int world = static_cast<int>(linear / (6 * pieces));
+  if (!active[world]) return;
+  const float x = track_pos[2 * linear];
+  const float y = track_pos[2 * linear + 1];
+  bool intersects = false;
+  for (int robot = 0; robot < 6 && !intersects; ++robot) {
+    const int pose_index = world * 18 + robot * 3;
+    const int size_index = world * 6 + robot;
+    const float dx = x - pose[pose_index];
+    const float dy = y - pose[pose_index + 1];
+    const float cosine = cosf(pose[pose_index + 2]);
+    const float sine = sinf(pose[pose_index + 2]);
+    const float longitudinal = dx * cosine + dy * sine;
+    const float lateral = fabsf(-dx * sine + dy * cosine);
+    intersects =
+        longitudinal >= -length[size_index] * .5f - fuel_radius &&
+        longitudinal <= length[size_index] * .5f + .35f + fuel_radius &&
+        lateral <= width[size_index] * .5f + .075f + fuel_radius;
+  }
+  if (intersects) {
+    track_mask[linear] = false;
+    track_age[linear] = INFINITY;
+  }
+}
+
+void invalidate_tracks_launch(const float* pose, const float* length,
+    const float* width, const float* track_pos, bool* track_mask,
+    float* track_age, const bool* active, int n, int pieces,
+    float fuel_radius, hipStream_t stream) {
+  constexpr int threads = 256;
+  const int64_t total = static_cast<int64_t>(n) * 6 * pieces;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  invalidate_tracks_kernel<<<dim3(blocks), dim3(threads), 0, stream>>>(pose,
+      length, width, track_pos, track_mask, track_age, active, n, pieces,
+      fuel_radius);
+}
+
+__global__ void footprint_path_clear_kernel(const float* path,
+    const float* heading, const float* length, const float* width,
+    const float* boxes, bool* clear, int rows, int points, int box_count,
+    float field_length, float field_width, float clearance) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const float len = length[row], wid = width[row];
+  const float outer = .5f * sqrtf(len * len + wid * wid);
+  const float inner = .5f * fminf(len, wid);
+  const float half_len = .5f * len, half_wid = .5f * wid;
+  bool path_hit = false, wall_hit = false;
+  for (int segment = 0; segment < points - 1 && !path_hit && !wall_hit;
+       ++segment) {
+    const int a = (row * points + segment) * 2;
+    const int b = a + 2;
+    const float x0 = path[a], y0 = path[a + 1];
+    const float dx = path[b] - x0, dy = path[b + 1] - y0;
+    const float h0 = heading[row];
+    const float dh = 0.f;
+    const float steps_f = ceilf(fmaxf(sqrtf(dx * dx + dy * dy),
+                                      fabsf(dh) * outer) / .02f);
+    const int steps = max(1, min(64, static_cast<int>(steps_f)));
+    const float segment_clearance = segment == 0 ? 0.f : clearance;
+    for (int sample = 1; sample <= steps && !path_hit && !wall_hit; ++sample) {
+      const float fraction = static_cast<float>(sample) / steps;
+      const float x = x0 + dx * fraction, y = y0 + dy * fraction;
+      const float angle = h0 + dh * fraction;
+      const float c = cosf(angle), s = sinf(angle);
+      const float ex = .5f * (len * fabsf(c) + wid * fabsf(s));
+      const float ey = .5f * (len * fabsf(s) + wid * fabsf(c));
+      wall_hit = x < ex || x > field_length - ex ||
+                 y < ey || y > field_width - ey;
+      for (int box = 0; box < box_count && !path_hit && !wall_hit; ++box) {
+        const float* q = boxes + box * 4;
+        const float bx = x - q[0], by = y - q[1];
+        const float hx = q[2], hy = q[3];
+        const float nx = fmaxf(fabsf(bx) - hx, 0.f);
+        const float ny = fmaxf(fabsf(by) - hy, 0.f);
+        const float separation = sqrtf(nx * nx + ny * ny);
+        const float box_outer = sqrtf(hx * hx + hy * hy);
+        const bool broad_clear = separation > outer + box_outer + segment_clearance;
+        const bool definite_hit = separation <= inner + segment_clearance;
+        bool hit = definite_hit;
+        if (!broad_clear && !definite_hit) {
+          const float signed_axis[4] = {
+              bx, by, bx * c + by * s, -bx * s + by * c};
+          const float robot_radius[4] = {
+              fabsf(c) * half_len + fabsf(s) * half_wid,
+              fabsf(s) * half_len + fabsf(c) * half_wid,
+              half_len, half_wid};
+          const float box_radius[4] = {
+              hx, hy, hx * fabsf(c) + hy * fabsf(s),
+              hx * fabsf(s) + hy * fabsf(c)};
+          float minimum = 1.e30f;
+          #pragma unroll
+          for (int axis = 0; axis < 4; ++axis)
+            minimum = fminf(minimum, robot_radius[axis] + box_radius[axis] -
+                                     fabsf(signed_axis[axis]) + segment_clearance);
+          hit = minimum >= 0.f;
+        }
+        path_hit = hit;
+      }
+    }
+  }
+  clear[row] = !(path_hit || wall_hit);
+}
+
+void footprint_path_clear_launch(const float* path, const float* heading,
+    const float* length, const float* width, const float* boxes, bool* clear,
+    int rows, int points, int box_count, float field_length,
+    float field_width, float clearance, hipStream_t stream) {
+  constexpr int threads = 128;
+  const int blocks = (rows + threads - 1) / threads;
+  footprint_path_clear_kernel<<<dim3(blocks), dim3(threads), 0, stream>>>(
+      path, heading, length, width, boxes, clear, rows, points, box_count,
+      field_length, field_width, clearance);
 }

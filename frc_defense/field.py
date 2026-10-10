@@ -13,7 +13,7 @@ BUMP_HEIGHT = 6.513 * INCH
 BUMP_PANEL_THICKNESS = 0.5 * INCH
 BUMP_RAMP_RISE = BUMP_HEIGHT - BUMP_PANEL_THICKNESS
 BUMP_RAMP_GRADE = BUMP_RAMP_RISE / (44.4 * INCH / 2)
-BUMP_ROLLING_RESISTANCE = 0.025
+BUMP_ROLLING_RESISTANCE = 0.0125
 BUMP_ROBOT_CG_HEIGHT = 0.30
 # AD* keeps a modest conservative traversal cost in addition to gravity/load
 # effects simulated from the ramp profile.

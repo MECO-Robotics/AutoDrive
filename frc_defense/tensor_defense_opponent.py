@@ -42,6 +42,21 @@ class TensorDefenseOpponentMixin:
                                  self.sim.velocity[:,robot,2],self.sim.dt)
         return torch.where(intent,rate,torch.zeros_like(rate))
 
+    def _face_ferry_omega(self, robot, intent):
+        """Turn a dumper toward the shared ferry aim before release."""
+        from .fuel_physics_runtime import ferry_aim_targets
+        pose=self.sim.pose[:,robot]
+        teams=self.team_ids[robot].expand(self.n)
+        target=ferry_aim_targets(self,pose[:,:2],teams)
+        delta=target-pose[:,:2]
+        bearing=torch.atan2(delta[:,1],delta[:,0])
+        error=torch.atan2(torch.sin(bearing-pose[:,2]),
+                          torch.cos(bearing-pose[:,2]))
+        rate=swerve_heading_rate(error,self.sim.omega_limit[:,robot],
+                                 self.sim.alpha[:,robot],
+                                 self.sim.velocity[:,robot,2],self.sim.dt)
+        return torch.where(intent,rate,torch.zeros_like(rate))
+
     def _adstar_target_velocity(self, waypoint, active_mask=None):
         """Route robot 0 to an absolute strategic waypoint with AD*."""
         planner=self._adstar_tactical_planner
@@ -63,59 +78,33 @@ class TensorDefenseOpponentMixin:
         return torch.cat((command,torch.zeros((self.n,1),device=self.device)),dim=-1)
 
     def _strategic_target(self,action_class,*,_candidate_data=None):
-        """Resolve masked strategic choices into waypoints for the AD* controller."""
+        """Resolve shared collect, shoot, defend, ferry, and hold actions."""
         position=self.sim.pose[:,0,:2]
         candidates,valid,_=(self._fuel_candidates(0) if _candidate_data is None
                             else _candidate_data)
         rows=torch.arange(self.n,device=self.device)
+        slot=action_class.clamp(0,3)
+        points,_,_=self._perceived_fuel(0)
+        candidate=points[rows,candidates[rows,slot]]
+        candidate_valid=valid[rows,slot]
+        hub=self.hub_centers[0].expand(self.n,-1)
+        away=position-hub
+        away=away/away.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        approach=hub+away*(.595+.5*torch.sqrt(
+            self.sim.length[:,0].square()+self.sim.width[:,0].square())+.02)[:,None]
+        collect=torch.where(candidate_valid[:,None],candidate,approach)
+        ferry=self.ferry_targets[0].expand(self.n,-1)
+        hold=position
         if self.task=="defense":
-            attacker_pose,attacker_velocity=self._observed_robot(0,1)
-            attacker=attacker_pose[:,:2]
-            velocity=attacker_velocity[:,:2]
-            speed=velocity.norm(dim=-1,keepdim=True)
-            to_defender=position-attacker
-            fallback=to_defender/to_defender.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            heading=torch.where(speed>.15,velocity/speed.clamp_min(.15),fallback)
-            eta=((position-attacker).norm(dim=-1,keepdim=True)/self.sim.speed[:,0,None].clamp_min(.1)).clamp(0.,1.25)
-            contest=attacker+velocity*eta+heading*.55
-            hub_delta=self.hub_centers[None,:,:]-attacker[:,None,:]
-            hub_distance=hub_delta.norm(dim=-1).clamp_min(1e-6)
-            alignment=(heading[:,None,:]*hub_delta/hub_distance[...,None]).sum(-1)
-            likely_hub=alignment.argmax(-1)
-            target_hub=self.hub_centers[likely_hub]
-            target_direction=target_hub-attacker
-            target_distance=target_direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            target_direction=target_direction/target_distance
-            block_lane=attacker+target_direction*torch.minimum(target_distance*.35,
-                torch.full_like(target_distance,.9))
-            slot=(action_class-1).clamp(0,3)
-            points,_,_=self._perceived_fuel(0)
-            candidate=points[rows,candidates[rows,slot]]
-            candidate_valid=valid[rows,slot]
-            deny=torch.where(candidate_valid[:,None],candidate,block_lane)
-            target=torch.where((action_class==0)[:,None],contest,
-                torch.where(((action_class>=1)&(action_class<=4))[:,None],deny,
-                    torch.where((action_class==5)[:,None],block_lane,
-                        torch.where((action_class==6)[:,None],attacker+velocity*.35,contest))))
-            fuel_action=(action_class>=1)&(action_class<=4)
-            available=self._opponent_track_valid[:,0]|fuel_action
-            return torch.where(available[:,None],target,position)
-        else:
-            own_hub=self.hub_centers[0].expand(self.n,-1)
-            hub_direction=position-own_hub
-            hub_direction=hub_direction/hub_direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            approach=own_hub+hub_direction*(.595+.5*torch.sqrt(
-                self.sim.length[:,0].square()+self.sim.width[:,0].square())+.02)[:,None]
-            slot=action_class.clamp(0,3)
-            points,_,_=self._perceived_fuel(0)
-            collect=points[rows,candidates[rows,slot]]
-            collect=torch.where(valid[rows,slot,None],collect,approach)
-            direction=own_hub-position
-            direction=direction/direction.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            tactical=position+direction*1.5
-            return torch.where((action_class<=3)[:,None],collect,
-                torch.where((action_class==4)[:,None],approach,
-                    torch.where((action_class==6)[:,None],tactical,position)))
+            attacker,_=self._observed_robot(0,1)
+            attacker=attacker[:,:2]
+            toward_hub=hub-attacker
+            toward_hub=toward_hub/toward_hub.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+            defend=attacker+toward_hub*.9
+            hold=defend
+        return torch.where((action_class<4)[:,None],collect,
+            torch.where((action_class==4)[:,None],approach,
+            torch.where((action_class==6)[:,None],ferry,hold)))
 
     def _adstar_opponent_velocity(self,target,active_mask=None):
         """Plan robot 1's route to a game-state objective."""

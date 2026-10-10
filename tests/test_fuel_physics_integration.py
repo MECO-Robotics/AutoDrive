@@ -62,14 +62,20 @@ def test_pickup_tracks_current_grid_cell_and_excludes_airborne_fuel(height, coll
 
 @pytest.mark.parametrize("release", ["score", "pass", "netpass"])
 def test_game_release_retains_motion_on_next_physics_tick(release, monkeypatch):
-    from frc_defense import _tensor_3v3_gamepieces as gamepieces
+    from frc_defense import gamepiece_actions as gamepieces
     real_launch = gamepieces.launch_fuel
     release_scales = []
+    expected_speeds = []
     env = None
 
     def record_launch(env, selected, destinations, **kwargs):
         if selected.any():
             release_scales.append(kwargs.get("horizontal_velocity_scale", 1.))
+            if release == "pass":
+                expected_speeds.extend(
+                    ((destinations-kwargs["origins"]).norm(dim=-1)*
+                     kwargs.get("horizontal_velocity_scale", 1.)/
+                     kwargs.get("flight_time", .8))[selected].tolist())
             if release == "score":
                 origin = kwargs["origins"]
                 midfield = origin.new_tensor([env.sim.field_length*.5, env.sim.field_width*.5])
@@ -109,7 +115,7 @@ def test_game_release_retains_motion_on_next_physics_tick(release, monkeypatch):
         env.sim.pose[0, 0, :2] = env.ferry_targets[0]
         env.last_actions[0, 0] = 6
     env._update_fuel(torch.ones(1, dtype=torch.bool), score_intent)
-    assert release_scales == [.1]
+    assert release_scales == ([.1] if release != "score" else [.15])
     assert env.piece_owner[0, 0].item() == -1
     event = env.fuel_scored_event if release == "score" else env.fuel_passed_event
     assert event[0, 0].item() == 1
@@ -118,6 +124,12 @@ def test_game_release_retains_motion_on_next_physics_tick(release, monkeypatch):
     if release == "score":
         assert start_height > .2
         assert env.fuel_physics.vel[0, 0, 2].item() > 0
+        hub=env.hub_centers[env.team_ids[0]]
+        midfield=start_xy.new_tensor([env.sim.field_length/2,
+                                       env.sim.field_width/2])
+        assert start_xy[0] > (hub[0]+47.*.0254/2+
+                              env.fuel_physics.config.radius)
+        assert (env.fuel_physics.vel[0, 0, :2]*(midfield-hub)).sum() > 0
     else:
         if release == "netpass":
             assert start_xy[0] == pytest.approx(env.sim.field_length*.5, abs=1.65)
@@ -133,7 +145,7 @@ def test_game_release_retains_motion_on_next_physics_tick(release, monkeypatch):
             away_from_robot=start_xy-env.sim.pose[0, 0, :2]
             velocity=env.fuel_physics.vel[0, 0, :2]
             assert (velocity*away_from_robot).sum() > 0
-            expected_speed=away_from_robot.norm()*.1/.8
+            expected_speed=away_from_robot.norm()*.1/.5
             assert velocity.norm().item() == pytest.approx(expected_speed.item())
     assert not env.fuel_physics.sleeping[0, 0]
     assert env.piece_vel[0, 0].norm().item() > .1
@@ -232,7 +244,7 @@ def test_ferry_velocity_multiplier_preserves_vertical_and_unselected_state(devic
                           if torch.version.hip else []))
 def test_shooter_respawn_cone_spreads_both_alliances_and_preserves_speed(device):
     from types import SimpleNamespace
-    from frc_defense.fuel_physics_runtime import launch_fuel, shooter_respawn_targets
+    from frc_defense.fuel_physics_runtime import launch_fuel, shooter_respawn_cone
     from test_fuel_physics import make_world
 
     physics, sim, *_ = make_world(worlds=2, pieces=64, device=device,
@@ -246,9 +258,11 @@ def test_shooter_respawn_cone_spreads_both_alliances_and_preserves_speed(device)
                           generator=torch.Generator(device=device).manual_seed(42),
                           _midfield_respawn_positions=midfield.expand(64, -1))
     rng = env.generator.get_state()
-    target = shooter_respawn_targets(env, origins)
+    spawn, target = shooter_respawn_cone(env, origins)
     env.generator.set_state(rng)
-    torch.testing.assert_close(shooter_respawn_targets(env, origins), target)
+    spawn_again, target_again = shooter_respawn_cone(env, origins)
+    torch.testing.assert_close(spawn_again, spawn)
+    torch.testing.assert_close(target_again, target)
     delta = target-origins
     axis = midfield-origins
     angle = torch.atan2(axis[..., 0]*delta[..., 1]-axis[..., 1]*delta[..., 0],
@@ -259,7 +273,9 @@ def test_shooter_respawn_cone_spreads_both_alliances_and_preserves_speed(device)
     torch.testing.assert_close(delta.norm(dim=-1), axis.norm(dim=-1))
     selected = torch.ones((2, 64), dtype=torch.bool, device=device)
     launch_fuel(env, selected, target, origins=origins, height=1.83,
-                flight_time=1., horizontal_velocity_scale=.1)
+                flight_time=1., horizontal_velocity_scale=.1,
+                spawn_positions=spawn)
+    torch.testing.assert_close(physics.pos[..., :2], spawn)
     torch.testing.assert_close(physics.vel[..., :2].norm(dim=-1), axis.norm(dim=-1)*.1)
 
 
@@ -307,7 +323,7 @@ def test_ferry_cone_lands_in_friendly_zone_for_both_alliances(device):
     assert ((crossing_y-hub[..., 1]).abs() > .6).all()
 
 
-def test_repeated_ferry_releases_use_ball_contacts_to_clear_crowded_landings():
+def test_repeated_ferry_releases_spawn_in_friendly_alliance_zone():
     from frc_defense.fuel_physics_runtime import ferry_aim_targets
 
     env = TensorThreeVsThreeEnv(
@@ -332,9 +348,16 @@ def test_repeated_ferry_releases_use_ball_contacts_to_clear_crowded_landings():
     no_score = torch.zeros((1, 6), dtype=torch.bool)
 
     peak_speed = 0.
+    release_positions = []
     ticks = 0
     while (env.piece_owner[0, :12] >= 0).any() and ticks < 500:
+        held_before = env.piece_owner[0, :12] >= 0
         env._update_fuel(active, no_score)
+        released = held_before & (env.piece_owner[0, :12] < 0)
+        if released.any():
+            positions = env.piece_pos[0, :12][released].clone()
+            velocities = env.fuel_physics.vel[0, :12, :2][released].clone()
+            release_positions.append(positions)
         env.fuel_physics.step(active, env.piece_active, env.piece_owner)
         peak_speed = max(peak_speed,
                          env.fuel_physics.vel[0, :12, :2].norm(dim=-1).max().item())
@@ -343,10 +366,12 @@ def test_repeated_ferry_releases_use_ball_contacts_to_clear_crowded_landings():
 
     assert (env.piece_owner[0, :12] == -1).all()
     assert peak_speed < 1.3, f"crowded ferry releases reached {peak_speed:.2f} m/s"
+    spawned = torch.cat(release_positions)
+    assert (spawned[:, 0] < env.alliance_zone_depth).all()
+    assert (spawned[:, 0] < env.sim.field_length/2).all()
+    assert spawned[:, 1].std() > .15
     landed = env.piece_pos[0, :12]
-    assert (landed[:, 0] <= env.alliance_zone_depth).all()
-    # Closely placed ferry releases remain in the ball-contact simulation;
-    # no queue or empty-cell relocation is used.
+    # Released FUEL travels through the randomized midfield-facing HUB region.
     for _ in range(12):
         env.fuel_physics.step(active, env.piece_active, env.piece_owner)
     free = env.piece_owner[0, :12] < 0

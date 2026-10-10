@@ -97,3 +97,29 @@ def candidates(points: torch.Tensor, robot_xy: torch.Tensor, free: torch.Tensor,
     # Like observation construction, candidate generation is read-only and
     # returns each row's current data even for inactive worlds.
     return _extension().candidates(points.contiguous(), robot_xy.contiguous(), free.contiguous())
+
+
+def top4_with_age_and_nearby(points: torch.Tensor, intake_xy: torch.Tensor,
+                            robot_xy: torch.Tensor, age: torch.Tensor,
+                            free: torch.Tensor, midfield: torch.Tensor,
+                            age_weight: float = .4):
+    """Fuse age-adjusted nearest-four ranking and nearby-midfield detection."""
+    if not available(points.device):
+        raise RuntimeError("fuel candidate top-four kernel requires HIP")
+    return _extension().candidate_top4_with_nearby(
+        points.contiguous(), intake_xy.contiguous(), robot_xy.contiguous(),
+        age.contiguous(), free.contiguous(), midfield.contiguous(),
+        float(age_weight))
+
+
+def costs_with_age_and_nearby(points: torch.Tensor, intake_xy: torch.Tensor,
+                              robot_xy: torch.Tensor, age: torch.Tensor,
+                              free: torch.Tensor, midfield: torch.Tensor,
+                              age_weight: float = .4):
+    """Calculate age-adjusted intake costs and nearby midfield flags together."""
+    if not available(points.device):
+        raise RuntimeError("fuel candidate cost kernel requires HIP")
+    return _extension().candidate_costs_with_nearby(
+        points.contiguous(), intake_xy.contiguous(), robot_xy.contiguous(),
+        age.contiguous(), free.contiguous(), midfield.contiguous(),
+        float(age_weight))

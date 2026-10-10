@@ -7,17 +7,15 @@ namespace {
 constexpr int THREADS=512;
 __global__ void pickup_kernel(const bool* active,const float* pose,
     const float* length,const float* width,const float* piece_pos,
-    const bool* piece_active,int64_t* owner,bool* free,const int16_t* possible_cells,
+    const bool* piece_active,int64_t* owner,bool* free,
     float* next_intake,const float* elapsed,const bool* controlled,
     const bool* deterministic,const bool* defense_role,int64_t* acquired_event,
-    bool* track_clear_mask,int worlds,int pieces,int robot,int nx,
-    int ny,float cell_size,int capacity,bool allow_sweep) {
+    bool* track_clear_mask,int worlds,int pieces,int robot,int capacity,bool allow_sweep) {
   const int w=blockIdx.x, lane=threadIdx.x;
   if(w>=worlds||!active[w])return;
   const int64_t piece_row=static_cast<int64_t>(w)*pieces;
   const int64_t pose_row=static_cast<int64_t>(w)*6*3;
   const int64_t owner_row=static_cast<int64_t>(w)*6;
-  const int64_t track_row=static_cast<int64_t>(w)*6*pieces;
   const int64_t robot_state=pose_row+robot*3;
   __shared__ int counts[THREADS];
   __shared__ int prefix_a[THREADS];
@@ -40,32 +38,18 @@ __global__ void pickup_kernel(const bool* active,const float* pose,
   const bool can_control=controlled[robot]||deterministic[robot];
   const float x=pose[robot_state],y=pose[robot_state+1],heading=pose[robot_state+2];
   const float c=cosf(heading),s=sinf(heading);
-  const float radius=sqrtf((.5f*length[owner_row+robot]+.35f)*
-                           (.5f*length[owner_row+robot]+.35f)+
-                           (.5f*width[owner_row+robot]+.075f)*
-                           (.5f*width[owner_row+robot]+.075f));
-  const int xlo=max(0,min(nx-1,static_cast<int>(floorf((x-radius)/cell_size))-1));
-  const int xhi=max(0,min(nx-1,static_cast<int>(floorf((x+radius)/cell_size))));
-  const int ylo=max(0,min(ny-1,static_cast<int>(floorf((y-radius)/cell_size))-1));
-  const int yhi=max(0,min(ny-1,static_cast<int>(floorf((y+radius)/cell_size))));
   const float fuel_radius=.0825f;
   const float intake_low=.5f*length[owner_row+robot]-.075f-fuel_radius;
-  const float intake_high=.5f*length[owner_row+robot]+.35f+fuel_radius;
+  // Python dispatch masks this kernel to worlds where the intake is deployed.
+  const float intake_high=.5f*length[owner_row+robot]+.35f+.3048f+fuel_radius;
   const float lateral_limit=.5f*width[owner_row+robot]+.075f+fuel_radius;
   const bool ready=elapsed[w]+1.0e-6f>=next_intake[owner_row+robot];
 
   bool candidate=false;float dist=INFINITY;int index=pieces;
   if(lane<pieces){
     const int64_t pi=piece_row+lane;
-    bool nearby=false;
-    #pragma unroll
-    for(int k=0;k<3;k++){
-      const int id=static_cast<int>(possible_cells[(pi*3)+k]);
-      if(id>=0){const int cy=id/nx,cx=id-cy*nx;
-        nearby|=(cx>=xlo&&cx<=xhi&&cy>=ylo&&cy<=yhi);}
-    }
     const bool is_free=free[pi]&&piece_active[pi]&&owner[pi]<0;
-    if(nearby&&is_free&&can_control){
+    if(is_free&&can_control){
       const float dx=piece_pos[pi*2]-x,dy=piece_pos[pi*2+1]-y;
       const float longitudinal=dx*c+dy*s;
       const float lateral=fabsf(-dx*s+dy*c);
@@ -120,13 +104,14 @@ __global__ void pickup_kernel(const bool* active,const float* pose,
   }
 }
 
-__global__ void pickup_all_kernel(const bool* active,const float* pose,
+__global__ void pickup_all_kernel(const bool* active,const bool* intake_extended,
+    const float* pose,
     const float* length,const float* width,const float* piece_pos,
     const bool* piece_active,int64_t* owner,bool* free,
-    const int16_t* possible_cells,float* next_intake,const float* elapsed,
+    float* next_intake,const float* elapsed,
     const bool* controlled,const bool* deterministic,const bool* defense_role,
     const bool* hub_active,const int64_t* capacities,int64_t* acquired_event,
-    bool* track_clear_mask,int worlds,int pieces,int nx,int ny,float cell_size,
+    bool* track_clear_mask,int worlds,int pieces,
     float alliance_depth,float field_length) {
   const int w=blockIdx.x, lane=threadIdx.x;
   if(w>=worlds)return;
@@ -145,8 +130,7 @@ __global__ void pickup_all_kernel(const bool* active,const float* pose,
   // Preserve the Python robot loop's slot-order reservation semantics while
   // moving all six ranking passes into this single block/kernel launch.
   for(int robot=0;robot<6;robot++){
-    if(!active[w]) {
-      if(lane==0) acquired_event[robot_row+robot]=0;
+    if(!active[w]||!intake_extended[robot_row+robot]) {
       __syncthreads();
       continue;
     }
@@ -170,28 +154,15 @@ __global__ void pickup_all_kernel(const bool* active,const float* pose,
     const float c=cosf(heading),s=sinf(heading);
     const float robot_length=length[robot_row+robot];
     const float robot_width=width[robot_row+robot];
-    const float radius=sqrtf((.5f*robot_length+.35f)*(.5f*robot_length+.35f)+
-                             (.5f*robot_width+.075f)*(.5f*robot_width+.075f));
-    const int xlo=max(0,min(nx-1,static_cast<int>(floorf((x-radius)/cell_size))-1));
-    const int xhi=max(0,min(nx-1,static_cast<int>(floorf((x+radius)/cell_size))));
-    const int ylo=max(0,min(ny-1,static_cast<int>(floorf((y-radius)/cell_size))-1));
-    const int yhi=max(0,min(ny-1,static_cast<int>(floorf((y+radius)/cell_size))));
     const float fuel_radius=.0825f;
     const float intake_low=.5f*robot_length-.075f-fuel_radius;
-    const float intake_high=.5f*robot_length+.35f+fuel_radius;
+    const float intake_high=.5f*robot_length+.35f+.3048f+fuel_radius;
     const float lateral_limit=.5f*robot_width+.075f+fuel_radius;
     const bool ready=elapsed[w]+1.0e-6f>=next_intake[robot_row+robot];
 
     bool candidate=false;float dist=INFINITY;int index=pieces;
     if(lane<pieces){
       const int64_t pi=piece_row+lane;
-      bool nearby=false;
-      #pragma unroll
-      for(int k=0;k<3;k++){
-        const int id=static_cast<int>(possible_cells[pi*3+k]);
-        if(id>=0){const int cy=id/nx,cx=id-cy*nx;
-          nearby|=(cx>=xlo&&cx<=xhi&&cy>=ylo&&cy<=yhi);}
-      }
       bool allowed=true;
       if(det_offense&&!hub_is_active){
         const float piece_x=piece_pos[pi*2];
@@ -200,7 +171,7 @@ __global__ void pickup_all_kernel(const bool* active,const float* pose,
         allowed=!in_alliance;
       }
       const bool is_free=allowed&&free[pi]&&piece_active[pi]&&owner[pi]<0;
-      if(nearby&&is_free&&can_control){
+      if(is_free&&can_control){
         const float dx=piece_pos[pi*2]-x,dy=piece_pos[pi*2+1]-y;
         const float longitudinal=dx*c+dy*s;
         const float lateral=fabsf(-dx*s+dy*c);
@@ -258,28 +229,28 @@ __global__ void pickup_all_kernel(const bool* active,const float* pose,
 
 void pickup_grid_launch(const bool* active,const float* pose,const float* length,
     const float* width,const float* piece_pos,const bool* piece_active,
-    int64_t* owner,bool* free,const int16_t* possible_cells,float* next_intake,
+    int64_t* owner,bool* free,float* next_intake,
     const float* elapsed,const bool* controlled,const bool* deterministic,
     const bool* defense_role,int64_t* acquired_event,bool* track_mask,
-    int worlds,int pieces,int robot,int nx,int ny,
-    float cell_size,int capacity,bool allow_sweep,hipStream_t stream){
+    int worlds,int pieces,int robot,int capacity,bool allow_sweep,hipStream_t stream){
   hipLaunchKernelGGL(pickup_kernel,dim3(worlds),dim3(THREADS),0,stream,
-      active,pose,length,width,piece_pos,piece_active,owner,free,possible_cells,
+      active,pose,length,width,piece_pos,piece_active,owner,free,
       next_intake,elapsed,controlled,deterministic,defense_role,acquired_event,
-      track_mask,worlds,pieces,robot,nx,ny,cell_size,capacity,allow_sweep);
+      track_mask,worlds,pieces,robot,capacity,allow_sweep);
 }
 
-void pickup_all_launch(const bool* active,const float* pose,const float* length,
+void pickup_all_launch(const bool* active,const bool* intake_extended,
+    const float* pose,const float* length,
     const float* width,const float* piece_pos,const bool* piece_active,
-    int64_t* owner,bool* free,const int16_t* possible_cells,float* next_intake,
+    int64_t* owner,bool* free,float* next_intake,
     const float* elapsed,const bool* controlled,const bool* deterministic,
     const bool* defense_role,const bool* hub_active,const int64_t* capacities,
-    int64_t* acquired_event,bool* track_mask,int worlds,int pieces,int nx,int ny,
-    float cell_size,float alliance_depth,float field_length,hipStream_t stream){
- hipLaunchKernelGGL(( pickup_all_kernel), dim3(dim3(worlds)),dim3(dim3(THREADS)),0,stream, active,pose,length,
-      width,piece_pos,piece_active,owner,free,possible_cells,next_intake,elapsed,
+    int64_t* acquired_event,bool* track_mask,int worlds,int pieces,
+    float alliance_depth,float field_length,hipStream_t stream){
+ hipLaunchKernelGGL(( pickup_all_kernel), dim3(dim3(worlds)),dim3(dim3(THREADS)),0,stream, active,intake_extended,pose,length,
+      width,piece_pos,piece_active,owner,free,next_intake,elapsed,
       controlled,deterministic,defense_role,hub_active,capacities,acquired_event,
-      track_mask,worlds,pieces,nx,ny,cell_size,alliance_depth,field_length);
+      track_mask,worlds,pieces,alliance_depth,field_length);
 }
 
 __global__ void possession_counts_kernel(const int64_t* owner,int64_t* counts,

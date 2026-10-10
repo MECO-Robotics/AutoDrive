@@ -4,7 +4,7 @@
 
 void robot_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const bool*, const int64_t*,
-    bool*, bool*, int, hipStream_t);
+    bool*, bool*, int, bool, hipStream_t);
 void field_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const bool*,
     bool*, int, int, hipStream_t);
@@ -17,12 +17,47 @@ void safe_score_targets_launch(const float*, const float*, const float*,
 void avoidance_launch(const float*, const float*, const float*, const float*,
     const float*, const float*, const bool*, const int64_t*, const bool*,
     int64_t*, float*, int, bool, hipStream_t);
+void invalidate_tracks_launch(const float*, const float*, const float*,
+    const float*, bool*, float*, const bool*, int, int, float, hipStream_t);
+void footprint_path_clear_launch(const float*, const float*, const float*,
+    const float*, const float*, bool*, int, int, int, float, float, float,
+    hipStream_t);
+
+torch::Tensor footprint_path_clear(torch::Tensor path, torch::Tensor heading,
+    torch::Tensor length, torch::Tensor width, torch::Tensor boxes,
+    double field_length, double field_width, double clearance) {
+  const auto rows = path.size(0);
+  const auto points = path.size(1);
+  TORCH_CHECK(path.is_cuda() && path.scalar_type() == at::kFloat &&
+              path.dim() == 3 && path.size(2) == 2 && points >= 2 &&
+              heading.sizes() == torch::IntArrayRef({rows}) &&
+              length.sizes() == heading.sizes() && width.sizes() == heading.sizes() &&
+              heading.scalar_type() == at::kFloat &&
+              length.scalar_type() == at::kFloat && width.scalar_type() == at::kFloat &&
+              boxes.dim() == 2 && boxes.size(1) == 4 && boxes.size(0) > 0 &&
+              boxes.scalar_type() == at::kFloat && field_length > 0. &&
+              field_width > 0. && clearance >= 0.,
+              "footprint path tensor shape or dtype mismatch");
+  for (const auto& t : {path, heading, length, width, boxes})
+    TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == path.device(),
+                "footprint path tensors must be contiguous on one HIP device");
+  auto clear = torch::empty({rows}, path.options().dtype(at::kBool));
+  footprint_path_clear_launch(path.data_ptr<float>(), heading.data_ptr<float>(),
+      length.data_ptr<float>(), width.data_ptr<float>(), boxes.data_ptr<float>(),
+      clear.data_ptr<bool>(), static_cast<int>(rows), static_cast<int>(points),
+      static_cast<int>(boxes.size(0)), static_cast<float>(field_length),
+      static_cast<float>(field_width), static_cast<float>(clearance),
+      c10::cuda::getCurrentCUDAStream(path.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return clear;
+}
 
 void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
     torch::Tensor length, torch::Tensor width, torch::Tensor mass,
     torch::Tensor yaw_inertia_multiplier, torch::Tensor mu,
     torch::Tensor active, torch::Tensor team_ids,
-    torch::Tensor robot_contact, torch::Tensor opponent_contact) {
+    torch::Tensor robot_contact, torch::Tensor opponent_contact,
+    bool parallel_single_world) {
   const auto n = pose.size(0);
   TORCH_CHECK(pose.is_cuda() && pose.scalar_type() == at::kFloat &&
               pose.sizes() == torch::IntArrayRef({n, 6, 3}),
@@ -47,7 +82,8 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
       yaw_inertia_multiplier.data_ptr<float>(), mu.data_ptr<float>(),
       active.data_ptr<bool>(), team_ids.data_ptr<int64_t>(),
       robot_contact.data_ptr<bool>(), opponent_contact.data_ptr<bool>(),
-      static_cast<int>(n), c10::cuda::getCurrentCUDAStream(pose.get_device()));
+      static_cast<int>(n), parallel_single_world,
+      c10::cuda::getCurrentCUDAStream(pose.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -182,6 +218,40 @@ torch::Tensor avoid_robot_contention(torch::Tensor pose, torch::Tensor command,
   return adjusted;
 }
 
+void invalidate_tracks_in_robot_contact(torch::Tensor pose,
+    torch::Tensor length, torch::Tensor width, torch::Tensor track_pos,
+    torch::Tensor track_mask, torch::Tensor track_age, torch::Tensor active,
+    double fuel_radius) {
+  const auto n = pose.size(0);
+  const auto pieces = track_pos.size(2);
+  TORCH_CHECK(pose.is_cuda() && pose.scalar_type() == at::kFloat &&
+              pose.sizes() == torch::IntArrayRef({n, 6, 3}) &&
+              length.sizes() == torch::IntArrayRef({n, 6}) &&
+              width.sizes() == length.sizes() &&
+              track_pos.sizes() == torch::IntArrayRef({n, 6, pieces, 2}) &&
+              track_mask.sizes() == torch::IntArrayRef({n, 6, pieces}) &&
+              track_age.sizes() == track_mask.sizes() &&
+              length.scalar_type() == at::kFloat &&
+              width.scalar_type() == at::kFloat &&
+              track_pos.scalar_type() == at::kFloat &&
+              track_mask.scalar_type() == at::kBool &&
+              track_age.scalar_type() == at::kFloat &&
+              active.sizes() == torch::IntArrayRef({n}) &&
+              active.scalar_type() == at::kBool && fuel_radius > 0.,
+              "track invalidation tensor shape or dtype mismatch");
+  for (const auto& t : {pose, length, width, track_pos, track_mask,
+                        track_age, active})
+    TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == pose.device(),
+                "track invalidation tensors must be contiguous on one HIP device");
+  invalidate_tracks_launch(pose.data_ptr<float>(), length.data_ptr<float>(),
+      width.data_ptr<float>(), track_pos.data_ptr<float>(),
+      track_mask.data_ptr<bool>(), track_age.data_ptr<float>(),
+      active.data_ptr<bool>(), static_cast<int>(n), static_cast<int>(pieces),
+      static_cast<float>(fuel_radius),
+      c10::cuda::getCurrentCUDAStream(pose.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("robot_contacts", &robot_contacts, "Fused six-robot SAT contacts (HIP)");
   m.def("field_contacts", &field_contacts, "Fused six-robot field SAT contacts (HIP)");
@@ -191,4 +261,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused six-robot safe score target search (HIP)");
   m.def("avoid_robot_contention", &avoid_robot_contention,
         "Fused six-robot motion contention adjustment (HIP)");
+  m.def("invalidate_tracks_in_robot_contact", &invalidate_tracks_in_robot_contact,
+        "Fused perceived-track robot intake invalidation (HIP)");
+  m.def("footprint_path_clear", &footprint_path_clear,
+        "Fused batched robot footprint path clearance (HIP)");
 }

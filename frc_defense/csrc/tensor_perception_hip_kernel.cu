@@ -9,6 +9,7 @@ __global__ void piece_occlusion_kernel(const float* pose_xy,
                                        bool* output,
                                        int pieces,
                                        int obstacle_count,
+                                       int obstacle_width,
                                        int64_t total) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) return;
@@ -29,7 +30,33 @@ __global__ void piece_occlusion_kernel(const float* pose_xy,
 
   bool blocked = false;
   for (int obstacle = 0; obstacle < obstacle_count; ++obstacle) {
-    const float* circle = obstacles + static_cast<int64_t>(obstacle) * 3;
+    const float* circle = obstacles + static_cast<int64_t>(obstacle) * obstacle_width;
+    if (obstacle_width == 4) {
+      const float half_x = __fadd_rn(circle[2], 0.03f);
+      const float half_y = __fadd_rn(circle[3], 0.03f);
+      const bool parallel_x = fabsf(dx) < 1.0e-8f;
+      const bool parallel_y = fabsf(dy) < 1.0e-8f;
+      const bool outside_parallel_x = parallel_x && fabsf(__fadd_rn(pose[0], -circle[0])) > half_x;
+      const bool outside_parallel_y = parallel_y && fabsf(__fadd_rn(pose[1], -circle[1])) > half_y;
+      if (outside_parallel_x || outside_parallel_y) continue;
+      const float safe_dx = parallel_x ? 1.0f : dx;
+      const float safe_dy = parallel_y ? 1.0f : dy;
+      const float x0 = __fdiv_rn(__fadd_rn(circle[0] - half_x, -pose[0]), safe_dx);
+      const float x1 = __fdiv_rn(__fadd_rn(circle[0] + half_x, -pose[0]), safe_dx);
+      const float y0 = __fdiv_rn(__fadd_rn(circle[1] - half_y, -pose[1]), safe_dy);
+      const float y1 = __fdiv_rn(__fadd_rn(circle[1] + half_y, -pose[1]), safe_dy);
+      const float x_near = parallel_x ? -INFINITY : fminf(x0, x1);
+      const float x_far = parallel_x ? INFINITY : fmaxf(x0, x1);
+      const float y_near = parallel_y ? -INFINITY : fminf(y0, y1);
+      const float y_far = parallel_y ? INFINITY : fmaxf(y0, y1);
+      const float enters = fmaxf(0.02f, fmaxf(x_near, y_near));
+      const float exits = fminf(0.98f, fminf(x_far, y_far));
+      if (exits >= enters) {
+        blocked = true;
+        break;
+      }
+      continue;
+    }
     const float radius = __fadd_rn(circle[2], 0.03f);
     if (!(radius > 0.0f)) continue;
 
@@ -137,7 +164,8 @@ __global__ void visibility_3v3_kernel(const float* pose, const float* pieces_xy,
                                       const float* obstacles,
                                       const float* robot_radius, bool* output,
                                       int robots, int pieces, int obstacle_count,
-                                      float range_m, float half_fov, bool full_fov,
+                                      int obstacle_width, float range_m,
+                                      float half_fov, bool full_fov,
                                       int64_t total) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) return;
@@ -174,22 +202,50 @@ __global__ void visibility_3v3_kernel(const float* pose, const float* pieces_xy,
   const float denominator_raw = __fadd_rn(__fmul_rn(dx, dx), __fmul_rn(dy, dy));
   const float denominator = fmaxf(denominator_raw, 1.0e-8f);
   for (int obstacle = 0; obstacle < obstacle_count; ++obstacle) {
-    const float* circle = obstacles + static_cast<int64_t>(obstacle) * 3;
-    const float radius = __fadd_rn(circle[2], 0.03f);
-    if (!(radius > 0.0f)) continue;
-    const float rel_x = __fadd_rn(circle[0], -robot[0]);
-    const float rel_y = __fadd_rn(circle[1], -robot[1]);
-    const float dot = __fadd_rn(__fmul_rn(rel_x, dx), __fmul_rn(rel_y, dy));
-    const float t = __fdiv_rn(dot, denominator);
-    if (!(t > 0.02f && t < 0.98f)) continue;
-    const float clamped_t = fminf(1.0f, fmaxf(0.0f, t));
-    const float closest_x = __fadd_rn(robot[0], __fmul_rn(clamped_t, dx));
-    const float closest_y = __fadd_rn(robot[1], __fmul_rn(clamped_t, dy));
-    const float distance_x = __fadd_rn(closest_x, -circle[0]);
-    const float distance_y = __fadd_rn(closest_y, -circle[1]);
-    const float closest_sq = __fadd_rn(__fmul_rn(distance_x, distance_x),
-                                       __fmul_rn(distance_y, distance_y));
-    if (sqrtf(closest_sq) <= radius) {
+    bool intersects = false;
+    if (obstacle_width == 4) {
+      const float* box = obstacles + static_cast<int64_t>(obstacle) * 4;
+      const float hx = box[2] + 0.03f, hy = box[3] + 0.03f;
+      const bool parallel_x = fabsf(dx) < 1.0e-8f;
+      const bool parallel_y = fabsf(dy) < 1.0e-8f;
+      const bool outside_parallel =
+          (parallel_x && fabsf(robot[0] - box[0]) > hx) ||
+          (parallel_y && fabsf(robot[1] - box[1]) > hy);
+      if (!outside_parallel) {
+        const float safe_dx = parallel_x ? 1.0f : dx;
+        const float safe_dy = parallel_y ? 1.0f : dy;
+        const float tx0 = (box[0] - hx - robot[0]) / safe_dx;
+        const float tx1 = (box[0] + hx - robot[0]) / safe_dx;
+        const float ty0 = (box[1] - hy - robot[1]) / safe_dy;
+        const float ty1 = (box[1] + hy - robot[1]) / safe_dy;
+        const float near_x = parallel_x ? -INFINITY : fminf(tx0, tx1);
+        const float far_x = parallel_x ? INFINITY : fmaxf(tx0, tx1);
+        const float near_y = parallel_y ? -INFINITY : fminf(ty0, ty1);
+        const float far_y = parallel_y ? INFINITY : fmaxf(ty0, ty1);
+        const float enters = fmaxf(fmaxf(near_x, near_y), 0.02f);
+        const float exits = fminf(fminf(far_x, far_y), 0.98f);
+        intersects = exits >= enters;
+      }
+    } else {
+      const float* circle = obstacles + static_cast<int64_t>(obstacle) * 3;
+      const float radius = __fadd_rn(circle[2], 0.03f);
+      if (!(radius > 0.0f)) continue;
+      const float rel_x = __fadd_rn(circle[0], -robot[0]);
+      const float rel_y = __fadd_rn(circle[1], -robot[1]);
+      const float dot = __fadd_rn(__fmul_rn(rel_x, dx), __fmul_rn(rel_y, dy));
+      const float t = __fdiv_rn(dot, denominator);
+      if (t > 0.02f && t < 0.98f) {
+        const float clamped_t = fminf(1.0f, fmaxf(0.0f, t));
+        const float closest_x = __fadd_rn(robot[0], __fmul_rn(clamped_t, dx));
+        const float closest_y = __fadd_rn(robot[1], __fmul_rn(clamped_t, dy));
+        const float distance_x = __fadd_rn(closest_x, -circle[0]);
+        const float distance_y = __fadd_rn(closest_y, -circle[1]);
+        const float closest_sq = __fadd_rn(__fmul_rn(distance_x, distance_x),
+                                           __fmul_rn(distance_y, distance_y));
+        intersects = sqrtf(closest_sq) <= radius;
+      }
+    }
+    if (intersects) {
       output[index] = false;
       return;
     }
@@ -1067,6 +1123,7 @@ void piece_occlusion_launch(const float* pose_xy, const float* segment,
                             const float* obstacles, const bool* eligible,
                             bool* output,
                             int worlds, int pieces, int obstacle_count,
+                            int obstacle_width,
                             hipStream_t stream) {
   const int64_t total = static_cast<int64_t>(worlds) * pieces;
   if (total == 0) return;
@@ -1074,7 +1131,7 @@ void piece_occlusion_launch(const float* pose_xy, const float* segment,
   const int blocks = static_cast<int>((total + threads - 1) / threads);
   hipLaunchKernelGGL(piece_occlusion_kernel, dim3(blocks), dim3(threads), 0,
                      stream, pose_xy, segment, obstacles, eligible, output, pieces,
-                     obstacle_count, total);
+                     obstacle_count, obstacle_width, total);
 }
 
 void visibility_launch(const float* pose, const float* pieces_xy,
@@ -1098,7 +1155,8 @@ void visibility_3v3_launch(const float* pose, const float* pieces_xy,
                            const bool* piece_active, const int64_t* piece_owner,
                            const bool* active, const float* obstacles,
                            const float* robot_radius, bool* output, int worlds,
-                           int robots, int pieces, int obstacle_count, float range_m,
+                           int robots, int pieces, int obstacle_count,
+                           int obstacle_width, float range_m,
                            float half_fov, bool full_fov, hipStream_t stream) {
   const int64_t total = static_cast<int64_t>(worlds) * robots * pieces;
   if (total == 0) return;
@@ -1107,7 +1165,8 @@ void visibility_3v3_launch(const float* pose, const float* pieces_xy,
   hipLaunchKernelGGL(visibility_3v3_kernel, dim3(blocks), dim3(threads), 0,
                      stream, pose, pieces_xy, piece_active, piece_owner, active,
                      obstacles, robot_radius, output, robots, pieces,
-                     obstacle_count, range_m, half_fov, full_fov, total);
+                     obstacle_count, obstacle_width, range_m, half_fov,
+                     full_fov, total);
 }
 
 void angular_cluster_launch(const float* pose,const float* positions,
@@ -1387,4 +1446,45 @@ void opponent_tracks_3v3_launch(const float* pose, const float* length,
       controlled, defense_role, ticks, opponent_pose, opponent_velocity,
       opponent_size, opponent_age, opponent_valid, seed, worlds, obstacle_count,
       range_m, half_fov, dropout, position_noise, velocity_noise, dt, total);
+}
+
+__global__ void age_tracks_3v3_kernel(
+    float* track_pos, const float* track_vel, float* track_age,
+    bool* track_mask, float* opponent_age, bool* opponent_valid,
+    const bool* active, int robots, int pieces, float dt, float timeout,
+    int64_t track_total, int64_t total) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) return;
+  if (index < track_total) {
+    const int64_t per_world = static_cast<int64_t>(robots) * pieces;
+    const int world = static_cast<int>(index / per_world);
+    if (!active[world] || !track_mask[index]) return;
+    const float age = __fadd_rn(track_age[index], dt);
+    track_age[index] = age;
+    const int64_t xy = index * 2;
+    track_pos[xy] = __fadd_rn(track_pos[xy], __fmul_rn(track_vel[xy], dt));
+    track_pos[xy + 1] = __fadd_rn(track_pos[xy + 1],
+                                  __fmul_rn(track_vel[xy + 1], dt));
+    if (age > timeout) track_mask[index] = false;
+    return;
+  }
+  const int64_t opponent_index = index - track_total;
+  const int world = static_cast<int>(opponent_index / robots);
+  if (!active[world] || !opponent_valid[opponent_index]) return;
+  const float age = __fadd_rn(opponent_age[opponent_index], dt);
+  opponent_age[opponent_index] = age;
+  if (age > 1.0f) opponent_valid[opponent_index] = false;
+}
+
+void age_tracks_3v3_launch(float* track_pos, const float* track_vel,
+    float* track_age, bool* track_mask, float* opponent_age,
+    bool* opponent_valid, const bool* active, int worlds, int robots,
+    int pieces, float dt, float timeout, hipStream_t stream) {
+  const int64_t track_total = static_cast<int64_t>(worlds) * robots * pieces;
+  const int64_t total = track_total + static_cast<int64_t>(worlds) * robots;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  hipLaunchKernelGGL(age_tracks_3v3_kernel, dim3(blocks), dim3(threads), 0,
+      stream, track_pos, track_vel, track_age, track_mask, opponent_age,
+      opponent_valid, active, robots, pieces, dt, timeout, track_total, total);
 }

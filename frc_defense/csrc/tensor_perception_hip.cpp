@@ -10,6 +10,7 @@ void piece_occlusion_launch(const float* pose_xy, const float* segment,
                             const float* obstacles, const bool* eligible,
                             bool* output,
                             int worlds, int pieces, int obstacle_count,
+                            int obstacle_width,
                             hipStream_t stream);
 void visibility_launch(const float* pose, const float* pieces_xy,
                        const bool* piece_active, const int64_t* piece_owner,
@@ -22,8 +23,9 @@ void visibility_3v3_launch(const float* pose, const float* pieces_xy,
                            const bool* piece_active, const int64_t* piece_owner,
                            const bool* active, const float* obstacles,
                            const float* robot_radius, bool* output, int worlds,
-                           int robots, int pieces, int obstacle_count, float range_m,
-                           float half_fov, bool full_fov, hipStream_t stream);
+                           int robots, int pieces, int obstacle_count,
+                           int obstacle_width, float range_m, float half_fov,
+                           bool full_fov, hipStream_t stream);
 void angular_cluster_launch(const float* pose,const float* positions,
                             const float* velocities,const bool* visible,
                             const float* input_fraction,const float* input_spatial,
@@ -89,6 +91,10 @@ void opponent_tracks_3v3_launch(const float* pose, const float* length,
                                 int obstacle_count, float range_m, float half_fov,
                                 float dropout, float position_noise,
                                 float velocity_noise, float dt, hipStream_t stream);
+void age_tracks_3v3_launch(float* track_pos, const float* track_vel,
+    float* track_age, bool* track_mask, float* opponent_age,
+    bool* opponent_valid, const bool* active, int worlds, int robots,
+    int pieces, float dt, float timeout, hipStream_t stream);
 
 torch::Tensor piece_occlusion(torch::Tensor pose_xy, torch::Tensor segment,
                               torch::Tensor obstacles, torch::Tensor eligible) {
@@ -104,8 +110,9 @@ torch::Tensor piece_occlusion(torch::Tensor pose_xy, torch::Tensor segment,
   TORCH_CHECK(segment.dim() == 3 && segment.size(0) == pose_xy.size(0) &&
               segment.size(2) == 2,
               "segment must have shape [world,piece,2]");
-  TORCH_CHECK(obstacles.dim() == 2 && obstacles.size(1) == 3,
-              "obstacles must have shape [circle,3]");
+  TORCH_CHECK(obstacles.dim() == 2 &&
+              (obstacles.size(1) == 3 || obstacles.size(1) == 4),
+              "obstacles must have shape [circle,3] or [box,4]");
   TORCH_CHECK(eligible.scalar_type() == at::kBool && eligible.dim() == 2 &&
               eligible.size(0) == segment.size(0) &&
               eligible.size(1) == segment.size(1),
@@ -122,6 +129,7 @@ torch::Tensor piece_occlusion(torch::Tensor pose_xy, torch::Tensor segment,
                          static_cast<int>(segment.size(0)),
                          static_cast<int>(segment.size(1)),
                          static_cast<int>(obstacles.size(0)),
+                         static_cast<int>(obstacles.size(1)),
                          c10::cuda::getCurrentCUDAStream(pose_xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
@@ -149,7 +157,7 @@ torch::Tensor visibility_mask(torch::Tensor pose, torch::Tensor pieces_xy,
               piece_active.size(0) == pose.size(0) && piece_active.size(1) == pieces_xy.size(1),
               "piece state must have shape [world,piece]");
   TORCH_CHECK(active.dim() == 1 && active.size(0) == pose.size(0) &&
-              obstacles.dim() == 2 && obstacles.size(1) == 3 &&
+              obstacles.dim() == 2 && (obstacles.size(1) == 3 || obstacles.size(1) == 4) &&
               other_xy.dim() == 2 && other_xy.size(0) == pose.size(0) && other_xy.size(1) == 2 &&
               other_radius.dim() == 1 && other_radius.size(0) == pose.size(0),
               "visibility input shape mismatch");
@@ -204,7 +212,7 @@ torch::Tensor visibility_mask_3v3(torch::Tensor pose, torch::Tensor pieces_xy,
               piece_owner.sizes() == piece_active.sizes(),
               "piece state must have shape [world,piece]");
   TORCH_CHECK(active.dim() == 1 && active.size(0) == worlds &&
-              obstacles.dim() == 2 && obstacles.size(1) == 3 &&
+              obstacles.dim() == 2 && (obstacles.size(1) == 3 || obstacles.size(1) == 4) &&
               robot_radius.sizes() == torch::IntArrayRef({worlds, robots}),
               "3v3 visibility input shape mismatch");
   TORCH_CHECK(pose.device() == pieces_xy.device() && pose.device() == piece_active.device() &&
@@ -223,6 +231,7 @@ torch::Tensor visibility_mask_3v3(torch::Tensor pose, torch::Tensor pieces_xy,
       active.data_ptr<bool>(), obstacles.data_ptr<float>(), robot_radius.data_ptr<float>(),
       output.data_ptr<bool>(), static_cast<int>(worlds), static_cast<int>(robots),
       static_cast<int>(pieces_xy.size(1)), static_cast<int>(obstacles.size(0)),
+      static_cast<int>(obstacles.size(1)),
       static_cast<float>(perception_range),
       static_cast<float>((fov_degrees * M_PI / 180.0) * 0.5),
       fov_degrees >= 360.0,
@@ -557,6 +566,56 @@ void opponent_tracks_3v3(torch::Tensor pose, torch::Tensor length,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void age_tracks_3v3(torch::Tensor track_pos, torch::Tensor track_vel,
+                    torch::Tensor track_age, torch::Tensor track_mask,
+                    torch::Tensor opponent_age, torch::Tensor opponent_valid,
+                    torch::Tensor active, double dt, double timeout) {
+  TORCH_CHECK(track_pos.is_cuda() && track_vel.is_cuda() && track_age.is_cuda() &&
+              track_mask.is_cuda() && opponent_age.is_cuda() &&
+              opponent_valid.is_cuda() && active.is_cuda(),
+              "track aging inputs must be device tensors");
+  TORCH_CHECK(track_pos.scalar_type() == at::kFloat &&
+              track_vel.scalar_type() == at::kFloat &&
+              track_age.scalar_type() == at::kFloat &&
+              track_mask.scalar_type() == at::kBool &&
+              opponent_age.scalar_type() == at::kFloat &&
+              opponent_valid.scalar_type() == at::kBool &&
+              active.scalar_type() == at::kBool,
+              "track aging input dtype mismatch");
+  TORCH_CHECK(track_pos.dim() == 4 && track_pos.size(1) == 6 &&
+              track_pos.size(3) == 2,
+              "track_pos must have shape [world,6,pieces,2]");
+  const auto worlds = track_pos.size(0);
+  const auto pieces = track_pos.size(2);
+  TORCH_CHECK(track_vel.sizes() == track_pos.sizes() &&
+              track_age.sizes() == torch::IntArrayRef({worlds, 6, pieces}) &&
+              track_mask.sizes() == track_age.sizes() &&
+              opponent_age.sizes() == torch::IntArrayRef({worlds, 6}) &&
+              opponent_valid.sizes() == opponent_age.sizes() &&
+              active.sizes() == torch::IntArrayRef({worlds}),
+              "track aging input shape mismatch");
+  TORCH_CHECK(track_pos.device() == track_vel.device() &&
+              track_pos.device() == track_age.device() &&
+              track_pos.device() == track_mask.device() &&
+              track_pos.device() == opponent_age.device() &&
+              track_pos.device() == opponent_valid.device() &&
+              track_pos.device() == active.device(),
+              "track aging inputs must share a device");
+  TORCH_CHECK(track_pos.is_contiguous() && track_vel.is_contiguous() &&
+              track_age.is_contiguous() && track_mask.is_contiguous() &&
+              opponent_age.is_contiguous() && opponent_valid.is_contiguous() &&
+              active.is_contiguous(), "track aging inputs must be contiguous");
+  c10::cuda::CUDAGuard guard(track_pos.device());
+  age_tracks_3v3_launch(track_pos.data_ptr<float>(), track_vel.data_ptr<float>(),
+      track_age.data_ptr<float>(), track_mask.data_ptr<bool>(),
+      opponent_age.data_ptr<float>(), opponent_valid.data_ptr<bool>(),
+      active.data_ptr<bool>(), static_cast<int>(worlds), 6,
+      static_cast<int>(pieces), static_cast<float>(dt),
+      static_cast<float>(timeout),
+      c10::cuda::getCurrentCUDAStream(track_pos.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("piece_occlusion", &piece_occlusion,
         "Fused eligible piece-vs-circle segment occlusion (HIP)");
@@ -578,4 +637,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused anonymous gated association, sensor quality and track update (HIP)");
   m.def("opponent_tracks_3v3", &opponent_tracks_3v3,
         "Fused opponent visibility and six-robot sensor track update (HIP)");
+  m.def("age_tracks_3v3", &age_tracks_3v3,
+        "In-place FUEL and opponent track aging for six robots (HIP)");
 }

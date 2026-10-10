@@ -7,6 +7,7 @@ Source: https://github.com/mjansen4857/pathplanner/tree/main/pathplannerlib-pyth
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from math import ceil, floor
 from heapq import heappop, heappush
 from math import atan2, cos, hypot, sin
@@ -16,6 +17,46 @@ from .field import BUMP_RAMP_RISE, BUMP_ROLLING_RESISTANCE
 
 TURN_LATERAL_ACCEL_SCALE = .65
 BRAKING_ACCEL_SCALE = .65
+
+
+@lru_cache(maxsize=32)
+def _static_planner_grids(length, width, resolution, robot_length,
+                          robot_width, colliders, bumps):
+    """Share immutable field grids between equivalent local repair planners."""
+    nx, ny = int(ceil(length / resolution)), int(ceil(width / resolution))
+    radius = min(robot_length, robot_width) / 2
+    cell_pad = resolution / 2
+    blocked = []
+    bump_grid = []
+    for ix in range(nx):
+        x = (ix + .5) * resolution
+        blocked_col = []
+        bump_col = []
+        for iy in range(ny):
+            y = (iy + .5) * resolution
+            blocked_cell = (x < radius or x > length - radius or
+                            y < radius or y > width - radius)
+            if not blocked_cell:
+                for cx, cy, hx, hy in colliders:
+                    nearest_x = max(abs(x - cx) - hx, 0.)
+                    nearest_y = max(abs(y - cy) - hy, 0.)
+                    if (nearest_x * nearest_x + nearest_y * nearest_y <=
+                            (radius + cell_pad) ** 2):
+                        blocked_cell = True
+                        break
+            blocked_col.append(blocked_cell)
+            bump_col.append(any(abs(x - cx) <= hx and abs(y - cy) <= hy
+                                for cx, cy, hx, hy in bumps))
+        blocked.append(tuple(blocked_col))
+        bump_grid.append(tuple(bump_col))
+    return tuple(blocked), tuple(bump_grid)
+
+
+def _box_geometry(box):
+    if hasattr(box, "length"):
+        return (float(box.x), float(box.y), float(box.length) / 2,
+                float(box.width) / 2)
+    return tuple(float(value) for value in box)
 
 
 class ADStarPlanner:
@@ -46,18 +87,11 @@ class ADStarPlanner:
         self.lateral_friction = max(.1, float(lateral_friction))
         self.max_angular_speed = max(.1, float(max_angular_speed))
         self.max_angular_acceleration = max(.1, float(max_angular_acceleration))
-        self._blocked = [[False] * self.ny for _ in range(self.nx)]
-        for ix in range(self.nx):
-            x = (ix + .5) * self.resolution
-            for iy in range(self.ny):
-                y = (iy + .5) * self.resolution
-                self._blocked[ix][iy] = self._cell_blocked(ix, iy, ())
-        self._bump = [[False] * self.ny for _ in range(self.nx)]
-        for ix in range(self.nx):
-            x = (ix + .5) * self.resolution
-            for iy in range(self.ny):
-                y = (iy + .5) * self.resolution
-                self._bump[ix][iy] = any(self._inside_box(x, y, b, 0.) for b in self.bumps)
+        static_colliders = tuple(_box_geometry(box) for box in self.colliders)
+        static_bumps = tuple(_box_geometry(box) for box in self.bumps)
+        self._blocked, self._bump = _static_planner_grids(
+            self.length, self.width, self.resolution, self.robot_length,
+            self.robot_width, static_colliders, static_bumps)
         self._dynamic = ()
         self._g = {}
         self._rhs = {}

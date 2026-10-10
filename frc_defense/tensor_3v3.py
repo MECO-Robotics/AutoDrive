@@ -8,6 +8,7 @@ and reward per robot while match termination and physics remain per world.
 from __future__ import annotations
 
 import math
+import os
 from types import SimpleNamespace
 
 import torch
@@ -81,6 +82,16 @@ class TensorThreeVsThreeEnv(
         self.field_length = float(field_length)
         self.alliance_zone_depth = float(ALLIANCE_ZONE_DEPTH)
         self.dt, self.horizon = float(dt), int(horizon)
+        self._target_action_graph_enabled = bool(
+            torch.version.hip and self.n <= 8 and
+            os.environ.get("AUTODRIVE_3V3_TARGET_GRAPH", "1") != "0")
+        self._target_action_graph = None
+        self._target_action_graph_signature = None
+        self._target_action_graph_outputs = None
+        self._target_action_graph_audit = None
+        self._target_action_graph_actions = None
+        self._target_action_graph_active = None
+        self._target_action_graph_disabled = False
         self._world_indices=torch.arange(self.n,device=self.device)
         self._robot_owner_ids=torch.arange(NUM_ROBOTS,device=self.device,dtype=torch.long)
         self.obs_dim, self.action_dim, self.action_kind = OBS_DIM, ACTION_DIM, "categorical"
@@ -102,6 +113,7 @@ class TensorThreeVsThreeEnv(
         self.perception_interval = max(1, int(perception_interval))
         self._planner_tick_scalar=self.replan_interval-1
         self._planner_tick_aligned=True
+        self._full_batch_step_scalar=0
         self._vectorized_scoring_enabled=True
         self.normalize_observations = bool(normalize_observations)
         modes = list(control_modes or ("deterministic",) * NUM_ROBOTS)
@@ -169,6 +181,11 @@ class TensorThreeVsThreeEnv(
         self._has_deterministic_offense=any(
             mode=="deterministic" and role=="offense"
             for mode,role in zip(modes,roles))
+        self._deterministic_offense_robot_ids=tuple(
+            i for i,(mode,role) in enumerate(zip(modes,roles))
+            if mode=="deterministic" and role=="offense")
+        self._deterministic_offense_robot_index=torch.tensor(
+            self._deterministic_offense_robot_ids,device=self.device,dtype=torch.long)
         self.team_ids = torch.tensor(TEAM_IDS, device=self.device, dtype=torch.long)
         self._team_robot_ids=tuple(torch.tensor(
             [robot for robot,team in enumerate(TEAM_IDS) if team==alliance],
@@ -428,6 +445,7 @@ class TensorThreeVsThreeEnv(
         self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
         self.steps.zero_(); self.planner_ticks.fill_(self.replan_interval-1)
         self._planner_tick_scalar=self.replan_interval-1; self._planner_tick_aligned=True
+        self._full_batch_step_scalar=0
         self.hub_active.fill_(True); self.auto_fuel_scores.zero_(); self.fuel_score_count.zero_()
         for tensor in (self.fuel_acquisition_count, self.fuel_denied_count,
                        self.fuel_acquired_event, self.fuel_scored_event,
@@ -484,8 +502,10 @@ class TensorThreeVsThreeEnv(
         if bool(mask.all()):
             self._planner_tick_scalar=self.replan_interval-1
             self._planner_tick_aligned=True
+            self._full_batch_step_scalar=0
         else:
             self._planner_tick_aligned=False
+            self._full_batch_step_scalar=None
         self.match_remaining.copy_(torch.where(mask, torch.full_like(self.match_remaining, 160.),
                                                self.match_remaining))
         for tensor in (self.auto_fuel_scores, self.fuel_score_count, self.fuel_acquisition_count,
@@ -514,12 +534,67 @@ class TensorThreeVsThreeEnv(
         self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
         return self._last_obs
 
+    def _target_for_actions_step(self, actions, active, full_batch):
+        """Replay the static target-selection tensor workload on HIP batches."""
+        if (not self._target_action_graph_enabled or
+                self._target_action_graph_disabled or not full_batch or
+                self.device.type != "cuda" or
+                not torch.is_tensor(actions) or not actions.is_cuda or
+                actions.dtype != torch.long or
+                torch.cuda.is_current_stream_capturing()):
+            return self._target_for_actions(actions, active)
+
+        signature = (self.n, self.control_modes, self.robot_roles,
+                     self.robot_types, self.sweeping_enabled,
+                     self.dt, self.field_length, self.sim.field_width,
+                     self.fuel_physics is not None)
+        if self._target_action_graph_signature != signature:
+            self._target_action_graph = None
+            self._target_action_graph_outputs = None
+            self._target_action_graph_audit = None
+            self._target_action_graph_signature = signature
+        if self._target_action_graph_actions is None:
+            self._target_action_graph_actions = torch.empty(
+                (self.n, NUM_ROBOTS), device=self.device, dtype=torch.long)
+            self._target_action_graph_active = torch.empty(
+                (self.n,), device=self.device, dtype=torch.bool)
+
+        self._target_action_graph_actions.copy_(actions.reshape(self.n, NUM_ROBOTS))
+        self._target_action_graph_active.copy_(active)
+        if self._target_action_graph is None:
+            graph = torch.cuda.CUDAGraph()
+            try:
+                with torch.cuda.graph(graph):
+                    outputs = self._target_for_actions(
+                        self._target_action_graph_actions,
+                        self._target_action_graph_active)
+                audit = (self._last_audit_targets,
+                         self._last_audit_fuel_targets,
+                         self._last_audit_cluster_count)
+                graph.replay()
+            except Exception:
+                self._target_action_graph_disabled = True
+                return self._target_for_actions(actions, active)
+            self._target_action_graph = graph
+            self._target_action_graph_outputs = outputs
+            self._target_action_graph_audit = audit
+        else:
+            self._target_action_graph.replay()
+            (self._last_audit_targets,
+             self._last_audit_fuel_targets,
+             self._last_audit_cluster_count) = self._target_action_graph_audit
+        return self._target_action_graph_outputs
+
 
 
 
     def step(self, actions, active_mask=None, *, capture_observation=True,
              capture_info=True, _active_count=None, _return_info=None):
         full_batch=active_mask is None
+        if full_batch and self._full_batch_step_scalar is not None:
+            self._full_batch_step_scalar+=1
+        elif not full_batch:
+            self._full_batch_step_scalar=None
         active=(torch.ones(self.n,device=self.device,dtype=torch.bool) if full_batch else
                 torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
         if _return_info is not None:
@@ -532,7 +607,8 @@ class TensorThreeVsThreeEnv(
             return obs,torch.zeros((self.n,6),device=self.device),torch.zeros_like(active),torch.zeros_like(active),{}
         if self.sweeping_enabled:
             self._prepare_raster_cursor(active)
-        targets,action,carrying,fuel_delta=self._target_for_actions(actions,active)
+        targets,action,carrying,fuel_delta=self._target_for_actions_step(
+            actions,active,full_batch)
         raster_mask=(self.sweeping_enabled & (self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((action<4)|((action==6)&~carrying)))
@@ -754,18 +830,30 @@ class TensorThreeVsThreeEnv(
         # goals even when the straight chassis path is clear. Bridge that
         # final approach for every deterministic collector, not only audit
         # probes; retain planner routing whenever the direct path is blocked.
-        direct=(targets-self.sim.pose[:,:,:2])
+        offense_ids=self._deterministic_offense_robot_index
+        offense_targets=targets.index_select(1,offense_ids)
+        offense_pose=self.sim.pose.index_select(1,offense_ids)
+        offense_distance=distance.index_select(1,offense_ids)
+        offense_command=command.index_select(1,offense_ids)
+        direct=(offense_targets-offense_pose[:,:,:2])
         direct=direct/direct.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-        direct_speed=torch.minimum(self.sim.speed,
-                                   (distance[...,0]*6.))
+        direct_speed=torch.minimum(self.sim.speed.index_select(1,offense_ids),
+                                   offense_distance[:,:,0]*6.)
         direct_command=direct*direct_speed[...,None]
-        direct_path=torch.stack((start,targets.reshape(-1,2)),dim=1)
+        direct_path=torch.stack((offense_pose[...,:2],offense_targets),dim=2)
         direct_clear=self.planner._footprint_path_clear(
-            direct_path,heading,lengths,widths).reshape(self.n,NUM_ROBOTS)
-        stalled_collector=(pickup_active & ~trench_alignment &
-            (distance[...,0]>.03) &
-            ((distance[...,0]<1.6) | (command.norm(dim=-1)<.05)) & direct_clear)
-        command=torch.where(stalled_collector[...,None],direct_command,command)
+            direct_path.reshape(-1,2,2).contiguous(),
+            offense_pose[...,2].reshape(-1).contiguous(),
+            planner_lengths.index_select(1,offense_ids).reshape(-1).contiguous(),
+            self.sim.width.index_select(1,offense_ids).reshape(-1).contiguous()
+        ).reshape(self.n,-1)
+        stalled_collector=(pickup_active.index_select(1,offense_ids) &
+            ~trench_alignment.index_select(1,offense_ids) &
+            (offense_distance[:,:,0]>.03) &
+            ((offense_distance[:,:,0]<1.6) |
+             (offense_command.norm(dim=-1)<.05)) & direct_clear)
+        command.index_copy_(1,offense_ids,torch.where(
+            stalled_collector[...,None],direct_command,offense_command))
         # Rotate into the AD* travel tangent before taking the last step to a
         # fuel target; this keeps lateral chassis motion out of the intake
         # approach while preserving efficient swerve travel between targets.
@@ -842,6 +930,29 @@ class TensorThreeVsThreeEnv(
         self._update_fuel(active,score_intent=self._last_score_intent)
         if self.perception_interval == 1:
             self._update_perception(active,active_count=active_count)
+        elif full_batch and self._full_batch_step_scalar is not None:
+            if self._full_batch_step_scalar % self.perception_interval == 0:
+                self._update_perception(active,active_count=self.n)
+            else:
+                from . import tensor_perception
+                fused_aging=tensor_perception.age_tracks_3v3(
+                    self.track_pos,self.track_vel,self.track_age,self.track_mask,
+                    self.opponent_age,self.opponent_valid,active,self.dt,
+                    self.perception_track_timeout)
+                if not fused_aging:
+                    self.track_age = torch.where(
+                        active[:, None, None] & self.track_mask,
+                        self.track_age + self.dt, self.track_age)
+                    self.track_pos.add_(torch.where(
+                        (active[:, None, None] & self.track_mask)[..., None],
+                        self.track_vel * self.dt,
+                        torch.zeros_like(self.track_vel)))
+                    self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
+                                         active[:, None, None])
+                    self.opponent_age = torch.where(
+                        active[:, None] & self.opponent_valid,
+                        self.opponent_age + self.dt, self.opponent_age)
+                    self.opponent_valid &= ~((self.opponent_age > 1.) & active[:, None])
         else:
             perception_tick = (self.steps % self.perception_interval) == 0
             update_active = active & perception_tick

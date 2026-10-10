@@ -2,9 +2,18 @@
 from __future__ import annotations
 
 import math
+import os
 import torch
 from . import tensor_collision_multi_hip as _collision_multi_hip
 from . import tensor_3v3_pickup_grid_hip as _pickup_grid_hip
+from . import tensor_fuel_candidate_rank as _fuel_candidate_rank
+
+FUSED_ACTION_CANDIDATE_COSTS_ENABLED = (
+    os.environ.get("AUTODRIVE_FUSED_3V3_ACTION_COSTS", "1") != "0")
+OFFENSE_ONLY_CANDIDATE_RANK_ENABLED = (
+    os.environ.get("AUTODRIVE_3V3_OFFENSE_ONLY_CANDIDATE_RANK", "1") != "0")
+FUSED_TOP4_CANDIDATE_RANK_ENABLED = (
+    os.environ.get("AUTODRIVE_FUSED_TOP4_CANDIDATES", "1") != "0")
 
 
 class TensorThreeVsThreeActionMixin:
@@ -89,6 +98,7 @@ class TensorThreeVsThreeActionMixin:
             indices, valid, _ = self._candidates()
             masks, possession = self._action_mask(indices, valid)
         robot_hub_active = self.hub_active[:, self.team_ids]
+        active_hub_return = torch.zeros_like(robot_hub_active)
         hub=self.hub_centers[self.team_ids][None].expand(self.n,-1,-1)
         intake_indices, intake_eligible = indices, valid
         intake_available = valid.any(-1) if valid is not None else None
@@ -123,10 +133,65 @@ class TensorThreeVsThreeActionMixin:
             # just the four nearest targets exposed as intake actions.
             intake_available=eligible_tracks.any(-1)
             intake_tracks=eligible_tracks
-            intake_distance=(self.track_pos-intake_reference[:,:,None,:]).norm(dim=-1)
-            intake_distance+=self.track_age.clamp(0.,2.)*.4
-            nearest,intake_indices=intake_distance.masked_fill(
-                ~intake_tracks,float("inf")).topk(4,dim=-1,largest=False)
+            midfield_piece=eligible_tracks & ~piece_in_alliance
+            nearby_midfield_fuel=None
+            rank_offense_only=(self.n == 1 and defer_initial_candidates and
+                               OFFENSE_ONLY_CANDIDATE_RANK_ENABLED)
+            rank_robot_ids=(self._deterministic_offense_robot_ids
+                            if rank_offense_only else tuple(range(6)))
+            if (FUSED_ACTION_CANDIDATE_COSTS_ENABLED and
+                    _fuel_candidate_rank.integrated_available(self.device)):
+                rank_index=(self._deterministic_offense_robot_index
+                            if rank_offense_only else self._robot_owner_ids)
+                ranked_count=len(rank_robot_ids)
+                ranked_points=self.track_pos.index_select(1,rank_index).reshape(
+                    -1,self.fuel_count,2).contiguous()
+                ranked_intake=intake_reference.index_select(1,rank_index).reshape(
+                    -1,2).contiguous()
+                ranked_pose=p.index_select(1,rank_index)[...,:2].reshape(-1,2).contiguous()
+                ranked_age=self.track_age.index_select(1,rank_index).reshape(
+                    -1,self.fuel_count).contiguous()
+                ranked_free=intake_tracks.index_select(1,rank_index).reshape(
+                    -1,self.fuel_count).contiguous()
+                ranked_midfield=midfield_piece.index_select(1,rank_index).reshape(
+                    -1,self.fuel_count).contiguous()
+                if rank_offense_only and FUSED_TOP4_CANDIDATE_RANK_ENABLED:
+                    ranked_indices,ranked_nearest,ranked_nearby=(
+                        _fuel_candidate_rank.top4_with_age_and_nearby(
+                            ranked_points,ranked_intake,ranked_pose,ranked_age,
+                            ranked_free,ranked_midfield))
+                    ranked_nearby=ranked_nearby.reshape(self.n,ranked_count)
+                else:
+                    intake_costs,nearby_mask=(
+                        _fuel_candidate_rank.costs_with_age_and_nearby(
+                            ranked_points,ranked_intake,ranked_pose,ranked_age,
+                            ranked_free,ranked_midfield))
+                    ranked_costs=intake_costs.reshape(
+                        self.n,ranked_count,self.fuel_count)
+                    ranked_nearby=nearby_mask.reshape(
+                        self.n,ranked_count,self.fuel_count).any(-1)
+                    ranked_nearest,ranked_indices=ranked_costs.topk(
+                        4,dim=-1,largest=False)
+                ranked_nearest=ranked_nearest.reshape(self.n,ranked_count,4)
+                ranked_indices=ranked_indices.reshape(self.n,ranked_count,4)
+                if ranked_count==6:
+                    nearest,intake_indices=ranked_nearest,ranked_indices
+                    nearby_midfield_fuel=ranked_nearby
+                else:
+                    nearest=torch.full((self.n,6,4),float("inf"),
+                                       device=self.device,dtype=ranked_nearest.dtype)
+                    intake_indices=torch.zeros((self.n,6,4),device=self.device,
+                                               dtype=ranked_indices.dtype)
+                    nearby_midfield_fuel=torch.zeros(
+                        (self.n,6),device=self.device,dtype=torch.bool)
+                    nearest.index_copy_(1,rank_index,ranked_nearest)
+                    intake_indices.index_copy_(1,rank_index,ranked_indices)
+                    nearby_midfield_fuel.index_copy_(1,rank_index,ranked_nearby)
+            else:
+                intake_distance=(self.track_pos-intake_reference[:,:,None,:]).norm(dim=-1)
+                intake_distance+=self.track_age.clamp(0.,2.)*.4
+                nearest,intake_indices=intake_distance.masked_fill(
+                    ~intake_tracks,float("inf")).topk(4,dim=-1,largest=False)
             intake_eligible=torch.isfinite(nearest)
             if defer_initial_candidates:
                 indices,valid=intake_indices,intake_eligible
@@ -140,23 +205,32 @@ class TensorThreeVsThreeActionMixin:
         # scorer approach freely during perception dropouts.
         defense_action = torch.full_like(possession,5)
         if self._has_deterministic_offense:
-            # Active hubs reward steady scoring. Send partial loads so the
-            # dumper spends less time carrying fuel across long return routes.
-            active_batch_limit=torch.ceil(
-                self.robot_fuel_capacities[None].to(torch.float32)*.5).long()
-            active_batch_limit=active_batch_limit.expand_as(possession)
-            batch_limit=torch.where(
-                robot_hub_active,active_batch_limit,
-                self.robot_fuel_capacities[None].expand_as(possession))
+            batch_limit=self.robot_fuel_capacities[None].expand_as(possession)
+            robot_in_alliance_zone=torch.where(
+                self.team_ids[None,:]==0,
+                p[...,0]<=self.alliance_zone_depth,
+                p[...,0]>=self.field_length-self.alliance_zone_depth)
+            alliance_fuel=eligible_tracks & piece_in_alliance
+            alliance_fuel_available=alliance_fuel.any(-1)
+            positioned_to_score=(robot_in_alliance_zone & robot_hub_active)
+            # While our HUB is active, favor returning home: ferried fuel is
+            # likely waiting in the alliance zone. Make an exception for a
+            # nearby midfield piece so we do not pass up an easy collection.
+            if nearby_midfield_fuel is None:
+                midfield_piece=(eligible_tracks & ~piece_in_alliance)
+                midfield_distance=(self.track_pos-p[:,:,:2][:,:,None,:]).norm(dim=-1)
+                nearby_midfield_fuel=(midfield_piece & (midfield_distance<=2.0)).any(-1)
+            active_hub_return=(robot_hub_active & ~nearby_midfield_fuel &
+                               ~positioned_to_score)
             hub_bearing=torch.atan2(hub[...,1]-p[...,1],hub[...,0]-p[...,0])
             hub_heading_error=torch.atan2(
                 torch.sin(hub_bearing-p[...,2]),torch.cos(hub_bearing-p[...,2])).abs()
             bump_clear=self._robots_clear_of_bumps(p[:,:,:2])
             gather_more = (possession < batch_limit) & intake_available
             score_commit = (robot_hub_active & (possession>0) &
-                (self._score_committed |
-                 (possession>=batch_limit) | ~intake_available |
-                 (nearest[...,0]>2.5)))
+                            (self._score_committed |
+                             (possession>=batch_limit) |
+                             (positioned_to_score & ~alliance_fuel_available)))
             self._score_committed.copy_(torch.where(
                 active[:,None],score_commit,self._score_committed))
             # All robot types fill to capacity when an inactive HUB requires
@@ -189,6 +263,8 @@ class TensorThreeVsThreeActionMixin:
                                        torch.zeros_like(possession),offense_action)
             deterministic=torch.where(self._defense_role_mask[None],defense_action,
                                       offense_action)
+            deterministic=torch.where(active_hub_return & ~self._defense_role_mask[None],
+                                      torch.full_like(deterministic,6),deterministic)
         else:
             # With no deterministic offense controller, all deterministic
             # controllers in this batch are defenders and use action 5.
@@ -237,11 +313,6 @@ class TensorThreeVsThreeActionMixin:
         locked_index=self._target_fuel_index.clamp(0,self.fuel_count-1)
         # Rank deterministic intake targets by distance from the robot.
         if self._has_deterministic_offense:
-            intake_reference=(p[:,:,:2] +
-                torch.stack((torch.cos(p[:,:,2]),torch.sin(p[:,:,2])),-1)*
-                    (self.sim.length*.5+.15)[...,None] +
-                torch.stack((torch.sin(p[:,:,2]),-torch.cos(p[:,:,2])),-1)*
-                    (self.sim.width*.5)[...,None])
             local_dist = (candidate_points - intake_reference[:,:,None,:]).norm(dim=-1)
             candidate_age=self.track_age.gather(2,intake_indices).clamp(0.,2.)
             intake_cost=local_dist+candidate_age*.4
@@ -257,7 +328,7 @@ class TensorThreeVsThreeActionMixin:
             candidate_cost = torch.where(
                 (~robot_hub_active)[..., None], staging_cost, intake_cost)
             assigned = []
-            for robot in range(self.team_ids.numel()):
+            for robot in self._deterministic_offense_robot_ids:
                 wants_fuel = deterministic_offense[:, robot] & (action[:, robot] < 4)
                 available = intake_eligible[:, robot].clone()
                 for prior_robot, prior_index, prior_active in assigned:
@@ -423,22 +494,27 @@ class TensorThreeVsThreeActionMixin:
         action_six_target=torch.where(dumper_ferry[...,None],p[:,:,:2],ferry_target)
         deterministic_offense=(self._deterministic_mode_mask &
                                 ~self._defense_role_mask)[None]
-        sweeping=(self.sweeping_enabled & deterministic_offense & ((action<4)|
-                   ((action==6)&~possession_now)))
-        _, raster_target, tangent_vector=self._raster_waypoint_targets(p[:,:,:2])
         # The intake follows the direction of travel on the raster spline.
         fuel_delta = fuel_target - p[:, :, :2]
-        fuel_delta=torch.where(sweeping[...,None],tangent_vector,fuel_delta)
-        target=torch.where(sweeping[...,None],raster_target,
-            torch.where((action<4)[...,None],fuel_target,
+        if self.sweeping_enabled:
+            sweeping=(deterministic_offense & ((action<4)|
+                       ((action==6)&~possession_now)))
+            _,raster_target,tangent_vector=self._raster_waypoint_targets(p[:,:,:2])
+            fuel_delta=torch.where(sweeping[...,None],tangent_vector,fuel_delta)
+            target=torch.where(sweeping[...,None],raster_target,
+                torch.where((action<4)[...,None],fuel_target,
+                torch.where((action==4)[...,None],score_target,
+                torch.where((action==5)[...,None],intercept,
+                torch.where((action==6)[...,None],action_six_target,p[:,:,:2])))))
+        else:
+            target=torch.where((action<4)[...,None],fuel_target,
             torch.where((action==4)[...,None],score_target,
             torch.where((action==5)[...,None],intercept,
-            torch.where((action==6)[...,None],action_six_target,p[:,:,:2])))))
+            torch.where((action==6)[...,None],action_six_target,p[:,:,:2]))))
         if not self.sweeping_enabled and self._has_deterministic_offense:
             target_based_collect = deterministic_offense & (
                 (action < 4) | ((action == 6) & ~possession_now))
-            candidate_reference=intake_reference
-            candidate_distance=(candidate_points-candidate_reference[:,:,None,:]).norm(dim=-1)
+            candidate_distance=local_dist
             cluster_count=(intake_eligible & (candidate_distance<1.7)).sum(-1)
             self._last_audit_cluster_count=cluster_count
             nearest_distance=candidate_distance.masked_fill(
@@ -497,12 +573,16 @@ class TensorThreeVsThreeActionMixin:
             # Approach mode heads straight to the closest visible FUEL. With
             # no legal target, move toward the open field interior so AD* can
             # route around field elements while perception acquires new fuel.
+            no_alliance_fuel_search=(positioned_to_score &
+                                     ~alliance_fuel_available &
+                                     (possession>0))
             target_based_search=(target_based_collect & ~self._target_collecting &
-                                 (action==6))
+                                 (action==6) & ~no_alliance_fuel_search)
             search_target=torch.zeros_like(p[:,:,:2])
             search_target[...,0]=self.field_length*.5
             search_target[...,1]=self.sim.field_width*.5
             target=torch.where(target_based_search[...,None],search_target,target)
+            target=torch.where(no_alliance_fuel_search[...,None],search_target,target)
 
             # Trace the local fuel-cloud edge with the intake's right side.
             # A smoothed density gradient estimates the inward normal; its

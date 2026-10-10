@@ -470,6 +470,14 @@ class TensorADStar:
         """Check the supplied robot footprint against field boxes."""
         if not self._boxes.numel():
             return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
+        if (self.device.type == "cuda" and torch.version.hip and
+                path.shape[1] == 2):
+            from . import tensor_collision_multi_hip
+            fused = tensor_collision_multi_hip.footprint_path_clear(
+                path, heading, length, width, self._boxes,
+                self.length, self.width, self.footprint_clearance)
+            if fused is not None:
+                return fused
         return torch.cat([
             self._footprint_path_clear_chunk(path[offset:offset+8],
                 heading[offset:offset+8],length[offset:offset+8],width[offset:offset+8],
@@ -522,37 +530,19 @@ class TensorADStar:
 
         ambiguous=~broad_clear&~definite_hit
         hit=definite_hit.clone()
-        capturing=(path.device.type=="cuda" and
-                   torch.cuda.is_current_stream_capturing())
-        if capturing:
-            hl=length[:,None,None,None]*.5; hw=width[:,None,None,None]*.5
-            signed=torch.stack((dx,dy,dx*c[...,None]+dy*s[...,None],
-                                -dx*s[...,None]+dy*c[...,None]),-1)
-            robot_radius=torch.stack((
-                (c[...,None].abs()*hl+s[...,None].abs()*hw).expand_as(signed[...,0]),
-                (s[...,None].abs()*hl+c[...,None].abs()*hw).expand_as(signed[...,0]),
-                hl.expand_as(signed[...,0]),hw.expand_as(signed[...,0])),-1)
-            box_radius=torch.stack((hx.expand_as(signed[...,0]),hy.expand_as(signed[...,0]),
-                hx*c[...,None].abs()+hy*s[...,None].abs(),
-                hx*s[...,None].abs()+hy*c[...,None].abs()),-1)
-            sat_hit=(robot_radius+box_radius-signed.abs()+
-                     sample_clearance[:,:,None,:]).amin(-1)>=0.
-            hit|=ambiguous&sat_hit
-        elif bool(ambiguous.any().item()):
-            indices=torch.nonzero(ambiguous,as_tuple=False)
-            bi,si,ti,oi=indices.unbind(-1)
-            dx_a,dy_a=dx[bi,si,ti,oi],dy[bi,si,ti,oi]
-            c_a,s_a=c[bi,si,ti],s[bi,si,ti]
-            hl_a,hw_a=length[bi]*.5,width[bi]*.5
-            hx_a,hy_a=boxes[oi,2],boxes[oi,3]
-            penetration=torch.stack((
-                c_a.abs()*hl_a+s_a.abs()*hw_a+hx_a-dx_a.abs(),
-                s_a.abs()*hl_a+c_a.abs()*hw_a+hy_a-dy_a.abs(),
-                hl_a+hx_a*c_a.abs()+hy_a*s_a.abs()-
-                    (dx_a*c_a+dy_a*s_a).abs(),
-                hw_a+hx_a*s_a.abs()+hy_a*c_a.abs()-
-                    (-dx_a*s_a+dy_a*c_a).abs()),-1) + segment_clearance[bi,si,None]
-            hit[bi,si,ti,oi]=penetration.amin(-1)>=0.
+        hl=length[:,None,None,None]*.5; hw=width[:,None,None,None]*.5
+        signed=torch.stack((dx,dy,dx*c[...,None]+dy*s[...,None],
+                            -dx*s[...,None]+dy*c[...,None]),-1)
+        robot_radius=torch.stack((
+            (c[...,None].abs()*hl+s[...,None].abs()*hw).expand_as(signed[...,0]),
+            (s[...,None].abs()*hl+c[...,None].abs()*hw).expand_as(signed[...,0]),
+            hl.expand_as(signed[...,0]),hw.expand_as(signed[...,0])),-1)
+        box_radius=torch.stack((hx.expand_as(signed[...,0]),hy.expand_as(signed[...,0]),
+            hx*c[...,None].abs()+hy*s[...,None].abs(),
+            hx*s[...,None].abs()+hy*c[...,None].abs()),-1)
+        sat_hit=(robot_radius+box_radius-signed.abs()+
+                 sample_clearance[:,:,None,:]).amin(-1)>=0.
+        hit|=ambiguous&sat_hit
         path_hit=(hit&valid_sample[...,None]).any(dim=(1,2,3))
         ex=.5*(length[:,None,None]*c.abs()+width[:,None,None]*s.abs())
         ey=.5*(length[:,None,None]*s.abs()+width[:,None,None]*c.abs())

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import torch
 
 
@@ -9,10 +10,28 @@ def initialize_fuel_physics(env, config=True):
     """Keep legacy planar slots as the game/observation API."""
     if config is False:
         env.fuel_physics = None
-        return
-    from .fuel_physics import FuelPhysics
-    env.fuel_physics = FuelPhysics(env.sim, env.piece_pos, env.piece_vel,
-                                   None if config is True else config)
+    else:
+        from .fuel_physics import FuelPhysics
+        env.fuel_physics = FuelPhysics(env.sim, env.piece_pos, env.piece_vel,
+                                       None if config is True else config)
+    # Small HIP batches benefit from the substep graph; the measured 16-world
+    # path regresses, so leave larger training batches eager by default.
+    env._physics_graph_enabled = bool(
+        torch.version.hip and env.fuel_physics is not None and env.n <= 8 and
+        os.environ.get("AUTODRIVE_HIP_PHYSICS_GRAPH", "1") != "0")
+    env._physics_graphs = {}
+    env._physics_graph_command = torch.empty(
+        (env.n, env.sim.num_robots, 3), device=env.device,
+        dtype=env.sim.pose.dtype)
+    env._physics_graph_active = torch.empty(
+        (env.n,), device=env.device, dtype=torch.bool)
+    radius = (env.fuel_physics.config.radius if env.fuel_physics is not None
+              else env._fuel_radius)
+    env._field_midpoint = env.hub_centers.new_tensor(
+        [env.sim.field_length*.5, env.sim.field_width*.5])
+    env._ferry_field_lower = env.hub_centers.new_full((2,), radius)
+    env._ferry_field_upper = env.hub_centers.new_tensor(
+        [env.sim.field_length-radius, env.sim.field_width-radius])
 
 
 def bind_fuel_state(env):
@@ -40,6 +59,40 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                                          env.piece_active,env.piece_owner)
                 if physics.config.adaptive_substeps else physics.config.substeps)
     substep_dt = outer_dt / substeps
+    if env._physics_graph_enabled:
+        graph = env._physics_graphs.get(substeps)
+        graph_command = env._physics_graph_command
+        graph_active = env._physics_graph_active
+        graph_command.copy_(commands)
+        graph_active.copy_(active)
+        if graph is None:
+            try:
+                outer_sim_dt = env.sim.dt
+                graph = torch.cuda.CUDAGraph()
+                env.sim.dt = substep_dt
+                try:
+                    with torch.cuda.graph(graph):
+                        env.sim.step(graph_command, graph_active,
+                                     _active_nonempty=True)
+                        physics.step(graph_active, env.piece_active,
+                                     env.piece_owner, dt=substep_dt,
+                                     substeps=1, adaptive=False)
+                finally:
+                    env.sim.dt = outer_sim_dt
+            except Exception:
+                # Graph capture is an optimization only; retain the established
+                # eager path when any participating HIP operation cannot capture.
+                env._physics_graph_enabled = False
+                env._physics_graphs.clear()
+            else:
+                env._physics_graphs[substeps] = graph
+        if env._physics_graph_enabled:
+            try:
+                for _ in range(substeps):
+                    graph.replay()
+            finally:
+                env.sim.dt = outer_dt
+            return env.sim.state
     # The motor and tire model consumes collision-modified velocity on the
     # next substep. Restoring dt also preserves reset/playback timing.
     try:
@@ -53,17 +106,27 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     return env.sim.state
 
 
-def shooter_respawn_targets(env, origins):
-    """Sample a 45-degree total cone toward field center, preserving range."""
-    midfield = origins.new_tensor([env.sim.field_length*.5, env.sim.field_width*.5])
-    toward_midfield = midfield-origins
+def shooter_respawn_cone(env, hub_centers):
+    """Return a safe HUB-exit spawn and midfield launch target within a 45-degree cone."""
+    midfield = env._field_midpoint
+    toward_midfield = midfield-hub_centers
     bearing = torch.atan2(toward_midfield[..., 1], toward_midfield[..., 0])
-    offset = (torch.rand(origins.shape[:-1], device=origins.device,
+    offset = (torch.rand(hub_centers.shape[:-1], device=hub_centers.device,
                          generator=env.generator)-.5)*(math.pi/4)
     angle = bearing+offset
     direction = torch.stack((angle.cos(), angle.sin()), -1)
-    distance = (env._midfield_respawn_positions[None]-origins).norm(dim=-1)
-    return origins+distance[..., None]*direction
+    # Keep the entire spread just clear of the midfield-facing HUB and BUMP
+    # collision footprints. Dividing by cos(offset) gives every shot the same
+    # minimum outward clearance while spreading spawn positions along the HUB edge.
+    radius = (env.fuel_physics.config.radius if env.fuel_physics is not None
+              else env._fuel_radius)
+    hub_half_length = 47.0 * .0254 / 2
+    clearance = hub_half_length + radius + .05
+    spawn_distance = clearance / direction[..., 0].abs().clamp_min(1e-6)
+    spawn_origins = hub_centers + spawn_distance[..., None]*direction
+    launch_distance = (midfield-hub_centers).norm(dim=-1)
+    launch_targets = hub_centers + launch_distance[..., None]*direction
+    return spawn_origins, launch_targets
 
 
 def resolve_ferry_landings(env, origins, targets, team_ids, *,
@@ -72,8 +135,8 @@ def resolve_ferry_landings(env, origins, targets, team_ids, *,
     from .field import INCH
     radius = env.fuel_physics.config.radius if env.fuel_physics is not None else env._fuel_radius
     delta = targets-origins
-    lower = origins.new_tensor([radius, radius])
-    upper = origins.new_tensor([env.sim.field_length-radius, env.sim.field_width-radius])
+    lower = env._ferry_field_lower
+    upper = env._ferry_field_upper
     boundary = torch.where(delta>0, upper, lower)
     moving = delta.abs()>1e-8
     exit_fraction = (boundary-origins)/torch.where(moving, delta, 1.)
@@ -214,6 +277,15 @@ def launch_fuel(env, selected, destinations, *, origins=None, height=.35,
     position and retain the reduced horizontal velocity. Launch settings are
     illustrative.
     """
+    # Scoring and ferrying call this every tick, although selected is usually
+    # empty. The separation routine synchronizes to compact contacts, so skip
+    # launch work up front when there is no respawn. During graph capture keep
+    # the tensor path fixed and let replay apply the live mask.
+    if (not (env.device.type == "cuda" and
+             torch.cuda.is_current_stream_capturing()) and
+            not bool(torch.as_tensor(selected, device=env.device,
+                                     dtype=torch.bool).any().item())):
+        return
     physics = bind_fuel_state(env)
     start = env.piece_pos if origins is None else origins
     target = destinations.expand_as(env.piece_pos)
@@ -221,8 +293,10 @@ def launch_fuel(env, selected, destinations, *, origins=None, height=.35,
     velocity = (target - start) * (horizontal_velocity_scale / flight_time)
     vertical = ((physics.config.radius - z) / flight_time +
                 .5 * physics.config.gravity * flight_time)
-    position = (target if respawn_at_destination else
-                start if spawn_positions is None else spawn_positions)
+    if respawn_at_destination:
+        position = target if spawn_positions is None else spawn_positions
+    else:
+        position = start if spawn_positions is None else spawn_positions
     if respawn_at_destination:
         z = physics._spawn_height(position)
         vertical = 0.

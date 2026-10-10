@@ -226,16 +226,21 @@ class TensorDefenseResetMixin:
         self.auto_fuel_scores.zero_()
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
-                      self.fuel_denied_event,self.fuel_abandoned_event):
+                      self.fuel_denied_event,self.fuel_abandoned_event,
+                      self.fuel_passed_event):
             value.zero_()
-        for value in (self.next_intake_time,self.next_score_time):
+        for value in (self.next_intake_time,self.next_score_time,self.next_score,
+                      self.next_ferry):
             value.zero_()
+        self.last_actions.fill_(7)
+        self._intake_collecting.zero_()
         self._initialize_gamepieces()
         reset_fuel_physics(self)
         self._update_perception(torch.ones((self.n,),device=self.device,dtype=torch.bool))
         self._move_adstar_defenders_to_clear_start()
         self._place_defenders_near_clear_adstar_paths()
-        self._last_hub_zone.zero_(); self._last_strategic_action.zero_()
+        self._last_hub_zone.zero_(); self.last_hub_zone.zero_()
+        self._last_strategic_action.zero_()
         self._planner_tick.fill_(self.adstar_replan_interval-1)
         self._planner_tick_scalar=self.adstar_replan_interval-1
         self._planner_tick_aligned=True
@@ -289,6 +294,7 @@ class TensorDefenseResetMixin:
         self.hub_inactive_first=torch.where(mask,tie_choice,self.hub_inactive_first)
         self.auto_fuel_scores=torch.where(mask[:,None],torch.zeros_like(self.auto_fuel_scores),self.auto_fuel_scores)
         self._last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self._last_hub_zone),self._last_hub_zone)
+        self.last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self.last_hub_zone),self.last_hub_zone)
         self._initialize_gamepieces(mask)
         reset_fuel_physics(self,mask)
         self._update_perception(mask,active_mask=mask)
@@ -297,10 +303,14 @@ class TensorDefenseResetMixin:
         self._last_strategic_action=torch.where(mask,torch.zeros_like(self._last_strategic_action),self._last_strategic_action)
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
-                      self.fuel_denied_event,self.fuel_abandoned_event):
+                      self.fuel_denied_event,self.fuel_abandoned_event,
+                      self.fuel_passed_event):
             value.masked_fill_(mask[:,None],0)
-        for value in (self.next_intake_time,self.next_score_time):
+        for value in (self.next_intake_time,self.next_score_time,self.next_score,
+                      self.next_ferry):
             value.masked_fill_(mask[:,None],0)
+        self.last_actions[mask]=7
+        self._intake_collecting[mask]=False
         self._planner_tick=torch.where(mask,torch.full_like(self._planner_tick,
             self.adstar_replan_interval-1),self._planner_tick)
         if full_reset:

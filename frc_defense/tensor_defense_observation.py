@@ -263,21 +263,13 @@ class TensorDefenseObservationMixin:
         """Valid categorical choices for the current game state and robot role."""
         _,valid,_=(self._fuel_candidates(focal) if _candidate_data is None
                    else _candidate_data)
-        offense=(self.task=="counter_defense" and focal==0) or (self.task=="defense" and focal==1)
         mask=torch.zeros((self.n,8),device=self.device,dtype=torch.bool)
-        if offense:
-            mask[:,:4]=valid
-            carrying=(self.piece_active&(self.piece_owner==focal)).any(-1)
-            mask[:,4]=carrying
-            # Passing remains unavailable in the 1v1 field model until a teammate
-            # state is supplied; the categorical slot is reserved for that action.
-            mask[:,6]=True
-            mask[:,7]=True
-        else:
-            mask[:,0]=True  # intercept the attacker's observed route
-            mask[:,1:5]=valid  # deny one of the visible candidate FUEL pieces
-            mask[:,5]=True  # block the likely scoring lane
-            mask[:,6]=True  # shadow the attacker
+        mask[:,:4]=valid
+        carrying=(self.piece_active&(self.piece_owner==focal)).any(-1)
+        mask[:,4]=carrying                 # shoot
+        mask[:,5]=True                     # defend
+        mask[:,6]=True                     # ferry
+        mask[:,7]=True                     # hold
         return mask
 
     def _strategic_observation(self, focal, *, return_candidate_data=False,

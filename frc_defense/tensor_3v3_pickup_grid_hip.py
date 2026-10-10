@@ -54,7 +54,7 @@ def _extension():
             flags.append(f"--rocm-device-lib-path={device_lib}")
         try:
             _EXT = cpp_extension.load(
-                name="autodrive_3v3_pickup_grid_hip_v5",
+                name="autodrive_3v3_pickup_grid_hip_v7",
                 sources=[str(src / "tensor_3v3_pickup_grid_hip.cpp"),
                          str(src / "tensor_3v3_pickup_grid_hip_kernel.cu")],
                 with_cuda=True, extra_cflags=["-O3"], extra_cuda_cflags=flags,
@@ -73,38 +73,40 @@ def integrated_available(device="cuda"):
 
 
 def pickup_robot(*, active, pose, length, width, piece_pos, piece_active,
-                 piece_owner, free, possible_cells, next_intake, elapsed,
+                 piece_owner, free, next_intake, elapsed,
                  controlled, deterministic, defense_role, acquired_event,
-                 track_clear_mask, robot, nx, ny, cell_size, capacity,
+                 track_clear_mask, robot, capacity,
                  allow_sweep):
     ext = _extension()
     if ext is None:
         raise RuntimeError("HIP 3v3 pickup extension is unavailable")
     ext.pickup(active.contiguous(), pose.contiguous(), length.contiguous(),
         width.contiguous(), piece_pos.contiguous(), piece_active.contiguous(),
-        piece_owner, free, possible_cells.contiguous(), next_intake, elapsed,
+        piece_owner, free, next_intake, elapsed,
         controlled.contiguous(), deterministic.contiguous(),
         defense_role.contiguous(), acquired_event, track_clear_mask,
-        int(robot), int(nx), int(ny), float(cell_size), int(capacity),
+        int(robot), int(capacity),
         bool(allow_sweep))
 
 
 def pickup_all_robots(*, active, pose, length, width, piece_pos, piece_active,
-                      piece_owner, free, possible_cells, next_intake, elapsed,
+                      intake_extended, piece_owner, free,
+                      next_intake, elapsed,
                       controlled, deterministic, defense_role, hub_active,
                       capacities, acquired_event, track_clear_mask,
-                      nx, ny, cell_size, alliance_depth, field_length):
+                      alliance_depth, field_length):
     """Resolve all six robots in one ordered kernel, preserving slot priority."""
     ext = _extension()
     if ext is None:
         raise RuntimeError("HIP 3v3 pickup extension is unavailable")
-    ext.pickup_all(active.contiguous(), pose.contiguous(), length.contiguous(),
+    ext.pickup_all(active.contiguous(), intake_extended.contiguous(),
+        pose.contiguous(), length.contiguous(),
         width.contiguous(), piece_pos.contiguous(), piece_active.contiguous(),
-        piece_owner, free, possible_cells.contiguous(), next_intake, elapsed,
+        piece_owner, free, next_intake, elapsed,
         controlled.contiguous(), deterministic.contiguous(),
         defense_role.contiguous(), hub_active.contiguous(),
         capacities.contiguous(), acquired_event, track_clear_mask,
-        int(nx), int(ny), float(cell_size), float(alliance_depth),
+        float(alliance_depth),
         float(field_length))
 
 

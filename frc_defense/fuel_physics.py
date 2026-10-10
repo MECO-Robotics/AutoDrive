@@ -166,6 +166,12 @@ class FuelPhysics:
         free = torch.as_tensor(free, device=self.device, dtype=torch.bool)
         if selected.shape != (self.n, self.p) or free.shape != selected.shape:
             raise ValueError("selected and free masks must have shape [world,piece]")
+        # Stream capture cannot record data-dependent compaction. Use the
+        # fixed-shape masked formulation only while capturing a simulator step.
+        if (self.device.type == "cuda" and
+                torch.cuda.is_current_stream_capturing()):
+            self._separate_spawned_dense(selected, free)
+            return
         i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
         pair_selected = selected[:, i] | selected[:, j]
         valid = free[:, i] & free[:, j] & pair_selected
@@ -214,6 +220,52 @@ class FuelPhysics:
             self.vel[spawned_world[touching], spawned_piece[touching], :2]
         self._last_vxy[spawned_world[touching], spawned_piece[touching]] = \
             self.piece_vel[spawned_world[touching], spawned_piece[touching]]
+
+    def _separate_spawned_dense(self, selected, free):
+        """Fixed-shape equivalent of ``separate_spawned`` for graph capture."""
+        i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
+        pair_selected = selected[:, i] | selected[:, j]
+        valid = free[:, i] & free[:, j] & pair_selected
+        delta = self.pos[:, i, :2] - self.pos[:, j, :2]
+        distance = delta.norm(dim=-1)
+        contact = valid & (distance < 2*self.config.radius)
+        normal = delta / distance.clamp_min(1e-8)[..., None]
+        fallback = torch.zeros_like(normal)
+        fallback[..., 0] = 1.
+        normal = torch.where((distance < 1e-8)[..., None], fallback, normal)
+        correction = torch.where(contact,
+            (2*self.config.radius-distance).mul(.10).clamp_max(.005),
+            torch.zeros_like(distance))
+        displacement = correction[..., None] * normal
+        world = torch.arange(self.n, device=self.device)[:, None]
+        flat_delta = torch.zeros((self.n*self.p, 2), device=self.device,
+                                 dtype=self.pos.dtype)
+        flat_delta.index_add_(0, (world*self.p+i[None]).reshape(-1),
+                              displacement.reshape(-1, 2))
+        flat_delta.index_add_(0, (world*self.p+j[None]).reshape(-1),
+                              -displacement.reshape(-1, 2))
+        flat_delta = flat_delta.reshape(self.n, self.p, 2)
+        magnitude = flat_delta.norm(dim=-1, keepdim=True)
+        flat_delta *= .015/magnitude.clamp_min(.015)
+        self.pos[..., :2].add_(flat_delta)
+        self.piece_pos.add_(flat_delta)
+        self._last_xy.copy_(self.piece_pos)
+        affected = flat_delta.norm(dim=-1) > 0
+        self.sleeping &= ~affected
+        self.sleep_clock.masked_fill_(affected, 0.)
+
+        delta_to_all = self.pos[:, :, None, :2] - self.pos[:, None, :, :2]
+        distance_to_all = delta_to_all.norm(dim=-1)
+        not_self = ~torch.eye(self.p, device=self.device, dtype=torch.bool)
+        touching = (free[:, None, :] & not_self[None] &
+                    (distance_to_all < 2*self.config.radius)).any(-1)
+        soften = selected & touching
+        self.vel[..., :2].copy_(torch.where(
+            soften[..., None], self.vel[..., :2]*.2, self.vel[..., :2]))
+        self.piece_vel.copy_(torch.where(soften[..., None],
+                                         self.vel[..., :2], self.piece_vel))
+        self._last_vxy.copy_(torch.where(soften[..., None],
+                                         self.piece_vel, self._last_vxy))
 
     def refresh_stats(self):
         return self._hip.refresh_stats() if self._hip is not None else self.stats
@@ -491,6 +543,7 @@ class FuelPhysics:
             fuel_speed=fuel_speed*active_mask[:,None]
             robot_speed=robot_speed*active_mask[:,None]
         speed=torch.maximum(fuel_speed.amax(),robot_speed.amax())
+        duration=float(self.sim.dt if dt is None else dt)
         max_motion=self.config.max_translation_per_substep or self.config.radius*.5
         bound=2*float(speed.item())+self.config.gravity*duration
         return max(count,math.ceil(duration*bound/max_motion))

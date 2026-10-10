@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .field import midfield_respawn_points
+from .field import ALLIANCE_ZONE_DEPTH, midfield_respawn_points
 from .observation import normalize_tensor_observation_batch_in_place
 from .tensor_physics import (TensorState, TensorSwerveParameters,
                              TensorVectorizedSimulator, swerve_heading_rate)
@@ -245,6 +245,47 @@ class TensorDefenseEnv(
         self.piece_vel=torch.zeros_like(self.piece_pos)
         self.piece_active=torch.zeros((self.n,self.fuel_count),device=self.device,dtype=torch.bool)
         self.piece_owner=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
+        # Use the offense game's per-robot action/gamepiece contract in this
+        # two-robot simulator as well. Algorithms still choose movement using
+        # the environment's existing policy interface.
+        self.team_ids=self.sim.team_ids
+        self.field_length=self.sim.field_length
+        self.alliance_zone_depth=ALLIANCE_ZONE_DEPTH
+        self._fuel_radius=.0825
+        self.robot_roles=("offense","offense")
+        self.robot_types=("dumper","dumper")
+        self.control_modes=("deterministic","deterministic")
+        self._nn_mode_mask=torch.zeros((2,),device=self.device,dtype=torch.bool)
+        self._deterministic_mode_mask=~self._nn_mode_mask
+        self._controlled_mode_mask=torch.ones((2,),device=self.device,dtype=torch.bool)
+        self._defense_role_mask=torch.zeros((2,),device=self.device,dtype=torch.bool)
+        self.robot_fuel_capacity_values=(self.fuel_capacity,self.fuel_capacity)
+        self.robot_fuel_capacities=torch.full((2,),self.fuel_capacity,
+            device=self.device,dtype=torch.long)
+        self.robot_score_interval_values=(self.score_interval,self.score_interval)
+        self.robot_score_intervals=torch.full((2,),self.score_interval,
+            device=self.device)
+        self._dumper_mask=torch.ones((2,),device=self.device,dtype=torch.bool)
+        self._turret_mask=~self._dumper_mask
+        self._intake_collecting=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
+        self.last_actions=torch.full((self.n,2),7,device=self.device,dtype=torch.long)
+        self.next_score=torch.zeros((self.n,2),device=self.device)
+        self.next_ferry=torch.zeros_like(self.next_score)
+        self.fuel_passed_event=torch.zeros((self.n,2),device=self.device,dtype=torch.long)
+        self.last_hub_zone=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
+        self._world_indices=torch.arange(self.n,device=self.device)
+        self._robot_owner_ids=torch.arange(2,device=self.device,dtype=torch.long)
+        self._fuel_indices=torch.arange(self.fuel_count,device=self.device)[None]
+        self._vectorized_scoring_enabled=False
+        ferry_x=self.sim.field_length*.5+torch.where(self.team_ids==0,-.45,.45)
+        self.ferry_targets=torch.stack((ferry_x,
+            torch.full_like(ferry_x,self.sim.field_width*.5)),dim=-1)
+        self._pickup_grid_cell_size=2.0
+        self._pickup_grid_nx=math.ceil(self.sim.field_length/self._pickup_grid_cell_size)
+        self._pickup_grid_ny=math.ceil(self.sim.field_width/self._pickup_grid_cell_size)
+        self._pickup_possible_cells=torch.full(
+            (self.n,self.fuel_count,3),-1,device=self.device,dtype=torch.int16)
+        self._midfield_respawn_cells=torch.zeros_like(self._pickup_possible_cells)
         from .fuel_physics_runtime import initialize_fuel_physics
         initialize_fuel_physics(self,fuel_physics_config)
         self.piece_zone=torch.full((self.n,self.fuel_count),-1,device=self.device,dtype=torch.long)
@@ -258,6 +299,9 @@ class TensorDefenseEnv(
         self._track_vel=torch.zeros_like(self._track_pos)
         self._track_mask=torch.zeros((self.n,2,self.fuel_count),device=self.device,dtype=torch.bool)
         self._track_age=torch.full((self.n,2,self.fuel_count),float("inf"),device=self.device)
+        self.track_pos=self._track_pos
+        self.track_mask=self._track_mask
+        self.track_age=self._track_age
         self._opponent_track_pose=torch.zeros((self.n,2,3),device=self.device)
         self._opponent_track_velocity=torch.zeros_like(self._opponent_track_pose)
         self._opponent_track_valid=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
@@ -272,6 +316,7 @@ class TensorDefenseEnv(
         self.fuel_denied_event=torch.zeros_like(self.fuel_acquisition_count)
         self.fuel_abandoned_event=torch.zeros_like(self.fuel_acquisition_count)
         self.next_intake_time=torch.zeros((self.n,2),device=self.device)
+        self.next_intake=self.next_intake_time
         self.next_score_time=torch.zeros_like(self.next_intake_time)
         self._last_hub_zone=torch.zeros((self.n,2),device=self.device,dtype=torch.bool)
         self._last_strategic_action=torch.zeros((self.n,),device=self.device,dtype=torch.long)

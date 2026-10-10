@@ -80,8 +80,9 @@ class TensorDefenseStepMixin:
             target=self._strategic_target(self._last_strategic_action,
                                           _candidate_data=candidate_data)
             own=self._adstar_target_velocity(target,active_mask)
-            dumping=(self._last_strategic_action==4) if self.task=="counter_defense" else torch.zeros_like(self._last_strategic_action,dtype=torch.bool)
-            omega=self._face_hub_omega(0,dumping)
+            dumping=self._last_strategic_action==4
+            ferrying=self._last_strategic_action==6
+            omega=self._face_hub_omega(0,dumping)+self._face_ferry_omega(0,ferrying)
             a=torch.cat((own[:,:2]/self.sim.speed[:,0,None].clamp_min(.1),
                          (omega/self.sim.omega_limit[:,0].clamp_min(.1))[:,None]),dim=-1)
         else:

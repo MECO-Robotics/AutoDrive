@@ -18,6 +18,8 @@ _HIP_PERCEPTION_EXTENSION = None
 _HIP_PERCEPTION_EXTENSION_ATTEMPTED = False
 _HIP_PERCEPTION_ENABLED = os.environ.get("AUTODRIVE_FUSED_PERCEPTION_HIP", "1") != "0"
 FUSED_PERCEPTION_HIP_ENABLED = _HIP_PERCEPTION_ENABLED
+FUSED_TRACK_AGING_HIP_ENABLED = (
+    os.environ.get("AUTODRIVE_FUSED_TRACK_AGING_HIP", "1") != "0")
 
 
 def _hip_perception_extension():
@@ -156,7 +158,7 @@ def piece_occlusion_mask(pose_xy, segment, obstacles, eligible):
     is opt-in through AUTODRIVE_FUSED_PERCEPTION_HIP=1.
     """
     extension = _hip_perception_extension() if _HIP_PERCEPTION_ENABLED else None
-    if (extension is not None and obstacles.shape[-1] == 3 and
+    if (extension is not None and obstacles.shape[-1] in (3, 4) and
             pose_xy.is_cuda and pose_xy.dtype == torch.float32
             and segment.dtype == torch.float32 and obstacles.dtype == torch.float32
             and pose_xy.is_contiguous() and segment.is_contiguous()
@@ -194,7 +196,7 @@ def visibility_mask_3v3(pose, pieces_xy, piece_active, piece_owner, active,
     extension = _hip_perception_extension() if _HIP_PERCEPTION_ENABLED else None
     tensors = (pose, pieces_xy, piece_active, piece_owner, active, obstacles,
                robot_radius)
-    if (extension is not None and obstacles.shape[-1] == 3 and
+    if (extension is not None and obstacles.shape[-1] in (3, 4) and
             pose.is_cuda and pose.dtype == torch.float32 and
             all(t.is_contiguous() and t.device == pose.device for t in tensors) and
             piece_active.dtype == torch.bool and piece_owner.dtype == torch.long and
@@ -582,4 +584,28 @@ def opponent_tracks_3v3(pose, length, width, acceleration, robot_radius,
         opponent_size, opponent_age, opponent_valid, int(seed),
         float(perception_range), float(fov_degrees), float(dropout),
         float(position_noise), float(velocity_noise), float(dt))
+    return True
+
+
+def age_tracks_3v3(track_pos, track_vel, track_age, track_mask,
+                   opponent_age, opponent_valid, active, dt, timeout):
+    """Age known fuel and opponent tracks in one in-place HIP kernel."""
+    if not FUSED_TRACK_AGING_HIP_ENABLED:
+        return False
+    extension = _hip_perception_extension()
+    tensors = (track_pos, track_vel, track_age, track_mask, opponent_age,
+               opponent_valid, active)
+    if (extension is None or not track_pos.is_cuda or
+            track_pos.dtype != torch.float32 or
+            not all(t.is_contiguous() and t.device == track_pos.device
+                    for t in tensors)):
+        return False
+    if (any(t.dtype != torch.float32 for t in
+            (track_pos, track_vel, track_age, opponent_age)) or
+            track_mask.dtype != torch.bool or opponent_valid.dtype != torch.bool or
+            active.dtype != torch.bool):
+        return False
+    extension.age_tracks_3v3(track_pos, track_vel, track_age, track_mask,
+                             opponent_age, opponent_valid, active,
+                             float(dt), float(timeout))
     return True

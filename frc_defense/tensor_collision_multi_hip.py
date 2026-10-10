@@ -10,6 +10,8 @@ import torch
 _EXT = None
 _ATTEMPTED = False
 ENABLED = os.environ.get("AUTODRIVE_FUSED_ROBOT_COLLISION_6_HIP", "1") != "0"
+PARALLEL_SINGLE_WORLD = (
+    os.environ.get("AUTODRIVE_PARALLEL_3V3_ROBOT_CONTACTS", "1") != "0")
 
 
 def _extension():
@@ -85,7 +87,8 @@ def robot_contacts(sim, active_mask):
         return False
     ext.robot_contacts(sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
                        sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
-                       sim.robot_contact, sim.opponent_contact)
+                       sim.robot_contact, sim.opponent_contact,
+                       PARALLEL_SINGLE_WORLD)
     return True
 
 
@@ -150,6 +153,49 @@ def safe_score_targets(sim, score_target, robot_radius, x_min, x_max,
     return ext.safe_score_targets(
         sim.pose,score_target,robot_radius,x_min,x_max,boxes,
         grid_points,grid_clear,float(sim.field_width))
+
+
+def invalidate_tracks_in_robot_contact(sim, track_pos, track_mask, track_age,
+                                       active, fuel_radius=.0825):
+    """Clear perceived tracks intersecting any robot intake in one HIP launch."""
+    if (not ENABLED or sim.device.type != "cuda" or not torch.version.hip or
+            sim.num_robots != 6):
+        return False
+    active = torch.as_tensor(active, device=sim.device, dtype=torch.bool).reshape(
+        sim.n).contiguous()
+    tensors = (sim.pose, sim.length, sim.width, track_pos, track_mask, track_age,
+               active)
+    if (track_pos.ndim != 4 or track_pos.shape[:2] != (sim.n, 6) or
+            track_pos.shape[-1] != 2 or track_mask.shape != track_pos.shape[:-1] or
+            track_age.shape != track_mask.shape or
+            any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors)):
+        return False
+    ext = _extension()
+    if ext is None or not hasattr(ext, "invalidate_tracks_in_robot_contact"):
+        return False
+    ext.invalidate_tracks_in_robot_contact(
+        sim.pose, sim.length, sim.width, track_pos, track_mask, track_age, active,
+        float(fuel_radius))
+    return True
+
+
+def footprint_path_clear(path, heading, length, width, boxes,
+                         field_length, field_width, clearance):
+    """Check batched chassis paths against field boxes with one HIP kernel."""
+    if (not ENABLED or path.device.type != "cuda" or not torch.version.hip or
+            path.dtype != torch.float32 or path.ndim != 3 or
+            path.shape[-1] != 2 or not boxes.numel()):
+        return None
+    path, heading, length, width, boxes = (
+        tensor.contiguous() for tensor in (path, heading, length, width, boxes))
+    if any(t.device != path.device for t in (heading, length, width, boxes)):
+        return None
+    ext = _extension()
+    if ext is None or not hasattr(ext, "footprint_path_clear"):
+        return None
+    return ext.footprint_path_clear(path, heading, length, width, boxes,
+                                    float(field_length), float(field_width),
+                                    float(clearance))
 
 
 def avoid_robot_contention(sim, command, targets, active, winner, controlled,

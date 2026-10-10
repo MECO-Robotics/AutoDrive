@@ -69,3 +69,128 @@ void candidate_rank_launch(const float* points, const float* robot,
   candidate_rank_kernel<<<static_cast<unsigned>(n), 256, 0, stream>>>(
       points, robot, free, indices, valid, nearest, n, p);
 }
+
+__global__ void candidate_cost_nearby_kernel(
+    const float* points, const float* intake_xy, const float* robot_xy,
+    const float* age, const bool* free, const bool* midfield,
+    float* costs, bool* nearby, int64_t n, int64_t p, float age_weight) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = n * p;
+  if (linear >= total) return;
+  const int64_t row = linear / p;
+  if (free[linear]) {
+    const float dx = points[2 * linear] - intake_xy[2 * row];
+    const float dy = points[2 * linear + 1] - intake_xy[2 * row + 1];
+    const float bounded_age = fminf(fmaxf(age[linear], 0.f), 2.f);
+    costs[linear] = sqrtf(dx * dx + dy * dy) + bounded_age * age_weight;
+  } else {
+    costs[linear] = INFINITY;
+  }
+  if (midfield[linear]) {
+    const float dx = points[2 * linear] - robot_xy[2 * row];
+    const float dy = points[2 * linear + 1] - robot_xy[2 * row + 1];
+    nearby[linear] = sqrtf(dx * dx + dy * dy) <= 2.f;
+  } else {
+    nearby[linear] = false;
+  }
+}
+
+void candidate_cost_nearby_launch(const float* points, const float* intake_xy,
+    const float* robot_xy, const float* age, const bool* free,
+    const bool* midfield, float* costs, bool* nearby, int64_t n, int64_t p,
+    float age_weight, hipStream_t stream) {
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((n * p + threads - 1) / threads);
+  candidate_cost_nearby_kernel<<<blocks, threads, 0, stream>>>(
+      points, intake_xy, robot_xy, age, free, midfield, costs, nearby,
+      n, p, age_weight);
+}
+
+
+__global__ void candidate_top4_nearby_kernel(
+    const float* points, const float* intake_xy, const float* robot_xy,
+    const float* age, const bool* free, const bool* midfield,
+    int64_t* indices, float* nearest, bool* nearby, int64_t p,
+    float age_weight) {
+  const int64_t row = blockIdx.x;
+  const int lane = threadIdx.x;
+  __shared__ float shared_distance[256];
+  __shared__ int64_t shared_index[256];
+  __shared__ int nearby_flags[256];
+  __shared__ int64_t selected_index;
+  float local_distance[4] = {INFINITY, INFINITY, INFINITY, INFINITY};
+  int64_t local_index[4] = {p, p, p, p};
+  int local_nearby = 0;
+  int cursor = 0;
+  for (int64_t piece = lane; piece < p; piece += blockDim.x) {
+    const int64_t linear = row * p + piece;
+    const float dx_intake = points[2 * linear] - intake_xy[2 * row];
+    const float dy_intake = points[2 * linear + 1] - intake_xy[2 * row + 1];
+    if (free[linear]) {
+      const float bounded_age = fminf(fmaxf(age[linear], 0.f), 2.f);
+      const float cost = sqrtf(dx_intake * dx_intake + dy_intake * dy_intake) +
+                         bounded_age * age_weight;
+      for (int slot = 0; slot < 4; ++slot) {
+        if (cost < local_distance[slot] ||
+            (cost == local_distance[slot] && piece < local_index[slot])) {
+          for (int move = 3; move > slot; --move) {
+            local_distance[move] = local_distance[move - 1];
+            local_index[move] = local_index[move - 1];
+          }
+          local_distance[slot] = cost;
+          local_index[slot] = piece;
+          break;
+        }
+      }
+    }
+    if (midfield[linear]) {
+      const float dx_robot = points[2 * linear] - robot_xy[2 * row];
+      const float dy_robot = points[2 * linear + 1] - robot_xy[2 * row + 1];
+      local_nearby |= sqrtf(dx_robot * dx_robot + dy_robot * dy_robot) <= 2.f;
+    }
+  }
+  nearby_flags[lane] = local_nearby;
+  __syncthreads();
+  if (lane == 0) {
+    int any_nearby = 0;
+    for (int i = 0; i < blockDim.x; ++i) any_nearby |= nearby_flags[i];
+    nearby[row] = any_nearby != 0;
+  }
+  __syncthreads();
+  for (int rank = 0; rank < 4; ++rank) {
+    shared_distance[lane] = local_distance[cursor];
+    shared_index[lane] = local_index[cursor];
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (lane < stride) {
+        const float other_distance = shared_distance[lane + stride];
+        const int64_t other_index = shared_index[lane + stride];
+        if (other_distance < shared_distance[lane] ||
+            (other_distance == shared_distance[lane] &&
+             other_index < shared_index[lane])) {
+          shared_distance[lane] = other_distance;
+          shared_index[lane] = other_index;
+        }
+      }
+      __syncthreads();
+    }
+    if (lane == 0) {
+      const int64_t best_index = shared_index[0];
+      indices[row * 4 + rank] = best_index < p ? best_index : 0;
+      nearest[row * 4 + rank] = shared_distance[0];
+      selected_index = best_index;
+    }
+    __syncthreads();
+    if (local_index[cursor] == selected_index && cursor < 3) ++cursor;
+    __syncthreads();
+  }
+}
+
+void candidate_top4_nearby_launch(const float* points, const float* intake_xy,
+    const float* robot_xy, const float* age, const bool* free,
+    const bool* midfield, int64_t* indices, float* nearest, bool* nearby,
+    int64_t n, int64_t p, float age_weight, hipStream_t stream) {
+  candidate_top4_nearby_kernel<<<static_cast<unsigned>(n), 256, 0, stream>>>(
+      points, intake_xy, robot_xy, age, free, midfield, indices, nearest,
+      nearby, p, age_weight);
+}
