@@ -259,6 +259,8 @@ class TensorThreeVsThreeEnv(
                                         dtype=torch.long)
         self._raster_reanchor=torch.ones((self.n,NUM_ROBOTS),device=self.device,
                                          dtype=torch.bool)
+        self._no_track_search_active=torch.zeros(
+            (self.n,NUM_ROBOTS),device=self.device,dtype=torch.bool)
         self._target_collect_heading=torch.zeros((self.n,NUM_ROBOTS),
                                                   device=self.device,dtype=torch.float32)
         self._target_fuel_index=torch.full((self.n,NUM_ROBOTS),-1,
@@ -448,6 +450,7 @@ class TensorThreeVsThreeEnv(
         self._target_turn_anchor.copy_(self.sim.pose[:,:,:2])
         self._target_collecting.zero_()
         self._intake_collecting.zero_()
+        self._no_track_search_active.zero_()
         self._target_cluster_empty_ticks.zero_()
         self._raster_cursor.copy_(self._closest_raster_indices(self.sim.pose[:,:,:2]))
         self._raster_reanchor.fill_(True)
@@ -497,6 +500,7 @@ class TensorThreeVsThreeEnv(
         self._target_turn_anchor.copy_(torch.where(
             mask[:,None,None],self.sim.pose[:,:,:2],self._target_turn_anchor))
         self._target_collecting.masked_fill_(mask[:,None],False)
+        self._no_track_search_active.masked_fill_(mask[:,None],False)
         self._target_cluster_empty_ticks.masked_fill_(mask[:,None],0)
         reset_cursor=self._closest_raster_indices(self.sim.pose[:,:,:2])
         self._raster_cursor.copy_(torch.where(mask[:,None],reset_cursor,self._raster_cursor))
@@ -614,13 +618,14 @@ class TensorThreeVsThreeEnv(
         if active_count == 0:
             obs=self._last_obs
             return obs,torch.zeros((self.n,6),device=self.device),torch.zeros_like(active),torch.zeros_like(active),{}
-        if self.sweeping_enabled:
-            self._prepare_raster_cursor(active)
+        self._prepare_raster_cursor(active)
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
-        raster_mask=(self.sweeping_enabled & (self._deterministic_mode_mask &
+        raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
-                     ((action<4)|((action==6)&~carrying)))
+                     ((self.sweeping_enabled &
+                       ((action<4)|((action==6)&~carrying))) |
+                      self._no_track_search_active))
         # AD* routes are consumed only by robots with an active controller.
         # Keep stationary robots' cached paths untouched; when a rollout
         # changes controller assignments, the trainer forces a fresh plan.
@@ -659,7 +664,7 @@ class TensorThreeVsThreeEnv(
         # Plan with the intake extended whenever collection is requested,
         # including while the deployment guard keeps it retracted to clear a
         # nearby field element. This makes AD* route the escape safely.
-        intake_extended=(self._turret_mask[None] | (self.last_actions < 4))
+        intake_extended=(self._turret_mask[None] | self._intake_collecting)
         # The intake projects 12in beyond the bumper, so the centered AD*
         # rectangle needs 24in extra total length to cover that forward reach.
         planner_lengths=(self.sim.length + intake_extended.to(self.sim.length.dtype)*.6096)
@@ -932,8 +937,7 @@ class TensorThreeVsThreeEnv(
             self.sim.velocity.copy_(torch.where(
                 stationary[...,None],torch.zeros_like(self.sim.velocity),
                 self.sim.velocity))
-        if self.sweeping_enabled:
-            self._finish_raster_cursor(active,raster_mask)
+        self._finish_raster_cursor(active,raster_mask)
         self.steps+=active.long()
         self._update_match(active)
         self._update_fuel(active,score_intent=self._last_score_intent)

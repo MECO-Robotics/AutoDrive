@@ -308,7 +308,13 @@ class TensorThreeVsThreeActionMixin:
             action = action.clamp(0, 7)
             action = torch.where(masks.gather(-1, action[...,None]).squeeze(-1), action,
                                  masks.to(torch.int64).argmax(-1))
-        collecting=(action<4)
+        deterministic_offense_mode=(self._deterministic_mode_mask &
+                                     ~self._defense_role_mask)[None]
+        no_track_search=(deterministic_offense_mode & (action==6) &
+                         ~(possession>0) & ~intake_available)
+        self._no_track_search_active.copy_(torch.where(
+            active[:,None],no_track_search,self._no_track_search_active))
+        collecting=(action<4) | no_track_search
         # A dumper intake deploys 12 inches ahead of the bumper. Refuse the
         # collection action when that rectangle would overlap a solid field
         # element or cross the field boundary. Once deployed, planner lengths
@@ -606,9 +612,12 @@ class TensorThreeVsThreeActionMixin:
                                      (possession>0))
             target_based_search=(target_based_collect & ~self._target_collecting &
                                  (action==6) & ~no_alliance_fuel_search)
-            # Keep no-track searchers on separate field lanes instead of
-            # converging all empty robots at the exact same field midpoint.
-            target=torch.where(target_based_search[...,None],ferry_target,target)
+            # Use the raster only while an offense robot has no visible fuel
+            # target; otherwise retain the motion-derived ferry waypoint.
+            _,raster_search_target,_=self._raster_waypoint_targets(p[:,:,:2])
+            search_target=torch.where(no_track_search[...,None],
+                                      raster_search_target,ferry_target)
+            target=torch.where(target_based_search[...,None],search_target,target)
             target=torch.where(no_alliance_fuel_search[...,None],ferry_target,target)
 
             # Trace the local fuel-cloud edge with the intake's right side.
