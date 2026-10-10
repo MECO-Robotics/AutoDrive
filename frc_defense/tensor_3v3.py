@@ -49,6 +49,7 @@ class TensorThreeVsThreeEnv(
                  turret_scoring_bps=15.0,
                  perception_interval=2, contact_iterations=3,
                  teammate_intent_knowledge=False,
+                 teammate_coordination_enabled=None,
                  sweeping_enabled=False,
                  perception_range=6., perception_fov=120.,
                  stereo_baseline=.0635, fuel_ball_diameter=.15,
@@ -120,7 +121,13 @@ class TensorThreeVsThreeEnv(
         if len(modes) != NUM_ROBOTS or any(mode not in CONTROL_MODES for mode in modes):
             raise ValueError("control_modes must assign none, nn, or deterministic to six robots")
         self.control_modes = tuple(modes)
-        self.teammate_intent_knowledge=bool(teammate_intent_knowledge)
+        # Preserve the legacy constructor/config name for saved jobs and
+        # callers, while using one runtime switch for every intentional team
+        # coordination behavior. Physical teammate observations remain
+        # available to model onboard sensing.
+        if teammate_coordination_enabled is None:
+            teammate_coordination_enabled=teammate_intent_knowledge
+        self.teammate_coordination_enabled=bool(teammate_coordination_enabled)
         self.sweeping_enabled=bool(sweeping_enabled)
         self._controlled_mode_mask=torch.tensor(
             [mode!="none" for mode in modes],device=self.device,dtype=torch.bool)

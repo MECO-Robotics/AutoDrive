@@ -55,7 +55,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         fuel_physics=args.fuel_physics,
         replan_interval=args.replan_interval,
         perception_interval=args.perception_interval,
-        teammate_intent_knowledge=args.teammate_intent_knowledge,
+        teammate_coordination_enabled=args.teammate_coordination_enabled,
     )
     env.reset(seed=args.seed)
     actions = torch.full((args.envs, 6), 7, device=args.device, dtype=torch.long)
@@ -89,7 +89,8 @@ def evaluate(args: argparse.Namespace) -> dict:
             "fuel_physics": args.fuel_physics,
             "replan_interval": args.replan_interval,
             "perception_interval": args.perception_interval,
-            "teammate_intent_knowledge": args.teammate_intent_knowledge,
+            "teammate_intent_knowledge": args.teammate_coordination_enabled,
+            "teammate_coordination_enabled": args.teammate_coordination_enabled,
         },
         "elapsed_seconds": elapsed,
         "matches_per_second": args.envs / elapsed,
@@ -122,7 +123,8 @@ def main() -> None:
     parser.add_argument("--fuel-physics", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--replan-interval", type=int, default=20)
     parser.add_argument("--perception-interval", type=int, default=2)
-    parser.add_argument("--teammate-intent-knowledge",
+    parser.add_argument("--teammate-coordination", "--teammate-intent-knowledge",
+                        dest="teammate_coordination_enabled",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="enable teammate coordination (default: siloed robots)")
     parser.add_argument("--output", type=Path)

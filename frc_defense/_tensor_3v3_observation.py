@@ -795,7 +795,7 @@ class TensorThreeVsThreeObservationMixin:
             teammate_possession[...,None].to(p.dtype) /
                 max(self.fuel_capacity,1),
             self.agent_train_mask[team_idx].to(p.dtype)[...,None]), -1)
-        if not self.teammate_intent_knowledge:
+        if not self.teammate_coordination_enabled:
             teammate_shared.zero_()
         teammate = torch.cat((teammate_motion, teammate_shared,
             torch.ones((self.n,6,2,2),device=self.device)), -1).reshape(self.n,6,20)
@@ -803,7 +803,7 @@ class TensorThreeVsThreeObservationMixin:
         same_team_float=same_team.to(p.dtype)
         teammate_count=(torch.einsum("ij,nj->ni",same_team_float,possession.to(p.dtype)) /
                         (2*max(self.fuel_capacity,1)))
-        if not self.teammate_intent_knowledge:
+        if not self.teammate_coordination_enabled:
             teammate_count.zero_()
         possession_feat = torch.stack((own_count, teammate_count), -1)
         team_scores = self.fuel_score_count / max(self.fuel_count,1)

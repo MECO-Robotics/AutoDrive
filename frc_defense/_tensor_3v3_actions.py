@@ -21,7 +21,7 @@ class TensorThreeVsThreeActionMixin:
 
     def _ferry_targets_for_current_motion(self):
         """Return assigned ferry lanes or lanes inferred from own motion."""
-        if self.teammate_intent_knowledge:
+        if self.teammate_coordination_enabled:
             return self.ferry_targets[None].expand(self.n,-1,-1)
 
         position=self.sim.pose[:,:,:2]
@@ -358,7 +358,7 @@ class TensorThreeVsThreeActionMixin:
                 available = intake_eligible[:, robot].clone()
                 for prior_robot, prior_index, prior_active in assigned:
                     same_alliance = ((self.team_ids[robot] == self.team_ids[prior_robot]) &
-                                     self.teammate_intent_knowledge)
+                                     self.teammate_coordination_enabled)
                     destination = self.track_pos[
                         self._world_indices,prior_robot,
                         prior_index.clamp(0,self.fuel_count-1)]
@@ -746,7 +746,7 @@ class TensorThreeVsThreeActionMixin:
         if active is not None:
             fused = _collision_multi_hip.avoid_robot_contention(
                 self.sim, command, targets, active, self._avoidance_winner,
-                self._controlled_mode_mask,self.teammate_intent_knowledge)
+                self._controlled_mode_mask,self.teammate_coordination_enabled)
             if fused is not None:
                 return fused
         controlled=self._controlled_mode_mask[None]
@@ -772,8 +772,8 @@ class TensorThreeVsThreeActionMixin:
         goal_distance = (targets - position).norm(dim=-1)
         distance_i, distance_j = goal_distance[:, pair_i], goal_distance[:, pair_j]
         teammate_pair=(self.sim.team_ids[pair_i]==self.sim.team_ids[pair_j])
-        use_intent=teammate_pair & self.teammate_intent_knowledge
-        if not self.teammate_intent_knowledge:
+        use_intent=teammate_pair & self.teammate_coordination_enabled
+        if not self.teammate_coordination_enabled:
             # Teammates remain hard AD* and physics obstacles, but with intent
             # knowledge disabled, only react to close physical proximity.
             near_teammate=current_distance < (clearance + .05)
@@ -787,7 +787,7 @@ class TensorThreeVsThreeActionMixin:
         preferred_winner=torch.where(use_intent[None],intent_winner,stable_winner)
         i_controlled=self._controlled_mode_mask[pair_i]
         j_controlled=self._controlled_mode_mask[pair_j]
-        controller_priority=(~teammate_pair | self.teammate_intent_knowledge)
+        controller_priority=(~teammate_pair | self.teammate_coordination_enabled)
         preferred_winner=torch.where(
             (i_controlled&~j_controlled&controller_priority)[None],
             pair_j[None],preferred_winner)
@@ -797,7 +797,7 @@ class TensorThreeVsThreeActionMixin:
         conflict &= (i_controlled|j_controlled)[None]
         retained = ((self._avoidance_winner >= 0) &
                     (current_distance < clearance + .35) &
-                    (~teammate_pair[None] | self.teammate_intent_knowledge))
+                    (~teammate_pair[None] | self.teammate_coordination_enabled))
         winner = torch.where(retained,self._avoidance_winner,
             torch.where(conflict,preferred_winner,
                         torch.full_like(preferred_winner,-1)))
