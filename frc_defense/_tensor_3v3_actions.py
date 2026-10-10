@@ -270,8 +270,10 @@ class TensorThreeVsThreeActionMixin:
                                        torch.zeros_like(possession),offense_action)
             deterministic=torch.where(self._defense_role_mask[None],defense_action,
                                       offense_action)
-            deterministic=torch.where(active_hub_return & ~self._defense_role_mask[None],
-                                      torch.full_like(deterministic,6),deterministic)
+            return_loaded=(active_hub_return & (possession>0) &
+                           ~self._defense_role_mask[None])
+            deterministic=torch.where(return_loaded,
+                                      torch.full_like(deterministic,4),deterministic)
         else:
             # With no deterministic offense controller, all deterministic
             # controllers in this batch are defenders and use action 5.
