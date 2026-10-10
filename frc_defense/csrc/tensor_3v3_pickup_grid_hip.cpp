@@ -6,7 +6,7 @@
 void pickup_grid_launch(const bool*, const float*, const float*, const float*,
     const float*, const bool*, int64_t*, bool*, float*,
     const float*, const bool*, const bool*, const bool*, int64_t*, bool*, int,
-    int, int, int, int, bool, hipStream_t);
+    int, int, int, bool, hipStream_t);
 void pickup_all_launch(const bool*, const bool*, const float*, const float*, const float*,
     const float*, const bool*, int64_t*, bool*, float*,
     const float*, const bool*, const bool*, const bool*, const bool*,
