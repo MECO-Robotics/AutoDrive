@@ -14,6 +14,7 @@ metrics/
 evaluations/
 logs/
 outputs/fuel_physics/
+outputs/3v3-offense-batches/
 
 # Local native-extension and package build products.
 build/
