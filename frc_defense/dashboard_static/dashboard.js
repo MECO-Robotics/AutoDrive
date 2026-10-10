@@ -716,14 +716,15 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
     const scoringBps = behaviorProbe
       ? Number(scoringControl?.value ?? (robotTypes[0] === "turret" ? 15 : 25))
       : Number(savedJob?.scoring_bps ?? scoringControl?.value ?? 25);
-    const teammateIntentKnowledge = behaviorProbe ? false : Boolean(
-      savedJob?.teammate_intent_knowledge ?? $("teammateIntentKnowledge")?.checked ?? false,
+    const teammateCoordinationEnabled = behaviorProbe ? false : Boolean(
+      savedJob?.teammate_coordination_enabled ?? savedJob?.teammate_intent_knowledge ??
+      $("teammateIntentKnowledge")?.checked ?? false,
     );
     const sweepingEnabled = behaviorProbe ? false : Boolean(
       savedJob?.sweeping_enabled ?? $("sweepingEnabled")?.checked ?? false,
     );
     const intentControl = $("teammateIntentKnowledge");
-    if (intentControl) intentControl.checked = teammateIntentKnowledge;
+    if (intentControl) intentControl.checked = teammateCoordinationEnabled;
     const sweepingControl = $("sweepingEnabled");
     if (sweepingControl) sweepingControl.checked = sweepingEnabled;
     if (hopperControl) hopperControl.value = String(hopperCapacity);
@@ -742,7 +743,7 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       hopper_capacity: String(hopperCapacity),
       scoring_bps: String(scoringBps),
       random_gamepiece_placement: String(Boolean(behaviorProbe && $("focusedRandomPlacement")?.checked)),
-      teammate_intent_knowledge: String(teammateIntentKnowledge),
+      teammate_coordination_enabled: String(teammateCoordinationEnabled),
       sweeping_enabled: String(sweepingEnabled),
       dual_gpu: String(Boolean($("dualGpuMode")?.checked)),
     });
@@ -756,7 +757,8 @@ async function loadZonePlayback({ autoplay = true, resumeJob = null,
       behavior_mode: behaviorMode,
       control_modes: robotSetups, hopper_capacity: hopperCapacity,
       scoring_bps: scoringBps, robot_types: robotTypes,
-      teammate_intent_knowledge: teammateIntentKnowledge,
+      teammate_coordination_enabled: teammateCoordinationEnabled,
+      teammate_intent_knowledge: teammateCoordinationEnabled,
       sweeping_enabled: sweepingEnabled,
       random_gamepiece_placement: behaviorProbe && Boolean($("focusedRandomPlacement")?.checked),
       dual_gpu: Boolean($("dualGpuMode")?.checked) };

@@ -260,11 +260,13 @@ def create_handler(run_dir: Path):
                                for i in range(6)]
                 robot_types=[params.get(f"robot_type{i}",["dumper"])[0]
                              for i in range(6)]
-                intent_text=params.get("teammate_intent_knowledge",["false"])[0].lower()
+                intent_text=params.get(
+                    "teammate_coordination_enabled",
+                    params.get("teammate_intent_knowledge",["false"]))[0].lower()
                 if intent_text not in ("true","false"):
-                    self.send_error(400,"teammate_intent_knowledge must be true or false")
+                    self.send_error(400,"teammate_coordination_enabled must be true or false")
                     return
-                teammate_intent_knowledge=intent_text=="true"
+                teammate_coordination_enabled=intent_text=="true"
                 sweeping_text=params.get("sweeping_enabled",["false"])[0].lower()
                 if sweeping_text not in ("true","false"):
                     self.send_error(400,"sweeping_enabled must be true or false")
@@ -306,7 +308,8 @@ def create_handler(run_dir: Path):
                          "behavior_mode":behavior_mode,
                          "total_ticks":(BEHAVIOR_PROBE_TICKS if behavior_mode!="match" else ZONE_SCENARIO_TICKS),
                          "robot_types":robot_types,
-                         "teammate_intent_knowledge":teammate_intent_knowledge,
+                         "teammate_coordination_enabled":teammate_coordination_enabled,
+                         "teammate_intent_knowledge":teammate_coordination_enabled,
                          "sweeping_enabled":sweeping_enabled,
                          "random_gamepiece_placement":(params.get("random_gamepiece_placement",["false"])[0].lower()=="true"),
                          "hopper_capacity":hopper_capacity,"scoring_bps":scoring_bps,
