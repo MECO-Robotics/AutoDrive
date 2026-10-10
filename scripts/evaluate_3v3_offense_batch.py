@@ -117,6 +117,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", required=True, help="short candidate or worktree name")
     parser.add_argument("--seed", type=int, default=64821, help="batch seed; keep fixed across candidates")
+    parser.add_argument(
+        "--seeds", type=int, nargs="+",
+        help="evaluate several batch seeds in one Python process; each seed gets a fresh environment",
+    )
     parser.add_argument("--envs", type=int, default=32, help="randomized match worlds in one batch")
     parser.add_argument("--ticks", type=int, default=8000, help="physics ticks per full match")
     parser.add_argument("--device", default="cuda:0")
@@ -128,6 +132,10 @@ def main() -> None:
                         action=argparse.BooleanOptionalAction, default=False,
                         help="enable teammate coordination (default: siloed robots)")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help="with --seeds, write one existing-schema JSON artifact per seed here",
+    )
     args = parser.parse_args()
     if args.envs < 1 or args.ticks < 1:
         parser.error("envs and ticks must be positive")
@@ -135,6 +143,22 @@ def main() -> None:
         parser.error("planner and perception intervals must be positive")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.label):
         parser.error("label may contain only letters, numbers, dot, underscore, and hyphen")
+
+    if args.seeds is not None:
+        if args.output is not None or args.output_dir is None:
+            parser.error("--seeds requires --output-dir and cannot be combined with --output")
+        if len(set(args.seeds)) != len(args.seeds):
+            parser.error("--seeds must not contain duplicates")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        for seed in args.seeds:
+            args.seed = seed
+            result = evaluate(args)
+            output = args.output_dir / f"{args.label}-{seed}.json"
+            output.write_text(json.dumps(result, indent=2) + "\n")
+            print(f"wrote {output}")
+        return
+    if args.output_dir is not None:
+        parser.error("--output-dir requires --seeds")
 
     result = evaluate(args)
     encoded = json.dumps(result, indent=2) + "\n"
