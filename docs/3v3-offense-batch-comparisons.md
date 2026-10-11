@@ -1255,3 +1255,16 @@ selectable experiment; the gains remain variable and the pooled score is below
 800. Do not promote or assume it generalizes to other strategy bundles without
 separate paired holdouts. Records and this result are committed as `f0f99b7`
 and corrected in `ed31bd5` on `codex/fms-reachability-compose`.
+
+### FMS/reachability holdout S (2026-10-11)
+
+The same frozen FMS-window + obstacle-reachability composition was tested
+against current main on fresh seeds 164839, 725403, and 908271 (four paired
+worlds each). Across 12 worlds it lost 815 fuel acquisitions and 907 points;
+mean score fell 711.42→635.83. Seed fuel/score deltas were −71/−276,
+−46/−39, and −698/−592, respectively. Both measures regressed in two of three
+seed clusters. This holdout weighs against generalization of the Q/R aggregate;
+retain the composition only as a separate historical/selectable branch and do
+not promote or assume compatibility with other strategies. No other strategy
+was active in this run. Full paired records are committed as `5da0dc9` on
+`codex/fms-reachability-compose`; the candidate remains unmerged.
