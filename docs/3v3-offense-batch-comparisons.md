@@ -72,7 +72,7 @@ against the current checkout, then generate a fresh replay.
 | Turn intake toward fuel during a feasible approach (`407b00b`) | Against the prior raster-search behavior, the fixed 12-world comparison gained 462 acquisitions and 173 points. | In current `main`. |
 | Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
 | Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
-| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Recheck against current `main`: +58 acquisitions, +413 points across 12 worlds; seed deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Narrow, mixed result pending repeatability check. |
+| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Initial recheck: +58 acquisitions, +413 points across 12 worlds; seed fuel/score deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. Two independent replications against current behavior baseline: A +741 fuel/+483 points (8/12 worlds fuel-positive, 8/12 score-positive; seed deltas +748/+551, −586/−648, +579/+580); B +796 fuel/+923 points (7/12 fuel-positive, 7/12 score-positive; seed deltas +232/+398, −132/−46, +696/+571). Replication mean scores: A 708.67→748.92, B 700.08→777.00. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Both replications are aggregate-positive, but seed/world variance remains high and neither mean reached 800. Keep experimental pending broader robustness evidence. |
 
 ### Tested behavior changes that did not pass the fuel gate
 
@@ -97,6 +97,35 @@ names as experiment history, not validated gains; do not reintroduce teammate
 intent dependence into onboard choices. The current fixed-batch candidates are
 committed to their own branches even when they lose, so code and measured result
 remain linked. Candidate commits are not automatically merged to `main`.
+
+### Independent no-track phase replications (2026-10-11)
+
+The phase-offset candidate was re-evaluated in two independent paired runs on
+separate GPUs, using unchanged commit `6d9b709` and baseline behavior from
+`main` (`8409867`, whose runtime behavior matches `3e996c9`). Each run used the
+same three batch seeds and settings above, with baseline and candidate evaluated
+sequentially on the assigned GPU. Both candidate batches completed normally.
+
+- Replication A: +741 acquisitions and +483 points across 12 worlds; aggregate
+  mean score 708.67→748.92. Seed fuel/score deltas were 827104 +748/+551,
+  827105 −586/−648, and 191873 +579/+580. Fuel and score each improved in 8/12
+  worlds. Per-world fuel/score deltas: 827104 `(+152,+101), (+566,+299),
+  (+11,+138), (+19,+13)`; 827105 `(-405,-358), (-391,-387), (-127,-207),
+  (+337,+304)`; 191873 `(+283,+159), (-278,-96), (+331,+266), (+243,+251)`.
+  Candidate elapsed time was 773.09s versus 789.36s baseline (−2.1%, including
+  cold-cache cost in the first seed).
+- Replication B: +796 acquisitions and +923 points across 12 worlds; aggregate
+  mean score 700.08→777.00. Seed fuel/score deltas were 827104 +232/+398,
+  827105 −132/−46, and 191873 +696/+571. Fuel improved in 7/12 worlds and score
+  improved in 7/12. Candidate elapsed time was 658.98s versus 721.79s baseline.
+
+The aggregate direction reproduced, but per-seed/world differences are large;
+mean candidate score remained below 800 in both replications. This is promising
+but insufficient evidence to merge. JSON records are retained outside Git in
+`AutoDrive-no-track-raster-phase-recheck/evaluations/no-track-phase-replication-a/`
+and `AutoDrive-no-track-raster-phase-replication-b/evaluations/no-track-raster-phase-replication-b/`.
+No dashboard replay or dashboard stack verification was performed; these
+end-to-end batch records are the simulator evaluations for this behavior.
 
 ### Infrastructure and repeatability findings
 
