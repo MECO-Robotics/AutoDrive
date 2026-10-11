@@ -803,10 +803,20 @@ class TensorThreeVsThreeEnv(
             target_based_tangent=torch.where(tangent_norm>.5,adstar_tangent,
                 fallback_direction)
             # Follow AD* through the route, then aim the intake at its chosen
-            # piece for the final approach. A route tangent can run along a
-            # field boundary while the fuel lies just inside it.
+            # piece early enough to complete the required chassis turn during
+            # the remaining approach. A route tangent can run along a field
+            # boundary while fuel lies just inside it.
+            fuel_bearing=torch.atan2(pickup_fuel_delta[...,1],
+                                     pickup_fuel_delta[...,0])
+            fuel_turn_error=torch.atan2(
+                torch.sin(fuel_bearing-self.sim.pose[:,:,2]),
+                torch.cos(fuel_bearing-self.sim.pose[:,:,2])).abs()
+            turn_distance=(self.sim.speed*fuel_turn_error /
+                           self.sim.omega_limit.clamp_min(.1))
+            approach_distance=torch.maximum(torch.full_like(
+                pickup_fuel_distance,.9),turn_distance)
             final_intake_approach=(~self._target_collecting &
-                                   (pickup_fuel_distance<=.9))
+                                   (pickup_fuel_distance<=approach_distance))
             target_based_tangent=torch.where(
                 final_intake_approach[...,None],fuel_delta,target_based_tangent)
             pickup_direction=torch.where(target_based_picker[...,None],
