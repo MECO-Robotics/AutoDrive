@@ -1165,3 +1165,17 @@ exceeded 800. Repeated-seed A/B replications are summarized separately and are
 not counted as independent new seeds. Overall, phase staggering has positive
 cumulative evidence but substantial seed sensitivity; preserve it as an
 optional strategy rather than treating it as a robust improvement.
+
+### Robot-local obstacle reachability holdout P
+
+The frozen reachability candidate (`a3f0ffb`) gained 499 fuel acquisitions but
+lost 365 points over the 12 paired worlds. Pooled mean team score fell from
+814.83 to 784.42. Per-seed fuel/score mean changes were −344/−576 for 719531,
+−13/−70 for 842617, and +856/+281 for 236879. Fuel improved in 7/12 worlds
+but only one of three seed clusters. Keep the implementation selectable on
+its separate branch because aggregate fuel was positive; do not promote or
+bundle it while the score regression and seed concentration remain. Full
+records and paired comparisons are committed as `a934291` on
+`codex/occluded-fuel-obstacle-reachability`. Baseline runtime revision was
+`6e7aeda`; candidate runtime revision was `a3f0ffb`. Each worktree had the same
+three user-local HIP source edits, verified byte-identical before evaluation.
