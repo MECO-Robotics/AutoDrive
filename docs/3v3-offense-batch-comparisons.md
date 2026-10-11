@@ -261,6 +261,29 @@ hysteresis or lane search. Records are in
 `AutoDrive-no-track-raster-phase-recheck/evaluations/phase-holdout-H-candidate-corrected-gpu0/`.
 No dashboard replay was generated or checked.
 
+### Phase-stagger + FMS action-window bundle Holdout H (2026-10-11)
+
+Because the phase-stagger and FMS-window edits affect separate sections of
+the action-selection flow, they were cherry-picked into a separate bundle
+branch (`codex/phase-fms-bundle`, commits `2d4fa18` and `6390dcd`) and tested
+together without changing either standalone branch. The bundle was paired
+against main revision `60b2aaa` on seeds 615379, 704167, and 992791, four
+worlds per seed, with the same 8,000-tick, fuel-physics, replan-20,
+perception-2, no-teammate-coordination settings. Candidate imports were pinned
+to the bundle worktree and verified before launch.
+
+Across 12 worlds, the bundle gained 831 acquisitions and 984 points; mean
+score rose from 634.75 to 716.75, below 800. Seed acquisition/point deltas
+were +727/+585, +153/+371, and −49/+28. Acquisitions improved in 9/12 worlds
+and points in 11/12. On this shared holdout, the bundle aggregate was below
+phase-only (+1,229 acquisitions/+1,223 points) and FMS-only (+1,001/+557).
+These are separate candidate comparisons against common baselines, not a
+factorial estimate of interaction. Keep the bundle as its own unmerged
+strategy branch. Per-world outcomes, import provenance, and evaluator records
+are committed at `bb797e8` under
+`AutoDrive-phase-fms-bundle/evaluations/phase-fms-bundle-holdout-H-gpu0/`.
+No dashboard replay was generated or checked.
+
 ### Intake proximity and speed-lookahead trials (2026-10-11)
 
 Both new candidates were committed before evaluation, started from current-main
