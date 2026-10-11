@@ -481,3 +481,33 @@ results vary; keep the behavior experimental and unmerged.
 Baseline records are in `evaluations/cluster-target-hysteresis-holdout/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-cluster-target-hysteresis-bundle` worktree.
+
+### Dense-patch plus hysteresis unseen-seed holdout B (2026-10-11)
+
+The same frozen candidate `79b1e6d` was evaluated on a second preselected
+holdout batch: seeds 925531, 184331, and 419039, four worlds per seed. Settings
+were unchanged (8,000 ticks, fuel physics, replan interval 20, perception
+interval 2, no teammate intent knowledge or coordination), with baseline and
+candidate run sequentially on GPU1. This was a fresh end-to-end simulator
+evaluation; no dashboard replay or dashboard-stack verification was used.
+
+Across these 12 unseen worlds, the candidate gained 492 fuel acquisitions but
+lost 159 points; mean score fell from 792.08 to 778.83. Per-seed fuel/score
+deltas were 925531 −241/−421, 184331 +247/−32, and 419039 +486/+294. Per-world
+fuel/score deltas were 925531 `(+13,-84), (-30,-41), (+65,+3), (-289,-299)`;
+184331 `(+10,-193), (-64,-60), (+220,+121), (+81,+100)`; and 419039
+`(-67,-178), (-23,-1), (+282,+371), (+294,+102)`. Runtime was 754.26
+seconds baseline and 698.82 seconds candidate, excluding the candidate's
+first-time compile overhead.
+
+Across both independent holdout batches (24 worlds), the candidate's combined
+delta was +480 fuel acquisitions and +101 points, a mean-score increase of
+about 4.21 points per world. This is a small, mixed effect: holdout A was
+nearly flat on fuel with a modest score gain, while holdout B gained fuel but
+lost score. The fixed development batch's larger gain does not establish a
+robust improvement or reach the 800-point target. Keep the branch experimental
+and unmerged.
+
+Baseline records are in `evaluations/cluster-target-hysteresis-holdout-b/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-cluster-target-hysteresis-bundle` worktree.
