@@ -54,16 +54,19 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   and 1,211 points over momentum ranking, with score-positive seed aggregates
   on all three seeds. The historical candidate mean was 804.08, but only 5/12
   worlds exceeded 800.
-- **Promising but unmerged:** staggering no-track raster phases has two
-  independent aggregate-positive replications (+741 acquisitions/+483 points
-  and +796/+923). Seed and world results remain mixed, and the mean scores
-  were 748.92 and 777.00, so it has not established a robust >800 result.
+- **Promising but mixed, unmerged:** no-track raster phase staggering has
+  five current-main holdouts/replications: four gained aggregate fuel and
+  points, while holdout F lost 104 fuel and 128 points. Across these five
+  batches it gained 4,494 fuel and 4,042 points over 60 worlds. Its F mean
+  score fell 778.67→768.00; an earlier E mean reached 822.25. Retain it as a
+  selectable strategy, but do not claim every holdout generalizes positively.
 - **New speed-lookahead trial:** nominally gained 16 acquisitions and 184
   points, but fuel-positive evidence was mixed across seeds and close to the
   observed run variance. Keep it experimental and unmerged.
-- **New target-hysteresis trial:** gained 165 acquisitions and 1,030 points,
-  but one seed lost 463 acquisitions and mean score remained 777.17. Retain the
-  branch for alternate strategy work; it has not established a robust >800 mean.
+- **Target hysteresis, unmerged:** the initial batch gained 165 fuel and 1,030
+  points; fresh holdout F gained 759 fuel and 1,167 points, with mean score
+  702.08→799.33. Keep its branch as an alternate; evidence is promising but
+  still limited, and the holdout mean remained just below 800.
 - **Not accepted:** the current-main FMS staging and stale-track extrapolation
   candidates failed their aggregate gates; other tested ranking, confidence,
   boundary, turn-cost, scorer-aim, and pickup-braking changes are itemized below
@@ -98,7 +101,7 @@ against the current checkout, then generate a fresh replay.
 | Turn intake toward fuel during a feasible approach (`407b00b`) | Against the prior raster-search behavior, the fixed 12-world comparison gained 462 acquisitions and 173 points. | In current `main`. |
 | Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
 | Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
-| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Initial recheck: +58 acquisitions, +413 points across 12 worlds; seed fuel/score deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. Two independent replications against current behavior baseline: A +741 fuel/+483 points; B +796 fuel/+923 points. Holdout D: +871 fuel/+799 points, mean 696.67→763.25. Holdout E: +2,190 fuel/+1,965 points, mean 658.50→822.25; both fuel and score improved in 8/12 worlds. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. All four recent paired batches were aggregate-positive; holdout E is the first mean above 800. Keep as a selectable experimental strategy pending broader robustness evidence. |
+| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions/+15 points. Initial recheck: +58/+413. Current-main replications A/B: +741/+483 and +796/+923. Holdout D: +871/+799. E: +2,190/+1,965, mean 658.50→822.25. F: −104/−128, mean 778.67→768.00. Across the five current-main batches A/B/D/E/F (60 worlds): +4,494 fuel/+4,042 points. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Four batches gained fuel and points; F regressed. Keep as a separate selectable strategy; accumulated evidence is positive, though individual holds remain mixed. |
 | Scale no-track raster waypoint lookahead with the acting robot's speed (`470adef`, `codex/raster-speed-lookahead`) | Current-main paired batch: +16 acquisitions and +184 points across 12 worlds; acquisition-positive in 8/12 worlds and score-positive in 7/12. Seed acquisition/score deltas: 827104 −13/−94, 827105 −121/+199, 191873 +150/+79. Mean score 728.08→743.42; candidate elapsed time 594.62s versus 718.98s baseline. | Nominal aggregate gain is within observed run variance and seed results are mixed. Keep committed on its branch, experimental and unmerged. End-to-end records are in `AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/` and `evaluations/raster-speed-lookahead-baseline/`. |
 
 ### Tested behavior changes that did not pass the fuel gate
@@ -116,7 +119,7 @@ against the current checkout, then generate a fresh replay.
 | Measure midfield fuel proximity from the acting robot's forward intake reference (`9a8a24e`, `codex/intake-proximity-return`) | Current-main paired batch: −600 acquisitions and −446 points across 12 worlds; mean score 744.83→707.67. Seed fuel/score deltas: 827104 −442/−336, 827105 −508/−91, 191873 +350/−19. Fuel improved in 4/12 worlds and score in 3/12. Candidate runtime was 728.60s versus 699.91s baseline. | Rejected by both aggregate fuel and score evidence; committed on its branch, not merged. Records are in `evaluations/intake-proximity-return/baseline/` and `AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/candidate/`. |
 | Use a continuous stopping controller for HUB scoring aim (`08f39ad`, `codex/score-aim-continuous`) | Current-main paired batch: −358 acquisitions and −576 points across 12 worlds; mean score 743.08→695.08. Seed fuel/point deltas: 827104 −529/−499, 827105 +114/−58, 191873 +57/−19. Fuel improved in 7/12 worlds, score in 5/12. Runtime was 655.74s baseline and 573.99s candidate. | Failed both aggregate gates; faster runtime did not preserve scoring. Keep committed on its branch, not merged. Records are in `evaluations/score-aim-continuous/baseline/` and `AutoDrive-score-aim-continuous/evaluations/score-aim-continuous/candidate/`. |
 | Cap direct pickup fallback speed with a robot-local braking envelope (`6592633`, `codex/pickup-braking-envelope`) | Current-main paired batch: −1,302 acquisitions and −934 points; mean score 729.75→651.92. Seed fuel/score deltas: 827104 −1,324/−974, 827105 +174/+373, 191873 −152/−333. Fuel and score each improved in 4/12 worlds. Runtime was 654.67s baseline and 709.63s candidate. | Failed both aggregate gates and increased runtime. Keep committed on its branch, not merged. Records are in `evaluations/pickup-braking-envelope/baseline/` and `AutoDrive-pickup-braking-envelope/evaluations/pickup-braking-envelope/candidate/`. |
-| Retain a robot's selected fuel target while it remains competitive, scaling the margin by its own targetward motion (`14f1ce4`, `codex/target-hysteresis-current`) | Current-main paired batch: +165 acquisitions and +1,030 points; mean score 691.33→777.17. Seed fuel/score deltas: 827104 +234/+123, 827105 −463/+153, 191873 +394/+754. Fuel improved in 5/12 worlds, score in 7/12. Runtime was 671.46s baseline and 663.33s candidate. | Promising aggregate score gain but mixed by seed, and mean remained below 800. Keep committed for alternate strategy use, experimental and unmerged. Records are in `evaluations/target-hysteresis-current/baseline/` and `AutoDrive-target-hysteresis-current/evaluations/target-hysteresis-current/candidate/`. |
+| Retain a robot's selected fuel target while it remains competitive, scaling the margin by its own targetward motion (`14f1ce4`, `codex/target-hysteresis-current`) | Initial current-main batch: +165 fuel/+1,030 points; mean score 691.33→777.17. Fresh holdout F: +759 fuel/+1,167 points over 12 worlds; mean 702.08→799.33. Holdout seed fuel/score deltas: 416827 +693/+695, 730159 −125/+221, 982451 +191/+251. Across both batches: +924 fuel/+2,197 points over 24 worlds. | Positive aggregate fuel/score in both batches; holdout mean remains just under 800. Keep committed as a separate experimental strategy, unmerged pending more unseen seeds. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
 | Penalize pickup tracks near field boundaries (`7124128`, `codex/wall-clearance-pickup`) | Against sequential `f4eae79`: −321 acquisitions and −332 points over 12 worlds; mean score fell 745.08→717.42. Seed fuel/score deltas: 827104 −13/−151, 827105 −138/−180, 191873 −170/−1. | Rejected by both aggregate fuel and score evidence; attempt retained on branch, not merged. Per-world records are under `AutoDrive-wall-clearance/evaluations/fresh-local-candidate/`. |
 | Defer loaded scoring while nearby alliance-zone fuel is reachable (`e83fc4c`, `codex/fuel-local-alliance-score`) | Against sequential `cc22785`: −982 acquisitions, +248 points over 12 worlds; only 2/12 worlds gained fuel. Mean score rose 645.25→665.92, still well below 800. Seed fuel/point deltas: 827104 −562/−227, 827105 −331/+126, 191873 −89/+349. Runtime increased 3.9%. | Fuel gate failed despite a small score gain; attempt retained on its branch, not merged. Records are under `AutoDrive-fuel-local-alliance-score/evaluations/fuel-local-alliance-score/`. |
@@ -707,3 +710,42 @@ Neither candidate was merged. Records are in
 `evaluations/siloed-lane-search-holdout-e/{baseline,candidate}/`. No dashboard
 replay was generated, so dashboard stack status was not part of this
 validation.
+
+### Separate phase-stagger and target-hysteresis holdout F (2026-10-11)
+
+The frozen phase-stagger candidate `6d9b709` and target-hysteresis candidate
+`14f1ce4` were each evaluated separately against baseline `d95fb1a` on the
+same fresh seeds: 416827, 730159, and 982451. Each used four world slots,
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate intent or coordination. Phase baseline/candidate ran sequentially on
+`cuda:1`; target-hysteresis baseline/candidate ran sequentially on `cuda:0`.
+Generated HIP source hashes matched across the baseline and candidate
+worktrees. Their raw baseline outcomes differed between devices, so compare
+each candidate only with its paired baseline on the same device; do not compare
+absolute scores across the two arms.
+
+- **Phase staggering:** −104 fuel and −128 points over 12 worlds; mean score
+  778.67→768.00. Fuel/score deltas by seed were 416827 +249/+221, 730159
+  −230/−283, and 982451 −123/−66. Per-world fuel/score deltas were 416827
+  `(+31,-38), (-487,-237), (+130,+218), (+575,+278)`; 730159
+  `(-445,-234), (-573,-633), (+508,+364), (+280,+220)`; 982451
+  `(+89,+6), (-163,-172), (-165,+95), (+116,+5)`. Both fuel and score
+  improved in 7/12 worlds. Summed evaluator time was 630.42 seconds baseline
+  and 657.72 seconds candidate. This is a fresh end-to-end simulator batch,
+  not a dashboard replay.
+- **Robot-local target hysteresis:** +759 fuel and +1,167 points over 12
+  worlds; mean score 702.08→799.33. Fuel/score deltas by seed were 416827
+  +693/+695, 730159 −125/+221, and 982451 +191/+251. Per-world fuel/score
+  deltas were 416827 `(-32,+52), (+568,+367), (+60,+135), (+97,+141)`;
+  730159 `(-404,-103), (+116,+41), (-106,-17), (+269,+300)`; 982451
+  `(+467,+165), (+15,+81), (+71,+191), (-362,-186)`. Summed evaluator time
+  was 621.56 seconds baseline and 665.38 seconds candidate. This is a fresh
+  end-to-end simulator batch, not a dashboard replay.
+
+These are alternative behavior branches; no candidate was combined with the
+other or merged. Target hysteresis gained aggregate fuel on this holdout, while
+phase staggering regressed. Both remain committed and selectable, with more
+unseen-seed evidence needed before adoption. Records are preserved in
+`evaluations/phase-compat-holdout-f/phase-only/{baseline,candidate}/` and
+`evaluations/target-hysteresis-holdout-f/{baseline,candidate}/`. No dashboard
+replay was generated, so dashboard stack status was not part of validation.
