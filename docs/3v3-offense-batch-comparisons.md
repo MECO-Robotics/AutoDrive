@@ -83,6 +83,7 @@ against the current checkout, then generate a fresh replay.
 | Stage behavior around FMS transitions (broad pre-staging) | −6,235 acquisitions, −1,410 points over 12 worlds. | Rejected; no merge. |
 | Just-in-time FMS staging | −776 acquisitions, −963 points over 12 worlds. | Rejected; no merge. |
 | Increase occluded-fuel velocity damping | −1,318 acquisitions, −621 points over 12 worlds. | Rejected; inference behind obstacles alone did not justify this damping change. |
+| Extrapolate selected stale fuel position by observed velocity and age confidence (`06b1f12`, `codex/stale-fuel-extrapolation-current`) | Two independent paired batches: A +175 points/−152 acquisitions over 12 worlds; B −323/−303. Across 24 worlds: −148 points/−455 acquisitions. Seed score/fuel deltas A: 827104 +185/+62, 827105 −488/−761, 191873 +478/+547; B: −490/−558, −18/+305, +185/−50. | Mixed and not generalizable; fails the fuel gate across both replications. Keep its attempt branch, do not merge. Records are in `AutoDrive-stale-fuel-extrapolation-current/evaluations/stale-fuel-extrapolation-current/`. |
 | Stage loaded robots for the next HUB activation (`e33a265`, `codex/fms-activation-stage-current-main`; fixes `3e08901`, `7cb2c97`) | Fresh current-main paired batch: −7,950 acquisitions and −2,658 points; mean score 686.42→464.92. Seed fuel/score deltas: 827104 −2,486/−416, 827105 −1,872/−561, 191873 −3,592/−1,681. Fuel and score each improved in only 1/12 worlds. | Rejected. The candidate’s staging rule consistently degraded collection and scoring; remains committed on its branch, not merged. Earlier reported +763/+244 was not supported by the saved records and did not reproduce. |
 | Abort current-HUB pickup when remaining score window is too short (`34b085a`, `codex/fms-active-window-abort-current-main`; parity fix `f1edd80`) | Fresh current-main paired batch: −1,161 acquisitions and −677 points; mean score 744.75→688.33. Seed fuel/score deltas: 827104 −927/−849, 827105 −113/+95, 191873 −121/+77. Fuel and score each improved in 5/12 worlds. Candidate runtime was 637.91s versus 677.52s baseline. | Rejected: faster execution did not preserve behavior quality; both fuel and aggregate score fell. Remains committed on its branch, not merged. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
@@ -140,6 +141,37 @@ that result was not reproducible from the available records, and this clean
 current-main paired comparison was strongly negative. Both candidate branches
 remain unmerged. These were end-to-end simulator batch evaluations, not
  dashboard replays; no dashboard replay or stack verification was performed.
+
+### Stale fuel position extrapolation replications (2026-10-11)
+
+The prior single-seed change `70c5784` estimated a selected stale fuel track's
+current position from its last observed position, velocity, and age with an
+exponential confidence decay. It was ported onto the current-main behavior
+baseline as `06b1f12` and run in two independent paired replications. Each used
+seeds 827104, 827105, and 191873, four worlds per seed, 8,000 ticks, fuel
+physics, replan interval 20, perception interval 2, and no teammate
+coordination. Baseline and candidate ran sequentially on each assigned GPU.
+
+- Replication A: +175 points, −152 acquisitions; mean score 651.17→665.75.
+  Per-seed score/fuel deltas: 827104 +185/+62, 827105 −488/−761, 191873
+  +478/+547. Per-world score/fuel deltas: 827104 `(+333,+287), (-139,-282),
+  (+76,+223), (-85,-166)`; 827105 `(+61,+186), (-321,-330), (-188,-422),
+  (-40,-195)`; 191873 `(-75,+25), (+420,+498), (-45,-54), (+178,+78)`.
+  Runtime was 681.97s baseline and 716.51s candidate.
+- Replication B: −323 points, −303 acquisitions; mean score 702.17→675.25.
+  Per-seed score/fuel deltas: 827104 −490/−558, 827105 −18/+305, 191873
+  +185/−50. Per-world score/fuel deltas: 827104 `(+122,+240), (-83,-59),
+  (-479,-656), (-50,-83)`; 827105 `(+260,+276), (+53,+241), (+31,+97),
+  (-362,-309)`; 191873 `(+114,-6), (+99,+125), (+22,+107), (-50,-276)`.
+  Runtime was 677.01s baseline and 658.14s candidate.
+
+Across both replications, the candidate lost 455 acquisitions and 148 points
+in 24 worlds. Its direction changed across runs and seeds, so stale-position
+extrapolation did not demonstrate robust behind-obstacle inference value. The
+branch remains committed and unmerged. JSON batch records are retained in
+`AutoDrive-stale-fuel-extrapolation-current/evaluations/stale-fuel-extrapolation-current/`.
+No dashboard replay or stack verification was performed; these are simulator
+batch records.
 
 ### Independent no-track phase replications (2026-10-11)
 
