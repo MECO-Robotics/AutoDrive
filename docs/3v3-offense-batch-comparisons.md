@@ -44,3 +44,76 @@ preserves the paired scenario layout. Inspect a fresh full replay for promising
 candidates before merging their behavior change.
 
 Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
+
+## Results to date (2026-10-11)
+
+The current comparison baseline is `3e996c9` (`Penalize pickup targets behind
+obstacles`). Candidate runs use the known batch seeds `827104`, `827105`, and
+`191873`, four world slots per seed, 8,000 ticks, fuel physics, replan interval
+20, perception interval 2, and no teammate intent knowledge or coordination.
+Baseline and candidate are run sequentially on the same GPU. Candidate decisions
+must use only the acting robot's own observations/state. A positive aggregate
+fuel delta is a useful acquisition signal, not by itself proof of generalization:
+keep per-seed and per-world results and leave experimental branches unmerged
+until their robustness is established.
+
+The vector batch seed initializes four distinct slots; scenario IDs are
+`seed:slot`. Identical seed/settings runs have shown appreciable world-level
+variation, so small aggregate changes need repeated matched batches before they
+are treated as robust. Each run must also be a representative end-to-end
+simulation; this batch evaluator writes records but does not create dashboard
+replays. If a replay is later used, first restart and verify the dashboard stack
+against the current checkout, then generate a fresh replay.
+
+### Behavior changes with positive paired evidence
+
+| Change | Paired evidence | Disposition |
+| --- | --- | --- |
+| Turn intake toward fuel during a feasible approach (`407b00b`) | Against the prior raster-search behavior, the fixed 12-world comparison gained 462 acquisitions and 173 points. | In current `main`. |
+| Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
+| Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
+| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Recheck against current `main`: +58 acquisitions, +413 points across 12 worlds; seed deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Narrow, mixed result pending repeatability check. |
+
+### Tested behavior changes that did not pass the fuel gate
+
+| Change | Paired evidence | Disposition |
+| --- | --- | --- |
+| Raise stale fuel track age penalty from 0.4 to 0.8 | Against `3e996c9`: −1,417 acquisitions, −1,190 points; fuel improved in 4/12 worlds. | Attempt preserved as `0c105e1` on `codex/stale-track-age-08`; not merged. |
+| Rank targets by moving-fuel interception before the top four | Against obstacle-aware ranking: −7,577 acquisitions, −4,445 points over 12 worlds. | Rejected by the acquisition/score evidence; branch `codex/moving-fuel-rank` remains experimental. |
+| Stage behavior around FMS transitions (broad pre-staging) | −6,235 acquisitions, −1,410 points over 12 worlds. | Rejected; no merge. |
+| Just-in-time FMS staging | −776 acquisitions, −963 points over 12 worlds. | Rejected; no merge. |
+| Increase occluded-fuel velocity damping | −1,318 acquisitions, −621 points over 12 worlds. | Rejected; inference behind obstacles alone did not justify this damping change. |
+| Prefer nearby dense fuel patches | +109 acquisitions but −136 points over 12 worlds. | Did not meet both acquisition and scoring goals; no merge. |
+| Cluster pickup-throughput heuristic | −26 acquisitions, +924 points over 12 worlds. | Score-only improvement with a net fuel loss; not accepted as an offense gain. |
+
+Earlier single-seed siloed-behavior branches also explored loaded return,
+collection detours, lane search, reservations, score-zone choices, hysteresis,
+stale-track extrapolation, and intent-gated coordination. Treat their branch
+names as experiment history, not validated gains; do not reintroduce teammate
+intent dependence into onboard choices. The current fixed-batch candidates are
+committed to their own branches even when they lose, so code and measured result
+remain linked. Candidate commits are not automatically merged to `main`.
+
+### Infrastructure and repeatability findings
+
+- Reusing the captured computation graphs was faster than disabling graphs in
+  the measured fixed batch. Graph-off was slower for all three seed batches and
+  differed in world-level scores and acquisitions; it was not a lossless
+  optimization. Keep the current graph path.
+- A same-seed repeat on the same GPU differed substantially by world despite
+  matching reset-state hashes. A short diagnostic first diverged around tick
+  106 with velocity differences on the order of 1e-9 to 1e-8 before scoring or
+  pickup. Duplicate-index `index_add_` contact reductions are a plausible
+  source, but this has not been proven. Small behavior gains therefore need
+  repeated paired batches before being called robust.
+- The evaluator uses explicit seed resets, but that alone has not produced
+  bit-identical long trajectories. Report seed-level aggregates and spread,
+  not only a pooled win or one favorable scenario.
+
+### Current candidate work
+
+Two independent candidate tracks are evaluating fresh robot-local behavior
+changes on the fixed batch, one sequential baseline/candidate pair per GPU. Their
+branch names, source diffs, paired records, and outcomes should be added here
+after each run completes. Do not tune a candidate against these evaluation
+seeds; retain the entire fixed batch for the comparison.
