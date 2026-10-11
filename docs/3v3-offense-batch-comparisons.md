@@ -1097,6 +1097,20 @@ found no existing occurrence of these seeds. Keep the candidates separate,
 freeze their implementations, and retain results whether positive or negative;
 this is a generalization holdout, not a tuning batch.
 
+#### Endgame candidate result
+
+The endgame candidate lost 716 fuel acquisitions and 655 points across 12
+worlds; mean score fell from 717.58 to 663.00. Per-seed fuel/score deltas were
++439/+441, +42/−63, and −1,197/−1,033. Fuel improved in 4/12 worlds and score
+in 5/12. Seed 852739 alone averaged 822.75 points, but seed 912463 suffered a
+large loss, so the aggregate is a regression. Preserve the implementation as a
+separate selectable strategy, but do not promote or combine it based on one
+strong seed. Full records are committed as `3cf7a42` on
+`codex/robot-local-endgame-score-commit`. The actual baseline record revision
+was `b3af485`, a documentation-only descendant of behavior snapshot `3320480`;
+the candidate runtime snapshot was `e9200a1` with no behavior changes after
+`0641100`. The FMS-window N result was still pending when this was recorded.
+
 ### Cross-holdout statistical summaries
 
 Offline paired-record analyses were run with seed batches as the independent
