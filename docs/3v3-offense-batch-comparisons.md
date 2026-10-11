@@ -409,3 +409,27 @@ Baseline records and per-seed comparison files are in
 `evaluations/density-hysteresis-current-main/`; candidate records are in the
 `AutoDrive-density-hysteresis` candidate worktree under the matching
 evaluation directory.
+
+### Dense-patch ranking plus target hysteresis bundle (2026-10-11)
+
+Candidate `79b1e6d` (`codex/cluster-target-hysteresis-bundle`) combines dense
+fuel-patch ranking with robot-local target hysteresis. It was paired against
+the current behavior in `main` (`9afb152`, docs-only advances during the
+batch) on seeds 827104, 827105, and 191873, four worlds per seed, 8,000 ticks,
+fuel physics, replan interval 20, perception interval 2, and no teammate
+intent knowledge or coordination. This was a fresh end-to-end simulator
+evaluation; dashboard replay and dashboard-stack verification were not used.
+
+Across 12 worlds, the candidate gained 1,264 team fuel acquisitions and 1,464
+team points; mean score rose from 607.25 to 729.25. Mean score deltas by seed
+were +222.00, −39.00, and +183.00. Per-world fuel/score deltas were 827104
+`(+68,+234), (+240,+142), (-307,-88), (+874,+600)`; 827105
+`(-54,-127), (-230,-177), (-47,-22), (+139,+170)`; and 191873
+`(+604,+779), (-255,+27), (+36,-255), (+196,+181)`. Runtime was 635.30
+seconds baseline and 668.06 seconds candidate across the three seed batches.
+The aggregate is promising, but results vary by seed and mean remains below
+800, so preserve this committed alternate strategy as experimental and unmerged.
+
+Baseline records are in `evaluations/cluster-target-hysteresis/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-cluster-target-hysteresis-bundle` worktree.
