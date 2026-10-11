@@ -386,3 +386,26 @@ strategy; do not merge it based on the aggregate alone.
 Baseline records are in `evaluations/phase-hysteresis-bundle/baseline/` and
 candidate records are in the corresponding candidate worktree at
 `AutoDrive-phase-hysteresis-bundle/evaluations/phase-hysteresis-bundle/candidate/`.
+
+### Pickup density plus target hysteresis bundle (2026-10-11)
+
+Candidate `7419b50` (`codex/density-hysteresis-current-main`) combines dense
+patch pickup targeting with robot-local target hysteresis. It was compared
+against `main` at `97df7ec` on the same three seeds, four worlds per seed,
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate intent knowledge or coordination. The run was a fresh end-to-end
+simulator batch; it did not use dashboard replay or dashboard-stack checks.
+
+The candidate lost 873 team fuel acquisitions and 484 team points overall;
+mean score fell from 733.08 to 692.75. Fuel/score deltas by seed were 827104
++272/+175, 827105 −490/−452, and 191873 −655/−207. Per-world fuel/score
+deltas were 827104 `(+197,+163), (+162,+14), (-249,-152), (+162,+150)`;
+827105 `(-321,-322), (+87,+19), (+438,+226), (-694,-375)`; and 191873
+`(-621,-149), (+70,+132), (-89,-162), (-15,-28)`. Tick-loop runtime
+improved from 751.43 to 691.43 seconds, but behavior quality regressed, so
+retain the committed attempt without merging it.
+
+Baseline records and per-seed comparison files are in
+`evaluations/density-hysteresis-current-main/`; candidate records are in the
+`AutoDrive-density-hysteresis` candidate worktree under the matching
+evaluation directory.
