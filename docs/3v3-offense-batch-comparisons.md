@@ -1097,6 +1097,21 @@ found no existing occurrence of these seeds. Keep the candidates separate,
 freeze their implementations, and retain results whether positive or negative;
 this is a generalization holdout, not a tuning batch.
 
+### Pre-registration: robot-local fuel reachability holdout P (2026-10-11)
+
+Test two distinct, unmerged robot-local targeting candidates separately on
+fresh seeds 719531, 842617, and 236879, four worlds per seed: confidence- and
+velocity-aware reranking of aged obstacle-blocked fuel tracks
+(`a3f0ffb`, `codex/occluded-fuel-obstacle-reachability`) on `cuda:1`; and
+rotational intake-point velocity in target ranking (`47954ab`,
+`codex/rotation-aware-intake-velocity-rank`) on `cuda:0`. Pair each candidate
+with current-main behavior snapshot `fab4e1e` on the same device. Use 8,000
+ticks, fuel physics, replan interval 20, perception interval 2, and no teammate
+intent or coordination. Exact-seed searches across project Markdown and batch
+JSON records found no existing occurrence of these seeds. Freeze both changes;
+retain all outcomes and do no tuning on this batch. Verify each candidate
+imports from its own worktree and that common HIP sources match the baseline.
+
 #### Endgame candidate result
 
 The endgame candidate lost 716 fuel acquisitions and 655 points across 12
