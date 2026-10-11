@@ -1096,3 +1096,27 @@ or coordination. Exact-seed searches across the project docs and JSON records
 found no existing occurrence of these seeds. Keep the candidates separate,
 freeze their implementations, and retain results whether positive or negative;
 this is a generalization holdout, not a tuning batch.
+
+### Cross-holdout statistical summaries
+
+Offline paired-record analyses were run with seed batches as the independent
+units; no simulator or GPU work was used for these summaries. Frozen FMS
+action-window filtering (`e016b22`) across holdouts H/I/J gained 2,796 fuel
+acquisitions and 1,524 points across 36 worlds, with mean score 716.75→759.08.
+Fuel was positive in 8/9 seed batches and 23/36 worlds; points were positive in
+7/9 batches and 21/36 worlds. The nine seed-batch deltas had sample SD 416 fuel
+and 312 points; t-based 95% intervals for mean paired change were [−9, 630]
+fuel and [−70, 409] points. Holdout I alone exceeded 800 mean score, while the
+pooled score remained below 800 and holdout J was nearly flat. This supports
+keeping the FMS behavior available, but does not establish a dependable gain.
+
+For phase staggering, fresh current-main holdouts D/E/F/H/I/J/M (counting the
+corrected H cuda:0 pairs once) covered 84 worlds and 21 seed clusters, gaining
+3,943 fuel and 3,446 points; mean score was 712.55→753.57. Four batches were
+net positive and three net negative; both measures improved in 14/21 seed
+clusters. Seed-cluster SDs were 446 fuel and 387 points, and approximate
+95% t intervals crossed zero for both mean effects. Only E and I individually
+exceeded 800. Repeated-seed A/B replications are summarized separately and are
+not counted as independent new seeds. Overall, phase staggering has positive
+cumulative evidence but substantial seed sensitivity; preserve it as an
+optional strategy rather than treating it as a robust improvement.
