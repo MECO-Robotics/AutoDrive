@@ -1081,3 +1081,18 @@ device. Use the same 8,000-tick, fuel-physics, replan-20, perception-2 setup
 and no teammate intent/coordination. These seeds were checked against saved
 batch records before this entry was committed. Keep each strategy isolated and
 retain every outcome; no tuning or combination will be based on this batch.
+
+### Pre-registration: FMS-window and endgame-gate holdout N (2026-10-11)
+
+Replicate two previously fuel-positive standalone behaviors on fresh seeds
+852739, 467821, and 912463, four worlds per seed: FMS local action-window
+filtering (`e016b22`, `codex/fms-local-action-window`) on `cuda:0`, and
+robot-local endgame score commitment (`0641100`,
+`codex/robot-local-endgame-score-commit`) on `cuda:1`. Pair each candidate
+separately with the same current-main behavior snapshot (`b8f53e8`, docs-only
+after behavior snapshot `3320480`) on its assigned device. Use 8,000 ticks,
+fuel physics, replan interval 20, perception interval 2, and no teammate intent
+or coordination. Exact-seed searches across the project docs and JSON records
+found no existing occurrence of these seeds. Keep the candidates separate,
+freeze their implementations, and retain results whether positive or negative;
+this is a generalization holdout, not a tuning batch.
