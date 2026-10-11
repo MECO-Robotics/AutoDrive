@@ -1,0 +1,55 @@
+start_utc=2026-10-11T23:11:13Z
+arm=baseline seed=339752 worktree=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline cache=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-baseline
+git_head=5aa2cbf60cce26e974142dbe771618d3d28a34b7
+invocation: env PYTHONPATH=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-baseline TORCH_EXTENSIONS_DIR=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-baseline PYTORCH_ROCM_ARCH=gfx900 /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive/.venv/bin/python -u scripts/evaluate_3v3_offense_batch.py --label baseline-V --seed 339752 --envs 4 --ticks 8000 --device cuda:0 --fuel-physics --replan-interval 20 --perception-interval 2 --no-teammate-coordination --trace-slot 0 --trace-every 10 --output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-339752.json --trace-output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-339752-trace.json
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+Traceback (most recent call last):
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py", line 495, in <module>
+    main()
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py", line 477, in main
+    result = evaluate(args)
+             ^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py", line 197, in evaluate
+    env = TensorThreeVsThreeEnv(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_3v3.py", line 395, in __init__
+    self.reset(seed=seed)
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_3v3.py", line 484, in reset
+    self._last_obs = self.observe()
+                     ^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_observation.py", line 738, in observe
+    indices, valid, eta = self._candidates()
+                          ^^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_observation.py", line 709, in _candidates
+    _fuel_candidate_rank_hip.integrated_available(self.device)):
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_fuel_candidate_rank.py", line 83, in integrated_available
+    return FUSED_FUEL_CANDIDATE_RANK_HIP_ENABLED and available(device)
+                                                     ^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_fuel_candidate_rank.py", line 78, in available
+    return torch.version.hip is not None and torch.device(device).type == "cuda" and _extension() is not None
+                                                                                     ^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_fuel_candidate_rank.py", line 63, in _extension
+    _EXT = cpp_extension.load(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 1966, in load
+    return _jit_compile(
+           ^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2427, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2584, in _write_ninja_file_and_build_library
+    _run_ninja_build(
+  File "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2935, in _run_ninja_build
+    subprocess.run(
+  File "/mnt/zfs-storage/All Drives/Brian Data/ssd-offload/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/zfs-storage/All Drives/Brian Data/ssd-offload/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/subprocess.py", line 1196, in communicate
+    stdout = self.stdout.read()
+             ^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+exit_status=130
+end_utc=2026-10-11T23:12:36Z
