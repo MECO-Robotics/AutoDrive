@@ -456,3 +456,28 @@ regressed behavior and runtime; retain the committed attempt unmerged.
 Baseline records are in `evaluations/phase-density-current-main/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-phase-density` worktree.
+
+### Dense-patch plus hysteresis unseen-seed holdout A (2026-10-11)
+
+To test whether candidate `79b1e6d` generalizes beyond its development batch,
+it was evaluated without tuning on previously unused seeds 64821, 352190, and
+740813, four worlds per seed. Settings remained 8,000 ticks, fuel physics,
+replan interval 20, perception interval 2, and no teammate intent knowledge
+or coordination. Baseline and candidate were evaluated sequentially on GPU0;
+the current-main revisions differ only by docs-only commits during the run.
+This was a fresh end-to-end simulator holdout, with no dashboard replay or
+dashboard-stack verification.
+
+Across the 12 holdout worlds, fuel acquisitions changed by −12 and points by
++260; mean score rose from 685.92 to 707.58. Mean score increased on all
+three seeds: 64821 +40.75, 352190 +13.75, and 740813 +10.50. Per-world
+fuel/score deltas were 64821 `(+379,+270), (-368,-327), (-229,-255),
+(+527,+475)`; 352190 `(0,+131), (0,+158), (+237,+209), (-363,-443)`; and
+740813 `(+123,+89), (-397,-111), (-84,+12), (+163,+52)`. Runtime was
+638.60 seconds baseline and 640.84 seconds candidate. The score effect is
+modestly positive across seed means, but the fuel gate did not hold and world
+results vary; keep the behavior experimental and unmerged.
+
+Baseline records are in `evaluations/cluster-target-hysteresis-holdout/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-cluster-target-hysteresis-bundle` worktree.
