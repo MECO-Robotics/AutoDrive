@@ -55,15 +55,18 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   on all three seeds. The historical candidate mean was 804.08, but only 5/12
   worlds exceeded 800.
 - **Promising but mixed, unmerged:** no-track raster phase staggering has
-  six current-main holdouts/replications: four gained aggregate fuel and
-  points, while F and J regressed. Across these six batches it gained 3,621
-  fuel and 3,713 points over 72 worlds. Its F mean score fell 778.67→768.00;
-  an earlier E mean reached 822.25. Retain it as a selectable strategy, but
-  do not claim every holdout generalizes positively.
-- **FMS local action window, mixed and unmerged:** fresh holdout J gained 364
-  fuel but only 10 points over 12 worlds; mean score was 757.83→758.67, with
-  the result driven by two positive seeds and one large negative seed. Keep it
-  isolated pending further unseen-seed evidence.
+  holdouts D/E/F/H/I/J/M/T: five batches gained aggregate fuel and points,
+  while three regressed. Across these eight batches it gained 4,450 fuel and
+  4,177 points over 96 worlds. Fresh holdout T gained 507 fuel and 731 points,
+  with mean score 800.33→861.25, but its fuel gain came from one seed and only
+  5/12 worlds improved. Keep it selectable and unmerged; require another fresh
+  seed replication before calling it robust.
+- **FMS local action window, mixed and unmerged:** holdouts H/I/J/N together
+  gained 3,457 fuel and 2,121 points over 48 worlds, but fresh holdout T lost
+  722 fuel and 1,419 points; its mean score fell 885.25→767.00 and all three
+  seed score aggregates regressed. Across H/I/J/N/T the net is +2,735 fuel and
+  +702 points over 60 worlds, with pooled mean score about 746.05→757.75. Keep
+  it isolated; the fresh regression weighs against reliable generalization.
 - **New speed-lookahead trial:** nominally gained 16 acquisitions and 184
   points, but fuel-positive evidence was mixed across seeds and close to the
   observed run variance. Keep it experimental and unmerged.
@@ -1158,8 +1161,12 @@ pooled score remained below 800 and holdout J was nearly flat. This supports
 keeping the FMS behavior available, but does not establish a dependable gain.
 Holdout N adds a positive fresh batch (+661 fuel/+597 points, mean
 694.75→744.50), bringing H/I/J/N to +3,457 fuel and +2,121 points across 48
-worlds with pooled mean score 711.25→755.44. Even with this replication, the
-pooled result remains below 800.
+worlds with pooled mean score 711.25→755.44. Fresh holdout T then lost 722 fuel
+and 1,419 points, with per-seed changes −574/−736, +330/−73, and −478/−610.
+Across H/I/J/N/T the net is +2,735 fuel and +702 points over 60 worlds; pooled
+mean score is approximately 746.05→757.75. All three T seed score totals
+regressed. The fresh result argues against treating the earlier aggregate as a
+reliable gain.
 
 For phase staggering, fresh current-main holdouts D/E/F/H/I/J/M (counting the
 corrected H cuda:0 pairs once) covered 84 worlds and 21 seed clusters, gaining
@@ -1180,6 +1187,18 @@ came from the first seed cluster. This is a positive fresh batch above 800,
 but not robust evidence across seeds. Keep the branch isolated pending another
 unseen-seed replication. Full provenance and records are committed as
 `a9562ab` on `codex/no-track-raster-phase-recheck`.
+
+### Standalone FMS action-window holdout T (2026-10-11)
+
+The frozen FMS action-window candidate (`e016b22`) was paired with current main
+on the same fresh seeds `530619`, `762481`, and `913057`, four worlds per seed.
+It lost 722 fuel acquisitions and 1,419 points over 12 worlds; mean score fell
+885.25→767.00. Per-seed fuel/score deltas were −574/−736, +330/−73, and
+−478/−610. Fuel improved in 4/12 worlds and one seed cluster; score improved
+in 4/12 worlds, while all three seed-level score aggregates regressed. Keep the
+candidate as a separate historical experiment, but this holdout does not
+support generalization. Full records and analysis are committed as `8798e60`
+on `codex/fms-local-action-window`; it remains unmerged.
 
 ### Robot-local obstacle reachability holdout P
 
