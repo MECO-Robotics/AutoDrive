@@ -55,11 +55,15 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   on all three seeds. The historical candidate mean was 804.08, but only 5/12
   worlds exceeded 800.
 - **Promising but mixed, unmerged:** no-track raster phase staggering has
-  five current-main holdouts/replications: four gained aggregate fuel and
-  points, while holdout F lost 104 fuel and 128 points. Across these five
-  batches it gained 4,494 fuel and 4,042 points over 60 worlds. Its F mean
-  score fell 778.67→768.00; an earlier E mean reached 822.25. Retain it as a
-  selectable strategy, but do not claim every holdout generalizes positively.
+  six current-main holdouts/replications: four gained aggregate fuel and
+  points, while F and J regressed. Across these six batches it gained 3,621
+  fuel and 3,713 points over 72 worlds. Its F mean score fell 778.67→768.00;
+  an earlier E mean reached 822.25. Retain it as a selectable strategy, but
+  do not claim every holdout generalizes positively.
+- **FMS local action window, mixed and unmerged:** fresh holdout J gained 364
+  fuel but only 10 points over 12 worlds; mean score was 757.83→758.67, with
+  the result driven by two positive seeds and one large negative seed. Keep it
+  isolated pending further unseen-seed evidence.
 - **New speed-lookahead trial:** nominally gained 16 acquisitions and 184
   points, but fuel-positive evidence was mixed across seeds and close to the
   observed run variance. Keep it experimental and unmerged.
