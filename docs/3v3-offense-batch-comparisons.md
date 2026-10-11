@@ -119,7 +119,8 @@ and `evaluations/fms-window-current-audit/` and
   fuel/score deltas: 827104 −2,486/−416, 827105 −1,872/−561, 191873 −3,592/−1,681.
   Per-world score/fuel deltas: 827104 `(-250,-740), (-113,-625), (+71,-421),
   (-124,-700)`; 827105 `(-35,-378), (-390,-894), (-126,-671), (-10,+71)`;
-  191873 `(-452,-978), (-405,-905), (-516,-970), (-308,-739)`. The historical
+  191873 `(-452,-978), (-405,-905), (-516,-970), (-308,-739)`. Runtime fell
+  from 703.17s to 610.67s alongside the large behavior loss. The historical
   branch initially failed evaluation due score-grid shape indexing; fixes are
   committed on the same branch and the final 12-world batch completed.
 - **Active-window pickup abort (`34b085a`, final tested code `f1edd80`)**:
