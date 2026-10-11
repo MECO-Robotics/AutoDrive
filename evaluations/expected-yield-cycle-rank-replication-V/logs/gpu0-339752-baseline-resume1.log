@@ -1,0 +1,21 @@
+start_utc=2026-10-11T23:14:55Z
+arm=baseline seed=339752 worktree=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline cache=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-baseline
+git_head=5aa2cbf60cce26e974142dbe771618d3d28a34b7
+dirty_files= M frc_defense/csrc/tensor_collision_multi_hip_kernel.hip
+ M frc_defense/csrc/tensor_fuel_candidate_rank_kernel.hip
+84b4cb2accd5a201fc641c401183c729d3907da73383fc31ebdf0ea8bc4c4a9a  /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_multi_hip_kernel.hip
+84fe093233bcad48ea8bda9705400f874c48c1746122af6e108afd29528a5d55  /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_fuel_candidate_rank_kernel.hip
+invocation: env PYTHONPATH=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-baseline TORCH_EXTENSIONS_DIR=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-baseline PYTORCH_ROCM_ARCH=gfx900 /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive/.venv/bin/python -u scripts/evaluate_3v3_offense_batch.py --label baseline-V --seed 339752 --envs 4 --ticks 8000 --device cuda:0 --fuel-physics --replan-interval 20 --perception-interval 2 --no-teammate-coordination --trace-slot 0 --trace-every 10 --output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-339752.json --trace-output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-339752-trace.json
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+wrote /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-339752.json
+exit_status=0
+end_utc=2026-10-11T23:20:26Z

@@ -1,7 +1,7 @@
 # Expected-yield cycle-rank replication V: closeout
 
 Date: 2026-10-11 UTC
-Disposition: stopped before a completed simulator rollout; candidate effect unknown.
+Disposition at the initial stop: no completed rollout existed then. The study later resumed; see `INTERIM-RESULTS-2-SEEDS.md` for the current paired evidence.
 
 ## What was attempted
 
@@ -12,7 +12,7 @@ The preregistered six-seed replication compared the frozen robot-local expected-
 | 0 | 339752 | 23:11:13 | 23:12:36 | SIGINT (130) during first-run HIP extension compilation |
 | 1 | 973688 | 23:11:15 | 23:12:36 | SIGINT (130) during first-run HIP extension compilation |
 
-Both jobs were stopped to honor the request for a quick closeout. No batch result JSON, trace, score, or fuel-acquisition count was produced. Candidate arms and the other four seeds were not started. The paired sample size is zero, so this attempt provides no evidence for or against the candidate and no fuel-gain update should be sent to subagents.
+Both first launches were stopped to honor the quick closeout and produced no batch result. They were later resumed with new logs and the originally empty preregistered result paths. The first two completed paired seed clusters are recorded in `INTERIM-RESULTS-2-SEEDS.md`; the full six-seed campaign remains open.
 
 The full invocations and interruption output are preserved in `logs/`. Partial HIP build caches remain outside this records checkout at `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/`.
 
@@ -20,7 +20,7 @@ The full invocations and interruption output are preserved in `logs/`. Partial H
 
 - Simulator behavior tests: none completed. The two processes stopped before an end-to-end match result existed.
 - Dashboard/replay: none generated; the dashboard stack was not checked.
-- GPU release: confirmed after stopping; both devices reported 0% busy and about 8 MB VRAM used, with no evaluator/compiler process remaining.
+- GPU release at the initial stop: both devices reported 0% busy and about 8 MB VRAM used, with no evaluator/compiler process remaining. The later resumed campaign is using the devices as recorded in its run logs.
 - Source worktrees were untouched. Main was not committed to or merged. The attempt record belongs on `codex/expected-yield-cycle-rank-replication-records`.
 
 ## Context for the optimization goal

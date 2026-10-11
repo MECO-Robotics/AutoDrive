@@ -1,0 +1,19 @@
+start_utc=2026-10-11T23:15:06Z
+worktree=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline
+cache=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline
+arch=gfx900
+source_head=5aa2cbf60cce26e974142dbe771618d3d28a34b7
+exact_invocation: env PYTHONPATH=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-baseline TORCH_EXTENSIONS_DIR=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline PYTORCH_ROCM_ARCH=gfx900 /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive/.venv/bin/python -u /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py --label baseline-V --seed 973688 --envs 4 --ticks 8000 --device cuda:1 --fuel-physics --replan-interval 20 --perception-interval 2 --no-teammate-coordination --trace-slot 0 --trace-every 10 --output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-973688.json --trace-output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-973688-trace.json 
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+wrote /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-973688.json
+exit_status=0
+end_utc=2026-10-11T23:20:24Z

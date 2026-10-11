@@ -1,0 +1,20 @@
+start_utc=2026-10-11T23:20:42Z
+arm=candidate seed=339752 worktree=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-candidate cache=/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-candidate
+git_head=4ab387a56f9f183ecf1fe65a88a22ec133eae5f5
+dirty_files= M frc_defense/csrc/tensor_collision_multi_hip_kernel.hip
+84b4cb2accd5a201fc641c401183c729d3907da73383fc31ebdf0ea8bc4c4a9a  /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-candidate/frc_defense/csrc/tensor_collision_multi_hip_kernel.hip
+b6b6627608a6e978ee1136622e122f1fac130947cc5e5eecbc67c5ac81d4b219  /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-candidate/frc_defense/csrc/tensor_fuel_candidate_rank_kernel.hip
+invocation: env PYTHONPATH=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-candidate TORCH_EXTENSIONS_DIR=/mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu0-candidate PYTORCH_ROCM_ARCH=gfx900 /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive/.venv/bin/python -u scripts/evaluate_3v3_offense_batch.py --label candidate-V --seed 339752 --envs 4 --ticks 8000 --device cuda:0 --fuel-physics --replan-interval 20 --perception-interval 2 --no-teammate-coordination --trace-slot 0 --trace-every 10 --output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/candidate/candidate-339752.json --trace-output /mnt/zfs-storage/All\ Drives/Brian\ Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/candidate-339752-trace.json
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+[92mSuccessfully preprocessed all matching files.[0m
+wrote /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/candidate/candidate-339752.json
+exit_status=0
+end_utc=2026-10-11T23:26:58Z
