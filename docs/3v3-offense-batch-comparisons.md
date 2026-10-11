@@ -47,6 +47,25 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
 
 ## Results to date (2026-10-11)
 
+### At a glance
+
+- **Best established change:** obstacle-aware pickup ranking (`3e996c9`) is
+  part of `main`. Its original 12-world paired batch gained 887 acquisitions
+  and 1,211 points over momentum ranking, with score-positive seed aggregates
+  on all three seeds. The historical candidate mean was 804.08, but only 5/12
+  worlds exceeded 800.
+- **Promising but unmerged:** staggering no-track raster phases has two
+  independent aggregate-positive replications (+741 acquisitions/+483 points
+  and +796/+923). Seed and world results remain mixed, and the mean scores
+  were 748.92 and 777.00, so it has not established a robust >800 result.
+- **Not accepted:** the current-main FMS staging and stale-track extrapolation
+  candidates failed their aggregate gates; other tested ranking, confidence,
+  boundary, and turn-cost changes are itemized below with their paired results.
+- **Attempt history:** behavior attempts stay committed on their own branches,
+  including failed runs and evaluation fixes. Only measured behavior changes
+  are candidates for promotion; none of the current experimental branches is
+  merged into `main`.
+
 The current comparison baseline is `3e996c9` (`Penalize pickup targets behind
 obstacles`). Candidate runs use the known batch seeds `827104`, `827105`, and
 `191873`, four world slots per seed, 8,000 ticks, fuel physics, replan interval
