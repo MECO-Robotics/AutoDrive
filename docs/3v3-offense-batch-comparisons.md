@@ -669,6 +669,27 @@ candidate records are in the matching main evaluation directory and the
 respective revisions; candidate and baseline generated HIP sources matched by
 hash. Dashboard replay and stack checks were not performed.
 
+### Siloed lane search independent holdout H (2026-10-11)
+
+The frozen candidate `c625676` was paired against current-main revision
+`60b2aaa` on seeds 615379, 704167, and 992791, four worlds per seed. Both
+record sets used 8,000 ticks, fuel physics, replan interval 20, perception
+interval 2, and no teammate intent or coordination. The candidate evaluator
+used `PYTHONPATH` pinned to its worktree and verified its imported package and
+behavior module paths before launch. Candidate ran on `cuda:1`, paired with
+the matching device-specific main baseline; scenario IDs match world by
+world.
+
+Across 12 worlds, raw fuel acquisitions fell by 30 while team-0 scored fuel
+and score differential each rose by 80. Per-seed acquisition/scored-fuel/point
+deltas were 615379 +300/+280/+280, 704167 +125/−41/−41, and 992791
+−455/−159/−159. Acquisitions improved in 5/12 worlds and scored fuel in 4/12.
+This is mixed evidence, not a general collection gain; keep lane search as an
+isolated, unmerged strategy. Its result record is committed on the strategy
+branch at `33d7bb5`, under
+`AutoDrive-siloed-lane-search/docs/siloed-lane-search-holdout-H.md`. No
+dashboard replay was generated or checked.
+
 ### No-track raster phase staggering unseen-seed holdout D (2026-10-11)
 
 Frozen candidate `6d9b709` was compared with current-main baseline `1900abe`
@@ -812,3 +833,24 @@ improvement. Neither branch was merged. Records are in
 `evaluations/phase-hysteresis-holdout-g/{baseline,candidate}/`. These were
 fresh end-to-end simulator batches; no dashboard replay or stack check was
 performed.
+
+### FMS local action-window independent holdout H (2026-10-11)
+
+The isolated FMS candidate `e016b22` on `codex/fms-local-action-window` was
+paired against current-main revision `60b2aaa` on seeds 615379, 704167, and
+992791, four worlds per seed. Candidate and baseline both used 8,000 ticks,
+fuel physics, replan interval 20, perception interval 2, and no teammate
+intent or coordination. Candidate ran on `cuda:0` with `PYTHONPATH` pinned to
+its worktree; package and behavior-module import paths were verified. Its
+records match the main baseline scenarios world by world.
+
+Across 12 worlds, offense fuel acquisitions increased by 1,001 and points by
+557; mean score rose from 634.75 to 681.17. Per-seed fuel/point deltas were
+615379 +768/+271, 704167 +156/−6, and 992791 +77/+292. Fuel improved in 8/12
+worlds and points in 7/12. Aggregate fuel was positive on all three seeds, but
+the mean remained below 800 and world outcomes were mixed. Keep the behavior
+as a separate unmerged strategy; this result does not validate combining it
+with phase staggering or lane search. Provenance, per-world deltas, and JSON
+records are committed on that branch at `cadb8bc` in
+`AutoDrive-fms-local-action-window/evaluations/fms-local-action-window-holdout-H-gpu0/`.
+No dashboard replay was generated or checked.
