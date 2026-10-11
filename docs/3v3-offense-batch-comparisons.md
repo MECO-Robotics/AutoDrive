@@ -1179,3 +1179,18 @@ records and paired comparisons are committed as `a934291` on
 `codex/occluded-fuel-obstacle-reachability`. Baseline runtime revision was
 `6e7aeda`; candidate runtime revision was `a3f0ffb`. Each worktree had the same
 three user-local HIP source edits, verified byte-identical before evaluation.
+
+### Robot-local intake velocity holdout P
+
+The frozen rotational intake-point velocity candidate (`47954ab`) gained 664
+points but lost 34 fuel acquisitions across 12 paired worlds; pooled mean score
+rose from 714.67 to 770.00, still below 800. Per-seed fuel/score mean changes
+were +249/+368 for 719531, +167/+290 for 842617, and −450/+6 for 236879.
+Fuel improved in 8/12 worlds but was negative overall. Preserve this attempt as
+its own selectable strategy; it did not pass the positive-fuel gate and has not
+been combined with the separate obstacle-reachability behavior. Full records
+and paired comparisons are committed as `fa4f470` on
+`codex/rotation-aware-intake-velocity-rank`. Baseline runtime revision was
+`6e7aeda`; candidate runtime revision was `47954ab`. Both worktrees used the
+same three user-local HIP source edits, verified byte-identical before
+evaluation.
