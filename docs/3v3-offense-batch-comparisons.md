@@ -274,6 +274,26 @@ combine the candidates in this holdout. Preserve the branch and complete
 paired records even when results regress; report per-seed as well as pooled
 fuel and score deltas. Dashboard replay is not part of this batch plan.
 
+Both candidate arms completed with imports pinned to their separate
+worktrees; all candidate and baseline scenario IDs/settings matched. The
+frozen phase strategy (`6d9b709`, result commit `437a703`) gained 664 fuel
+acquisitions and 483 points over 12 worlds; mean score rose from 761.33 to
+801.58. Per-seed fuel/point deltas were 712943 +436/+107, 835117 −154/−46,
+and 264397 +382/+422. Fuel and score each improved in 7/12 worlds, and
+three-seed cluster intervals cross zero. The separate FMS strategy (`e016b22`,
+result commit `d953ec9`) gained 1,431 acquisitions and 957 points; mean score
+rose from 757.67 to 837.42. Its per-seed fuel/point deltas were 712943
++570/+505, 835117 +802/+416, and 264397 +59/+36; fuel improved in 8/12 worlds
+and points in 9/12.
+
+Each arm cleared 800 on Holdout I, but Holdout H and I pooled means remain
+below 800 for both: phase 698.04→769.13 across 24 worlds, FMS 696.21→759.29.
+Keep both strategies separate and unmerged; the I result is positive evidence
+that merits another unseen-seed replication, not proof that either strategy
+generalizes above target. Candidate records and per-world analyses are on the
+respective branches in `AutoDrive-no-track-raster-phase-recheck/evaluations/`
+and `AutoDrive-fms-local-action-window/evaluations/`.
+
 ### Phase-stagger + FMS action-window bundle Holdout H (2026-10-11)
 
 Because the phase-stagger and FMS-window edits affect separate sections of
