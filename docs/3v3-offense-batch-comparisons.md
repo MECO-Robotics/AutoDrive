@@ -84,6 +84,7 @@ against the current checkout, then generate a fresh replay.
 | Just-in-time FMS staging | −776 acquisitions, −963 points over 12 worlds. | Rejected; no merge. |
 | Increase occluded-fuel velocity damping | −1,318 acquisitions, −621 points over 12 worlds. | Rejected; inference behind obstacles alone did not justify this damping change. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
+| Penalize pickup tracks near field boundaries (`7124128`, `codex/wall-clearance-pickup`) | Against sequential `f4eae79`: −321 acquisitions and −332 points over 12 worlds; mean score fell 745.08→717.42. Seed fuel/score deltas: 827104 −13/−151, 827105 −138/−180, 191873 −170/−1. | Rejected by both aggregate fuel and score evidence; attempt retained on branch, not merged. Per-world records are under `AutoDrive-wall-clearance/evaluations/fresh-local-candidate/`. |
 | Prefer nearby dense fuel patches | +109 acquisitions but −136 points over 12 worlds. | Did not meet both acquisition and scoring goals; no merge. |
 | Cluster pickup-throughput heuristic | −26 acquisitions, +924 points over 12 worlds. | Score-only improvement with a net fuel loss; not accepted as an offense gain. |
 
@@ -113,8 +114,8 @@ remain linked. Candidate commits are not automatically merged to `main`.
 
 ### Current candidate work
 
-Two independent candidate tracks are evaluating fresh robot-local behavior
-changes on the fixed batch, one sequential baseline/candidate pair per GPU. Their
-branch names, source diffs, paired records, and outcomes should be added here
-after each run completes. Do not tune a candidate against these evaluation
-seeds; retain the entire fixed batch for the comparison.
+The two latest fixed-batch attempts, fuel-cloud confidence and wall clearance,
+are complete and preserved on their own branches. Their gains did not establish
+robust improvement. Future candidates should start from current `main`, keep the
+fixed batch unchanged, and add their branch hash and paired result here whether
+they pass or fail. Never merge an experimental candidate automatically.
