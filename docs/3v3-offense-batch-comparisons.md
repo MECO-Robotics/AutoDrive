@@ -511,3 +511,27 @@ and unmerged.
 Baseline records are in `evaluations/cluster-target-hysteresis-holdout-b/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-cluster-target-hysteresis-bundle` worktree.
+
+### Phase, dense-patch, and target-hysteresis triple bundle (2026-10-11)
+
+Candidate `7aa607f` (`codex/phase-density-hysteresis-bundle`) combines
+no-track raster phase staggering, dense-patch ranking, and robot-local target
+hysteresis. It was paired against current `main` on the original seeds 827104,
+827105, and 191873, four worlds per seed, 8,000 ticks, fuel physics, replan
+interval 20, perception interval 2, and no teammate intent knowledge or
+coordination. This was a fresh end-to-end simulator batch; no dashboard replay
+or dashboard-stack verification was used.
+
+Across 12 worlds, the candidate gained 144 team fuel acquisitions and 59 team
+points; mean score rose from 713.83 to 718.75. Mean score deltas by seed were
+827104 +114.50, 827105 −106.50, and 191873 +6.75. Per-world fuel/score deltas
+were 827104 `(-44,-31), (+384,+568), (-201,-132), (+311,+53)`; 827105
+`(+217,+101), (+85,-30), (-219,-189), (-307,-308)`; and 191873
+`(-185,-63), (+195,+120), (+66,+66), (-158,-96)`. Runtime was 639.56
+seconds baseline and 726.37 seconds candidate. This is a small, mixed result,
+with a large regression on seed 827105 and increased runtime; preserve the
+branch as an alternate experiment and leave it unmerged.
+
+Baseline records are in `evaluations/phase-density-hysteresis/baseline/`;
+candidate records are in the matching directory in the
+`AutoDrive-phase-density-hysteresis-bundle` worktree.
