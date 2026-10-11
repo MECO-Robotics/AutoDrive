@@ -535,3 +535,28 @@ branch as an alternate experiment and leave it unmerged.
 Baseline records are in `evaluations/phase-density-hysteresis/baseline/`;
 candidate records are in the matching directory in the
 `AutoDrive-phase-density-hysteresis-bundle` worktree.
+
+### Siloed lane search (2026-10-11)
+
+Candidate `c625676` (`codex/siloed-lane-search-holdout`) changes the existing
+no-track search fallback to a static field lane derived from the acting
+robot's team ID and slot. The path does not read teammate intent or teammate
+state. It was paired against current `main` on the original seeds 827104,
+827105, and 191873, four worlds per seed, 8,000 ticks, fuel physics, replan
+interval 20, perception interval 2, and `--no-teammate-coordination`. This was
+a fresh end-to-end simulator batch, not a dashboard replay.
+
+Across 12 worlds, the candidate gained 1,183 team fuel acquisitions and 945
+team points; mean score rose from 659.67 to 738.42. Fuel/score totals by seed
+were 827104 −52/+53, 827105 +417/+487, and 191873 +818/+405. Per-world
+fuel/score deltas were 827104 `(+292,+139), (-301,-256), (-22,+75),
+(-21,+95)`; 827105 `(+170,+245), (+234,+127), (-210,-95), (+223,+210)`; and
+191873 `(-136,-28), (+876,+412), (-112,-120), (+190,+141)`. Runtime was
+693.08 seconds baseline and 638.74 seconds candidate. The gain is promising
+but concentrated in two seeds, and the mean remains below 800; keep the
+committed behavior experimental until it passes unseen-seed evaluation.
+
+The baseline's first two JSON records identify `d520ed3`, and its last record
+identifies `f8d5872`; the intervening change was docs-only. Candidate records
+are in `AutoDrive-siloed-lane-search/evaluations/siloed-lane-search-holdout/candidate/`;
+baseline records are in `evaluations/siloed-lane-search-holdout/baseline/`.
