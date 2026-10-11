@@ -1240,3 +1240,18 @@ and relevant batch/replay JSON found no prior occurrence of these seeds. Freeze
 the candidate; retain every outcome. This replication is required because Q's
 positive aggregate was driven mainly by one seed and its pooled mean remained
 below 800.
+
+### FMS/reachability replication holdout R result
+
+The frozen composition gained 283 fuel acquisitions and 540 team-score points
+over 12 worlds; mean score changed from 752.58 to 797.58. Per-seed fuel/score
+deltas were −546/+16, +532/+407, and +297/+117 for seeds 478219, 906517, and
+352671. Fuel improved in 7/12 worlds and two of three seed clusters; score
+improved in 8/12 worlds and all three clusters. Combining Q and R gives +965
+fuel and +1,105 points over 24 worlds, with pooled mean score 752.17→798.21.
+Across six seed clusters, fuel was positive in three and score in four. Keep
+the exact FMS-window + obstacle-reachability composition as an isolated,
+selectable experiment; the gains remain variable and the pooled score is below
+800. Do not promote or assume it generalizes to other strategy bundles without
+separate paired holdouts. Records and this result are committed as `f0f99b7`
+and corrected in `ed31bd5` on `codex/fms-reachability-compose`.
