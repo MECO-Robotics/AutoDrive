@@ -976,3 +976,28 @@ runtime source edits in the main checkout are copied byte-for-byte to each
 candidate worktree before evaluation so native simulator code matches. The
 pre-registered seeds were checked against this comparison document and have
 not been evaluated in this experiment.
+
+Holdout K completed on both devices with the required settings and candidate
+imports verified from their worktrees:
+
+- **Local active-window pickup/return gate** (`87e425f`, fixed at `cb51892`):
+  +255 fuel and +386 points over 12 worlds; mean score 641.92→674.08. Seed
+  fuel/score deltas: 301927 +809/+709, 570381 −261/+18, 938617 −293/−341.
+  Fuel and score each improved in 5/12 worlds. The first launch failed before
+  producing candidate rows due to a tensor index error; that failure log is
+  preserved and the corrected full batch passed. Since the gain is driven by
+  one seed and the other two lose fuel, retain it only as an experimental,
+  separate strategy.
+- **Robot-local endgame score commitment** (`0641100`): +198 fuel and +415
+  points over 12 worlds; mean score 632.67→667.25. Seed fuel/score deltas:
+  301927 +80/+114, 570381 −668/−242, 938617 +786/+543. Fuel improved in
+  5/12 worlds and score in 7/12. The direction is seed-sensitive; retain it
+  only as an experimental, separate strategy.
+
+The candidates remain committed and unmerged and have not been combined with
+each other. Their complete baseline/candidate records, paired comparisons, and
+logs are committed on their branches: active-window `1169cac` on
+`codex/local-active-window-pickup-gate`; endgame `d85d9c6` on
+`codex/robot-local-endgame-score-commit`. Neither reaches the >800 mean-score
+target or establishes broad generalization. These were fresh simulator batches,
+not dashboard replays; dashboard stack status was not checked.
