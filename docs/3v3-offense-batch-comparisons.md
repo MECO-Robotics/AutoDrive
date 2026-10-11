@@ -236,6 +236,31 @@ and `AutoDrive-no-track-raster-phase-replication-b/evaluations/no-track-raster-p
 No dashboard replay or dashboard stack verification was performed; these
 end-to-end batch records are the simulator evaluations for this behavior.
 
+### Corrected independent phase holdout H (2026-10-11)
+
+The first recorded candidate run for Holdout H was invalid: its evaluator
+process imported `frc_defense` from the main checkout through the shared
+editable install, even though it ran from the phase worktree. The earlier
+candidate records remain on `codex/no-track-raster-phase-recheck` as historical
+attempts and are explicitly superseded there. The corrected run set `PYTHONPATH`
+to the phase candidate worktree and verified the imported package and behavior
+module paths before evaluation. It tested the same seeds and settings as the
+GPU0 main baselines above: 615379, 704167, and 992791; four worlds each; 8,000
+ticks; fuel physics; replan interval 20; perception interval 2; no teammate
+intent or coordination.
+
+The corrected phase-only candidate gained 1,229 fuel acquisitions and 1,223
+points over 12 paired worlds. Fuel improved in 10/12 worlds and points in
+8/12. Mean team-0 score rose from 634.75 to 736.67, still below 800. Per-seed
+fuel/point deltas were 615379 +730/+584, 704167 +79/+137, and 992791 +420/+502.
+The code remains committed separately at `6d9b709`; corrected provenance,
+records, and the invalid-attempt correction are committed on that branch at
+`e53c2b3`. This result is positive aggregate evidence, not a merge: phase
+staggering remains an optional branch strategy and is not bundled with
+hysteresis or lane search. Records are in
+`AutoDrive-no-track-raster-phase-recheck/evaluations/phase-holdout-H-candidate-corrected-gpu0/`.
+No dashboard replay was generated or checked.
+
 ### Intake proximity and speed-lookahead trials (2026-10-11)
 
 Both new candidates were committed before evaluation, started from current-main
