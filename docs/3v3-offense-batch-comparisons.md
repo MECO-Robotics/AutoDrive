@@ -61,6 +61,9 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
 - **New speed-lookahead trial:** nominally gained 16 acquisitions and 184
   points, but fuel-positive evidence was mixed across seeds and close to the
   observed run variance. Keep it experimental and unmerged.
+- **New target-hysteresis trial:** gained 165 acquisitions and 1,030 points,
+  but one seed lost 463 acquisitions and mean score remained 777.17. Retain the
+  branch for alternate strategy work; it has not established a robust >800 mean.
 - **Not accepted:** the current-main FMS staging and stale-track extrapolation
   candidates failed their aggregate gates; other tested ranking, confidence,
   boundary, turn-cost, scorer-aim, and pickup-braking changes are itemized below
@@ -113,6 +116,7 @@ against the current checkout, then generate a fresh replay.
 | Measure midfield fuel proximity from the acting robot's forward intake reference (`9a8a24e`, `codex/intake-proximity-return`) | Current-main paired batch: −600 acquisitions and −446 points across 12 worlds; mean score 744.83→707.67. Seed fuel/score deltas: 827104 −442/−336, 827105 −508/−91, 191873 +350/−19. Fuel improved in 4/12 worlds and score in 3/12. Candidate runtime was 728.60s versus 699.91s baseline. | Rejected by both aggregate fuel and score evidence; committed on its branch, not merged. Records are in `evaluations/intake-proximity-return/baseline/` and `AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/candidate/`. |
 | Use a continuous stopping controller for HUB scoring aim (`08f39ad`, `codex/score-aim-continuous`) | Current-main paired batch: −358 acquisitions and −576 points across 12 worlds; mean score 743.08→695.08. Seed fuel/point deltas: 827104 −529/−499, 827105 +114/−58, 191873 +57/−19. Fuel improved in 7/12 worlds, score in 5/12. Runtime was 655.74s baseline and 573.99s candidate. | Failed both aggregate gates; faster runtime did not preserve scoring. Keep committed on its branch, not merged. Records are in `evaluations/score-aim-continuous/baseline/` and `AutoDrive-score-aim-continuous/evaluations/score-aim-continuous/candidate/`. |
 | Cap direct pickup fallback speed with a robot-local braking envelope (`6592633`, `codex/pickup-braking-envelope`) | Current-main paired batch: −1,302 acquisitions and −934 points; mean score 729.75→651.92. Seed fuel/score deltas: 827104 −1,324/−974, 827105 +174/+373, 191873 −152/−333. Fuel and score each improved in 4/12 worlds. Runtime was 654.67s baseline and 709.63s candidate. | Failed both aggregate gates and increased runtime. Keep committed on its branch, not merged. Records are in `evaluations/pickup-braking-envelope/baseline/` and `AutoDrive-pickup-braking-envelope/evaluations/pickup-braking-envelope/candidate/`. |
+| Retain a robot's selected fuel target while it remains competitive, scaling the margin by its own targetward motion (`14f1ce4`, `codex/target-hysteresis-current`) | Current-main paired batch: +165 acquisitions and +1,030 points; mean score 691.33→777.17. Seed fuel/score deltas: 827104 +234/+123, 827105 −463/+153, 191873 +394/+754. Fuel improved in 5/12 worlds, score in 7/12. Runtime was 671.46s baseline and 663.33s candidate. | Promising aggregate score gain but mixed by seed, and mean remained below 800. Keep committed for alternate strategy use, experimental and unmerged. Records are in `evaluations/target-hysteresis-current/baseline/` and `AutoDrive-target-hysteresis-current/evaluations/target-hysteresis-current/candidate/`. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
 | Penalize pickup tracks near field boundaries (`7124128`, `codex/wall-clearance-pickup`) | Against sequential `f4eae79`: −321 acquisitions and −332 points over 12 worlds; mean score fell 745.08→717.42. Seed fuel/score deltas: 827104 −13/−151, 827105 −138/−180, 191873 −170/−1. | Rejected by both aggregate fuel and score evidence; attempt retained on branch, not merged. Per-world records are under `AutoDrive-wall-clearance/evaluations/fresh-local-candidate/`. |
 | Defer loaded scoring while nearby alliance-zone fuel is reachable (`e83fc4c`, `codex/fuel-local-alliance-score`) | Against sequential `cc22785`: −982 acquisitions, +248 points over 12 worlds; only 2/12 worlds gained fuel. Mean score rose 645.25→665.92, still well below 800. Seed fuel/point deltas: 827104 −562/−227, 827105 −331/+126, 191873 −89/+349. Runtime increased 3.9%. | Fuel gate failed despite a small score gain; attempt retained on its branch, not merged. Records are under `AutoDrive-fuel-local-alliance-score/evaluations/fuel-local-alliance-score/`. |
@@ -299,6 +303,40 @@ cautiously; paired per-world direction and replication matter. Records are in
 `AutoDrive-score-aim-continuous/evaluations/score-aim-continuous/candidate/`,
 `evaluations/pickup-braking-envelope/baseline/`, and
 `AutoDrive-pickup-braking-envelope/evaluations/pickup-braking-envelope/candidate/`.
+
+### Target hysteresis and clear-zone scoring trials (2026-10-11)
+
+Both candidates were committed before evaluation and paired against runtime
+behavior from `main` (`958ebd8`). They used the fixed 3-seed x 4-world protocol,
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate coordination. Each baseline/candidate pair ran sequentially on one GPU;
+the candidate experiments used separate GPUs. These were end-to-end simulator
+records, not dashboard replays; no dashboard replay or stack verification was
+performed.
+
+- **Robot-local target hysteresis (`14f1ce4`,
+  `codex/target-hysteresis-current`)**: +165 acquisitions and +1,030 points;
+  mean score 691.33→777.17. Per-seed fuel/score deltas: 827104 +234/+123,
+  827105 −463/+153, 191873 +394/+754. Per-world fuel/score deltas: 827104
+  `(+172,+94), (-42,-165), (+213,+297), (-109,-103)`; 827105
+  `(-217,-165), (+135,+421), (-79,-10), (-302,-93)`; 191873
+  `(-149,+137), (-100,+90), (+400,+405), (+243,+122)`. Runtime was
+  671.46s baseline and 663.33s candidate. Strong aggregate points, but mixed
+  seed and acquisition results leave it experimental and unmerged.
+- **Score on entry to a clear active HUB zone (`4dc9486`,
+  `codex/active-zone-score-commit`)**: −606 acquisitions and −638 points;
+  mean score 760.00→707.83. Per-seed fuel/point deltas: 827104 +189/+231,
+  827105 +258/−465, and 191873 −1,053/−404. Per-world fuel/point deltas:
+  827104 `(-105,-140), (+56,+195), (+25,-135), (+213,+311)`; 827105
+  `(-23,-122), (+179,-222), (+121,-96), (-19,-25)`; 191873
+  `(-271,-107), (-186,-41), (-120,-167), (-476,-89)`. Runtime was 555.15s
+  baseline and 605.65s candidate. The strategy change degraded the aggregate
+  score and remains committed, unmerged.
+
+Records are in `evaluations/target-hysteresis-current/baseline/`,
+`AutoDrive-target-hysteresis-current/evaluations/target-hysteresis-current/candidate/`,
+`evaluations/active-zone-score-commit/baseline/`, and
+`AutoDrive-active-zone-score-commit/evaluations/active-zone-score-commit/candidate/`.
 
 ### Infrastructure and repeatability findings
 
