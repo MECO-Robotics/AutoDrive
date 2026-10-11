@@ -1036,7 +1036,8 @@ replay or dashboard stack check was performed.
 Evaluate two unmerged strategies separately on new seeds 521709, 736481, and
 991027, four worlds per seed: frozen phase staggering (`6d9b709`) on `cuda:0`
 and frozen endgame score commitment (`0641100`) on `cuda:1`. Pair each with
-current-main behavior (`c8899b1`) sequentially on its device. Use 8,000 ticks,
+current-main behavior (pre-run snapshot `dca9d5c`, with no behavior-code
+changes since `c8899b1`) sequentially on its device. Use 8,000 ticks,
 fuel physics, replan 20, perception 2, and no teammate intent/coordination.
 These seeds were checked against saved batch records before this entry was
 committed. The candidates remain separate; no combined run or seed-specific
