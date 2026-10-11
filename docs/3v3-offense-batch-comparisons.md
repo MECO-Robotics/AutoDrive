@@ -261,6 +261,19 @@ hysteresis or lane search. Records are in
 `AutoDrive-no-track-raster-phase-recheck/evaluations/phase-holdout-H-candidate-corrected-gpu0/`.
 No dashboard replay was generated or checked.
 
+### Pre-registered independent Holdout I (2026-10-11)
+
+Before running either candidate, reserve batch seeds 712943, 835117, and
+264397 (four worlds per seed). Exact-seed searches found no prior occurrence
+in the tracked evaluation JSON or comparison docs. Compare two strategies
+separately against device-matched current-main baselines: phase staggering
+alone (`6d9b709`) on `cuda:0`, and FMS action-window filtering alone
+(`e016b22`) on `cuda:1`. Both use 8,000 ticks, fuel physics, replan interval
+20, perception interval 2, and no teammate intent or coordination. Do not
+combine the candidates in this holdout. Preserve the branch and complete
+paired records even when results regress; report per-seed as well as pooled
+fuel and score deltas. Dashboard replay is not part of this batch plan.
+
 ### Phase-stagger + FMS action-window bundle Holdout H (2026-10-11)
 
 Because the phase-stagger and FMS-window edits affect separate sections of
