@@ -63,7 +63,8 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   observed run variance. Keep it experimental and unmerged.
 - **Not accepted:** the current-main FMS staging and stale-track extrapolation
   candidates failed their aggregate gates; other tested ranking, confidence,
-  boundary, and turn-cost changes are itemized below with their paired results.
+  boundary, turn-cost, scorer-aim, and pickup-braking changes are itemized below
+  with their paired results.
 - **Attempt history:** behavior attempts stay committed on their own branches,
   including failed runs and evaluation fixes. Only measured behavior changes
   are candidates for promotion; none of the current experimental branches is
@@ -110,6 +111,8 @@ against the current checkout, then generate a fresh replay.
 | Stage loaded robots for the next HUB activation (`e33a265`, `codex/fms-activation-stage-current-main`; fixes `3e08901`, `7cb2c97`) | Fresh current-main paired batch: −7,950 acquisitions and −2,658 points; mean score 686.42→464.92. Seed fuel/score deltas: 827104 −2,486/−416, 827105 −1,872/−561, 191873 −3,592/−1,681. Fuel and score each improved in only 1/12 worlds. | Rejected. The candidate’s staging rule consistently degraded collection and scoring; remains committed on its branch, not merged. Earlier reported +763/+244 was not supported by the saved records and did not reproduce. |
 | Abort current-HUB pickup when remaining score window is too short (`34b085a`, `codex/fms-active-window-abort-current-main`; parity fix `f1edd80`) | Fresh current-main paired batch: −1,161 acquisitions and −677 points; mean score 744.75→688.33. Seed fuel/score deltas: 827104 −927/−849, 827105 −113/+95, 191873 −121/+77. Fuel and score each improved in 5/12 worlds. Candidate runtime was 637.91s versus 677.52s baseline. | Rejected: faster execution did not preserve behavior quality; both fuel and aggregate score fell. Remains committed on its branch, not merged. |
 | Measure midfield fuel proximity from the acting robot's forward intake reference (`9a8a24e`, `codex/intake-proximity-return`) | Current-main paired batch: −600 acquisitions and −446 points across 12 worlds; mean score 744.83→707.67. Seed fuel/score deltas: 827104 −442/−336, 827105 −508/−91, 191873 +350/−19. Fuel improved in 4/12 worlds and score in 3/12. Candidate runtime was 728.60s versus 699.91s baseline. | Rejected by both aggregate fuel and score evidence; committed on its branch, not merged. Records are in `evaluations/intake-proximity-return/baseline/` and `AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/candidate/`. |
+| Use a continuous stopping controller for HUB scoring aim (`08f39ad`, `codex/score-aim-continuous`) | Current-main paired batch: −358 acquisitions and −576 points across 12 worlds; mean score 743.08→695.08. Seed fuel/point deltas: 827104 −529/−499, 827105 +114/−58, 191873 +57/−19. Fuel improved in 7/12 worlds, score in 5/12. Runtime was 655.74s baseline and 573.99s candidate. | Failed both aggregate gates; faster runtime did not preserve scoring. Keep committed on its branch, not merged. Records are in `evaluations/score-aim-continuous/baseline/` and `AutoDrive-score-aim-continuous/evaluations/score-aim-continuous/candidate/`. |
+| Cap direct pickup fallback speed with a robot-local braking envelope (`6592633`, `codex/pickup-braking-envelope`) | Current-main paired batch: −1,302 acquisitions and −934 points; mean score 729.75→651.92. Seed fuel/score deltas: 827104 −1,324/−974, 827105 +174/+373, 191873 −152/−333. Fuel and score each improved in 4/12 worlds. Runtime was 654.67s baseline and 709.63s candidate. | Failed both aggregate gates and increased runtime. Keep committed on its branch, not merged. Records are in `evaluations/pickup-braking-envelope/baseline/` and `AutoDrive-pickup-braking-envelope/evaluations/pickup-braking-envelope/candidate/`. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
 | Penalize pickup tracks near field boundaries (`7124128`, `codex/wall-clearance-pickup`) | Against sequential `f4eae79`: −321 acquisitions and −332 points over 12 worlds; mean score fell 745.08→717.42. Seed fuel/score deltas: 827104 −13/−151, 827105 −138/−180, 191873 −170/−1. | Rejected by both aggregate fuel and score evidence; attempt retained on branch, not merged. Per-world records are under `AutoDrive-wall-clearance/evaluations/fresh-local-candidate/`. |
 | Defer loaded scoring while nearby alliance-zone fuel is reachable (`e83fc4c`, `codex/fuel-local-alliance-score`) | Against sequential `cc22785`: −982 acquisitions, +248 points over 12 worlds; only 2/12 worlds gained fuel. Mean score rose 645.25→665.92, still well below 800. Seed fuel/point deltas: 827104 −562/−227, 827105 −331/+126, 191873 −89/+349. Runtime increased 3.9%. | Fuel gate failed despite a small score gain; attempt retained on its branch, not merged. Records are under `AutoDrive-fuel-local-alliance-score/evaluations/fuel-local-alliance-score/`. |
@@ -259,6 +262,43 @@ JSON records are retained in `evaluations/intake-proximity-return/` and
 the respective candidate worktrees under
 `AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/` and
 `AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/`.
+
+### Scoring aim and pickup braking trials (2026-10-11)
+
+Both candidates were committed before evaluation and paired against runtime
+behavior from `main` (`0141e24`). They used the fixed 3-seed x 4-world protocol,
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate coordination. Each baseline/candidate pair ran sequentially on one GPU;
+the two experiments used separate GPUs. These were end-to-end simulator
+records, not dashboard replays; no dashboard replay or stack verification was
+performed.
+
+- **Continuous HUB scoring aim (`08f39ad`, `codex/score-aim-continuous`)**:
+  −358 acquisitions and −576 points; mean score 743.08→695.08. Per-seed
+  fuel/score deltas: 827104 −529/−499, 827105 +114/−58, 191873 +57/−19.
+  Per-world fuel/score deltas: 827104 `(-174,-183), (+16,+34), (-133,-84),
+  (-238,-266)`; 827105 `(+106,+28), (+31,-60), (+53,+15), (-76,-41)`;
+  191873 `(+202,+149), (-368,-380), (+4,-6), (+219,+218)`. Runtime was
+  655.74s baseline and 573.99s candidate. Candidate code did not improve the
+  aggregate acquisition or scoring result and remains committed, unmerged.
+- **Robot-local pickup braking envelope (`6592633`,
+  `codex/pickup-braking-envelope`)**: −1,302 acquisitions and −934 points;
+  mean score 729.75→651.92. Per-seed fuel/score deltas: 827104 −1,324/−974,
+  827105 +174/+373, 191873 −152/−333. Per-world fuel/score deltas: 827104
+  `(-399,-235), (-827,-553), (-300,-237), (+202,+51)`; 827105
+  `(+239,+305), (-140,-176), (+295,+381), (-220,-137)`; 191873
+  `(-97,-22), (-53,-70), (-173,-173), (+171,-68)`. Runtime was 654.67s
+  baseline and 709.63s candidate. The candidate did not generalize across the
+  seeds and remains committed, unmerged.
+
+The score-aim baseline itself illustrates run variance: its seed 827104 batch
+scored 3,282 total points, 469 more than an earlier same-code, same-seed batch
+at 2,813. This is evidence to treat small aggregate candidate differences
+cautiously; paired per-world direction and replication matter. Records are in
+`evaluations/score-aim-continuous/baseline/`,
+`AutoDrive-score-aim-continuous/evaluations/score-aim-continuous/candidate/`,
+`evaluations/pickup-braking-envelope/baseline/`, and
+`AutoDrive-pickup-braking-envelope/evaluations/pickup-braking-envelope/candidate/`.
 
 ### Infrastructure and repeatability findings
 
