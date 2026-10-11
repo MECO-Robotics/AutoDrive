@@ -1109,7 +1109,19 @@ strong seed. Full records are committed as `3cf7a42` on
 `codex/robot-local-endgame-score-commit`. The actual baseline record revision
 was `b3af485`, a documentation-only descendant of behavior snapshot `3320480`;
 the candidate runtime snapshot was `e9200a1` with no behavior changes after
-`0641100`. The FMS-window N result was still pending when this was recorded.
+`0641100`.
+
+#### FMS action-window candidate result
+
+The FMS-window candidate gained 661 fuel acquisitions and 597 points across
+12 worlds; mean score rose from 694.75 to 744.50. Per-seed fuel/score deltas
+were +462/+83, +277/+325, and −78/+189. Fuel improved in 8/12 worlds and
+score in 7/12, with all three seed score aggregates positive. This is a
+positive fresh-seed replication, though pooled mean remains below 800. Retain
+the candidate as a separate selectable strategy pending another replication;
+full records are committed as `bbb275b` on `codex/fms-local-action-window`.
+The baseline runtime revision was `b3af485`; candidate runtime revision was
+`ecd50ce`, with frozen behavior code from `e016b22`.
 
 ### Cross-holdout statistical summaries
 
@@ -1123,6 +1135,10 @@ and 312 points; t-based 95% intervals for mean paired change were [−9, 630]
 fuel and [−70, 409] points. Holdout I alone exceeded 800 mean score, while the
 pooled score remained below 800 and holdout J was nearly flat. This supports
 keeping the FMS behavior available, but does not establish a dependable gain.
+Holdout N adds a positive fresh batch (+661 fuel/+597 points, mean
+694.75→744.50), bringing H/I/J/N to +3,457 fuel and +2,121 points across 48
+worlds with pooled mean score 711.25→755.44. Even with this replication, the
+pooled result remains below 800.
 
 For phase staggering, fresh current-main holdouts D/E/F/H/I/J/M (counting the
 corrected H cuda:0 pairs once) covered 84 worlds and 21 seed clusters, gaining
