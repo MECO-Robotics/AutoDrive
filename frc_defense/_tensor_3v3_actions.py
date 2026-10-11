@@ -286,6 +286,29 @@ class TensorThreeVsThreeActionMixin:
                                    (possession<self.robot_fuel_capacities[None]))
             offense_action=torch.where(active_turret_collect,
                                        torch.zeros_like(possession),offense_action)
+            # During an inactive HUB shift, loaded robots normally ferry as
+            # soon as they are full. If the next FMS transition will reactivate
+            # this HUB before the robot can reach a clear scoring pose, keep
+            # the load and stage toward that pose so scoring can start on
+            # activation. This uses only the public schedule and this robot's
+            # pose; no teammate state or intent is consulted.
+            if self.behavior_probe is None:
+                elapsed=self.match_elapsed[:,None]
+                shift=((self.match_elapsed-30.).clamp_min(0.)/25.).floor()
+                next_activation=30.+(shift+1.)*25.
+                activation_eta=(next_activation[:,None]-elapsed).clamp_min(0.)
+                score_points=self._score_grid_points
+                score_clear=self._score_grid_clear
+                score_distance=(score_points-p[:,:,:2,None,:]).norm(dim=-1)
+                score_distance=score_distance.masked_fill(~score_clear,float("inf"))
+                score_path_lower_bound=score_distance.amin(-1)
+                score_stage_eta=(1.5*score_path_lower_bound /
+                                 self.sim.speed.clamp_min(.1)+.5)
+                stage_for_activation=(~robot_hub_active & (possession>0) &
+                    (self.match_elapsed[:,None]<130.) &
+                    (score_stage_eta<=activation_eta))
+                offense_action=torch.where(stage_for_activation,
+                    torch.full_like(offense_action,4),offense_action)
             deterministic=torch.where(self._defense_role_mask[None],defense_action,
                                       offense_action)
             return_loaded=(active_hub_return & (possession>0) &
