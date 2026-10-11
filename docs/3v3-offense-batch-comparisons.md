@@ -1222,7 +1222,7 @@ fuel gate or improve pooled score. Full records are committed as `4834bc6` on
 The frozen FMS action-window + obstacle-reachability bundle (`7de31fb`) gained
 682 fuel and 565 points over 12 worlds; mean score rose 751.75→798.83. Per-seed
 fuel/score changes were −346/−322, −297/−421, and +1,325/+1,308 for seeds
-388175, 905263, and 631447. Fuel improved in 6/12 worlds and two seed clusters;
+388175, 905263, and 631447. Fuel improved in 6/12 worlds and one seed cluster;
 score improved in 7/12, but most of the aggregate gain came from 631447. Keep
 this separate composition because aggregate fuel is positive, but require
 another unseen-seed replication before treating it as robust. Full records are
