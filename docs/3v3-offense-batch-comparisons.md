@@ -433,3 +433,26 @@ The aggregate is promising, but results vary by seed and mean remains below
 Baseline records are in `evaluations/cluster-target-hysteresis/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-cluster-target-hysteresis-bundle` worktree.
+
+### No-track raster phases plus dense-patch ranking bundle (2026-10-11)
+
+Candidate `25fb36d` (`codex/phase-density-current-main`) combines no-track
+raster phase staggering with dense-patch fuel ranking, preserving the
+obstacle-aware ranking on `main`. It was paired against `main` at `9afb152`
+on seeds 827104, 827105, and 191873, four worlds per seed, 8,000 ticks, fuel
+physics, replan interval 20, perception interval 2, and no teammate intent
+knowledge or coordination. This was a fresh end-to-end simulator batch; no
+dashboard replay or dashboard-stack verification was involved.
+
+Across 12 worlds, this candidate lost 2,238 team fuel acquisitions and 633
+team points. Mean score fell from 722.75 to 670.00. Fuel/score deltas by seed
+were 827104 −1,224/−468, 827105 −253/−9, and 191873 −761/−156. Per-world
+fuel/score deltas were 827104 `(-324,-21), (-85,-28), (-637,-389),
+(-178,-30)`; 827105 `(+223,+26), (-90,+157), (-156,-15), (-230,-177)`; and
+191873 `(+271,+388), (-346,-141), (-203,+38), (-483,-441)`. Runtime was
+685.96 seconds baseline and 703.67 seconds candidate. This combination
+regressed behavior and runtime; retain the committed attempt unmerged.
+
+Baseline records are in `evaluations/phase-density-current-main/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-phase-density` worktree.
