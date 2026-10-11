@@ -584,3 +584,30 @@ attempt, but do not merge it or treat this as a generalized improvement.
 Baseline records are in `evaluations/siloed-lane-search-holdout-c/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-siloed-lane-search` worktree.
+
+### Siloed lane search unseen-seed holdout B (2026-10-11)
+
+The same frozen candidate `c625676` was evaluated on seeds 579239, 420221,
+and 885113, four worlds per seed. Settings remained 8,000 ticks, fuel physics,
+replan interval 20, perception interval 2, and no teammate intent knowledge or
+coordination. This was a fresh end-to-end simulator evaluation, not a dashboard
+replay.
+
+Across 12 unseen worlds, fuel acquisitions increased by 599 and points by 850;
+mean score rose from 788.08 to 858.92. Fuel/score deltas by seed were 579239
++622/+289, 420221 −180/+288, and 885113 +157/+273. Per-world fuel/score deltas
+were 579239 `(+440,+253), (+309,+224), (+34,-33), (-161,-155)`; 420221
+`(-12,+120), (-450,-205), (+103,+238), (+179,+135)`; and 885113
+`(-68,+15), (+300,+278), (-162,-57), (+87,+37)`. Runtime totals were 611.74
+seconds baseline and 642.63 seconds candidate.
+
+This holdout was positive on aggregate fuel and score, though fuel improved in
+7/12 worlds and the per-seed fuel effect was mixed. Combined with independent
+holdout C, the two unseen batches (24 worlds) yielded +765 fuel and +650 points
+(+27.08 mean score per world). This supports keeping the committed lane-search
+branch as a promising experimental alternative, but not merging it: holdout C
+lost 200 points, and the combined evidence remains limited to two batches.
+
+Baseline records are in `evaluations/siloed-lane-search-holdout-b/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-siloed-lane-search` worktree.
