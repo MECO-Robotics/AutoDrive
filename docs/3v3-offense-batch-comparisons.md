@@ -1001,3 +1001,15 @@ logs are committed on their branches: active-window `1169cac` on
 `codex/robot-local-endgame-score-commit`. Neither reaches the >800 mean-score
 target or establishes broad generalization. These were fresh simulator batches,
 not dashboard replays; dashboard stack status was not checked.
+
+### Pre-registration: local score-gate replication L (2026-10-11)
+
+To check generalization without combining or retuning, replicate the two
+Holdout K robot-local gates on new seeds 413807, 725961, and 884317, four
+worlds per seed. Evaluate the local active-window pickup/return gate at
+`1169cac` on `cuda:0` and endgame score commitment at `d85d9c6` on `cuda:1`,
+each paired sequentially against current-main behavior (`030663b`) on the same
+device. Use the same 8,000-tick, fuel-physics, replan-20, perception-2 setup
+and no teammate intent/coordination. These seeds were checked against saved
+batch records before this entry was committed. Keep each strategy isolated and
+retain every outcome; no tuning or combination will be based on this batch.
