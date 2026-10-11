@@ -1053,8 +1053,22 @@ fuel/score deltas were +157/−122, −334/−166, and +32/+219. Fuel improved i
 one gained score. This is mixed evidence and does not support promotion. Keep
 the behavior as a separate selectable branch, with its full records committed
 as `e9200a1` on `codex/robot-local-endgame-score-commit`; do not combine it
-with another strategy without a dedicated evaluation. The phase candidate's
-M evaluation was still running when this result was recorded.
+with another strategy without a dedicated evaluation.
+
+The phase staggering candidate also completed on the same paired batch. It
+lost 34 fuel acquisitions and 567 points overall; mean score fell from 709.00
+to 661.75. Per-seed fuel/score deltas were +768/+466, −511/−632, and
+−291/−401. Fuel improved in 6/12 worlds and score in 3/12. This is a clear
+aggregate regression and poor cross-seed generalization. Preserve the candidate
+as a separate selectable branch with full records committed as `0147e73` on
+`codex/no-track-raster-phase-recheck`; do not combine it with another strategy
+without a dedicated evaluation.
+
+Both candidates were evaluated individually against the same baseline, never
+simultaneously. Their full records, per-seed comparisons, and logs are
+committed on their respective branches. The simulator runs used no teammate
+intent knowledge or coordination; no dashboard replay was generated or
+checked.
 
 ### Pre-registration: local score-gate replication L (2026-10-11)
 
