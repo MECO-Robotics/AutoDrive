@@ -1031,6 +1031,18 @@ first L launch failed before simulation because it had no local virtualenv; the
 failure is logged and the retry used the shared interpreter. No dashboard
 replay or dashboard stack check was performed.
 
+### Pre-registration: phase strategy and endgame-gate holdout M (2026-10-11)
+
+Evaluate two unmerged strategies separately on new seeds 521709, 736481, and
+991027, four worlds per seed: frozen phase staggering (`6d9b709`) on `cuda:0`
+and frozen endgame score commitment (`0641100`) on `cuda:1`. Pair each with
+current-main behavior (`c8899b1`) sequentially on its device. Use 8,000 ticks,
+fuel physics, replan 20, perception 2, and no teammate intent/coordination.
+These seeds were checked against saved batch records before this entry was
+committed. The candidates remain separate; no combined run or seed-specific
+tuning is planned. The three native HIP source files are byte-identical across
+the baseline and candidate worktrees.
+
 ### Pre-registration: local score-gate replication L (2026-10-11)
 
 To check generalization without combining or retuning, replicate the two
