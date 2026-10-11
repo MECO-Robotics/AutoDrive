@@ -19,6 +19,39 @@ FUSED_TOP4_CANDIDATE_RANK_ENABLED = (
 class TensorThreeVsThreeActionMixin:
     """Methods that translate strategic actions into robot targets."""
 
+    def _candidate_obstacle_detour(self, start, targets, robot_radius):
+        """Estimate a bounded detour when a direct pickup route hits geometry."""
+        boxes=torch.cat((self.planner._boxes,self.planner._bumps),dim=0)
+        if not boxes.shape[0]:
+            return torch.zeros(targets.shape[:-1],device=targets.device,
+                               dtype=targets.dtype)
+        box_count=boxes.shape[0]
+        box_shape=(*([1]*(targets.ndim-1)),box_count,2)
+        center=boxes[:,:2].reshape(box_shape)
+        half=boxes[:,2:4].reshape(box_shape)
+        radius=robot_radius[...,None,None,None]
+        half=half+radius
+        p0=start[...,None,None,:]
+        p1=targets.unsqueeze(-2)
+        delta=p1-p0
+        lower=center-half
+        upper=center+half
+        parallel=delta.abs()<1e-6
+        safe_delta=torch.where(parallel,torch.ones_like(delta),delta)
+        t0=(lower-p0)/safe_delta
+        t1=(upper-p0)/safe_delta
+        axis_enter=torch.where(parallel,torch.full_like(delta,-float("inf")),
+                               torch.minimum(t0,t1))
+        axis_exit=torch.where(parallel,torch.full_like(delta,float("inf")),
+                              torch.maximum(t0,t1))
+        parallel_inside=(p0>=lower)&(p0<=upper)
+        enter=axis_enter.amax(-1).clamp_min(0.)
+        leave=axis_exit.amin(-1).clamp_max(1.)
+        intersects=(enter<=leave)&((~parallel)|parallel_inside).all(-1)
+        per_box_detour=2.*half.amin(-1)
+        detour=(intersects.to(targets.dtype)*per_box_detour).sum(-1)
+        return detour.clamp(max=1.5)
+
     def _ferry_targets_for_current_motion(self):
         """Use assigned search lanes only with coordination; otherwise infer
         each robot's ferry lane from its own observed motion.
@@ -182,7 +215,11 @@ class TensorThreeVsThreeActionMixin:
                     -1,self.fuel_count).contiguous()
                 ranked_midfield=midfield_piece.index_select(1,rank_index).reshape(
                     -1,self.fuel_count).contiguous()
-                if rank_offense_only and FUSED_TOP4_CANDIDATE_RANK_ENABLED:
+                use_fused_top4=(rank_offense_only and
+                    FUSED_TOP4_CANDIDATE_RANK_ENABLED and
+                    not self.planner._boxes.shape[0] and
+                    not self.planner._bumps.shape[0])
+                if use_fused_top4:
                     ranked_indices,ranked_nearest,ranked_nearby=(
                         _fuel_candidate_rank.top4_with_age_and_nearby(
                             ranked_points,ranked_intake,ranked_pose,ranked_age,
@@ -195,6 +232,15 @@ class TensorThreeVsThreeActionMixin:
                             ranked_free,ranked_midfield))
                     ranked_costs=intake_costs.reshape(
                         self.n,ranked_count,self.fuel_count)
+                    ranked_start=intake_reference.index_select(
+                        1,rank_index).reshape(self.n,ranked_count,2)
+                    ranked_targets=ranked_points.reshape(
+                        self.n,ranked_count,self.fuel_count,2)
+                    ranked_radius=(.5*torch.sqrt(
+                        self.sim.length[:,rank_index].square()+
+                        self.sim.width[:,rank_index].square()))
+                    ranked_costs+=self._candidate_obstacle_detour(
+                        ranked_start,ranked_targets,ranked_radius)
                     ranked_nearby=nearby_mask.reshape(
                         self.n,ranked_count,self.fuel_count).any(-1)
                     ranked_nearest,ranked_indices=ranked_costs.topk(
@@ -357,8 +403,12 @@ class TensorThreeVsThreeActionMixin:
         if self._has_deterministic_offense:
             local_dist = (candidate_points - intake_reference[:,:,None,:]).norm(dim=-1)
             ranking_dist = (candidate_points - ranking_reference[:,:,None,:]).norm(dim=-1)
+            robot_radius=.5*torch.sqrt(
+                self.sim.length.square()+self.sim.width.square())
+            obstacle_detour=self._candidate_obstacle_detour(
+                intake_reference,candidate_points,robot_radius)
             candidate_age=self.track_age.gather(2,intake_indices).clamp(0.,2.)
-            intake_cost=ranking_dist+candidate_age*.4
+            intake_cost=ranking_dist+candidate_age*.4+obstacle_detour
             staging_cost = intake_cost
             staging_idx = staging_cost.masked_fill(~intake_eligible,float("inf")).argmin(-1)
             stage_selected = intake_indices.gather(2,staging_idx[...,None]).squeeze(-1)
