@@ -312,18 +312,6 @@ class TensorThreeVsThreeActionMixin:
                                      ~self._defense_role_mask)[None]
         no_track_search=(deterministic_offense_mode & (action==6) &
                          ~(possession>0) & ~intake_available)
-        raster_count=self.raster_sweep_points.shape[1]
-        robot_slots=torch.arange(self._raster_cursor.shape[1],device=self.device)
-        slot_phase=(robot_slots%3)*(
-            raster_count//3)
-        entering_search=no_track_search & ~self._no_track_search_active
-        leaving_search=~no_track_search & self._no_track_search_active
-        phase_delta=torch.where(entering_search,slot_phase[None],
-            torch.where(leaving_search,-slot_phase[None],
-                        torch.zeros_like(self._raster_cursor)))
-        phase_cursor=(self._raster_cursor+phase_delta)%raster_count
-        self._raster_cursor.copy_(torch.where(
-            active[:,None],phase_cursor,self._raster_cursor))
         self._no_track_search_active.copy_(torch.where(
             active[:,None],no_track_search,self._no_track_search_active))
         collecting=(action<4) | no_track_search
