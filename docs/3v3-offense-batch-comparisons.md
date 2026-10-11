@@ -294,6 +294,19 @@ generalizes above target. Candidate records and per-world analyses are on the
 respective branches in `AutoDrive-no-track-raster-phase-recheck/evaluations/`
 and `AutoDrive-fms-local-action-window/evaluations/`.
 
+### Pre-registered independent Holdout J (2026-10-11)
+
+Reserve seeds 153719, 246817, and 390527 (four worlds each) for one more
+independent replication; exact-seed searches found no existing occurrence in
+the comparison docs or evaluation JSONs. Repeat only the two standalone
+strategies, phase staggering on `cuda:0` and FMS action-window filtering on
+`cuda:1`, each paired sequentially with current-main baseline on its assigned
+device. Settings remain 8,000 ticks, fuel physics, replan interval 20,
+perception interval 2, and no teammate intent or coordination. Candidate
+imports must be pinned and verified against their worktrees. Keep both
+branches separate, retain all outcomes, and report per-world, per-seed, and
+pooled fuel/score deltas. This batch is a replication, not a tuning set.
+
 ### Phase-stagger + FMS action-window bundle Holdout H (2026-10-11)
 
 Because the phase-stagger and FMS-window edits affect separate sections of
