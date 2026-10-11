@@ -611,3 +611,59 @@ lost 200 points, and the combined evidence remains limited to two batches.
 Baseline records are in `evaluations/siloed-lane-search-holdout-b/baseline/`;
 candidate records are under the matching directory in the
 `AutoDrive-siloed-lane-search` worktree.
+
+### Siloed lane search unseen-seed holdout D (2026-10-11)
+
+The frozen candidate `c625676` was compared with current-main baseline
+`1900abe` on seeds 305411, 693217, and 158329, four worlds per seed. Settings
+were 8,000 ticks, fuel physics, replan interval 20, perception interval 2, and
+no teammate intent knowledge or coordination. This was a fresh end-to-end
+simulator evaluation, not a dashboard replay.
+
+Across 12 worlds, fuel acquisitions increased by 209 and points by 241; mean
+score rose from 706.42 to 726.50. Fuel/score deltas by seed were 305411
+−70/−191, 693217 +195/+262, and 158329 +84/+170. Per-world fuel/score deltas
+were 305411 `(+11,+85), (-158,-212), (+507,+339), (-430,-403)`; 693217
+`(-184,-71), (+113,+117), (+106,+320), (+160,-104)`; and 158329
+`(-463,-218), (+223,-50), (+236,+300), (+88,+138)`. Runtime totals were
+681.01 seconds baseline and 631.20 seconds candidate.
+
+The aggregate was positive, but the first seed regressed and the mean remained
+below 800. Keep the already committed lane-search branch as an isolated
+experimental option; this batch does not justify merging it. Across all three
+unseen lane-search holds B, C, and D (36 worlds), total change is +974 fuel
+and +891 points, with score losses in holdout C and a combined mean-score
+gain of 24.75 points per world.
+
+Baseline records are in `evaluations/siloed-lane-search-holdout-d/baseline/`;
+candidate records are in the matching main evaluation directory and the
+`AutoDrive-siloed-lane-search` worktree. Both record sets identify their
+respective revisions; candidate and baseline generated HIP sources matched by
+hash. Dashboard replay and stack checks were not performed.
+
+### No-track raster phase staggering unseen-seed holdout D (2026-10-11)
+
+Frozen candidate `6d9b709` was compared with current-main baseline `1900abe`
+on seeds 740021, 268933, and 913507, four worlds per seed. Settings were
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate intent knowledge or coordination. This was a fresh end-to-end
+simulator evaluation, not a dashboard replay.
+
+Across 12 unseen worlds, fuel acquisitions increased by 871 and points by 799;
+mean score rose from 696.67 to 763.25. Fuel/score deltas by seed were 740021
++262/+175, 268933 +24/+90, and 913507 +585/+534. Per-world fuel/score deltas
+were 740021 `(+112,+26), (+158,+40), (+92,+104), (-100,+5)`; 268933
+`(+242,+137), (-372,-356), (+131,+150), (+23,+159)`; and 913507
+`(-254,-158), (+228,+285), (+547,+384), (+64,+23)`. Runtime totals were
+611.38 seconds baseline and 629.85 seconds candidate. Fuel improved in 9/12
+worlds and score in 10/12.
+
+This is a solid positive batch, though its aggregate mean remains below 800 and
+its elapsed time was about 3% higher. Preserve `6d9b709` as a separate,
+unmerged behavior option; continue testing generalization before adoption.
+
+Baseline records are in `evaluations/no-track-phase-holdout-d/baseline/`;
+candidate records are in the matching main evaluation directory and the
+`AutoDrive-no-track-raster-phase-recheck` worktree. Candidate and baseline
+generated HIP sources matched by hash. Dashboard replay and stack checks were
+not performed.
