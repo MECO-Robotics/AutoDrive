@@ -75,6 +75,12 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   candidates failed their aggregate gates; other tested ranking, confidence,
   boundary, turn-cost, scorer-aim, and pickup-braking changes are itemized below
   with their paired results.
+- **Infrastructure attempt:** immutable HIP input staging (`abf47d4`,
+  `codex/hip-immutable-staging`) has not passed lossless validation. Same-revision
+  cold/warm simulator batches differed on all four worlds, and the non-staging
+  baseline was stopped after 886 seconds without a result while emitting cache
+  verification fallbacks. Preserve it as inconclusive; see branch commit
+  `60ea415` for records and the next required benchmark.
 - **Attempt history:** behavior attempts stay committed on their own branches,
   including failed runs and evaluation fixes. Only measured behavior changes
   are candidates for promotion; none of the current experimental branches is
