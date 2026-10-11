@@ -958,3 +958,21 @@ respective branches: phase `142af44` on
 `codex/no-track-raster-phase-recheck`; FMS `ecd50ce` on
 `codex/fms-local-action-window`. This was end-to-end simulator validation, not a
 dashboard replay; dashboard stack status was not checked.
+
+### Pre-registration: two local score-commit candidates holdout K (2026-10-11)
+
+Before either candidate is evaluated, freeze this paired comparison for seeds
+301927, 570381, and 938617, four vector worlds per seed. Candidate A is the
+active-FMS pickup/return gate (`87e425f`, `codex/local-active-window-pickup-gate`);
+candidate B is the end-of-match loaded scoring gate (`0641100`,
+`codex/robot-local-endgame-score-commit`). Evaluate each candidate alone against
+the same current-main behavior on a dedicated device: A on `cuda:0`, B on
+`cuda:1`, with baseline and candidate sequential on that device. Use 8,000
+ticks, fuel physics, replan interval 20, perception interval 2, and disabled
+teammate intent/coordination. Do not combine candidates or tune from these
+seeds. Record all per-world fuel and score outcomes and keep each attempt on
+its own branch regardless of result. The three existing uncommitted HIP
+runtime source edits in the main checkout are copied byte-for-byte to each
+candidate worktree before evaluation so native simulator code matches. The
+pre-registered seeds were checked against this comparison document and have
+not been evaluated in this experiment.
