@@ -111,7 +111,7 @@ against the current checkout, then generate a fresh replay.
 | Turn intake toward fuel during a feasible approach (`407b00b`) | Against the prior raster-search behavior, the fixed 12-world comparison gained 462 acquisitions and 173 points. | In current `main`. |
 | Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
 | Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
-| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions/+15 points. Initial recheck: +58/+413. Current-main replications A/B: +741/+483 and +796/+923. Holdout D: +871/+799. E: +2,190/+1,965, mean 658.50→822.25. F: −104/−128, mean 778.67→768.00. Across the five current-main batches A/B/D/E/F (60 worlds): +4,494 fuel/+4,042 points. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Four batches gained fuel and points; F regressed. Keep as a separate selectable strategy; accumulated evidence is positive, though individual holds remain mixed. |
+| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions/+15 points. Initial recheck: +58/+413. Current-main replications A/B: +741/+483 and +796/+923. Holdout D: +871/+799. E: +2,190/+1,965, mean 658.50→822.25. F: −104/−128, mean 778.67→768.00. Fresh holdout T: +507/+731, mean 800.33→861.25. Across A/B/D/E/F/T (72 worlds): +5,001 fuel/+4,773 points. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Five batches gained fuel and points; F regressed. T’s fuel gain came from one seed cluster and only 5/12 worlds improved fuel. Keep as a separate selectable strategy; its T mean clears 800, but the seed sensitivity still requires replication. |
 | Retain a robot's selected fuel target while it remains competitive, scaling the margin by its own targetward motion (`14f1ce4`, `codex/target-hysteresis-current`) | Initial current-main batch: +165 fuel/+1,030 points. Holdout F: +759/+1,167, mean 702.08→799.33. Holdout G: −405/−688, mean 753.08→695.75. Across all three 12-world batches: +519 fuel/+1,509 points; combined mean 715.50→757.42. | Mixed generalization: pooled aggregate fuel/score remain positive, but holdout G regressed strongly and none of these combined batches reached 800. Preserve the separate strategy branch; do not merge. |
 | Scale no-track raster waypoint lookahead with the acting robot's speed (`470adef`, `codex/raster-speed-lookahead`) | Current-main paired batch: +16 acquisitions and +184 points across 12 worlds; acquisition-positive in 8/12 worlds and score-positive in 7/12. Seed acquisition/score deltas: 827104 −13/−94, 827105 −121/+199, 191873 +150/+79. Mean score 728.08→743.42; candidate elapsed time 594.62s versus 718.98s baseline. | Nominal aggregate gain is within observed run variance and seed results are mixed. Keep committed on its branch, experimental and unmerged. End-to-end records are in `AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/` and `evaluations/raster-speed-lookahead-baseline/`. |
 
@@ -1171,6 +1171,15 @@ exceeded 800. Repeated-seed A/B replications are summarized separately and are
 not counted as independent new seeds. Overall, phase staggering has positive
 cumulative evidence but substantial seed sensitivity; preserve it as an
 optional strategy rather than treating it as a robust improvement.
+
+The separately preregistered phase-only holdout T (`530619`, `762481`,
+`913057`) added 507 fuel and 731 points over 12 worlds; mean score rose
+800.33→861.25. Per-seed fuel/score changes were +953/+177.25, −329/−7.75,
+and −117/+13.25. Fuel improved in only 5/12 worlds and the aggregate fuel gain
+came from the first seed cluster. This is a positive fresh batch above 800,
+but not robust evidence across seeds. Keep the branch isolated pending another
+unseen-seed replication. Full provenance and records are committed as
+`a9562ab` on `codex/no-track-raster-phase-recheck`.
 
 ### Robot-local obstacle reachability holdout P
 
