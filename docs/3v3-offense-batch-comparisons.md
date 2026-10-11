@@ -1002,6 +1002,35 @@ logs are committed on their branches: active-window `1169cac` on
 target or establishes broad generalization. These were fresh simulator batches,
 not dashboard replays; dashboard stack status was not checked.
 
+### Independent local score-gate replication L (2026-10-11)
+
+The same two frozen candidates were evaluated on fresh seeds 413807, 725961,
+and 884317, four worlds per seed. The active-window candidate ran on `cuda:0`
+and endgame score commitment on `cuda:1`, each paired sequentially against the
+same main behavior on its device. Settings and no-coordination policy matched
+Holdout K; candidate imports and common HIP source bytes were verified.
+
+- **Active-window pickup/return gate:** +20 fuel and +91 points over 12 worlds;
+  mean score 848.42→856.00. Seed fuel/score deltas: 413807 +28/−55, 725961
+  −29/+134, 884317 +21/+12. Fuel improved in 6/12 worlds and score in 5/12.
+  The aggregate fuel change is near zero. Across K and L, it gained 275 fuel
+  and 477 points in 24 worlds; mean score was 745.17→765.04. Keep it isolated
+  as an experimental alternative.
+- **Endgame score commitment:** +262 fuel and +735 points over 12 worlds;
+  mean score 806.58→867.83. Seed fuel/score deltas: 413807 +223/+257, 725961
+  +128/+207, 884317 −89/+271. Score improved on every seed and in 8/12
+  worlds; fuel improved in 9/12. Holdout K was weaker (+198/+415, mean
+  632.67→667.25). Across K and L it gained 460 fuel and 1,150 points in 24
+  worlds; combined mean score was 719.63→767.54. L exceeds the >800 target,
+  but the two-batch combined mean does not yet; preserve as a promising
+  separate strategy pending another unseen-seed replication.
+
+Full L records are committed on the strategy branches: active-window `04d9ab9`
+and endgame `a70dcbc`. Neither branch is merged. The active-window worktree's
+first L launch failed before simulation because it had no local virtualenv; the
+failure is logged and the retry used the shared interpreter. No dashboard
+replay or dashboard stack check was performed.
+
 ### Pre-registration: local score-gate replication L (2026-10-11)
 
 To check generalization without combining or retuning, replicate the two
