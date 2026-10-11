@@ -362,3 +362,27 @@ preserved on their own branches. None established a robust improvement in both
 fuel and scoring. Future candidates should start from current `main`, keep the
 fixed batch unchanged, and add their branch hash and paired result here whether
 they pass or fail. Never merge an experimental candidate automatically.
+
+### Phase staggering plus target hysteresis bundle (2026-10-11)
+
+Candidate `3aaf861` (`codex/phase-hysteresis-bundle`) combines raster phase
+staggering with robot-local target hysteresis. It was evaluated against `main`
+at `97df7ec` using seeds 827104, 827105, and 191873, four worlds per seed,
+8,000 ticks, fuel physics, replan interval 20, perception interval 2, and no
+teammate intent knowledge or coordination. This was a fresh end-to-end
+simulator batch; dashboard replay and dashboard-stack verification were not
+performed.
+
+Across 12 worlds, the candidate gained 898 team fuel acquisitions and 233
+team points. Mean score deltas by seed were +31.50, +75.75, and −49.00,
+respectively. Per-world fuel/score deltas were 827104 `(-96,+47),
+(+107,-180), (+250,+119), (+239,+140)`; 827105 `(+567,+429), (+333,-27),
+(-24,+131), (-256,-230)`; and 191873 `(+156,+218), (+438,+330),
+(-581,-545), (-235,-199)`. Runtime was 646.12 seconds baseline and 668.66
+seconds candidate across the three seed batches. The per-world results are
+mixed and seed 191873 regressed, so preserve this as an experimental alternate
+strategy; do not merge it based on the aggregate alone.
+
+Baseline records are in `evaluations/phase-hysteresis-bundle/baseline/` and
+candidate records are in the corresponding candidate worktree at
+`AutoDrive-phase-hysteresis-bundle/evaluations/phase-hysteresis-bundle/candidate/`.
