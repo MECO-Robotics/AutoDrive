@@ -1036,13 +1036,25 @@ replay or dashboard stack check was performed.
 Evaluate two unmerged strategies separately on new seeds 521709, 736481, and
 991027, four worlds per seed: frozen phase staggering (`6d9b709`) on `cuda:0`
 and frozen endgame score commitment (`0641100`) on `cuda:1`. Pair each with
-current-main behavior (pre-run snapshot `dca9d5c`, with no behavior-code
+current-main behavior (pre-run snapshot `3320480`, with no behavior-code
 changes since `c8899b1`) sequentially on its device. Use 8,000 ticks,
 fuel physics, replan 20, perception 2, and no teammate intent/coordination.
 These seeds were checked against saved batch records before this entry was
 committed. The candidates remain separate; no combined run or seed-specific
 tuning is planned. The three native HIP source files are byte-identical across
 the baseline and candidate worktrees.
+
+#### Endgame candidate result
+
+The endgame score-gate run completed with paired seed deltas of −145 fuel and
+−69 points over 12 worlds; mean score fell from 755.67 to 749.92. Per-seed
+fuel/score deltas were +157/−122, −334/−166, and +32/+219. Fuel improved in
+7/12 worlds and score in 8/12; two seed aggregates gained fuel, while only
+one gained score. This is mixed evidence and does not support promotion. Keep
+the behavior as a separate selectable branch, with its full records committed
+as `e9200a1` on `codex/robot-local-endgame-score-commit`; do not combine it
+with another strategy without a dedicated evaluation. The phase candidate's
+M evaluation was still running when this result was recorded.
 
 ### Pre-registration: local score-gate replication L (2026-10-11)
 
