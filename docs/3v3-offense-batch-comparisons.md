@@ -58,6 +58,9 @@ Generated artifacts are ignored by Git under `outputs/3v3-offense-batches/`.
   independent aggregate-positive replications (+741 acquisitions/+483 points
   and +796/+923). Seed and world results remain mixed, and the mean scores
   were 748.92 and 777.00, so it has not established a robust >800 result.
+- **New speed-lookahead trial:** nominally gained 16 acquisitions and 184
+  points, but fuel-positive evidence was mixed across seeds and close to the
+  observed run variance. Keep it experimental and unmerged.
 - **Not accepted:** the current-main FMS staging and stale-track extrapolation
   candidates failed their aggregate gates; other tested ranking, confidence,
   boundary, and turn-cost changes are itemized below with their paired results.
@@ -92,6 +95,7 @@ against the current checkout, then generate a fresh replay.
 | Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
 | Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
 | Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Initial recheck: +58 acquisitions, +413 points across 12 worlds; seed fuel/score deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. Two independent replications against current behavior baseline: A +741 fuel/+483 points (8/12 worlds fuel-positive, 8/12 score-positive; seed deltas +748/+551, −586/−648, +579/+580); B +796 fuel/+923 points (7/12 fuel-positive, 7/12 score-positive; seed deltas +232/+398, −132/−46, +696/+571). Replication mean scores: A 708.67→748.92, B 700.08→777.00. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Both replications are aggregate-positive, but seed/world variance remains high and neither mean reached 800. Keep experimental pending broader robustness evidence. |
+| Scale no-track raster waypoint lookahead with the acting robot's speed (`470adef`, `codex/raster-speed-lookahead`) | Current-main paired batch: +16 acquisitions and +184 points across 12 worlds; acquisition-positive in 8/12 worlds and score-positive in 7/12. Seed acquisition/score deltas: 827104 −13/−94, 827105 −121/+199, 191873 +150/+79. Mean score 728.08→743.42; candidate elapsed time 594.62s versus 718.98s baseline. | Nominal aggregate gain is within observed run variance and seed results are mixed. Keep committed on its branch, experimental and unmerged. End-to-end records are in `AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/` and `evaluations/raster-speed-lookahead-baseline/`. |
 
 ### Tested behavior changes that did not pass the fuel gate
 
@@ -105,6 +109,7 @@ against the current checkout, then generate a fresh replay.
 | Extrapolate selected stale fuel position by observed velocity and age confidence (`06b1f12`, `codex/stale-fuel-extrapolation-current`) | Two independent paired batches: A +175 points/−152 acquisitions over 12 worlds; B −323/−303. Across 24 worlds: −148 points/−455 acquisitions. Seed score/fuel deltas A: 827104 +185/+62, 827105 −488/−761, 191873 +478/+547; B: −490/−558, −18/+305, +185/−50. | Mixed and not generalizable; fails the fuel gate across both replications. Keep its attempt branch, do not merge. Records are in `AutoDrive-stale-fuel-extrapolation-current/evaluations/stale-fuel-extrapolation-current/`. |
 | Stage loaded robots for the next HUB activation (`e33a265`, `codex/fms-activation-stage-current-main`; fixes `3e08901`, `7cb2c97`) | Fresh current-main paired batch: −7,950 acquisitions and −2,658 points; mean score 686.42→464.92. Seed fuel/score deltas: 827104 −2,486/−416, 827105 −1,872/−561, 191873 −3,592/−1,681. Fuel and score each improved in only 1/12 worlds. | Rejected. The candidate’s staging rule consistently degraded collection and scoring; remains committed on its branch, not merged. Earlier reported +763/+244 was not supported by the saved records and did not reproduce. |
 | Abort current-HUB pickup when remaining score window is too short (`34b085a`, `codex/fms-active-window-abort-current-main`; parity fix `f1edd80`) | Fresh current-main paired batch: −1,161 acquisitions and −677 points; mean score 744.75→688.33. Seed fuel/score deltas: 827104 −927/−849, 827105 −113/+95, 191873 −121/+77. Fuel and score each improved in 5/12 worlds. Candidate runtime was 637.91s versus 677.52s baseline. | Rejected: faster execution did not preserve behavior quality; both fuel and aggregate score fell. Remains committed on its branch, not merged. |
+| Measure midfield fuel proximity from the acting robot's forward intake reference (`9a8a24e`, `codex/intake-proximity-return`) | Current-main paired batch: −600 acquisitions and −446 points across 12 worlds; mean score 744.83→707.67. Seed fuel/score deltas: 827104 −442/−336, 827105 −508/−91, 191873 +350/−19. Fuel improved in 4/12 worlds and score in 3/12. Candidate runtime was 728.60s versus 699.91s baseline. | Rejected by both aggregate fuel and score evidence; committed on its branch, not merged. Records are in `evaluations/intake-proximity-return/baseline/` and `AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/candidate/`. |
 | Weight each robot's cloud-edge fuel-track weights by its own observation confidence (`120de5a`, `codex/fuel-cloud-confidence`) | Against sequential `f4eae79`: +15 acquisitions but −243 points over 12 worlds; fuel improved in 6/12 worlds and score in 4/12. Seed fuel/score deltas: 827104 −252/−406, 827105 +56/+368, 191873 +211/−205. Mean score fell 704.42→684.17 and elapsed time rose 13.2%. | Mixed fuel-only result with lower scoring and high world variance; retained on its branch, not merged. Records are under `AutoDrive-fuel-cloud-confidence/evaluations/fuel-cloud-confidence/`. |
 | Penalize pickup tracks near field boundaries (`7124128`, `codex/wall-clearance-pickup`) | Against sequential `f4eae79`: −321 acquisitions and −332 points over 12 worlds; mean score fell 745.08→717.42. Seed fuel/score deltas: 827104 −13/−151, 827105 −138/−180, 191873 −170/−1. | Rejected by both aggregate fuel and score evidence; attempt retained on branch, not merged. Per-world records are under `AutoDrive-wall-clearance/evaluations/fresh-local-candidate/`. |
 | Defer loaded scoring while nearby alliance-zone fuel is reachable (`e83fc4c`, `codex/fuel-local-alliance-score`) | Against sequential `cc22785`: −982 acquisitions, +248 points over 12 worlds; only 2/12 worlds gained fuel. Mean score rose 645.25→665.92, still well below 800. Seed fuel/point deltas: 827104 −562/−227, 827105 −331/+126, 191873 −89/+349. Runtime increased 3.9%. | Fuel gate failed despite a small score gain; attempt retained on its branch, not merged. Records are under `AutoDrive-fuel-local-alliance-score/evaluations/fuel-local-alliance-score/`. |
@@ -220,6 +225,40 @@ but insufficient evidence to merge. JSON records are retained outside Git in
 and `AutoDrive-no-track-raster-phase-replication-b/evaluations/no-track-raster-phase-replication-b/`.
 No dashboard replay or dashboard stack verification was performed; these
 end-to-end batch records are the simulator evaluations for this behavior.
+
+### Intake proximity and speed-lookahead trials (2026-10-11)
+
+Both new candidates were committed before evaluation, started from current-main
+runtime behavior, and tested on seeds 827104, 827105, and 191873 with four
+worlds per seed, 8,000 ticks, fuel physics, replan interval 20, perception
+interval 2, and no teammate coordination. Each baseline/candidate pair ran
+sequentially on one GPU; the two candidate experiments ran concurrently on
+separate GPUs. Their batches wrote end-to-end simulator records, not dashboard
+replays, so no dashboard replay or stack verification was performed.
+
+- **Forward-intake proximity (`9a8a24e`, `codex/intake-proximity-return`)**:
+  −600 acquisitions and −446 points; mean score 744.83→707.67. Per-seed
+  fuel/score deltas: 827104 −442/−336, 827105 −508/−91, and 191873 +350/−19.
+  Per-world fuel/score deltas: 827104 `(-150,-47), (-365,-357), (+382,+302),
+  (-309,-234)`; 827105 `(-144,-39), (+147,+105), (-90,-28), (-421,-129)`;
+  191873 `(+266,-87), (-146,-263), (-264,-12), (+494,+343)`. Runtime was
+  699.91s baseline and 728.60s candidate. The one-line local geometry change
+  did not generalize across the batch; branch remains committed and unmerged.
+- **Speed-scaled no-track lookahead (`470adef`,
+  `codex/raster-speed-lookahead`)**: +16 acquisitions and +184 points; mean
+  score 728.08→743.42. Per-seed fuel/score deltas: 827104 −13/−94, 827105
+  −121/+199, and 191873 +150/+79. Per-world fuel/score deltas: 827104
+  `(+79,-103), (-108,-84), (+18,+41), (-2,+52)`; 827105 `(-491,-307),
+  (+94,+310), (+30,+73), (+246,+123)`; 191873 `(+1,-53), (+377,+410),
+  (+209,+99), (-437,-377)`. Runtime was 718.98s baseline and 594.62s
+  candidate. The small net fuel gain is within observed run variance; keep it
+  experimental and unmerged.
+
+JSON records are retained in `evaluations/intake-proximity-return/` and
+`evaluations/raster-speed-lookahead-baseline/` in the baseline checkout and in
+the respective candidate worktrees under
+`AutoDrive-intake-proximity-return/evaluations/intake-proximity-return/` and
+`AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/`.
 
 ### Infrastructure and repeatability findings
 
