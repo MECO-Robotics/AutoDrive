@@ -1194,3 +1194,18 @@ and paired comparisons are committed as `fa4f470` on
 `6e7aeda`; candidate runtime revision was `47954ab`. Both worktrees used the
 same three user-local HIP source edits, verified byte-identical before
 evaluation.
+
+### Pre-registration: FMS composition holdout Q (2026-10-11)
+
+If offline review produces two behavior-only candidates without teammate
+coordination, independently compare each against the same current behavior
+snapshot on fresh seeds 388175, 905263, and 631447 (four paired worlds per
+seed). Candidate A is the exact composition of FMS action-window filtering and
+phase staggering, if their actual diffs compose cleanly. Candidate B is the
+exact composition of FMS action-window filtering and robot-local obstacle
+reachability, if compatible. Keep candidates and records on separate branches;
+never evaluate a combined stack as evidence for either individual candidate.
+Use 8,000 ticks, fuel physics, replan interval 20, perception interval 2, and
+no teammate intent or coordination. Exact whole-number seed searches across
+project docs and relevant batch/replay JSON found no prior occurrences. Freeze
+candidate code before evaluation; retain positive and negative results.
