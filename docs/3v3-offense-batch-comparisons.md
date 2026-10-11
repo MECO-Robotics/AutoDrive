@@ -98,7 +98,7 @@ against the current checkout, then generate a fresh replay.
 | Turn intake toward fuel during a feasible approach (`407b00b`) | Against the prior raster-search behavior, the fixed 12-world comparison gained 462 acquisitions and 173 points. | In current `main`. |
 | Rank fuel targets with robot momentum (`28e0802`) | Against the turn-envelope behavior, fixed 12-world comparison gained 295 acquisitions and 18 points. | In current `main`; modest score gain. |
 | Penalize pickup targets behind obstacles (`3e996c9`) | Against momentum ranking, fixed 12-world comparison gained 887 acquisitions and 1,211 points; all three seed aggregates were score-positive. Historical mean score was 804.08, though only 5/12 worlds individually exceeded 800. | In current `main`; the clearest measured step toward the >800-point target. |
-| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Initial recheck: +58 acquisitions, +413 points across 12 worlds; seed fuel/score deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. Two independent replications against current behavior baseline: A +741 fuel/+483 points (8/12 worlds fuel-positive, 8/12 score-positive; seed deltas +748/+551, −586/−648, +579/+580); B +796 fuel/+923 points (7/12 fuel-positive, 7/12 score-positive; seed deltas +232/+398, −132/−46, +696/+571). Replication mean scores: A 708.67→748.92, B 700.08→777.00. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. Both replications are aggregate-positive, but seed/world variance remains high and neither mean reached 800. Keep experimental pending broader robustness evidence. |
+| Stagger no-track raster phases by robot slot | Historical comparison against an older raster baseline: +508 acquisitions, +15 points. Initial recheck: +58 acquisitions, +413 points across 12 worlds; seed fuel/score deltas 827104 +217/+370, 827105 +150/+161, 191873 −309/−118; fuel improved in 5/12 worlds. Two independent replications against current behavior baseline: A +741 fuel/+483 points; B +796 fuel/+923 points. Holdout D: +871 fuel/+799 points, mean 696.67→763.25. Holdout E: +2,190 fuel/+1,965 points, mean 658.50→822.25; both fuel and score improved in 8/12 worlds. | Committed as `6d9b709` on `codex/no-track-raster-phase-recheck`; not merged. All four recent paired batches were aggregate-positive; holdout E is the first mean above 800. Keep as a selectable experimental strategy pending broader robustness evidence. |
 | Scale no-track raster waypoint lookahead with the acting robot's speed (`470adef`, `codex/raster-speed-lookahead`) | Current-main paired batch: +16 acquisitions and +184 points across 12 worlds; acquisition-positive in 8/12 worlds and score-positive in 7/12. Seed acquisition/score deltas: 827104 −13/−94, 827105 −121/+199, 191873 +150/+79. Mean score 728.08→743.42; candidate elapsed time 594.62s versus 718.98s baseline. | Nominal aggregate gain is within observed run variance and seed results are mixed. Keep committed on its branch, experimental and unmerged. End-to-end records are in `AutoDrive-raster-speed-lookahead/evaluations/raster-speed-lookahead/` and `evaluations/raster-speed-lookahead-baseline/`. |
 
 ### Tested behavior changes that did not pass the fuel gate
@@ -667,3 +667,43 @@ candidate records are in the matching main evaluation directory and the
 `AutoDrive-no-track-raster-phase-recheck` worktree. Candidate and baseline
 generated HIP sources matched by hash. Dashboard replay and stack checks were
 not performed.
+
+### Fresh phase and lane strategy holdout E (2026-10-11)
+
+These are separate candidate branches evaluated independently against the same
+current-main revision (`7280584`); they were not combined or enabled
+simultaneously. Each evaluation used three fresh seeds and four paired world
+slots per seed, 8,000 ticks, fuel physics, replan interval 20, perception
+interval 2, and disabled teammate intent knowledge and coordination. The saved
+records identify baseline revision `7280584`, phase candidate `6d9b709`, and
+lane-search candidate `c625676`. Candidate records were copied to the main
+evaluation directories and verified against their originals.
+
+- **No-track raster phase staggering**, seeds 684293, 217531, and 907163:
+  +2,190 fuel acquisitions and +1,965 points over 12 worlds; mean score
+  658.50→822.25. Fuel and score both improved in 8/12 worlds. Seed fuel/score
+  deltas were 684293 +702/+684, 217531 +683/+395, and 907163 +805/+886.
+  Per-world fuel/score deltas were 684293 `(-141,-13), (+502,+735),
+  (-69,-81), (+31,+43)`; 217531 `(-115,+41), (+308,+258), (+74,-75),
+  (+416,+171)`; 907163 `(+334,+309), (-104,-62), (+339,+414), (+236,+225)`.
+  Summed evaluator time was 621.74 seconds baseline and 635.11 seconds
+  candidate (+2.2%). This was a fresh end-to-end simulator batch, not a
+  dashboard replay.
+- **Siloed lane search**, seeds 326741, 581023, and 947351: −1,548 fuel
+  acquisitions and −826 points over 12 worlds; mean score 780.83→712.00.
+  Seed fuel/score deltas were 326741 −1,146/−825, 581023 +88/−21, and 947351
+  −490/+20. Per-world fuel/score deltas were 326741 `(-177,-58),
+  (-377,-186), (-400,-242), (-192,-339)`; 581023 `(-110,-107), (+81,+112),
+  (-81,-116), (+198,+90)`; 947351 `(-47,+101), (+15,+73), (-9,+151),
+  (-449,-305)`. Summed evaluator time was 641.42 seconds baseline and
+  634.50 seconds candidate. This was a fresh end-to-end simulator batch, not a
+  dashboard replay.
+
+Keep the two committed behaviors as separate selectable options:
+`6d9b709` on `codex/no-track-raster-phase-recheck` has a positive holdout E,
+while `c625676` on `codex/siloed-lane-search-holdout` regressed on holdout E.
+Neither candidate was merged. Records are in
+`evaluations/no-track-phase-holdout-e/{baseline,candidate}/` and
+`evaluations/siloed-lane-search-holdout-e/{baseline,candidate}/`. No dashboard
+replay was generated, so dashboard stack status was not part of this
+validation.
