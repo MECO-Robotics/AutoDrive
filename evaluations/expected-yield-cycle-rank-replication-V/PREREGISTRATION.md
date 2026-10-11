@@ -32,7 +32,7 @@ For each seed, run baseline then candidate on the assigned GPU, back-to-back, us
 
 ## Simulator and trace settings
 
-Each arm uses a four-world vector batch for 8,000 ticks at 0.02 seconds per tick, 504 fuel pieces, randomized scenarios, fuel physics enabled, fused sensor RNG, deterministic controllers, three offense and three defense robots, replan interval 20, perception interval 2, and no teammate coordination. Capture slot 0 in the same rollout every 10 ticks (800 samples through tick 8,000); the instrumented evaluator checks trace final score and acquisitions against that exact batch slot. Baseline and candidate extension caches are separate per GPU.
+Each arm uses a four-world vector batch for 8,000 ticks at 0.02 seconds per tick, 504 fuel pieces, randomized scenarios, fuel physics enabled, fused sensor RNG, deterministic controllers, three offense and three defense robots, replan interval 20, perception interval 2, and no teammate coordination. Capture slot 0 in the same rollout every 10 ticks (800 samples through tick 8,000); the instrumented evaluator checks trace final score and acquisitions against that exact batch slot. Set `PYTORCH_ROCM_ARCH=gfx900`. Baseline and candidate extension caches are separate per GPU.
 
 Run outputs and logs are written outside the source checkouts under `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/` so evaluator revision and dirty-state provenance remain meaningful. Copy and commit all raw results, traces, logs, analysis, and this registration on the isolated records branch after the evaluations. Do not merge the behavior.
 
