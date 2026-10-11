@@ -1209,3 +1209,21 @@ Use 8,000 ticks, fuel physics, replan interval 20, perception interval 2, and
 no teammate intent or coordination. Exact whole-number seed searches across
 project docs and relevant batch/replay JSON found no prior occurrences. Freeze
 candidate code before evaluation; retain positive and negative results.
+
+### FMS/phase and FMS/reachability compositions, holdout Q
+
+The frozen phase-staggering + FMS action-window bundle (`41ec350`) lost 16
+fuel acquisitions and 16 points over 12 worlds; mean score was 751.75→750.42.
+Only seed 631447 improved materially (+544 fuel/+673 points); the other two
+seed clusters regressed. Preserve it on its own branch, but it did not pass the
+fuel gate or improve pooled score. Full records are committed as `4834bc6` on
+`codex/phase-fms-action-window-bundle`.
+
+The frozen FMS action-window + obstacle-reachability bundle (`7de31fb`) gained
+682 fuel and 565 points over 12 worlds; mean score rose 751.75→798.83. Per-seed
+fuel/score changes were −346/−322, −297/−421, and +1,325/+1,308 for seeds
+388175, 905263, and 631447. Fuel improved in 6/12 worlds and two seed clusters;
+score improved in 7/12, but most of the aggregate gain came from 631447. Keep
+this separate composition because aggregate fuel is positive, but require
+another unseen-seed replication before treating it as robust. Full records are
+committed as `97c7bd4` on `codex/fms-reachability-compose`; it was not merged.
