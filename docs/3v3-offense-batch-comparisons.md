@@ -1227,3 +1227,16 @@ score improved in 7/12, but most of the aggregate gain came from 631447. Keep
 this separate composition because aggregate fuel is positive, but require
 another unseen-seed replication before treating it as robust. Full records are
 committed as `97c7bd4` on `codex/fms-reachability-compose`; it was not merged.
+
+### Pre-registration: FMS/reachability replication holdout R (2026-10-11)
+
+Replicate the frozen FMS action-window + obstacle-reachability composition
+(`7de31fb`, `codex/fms-reachability-compose`) on fresh seeds 478219, 906517,
+and 352671, four worlds per seed. Pair each with the same current-main behavior
+snapshot (`469f8ed`, documentation-only after behavior snapshot `fab4e1e`).
+Use 8,000 ticks, fuel physics, replan interval 20, perception interval 2, and
+no teammate intent or coordination. Exact whole-number searches across docs
+and relevant batch/replay JSON found no prior occurrence of these seeds. Freeze
+the candidate; retain every outcome. This replication is required because Q's
+positive aggregate was driven mainly by one seed and its pooled mean remained
+below 800.
