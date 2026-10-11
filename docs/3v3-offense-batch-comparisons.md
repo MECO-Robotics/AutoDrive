@@ -923,3 +923,34 @@ with phase staggering or lane search. Provenance, per-world deltas, and JSON
 records are committed on that branch at `cadb8bc` in
 `AutoDrive-fms-local-action-window/evaluations/fms-local-action-window-holdout-H-gpu0/`.
 No dashboard replay was generated or checked.
+
+### Phase and FMS strategy independent holdout J (2026-10-11)
+
+The frozen phase-stagger (`6d9b709`) and FMS local action-window (`e016b22`)
+strategies were each evaluated alone against main revision `737c886` on fresh
+seeds 153719, 246817, and 390527, four worlds per seed. Both arms used 8,000
+ticks, fuel physics, replan 20, perception 2, and disabled teammate intent and
+coordination. Phase ran on `cuda:0`; FMS ran on `cuda:1`; each baseline was
+paired on the same device. Candidate worktree imports were verified before
+launch, and the comparison script confirmed identical scenario IDs and
+settings.
+
+- **Phase staggering alone:** −873 fuel acquisitions and −329 points over 12
+  worlds; mean score 748.92→721.50. Seed fuel/score deltas: 153719 −471/−168,
+  246817 +154/+112, 390527 −556/−273. Fuel improved in 5/12 worlds and score
+  in 4/12. This fresh holdout regresses the aggregate.
+- **FMS action-window filtering alone:** +364 fuel acquisitions and +10 points
+  over 12 worlds; mean score 757.83→758.67. Seed fuel/score deltas: 153719
+  +687/+414, 246817 +99/+110, 390527 −422/−514. Fuel improved in 7/12 worlds
+  and score in 5/12. The small aggregate fuel gain is seed-sensitive and did
+  not translate to a material score gain.
+
+These independent runs show why the strategy branches remain separate. Neither
+candidate exceeds 800 mean score or establishes reliable generalization; do not
+merge either behavior based on these results. In particular, standalone
+results do not demonstrate that strategies combine well. Full batch JSON,
+paired comparisons, logs, and per-strategy reports are committed on their
+respective branches: phase `142af44` on
+`codex/no-track-raster-phase-recheck`; FMS `ecd50ce` on
+`codex/fms-local-action-window`. This was end-to-end simulator validation, not a
+dashboard replay; dashboard stack status was not checked.
