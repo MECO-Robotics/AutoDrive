@@ -144,6 +144,15 @@ class TensorThreeVsThreeActionMixin:
             intake_reference=(p[:,:,:2] +
                 intake_forward*(self.sim.length*.5+.15)[...,None] +
                 intake_right*(self.sim.width*.5)[...,None])
+            # Rank pickup candidates near the intake's short-horizon
+            # momentum projection. Replan halfway through the next planner
+            # interval, but cap the displacement so transient wheel slip
+            # cannot move the ranking point far across the field.
+            momentum_horizon=min(self.replan_interval*self.dt*.5,.2)
+            momentum_offset=self.sim.velocity[:,:,:2]*momentum_horizon
+            momentum_distance=momentum_offset.norm(dim=-1,keepdim=True)
+            momentum_offset*=torch.clamp(.5/momentum_distance.clamp_min(1e-6),max=1.)
+            ranking_reference=intake_reference+momentum_offset
             eligible_tracks=live_tracks & torch.where(
                 offense_mode[...,None],strategy_eligible,
                 torch.ones_like(strategy_eligible))
@@ -164,7 +173,7 @@ class TensorThreeVsThreeActionMixin:
                 ranked_count=len(rank_robot_ids)
                 ranked_points=self.track_pos.index_select(1,rank_index).reshape(
                     -1,self.fuel_count,2).contiguous()
-                ranked_intake=intake_reference.index_select(1,rank_index).reshape(
+                ranked_intake=ranking_reference.index_select(1,rank_index).reshape(
                     -1,2).contiguous()
                 ranked_pose=p.index_select(1,rank_index)[...,:2].reshape(-1,2).contiguous()
                 ranked_age=self.track_age.index_select(1,rank_index).reshape(
@@ -206,7 +215,7 @@ class TensorThreeVsThreeActionMixin:
                     intake_indices.index_copy_(1,rank_index,ranked_indices)
                     nearby_midfield_fuel.index_copy_(1,rank_index,ranked_nearby)
             else:
-                intake_distance=(self.track_pos-intake_reference[:,:,None,:]).norm(dim=-1)
+                intake_distance=(self.track_pos-ranking_reference[:,:,None,:]).norm(dim=-1)
                 intake_distance+=self.track_age.clamp(0.,2.)*.4
                 nearest,intake_indices=intake_distance.masked_fill(
                     ~intake_tracks,float("inf")).topk(4,dim=-1,largest=False)
@@ -344,11 +353,12 @@ class TensorThreeVsThreeActionMixin:
         target_based_approach=(not self.sweeping_enabled and
             deterministic_offense & ((action<4)|((action==6)&~(possession>0))))
         locked_index=self._target_fuel_index.clamp(0,self.fuel_count-1)
-        # Rank deterministic intake targets by distance from the robot.
+        # Rank deterministic intake targets near the short-horizon intake pose.
         if self._has_deterministic_offense:
             local_dist = (candidate_points - intake_reference[:,:,None,:]).norm(dim=-1)
+            ranking_dist = (candidate_points - ranking_reference[:,:,None,:]).norm(dim=-1)
             candidate_age=self.track_age.gather(2,intake_indices).clamp(0.,2.)
-            intake_cost=local_dist+candidate_age*.4
+            intake_cost=ranking_dist+candidate_age*.4
             staging_cost = intake_cost
             staging_idx = staging_cost.masked_fill(~intake_eligible,float("inf")).argmin(-1)
             stage_selected = intake_indices.gather(2,staging_idx[...,None]).squeeze(-1)
