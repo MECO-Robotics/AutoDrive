@@ -560,3 +560,27 @@ The baseline's first two JSON records identify `d520ed3`, and its last record
 identifies `f8d5872`; the intervening change was docs-only. Candidate records
 are in `AutoDrive-siloed-lane-search/evaluations/siloed-lane-search-holdout/candidate/`;
 baseline records are in `evaluations/siloed-lane-search-holdout/baseline/`.
+
+### Siloed lane search unseen-seed holdout C (2026-10-11)
+
+The frozen candidate `c625676` was evaluated on seeds 390671, 817931, and
+260989, four worlds per seed. Settings remained 8,000 ticks, fuel physics,
+replan interval 20, perception interval 2, and no teammate intent knowledge or
+coordination. This was a fresh end-to-end simulator evaluation, not a dashboard
+replay.
+
+Across 12 unseen worlds, fuel acquisitions increased by 166 while points
+decreased by 200; mean score fell from 745.00 to 728.33. Mean score deltas by
+seed were 390671 −139.25, 817931 +68.50, and 260989 +20.75. Per-world
+fuel/score deltas were 390671 `(-108,-46), (+2,+47), (-244,-398), (-163,-160)`;
+817931 `(-248,-118), (-64,-122), (+586,+474), (-24,+40)`; and 260989
+`(+209,+36), (-153,-186), (+11,+26), (+362,+207)`. Runtime was 612.96 seconds
+baseline and 620.30 seconds candidate.
+
+The positive fuel total did not translate to a score gain and the seed effects
+vary substantially. Preserve the committed candidate branch as an alternate
+attempt, but do not merge it or treat this as a generalized improvement.
+
+Baseline records are in `evaluations/siloed-lane-search-holdout-c/baseline/`;
+candidate records are under the matching directory in the
+`AutoDrive-siloed-lane-search` worktree.
