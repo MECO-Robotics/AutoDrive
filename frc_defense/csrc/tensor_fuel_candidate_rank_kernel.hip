@@ -102,7 +102,7 @@ void candidate_cost_nearby_launch(const float* points, const float* intake_xy,
     float age_weight, hipStream_t stream) {
   constexpr int threads = 256;
   const int blocks = static_cast<int>((n * p + threads - 1) / threads);
- hipLaunchKernelGGL(( candidate_cost_nearby_kernel), dim3(blocks), dim3(threads), 0, stream,
+ hipLaunchKernelGGL(( candidate_cost_nearby_kernel), dim3(blocks), dim3(threads), 0, stream, 
       points, intake_xy, robot_xy, age, free, midfield, costs, nearby,
       n, p, age_weight);
 }
@@ -191,7 +191,7 @@ void candidate_top4_nearby_launch(const float* points, const float* intake_xy,
     const float* robot_xy, const float* age, const bool* free,
     const bool* midfield, int64_t* indices, float* nearest, bool* nearby,
     int64_t n, int64_t p, float age_weight, hipStream_t stream) {
- hipLaunchKernelGGL(( candidate_top4_nearby_kernel), dim3(static_cast<unsigned>(n)), dim3(256), 0, stream,
+ hipLaunchKernelGGL(( candidate_top4_nearby_kernel), dim3(static_cast<unsigned>(n)), dim3(256), 0, stream, 
       points, intake_xy, robot_xy, age, free, midfield, indices, nearest,
       nearby, p, age_weight);
 }

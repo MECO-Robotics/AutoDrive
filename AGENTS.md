@@ -1,0 +1,7 @@
+# Simulation behavior validation
+
+- For every test run that checks robot, FUEL, scoring, collection, shooting, ferrying, or other simulated game behavior, accompany it with a representative end-to-end simulator evaluation. Unit and regression tests alone do not establish that the behavior works in simulation.
+- The simulator evaluation must exercise the changed behavior and inspect its outcome in the simulation record or replay. Use a reproducible seed when practical, and retain or report the scenario, seed, and result so the evaluation can be reviewed.
+- Before generating or reviewing a dashboard replay, make sure the dashboard stack is running the current checkout. Restart the serving dashboard service(s) after code changes so Python modules are reloaded; verify each relevant service is active and its endpoint responds successfully.
+- Confirm the dashboard serves the current frontend assets as well as the current backend. Generate a fresh replay after the restart instead of relying on a replay produced by an earlier process or cached under older simulator code. Check replay provenance and mark old-code replays as outdated.
+- When reporting validation, state which tests ran, which simulation evaluation ran, the replay/scenario identifier and seed, and whether the dashboard stack was verified current. If a required simulator evaluation or stack check cannot be completed, say so explicitly rather than treating the tests as complete validation.

@@ -37,6 +37,15 @@ Increase the seed and repeat for additional batches before selecting a change.
 The evaluator records per-world scores, acquisitions, source revision, timing,
 and compact aggregate metrics. It does not produce per-match replay files.
 
+For causal follow-up on an attempt, use `scripts/sample_3v3_offense_match.py`
+to record one full randomized match at 0.2 s intervals. It samples pose,
+velocity, action, target, route goal, collecting state, robot possession,
+acquisitions, team score, and HUB activity, and records the code revision and
+scenario seed. Pair the same `seed:0` in baseline and candidate worktrees;
+this single-world trace explains behavior but is not an independent estimate
+of strategy quality. Use the batch evaluator for that estimate. The trace
+does not include dashboard replay output or event timestamps between samples.
+
 The vector simulator uses one batch seed to initialize distinct world slots;
 it does not accept independent seeds per slot. A scenario ID is therefore the
 pair `(batch seed, slot)`. Matching batch settings across candidate worktrees
@@ -463,6 +472,102 @@ Records are in `evaluations/target-hysteresis-current/baseline/`,
 - The evaluator uses explicit seed resets, but that alone has not produced
   bit-identical long trajectories. Report seed-level aggregates and spread,
   not only a pooled win or one favorable scenario.
+
+### Failure review and current explanatory limits
+
+Review of prior paired records finds several repeatable *outcome patterns*,
+but no saved trajectories that establish their physical cause. The batch
+evaluator stores final per-world score and cumulative acquisition counts;
+historical replays were not retained for most attempts. Therefore statements
+below distinguish direct evidence from likely explanations to be checked by
+sampled pose/action/possession traces.
+
+- **More pickups did not reliably become more points.** Lane search unseen
+  holdout C gained 166 acquisitions but lost 200 points; holdout H gained 425
+  acquisitions but lost 80 points; phase plus dense-patch ranking lost 2,238
+  acquisitions and 633 points. This shows acquisition count is not a sufficient
+  scoring proxy. Candidate mechanisms to measure are loaded travel duration,
+  time inside an active scoring zone, HUB-inactive waiting while loaded, and
+  pickup-to-score conversion by match phase.
+- **A better target score may still rank the wrong candidate set.** Expected-
+  yield/cycle-time ranking gained 1,069 acquisitions and 548 points over 12
+  worlds, but most gain came from one seed, only 5/12 worlds gained score, and
+  the scorer ranks only the four candidates supplied upstream. The sampled
+  holdout-U candidate trajectory also had lower pickup yield and much less
+  active-zone dwell than its saved batch result. Widening the pool is a clean
+  hypothesis; compare it against the frozen candidate over fresh seed clusters
+  and inspect targetward progress, yield, and scoring exposure.
+- **FMS staging repeatedly disrupted collection.** Broad staging, just-in-time
+  staging, and the later loaded-robot activation staging all regressed; the
+  latest lost 7,950 acquisitions and 2,658 points across 12 worlds. This is
+  consistent with time diverted from collection and/or poorly timed returns,
+  but the outcome records do not reveal whether robots stopped, detoured, or
+  waited loaded. Trace action switches, target distance/progress, possession,
+  and HUB changes around each transition before proposing another staging
+  rule.
+- **Several controller tweaks ran faster and performed worse.** Active-window
+  pickup abort, continuous score aim, and acceleration-aware intake turning
+  reduced measured runtime but also reduced both acquisition and score totals.
+  Pickup braking increased runtime and also regressed behavior. Runtime is
+  therefore an implementation metric, not match efficiency; characterize
+  robot distance, low-speed time, targetward progress, pickup rate, and loaded
+  return-to-score latency separately.
+- **Seed/world concentration and trajectory variance are large.** Phase
+  staggering and FMS action-window filtering each have favorable and sharply
+  negative holdouts. A same-code, same-seed rerun has also changed world
+  outcomes after tiny early floating-point divergence. Large gains in one
+  cluster can mask losses elsewhere; use matched per-world traces, summarize
+  within each seed, and avoid treating 4 slots from one batch seed as four
+  independent seed replications.
+
+The trace sampler records distance and speed, targetward progress, target
+changes, low-speed time while a target is distant, collection time and yield,
+possession, loaded return to the alliance zone, loaded time during active and
+inactive HUB periods, and score changes by HUB phase. These are per-world
+descriptive metrics; aggregate traces by seed before making strategy claims.
+
+#### Sampled U traces: movement and scoring signals
+
+Sampled scenario `281963:0` used four vector slots, 8,000 ticks, 10-tick
+sampling, fuel physics, and no teammate coordination. The main baseline trace
+ended at 542 points and 988 acquisitions (the saved batch slot was 529/984).
+The correctly imported expected-yield candidate (`a4bbf03`, module path
+verified inside its worktree) ended at 280 points and 724 acquisitions (its
+saved batch slot was 728/1,181). These trace runs therefore do **not** reproduce
+the saved candidate outcome; treat the comparison as descriptive evidence of
+trajectory variation, not a paired estimate of expected-yield performance.
+
+Within those two traces, the candidate had 269.4 versus 222.4 robot-seconds
+moving slower than 0.3 m/s while more than 1 m from its target. It spent 367.6
+versus 312.8 robot-seconds in collect actions, yet acquired fewer pieces; this
+corresponds to 118 versus 190 acquisitions per collection-minute. Team travel
+distance was similar (155.8 versus 164.0 m), while candidate active alliance
+zone dwell fell from 217.6 to 127.8 robot-seconds and loaded active-zone dwell
+from 167.8 to 69.8. Loaded inactive-HUB time changed less (118.4 to 102.0 s).
+This sampled candidate trajectory points to less collection yield and much
+less active scoring-zone exposure as the immediate quantities to inspect in
+future traces. It does not establish that expected-yield ranking caused either
+change: tiny numerical divergence and run variance can produce different
+trajectories, and this candidate trace contradicts the positive saved slot
+outcome.
+
+The first profiler attempt was stopped before match completion. Review of its
+process tree later showed an active C++ compiler child, not an idle build
+worker. The sampler was then changed to retain snapshots on-device and make a
+single host transfer at the end. The corrected run completed 8,000 ticks in
+about 291 s, including roughly 130 s of worktree-specific HIP extension
+rebuild and 161 s of rollout. The baseline trace completed in 232 s. The
+candidate import initially resolved through the venv's editable install to
+main; that mislabeled trace is preserved as
+`candidate-281963-module-shadowed.json` and excluded. The accepted trace's
+module provenance points to the candidate worktree. Shared extension-cache
+entries are rewritten with worktree absolute source paths, causing these
+rebuilds; a lossless cache reuse fix remains an infrastructure follow-up.
+
+A trace can diagnose slowdowns for its sampled trajectory, but it cannot prove
+strategy generalization or explain a batch score difference on its own. The
+current traces reinforce the need to report per-seed batches alongside
+intra-match metrics, not to replace one with the other.
 
 ### Current candidate work
 

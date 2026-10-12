@@ -785,7 +785,7 @@ void footprint_path_clear_launch(const float* path, const float* heading,
     float field_width, float clearance, hipStream_t stream) {
   constexpr int threads = 128;
   const int blocks = (rows + threads - 1) / threads;
- hipLaunchKernelGGL(( footprint_path_clear_kernel), dim3(dim3(blocks)), dim3(dim3(threads)), 0, stream,
+ hipLaunchKernelGGL(( footprint_path_clear_kernel), dim3(dim3(blocks)), dim3(dim3(threads)), 0, stream, 
       path, heading, length, width, boxes, clear, rows, points, box_count,
       field_length, field_width, clearance);
 }
