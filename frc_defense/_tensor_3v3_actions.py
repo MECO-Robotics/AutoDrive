@@ -410,6 +410,67 @@ class TensorThreeVsThreeActionMixin:
             candidate_age=self.track_age.gather(2,intake_indices).clamp(0.,2.)
             intake_cost=ranking_dist+candidate_age*.4+obstacle_detour
             staging_cost = intake_cost
+            # Prefer locally dense pickup opportunities when a robot can score
+            # its load: estimate confidence-weighted fuel within one chassis
+            # diameter of each candidate, clipped to this robot's free capacity.
+            candidate_track_delta=(self.track_pos[:,:,None,:,:]-
+                                   candidate_points[:,:,:,None,:])
+            candidate_track_distance=candidate_track_delta.norm(dim=-1)
+            local_cluster=(eligible_tracks[:,:,None,:] &
+                (candidate_track_distance<=2.*robot_radius[...,None,None]))
+            track_quality=(self.track_confidence.clamp(0.,1.) *
+                torch.exp(-self.track_age.clamp_min(0.)/
+                    max(self.perception_track_timeout,1e-6)))
+            expected_yield=(local_cluster.to(track_quality.dtype) *
+                             track_quality[:,:,None,:]).sum(-1)
+            remaining_capacity=(self.robot_fuel_capacities[None]-possession).clamp_min(0.)
+            expected_yield=torch.minimum(expected_yield,
+                                         remaining_capacity[...,None].to(expected_yield.dtype))
+
+            # Estimate a direct pickup-plus-score-return cycle. Outbound speed
+            # uses only this robot's measured velocity projected toward fuel;
+            # return begins from rest at the pickup and ends at its own scoring
+            # zone. The existing age and obstacle costs become travel-time
+            # penalties. Inactive-HUB staging keeps its existing distance rank.
+            target_delta=candidate_points-intake_reference[:,:,None,:]
+            target_distance=target_delta.norm(dim=-1)
+            target_direction=(target_delta/
+                target_distance[...,None].clamp_min(1e-6))
+            outbound_speed=(self.sim.velocity[:,:,:2][:,:,None,:]*
+                            target_direction).sum(-1).clamp_min(0.)
+            max_speed=self.sim.speed[...,None].clamp_min(.1)
+            outbound_speed=torch.minimum(outbound_speed,max_speed)
+            acceleration=self.sim.accel[...,None].clamp_min(1e-4)
+
+            def travel_time(distance,initial_speed):
+                distance_to_speed=(max_speed.square()-initial_speed.square()).clamp_min(0.)/(2.*acceleration)
+                time_to_speed=(max_speed-initial_speed).clamp_min(0.)/acceleration
+                accelerated_time=((initial_speed.square()+
+                    2.*acceleration*distance).sqrt()-initial_speed)/acceleration
+                return torch.where(distance<=distance_to_speed,accelerated_time,
+                    time_to_speed+(distance-distance_to_speed)/max_speed)
+
+            pickup_drive_time=travel_time(target_distance,outbound_speed)
+            target_bearing=torch.atan2(target_delta[...,1],target_delta[...,0])
+            heading_error=torch.atan2(
+                torch.sin(target_bearing-p[:,:,2,None]),
+                torch.cos(target_bearing-p[:,:,2,None])).abs()
+            turn_time=heading_error/self.sim.omega_limit[...,None].clamp_min(1e-3)
+            pickup_time=torch.maximum(pickup_drive_time,turn_time)
+            score_boundary=torch.where(self.team_ids[None,:,None]==0,
+                torch.full_like(candidate_points[...,0],self.alliance_zone_depth),
+                torch.full_like(candidate_points[...,0],
+                    self.field_length-self.alliance_zone_depth))
+            return_distance=torch.where(self.team_ids[None,:,None]==0,
+                (candidate_points[...,0]-score_boundary).clamp_min(0.),
+                (score_boundary-candidate_points[...,0]).clamp_min(0.))
+            return_time=travel_time(return_distance,torch.zeros_like(return_distance))
+            intake_wait=(self.next_intake[:,:,None]-
+                         self.match_elapsed[:,None,None]).clamp_min(0.)
+            cycle_time=(pickup_time+return_time+intake_wait+.20+
+                (candidate_age*.4+obstacle_detour)/max_speed)
+            cycle_cost=cycle_time/expected_yield.clamp_min(.1)
+            cycle_cost=cycle_cost.masked_fill(~intake_eligible,float("inf"))
             staging_idx = staging_cost.masked_fill(~intake_eligible,float("inf")).argmin(-1)
             stage_selected = intake_indices.gather(2,staging_idx[...,None]).squeeze(-1)
             stage_mask = deterministic_offense & ~robot_hub_active & intake_available
@@ -419,7 +480,7 @@ class TensorThreeVsThreeActionMixin:
             # useful patch of collection area, rather than only the exact
             # selected fuel track.
             candidate_cost = torch.where(
-                (~robot_hub_active)[..., None], staging_cost, intake_cost)
+                (~robot_hub_active)[..., None], staging_cost, cycle_cost)
             assigned = []
             for robot in self._deterministic_offense_robot_ids:
                 wants_fuel = deterministic_offense[:, robot] & (action[:, robot] < 4)
