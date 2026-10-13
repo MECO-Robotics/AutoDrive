@@ -52,7 +52,7 @@ Deltas are candidate minus baseline and aggregate the three offense robots in th
 - End-to-end simulator batches: four baseline/candidate seed pairs, 4 worlds per arm per seed, 8,000 ticks per world. All eight batch invocations exited successfully.
 - Trace inspection: 800 frames per trace, scenario ID matched the paired slot, and final score/acquisition counts matched batch JSON exactly.
 - Teammate coordination: disabled in all runs.
-- Unit/regression tests: none run. Dashboard replay: none generated, so dashboard currentness was not checked.
+- Unit/regression tests: none run. No dashboard replay was generated during the behavior study. After the later main merge, both FRC dashboard services were restarted from the existing default-worktree path and verified active; root, status, and game-evaluation endpoints returned HTTP 200, and served JavaScript/CSS hashes matched this checkout.
 - The seeded evaluator JSONs capture expected frozen HEADs, but HIP JIT setup left identical local generated diffs in baseline and candidate source worktrees. The run records mark these revisions dirty. The matching generated diffs are one pickup-grid declaration argument removal in tensor_3v3_pickup_grid_hip_hip.cpp and trailing-space changes in tensor_collision_multi_hip_kernel.hip and tensor_fuel_candidate_rank_kernel.hip. No manual source edit or cleanup was performed in those worktrees.
 - The six-seed preregistered confidence analysis is incomplete because 247246 and 762406 were not run.
 
