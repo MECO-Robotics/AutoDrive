@@ -14,4 +14,6 @@ This is a local opportunity-density estimate, not a route planner or a guarantee
 
 ## Validation status
 
-No tests, simulation, GPU evaluation, or replay have run for this candidate yet. Its holdout seeds are 281963, 470261, and 835049, paired against current main in four worlds per seed.
+The frozen policy was evaluated against baseline d434694 in four paired seed clusters: 339752, 199448, 973688, and 144124. Each arm ran four worlds for 8,000 ticks with fuel physics, replan interval 20, perception interval 2, and teammate coordination disabled. The candidate gained 1,552 offense acquisitions and 586 points across 16 worlds; its median score was 809 versus 734.5 baseline. Fuel improved in two clusters and regressed in two. Four-cluster 95% intervals include zero, and preregistered seeds 247246 and 762406 were not run. This is a positive pooled result but inconclusive evidence of generalization. The batch JSONs and 800-frame slot-0 traces are archived under evaluations/expected-yield-cycle-rank-replication-V/; trace scores and acquisitions matched the batch records.
+
+No unit or regression tests ran, and no dashboard replay was generated. The candidate was merged into the default main worktree at the user's direction after closeout; that deployment does not change the inconclusive evaluation result.

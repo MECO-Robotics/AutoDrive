@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
 
 
@@ -23,8 +24,12 @@ def analyze(path: Path) -> dict:
     for robot in range(6):
         stats = {"robot": robot, "team": 0 if robot < 3 else 1,
                  "samples": len(frames), "distance_m": 0., "moving_seconds": 0.,
-                 "targetward_progress_m": 0., "target_changes": 0,
+                 "targetward_progress_m": 0., "command_target_changes": 0,
+                 "fuel_target_assignments": 0, "fuel_target_switches": 0,
+                 "fuel_target_losses": 0, "fuel_target_active_seconds": 0.,
+                 "fuel_target_dwell_seconds": [],
                  "low_speed_far_seconds": 0., "collecting_seconds": 0.,
+                 "cluster_sweep_seconds": 0.,
                  "loaded_seconds": 0., "loaded_hub_inactive_seconds": 0.,
                  "loaded_in_alliance_zone_seconds": 0.,
                  "loaded_active_score_zone_seconds": 0.,
@@ -35,15 +40,39 @@ def analyze(path: Path) -> dict:
         last = None
         load_started_s = None
         reached_zone_this_load = False
+        fuel_target_started_s = None
         for frame in frames:
             dt = (float(frame["time_s"]) - float(last["time_s"])) if last else 0.
             pose = frame["robots"][robot]
             speed = math.hypot(*frame["velocity_mps"][robot])
             target = frame["targets"][robot]
             target_dist = math.dist(pose[:2], target)
+            fuel_target_index = int(frame.get("fuel_target_indices", [-1] * 6)[robot])
+            fuel_target_step = int(frame.get("fuel_target_selected_steps", [-1] * 6)[robot])
             possession = int(frame["possession_by_robot"][robot])
             action = int(frame["actions"][robot])
             action_name = ACTION_NAMES.get(action, "other")
+            if last is None:
+                if fuel_target_index >= 0:
+                    stats["fuel_target_assignments"] += 1
+                    fuel_target_started_s = fuel_target_step * .02
+            else:
+                previous_fuel_target = int(last.get("fuel_target_indices", [-1] * 6)[robot])
+                if fuel_target_index != previous_fuel_target:
+                    if previous_fuel_target >= 0:
+                        stats["fuel_target_dwell_seconds"].append(max(
+                            0., float(frame["time_s"]) -
+                            float(fuel_target_started_s if fuel_target_started_s is not None
+                                  else last["time_s"])))
+                    if fuel_target_index >= 0:
+                        if previous_fuel_target >= 0:
+                            stats["fuel_target_switches"] += 1
+                        else:
+                            stats["fuel_target_assignments"] += 1
+                        fuel_target_started_s = fuel_target_step * .02
+                    else:
+                        stats["fuel_target_losses"] += 1
+                        fuel_target_started_s = None
             if dt > 0:
                 if last:
                     prev_pose = last["robots"][robot]
@@ -53,7 +82,7 @@ def analyze(path: Path) -> dict:
                         stats["targetward_progress_m"] += (
                             math.dist(prev_pose[:2], target) - target_dist)
                     else:
-                        stats["target_changes"] += 1
+                        stats["command_target_changes"] += 1
                 if speed >= .3:
                     stats["moving_seconds"] += dt
                 if speed < .3 and target_dist > 1.0:
@@ -63,6 +92,10 @@ def analyze(path: Path) -> dict:
                 # collecting state for throughput denominators.
                 if frame["collecting"][robot]:
                     stats["collecting_seconds"] += dt
+                if frame.get("target_collecting", [False] * 6)[robot]:
+                    stats["cluster_sweep_seconds"] += dt
+                if fuel_target_index >= 0:
+                    stats["fuel_target_active_seconds"] += dt
                 if possession > 0:
                     if last is None or int(last["possession_by_robot"][robot]) == 0:
                         stats["loaded_trips"] += 1
@@ -100,9 +133,18 @@ def analyze(path: Path) -> dict:
                 stats["sampled_scored_event_samples"] += int(
                     frame["scored_event_by_robot"][robot])
             last = frame
+        if last is not None and int(last.get("fuel_target_indices", [-1] * 6)[robot]) >= 0:
+            stats["fuel_target_dwell_seconds"].append(max(
+                0., float(last["time_s"]) -
+                float(fuel_target_started_s if fuel_target_started_s is not None
+                      else last["time_s"])))
         elapsed = max(0., float(frames[-1]["time_s"]) - float(frames[0]["time_s"])) if frames else 0.
         stats["elapsed_s"] = elapsed
         stats["mean_speed_mps"] = stats["distance_m"] / elapsed if elapsed else 0.
+        dwell = stats["fuel_target_dwell_seconds"]
+        stats["mean_fuel_target_dwell_s"] = sum(dwell) / len(dwell) if dwell else None
+        stats["median_fuel_target_dwell_s"] = (
+            statistics.median(dwell) if dwell else None)
         stats["mean_loaded_return_to_zone_s"] = (
             sum(stats["loaded_return_to_zone_seconds"]) /
             len(stats["loaded_return_to_zone_seconds"])

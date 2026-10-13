@@ -1,0 +1,258 @@
+{
+  "source": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/candidate-199448-trace.json",
+  "label": "candidate-V-trace-199448-0",
+  "revision": {
+    "commit": "4ab387a56f9f183ecf1fe65a88a22ec133eae5f5",
+    "dirty": true
+  },
+  "scenario_id": "199448:0",
+  "settings": {
+    "ticks": 8000,
+    "dt": 0.02,
+    "sample_every_ticks": 10,
+    "envs": 4,
+    "world_slot": 0,
+    "device": "cuda:0",
+    "teammate_coordination": false,
+    "replan_interval": 20,
+    "perception_interval": 2,
+    "fuel_physics": true,
+    "fused_sensor_rng": true
+  },
+  "profile_elapsed_s": 178.76573892499437,
+  "final": {
+    "score_by_team": [
+      431,
+      0
+    ],
+    "acquisitions_by_robot": [
+      218,
+      462,
+      388,
+      0,
+      0,
+      0
+    ]
+  },
+  "per_robot": [
+    {
+      "robot": 0,
+      "team": 0,
+      "samples": 800,
+      "distance_m": 43.735964188104425,
+      "moving_seconds": 40.997877672314644,
+      "targetward_progress_m": 10.419096633316968,
+      "target_changes": 172,
+      "low_speed_far_seconds": 105.80037236213684,
+      "collecting_seconds": 121.00086325407028,
+      "loaded_seconds": 135.2000869512558,
+      "loaded_hub_inactive_seconds": 37.798423767089844,
+      "loaded_in_alliance_zone_seconds": 67.39926755428314,
+      "loaded_active_score_zone_seconds": 42.3986953496933,
+      "alliance_zone_seconds": 91.79657442867756,
+      "score_zone_active_seconds": 54.798016384243965,
+      "acquisitions": 218,
+      "sampled_scored_event_samples": 15,
+      "loaded_trips": 6,
+      "loaded_return_to_zone_seconds": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "action_seconds": {
+        "collect": 140.79870374500751,
+        "score_or_return": 14.399428606033325,
+        "wait": 0.79986572265625,
+        "search_or_ferry": 3.7993621826171875
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.27369641224330693,
+      "mean_loaded_return_to_zone_s": 0.0,
+      "acquisitions_per_collect_min": 108.09840234391889
+    },
+    {
+      "robot": 1,
+      "team": 0,
+      "samples": 800,
+      "distance_m": 81.06939635865548,
+      "moving_seconds": 52.396407678723335,
+      "targetward_progress_m": 24.091422269947742,
+      "target_changes": 157,
+      "low_speed_far_seconds": 84.60214734077454,
+      "collecting_seconds": 45.19671005010605,
+      "loaded_seconds": 150.59733486175537,
+      "loaded_hub_inactive_seconds": 49.19635772705078,
+      "loaded_in_alliance_zone_seconds": 11.799087524414062,
+      "loaded_active_score_zone_seconds": 9.999275207519531,
+      "alliance_zone_seconds": 19.999094799160957,
+      "score_zone_active_seconds": 18.199282482266426,
+      "acquisitions": 462,
+      "sampled_scored_event_samples": 18,
+      "loaded_trips": 4,
+      "loaded_return_to_zone_seconds": [
+        5.600128173828125,
+        0.0
+      ],
+      "action_seconds": {
+        "collect": 51.596074894070625,
+        "score_or_return": 92.00171566009521,
+        "search_or_ferry": 13.9996337890625,
+        "wait": 2.1999359130859375
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.5073262551310016,
+      "mean_loaded_return_to_zone_s": 2.8000640869140625,
+      "acquisitions_per_collect_min": 613.3189776262257
+    },
+    {
+      "robot": 2,
+      "team": 0,
+      "samples": 800,
+      "distance_m": 59.18850301271206,
+      "moving_seconds": 46.99700880050659,
+      "targetward_progress_m": 15.655775488476246,
+      "target_changes": 157,
+      "low_speed_far_seconds": 88.20295460522175,
+      "collecting_seconds": 62.39749950170517,
+      "loaded_seconds": 134.39710235595703,
+      "loaded_hub_inactive_seconds": 31.596031188964844,
+      "loaded_in_alliance_zone_seconds": 56.597341537475586,
+      "loaded_active_score_zone_seconds": 44.19808769226074,
+      "alliance_zone_seconds": 80.99766691029072,
+      "score_zone_active_seconds": 50.59800107777119,
+      "acquisitions": 388,
+      "sampled_scored_event_samples": 7,
+      "loaded_trips": 7,
+      "loaded_return_to_zone_seconds": [
+        2.799997329711914,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "action_seconds": {
+        "collect": 70.19718630611897,
+        "score_or_return": 70.00224304199219,
+        "wait": 5.79925537109375,
+        "search_or_ferry": 13.798675537109375
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.37039725135492824,
+      "mean_loaded_return_to_zone_s": 0.46666622161865234,
+      "acquisitions_per_collect_min": 373.09187364733765
+    },
+    {
+      "robot": 3,
+      "team": 1,
+      "samples": 800,
+      "distance_m": 55.759361827093585,
+      "moving_seconds": 39.397750571370125,
+      "targetward_progress_m": 11.524728126364503,
+      "target_changes": 95,
+      "low_speed_far_seconds": 48.39915192127228,
+      "collecting_seconds": 0.0,
+      "loaded_seconds": 0.0,
+      "loaded_hub_inactive_seconds": 0.0,
+      "loaded_in_alliance_zone_seconds": 0.0,
+      "loaded_active_score_zone_seconds": 0.0,
+      "alliance_zone_seconds": 3.3999973088502884,
+      "score_zone_active_seconds": 3.3999973088502884,
+      "acquisitions": 0,
+      "sampled_scored_event_samples": 0,
+      "loaded_trips": 0,
+      "loaded_return_to_zone_seconds": [],
+      "action_seconds": {
+        "defend": 159.79736025631428
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.34893794076232426,
+      "mean_loaded_return_to_zone_s": null,
+      "acquisitions_per_collect_min": 0.0
+    },
+    {
+      "robot": 4,
+      "team": 1,
+      "samples": 800,
+      "distance_m": 78.93221994369006,
+      "moving_seconds": 59.99727787077427,
+      "targetward_progress_m": 7.961382032382086,
+      "target_changes": 214,
+      "low_speed_far_seconds": 87.40151518583298,
+      "collecting_seconds": 0.0,
+      "loaded_seconds": 0.0,
+      "loaded_hub_inactive_seconds": 0.0,
+      "loaded_in_alliance_zone_seconds": 0.0,
+      "loaded_active_score_zone_seconds": 0.0,
+      "alliance_zone_seconds": 5.399995639920235,
+      "score_zone_active_seconds": 5.399995639920235,
+      "acquisitions": 0,
+      "sampled_scored_event_samples": 0,
+      "loaded_trips": 0,
+      "loaded_return_to_zone_seconds": [],
+      "action_seconds": {
+        "defend": 159.79736025631428
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.4939519640191998,
+      "mean_loaded_return_to_zone_s": null,
+      "acquisitions_per_collect_min": 0.0
+    },
+    {
+      "robot": 5,
+      "team": 1,
+      "samples": 800,
+      "distance_m": 51.05052759948572,
+      "moving_seconds": 40.397225216031075,
+      "targetward_progress_m": 7.473088244248136,
+      "target_changes": 97,
+      "low_speed_far_seconds": 93.3997688293457,
+      "collecting_seconds": 0.0,
+      "loaded_seconds": 0.0,
+      "loaded_hub_inactive_seconds": 0.0,
+      "loaded_in_alliance_zone_seconds": 0.0,
+      "loaded_active_score_zone_seconds": 0.0,
+      "alliance_zone_seconds": 1.3999990969896317,
+      "score_zone_active_seconds": 1.3999990969896317,
+      "acquisitions": 0,
+      "sampled_scored_event_samples": 0,
+      "loaded_trips": 0,
+      "loaded_return_to_zone_seconds": [],
+      "action_seconds": {
+        "defend": 159.79736025631428
+      },
+      "elapsed_s": 159.79736025631428,
+      "mean_speed_mps": 0.31947040625452694,
+      "mean_loaded_return_to_zone_s": null,
+      "acquisitions_per_collect_min": 0.0
+    }
+  ],
+  "team_summary": {
+    "0": {
+      "distance_m": 183.99386355947198,
+      "acquisitions": 1068,
+      "scored_fuel": 431,
+      "score_deltas_during_active_hub": 431,
+      "score_deltas_during_inactive_hub": 0,
+      "low_speed_far_seconds": 278.6054743081331,
+      "loaded_seconds": 420.1945241689682,
+      "loaded_inactive_seconds": 118.59081268310547,
+      "loaded_active_score_zone_seconds": 96.59605824947357,
+      "score_zone_active_seconds": 123.59529994428158
+    },
+    "1": {
+      "distance_m": 185.74210937026936,
+      "acquisitions": 0,
+      "scored_fuel": 0,
+      "score_deltas_during_active_hub": 0,
+      "score_deltas_during_inactive_hub": 0,
+      "low_speed_far_seconds": 229.20043593645096,
+      "loaded_seconds": 0.0,
+      "loaded_inactive_seconds": 0.0,
+      "loaded_active_score_zone_seconds": 0.0,
+      "score_zone_active_seconds": 10.199992045760155
+    }
+  }
+}

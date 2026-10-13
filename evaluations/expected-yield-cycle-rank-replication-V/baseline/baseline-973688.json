@@ -1,0 +1,680 @@
+{
+  "schema_version": 1,
+  "label": "baseline-V",
+  "revision": {
+    "commit": "5aa2cbf60cce26e974142dbe771618d3d28a34b7",
+    "dirty": true
+  },
+  "provenance": {
+    "evaluator_script": {
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py",
+      "sha256": "18672b6fe1608629e54d8462e512ed95c5941a496d7fb7cb2bb4abdc1358857a"
+    },
+    "invocation": {
+      "argv": [
+        "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py",
+        "--label",
+        "baseline-V",
+        "--seed",
+        "973688",
+        "--envs",
+        "4",
+        "--ticks",
+        "8000",
+        "--device",
+        "cuda:1",
+        "--fuel-physics",
+        "--replan-interval",
+        "20",
+        "--perception-interval",
+        "2",
+        "--no-teammate-coordination",
+        "--trace-slot",
+        "0",
+        "--trace-every",
+        "10",
+        "--output",
+        "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-973688.json",
+        "--trace-output",
+        "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-973688-trace.json"
+      ],
+      "arguments": {
+        "label": "baseline-V",
+        "seed": 973688,
+        "seeds": null,
+        "envs": 4,
+        "ticks": 8000,
+        "device": "cuda:1",
+        "fuel_physics": true,
+        "replan_interval": 20,
+        "perception_interval": 2,
+        "teammate_coordination_enabled": false,
+        "output": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/baseline/baseline-973688.json",
+        "trace_slot": 0,
+        "trace_every": 10,
+        "trace_output": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-973688-trace.json",
+        "output_dir": null
+      },
+      "working_directory": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline",
+      "script_path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/scripts/evaluate_3v3_offense_batch.py"
+    },
+    "python": {
+      "version": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+      "executable": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/bin/python",
+      "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43"
+    },
+    "torch": {
+      "version": "2.14.0+rocm10.2.0a20260927",
+      "hip_version": "7.17.26385",
+      "cuda_version": null
+    },
+    "device": {
+      "requested": "cuda:1",
+      "type": "cuda",
+      "index": 1,
+      "name": "AMD Radeon Pro WX 9100",
+      "total_memory_bytes": 17163091968,
+      "multi_processor_count": 64,
+      "gcn_arch_name": "gfx900:xnack-"
+    },
+    "extension_environment": {
+      "TORCH_EXTENSIONS_DIR": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline",
+      "PYTORCH_ROCM_ARCH": "gfx900",
+      "TORCH_CUDA_ARCH_LIST": null,
+      "ROCM_HOME": "/tmp/autodrive-rocm-sdk",
+      "HIP_HOME": null,
+      "CUDA_HOME": null,
+      "HIPCC": null,
+      "CC": null,
+      "CXX": null
+    },
+    "default_torch_extension_root": "/home/brian/.cache/torch_extensions",
+    "simulator_module": {
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_3v3.py",
+      "sha256": "eceedf92df1418892235198774c9c7df99de65112d2dc70696d02bfbb9ef604a"
+    },
+    "python_modules": [
+      {
+        "module": "frc_defense",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/__init__.py",
+        "sha256": "bb70af740dfcb5a594f6120e6f476d8c8a9ecde641c4243988930afbc56f143c"
+      },
+      {
+        "module": "frc_defense._tensor_3v3_actions",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_actions.py",
+        "sha256": "b2e4057d5f822d237c348b4866288ec50863342c7d8042b32f85467fbd94c4ec"
+      },
+      {
+        "module": "frc_defense._tensor_3v3_constants",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_constants.py",
+        "sha256": "fc8898550d31a08a05195cdebe6802afc4563e87019ddcd77e7eea716f9a410a"
+      },
+      {
+        "module": "frc_defense._tensor_3v3_gamepieces",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_gamepieces.py",
+        "sha256": "0df6d22eb978cf7bb5171a3fa18d19aefde3a69d315c02d02cb21e463912c717"
+      },
+      {
+        "module": "frc_defense._tensor_3v3_navigation",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_navigation.py",
+        "sha256": "2ba32799494c5e9154cc0c53b84b8173fde67277dd17127d3819f06339233bde"
+      },
+      {
+        "module": "frc_defense._tensor_3v3_observation",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/_tensor_3v3_observation.py",
+        "sha256": "3921baf72aad8e8599d240abbde867363d059dd98b82b5cae3a1c9376cb5ec82"
+      },
+      {
+        "module": "frc_defense.adstar",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/adstar.py",
+        "sha256": "cbe97564714bedcacdfa07f601804e16ee2b41edf02b8b2b85fe4ec2a9257f41"
+      },
+      {
+        "module": "frc_defense.field",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/field.py",
+        "sha256": "07eb5e9fe4c61ddb306a4b06f3b04f628f796c5ad556dd9142add2bae9e7a0a7"
+      },
+      {
+        "module": "frc_defense.fuel_physics",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/fuel_physics.py",
+        "sha256": "16b8c0a3c07a624f65d1c9f19eab52b4f316e76cf52ff34a4eb606a42ddaa5e5"
+      },
+      {
+        "module": "frc_defense.fuel_physics_hip",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/fuel_physics_hip.py",
+        "sha256": "d81c7e44b2d72dba8dbd5d9d064dfc8e356a102c2819bdc3a7facfdfa91603a9"
+      },
+      {
+        "module": "frc_defense.fuel_physics_runtime",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/fuel_physics_runtime.py",
+        "sha256": "065d448087d35175901d76cfefcaa8dc1d91a0d1176108f495c70a150652713f"
+      },
+      {
+        "module": "frc_defense.gamepiece_actions",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/gamepiece_actions.py",
+        "sha256": "e2c2a8bce08eccda804c20f9cf858b09f5f1a2f9539992a07cff0cd1d4f874a1"
+      },
+      {
+        "module": "frc_defense.observation",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/observation.py",
+        "sha256": "3b51a60864e90cc8a773a3a5109a0601a4450c63708f718df07346da8d817db6"
+      },
+      {
+        "module": "frc_defense.reward",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/reward.py",
+        "sha256": "033b29fa26602afe78161f11408e06bf4be334c9e4c6a90887f9756a330c476d"
+      },
+      {
+        "module": "frc_defense.runtime",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/runtime.py",
+        "sha256": "961f4e7db5cd4e1a23a9597e1901878c20d8ffeceb7077f69eaf763b2ebe3bc7"
+      },
+      {
+        "module": "frc_defense.tensor_3v3",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_3v3.py",
+        "sha256": "eceedf92df1418892235198774c9c7df99de65112d2dc70696d02bfbb9ef604a"
+      },
+      {
+        "module": "frc_defense.tensor_3v3_pickup_grid_hip",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_3v3_pickup_grid_hip.py",
+        "sha256": "155e703bbb4140ced2b3a03ac69f375223891ce8af450fcd83fd54257a41154c"
+      },
+      {
+        "module": "frc_defense.tensor_adstar",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_adstar.py",
+        "sha256": "3a6c0e97127acba3ed49c47842a6b33c6b1fbcc43771ca33e9d7d4743366d145"
+      },
+      {
+        "module": "frc_defense.tensor_collision",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_collision.py",
+        "sha256": "0dec094b73ae97344c2212aab724511d75de4784b0a7a3bcefce61547e5e9bd1"
+      },
+      {
+        "module": "frc_defense.tensor_collision_multi_hip",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_collision_multi_hip.py",
+        "sha256": "3802da4d7f46fe77d22187e79769ab0fc624ee895c574fe138b53dd72e83d1de"
+      },
+      {
+        "module": "frc_defense.tensor_collision_pipeline",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_collision_pipeline.py",
+        "sha256": "5d54668a44a73eb95251563970c2a7fa9a52f760630d826f2f36c35a468273b6"
+      },
+      {
+        "module": "frc_defense.tensor_defense_gamepieces",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_defense_gamepieces.py",
+        "sha256": "3916a45d8c8925f76c2ebecc43050d3a58b0e51a988c4d48ded644f03cd503d4"
+      },
+      {
+        "module": "frc_defense.tensor_defense_observation",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_defense_observation.py",
+        "sha256": "4bc7c2fce381aab1bdf906f1faf92f5c91e685302697a70dfbd3efddc4c20dc5"
+      },
+      {
+        "module": "frc_defense.tensor_defense_opponent",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_defense_opponent.py",
+        "sha256": "f8ba7b7739a16959d29d5e818b09671c6600239fa2204ab25167b347ff729ada"
+      },
+      {
+        "module": "frc_defense.tensor_defense_reset",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_defense_reset.py",
+        "sha256": "4e91ab6a68ebe42969cb465045f363adf098a599905465a6d35ed6d4bae3f035"
+      },
+      {
+        "module": "frc_defense.tensor_defense_step",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_defense_step.py",
+        "sha256": "fecad83d24c4f50b7fb82af1a5857acd6bfe72ee1fcb341034f14f6d8bdba30d"
+      },
+      {
+        "module": "frc_defense.tensor_fuel_candidate_rank",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_fuel_candidate_rank.py",
+        "sha256": "b6f40b95702ae92f5d662e8d65a0f5db227645418cec46b061bed6fb70fa3edb"
+      },
+      {
+        "module": "frc_defense.tensor_perception",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_perception.py",
+        "sha256": "a8e709c9b73041c210bbb2585a8dfe15996bbbd330699ffb81456b583851e319"
+      },
+      {
+        "module": "frc_defense.tensor_perception_commit_proto",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_perception_commit_proto.py",
+        "sha256": "8d7d72c3e17d7cd7c638b4cfd5785d0691d87eafc68c636fc438b81005ad696a"
+      },
+      {
+        "module": "frc_defense.tensor_physics",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_physics.py",
+        "sha256": "933b65a6ce84d6dbe169d401f526f159d0a8ae04546a385d11e02b46c5be3e29"
+      },
+      {
+        "module": "frc_defense.tensor_physics_collision",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_physics_collision.py",
+        "sha256": "83f12c64576aab6e4981b3a0b1dd92d745768f0f888005964487630f489d3f2b"
+      },
+      {
+        "module": "frc_defense.tensor_sim",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_sim.py",
+        "sha256": "6cfba93527c1f8a8d68962ff05696c1e1611109c7e6d5c0c3a3990e08217958c"
+      },
+      {
+        "module": "frc_defense.tensor_strategic_observation_full_proto",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_strategic_observation_full_proto.py",
+        "sha256": "e1bad4261f4c5fd233fbc533ab3a58b5443f24380dedcb2e6e5dc05478d42b7c"
+      },
+      {
+        "module": "frc_defense.tensor_strategic_observation_proto",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_strategic_observation_proto.py",
+        "sha256": "7644a4fbc8a63ee06f5eb5de0305e208681329ba9bdfc6c72a3d4256e2a045be"
+      },
+      {
+        "module": "frc_defense.tensor_swerve_pose_hip",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/tensor_swerve_pose_hip.py",
+        "sha256": "decad6b03ba04ca35fe71c5e8a4f915db431909e21b81f12b8f3b9a0717a48ae"
+      },
+      {
+        "module": "frc_defense.types",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/types.py",
+        "sha256": "4b3d5e436380ca509ae996c3a5fb39b7ba10dc65c36d6c95ca731b4d7c058c8f"
+      }
+    ],
+    "native_sources": [
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/fuel_physics_hip.cpp",
+        "sha256": "ad799f6b4565cce4d9eeff287a3af49d8e77d746b85ee1eb65b21b847116d30c"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/fuel_physics_hip_kernel.cu",
+        "sha256": "2cd531d4573ef7f52bbb2e4e028e3f4afbcb5723999d65193b45ac935a26933f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/fuel_physics_hip_kernel.hip",
+        "sha256": "f1c474ed6bf8cec8faa983e1e169ceaf94202d0763a8148ed839664e07da1c8c"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/fuel_sleep_hip.cpp",
+        "sha256": "a4802381963ba419298429949fba49b80aad83884244b49bf7d72e0d64549935"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/fuel_sleep_hip_kernel.cu",
+        "sha256": "3372624c149b985ea0be9879df6ff98f4d304c493e506025b614fb3b864ea69f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_3v3_gamepieces_hip_hip.cpp",
+        "sha256": "0b0db22ff1a7dc555f2256d7d5ff88f798fddb475953d7a5ebfe5f7ab17e4d18"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_3v3_pickup_grid_hip.cpp",
+        "sha256": "8908f2397b9e9250bba1a1db4fac933ea8b3f411a80c3c72fe95ac32eddd0779"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_3v3_pickup_grid_hip_hip.cpp",
+        "sha256": "e2bfdd6d2f3cc97ef34b53907ff65758d8f902fa1edaa276f05e3a2f5a39476c"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.cu",
+        "sha256": "4f11f2f670b6081c154701f8cb4aa76b514da4c21b4416de30e122fd0c526615"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.hip",
+        "sha256": "8350dbcefc9e32937898134ad068ef022f9be9e205627ffccb6734b76b2a2bd3"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_hip.cpp",
+        "sha256": "6ad3cae0b5401118e5defd7c98f1910a27ea18a6c418e67949489bf9f707b6a4"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_hip_hip.cpp",
+        "sha256": "232ecd7613cba9e67251b00ce2ba5fca13797eab43207fa5eb85abb61d1e6a47"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_hip_kernel.cu",
+        "sha256": "4bbb96caa9b9307bde086fd04037b725ec74e47ae36ffd1f782f06db1f5a745e"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_occupancy_hip.cpp",
+        "sha256": "d251d94dbdbbafc25504a3e2d13b73a5a1fbcd6ab4292207feadf9aa9918ebbb"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_occupancy_hip_hip.cpp",
+        "sha256": "78d4851dd49088e3cb494507541f90f1d54843ea0fda0b7dbf1ffae55d88e84f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_occupancy_hip_kernel.cu",
+        "sha256": "709ed9b714d478bb6df3603c4f20b66d98fceca0923e2585731a87e852a46dae"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_occupancy_proto_hip.cpp",
+        "sha256": "78d4851dd49088e3cb494507541f90f1d54843ea0fda0b7dbf1ffae55d88e84f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_reference_hip.cpp",
+        "sha256": "15fb338ea66614f3d83df6161251461f3b939e91605cb25b3f9164c949927b7f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_reference_hip_hip.cpp",
+        "sha256": "e25958e617c01fd3da9ab41c0d3f1181e2c0cb62d9cb2414983505f35a7712e6"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_reference_kernel.cu",
+        "sha256": "9235fb612f26bff9931768b928a1fd9664d51b68f7881e1938141f5190adc7cd"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_adstar_route_kernel.cu",
+        "sha256": "0d0caf3fdcae81a9ed3172c54e386a6e39966e4174a718678f1b378321df7cef"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_3v3_hip_hip.cpp",
+        "sha256": "d8e86446a3c4b478d9ff3ee0b6186d945f5f3f26aac3124d480f4284e67cd5ef"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_hip.cpp",
+        "sha256": "72407dd90af5b2e1d85582ea5f1b821678bdd58cad88d1725c9ef2ee9080849d"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_hip_hip.cpp",
+        "sha256": "f15995a156ad80c308c2efdb9762a3cb1b7d1a87722d9aaab929832a3537727f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_hip_kernel.cu",
+        "sha256": "a09301eaeadc82fdef7dcf861cdecb6853108194a8d39b498c18e5ba3cbccc8e"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_multi_hip.cpp",
+        "sha256": "9ef432f83e39a52a2ecf849e86c45e3533ee80a8a1d2bcbd7912c8892729f147"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_multi_hip_kernel.cu",
+        "sha256": "d1a6eb2761432b987fc9796e62068e29f1f24cdf298d561c1b19847ac8e7dc2d"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_multi_hip_kernel.hip",
+        "sha256": "84b4cb2accd5a201fc641c401183c729d3907da73383fc31ebdf0ea8bc4c4a9a"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_pipeline_hip.cpp",
+        "sha256": "0a957feea40ac091f4ba47fe15810a31d54e9f763fd636dc1afcdf54443bd27d"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_pipeline_hip_hip.cpp",
+        "sha256": "95bdd2a7507e717994af04f17433e898716c2eb60736dbf14963a092cb199ec8"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_pipeline_hip_kernel.cu",
+        "sha256": "1cc2187f8de03e1bb7432638388bd364782b719cb12e1da986d2eb736af50983"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_pipeline_proto.cpp",
+        "sha256": "bf7dcac0a65673375df707f821276b860269c20a23fba8d65b3bc0b6912dcf2e"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_collision_pipeline_proto_kernel.cu",
+        "sha256": "1cc2187f8de03e1bb7432638388bd364782b719cb12e1da986d2eb736af50983"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_fuel_candidate_rank.cpp",
+        "sha256": "e58f8efa7288b7bca1c2cf767f2edc372adb739810768d659d354791e3c0056a"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_fuel_candidate_rank_hip.cpp",
+        "sha256": "7cf78bbdadf2ac87beb0ab7b6141bc9a9aa4acc8cb39fe49b83c23ba3399b4a9"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_fuel_candidate_rank_kernel.cu",
+        "sha256": "9109b3985810a5db2bb11272f6d90b512c0886af1dbcc71f227fedfcf0fb820e"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_fuel_candidate_rank_kernel.hip",
+        "sha256": "84fe093233bcad48ea8bda9705400f874c48c1746122af6e108afd29528a5d55"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_gamepieces_hip.cpp",
+        "sha256": "af0f8324355cd78fdfe4c3dee3c79b808f6f9a1acb52e4338acb7d07b335c985"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_gamepieces_hip_hip.cpp",
+        "sha256": "c70da06135367b95fd00a8b74f80a027feddefc5b4bfbefefd5439c619d998fe"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_gamepieces_hip_kernel.cu",
+        "sha256": "5d90ab345ee95afc71beeb8de3fa94c98f025cecc1336007ddadd273a01086a6"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_gamepieces_hip_kernel.hip",
+        "sha256": "49096b1833401419b495e8f7603a2740a1f9867d67702f7fcc429558f5b553a9"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_commit_proto.cpp",
+        "sha256": "202bffe62f5c91cde7b97f7314c8afe331bfb92064c5533c76ec872f27ff34ce"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_commit_proto_hip.cpp",
+        "sha256": "12ffeefbbc7ee7cb013ba8f3c8f363229ed668f952a68e6e6432f61840ee0a80"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_commit_proto_kernel.cu",
+        "sha256": "aa176f3a42dc64fa6457dad8c0aabba1cbedeeabb6343547249a4beca840697f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_hip.cpp",
+        "sha256": "9dec1986352c41ec1a8fa221c740da18a0f9d7e6eddd24947bdda90d3c05473f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_hip_hip.cpp",
+        "sha256": "686e72e24e44b3d00dd7b7e2d8703880aaf733434675e8e3a84edd23687741cd"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_perception_hip_kernel.cu",
+        "sha256": "b1a5d63bc520e0079ab9ed6400cf826b4712aec5deaec6894c352e1837e0c7cd"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_full_proto.cpp",
+        "sha256": "7230e5da5cda694506cf0da961178b61517de23af453378e4d5ea2a39405062f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_full_proto_hip.cpp",
+        "sha256": "201d0b83d9132bd588f0f14d216542d7910f77682ca3fde22965e6862f693fa5"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_full_proto_kernel.cu",
+        "sha256": "bb54fb8e18b4dc5ccaaa9274337793c4c1058ea60301b78be405bf534368deac"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_proto.cpp",
+        "sha256": "eb4f0637508e9cf1133cfda6d02ee9b3672eba4bd194a0313b8d3fdbb54e12a0"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_proto_hip.cpp",
+        "sha256": "0c021939d6083131b3c7a94a2fd6fc4fd4fddecd5ab417237ad3fd8769a1beda"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_strategic_observation_proto_kernel.cu",
+        "sha256": "57c42cf8934dadda0fa81ee1ddd11213de33b234ebeed59d6852694b959c6d9e"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_swerve_pose_hip.cpp",
+        "sha256": "41596f98ff5ea39be3995600969adfe65f1db4d452f0bc2a8407342911e91939"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_swerve_pose_hip_hip.cpp",
+        "sha256": "fbc44a9758235ceb5fdf7fa17f7dfdf0bfd32f7cd2a572c6b9e42091a82da83f"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_swerve_pose_kernel.cu",
+        "sha256": "64799969b10641eef8da31f65322be3daf74476f92691118c8d2577a2903c3fe"
+      },
+      {
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-baseline/frc_defense/csrc/tensor_swerve_pose_proto_hip_hip.cpp",
+        "sha256": "4db92601faa40aac7820c80ff3d5d85295b5448cb60a81b4b1bea7ac4d9b4ea2"
+      }
+    ],
+    "loaded_native_extensions": [
+      {
+        "module": "frc_defense.tensor_3v3_pickup_grid_hip._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_3v3_pickup_grid_hip_v7/autodrive_3v3_pickup_grid_hip_v7.so",
+        "sha256": "674a08aa4d954851cd5b68eac06607812c97c410899ef36dd1a9308a27b8b0b0"
+      },
+      {
+        "module": "frc_defense.tensor_fuel_candidate_rank._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_fuel_candidate_rank_hip/autodrive_fuel_candidate_rank_hip.so",
+        "sha256": "ca993ffef1a78e566332b5c5985daae93c8bc6a79f6485f62db74d33e470d60c"
+      },
+      {
+        "module": "frc_defense.fuel_physics_hip._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_fuel_physics_hip/autodrive_fuel_physics_hip.so",
+        "sha256": "c2b99487453f698b2213888883596ccb9baeecbec6a2fd8e52f74f4990b0634c"
+      },
+      {
+        "module": "frc_defense.tensor_adstar._HIP_ADSTAR_EXTENSION",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_adstar_hip/autodrive_tensor_adstar_hip.so",
+        "sha256": "18cdaefe255be2aa376e4dc073c01d4f7399ed9306fa44ba9d109ed218c642ed"
+      },
+      {
+        "module": "frc_defense.tensor_adstar._HIP_OCCUPANCY_EXTENSION",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_adstar_occupancy_hip/autodrive_tensor_adstar_occupancy_hip.so",
+        "sha256": "ccd5227c52871b4479e487a8c4bcfb260f698e667a27e749f69ffad03d3c2f36"
+      },
+      {
+        "module": "frc_defense.tensor_adstar._HIP_PATH_REFERENCE_EXTENSION",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_adstar_path_reference_hip/autodrive_tensor_adstar_path_reference_hip.so",
+        "sha256": "6a88d9e1a97d0e2545d26f04eb8a01f87e97f8f6eb48aa4a3149e9edf63eaf67"
+      },
+      {
+        "module": "frc_defense.tensor_collision._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_collision_hip/autodrive_tensor_collision_hip.so",
+        "sha256": "57268e4953aea1281a82cdac60b85085f146f1f8a46d29530b96e4420ea1458b"
+      },
+      {
+        "module": "frc_defense.tensor_collision_multi_hip._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_collision_multi_hip/autodrive_tensor_collision_multi_hip.so",
+        "sha256": "53f81918e37c52b062acafbb239e41a14f5d34bf9b3948393e4a56d5cf363efc"
+      },
+      {
+        "module": "frc_defense.tensor_perception._HIP_PERCEPTION_EXTENSION",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_perception_hip/autodrive_tensor_perception_hip.so",
+        "sha256": "f3c574f31bb703dc9cbc244a9042430ef5eae96ecf0f83a86be68b3361152020"
+      },
+      {
+        "module": "frc_defense.tensor_swerve_pose_hip._EXT",
+        "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/cache/gpu1-baseline/autodrive_tensor_swerve_pose_hip/autodrive_tensor_swerve_pose_hip.so",
+        "sha256": "ab178f30b9c2c0ac3fd9ab12618085d5831e8e1eba78b05be31e9ba2fa372167"
+      }
+    ]
+  },
+  "scenario": {
+    "batch_seed": 973688,
+    "world_slots": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "scenario_ids": [
+      "973688:0",
+      "973688:1",
+      "973688:2",
+      "973688:3"
+    ],
+    "seed_semantics": "one seeded vector batch; slots are distinct worlds, not independently seeded resets"
+  },
+  "settings": {
+    "ticks": 8000,
+    "seconds_per_match": 160.0,
+    "device": "cuda:1",
+    "controllers": [
+      "deterministic",
+      "deterministic",
+      "deterministic",
+      "deterministic",
+      "deterministic",
+      "deterministic"
+    ],
+    "robot_roles": [
+      "offense",
+      "offense",
+      "offense",
+      "defense",
+      "defense",
+      "defense"
+    ],
+    "fuel_physics": true,
+    "fused_sensor_rng": true,
+    "replan_interval": 20,
+    "perception_interval": 2,
+    "teammate_intent_knowledge": false,
+    "teammate_coordination_enabled": false
+  },
+  "elapsed_seconds": 293.8173338439956,
+  "matches_per_second": 0.013613900676546975,
+  "per_match": [
+    {
+      "scenario_id": "973688:0",
+      "score_by_team": [
+        531,
+        0
+      ],
+      "score_differential_team0_minus_team1": 531,
+      "fuel_acquisitions_by_robot": [
+        366,
+        240,
+        292,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "scenario_id": "973688:1",
+      "score_by_team": [
+        640,
+        0
+      ],
+      "score_differential_team0_minus_team1": 640,
+      "fuel_acquisitions_by_robot": [
+        384,
+        328,
+        403,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "scenario_id": "973688:2",
+      "score_by_team": [
+        900,
+        0
+      ],
+      "score_differential_team0_minus_team1": 900,
+      "fuel_acquisitions_by_robot": [
+        464,
+        632,
+        319,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "scenario_id": "973688:3",
+      "score_by_team": [
+        993,
+        0
+      ],
+      "score_differential_team0_minus_team1": 993,
+      "fuel_acquisitions_by_robot": [
+        599,
+        334,
+        684,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "summary": {
+    "mean_team0_score": 766.0,
+    "mean_team1_score": 0.0,
+    "mean_score_differential": 766.0,
+    "total_team0_score": 3064,
+    "total_team1_score": 0
+  },
+  "trace_output": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-cycle-rank-replication-artifacts/trace/baseline-973688-trace.json"
+}
