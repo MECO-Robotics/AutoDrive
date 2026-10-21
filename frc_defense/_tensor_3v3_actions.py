@@ -93,6 +93,12 @@ class TensorThreeVsThreeActionMixin:
 
     def _prepare_score_grid(self):
         """Cache fixed-field score points and their chassis-clearance mask."""
+        # The target graph captures these tensors' addresses. Reset rebuilds
+        # them, so retaining the old graph would read freed scoring-grid data.
+        self._target_action_graph = None
+        self._target_action_graph_outputs = None
+        self._target_action_graph_audit = None
+        self._target_action_graph_signature = None
         robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
         red_min=robot_radius
         red_max=(self.alliance_zone_depth-robot_radius).clamp_min(0.)
@@ -603,11 +609,6 @@ class TensorThreeVsThreeActionMixin:
                 2,grid_index[...,None,None].expand(-1,-1,1,2)).squeeze(2)
             safe_target=torch.where((nearest<side_count)[...,None],side_target,grid_target)
             score_target=torch.where(has_clear[...,None],safe_target,score_target)
-        enemy_mask=self.team_ids[:,None] != self.team_ids[None,:]
-        enemy_delta=p[:,None,:,:2]-p[:,:,None,:2]
-        enemy_dist=enemy_delta.norm(dim=-1).masked_fill(~enemy_mask[None],float("inf"))
-        nearest_enemy=enemy_dist.argmin(-1)
-        nearest_enemy_pose=p.gather(1,nearest_enemy[...,None].expand(-1,-1,3))
         # Defend the perceived attacker's scoring lane around the HUB. When
         # that opponent is temporarily occluded, keep a post on the standard
         # alliance-side approach rather than giving up the HUB.
@@ -641,8 +642,10 @@ class TensorThreeVsThreeActionMixin:
         guarded_score_pose=torch.where(self.opponent_valid[...,None],guarded_target,
                                        standard_post)
         defense_intercept=guarded_score_pose
+        offense_intercept=torch.where(self.opponent_valid[...,None],
+                                      tracked_enemy,p[:,:,:2])
         intercept=torch.where(self._defense_role_mask[None,:,None],
-                              defense_intercept,nearest_enemy_pose[...,:2])
+                              defense_intercept,offense_intercept)
         # Use the same lane calculation for navigation and ferry release.
         ferry_target=self._ferry_targets_for_current_motion()
         dumper_ferry=(self._dumper_mask[None]&possession_now&~robot_hub_active)
@@ -874,13 +877,11 @@ class TensorThreeVsThreeActionMixin:
         return target, action, possession_now, fuel_delta
 
     def _avoid_robot_contention(self, command, targets, active=None):
-        """Bend commanded motion around robots on near-term collision courses."""
-        if active is not None:
-            fused = _collision_multi_hip.avoid_robot_contention(
-                self.sim, command, targets, active, self._avoidance_winner,
-                self._controlled_mode_mask,self.teammate_coordination_enabled)
-            if fused is not None:
-                return fused
+        """Coordinate known teammates and react to an anonymous opponent track.
+
+        The native pair helper uses every true enemy pose and commanded intent,
+        so it cannot implement this observation boundary.
+        """
         controlled=self._controlled_mode_mask[None]
         command=torch.where(controlled[...,None],command,torch.zeros_like(command))
         pair_i, pair_j = self.sim._collision_pair_i, self.sim._collision_pair_j
@@ -904,6 +905,7 @@ class TensorThreeVsThreeActionMixin:
         goal_distance = (targets - position).norm(dim=-1)
         distance_i, distance_j = goal_distance[:, pair_i], goal_distance[:, pair_j]
         teammate_pair=(self.sim.team_ids[pair_i]==self.sim.team_ids[pair_j])
+        conflict &= teammate_pair[None]
         use_intent=teammate_pair & self.teammate_coordination_enabled
         if not self.teammate_coordination_enabled:
             # Teammates remain hard AD* and physics obstacles, but with intent
@@ -927,7 +929,7 @@ class TensorThreeVsThreeActionMixin:
             (~i_controlled&j_controlled&controller_priority)[None],
             pair_i[None],preferred_winner)
         conflict &= (i_controlled|j_controlled)[None]
-        retained = ((self._avoidance_winner >= 0) &
+        retained = (teammate_pair[None] & (self._avoidance_winner >= 0) &
                     (current_distance < clearance + .35) &
                     (~teammate_pair[None] | self.teammate_coordination_enabled))
         winner = torch.where(retained,self._avoidance_winner,
@@ -963,4 +965,35 @@ class TensorThreeVsThreeActionMixin:
                                   self.sim.speed[..., None] /
                                   adjusted_speed.clamp_min(1e-6))
         adjusted=torch.where((count > 0.)[..., None], adjusted, command)
+        # Opponent observations are anonymous. Do not infer an enemy slot or
+        # inspect its simulator command/velocity to choose collision priority.
+        observed_position=self.opponent_pose[:,:,:2]
+        observed_velocity=self.opponent_velocity[:,:,:2]
+        observed_size=self.opponent_size[:,:,:2]
+        observed_valid=(self.opponent_valid &
+            torch.isfinite(observed_position).all(-1) &
+            torch.isfinite(observed_velocity).all(-1) &
+            torch.isfinite(observed_size).all(-1) &
+            (observed_size>0.).all(-1))
+        observed_position=torch.where(observed_valid[...,None],observed_position,0.)
+        observed_velocity=torch.where(observed_valid[...,None],observed_velocity,0.)
+        observed_size=torch.where(observed_valid[...,None],observed_size,0.)
+        relative=position-observed_position
+        relative_velocity=adjusted-observed_velocity
+        speed_sq=relative_velocity.square().sum(-1)
+        time=(-(relative*relative_velocity).sum(-1)/speed_sq.clamp_min(1e-6)).clamp(0.,.7)
+        closest=relative+relative_velocity*time[...,None]
+        clearance=radii+.5*observed_size.norm(dim=-1)+.25
+        observed_conflict=(observed_valid & controlled &
+            (((speed_sq>.0225)&(closest.norm(dim=-1)<clearance)) |
+             (relative.norm(dim=-1)<clearance-.08)))
+        separation=torch.where((closest.norm(dim=-1)<.1)[...,None],relative,closest)
+        radial=separation/separation.norm(dim=-1,keepdim=True).clamp_min(1e-5)
+        tangent=torch.stack((-radial[...,1],radial[...,0]),-1)
+        tangent=torch.where(((tangent*adjusted).sum(-1)<0.)[...,None],-tangent,tangent)
+        observed_adjustment=adjusted.norm(dim=-1).clamp_min(.65)[...,None]*(tangent+.75*radial)
+        observed_speed=observed_adjustment.norm(dim=-1,keepdim=True)
+        observed_adjustment*=torch.minimum(torch.ones_like(observed_speed),
+            self.sim.speed[...,None]/observed_speed.clamp_min(1e-6))
+        adjusted=torch.where(observed_conflict[...,None],observed_adjustment,adjusted)
         return torch.where(controlled[...,None],adjusted,torch.zeros_like(adjusted))

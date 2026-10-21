@@ -133,6 +133,16 @@ class TensorThreeVsThreeGamepieceMixin:
     def _update_match(self, active):
         self.match_elapsed.copy_(torch.where(active,(self.match_elapsed+self.dt).clamp(max=160.),self.match_elapsed))
         self.match_remaining.copy_(torch.where(active,(160.-self.match_elapsed).clamp_min(0.),self.match_remaining))
+        schedule = getattr(self, "curriculum_schedule", None)
+        if schedule is not None:
+            # Overrides are consumed every ordinary match update, including
+            # reset initialization; controlled windows cannot be overwritten.
+            friendly = torch.full_like(active, bool(schedule[0][1]))
+            for boundary, enabled in schedule:
+                friendly = torch.where(self.match_elapsed >= boundary, enabled, friendly)
+            values = torch.stack((~friendly, friendly), -1)
+            self.hub_active.copy_(torch.where(active[:, None], values, self.hub_active))
+            return
         if self.behavior_probe is not None:
             values=torch.ones_like(self.hub_active)
             values[:,0]=self.behavior_probe_hub_active

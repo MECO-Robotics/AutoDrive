@@ -17,7 +17,8 @@ def initialize_fuel_physics(env, config=True):
     # Small HIP batches benefit from the substep graph; the measured 16-world
     # path regresses, so leave larger training batches eager by default.
     env._physics_graph_enabled = bool(
-        torch.version.hip and env.fuel_physics is not None and env.n <= 8 and
+        env.device.type == "cuda" and torch.version.hip and
+        env.fuel_physics is not None and env.n <= 8 and
         os.environ.get("AUTODRIVE_HIP_PHYSICS_GRAPH", "1") != "0")
     env._physics_graphs = {}
     env._physics_graph_command = torch.empty(

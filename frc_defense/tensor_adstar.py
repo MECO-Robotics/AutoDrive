@@ -468,6 +468,8 @@ class TensorADStar:
 
     def _footprint_path_clear(self, path, heading, length, width):
         """Check the supplied robot footprint against field boxes."""
+        if path.shape[0] == 0:
+            return torch.empty(0, device=path.device, dtype=torch.bool)
         if not self._boxes.numel():
             return torch.ones(path.shape[0],device=path.device,dtype=torch.bool)
         if (self.device.type == "cuda" and torch.version.hip and

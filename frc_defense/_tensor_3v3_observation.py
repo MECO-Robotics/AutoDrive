@@ -210,9 +210,11 @@ class TensorThreeVsThreeObservationMixin:
             piece_tracks_batched=True
         else:
             piece_tracks_batched = False
-        has_controlled_defender=any(
-            mode!="none" and self.robot_roles[robot]=="defense"
-            for robot,mode in enumerate(self.control_modes))
+        opponent_robot_ids=tuple(
+            robot for robot,mode in enumerate(self.control_modes)
+            if mode!="none" and (self.robot_roles[robot]=="defense" or mode=="nn"))
+        opponent_observer_mask=self._defense_role_mask | self._nn_mode_mask
+        has_controlled_observer=bool(opponent_robot_ids)
         anonymous_piece_positions=None
         anonymous_piece_velocities=None
         anonymous_visible_fraction=None
@@ -391,7 +393,7 @@ class TensorThreeVsThreeObservationMixin:
         opponent_pose_rows=[]
         opponent_velocity_rows=[]
         opponent_size_rows=[]
-        fused_opponents = (has_controlled_defender and self.fused_sensor_rng and
+        fused_opponents = (has_controlled_observer and self.fused_sensor_rng and
             camera_poses is not None and
             tensor_perception.opponent_tracks_3v3(
                 pose.contiguous(), self.sim.length.contiguous(),
@@ -399,7 +401,7 @@ class TensorThreeVsThreeObservationMixin:
                 self._robot_occlusion_radius.contiguous(),
                 self.field_feature_obstacles.contiguous(), active.contiguous(),
                 self._controlled_mode_mask.contiguous(),
-                self._defense_role_mask.contiguous(), self._perception_rng_ticks,
+                opponent_observer_mask.contiguous(), self._perception_rng_ticks,
                 self.opponent_pose, self.opponent_velocity, self.opponent_size,
                 self.opponent_age, self.opponent_valid, self._perception_rng_seed,
                 self.perception_range, self.perception_fov_degrees,
@@ -407,9 +409,9 @@ class TensorThreeVsThreeObservationMixin:
                 self.velocity_noise, self.dt))
         self._fused_opponent_tracks_used |= bool(fused_opponents)
         self._fused_sensor_rng_used |= bool(fused_opponents)
-        batch_opponent_commit=(piece_tracks_batched and has_controlled_defender and
+        batch_opponent_commit=(piece_tracks_batched and has_controlled_observer and
                                not fused_opponents)
-        if has_controlled_defender and not fused_opponents:
+        if has_controlled_observer and not fused_opponents:
             self.opponent_pose[..., :2].add_(torch.where(
                 (active[:, None] & self.opponent_valid)[..., None],
                 self.opponent_velocity[..., :2] * self.dt,
@@ -553,7 +555,7 @@ class TensorThreeVsThreeObservationMixin:
                     self._current_fuel_visibility[
                         rows[accepted],robot,target[accepted]]=True
 
-            if self.robot_roles[robot] != "defense":
+            if robot not in opponent_robot_ids:
                 continue
             if fused_opponents:
                 continue
@@ -571,8 +573,7 @@ class TensorThreeVsThreeObservationMixin:
             # stationary field obstacles. Do not let a scripted defender
             # treat those empty slots as an attacking robot when an assigned
             # opponent is present.
-            if self.robot_roles[robot]=="defense":
-                in_view &= self._controlled_mode_mask[enemy_ids][None]
+            in_view &= self._controlled_mode_mask[enemy_ids][None]
             in_view &= active[:, None]
             if self.field_occlusion_boxes.numel():
                 from .tensor_perception import piece_occlusion_mask
@@ -634,7 +635,7 @@ class TensorThreeVsThreeObservationMixin:
                                                           self.opponent_age[:, robot])
                 self.opponent_valid[:, robot] |= has_enemy
         if batch_opponent_commit and opponent_robot_rows:
-            rows=self._defense_robot_ids
+            rows=torch.tensor(opponent_robot_rows,device=self.device,dtype=torch.long)
             has_enemy=torch.stack(opponent_has_rows,dim=1)
             chosen=torch.stack(opponent_pose_rows,dim=1)
             chosen_velocity=torch.stack(opponent_velocity_rows,dim=1)
@@ -729,6 +730,13 @@ class TensorThreeVsThreeObservationMixin:
         mask[..., 5] = self.opponent_valid | self._defense_role_mask[None]
         mask[..., 6] = True
         mask[..., 7] = True
+        curriculum_mask = getattr(self, "curriculum_action_mask", None)
+        if curriculum_mask is not None:
+            mask &= curriculum_mask
+            if self.curriculum["scenario_id"].startswith("pickup_"):
+                # Search is useful with an empty hopper; action6 would ferry
+                # away the retained target once a pickup primitive has load.
+                mask[:, 3, 6] &= possession[:, 3] == 0
         return mask, possession
 
     def observe(self, active_mask=None):
@@ -816,7 +824,9 @@ class TensorThreeVsThreeObservationMixin:
         own_eta = torch.where(valid,
             eta / self.sim.speed[:, :, None].clamp_min(.1),torch.zeros_like(eta))
         enemy_distance = (candidate_points - opponent[:, :, None, :2]).norm(dim=-1)
-        enemy_eta = enemy_distance / self.sim.speed.mean(-1)[:, None, None].clamp_min(.1)
+        # Use this robot's calibrated speed as a prior. Averaging simulator
+        # speeds would expose unobserved opponents' physical parameters.
+        enemy_eta = enemy_distance / self.sim.speed[:, :, None].clamp_min(.1)
         team = self.team_ids[None, :, None]
         hub = self.hub_centers[self.team_ids][None]
         to_score = (candidate_points-hub[:,:,None]).norm(dim=-1) / self.sim.speed[:, :, None].clamp_min(.1)

@@ -7,8 +7,56 @@ import torch
 from .fuel_physics_runtime import (launch_fuel, shooter_respawn_cone,
                                   ferry_aim_targets, ferry_respawn_targets)
 from . import tensor_3v3_pickup_grid_hip as _pickup_grid_hip
-from . import tensor_collision_multi_hip as _collision_multi_hip
 from ._tensor_3v3_observation import NUM_ROBOTS
+
+
+def _invalidate_perceived_contact_tracks(env, active):
+    """Retire tracks using known chassis contact, without hidden enemy poses.
+
+    The fused all-robot contact invalidator is incompatible with this boundary:
+    an unseen opponent passing over a remembered track must not erase it.
+    """
+    same_team = env.team_ids[:, None] == env.team_ids[None, :]
+    delta = env.track_pos[:, :, :, None, :] - env.sim.pose[:, None, None, :, :2]
+    heading = env.sim.pose[:, :, 2]
+    forward = torch.stack((heading.cos(), heading.sin()), -1)
+    left = torch.stack((-heading.sin(), heading.cos()), -1)
+    longitudinal = (delta * forward[:, None, None]).sum(-1)
+    lateral = (delta * left[:, None, None]).sum(-1).abs()
+    radius = env._fuel_radius
+    contact = (
+        (longitudinal >= -env.sim.length[:, None, None] * .5 - radius)
+        & (longitudinal <= env.sim.length[:, None, None] * .5 + .35 + radius)
+        & (lateral <= env.sim.width[:, None, None] * .5 + .075 + radius)
+        & same_team[None, :, None, :]
+    ).any(-1)
+
+    if hasattr(env, "opponent_pose"):
+        pose = env.opponent_pose
+        size = env.opponent_size[:, :, :2]
+        observed_valid = env.opponent_valid
+    else:
+        # The two-robot roster has pose tracks without a size measurement.
+        # Use the observer's calibrated footprint as a prior, not enemy truth.
+        pose = env._opponent_track_pose
+        size = torch.stack((env.sim.length, env.sim.width), -1)
+        observed_valid = env._opponent_track_valid
+    valid = (observed_valid & torch.isfinite(pose).all(-1)
+             & torch.isfinite(size).all(-1) & (size > 0.).all(-1))
+    observed_delta = env.track_pos - pose[:, :, None, :2]
+    observed_forward = torch.stack((pose[:, :, 2].cos(), pose[:, :, 2].sin()), -1)
+    observed_left = torch.stack((-pose[:, :, 2].sin(), pose[:, :, 2].cos()), -1)
+    observed_longitudinal = (observed_delta * observed_forward[:, :, None]).sum(-1)
+    observed_lateral = (observed_delta * observed_left[:, :, None]).sum(-1).abs()
+    observed_contact = (
+        (observed_longitudinal >= -size[:, :, None, 0] * .5 - radius)
+        & (observed_longitudinal <= size[:, :, None, 0] * .5 + .35 + radius)
+        & (observed_lateral <= size[:, :, None, 1] * .5 + .075 + radius)
+        & valid[:, :, None]
+    )
+    intersected = (contact | observed_contact) & active[:, None, None]
+    env.track_mask.masked_fill_(intersected, False)
+    env.track_age.masked_fill_(intersected, float("inf"))
 
 
 def update_fuel_actions(self, active, score_intent):
@@ -16,6 +64,10 @@ def update_fuel_actions(self, active, score_intent):
     self.fuel_passed_event[active]=0; self.fuel_denied_event[active]=0
     if hasattr(self,"fuel_abandoned_event"):
         self.fuel_abandoned_event[active]=0
+    curriculum_metrics = getattr(self, "curriculum_metrics", None)
+    if curriculum_metrics is not None:
+        acquisition_owners = self.piece_owner.clone()
+        acquisition_positions = self.piece_pos.clone()
     original_piece_team=self.team_ids[self.piece_owner.clamp(
         0,self.sim.num_robots-1)]
     free = self.piece_active & (self.piece_owner < 0)
@@ -163,10 +215,14 @@ def update_fuel_actions(self, active, score_intent):
         self.next_intake[:,robot]=torch.where(picked,self.match_elapsed+.20,self.next_intake[:,robot])
         free |= policy_blocked
 
+    if curriculum_metrics is not None:
+        acquired = (acquisition_owners < 0) & (self.piece_owner >= 0) & active[:, None]
+        curriculum_metrics.acquired(acquired, self.piece_owner, acquisition_positions)
+
     # Piece positions are world-major while ownership is per-piece. Gather
     # the owning robot's pose once, then apply pass-zone overrides in one
     # batched write before scoring is evaluated.
-    owner_before_pass = self.piece_owner
+    owner_before_pass = self.piece_owner.clone() if curriculum_metrics is not None else self.piece_owner
     safe_owner = owner_before_pass.clamp(0, robot_count - 1)
     held = (self.piece_active & (owner_before_pass >= 0) &
             (owner_before_pass < robot_count) & active[:,None])
@@ -261,6 +317,8 @@ def update_fuel_actions(self, active, score_intent):
         passed_counts = torch.zeros_like(self.fuel_passed_event)
         passed_counts.scatter_add_(1, safe_owner,
                                    passed.to(self.fuel_passed_event.dtype))
+    if curriculum_metrics is not None:
+        curriculum_metrics.released(passed, owner_before_pass)
     self.fuel_passed_event.copy_(torch.where(
         active[:,None], passed_counts, self.fuel_passed_event))
     self.next_ferry.copy_(torch.where(passed_counts>0,
@@ -363,23 +421,9 @@ def update_fuel_actions(self, active, score_intent):
                 self.next_score[:,robot])
             self.last_hub_zone[:,robot]=torch.where(active,ready,self.last_hub_zone[:,robot])
 
-    if not _collision_multi_hip.invalidate_tracks_in_robot_contact(
-            self.sim,self.track_pos,self.track_mask,self.track_age,active,
-            self._fuel_radius):
-        track_delta=(self.track_pos[:,:,:,None,:]-
-                     self.sim.pose[:,None,None,:,:2])
-        forward=torch.stack((self.sim.pose[:,:,2].cos(),
-                             self.sim.pose[:,:,2].sin()),-1)
-        left=torch.stack((-forward[...,1],forward[...,0]),-1)
-        longitudinal=(track_delta*forward[:,None,None,:,:]).sum(-1)
-        lateral=(track_delta*left[:,None,None,:,:]).sum(-1).abs()
-        contact_envelope=(
-            (longitudinal>=-self.sim.length[:,None,None,:]*.5-self._fuel_radius)&
-            (longitudinal<=self.sim.length[:,None,None,:]*.5+.35+self._fuel_radius)&
-            (lateral<=self.sim.width[:,None,None,:]*.5+.075+self._fuel_radius))
-        intersected=contact_envelope.any(-1)&active[:,None,None]
-        self.track_mask.masked_fill_(intersected,False)
-        self.track_age.masked_fill_(intersected,float("inf"))
+    if curriculum_metrics is not None:
+        curriculum_metrics.scored(newly_scored, self.piece_owner.clone())
+    _invalidate_perceived_contact_tracks(self, active)
     if (self.fuel_physics is not None and not capturing and
             not bool(newly_scored.any().item())):
         # shooter_respawn_cone draws exactly one [world,piece] tensor before

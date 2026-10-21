@@ -341,8 +341,14 @@ def evaluate_game_ablations(*, defense_checkpoint: str | Path | None = None,
 
 
 def main() -> None:
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "curriculum":
+        from .curriculum_training import main as curriculum_main
+        curriculum_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(description="Tensor-resident FRC defense learning")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("curriculum", help="Outcome-gated offense curriculum: plan, train, evaluate, teacher")
     p = commands.add_parser("train")
     p.add_argument("--task", choices=("defense",), default="defense")
     p.add_argument("--steps", type=int, default=1_000_000)

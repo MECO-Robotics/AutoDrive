@@ -1,6 +1,6 @@
 # 2026 REBUILT Gamepiece Training
 
-GPU-vectorized training for FRC robots acquiring FUEL, carrying it to an active HUB, and scoring. Offense uses the deterministic game strategy; PPO trains defense to contest using the same visible field state. AD* plus the robot controller handles movement. Defense is scored on FUEL denied and simulated match points.
+GPU-vectorized training for FRC robots acquiring FUEL, carrying it to an active HUB, and scoring. Default training uses deterministic offense and PPO defense with the same visible field state. An opt-in offense curriculum now supplies draft scenarios, lifecycle metrics, and standard PPO; its policies and scenario budgets remain unqualified. AD* plus the robot controller handles movement. Defense is scored on FUEL denied and simulated match points.
 
 ## Train on the WX 9100 GPUs
 
@@ -83,3 +83,30 @@ uv venv --python 3.12 .venv
 ```
 
 Training checkpoints, evaluation data, logs, and local environment files are generated locally and excluded from Git.
+
+
+## Opt-in offense curriculum
+
+Inspect the versioned stages and outcome gates:
+
+```sh
+.venv/bin/python -m frc_defense.curriculum_training plan
+frc-defense curriculum --help
+```
+
+Run a short CPU infrastructure check, then resume its optimizer and curriculum state:
+
+```sh
+.venv/bin/python -m frc_defense.curriculum_training train --updates 1 --envs 1 --rollout-steps 2 --epochs 1 --action-ticks 2 --horizon 10 --eval-every 0 --device cpu --output checkpoints/curriculum-offense-smoke
+.venv/bin/python -m frc_defense.curriculum_training train --updates 2 --envs 1 --rollout-steps 2 --epochs 1 --action-ticks 2 --horizon 10 --eval-every 0 --device cpu --output checkpoints/curriculum-offense-smoke --resume checkpoints/curriculum-offense-smoke/latest.pt
+.venv/bin/python -m frc_defense.curriculum_training evaluate --checkpoint checkpoints/curriculum-offense-smoke/latest.pt --scenario pickup_simple --category single --episodes 1 --horizon 20 --action-ticks 2 --output evaluations/curriculum-offense/smoke-validation.json
+.venv/bin/python -m frc_defense.curriculum_training teacher --scenario pickup_simple --category single --episodes 1 --horizon 20 --action-ticks 2 --output evaluations/curriculum-offense/teacher.jsonl
+```
+
+These horizon overrides are diagnostic and cannot promote a checkpoint. Normal-budget training collects each batch until physical completion or its scenario horizon; `--rollout-steps` is a minimum in that mode. Later scenarios therefore require substantial simulator time. `--device cuda:0` explicitly selects an accelerator. The default cadence of 12 physics ticks at 20 ms is approximately 4.167 strategic decisions per second.
+
+Promotion requires all categories, at least 100 validation episodes per category, three consecutive passing rounds, and compatible prerequisite retention. Those evaluations are substantial; `--evaluation-episodes 1` is a diagnostic check. Training uses train/validation pools. Final testing requires an explicit `evaluate --split test --final-test --checkpoint ...`; the selected checkpoint bytes are frozen into a content-addressed artifact before test episodes run. Choose the final pool only after checkpoint selection is frozen. The evaluator reserves test index 0 for infrastructure diagnostics and starts final evaluation at index 1.
+
+Checkpoints preserve the standard 137-input/8-action ActorCritic, optimizer, RNG state, update and seed cursors, scheduler, curriculum state, recovery tasks, and source/runtime identity. Resume rejects incompatible configuration or source changes; only target update count and output directory may change. Each promoted stage retains `qualified/<scenario>/<policy_id>.pt`, plus a `last-qualified.pt` convenience copy. Evaluation records include exact paired seeds, actual actions/poses, legal masks, phase schedules, source fingerprints, and physical outcomes. Teacher JSONL contains ordinary observations and legal masks, with no hidden object state.
+
+The diagnostic teacher uses generic NN execution. Pickup tasks use capacity 30; delivery tasks use a six-piece hopper to expose repeated batches. Neither deployed 60-FUEL capacity nor complete 160-second play is qualified. Useful throughput is normalized by elapsed scenario seconds, with active/inactive seconds recorded separately. Whole-batch resets use the curriculum reset path; legacy `reset_done` is not used. See [the curriculum design and validation record](docs/TRAINING_CURRICULUM.md).

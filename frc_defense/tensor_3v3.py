@@ -42,7 +42,7 @@ class TensorThreeVsThreeEnv(
     """
 
     def __init__(self, num_envs=1, device="cuda", seed=0, *, control_modes=None,
-                 robot_roles=None, robot_types=None,
+                 robot_roles=None, robot_types=None, allow_nn_offense=False,
                  dt=.02, horizon=8000, randomize=True, fuel_count=504,
                  preloaded_per_robot=0, max_fuel_capacity=60,
                  max_scoring_bps=25.0, turret_fuel_capacity=40,
@@ -138,7 +138,7 @@ class TensorThreeVsThreeEnv(
         roles = list(robot_roles or ("offense",) * 3 + ("defense",) * 3)
         if len(roles) != NUM_ROBOTS or any(role not in ("offense", "defense") for role in roles):
             raise ValueError("robot_roles must assign offense or defense to six robots")
-        if any(mode == "nn" and role != "defense" for mode, role in zip(modes, roles)):
+        if not allow_nn_offense and any(mode == "nn" and role != "defense" for mode, role in zip(modes, roles)):
             raise ValueError("neural control is available only for defense-role robots")
         self.robot_roles = tuple(roles)
         types = list(robot_types or ("dumper",) * NUM_ROBOTS)
@@ -601,6 +601,26 @@ class TensorThreeVsThreeEnv(
 
 
 
+    def _perceived_robot_obstacles(self):
+        """Known same-team localization plus one anonymous observed opponent."""
+        # Each observer receives three known team slots and one anonymous enemy
+        # track. The final two slots remain disabled, preserving planner shape.
+        known_ids = torch.stack(self._team_robot_ids)[self.team_ids]
+        obstacles = self.sim.pose.new_zeros((self.n, NUM_ROBOTS, NUM_ROBOTS, 3))
+        obstacles[:, :, :3, :2] = self.sim.pose[:, known_ids, :2]
+        radii = .5 * torch.minimum(self.sim.length, self.sim.width)
+        own = known_ids == torch.arange(NUM_ROBOTS, device=self.device)[:, None]
+        obstacles[:, :, :3, 2] = radii[:, known_ids].masked_fill(own[None], 0.)
+        observed_xy = self.opponent_pose[:, :, :2]
+        observed_size = self.opponent_size[:, :, :2]
+        valid = (self.opponent_valid & torch.isfinite(observed_xy).all(-1)
+                 & torch.isfinite(observed_size).all(-1)
+                 & (observed_size > 0.).all(-1))
+        obstacles[:, :, 3, :2] = torch.where(valid[:, :, None], observed_xy, 0.)
+        observed_radius = .5 * observed_size.amin(-1)
+        obstacles[:, :, 3, 2] = torch.where(valid, observed_radius, 0.)
+        return obstacles.reshape(-1, NUM_ROBOTS, 3)
+
     def step(self, actions, active_mask=None, *, capture_observation=True,
              capture_info=True, _active_count=None, _return_info=None):
         full_batch=active_mask is None
@@ -672,17 +692,7 @@ class TensorThreeVsThreeEnv(
         speeds=self.sim.speed.reshape(-1); accel=self.sim.accel.reshape(-1)
         lateral=self.sim.lateral_mu.reshape(-1)
         if replan_due:
-            robot_pose=self.sim.pose
-            robot_radii=.5*torch.minimum(self.sim.length,self.sim.width)
-            robot_obstacles=torch.cat((
-                robot_pose[:,None,:,:2].expand(-1,NUM_ROBOTS,-1,-1),
-                robot_radii[:,None,:,None].expand(-1,NUM_ROBOTS,-1,1)),dim=-1)
-            robot_obstacles=robot_obstacles.reshape(-1,NUM_ROBOTS,3)
-            # Each route row sees every other robot as an obstacle. Zero radius
-            # marks the row's own chassis so its starting cell stays traversable.
-            own_radius=torch.eye(NUM_ROBOTS,device=self.device,dtype=torch.bool)
-            own_radius=own_radius[None].expand(self.n,-1,-1).reshape(-1,NUM_ROBOTS)
-            robot_obstacles[:,:,2].masked_fill_(own_radius,0.)
+            robot_obstacles=self._perceived_robot_obstacles()
             waypoint_chains=self.raster_sweep_points[None].expand(
                 self.n,-1,-1,-1).reshape(-1,self.raster_sweep_points.shape[1],2)
             if self.sweeping_enabled:
@@ -938,6 +948,8 @@ class TensorThreeVsThreeEnv(
         enabled=self._controlled_mode_mask
         commands=commands*enabled[None,:,None]
         stationary_pose=(self.sim.pose.clone() if "none" in self.control_modes else None)
+        if hasattr(self, "_curriculum_commands"):
+            commands = self._curriculum_commands(commands, active)
         advance_with_fuel(self,commands,None if full_batch else active,
                           active_nonempty=active_count>0)
         if stationary_pose is not None:
@@ -963,35 +975,35 @@ class TensorThreeVsThreeEnv(
                     self.opponent_age,self.opponent_valid,active,self.dt,
                     self.perception_track_timeout)
                 if not fused_aging:
-                    self.track_age = torch.where(
+                    self.track_age.copy_(torch.where(
                         active[:, None, None] & self.track_mask,
-                        self.track_age + self.dt, self.track_age)
+                        self.track_age + self.dt, self.track_age))
                     self.track_pos.add_(torch.where(
                         (active[:, None, None] & self.track_mask)[..., None],
                         self.track_vel * self.dt,
                         torch.zeros_like(self.track_vel)))
                     self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
                                          active[:, None, None])
-                    self.opponent_age = torch.where(
+                    self.opponent_age.copy_(torch.where(
                         active[:, None] & self.opponent_valid,
-                        self.opponent_age + self.dt, self.opponent_age)
+                        self.opponent_age + self.dt, self.opponent_age))
                     self.opponent_valid &= ~((self.opponent_age > 1.) & active[:, None])
         else:
             perception_tick = (self.steps % self.perception_interval) == 0
             update_active = active & perception_tick
             aging_active = active & ~perception_tick
             if aging_active.any():
-                self.track_age = torch.where(
+                self.track_age.copy_(torch.where(
                     aging_active[:, None, None] & self.track_mask,
-                    self.track_age + self.dt, self.track_age)
+                    self.track_age + self.dt, self.track_age))
                 self.track_pos.add_(torch.where(
                     (aging_active[:, None, None] & self.track_mask)[..., None],
                     self.track_vel * self.dt, torch.zeros_like(self.track_vel)))
                 self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
                                      aging_active[:, None, None])
-                self.opponent_age = torch.where(
+                self.opponent_age.copy_(torch.where(
                     aging_active[:, None] & self.opponent_valid,
-                    self.opponent_age + self.dt, self.opponent_age)
+                    self.opponent_age + self.dt, self.opponent_age))
                 self.opponent_valid &= ~((self.opponent_age > 1.) & aging_active[:, None])
             update_count = int(update_active.sum().item())
             if update_count:
