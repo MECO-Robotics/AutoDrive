@@ -622,7 +622,8 @@ class TensorThreeVsThreeEnv(
         return obstacles.reshape(-1, NUM_ROBOTS, 3)
 
     def step(self, actions, active_mask=None, *, capture_observation=True,
-             capture_info=True, _active_count=None, _return_info=None):
+             capture_info=True, _active_count=None, _return_info=None,
+             planner_goal_override=None, planner_goal_override_action=None):
         full_batch=active_mask is None
         if full_batch and self._full_batch_step_scalar is not None:
             self._full_batch_step_scalar+=1
@@ -641,6 +642,21 @@ class TensorThreeVsThreeEnv(
         self._prepare_raster_cursor(active)
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
+        if planner_goal_override is not None:
+            if planner_goal_override_action is None:
+                raise ValueError("planner goal override requires its paired action index")
+            goal = torch.as_tensor(planner_goal_override, device=self.device,
+                                   dtype=targets.dtype).reshape(2)
+            expected_action = int(planner_goal_override_action)
+            if not 0 <= expected_action < 8:
+                raise ValueError("planner goal override action must be in [0, 7]")
+            if not bool(torch.isfinite(goal).all()) or not (
+                    0. <= float(goal[0]) < float(self.sim.field_length) and
+                    0. <= float(goal[1]) < float(self.sim.field_width)):
+                raise ValueError("planner_goal_override must be a finite in-field XY endpoint")
+            targets = targets.clone()
+            targets[:, 3] = torch.where((action[:, 3] == expected_action)[:, None],
+                                         goal[None], targets[:, 3])
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((self.sweeping_enabled &

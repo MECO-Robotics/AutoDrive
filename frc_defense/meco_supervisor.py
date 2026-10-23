@@ -69,6 +69,7 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--category", config.category, "--updates", str(config.updates),
         "--rollout-steps", str(config.rollout_steps), "--epochs", str(config.epochs),
         "--action-ticks", str(config.action_ticks), "--seed", str(config.seed),
+        "--candidate-k", str(config.candidate_k),
         "--device", config.device, "--learning-rate", str(config.learning_rate),
         "--gamma", str(config.gamma), "--gae-lambda", str(config.gae_lambda),
         "--clip-coef", str(config.clip_coef), "--entropy-coef", str(config.entropy_coef),
@@ -98,6 +99,7 @@ class MecoSupervisor:
                  rollout_steps: int, epochs: int, action_ticks: int, learning_rate: float,
                  gamma: float, gae_lambda: float, clip_coef: float, entropy_coef: float,
                  value_coef: float, max_grad_norm: float, route_cost_weight: float,
+                 candidate_k: int,
                  evaluation_categories: tuple[str, ...], evaluation_episodes: int,
                  evaluation_seed: int, evaluation_device: str | None,
                  cycles: int, stop_file: str | None):
@@ -118,6 +120,7 @@ class MecoSupervisor:
         self.scenario = scenario
         self.category = category
         self.seed = seed
+        self.candidate_k = candidate_k
         self.chunk_updates = chunk_updates
         self.evaluation_categories = evaluation_categories
         self.evaluation_episodes = evaluation_episodes
@@ -144,6 +147,7 @@ class MecoSupervisor:
                 learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
                 clip_coef=clip_coef, entropy_coef=entropy_coef, value_coef=value_coef,
                 max_grad_norm=max_grad_norm, route_cost_points_per_second=route_cost_weight,
+                candidate_k=candidate_k,
                 output=str(self.output / track))
             config.validate()
             self.configs[track] = config
@@ -606,6 +610,7 @@ def _parser():
     parser.add_argument("--rollout-steps", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--action-ticks", type=int, default=12)
+    parser.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=.993)
     parser.add_argument("--gae-lambda", type=float, default=.95)
@@ -638,6 +643,7 @@ def main(argv=None):
         clip_coef=args.clip_coef, entropy_coef=args.entropy_coef,
         value_coef=args.value_coef, max_grad_norm=args.max_grad_norm,
         route_cost_weight=args.route_cost_weight,
+        candidate_k=args.candidate_k,
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,
         cycles=args.cycles, stop_file=args.stop_file)

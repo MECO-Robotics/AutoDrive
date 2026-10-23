@@ -57,6 +57,7 @@ class MecoTrainConfig:
     value_coef: float = .5
     max_grad_norm: float = .5
     route_cost_points_per_second: float = ROUTE_COST_POINTS_PER_SECOND
+    candidate_k: int = 16
     output: str = ""
 
     def validate(self):
@@ -70,6 +71,8 @@ class MecoTrainConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
+        if type(self.candidate_k) is not int or self.candidate_k not in (8, 16, 32):
+            raise ValueError("candidate_k must be one of 8, 16, or 32")
         if self.device.startswith("cuda") and not torch.cuda.is_available():
             raise ValueError("requested ROCm/CUDA device is unavailable")
         for name in ("learning_rate", "gamma", "gae_lambda", "clip_coef",
@@ -159,10 +162,10 @@ def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
 
 def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       *, route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND,
-                      action_ticks=12, deterministic=False, value_head=None):
+                      action_ticks=12, candidate_k=16, deterministic=False, value_head=None):
     observation = env._last_obs
     candidate_set = build_route_feasible_candidates(env, observation, graph,
-        episode_id=episode_id, action_ticks=action_ticks)
+        episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k)
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     graph_data = _graph_inputs(track, graph, env, raster)
     route_cost = _route_cost_tensor(candidate_set, route_cost_points_per_second,
@@ -186,13 +189,15 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
-def _run_macro_step(env, action_index: int, action_ticks: int):
+def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
     ended = timeout = False
     for _ in range(action_ticks):
-        _, _, done, truncated, _ = env.step(actions, capture_info=False)
+        _, _, done, truncated, _ = env.step(actions, capture_info=False,
+            planner_goal_override=goal_xy,
+            planner_goal_override_action=action_index if goal_xy is not None else None)
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
@@ -349,6 +354,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "graph": {"nodes": graph.node_count, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
+        "candidate_k": config.candidate_k,
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "chunk_start_update": update,
         "chunk_start_seed": chunk_seed,
@@ -376,12 +382,18 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     prepared = _prepare_decision(config.track, model, env, graph,
                         episode_generation, hidden,
                         route_cost_points_per_second=config.route_cost_points_per_second,
-                        action_ticks=config.action_ticks, value_head=value_head)
+                        action_ticks=config.action_ticks, candidate_k=config.candidate_k,
+                        value_head=value_head)
                     action_index = int(prepared["action"][0].item())
                     hidden = prepared["hidden_next"].detach()
                     value = prepared["value"].detach().reshape(())
-                action = prepared["candidate_set"].action_indices[action_index]
-                reward, ended, timeout = _run_macro_step(env, action, config.action_ticks)
+                candidate = prepared["candidate_set"]
+                action = candidate.action_indices[action_index]
+                cols = {name: i for i, name in enumerate(candidate.table.feature_names)}
+                selected_row = candidate.table.features[action_index]
+                goal_xy = (float(selected_row[cols["goal_x_m"]]),
+                           float(selected_row[cols["goal_y_m"]]))
+                reward, ended, timeout = _run_macro_step(env, action, config.action_ticks, goal_xy)
                 update_heartbeat()
                 rows.append({"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -393,7 +405,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "logprob": prepared["logprob"].detach().reshape(()),
                     "hidden_before": hidden_before,
                     "hidden_next": hidden.detach().clone(), "value": value,
-                    "reward": reward.detach().reshape(()), "done": ended or timeout})
+                    "reward": reward.detach().reshape(()), "done": ended or timeout,
+                    "candidate_recall": candidate.candidate_recall})
                 if ended or timeout:
                     episode += 1
                     episode_seed = config.seed + episode
@@ -407,7 +420,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     bootstrap = _prepare_decision(config.track, model, env, graph,
                         episode_generation, hidden,
                         route_cost_points_per_second=config.route_cost_points_per_second,
-                        action_ticks=config.action_ticks, deterministic=True,
+                        action_ticks=config.action_ticks, candidate_k=config.candidate_k,
+                        deterministic=True,
                         value_head=value_head)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
             stats = _ppo_update(config.track, model, value_head, optimizer, rows,
@@ -417,6 +431,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             stats.update(update=update, episode=episode, track=config.track,
                          scenario_id=config.scenario_id, category=config.category,
                          learning_rate=config.learning_rate,
+                         candidate_k=config.candidate_k,
+                         within_candidate_pool_recall=sum(
+                             row["candidate_recall"]["within_candidate_pool_recall"]
+                             for row in rows) / len(rows),
                          graph_nodes=graph.node_count,
                          update_utc=datetime.now(timezone.utc).isoformat())
             history.append(stats)
@@ -509,6 +527,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     loaded = {}
     policy_manifest = {}
     route_weight = None
+    candidate_k = None
     common_training_config = None
     common_training_protocol = None
     protocol_initialized = False
@@ -518,12 +537,19 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             raise ValueError(f"{track} checkpoint is incompatible with current source")
         track_route_weight = float(payload["config"].get(
             "route_cost_points_per_second", ROUTE_COST_POINTS_PER_SECOND))
+        track_candidate_k = int(payload["config"].get("candidate_k", 8))
+        if track_candidate_k not in (8, 16, 32):
+            raise ValueError(f"{track} checkpoint has invalid candidate_k")
         if not math.isfinite(track_route_weight) or track_route_weight < 0:
             raise ValueError(f"{track} checkpoint has invalid route cost weight")
         if route_weight is None:
             route_weight = track_route_weight
         elif track_route_weight != route_weight:
             raise ValueError("paired evaluation checkpoints must share one route-cost weight")
+        if candidate_k is None:
+            candidate_k = track_candidate_k
+        elif track_candidate_k != candidate_k:
+            raise ValueError("paired evaluation checkpoints must share one candidate_k")
         model = make_meco_track(track,
             candidate_features=len(__import__("frc_defense.meco_tracks", fromlist=["SAFE_ACTION_FEATURES"]).SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)).to(device)
         model.load_state_dict(payload["model"])
@@ -607,7 +633,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         while elapsed < env.horizon:
                             obs = env._last_obs
                             candidate_set = build_route_feasible_candidates(env, obs, graph,
-                                episode_id=episode_id, action_ticks=12)
+                                episode_id=episode_id, action_ticks=12,
+                                candidate_k=candidate_k)
                             raster, globals_ = _snapshot_tensors(candidate_set.observation,
                                                                  device=env.device)
                             if policy in MECO_TRACKS:
@@ -624,16 +651,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 action_source = "model"
                             elif policy == "D0":
                                 teacher = int(teacher_actions(env, obs)[0, 3].item())
-                                choice = teacher if candidate_set.table.valid_mask[teacher] else candidate_set.table.candidate_ids.index(candidate_set.fallback_candidate_id)
+                                candidates = [i for i, action_id in enumerate(candidate_set.action_indices)
+                                              if action_id == teacher and candidate_set.table.valid_mask[i]]
+                                choice = candidates[0] if candidates else candidate_set.table.candidate_ids.index(candidate_set.fallback_candidate_id)
                                 action_source = "d0_teacher"
                             else:
                                 logits = _d1_d2_scores(candidate_set, env, policy)
                                 choice = int(logits.argmax(-1).item())
                                 action_source = policy.lower()
                             action = candidate_set.action_indices[choice]
+                            cols = {name: i for i, name in enumerate(candidate_set.table.feature_names)}
+                            selected_row = candidate_set.table.features[choice]
+                            goal_xy = (float(selected_row[cols["goal_x_m"]]),
+                                       float(selected_row[cols["goal_y_m"]]))
                             actions_count[action] += 1
                             routes_seen.append(candidate_set.route_records[choice])
-                            _, ended, timeout = _run_macro_step(env, action, 12)
+                            _, ended, timeout = _run_macro_step(env, action, 12, goal_xy)
                             elapsed += 12
                             update_evaluation_status("running", len(records))
                             if ended or timeout:
@@ -664,6 +697,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "shared_training_configuration": common_training_config,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
+            "candidate_k": candidate_k,
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "controls": ["D0", "D1", "D2"] if include_controls else [],
             "control_definitions": {"D0": "curriculum teacher proxy; not production AutoDrive controller",
@@ -708,6 +742,7 @@ def _parser():
     train.add_argument("--entropy-coef", type=float, default=.01)
     train.add_argument("--value-coef", type=float, default=.5)
     train.add_argument("--max-grad-norm", type=float, default=.5)
+    train.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
     train.add_argument("--route-cost-points-per-second", type=float,
                         default=ROUTE_COST_POINTS_PER_SECOND)
     train.add_argument("--output", required=True)
@@ -737,6 +772,7 @@ def main(argv=None):
             gae_lambda=args.gae_lambda, clip_coef=args.clip_coef,
             entropy_coef=args.entropy_coef, value_coef=args.value_coef,
             max_grad_norm=args.max_grad_norm,
+            candidate_k=args.candidate_k,
             route_cost_points_per_second=args.route_cost_points_per_second,
             output=args.output)
         result = train_meco(config, resume=args.resume, stop_file=args.stop_file,

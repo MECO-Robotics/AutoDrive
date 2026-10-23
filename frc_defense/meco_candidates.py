@@ -1,12 +1,9 @@
 """Snapshot-bound simulator candidates with route and terminal-pose checks.
 
-This first bounded candidate generator uses the existing eight executable
-curriculum actions as its primitive set. It adds observed target poses, legal
-SE(2) endpoints, current observed-robot route feasibility, and ETA estimates.
-Its coverage is therefore limited to those eight actions. The report includes
-only a sensed-track coverage proxy; it does not build a larger executable
-oracle or measure candidate recall against one. K16/K32 enumeration and an
-explicit continue candidate remain unimplemented.
+The existing eight masked actions remain the behavior primitives. K=16/32 add
+stable, locally offset collection approach goals. The selected endpoint is
+passed to AD* while the simulator retains action legality and mechanisms. A
+route-qualified K=32 table provides a bounded same-observation recall oracle.
 """
 from __future__ import annotations
 
@@ -25,14 +22,20 @@ ROUTE_COST_POINTS_PER_SECOND = 0.05
 RISK_RADIUS_M = 2.0
 RISK_MAX_POINTS = 0.75
 CANDIDATE_BOUNDARY = {
-    "version": 1,
-    "capacity": 8,
+    "version": 2,
+    "capacity": [8, 16, 32],
     "source": "existing simulator action slots",
-    "configurable_k": False,
-    "k16_k32_supported": False,
-    "higher_budget_oracle_recall_measured": False,
+    "configurable_k": True,
+    "k16_k32_supported": True,
+    "higher_budget_oracle_recall_measured": True,
+    "oracle": "within_candidate_pool: route-qualified K32 from the same sensed action slots",
+    "expanded_goals": "bounded collection approach offsets",
+    "execution": "selected XY endpoint overrides planner goal; action mask/mechanisms remain simulator-owned",
+    "heading_execution": "candidate heading is scored/feasibility-checked; current action controller owns heading",
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": False,
+    "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
+    "capture_feasibility": "expanded collect endpoints checked against the simulator intake envelope",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m", "route_time_s",
                   "risk_penalty_points", "target_heading_rad")
@@ -160,6 +163,29 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
     return node, center, hbin
 
 
+def _capture_pose_possible(env, base: SafeActionCandidates, action: int,
+                           goal_xy, heading_bin: int) -> bool:
+    """Match the simulator's existing bounded dumper intake capture envelope."""
+    if action >= 4:
+        return True
+    row = base.table.features[action]
+    if row[2] is None or row[3] is None:
+        return False
+    slot = 3
+    fuel = goal_xy.new_tensor((row[2], row[3]))
+    delta = fuel - goal_xy
+    heading = heading_bin * (2. * math.pi / 8.)
+    forward = delta[0] * math.cos(heading) + delta[1] * math.sin(heading)
+    lateral = -delta[0] * math.sin(heading) + delta[1] * math.cos(heading)
+    radius = (float(env.fuel_physics.config.radius) if env.fuel_physics is not None
+              else float(env._fuel_radius))
+    half_length = float(env.sim.length[0, slot]) * .5
+    half_width = float(env.sim.width[0, slot]) * .5
+    return (-half_length - .075 - radius <= float(forward) <=
+            half_length + .35 + .3048 + radius and
+            abs(float(lateral)) <= half_width + .075 + radius)
+
+
 def _opponent_prediction(env, slot=3, horizon=0.):
     valid = bool(env.opponent_valid[0, slot])
     age = float(env.opponent_age[0, slot])
@@ -172,7 +198,8 @@ def _opponent_prediction(env, slot=3, horizon=0.):
 @torch.no_grad()
 def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     graph: LegalPoseGraph, *, episode_id: str,
-                                    action_ticks: int = 12) -> RouteFeasibleCandidates:
+                                    action_ticks: int = 12,
+                                    candidate_k: int = 8) -> RouteFeasibleCandidates:
     """Build the current bounded decision table and qualify every route row.
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
@@ -186,6 +213,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         raise ValueError("candidate source requires one world and a unique episode_id")
     if type(action_ticks) is not int or action_ticks < 1:
         raise ValueError("action_ticks must be a positive integer")
+    if type(candidate_k) is not int or candidate_k not in (8, 16, 32):
+        raise ValueError("candidate_k must be one of 8, 16, or 32")
     base = build_safe_action_candidates(env, observation, world=0, slot=3,
                                         episode_id=episode_id)
     sequence = int(env.steps[0].item())
@@ -198,26 +227,36 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             base.table.features, base.table.valid_mask, base.table.feature_names,
             route_costs=base.table.route_costs),
         base.fallback_candidate_id, base.action_indices)
-    targets = []
-    headings = []
-    route_queries = []
-    goal_nodes: list[int | None] = []
-    goal_centers = []
-    hbins = []
-    requested = []
-    for action in range(8):
+    specs = [(action, 0, 0., 0.) for action in range(8)]
+    offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
+               (.34, 0.), (-.34, 0.))
+    for variant, (forward, lateral) in enumerate(offsets, 1):
+        for action in range(4):
+            specs.append((action, variant, forward, lateral))
+    targets, headings, route_queries, goal_nodes = [], [], [], []
+    hbins, requested, ids = [], [], []
+    for row_index, (action, variant, forward_offset, lateral_offset) in enumerate(specs):
         target, heading, allowed, intake = _candidate_target(env, action, base)
+        candidate_id = (base.table.candidate_ids[action] if not variant else
+                        f"{base.table.candidate_ids[action]}:approach:{variant}")
+        ids.append(candidate_id)
+        if variant:
+            forward = target.new_tensor((math.cos(heading), math.sin(heading)))
+            left = target.new_tensor((-math.sin(heading), math.cos(heading)))
+            target = target + forward * forward_offset + left * lateral_offset
         node, center, hbin = _goal_node(env, graph, target, heading,
                                         intake_extended=intake)
         allowed &= node is not None
+        if center is not None:
+            target = center
+            allowed &= _capture_pose_possible(env, base, action, target, hbin)
         targets.append(target)
         headings.append(heading)
         goal_nodes.append(node)
-        goal_centers.append(center)
         hbins.append(hbin)
         requested.append(allowed)
         if allowed:
-            route_queries.append(RouteQuery(candidate_id=base.table.candidate_ids[action],
+            route_queries.append(RouteQuery(candidate_id=candidate_id,
                 snapshot_id=base.observation.snapshot_id, world=0, slot=3,
                 goal_xy=(float(center[0]), float(center[1])), intake_extended=intake))
 
@@ -233,17 +272,19 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     routes = []
     route_costs = []
     risk_costs = []
-    for action, old in enumerate(base.table.features):
-        result = result_by_id.get(base.table.candidate_ids[action])
+    for row_index, (action, variant, _, _) in enumerate(specs):
+        old = base.table.features[action]
+        candidate_id = ids[row_index]
+        result = result_by_id.get(candidate_id)
         distance = result.distance_m if result is not None and result.feasible else None
-        route_ok = bool(requested[action] and result is not None and result.feasible and
-                        goal_nodes[action] is not None)
-        turn = abs(math.atan2(math.sin(headings[action] - pose_heading),
-                              math.cos(headings[action] - pose_heading)))
+        route_ok = bool(requested[row_index] and result is not None and result.feasible and
+                        goal_nodes[row_index] is not None)
+        turn = abs(math.atan2(math.sin(headings[row_index] - pose_heading),
+                              math.cos(headings[row_index] - pose_heading)))
         eta = (None if distance is None else distance / speed + turn / omega
                + action_ticks * float(env.dt))
         predicted = _opponent_prediction(env, horizon=eta or 0.)
-        goal_xy = targets[action]
+        goal_xy = targets[row_index]
         if predicted is None and bool(env.opponent_valid[0, 3]):
             predicted = tuple(float(x) for x in env.opponent_pose[0, 3, :2])
         separation = None if predicted is None else math.hypot(
@@ -257,43 +298,53 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         row = list(old)
         row[2] = float(goal_xy[0])
         row[3] = float(goal_xy[1])
-        row[4] = float(hbins[action])
-        row.extend((None if goal_nodes[action] is None else float(goal_nodes[action]),
-                    distance, eta, risk, float(headings[action])))
+        row[4] = float(hbins[row_index])
+        row.extend((None if goal_nodes[row_index] is None else float(goal_nodes[row_index]),
+                    distance, eta, risk, float(headings[row_index])))
         rows.append(tuple(row))
         route_costs.append(0. if eta is None else eta * ROUTE_COST_POINTS_PER_SECOND)
         risk_costs.append(0. if risk is None else risk)
-        routes.append({"candidate_id": base.table.candidate_ids[action],
+        routes.append({"candidate_id": candidate_id,
             "action_index": action,
+            "candidate_row": row_index,
+            "goal_variant": variant,
             "route_status": "not_queried" if result is None else result.status,
             "feasible": valid, "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
-            "goal_heading_rad": float(headings[action]),
-            "legal_node_index": goal_nodes[action], "distance_m": distance,
+            "goal_heading_rad": float(headings[row_index]),
+            "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
             "endpoint_separation_m": separation, "risk_penalty_points": risk,
             "intake_extended": action < 4})
-    if not any(valid_mask):
+    if not any(valid_mask[:candidate_k]):
         raise RuntimeError("candidate service found no feasible row, including safe fallback")
     fallback = base.fallback_candidate_id
-    if fallback not in base.table.candidate_ids or not valid_mask[base.table.candidate_ids.index(fallback)]:
-        hold = base.table.candidate_ids.index("hold")
+    if fallback not in ids or not valid_mask[ids.index(fallback)]:
+        hold = ids.index("hold")
         if valid_mask[hold]:
             fallback = "hold"
         else:
-            fallback = min((i for i, valid in enumerate(valid_mask) if valid),
+            fallback = min((i for i, valid in enumerate(valid_mask[:candidate_k]) if valid),
                            key=lambda i: route_costs[i] + risk_costs[i])
-            fallback = base.table.candidate_ids[fallback]
+            fallback = ids[fallback]
     names = base.table.feature_names + EXTRA_FEATURES
-    table = CandidateTable(base.observation.snapshot_id, base.table.candidate_ids,
-        tuple(rows), tuple(valid_mask), names,
-        route_costs=tuple(route_costs), schema_version=base.table.schema_version)
+    oracle_ids = {ids[i] for i, valid in enumerate(valid_mask) if valid}
+    requested_ids = {ids[i] for i, valid in enumerate(valid_mask[:candidate_k]) if valid}
+    executable_tracks = sum(valid_mask[i] for i, (action, _, _, _) in enumerate(specs[:candidate_k]) if action < 4)
     sensed = int(env.track_mask[0, 3].sum().item())
-    recall = {"candidate_capacity": 8, "valid_executable_candidates": sum(valid_mask),
+    recall = {"candidate_capacity": candidate_k, "oracle_capacity": 32,
+              "valid_executable_candidates": sum(valid_mask[:candidate_k]),
               "sensed_track_oracle_count": sensed,
-              "executable_track_rows": sum(valid_mask[:4]),
-              "track_candidate_coverage_proxy": (sum(valid_mask[:4]) / sensed if sensed else None),
-              "higher_budget_oracle_recall_measured": False}
-    return RouteFeasibleCandidates(base.observation, table, fallback, tuple(range(8)),
-        torch.tensor(route_costs, device=env.device, dtype=torch.float32),
-        torch.tensor(risk_costs, device=env.device, dtype=torch.float32),
-        tuple(routes), recall)
+              "executable_track_rows": sum(valid_mask[i] for i, (action, _, _, _) in enumerate(specs[:candidate_k]) if action < 4),
+              "track_candidate_coverage_proxy": (executable_tracks / sensed if sensed else None),
+              "oracle_scope": "within_candidate_pool",
+              "within_candidate_pool_recall_measured": True,
+              "route_feasible_rows_in_K32": len(oracle_ids),
+              "within_candidate_pool_recall": (len(requested_ids & oracle_ids) / len(oracle_ids) if oracle_ids else 1.)}
+    table = CandidateTable(base.observation.snapshot_id, tuple(ids[:candidate_k]),
+        tuple(rows[:candidate_k]), tuple(valid_mask[:candidate_k]), names,
+        route_costs=tuple(route_costs[:candidate_k]), schema_version=base.table.schema_version)
+    return RouteFeasibleCandidates(base.observation, table, fallback,
+        tuple(spec[0] for spec in specs[:candidate_k]),
+        torch.tensor(route_costs[:candidate_k], device=env.device, dtype=torch.float32),
+        torch.tensor(risk_costs[:candidate_k], device=env.device, dtype=torch.float32),
+        tuple(routes[:candidate_k]), recall)
