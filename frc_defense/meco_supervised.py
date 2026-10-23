@@ -36,6 +36,10 @@ COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-w
 COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-p-route-warm-start-weights-v1"
 PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA = "meco-plan-a-legal-node-u-b-weights-v1"
 PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA = "meco-plan-a-joint-u-b-p-weights-v1"
+PLAN_A_EXPERT_GOAL_DATASET_SCHEMA = "meco-plan-a-expert-goal-annotations-v1"
+PLAN_A_EXPERT_GOAL_TARGET_SCHEMA = "meco-plan-a-explicit-goal-u-b-targets-v1"
+PLAN_A_EXPERT_GOAL_SEMANTICS = (
+    "explicit_annotated_goal_value_and_behavior_preference; teacher selection is not globally optimal")
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
 PLAN_A_VALUE_LABEL_PROVENANCE = (
     "within-prefix matched simulator gross_horizon_return regression and pairwise comparisons"
