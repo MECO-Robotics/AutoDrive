@@ -78,6 +78,31 @@ def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
     raise ValueError(f"unsupported MECO track: {track}")
 
 
+def _running_freshness(checkpoint: Path, run_id: str, track: str,
+                       update: int) -> dict:
+    """Report whether a running checkpoint has a matching progress heartbeat."""
+    heartbeat_path = checkpoint.parent / "heartbeat.json"
+    try:
+        heartbeat = json.loads(heartbeat_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "unknown", "reason": f"heartbeat unavailable: {exc}",
+                "path": str(heartbeat_path)}
+    if (not isinstance(heartbeat, dict) or heartbeat.get("schema_version") != 1
+            or heartbeat.get("run_id") != run_id or heartbeat.get("track") != track
+            or type(heartbeat.get("completed_updates")) is not int
+            or heartbeat["completed_updates"] < update
+            or not isinstance(heartbeat.get("heartbeat_utc"), str)):
+        return {"status": "unknown",
+                "reason": "heartbeat does not match checkpoint run, track, or update",
+                "path": str(heartbeat_path)}
+    return {"status": "heartbeat_observed", "path": str(heartbeat_path),
+            "heartbeat_utc": heartbeat["heartbeat_utc"],
+            "heartbeat_completed_updates": heartbeat["completed_updates"],
+            "checkpoint_update": update,
+            "checkpoint_matches_heartbeat_update": heartbeat["completed_updates"] == update,
+            "checkpoint_may_be_behind_running_update": heartbeat["completed_updates"] > update}
+
+
 def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
     checkpoint = checkpoint.resolve()
     if not checkpoint.is_file():
@@ -113,6 +138,11 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
         raise ValueError(f"checkpoint run manifest is missing or unreadable: {manifest_path}") from exc
     if not isinstance(manifest, dict):
         raise ValueError(f"checkpoint run manifest is invalid: {manifest_path}")
+    status = manifest.get("status")
+    if status == "failed":
+        failure = manifest.get("error")
+        detail = f": {failure}" if isinstance(failure, str) and failure else " without an error detail"
+        raise ValueError(f"refusing checkpoint from failed training run {run_id}{detail}")
     immutable_config = {key: value for key, value in config.items() if key != "updates"}
     manifest_config = manifest.get("config")
     try:
@@ -123,20 +153,32 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"checkpoint provenance is not canonical JSON: {checkpoint}") from exc
     completed_updates = manifest.get("completed_updates")
+    checkpoint_protocol = payload.get("protocol_id")
+    manifest_protocol = manifest.get("protocol_id")
     if (manifest.get("schema_version") != 1 or manifest.get("run_id") != run_id
             or manifest.get("sources") != sources or manifest_config != config
+            or "protocol_id" not in payload or "protocol_id" not in manifest
+            or checkpoint_protocol != manifest_protocol
             or manifest.get("source_identity_sha256") != source_digest
             or manifest.get("configuration_sha256") != config_digest
-            or manifest.get("status") not in ("running", "complete", "stopped", "failed")
+            or status not in ("running", "complete", "stopped")
             or (completed_updates is not None and
-                (type(completed_updates) is not int or completed_updates < update))):
+                (type(completed_updates) is not int or completed_updates < update))
+            or (status in ("complete", "stopped") and
+                (type(completed_updates) is not int or completed_updates != update))):
         raise ValueError(f"checkpoint provenance does not match its run manifest: {checkpoint}")
+    freshness = (_running_freshness(checkpoint, run_id, track, update)
+                 if status == "running" else None)
     model = make_meco_track(track, candidate_features=CANDIDATE_BASE_FEATURE_COUNT)
     model.load_state_dict(payload["model"], strict=True)
     provenance = {"checkpoint": str(checkpoint), "sha256": digest,
                   "track": track, "update": update,
                   "run_id": run_id, "sources": sources,
                   "config": config,
+                  "protocol_id": checkpoint_protocol,
+                  "training_status": status,
+                  "manifest_completed_updates": completed_updates,
+                  "running_checkpoint_freshness": freshness,
                   "run_manifest": str(manifest_path),
                   "source_trust": "checkpoint source snapshot matches adjacent trainer run manifest; current checkout is not compared"}
     return ExportAdapter(track, model).eval(), provenance

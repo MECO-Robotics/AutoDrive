@@ -36,11 +36,18 @@ shape, so a checkpoint with a different layer shape fails strict state loading.
 Checkpoint provenance is accepted only when the adjacent `run.json` agrees on
 schema version, run ID, track configuration, and the complete source snapshot;
 the manifest's source and immutable-configuration digests are recomputed. This
-is a consistency check between trainer artifacts, not a signature or proof of
-artifact authenticity. The inspector intentionally does not compare historical
-checkpoint source hashes with its current checkout, because the deployment
-inspector itself is among the tracked sources and that would invalidate older
-checkpoints whenever inspection code changes.
+also requires an explicitly present `protocol_id` in both checkpoint and
+manifest with exact equality (including `null` only when both explicitly use
+`null`). For `complete` and `stopped` runs, manifest `completed_updates` must
+equal the checkpoint update. Checkpoints from `failed` runs are rejected and
+the recorded failure is reported. A `running` run records whether a matching
+heartbeat was observed; absent or mismatched heartbeat data is labeled
+freshness unknown, and an ahead heartbeat warns that the checkpoint may lag the
+active run. These checks establish consistency between trainer artifacts, not
+a signature or proof of artifact authenticity. The inspector intentionally
+does not compare historical checkpoint source hashes with its current checkout,
+because the deployment inspector itself is among the tracked sources and that
+would invalidate older checkpoints whenever inspection code changes.
 The profile reports Hailo compiler package and `/dev/hailo*` visibility only;
 operator support, compilation, memory fit, and latency on Hailo hardware remain
 unverified until the actual toolchain and device are exercised.
