@@ -42,6 +42,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     SUPPORT_ORDER)
+from .meco_metric_ledger import MecoEpisodeMetricLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -433,7 +434,8 @@ def _value(value_head, globals_, hidden):
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
                     allow_action7_traversal=False,
-                    safety_counts: dict | None = None):
+                    safety_counts: dict | None = None,
+                    metric_ledger: MecoEpisodeMetricLedger | None = None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -447,6 +449,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading)
+        if metric_ledger is not None:
+            metric_ledger.observe_outer_step()
         executed_actions.append(int(env.last_actions[0, 3].item()))
         if safety_counts is not None:
             def focal_contact(name):
@@ -1337,6 +1341,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             component_timing_ms["legal_graph_build"].append(
                                 (time.perf_counter() - graph_started) * 1000.)
                         hidden = None
+                        episode_metric_ledger = MecoEpisodeMetricLedger(
+                            env, route_tracking_available=not is_production_d0,
+                            goal_tracking_available=not is_production_d0)
                         commitment = None
                         actions_count = [0] * 8
                         routes_seen = []
@@ -1377,6 +1384,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                              dtype=torch.long)
                                 _, _, done, truncated, _ = env.step(
                                     native_actions, capture_info=False)
+                                episode_metric_ledger.observe_outer_step()
                                 executed = int(env.last_actions[0, 3].item())
                                 executed_action_trace.append(executed)
                                 actions_count[executed] += 1
@@ -1504,6 +1512,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 goal_heading=goal_heading,
                                 allow_action7_traversal=(prepared is not None and
                                                           "support" in prepared and action == 7),
+                                metric_ledger=episode_metric_ledger,
                                 safety_counts=(post_fault_safety if use_d1_fallback else None))
                             if use_d1_fallback:
                                 post_fault_macro_count += 1
@@ -1537,6 +1546,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             route_id = (pending_eval_goal["route_id"] if forced_eval_goal
                                         else routes_seen[-1].get("candidate_id")
                                         if routes_seen else None)
+                            episode_metric_ledger.observe_route(route_id)
+                            episode_metric_ledger.observe_goal_attempt(
+                                action=action, route_id=route_id, goal_xy=goal_xy,
+                                goal_heading=goal_heading,
+                                terminal_goal_distance_m=goal_distance,
+                                terminal_heading_error_rad=heading_error,
+                                heading_alignment_opportunity=heading_opportunity)
                             if ((not forced_eval_goal and prepared is not None and
                                  prepared.get("fallback_used", False)) or hard_failure):
                                 execution_failures.append({
@@ -1650,6 +1666,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "execution_failures": execution_failures,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
+                            "meco_metric_ledger": episode_metric_ledger.to_record(),
                             "route_trace": routes_seen,
                             "episode_id": episode_id})
                         update_evaluation_status("running", len(records))
@@ -1659,6 +1676,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "sources": sources,
+            "episode_metric_ledger_schema": {
+                "schema_version": 1,
+                "record_field": "meco_metric_ledger",
+                "scope": "one ledger per evaluation record, focal slot 3",
+                "outer_step_sampling": "fuel event and contact signals are sampled after each outer CurriculumEnv.step",
+                "distance": "XY chord proxy between outer-step pose samples; not exact curved path length",
+                "route_switches": "selected candidate route ID changes; not AD* replans",
+                "route_aba_proxy": "three consecutive selected route IDs A-B-A; not interception or feint detection",
+                "unavailable_counts": ["abandoned fuel", "failed collection"],
+            },
             "training_protocol_ids": ([common_training_protocol]
                 if common_training_protocol else []),
             "shared_training_configuration": common_training_config,
