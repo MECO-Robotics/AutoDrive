@@ -18,6 +18,7 @@
         `<td>${esc(run.run_id || "—")}<small>Evidence ${esc(evidence.evaluation_id || "—")}</small></td>`+
         `<td>${esc(run.latest_checkpoint?.path || "—")}<small>${esc(run.latest_checkpoint?.bytes ?? "")} bytes</small></td>`+
         `<td><small>Source ${esc(run.source_identity_sha256 || evidence.source_hash || "—")}</small>`+
+        `<small>Policy ${esc(evidence.policy_manifest?.policy_id || "—")}</small>`+
         `<small>Eval weights ${esc(evidence.policy_manifest?.checkpoint_sha256 || "deterministic")}</small>`+
         `<small>Protocol ${esc(evidence.protocol_id || "—")}</small></td>`+
         `<td><small>${pretty(evidence.records || run.latest_training_metrics || {})}</small></td></tr>`;

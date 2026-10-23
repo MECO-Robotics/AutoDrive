@@ -183,6 +183,9 @@ def _comparison(report):
             or not report["sources"]
             or type(report.get("diagnostic")) is not bool
             or report.get("split") != "validation"
+            or not isinstance(report.get("control_definitions"), dict)
+            or report["control_definitions"].get("D0") !=
+               "curriculum teacher proxy; not production AutoDrive controller"
             or not isinstance(report.get("policy_manifest"), dict)
             or set(report["policy_manifest"]) != set(POLICIES)
             or any(not isinstance(value, dict)
@@ -270,6 +273,7 @@ def _comparison(report):
             "diagnostic": report.get("diagnostic") is True,
             "matched_status": "diagnostic matched" if report.get("diagnostic") is True else "non-diagnostic matched",
             "policy_manifest": report["policy_manifest"],
+            "control_definitions": report["control_definitions"],
             "policy_metrics": {policy: {category: _summarize([
                 _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
                 for category in categories} for policy in POLICIES}}

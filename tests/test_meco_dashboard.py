@@ -17,7 +17,9 @@ def _report():
                  "source_identity_sha256": source_hash}
         for policy in TRACKS
     }
-    policy_manifest.update({policy: {"policy_id": policy, "checkpoint_sha256": None,
+    control_ids = {"D0": "D0_teacher_proxy", "D1": "D1_hand_weighted",
+                   "D2": "D2_kinematic_prediction"}
+    policy_manifest.update({policy: {"policy_id": control_ids[policy], "checkpoint_sha256": None,
                                     "source_identity_sha256": source_hash}
                            for policy in CONTROLS})
     return {
@@ -27,6 +29,9 @@ def _report():
         "episodes_per_category": len(seeds),
         "tracks": list(TRACKS), "controls": list(CONTROLS), "paired": True,
         "split": "validation", "diagnostic": True,
+        "control_definitions": {"D0": "curriculum teacher proxy; not production AutoDrive controller",
+            "D1": "hand-weighted scorer over the shared feasible candidate table",
+            "D2": "D1 scorer with kinematic opponent endpoint prediction"},
         "policy_manifest": policy_manifest,
         "records": [{"scenario_id": "fuel-test", "category": category,
                      "seed": seed, "policy": policy,
@@ -101,6 +106,7 @@ def test_only_complete_matched_evaluation_is_exposed_with_category_uncertainty(t
     group = result["comparison_groups"][0]
     assert group["matched_status"] == "diagnostic matched"
     assert group["record_count"] == 4
+    assert group["control_definitions"]["D0"].startswith("curriculum teacher proxy")
     assert group["policy_metrics"]["A1"]["open"]["success"]["n"] == 2
     assert group["policy_metrics"]["A1"]["open"]["success"]["normal_95_interval"] is not None
     assert next(row for row in result["policies"] if row["policy_id"] == "D2")["evaluation_state"] == "diagnostic matched"
