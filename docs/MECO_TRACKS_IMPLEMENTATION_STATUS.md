@@ -452,22 +452,3 @@ or dashboard replay were run. Qualification, evaluation, and promotion evidence
 remain pending. The GPU-only contract applies to simulator/model/evaluator
 compute; orchestration, tensor serialization, checkpoint map-location, and RNG
 handling may still use the host CPU.
-
-## GPU-only defaults and snapshot capture follow-up (2026-10-23)
-
-In isolated worktree `codex/meco-gpu-only-freshness` based on runtime integration
-`755633d3`, observation snapshots now capture host monotonic time at acquisition
-before simulator tensor reads or CPU serialization, while preserving simulation
-time separately. Supervisor CLI and API validate all training and evaluator
-assignments as explicitly indexed, available CUDA/ROCm devices before workers
-can launch. The standalone trainer, supervised collection and warm-start,
-counterfactual collection, Plan A route collection, and Plan A P warm-start
-paths likewise reject omitted, CPU, unindexed, or unavailable devices. Qualification
-documentation now gives the target/prerequisite calibration bundle and margin
-sequence before v2 validation and identifies v1 as historical and nonpromotable.
-
-Static review only: no tests, simulator evaluation, calibration, GPU runtime,
-or dashboard replay were run. Qualification, evaluation, and promotion evidence
-remain pending. The GPU-only contract applies to simulator/model/evaluator
-compute; orchestration, tensor serialization, checkpoint map-location, and RNG
-handling may still use the host CPU.
