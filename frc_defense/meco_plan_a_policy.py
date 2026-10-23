@@ -45,9 +45,9 @@ class PlanAActionSupport:
         return int(self.valid_mask.numel())
 
 
-def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
-    """Recompute the integrity digest for frozen PPO support/path metadata."""
-    tensors = {
+def _plan_a_support_tensors(support: PlanAActionSupport, graph):
+    """Return the canonical, ordered tensor set bound to the support digest."""
+    return {
         "node_ids": support.node_ids,
         "behavior_ids": support.behavior_ids,
         "action_ids": support.action_ids,
@@ -66,9 +66,13 @@ def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
         "edges": graph.edges,
         "edge_mask": graph.edge_mask,
     }
+
+
+def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
+    """Recompute the integrity digest for frozen PPO support/path metadata."""
     digest = hashlib.sha256(SUPPORT_ORDER.encode())
     digest.update(support.snapshot_id.encode())
-    for name, tensor in tensors.items():
+    for name, tensor in _plan_a_support_tensors(support, graph).items():
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
@@ -233,20 +237,6 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     while (1 << len(jumps)) < n:
         previous = jumps[-1]
         jumps.append(previous.index_select(0, previous))
-    frozen = {
-        "node_ids": torch.arange(n, device=device, dtype=torch.long),
-        "behavior_ids": behavior_ids, "action_ids": action_ids,
-        "pair_node_ids": pair_node_ids, "descriptor_ids": descriptor_ids,
-        "valid_mask": valid,
-        "distances_m": torch.tensor(physical_distances, device=device, dtype=graph.xy.dtype),
-        "route_cost": torch.tensor(distances, device=device, dtype=graph.xy.dtype),
-        "parent_ids": torch.tensor(parents, device=device, dtype=torch.long),
-        "parent_edge_m": torch.tensor(edge_lengths, device=device, dtype=graph.xy.dtype),
-        "goal_xy": graph.xy.detach().clone(),
-        "heading_bin": graph.heading_bin.detach().clone(),
-        "edges": graph.edges.detach().clone(),
-        "edge_mask": graph.edge_mask.detach().clone(),
-    }
     support = PlanAActionSupport(
         node_ids=torch.arange(n, device=device, dtype=torch.long),
         behavior_ids=behavior_ids, action_ids=action_ids,
@@ -259,7 +249,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         traversal_order=torch.tensor(order, device=device, dtype=torch.long),
         ancestor_jumps=torch.stack(jumps),
         root_node=root, fallback_pair=fallback_pair,
-        goal_xy=frozen["goal_xy"], snapshot_id=snapshot_id,
+        goal_xy=graph.xy.detach().clone(), snapshot_id=snapshot_id,
         support_digest="")
     return PlanAActionSupport(**{
         **support.__dict__,
