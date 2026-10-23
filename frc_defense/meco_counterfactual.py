@@ -427,7 +427,7 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
                  planner_traversal_cost_override=None,
                  planner_traversal_cost_scale=1.0,
                  planner_force_goal_replan=False,
-                 planner_route_trace=None):
+                 planner_route_trace=None, return_execution_flags=False):
     from .meco_track_training import _run_macro_step
     values = _run_macro_step(env, action, action_ticks, goal_xy,
         goal_heading=goal_heading,
@@ -437,8 +437,13 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
         planner_force_goal_replan=planner_force_goal_replan,
         planner_route_trace=planner_route_trace)
     reward, ended, timeout = values[:3]
-    return (float(reward.detach().cpu().item()), bool(ended), bool(timeout),
+    result = (float(reward.detach().cpu().item()), bool(ended), bool(timeout),
             list(values[3]), values[4], values[5], bool(values[7]))
+    if return_execution_flags:
+        requested_action = int(action)
+        remasked = any(item != requested_action for item in values[3])
+        return (*result, bool(values[8]), remasked)
+    return result
 
 
 def _plan_a_p_map_digest(cost_map):
@@ -1572,6 +1577,12 @@ def _select_plan_a_expert_goal_v1(support):
 
 def _replay_plan_a_expert_goal_source_row(record, base_manifest):
     """Rebuild source support, rerun selection, and verify explicit execution."""
+    base = record.get("base_record")
+    if (not isinstance(base, dict) or
+            record.get("snapshot_id") != base.get("branch_state", {}).get("snapshot_id") or
+            record.get("state_sha256") != base.get("predecision_simulator_state_sha256") or
+            record.get("macro_ticks") != base.get("macro_ticks")):
+        raise RuntimeError("expert-goal source state identity differs from its v3 base row")
     replay = replay_counterfactual_branch(record["base_record"], base_manifest)
     env = replay["env"]
     try:
@@ -1583,22 +1594,30 @@ def _replay_plan_a_expert_goal_source_row(record, base_manifest):
                 selected["descriptor_sha256"] !=
                     record.get("teacher_selected_goal_descriptor_sha256")):
             raise RuntimeError("expert-goal selector result changed on replay")
-        reward, ended, timeout, trace, _, _, preempted = _reward_step(env,
+        (reward, ended, timeout, trace, _, _, preempted,
+         selected_target_lost, action_remasked) = _reward_step(env,
             selected["action"], record["macro_ticks"], goal_xy=selected["goal_xy_m"],
             goal_heading=selected["goal_heading_rad"],
             allow_action7_traversal=(selected["action"] == 7),
-            planner_force_goal_replan=True)
-        if preempted or any(action != selected["action"] for action in trace):
-            raise RuntimeError("explicit expert-goal execution was preempted or remasked")
+            planner_force_goal_replan=True, return_execution_flags=True)
+        if preempted or selected_target_lost or action_remasked:
+            raise RuntimeError("explicit expert-goal execution was preempted, lost, or remasked")
         if (trace != record.get("executed_action_trace") or
+                record.get("executed_action") != selected["action"] or
                 reward != record.get("gross_macro_return") or
-                bool(ended or timeout) != record.get("terminal")):
+                bool(ended or timeout) != record.get("terminal") or
+                record.get("execution_failure") is not False or
+                record.get("selected_target_lost") is not False or
+                record.get("action_remasked") is not False or
+                record.get("native_goal_preempted") is not False):
             raise RuntimeError("expert-goal execution trace/outcome changed on replay")
         return {"teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
             "selected_goal": selected, "selected_pair_index": pair,
             "teacher_selected_action": selected["action"],
             "teacher_selected_behavior": selected["behavior_id"],
-            "support_digest": support.support_digest}
+            "support_digest": support.support_digest,
+            "snapshot_id": record["snapshot_id"],
+            "simulator_state_sha256": record["state_sha256"]}
     finally:
         close = getattr(env, "close", None)
         if callable(close): close()
@@ -1624,13 +1643,14 @@ def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
         env = replay["env"]
         try:
             pair, selected = _select_plan_a_expert_goal_v1(replay["support"])
-            reward, ended, timeout, trace, _, _, preempted = _reward_step(env,
+            (reward, ended, timeout, trace, _, _, preempted,
+             selected_target_lost, action_remasked) = _reward_step(env,
                 selected["action"], base["macro_ticks"], goal_xy=selected["goal_xy_m"],
                 goal_heading=selected["goal_heading_rad"],
                 allow_action7_traversal=(selected["action"] == 7),
-                planner_force_goal_replan=True)
-            if preempted or any(action != selected["action"] for action in trace):
-                raise RuntimeError("selected explicit expert goal was preempted or remasked")
+                planner_force_goal_replan=True, return_execution_flags=True)
+            if preempted or selected_target_lost or action_remasked:
+                raise RuntimeError("selected explicit expert goal was preempted, lost, or remasked")
             output_rows.append({"schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
                 "target_schema": PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
                 "scenario_id": base["scenario_id"], "category": base["category"],
@@ -1642,6 +1662,10 @@ def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
                 "teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
                 "selected_pair_index": pair, "executed_action": selected["action"],
                 "executed_action_trace": trace, "gross_macro_return": reward,
+                "execution_failure": bool(preempted or selected_target_lost or action_remasked),
+                "native_goal_preempted": preempted,
+                "selected_target_lost": selected_target_lost,
+                "action_remasked": action_remasked,
                 "terminal": bool(ended or timeout), "u_status": "unavailable",
                 "u_target": None,
                 "u_unavailable_reason": "no independent expert goal-value oracle",

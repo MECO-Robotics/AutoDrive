@@ -526,12 +526,14 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
     expert_source_manifest_path = source_dataset.with_suffix(source_dataset.suffix + ".manifest.json")
     expert_source_manifest = json.loads(expert_source_manifest_path.read_text())
     expert_source_sha = hashlib.sha256(source_dataset.read_bytes()).hexdigest()
+    legal_source_dataset = source_dataset
     if expert_source_manifest.get("schema") == PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA:
         base_name = expert_source_manifest.get("base_dataset")
         if (not isinstance(base_name, str) or not base_name or
                 Path(base_name).is_absolute()):
             raise ValueError("expert-goal source has invalid base dataset reference")
         base_dataset = (source_dataset.parent / base_name).resolve()
+        legal_source_dataset = base_dataset
         source_rows, source_sha, source_manifest_sha, protocol, protocol_id, protocol_sha, source_manifest = \
             _read_counterfactual_dataset(base_dataset,
                 qualification_protocol=qualification_protocol, expected_sources=expected_sources)
@@ -613,7 +615,7 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
             legal_manifest.get("dataset_sha256") != legal_sha):
         raise ValueError("expert-goal annotations do not bind the frozen legal-node source")
     replayed_legal, _, replayed_legal_sha, _ = _read_and_replay_plan_a_legal_node_dataset(
-        legal_node_dataset, source_dataset, qualification_protocol, device, track=None)
+        legal_node_dataset, legal_source_dataset, qualification_protocol, device, track=None)
     if replayed_legal_sha != legal_sha:
         raise ValueError("bound legal-node dataset changed during replay validation")
     legal_rows = [sample["row"] for sample in replayed_legal]
@@ -643,9 +645,15 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
             raise ValueError("expert-goal row is malformed, duplicated, or outside bound train support")
         seen.add(key)
         legal, source = legal_by_key[key], source_by_key[key]
-        if (row.get("support_digest") != legal.get("support_digest") or
+        source_state_sha = source.get("simulator_state_sha256")
+        if (not isinstance(source.get("snapshot_id"), str) or not source["snapshot_id"] or
+                not isinstance(source_state_sha, str) or len(source_state_sha) != 64 or
+                any(char not in "0123456789abcdef" for char in source_state_sha) or
+                not isinstance(row.get("snapshot_id"), str) or not row["snapshot_id"] or
+                not isinstance(row.get("state_sha256"), str) or len(row["state_sha256"]) != 64 or
+                row.get("support_digest") != legal.get("support_digest") or
                 row.get("snapshot_id") != source.get("snapshot_id") or
-                row.get("state_sha256") != source.get("simulator_state_sha256") or
+                row.get("state_sha256") != source_state_sha or
                 legal.get("support_digest") is None):
             raise ValueError("expert annotation does not identify the exact replay support/execution state")
         if (not isinstance(source.get("teacher_selected_goal_descriptor_sha256"), str) or
@@ -658,7 +666,9 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
         expected_behavior = source.get("teacher_selected_behavior",
             ACTION_TO_BEHAVIOR.get(executed_action))
         if (type(executed_action) is not int or executed_action != expected_action or
-                row.get("selected_behavior_id") != expected_behavior):
+                type(expected_behavior) is not int or
+                type(row.get("selected_behavior_id")) is not int or
+                row["selected_behavior_id"] != expected_behavior):
             raise ValueError("annotation behavior/action does not match the replayed teacher execution")
         goal = row.get("selected_goal")
         if not isinstance(goal, dict) or type(goal.get("node_id")) is not int:
