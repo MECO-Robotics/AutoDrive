@@ -716,7 +716,8 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             elif state == "queued":
                 state = ("queued" if queue["state"] == "fresh"
                          and lane.get("run_id") == manifest.get("run_id") else "unconfirmed")
-            elif state not in ("complete", "stopped", "failed", "unknown"):
+            elif state not in ("complete", "stopped", "failed",
+                                "aborted_due_to_sibling_failure", "unknown"):
                 state = "unknown"
             if (lane.get("run_id") == manifest.get("run_id")
                     and lane.get("pid") == heartbeat.get("pid")):

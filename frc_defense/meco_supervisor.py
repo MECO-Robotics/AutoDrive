@@ -63,8 +63,42 @@ def _checkpoint_info(path: Path):
     return payload
 
 
+def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
+                        kill_seconds=10.):
+    """Give workers time to observe a stop marker, then bound group teardown."""
+    deadline = time.monotonic() + graceful_seconds
+    while time.monotonic() < deadline:
+        alive = [process for process in processes.values() if process.poll() is None]
+        if not alive:
+            break
+        time.sleep(min(.5, max(0., deadline - time.monotonic())))
+    for process in processes.values():
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + term_seconds
+    while time.monotonic() < deadline:
+        alive = [process for process in processes.values() if process.poll() is None]
+        if not alive:
+            break
+        time.sleep(min(.25, max(0., deadline - time.monotonic())))
+    for process in processes.values():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    deadline = time.monotonic() + kill_seconds
+    while time.monotonic() < deadline:
+        alive = [process for process in processes.values() if process.poll() is None]
+        if not alive:
+            break
+        time.sleep(min(.1, max(0., deadline - time.monotonic())))
+    return [process.pid for process in processes.values() if process.poll() is None]
+
+
 def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
-                   stop_file: Path, resume: Path | None, protocol_id: str,
+                   stop_file: Path, abort_file: Path, resume: Path | None, protocol_id: str,
                    task_assignment: dict, warm_start: Path | None = None,
                    qualification_protocol: Path | None = None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "train",
@@ -82,7 +116,8 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--p-cost-scale", str(config.p_cost_scale),
         "--p-points-per-grid-edge", str(config.p_points_per_grid_edge),
         "--prediction-mode", config.prediction_mode,
-        "--output", str(output), "--stop-file", str(stop_file), "--run-id", run_id,
+        "--output", str(output), "--stop-file", str(stop_file),
+        "--abort-file", str(abort_file), "--run-id", run_id,
         "--protocol-id", protocol_id]
     command.extend(("--task-assignment-json", json.dumps(
         task_assignment, sort_keys=True, allow_nan=False)))
@@ -452,6 +487,10 @@ class MecoSupervisor:
         processes = {}
         logs = {}
         failed = {}
+        abort_file = (self.output / ".sibling-aborts" /
+            f"{self.supervisor_id}-cycle-{cycle:06d}-{uuid.uuid4().hex}.json")
+        abort_started = None
+        force_terminated = set()
         try:
             for track in tracks:
                 if self.request_stop:
@@ -473,6 +512,7 @@ class MecoSupervisor:
                     raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
                 command = _train_command(config=config, output=self.output / track,
                     run_id=self.run_ids[track], stop_file=self.stop_file,
+                    abort_file=abort_file,
                     resume=latest if latest.is_file() else None,
                     protocol_id=self.protocol_id, task_assignment=task_assignment,
                     warm_start=warm_artifact,
@@ -501,24 +541,96 @@ class MecoSupervisor:
                     self.worker_pids.pop(track, None)
                     self._refresh_progress(track)
                     if result != 0:
-                        failed[track] = result
-                        statuses[track] = "failed"
+                        try:
+                            worker_manifest = json.loads(
+                                (self.output / track / "run.json").read_text())
+                        except (OSError, json.JSONDecodeError):
+                            worker_manifest = {}
+                        if (abort_started is not None and
+                                worker_manifest.get("status") != "failed"):
+                            statuses[track] = "aborted_due_to_sibling_failure"
+                            worker_manifest.update(status=statuses[track],
+                                sibling_abort_file=str(abort_file),
+                                sibling_abort_observed_utc=_utc(),
+                                worker_exit_code=result)
+                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                        else:
+                            failed[track] = result
+                            statuses[track] = "failed"
+                            worker_manifest.update(status="failed",
+                                error=worker_manifest.get("error") or
+                                      f"worker exited with status {result}",
+                                failed_utc=worker_manifest.get("failed_utc") or _utc(),
+                                worker_exit_code=result,
+                                completed_updates=self._completed_updates(track))
+                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            if abort_started is None:
+                                abort_started = time.monotonic()
+                                _atomic_json(abort_file, {
+                                    "schema_version": 1,
+                                    "supervisor_id": self.supervisor_id,
+                                    "cycle": cycle,
+                                    "protocol_id": self.protocol_id,
+                                    "source_identity_sha256": self.source_hash,
+                                    "failed_track": track,
+                                    "failed_exit_code": result,
+                                    "created_utc": _utc()})
                     elif self.stop_file.exists():
                         statuses[track] = "stopped"
                     else:
-                        statuses[track] = "complete"
-                        self.completed_chunks += 1
+                        try:
+                            worker_manifest = json.loads(
+                                (self.output / track / "run.json").read_text())
+                        except (OSError, json.JSONDecodeError):
+                            worker_manifest = {}
+                        worker_status = worker_manifest.get("status")
+                        if track in force_terminated:
+                            statuses[track] = "aborted_due_to_sibling_failure"
+                            worker_manifest.update(status=statuses[track],
+                                sibling_abort_file=str(abort_file),
+                                sibling_abort_reap="process_group_killed",
+                                completed_updates=self._completed_updates(track))
+                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                        elif abort_started is not None and worker_status == "aborted_due_to_sibling_failure":
+                            statuses[track] = worker_status
+                        else:
+                            statuses[track] = "complete"
+                            self.completed_chunks += 1
+                if abort_started is not None and processes and \
+                        time.monotonic() - abort_started >= 1800.:
+                    force_terminated.update(processes)
+                    unreaped = _reap_worker_groups(processes,
+                        graceful_seconds=0., term_seconds=10., kill_seconds=10.)
+                    for track, process in list(processes.items()):
+                        if process.poll() is not None:
+                            logs[track].close()
+                            del processes[track]
+                            self.worker_pids.pop(track, None)
+                            self._refresh_progress(track)
+                            statuses[track] = "aborted_due_to_sibling_failure"
+                            try:
+                                worker_manifest = json.loads(
+                                    (self.output / track / "run.json").read_text())
+                            except (OSError, json.JSONDecodeError):
+                                worker_manifest = {}
+                            worker_manifest.update(status=statuses[track],
+                                sibling_abort_file=str(abort_file),
+                                sibling_abort_reap="process_group_killed",
+                                worker_exit_code=process.returncode,
+                                completed_updates=self._completed_updates(track))
+                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                    if unreaped:
+                        raise RuntimeError(
+                            f"worker process groups remained after bounded sibling-abort reap: {unreaped}")
                 self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
                               statuses=statuses, error=failed or None)
                 self._poll_evaluator(cycle, statuses)
                 if processes:
                     time.sleep(.5)
         except BaseException:
-            # Child processes are detached into their own sessions. On every
-            # setup or runtime failure, persist stop intent and reap all workers
-            # before the output-root lock can be released. If stop-file creation
-            # fails, terminate groups directly rather than waiting on a signal
-            # path that cannot reach the children.
+            # Child processes are detached into their own sessions. On setup
+            # failure, persist stop intent and bound process-group reaping before
+            # releasing the output-root lock.
             stop_file_ready = False
             try:
                 self.stop_file.parent.mkdir(parents=True, exist_ok=True)
@@ -526,26 +638,10 @@ class MecoSupervisor:
                 stop_file_ready = True
             except OSError:
                 pass
-            for process in processes.values():
-                if process.poll() is None and not stop_file_ready:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except OSError:
-                        pass
-            for process in processes.values():
-                if process.poll() is None:
-                    try:
-                        process.wait(timeout=30. if stop_file_ready else 5.)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(process.pid, signal.SIGTERM)
-                            process.wait(timeout=5.)
-                        except (OSError, subprocess.TimeoutExpired):
-                            try:
-                                os.killpg(process.pid, signal.SIGKILL)
-                            except OSError:
-                                pass
-                            process.wait()
+            unreaped = _reap_worker_groups(processes,
+                graceful_seconds=30. if stop_file_ready else 0.)
+            if unreaped:
+                raise RuntimeError(f"worker process groups remained after bounded reap: {unreaped}")
             raise
         finally:
             for track, process in list(processes.items()):

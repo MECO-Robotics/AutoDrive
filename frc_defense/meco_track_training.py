@@ -723,7 +723,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                warm_start: str | None = None,
                qualification_protocol: str | None = None,
-               stop_file: str | None = None, run_id_override: str | None = None,
+               stop_file: str | None = None, abort_file: str | None = None,
+               run_id_override: str | None = None,
                protocol_id: str | None = None,
                task_assignment: dict | None = None):
     config.validate()
@@ -892,6 +893,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     empty_support_diagnostics = []
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
+    abort_path = Path(abort_file) if abort_file else None
 
     def abort_empty_support(exc, rows, update_number, update_events):
         nonlocal episode, task_aborts, hidden, commitment, episode_generation
@@ -929,7 +931,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
 
     try:
         chunk_target = update + config.updates
-        while update < chunk_target and not (stop_path and stop_path.exists()):
+        while update < chunk_target and not (stop_path and stop_path.exists()) \
+                and not (abort_path and abort_path.exists()):
             rows = []
             update_empty_support_events = []
             for _ in range(config.rollout_steps):
@@ -1140,7 +1143,11 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             _atomic_torch(output / "latest.pt", payload)
             _atomic_json(output / "stats.json", {"run_id": run_id, "track": config.track,
                 "update": update, "episode": episode, "history": history})
-        run_manifest.update(status="stopped" if stop_path and stop_path.exists() else "complete",
+        worker_status = ("stopped" if stop_path and stop_path.exists() else
+                         "aborted_due_to_sibling_failure"
+                         if abort_path and abort_path.exists() and update < chunk_target
+                         else "complete")
+        run_manifest.update(status=worker_status,
                             completed_updates=update,
                             stopped_utc=datetime.now(timezone.utc).isoformat())
         run_manifest["task_outcomes"] = {"assignment_id": task_assignment.get("assignment_id"),
@@ -2144,6 +2151,8 @@ def _parser():
     train.add_argument("--qualification-protocol",
         help="frozen qualification artifact required with --warm-start")
     train.add_argument("--stop-file")
+    train.add_argument("--abort-file",
+        help="invocation-scoped sibling-failure signal; honored after an atomic update checkpoint")
     train.add_argument("--run-id")
     train.add_argument("--protocol-id")
     train.add_argument("--task-assignment-json")
@@ -2189,6 +2198,7 @@ def main(argv=None):
         result = train_meco(config, resume=args.resume, warm_start=args.warm_start,
                             qualification_protocol=args.qualification_protocol,
                             stop_file=args.stop_file,
+                            abort_file=args.abort_file,
                             run_id_override=args.run_id, protocol_id=args.protocol_id,
                             task_assignment=assignment)
         print(json.dumps(result, indent=2))
