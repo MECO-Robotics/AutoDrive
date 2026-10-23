@@ -304,7 +304,8 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
 
 
 def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
-                     prediction_mode, max_c_candidates, max_a_pairs):
+                     prediction_mode, max_c_candidates, max_a_pairs,
+                     materialize=False):
     from .meco_track_training import (_candidate_replay_digest, _route_cost_tensor)
     safe = build_safe_action_candidates(env, env._last_obs, world=0, slot=3,
                                         episode_id=episode_id)
@@ -353,7 +354,7 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
             "goal_heading_rad": float(support.goal_heading[node].item())}
         item["descriptor_sha256"] = _hash(item)
         a_descriptors.append(item)
-    return {"snapshot_id": observation.snapshot_id,
+    result = {"snapshot_id": observation.snapshot_id,
         "macro_ticks": action_ticks,
         "simulator_state_sha256": _simulator_state_digest(env),
         "observation_sha256": _observation_digest(env._last_obs),
@@ -365,6 +366,113 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
         "teacher_action": int(teacher_actions(env, env._last_obs)[0, 3].item()),
         "candidate_descriptors": c_descriptors,
         "plan_a_descriptors": a_descriptors}
+    if materialize:
+        result["_training_inputs"] = {"observation": observation,
+            "candidate_set": candidates, "route_cost": route,
+            "risk_cost": risk, "support": support}
+    return result
+
+
+def replay_counterfactual_branch(record, manifest):
+    """Replay a v2 prefix with strict digest/trace parity and return branch inputs."""
+    from .meco_track_training import _reset_episode
+
+    scenario_id, category, seed = (record.get("scenario_id"),
+                                   record.get("category"), record.get("seed"))
+    if type(seed) is not int or seed < 0:
+        raise ValueError("counterfactual record has an invalid seed")
+    horizon_ticks = manifest["horizon_physics_ticks"]
+    action_ticks = manifest["max_macro_ticks"]
+    candidate_k = manifest["candidate_k"]
+    prediction_mode = manifest["prediction_mode"]
+    max_c = manifest["max_plan_c_descriptors_per_prefix"]
+    max_a = manifest["max_plan_a_pairs_per_prefix"]
+    device = manifest["device"]["device"]
+    decision_index = record["decision_index"]
+    transcript = record["prefix_transcript"]
+    if (type(decision_index) is not int or decision_index < 0 or
+            len(transcript) != decision_index or
+            _hash(transcript) != record.get("prefix_transcript_sha256")):
+        raise ValueError("counterfactual transcript length or digest mismatch")
+    if (sum(item["macro_ticks"] for item in transcript) != record.get("macro_start_tick") or
+            record.get("prefix_sha256") != _hash(transcript)):
+        raise ValueError("counterfactual prefix digest/tick position mismatch")
+
+    env = make_curriculum_env(scenario_id, category, 1, device, seed,
+                              horizon=horizon_ticks)
+    try:
+        graph = build_legal_pose_graph(env, slot=3)
+        episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
+        _reset_episode(env, seed)
+        for index, expected in enumerate(transcript):
+            ticks = expected["macro_ticks"]
+            if type(ticks) is not int or not 1 <= ticks <= action_ticks:
+                raise ValueError("counterfactual transcript has invalid macro ticks")
+            current = _prefix_snapshot(env, graph, episode_id,
+                action_ticks=ticks, candidate_k=candidate_k,
+                prediction_mode=prediction_mode, max_c_candidates=max_c,
+                max_a_pairs=max_a)
+            mapping = {"snapshot_id": "snapshot_id",
+                "predecision_simulator_state_sha256": "simulator_state_sha256",
+                "predecision_observation_sha256": "observation_sha256",
+                "safe_observation_sha256": "safe_observation_sha256",
+                "candidate_digest": "candidate_digest",
+                "candidate_replay_digest": "candidate_replay_digest",
+                "support_digest": "support_digest", "macro_ticks": "macro_ticks"}
+            for archived, actual in mapping.items():
+                if expected.get(archived) != current[actual]:
+                    raise RuntimeError(f"strict v2 replay parity mismatch at transcript[{index}].{archived}")
+            action = expected.get("action")
+            if type(action) is not int or action != current["teacher_action"]:
+                raise RuntimeError("teacher prefix action changed during v2 replay")
+            if expected.get("candidate_commitment") is not None:
+                raise ValueError("v2 teacher transcript cannot contain candidate commitments")
+            if type(expected.get("allow_action7_traversal")) is not bool:
+                raise ValueError("v2 teacher transcript has invalid traversal semantics")
+            reward, ended, timeout, trace, _, _, _ = _reward_step(env, action, ticks,
+                goal_xy=expected.get("goal_xy_m"),
+                goal_heading=expected.get("goal_heading_rad"),
+                allow_action7_traversal=expected.get("allow_action7_traversal", False))
+            if trace != expected.get("executed_action_trace"):
+                raise RuntimeError("executed action trace changed during v2 prefix replay")
+            if not math.isfinite(reward) or reward != expected.get("gross_macro_return"):
+                raise RuntimeError("prefix gross return changed during v2 replay")
+            if ended or timeout:
+                raise RuntimeError("v2 prefix ended before its archived branch point")
+
+        ticks = record.get("macro_ticks")
+        if type(ticks) is not int or not 1 <= ticks <= action_ticks:
+            raise ValueError("counterfactual branch has invalid macro ticks")
+        current = _prefix_snapshot(env, graph, episode_id, action_ticks=ticks,
+            candidate_k=candidate_k, prediction_mode=prediction_mode,
+            max_c_candidates=max_c, max_a_pairs=max_a, materialize=True)
+        state = record.get("branch_state")
+        mapping = {"snapshot_id": "snapshot_id",
+            "simulator_state_sha256": "simulator_state_sha256",
+            "observation_sha256": "observation_sha256",
+            "safe_observation_sha256": "safe_observation_sha256",
+            "candidate_digest": "candidate_digest",
+            "candidate_replay_digest": "candidate_replay_digest",
+            "support_digest": "support_digest"}
+        if not isinstance(state, dict):
+            raise ValueError("counterfactual branch state is missing")
+        for archived, actual in mapping.items():
+            top_level_value = record.get("predecision_" + archived)
+            if (state.get(archived) != current[actual] or
+                    (top_level_value is not None and top_level_value != current[actual])):
+                raise RuntimeError(f"strict v2 branch-state parity mismatch at {archived}")
+        for field in ("candidate_digest", "candidate_replay_digest", "support_digest"):
+            if record.get(field) != current[field]:
+                raise RuntimeError(f"strict v2 top-level branch parity mismatch at {field}")
+        if current["macro_ticks"] != record.get("macro_ticks"):
+            raise RuntimeError("strict v2 branch macro-tick mismatch")
+        return {"env": env, "graph": graph, "snapshot": current,
+                **current["_training_inputs"]}
+    except BaseException:
+        close = getattr(env, "close", None)
+        if callable(close):
+            close()
+        raise
 
 
 def _deterministic_sample(indices, limit, key):
@@ -507,6 +615,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "prediction_mode": prediction_mode,
         "prediction_contract": prediction_contract(prediction_mode),
         "candidate_boundary": CANDIDATE_BOUNDARY,
+        "candidate_k": candidate_k,
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
         "plan_a_support_order": SUPPORT_ORDER,
         "horizon_physics_ticks": horizon_ticks, "max_macro_ticks": action_ticks,
@@ -558,10 +667,28 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             if callable(close):
                 close()
         for decision_index, item in enumerate(prefix):
+            prefix_transcript = [{
+                "predecision_simulator_state_sha256": row["simulator_state_sha256"],
+                "predecision_observation_sha256": row["observation_sha256"],
+                "safe_observation_sha256": row["safe_observation_sha256"],
+                "candidate_digest": row["candidate_digest"],
+                "candidate_replay_digest": row["candidate_replay_digest"],
+                "support_digest": row["support_digest"],
+                "snapshot_id": row["snapshot_id"],
+                "macro_ticks": row["macro_ticks"],
+                "action": row["teacher_action"],
+                "goal_xy_m": row["prefix_goal_xy_m"],
+                "goal_heading_rad": row["prefix_goal_heading_rad"],
+                "allow_action7_traversal": row["prefix_action7_traversal"],
+                "candidate_commitment": row["prefix_candidate_commitment"],
+                "executed_action_trace": row["executed_action_trace"],
+                "gross_macro_return": row["prefix_gross_return"]}
+                for row in prefix[:decision_index]]
             group = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
                 "scenario_id": scenario_id, "category": category, "seed": seed,
                 "decision_index": decision_index,
-                "prefix_sha256": _hash(prefix[:decision_index]),
+                "prefix_sha256": _hash(prefix_transcript),
+                "prefix_transcript_sha256": _hash(prefix_transcript),
                 "protocol_id": protocol_id,
                 "qualification_protocol_sha256": protocol_sha,
                 "source_identity_sha256": manifest["source_identity_sha256"],
@@ -585,22 +712,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     "candidate_digest": item["candidate_digest"],
                     "candidate_replay_digest": item["candidate_replay_digest"],
                     "support_digest": item["support_digest"]},
-                "prefix_transcript": [{
-                    "predecision_simulator_state_sha256": row["simulator_state_sha256"],
-                    "predecision_observation_sha256": row["observation_sha256"],
-                    "candidate_digest": row["candidate_digest"],
-                    "candidate_replay_digest": row["candidate_replay_digest"],
-                    "support_digest": row["support_digest"],
-                    "snapshot_id": row["snapshot_id"],
-                    "macro_ticks": row["macro_ticks"],
-                    "action": row["teacher_action"],
-                    "goal_xy_m": row["prefix_goal_xy_m"],
-                    "goal_heading_rad": row["prefix_goal_heading_rad"],
-                    "allow_action7_traversal": row["prefix_action7_traversal"],
-                    "candidate_commitment": row["prefix_candidate_commitment"],
-                    "executed_action_trace": row["executed_action_trace"],
-                    "gross_macro_return": row["prefix_gross_return"]}
-                    for row in prefix[:decision_index]]}
+                "prefix_transcript": prefix_transcript}
             c_outcomes = []
             for descriptor in item["candidate_descriptors"]:
                 outcome = _branch_return(scenario_id=scenario_id, category=category,

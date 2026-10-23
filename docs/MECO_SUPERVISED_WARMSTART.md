@@ -115,7 +115,34 @@ python -m frc_defense.meco_supervised collect-counterfactual-v2 \
 
 This is a label collector, not an expert policy or simulator oracle. The v1
 `warm-start` command still consumes only v1 observed-behavior rows; v2-to-model
-fitting and training-checkpoint integration remain open. No simulator run has
-been performed to establish that reset-and-replay parity succeeds on the
-configured runtime/device. Until a v2 artifact is collected and reviewed with
-that parity evidence, Phase 2 remains incomplete.
+fitting is a distinct command and artifact path:
+
+```sh
+python -m frc_defense.meco_supervised warm-start-counterfactual-v2 \
+  --track C1 --dataset evaluations/meco-supervised/counterfactual-v2.jsonl \
+  --output checkpoints/meco-warmstart/C1-counterfactual-v2.pt \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --device cpu
+```
+
+The v2 fitter verifies dataset bytes, manifest and row schemas, protocol/train
+split, source/runtime/device, candidate and support contracts, finite returns,
+and pair labels. It replays every matched teacher prefix and rejects any
+simulator, observation, candidate, support, descriptor, or action-trace parity
+mismatch. It trains only on non-tied within-prefix pairwise comparisons of
+`gross_horizon_return`. Plan A scores exact sampled support rows with U(node) +
+B(behavior); P remains null and has zero prior. Plan C scores the exact replayed
+candidate rows with the existing candidate scorer. The resulting
+`meco-counterfactual-warm-start-weights-v2` artifact is weights-only and has a
+separate `validate_counterfactual_warm_start_artifact` /
+`load_counterfactual_warm_start` API. The v1 `warm-start` and its artifact
+contract remain unchanged and never read v2 labels. Plan A's penalty head gets
+no v2 pairwise gradient and remains untouched in the artifact; `plan_a_p_mode`
+is explicitly `p0` for this warm-start inference contract. Later RL can train
+the preserved head normally, and P ablations remain independent.
+
+No simulator run has been performed to establish that reset-and-replay parity
+succeeds on the configured runtime/device. A successful v2 fit requires that
+replay to pass when the command is run; Phase 2 still needs a representative
+end-to-end simulator evaluation before its behavior claims are treated as
+validated.
