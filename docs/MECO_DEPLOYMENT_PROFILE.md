@@ -27,6 +27,20 @@ fit these dimensions. Dynamic route construction, AD* search, simulator feature
 assembly, valid-candidate filtering, production action execution, and physical
 actuation are not measured. These synthetic scorer timings are explicitly
 non-qualification and must not be used as deployment evidence.
+
+For C1 and C2, each candidate row has 20 named values (14 safe-action columns
+and six route/commitment columns), plus 20 missingness indicators. The shared
+feature contract supplies both the trainer model constructor and profiler input
+shape, so a checkpoint with a different layer shape fails strict state loading.
+
+Checkpoint provenance is accepted only when the adjacent `run.json` agrees on
+schema version, run ID, track configuration, and the complete source snapshot;
+the manifest's source and immutable-configuration digests are recomputed. This
+is a consistency check between trainer artifacts, not a signature or proof of
+artifact authenticity. The inspector intentionally does not compare historical
+checkpoint source hashes with its current checkout, because the deployment
+inspector itself is among the tracked sources and that would invalidate older
+checkpoints whenever inspection code changes.
 The profile reports Hailo compiler package and `/dev/hailo*` visibility only;
 operator support, compilation, memory fit, and latency on Hailo hardware remain
 unverified until the actual toolchain and device are exercised.

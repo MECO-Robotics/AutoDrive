@@ -21,7 +21,8 @@ from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
     opponent_forecast, prediction_contract, PREDICTION_MODES,
-    PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS)
+    PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
+    SAFE_ACTION_FEATURES)
 
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
@@ -60,6 +61,11 @@ CANDIDATE_BOUNDARY = {
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
                   "risk_penalty_points", "target_heading_rad",
                   "is_continue", "commitment_switch_cost")
+# The learned candidate scorers receive both these named table columns and
+# one missingness bit per column. Keep the contract shared with training and
+# checkpoint export rather than inferring it from a stale export fixture.
+CANDIDATE_BASE_FEATURE_COUNT = len(SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)
+CANDIDATE_MODEL_FEATURE_COUNT = 2 * CANDIDATE_BASE_FEATURE_COUNT
 
 
 @dataclass(frozen=True)

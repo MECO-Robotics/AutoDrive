@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import io
+import json
 import platform
 import resource
 import time
@@ -16,9 +17,8 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
-    MECO_CANDIDATE_MODEL_INPUT_WIDTH,
-                          make_meco_track)
+from .meco_candidates import CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_MODEL_FEATURE_COUNT
+from .meco_tracks import MECO_TRACKS, make_meco_track
 
 BATCH = 1
 NODES = 256
@@ -27,7 +27,7 @@ REGIONS = 64
 CANDIDATES = 16
 RASTER_H = RASTER_W = 64
 GLOBAL_FEATURES = 7
-CANDIDATE_FEATURES = MECO_CANDIDATE_MODEL_INPUT_WIDTH
+CANDIDATE_FEATURES = CANDIDATE_MODEL_FEATURE_COUNT
 
 
 class ExportAdapter(nn.Module):
@@ -131,12 +131,13 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
             or (completed_updates is not None and
                 (type(completed_updates) is not int or completed_updates < update))):
         raise ValueError(f"checkpoint provenance does not match its run manifest: {checkpoint}")
-    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    model = make_meco_track(track, candidate_features=CANDIDATE_BASE_FEATURE_COUNT)
     model.load_state_dict(payload["model"], strict=True)
     provenance = {"checkpoint": str(checkpoint), "sha256": digest,
                   "track": track, "update": update,
                   "run_id": run_id, "sources": sources,
-                  "config": config, "run_manifest": str(manifest_path),
+                  "config": config,
+                  "run_manifest": str(manifest_path),
                   "source_trust": "checkpoint source snapshot matches adjacent trainer run manifest; current checkout is not compared"}
     return ExportAdapter(track, model).eval(), provenance
 

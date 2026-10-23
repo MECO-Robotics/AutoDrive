@@ -25,7 +25,7 @@ from torch import nn
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .curriculum_training import source_identity
 from .training_curriculum import get_scenario
-from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES, CandidateCommitment,
+from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
     RouteFeasibleCandidates, build_route_feasible_candidates)
 from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
@@ -693,7 +693,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     output.mkdir(parents=True, exist_ok=True)
     sources = source_identity()
     model = make_meco_track(config.track,
-        candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(config.device)
+        candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(config.device)
     warm_start_provenance = None
     initialization_record = None
     if warm_start is not None:
@@ -1116,8 +1116,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
-=======
->>>>>>> 9fff8d555 (Add D0 calibration and calibrated promotion gates)
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1188,7 +1186,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         elif track_candidate_k != candidate_k:
             raise ValueError("paired evaluation checkpoints must share one candidate_k")
         model = make_meco_track(track,
-            candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+            candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(device)
         model.load_state_dict(payload["model"])
         model.eval()
         loaded[track] = model
