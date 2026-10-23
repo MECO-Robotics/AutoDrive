@@ -74,7 +74,8 @@
         "A/B matrix reviewer found two blockers: C1/D1 uses mismatched prediction modes, and per-condition reports are not checked against frozen checkpoint/source/config/protocol hashes; implementer follow-up is fixing both",
         "Contact-rate commits 948d4f101/c530fb92d passed scoped static review; reports expose three source-bound per-active-tick contact rates and leave unavailable metrics null; runtime parity/calibration still gates promotion",
         "Dashboard integration confirmed: /api/meco-status exposes implementation_passes from this ledger; current checkout keeps planner complete, implementer in_progress, reviewer in_progress while approved and pending work remains tracked.",
-        "Section 7 A/B matrix follow-up committed as 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf in isolated worktree: C1/D1 now shares CV mode and each condition validates frozen protocol/config/source/checkpoint provenance plus pre/post hash stability; scoped re-review pending."
+        "Section 7 A/B matrix follow-up committed as 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf in isolated worktree: C1/D1 now shares CV mode and each condition validates frozen protocol/config/source/checkpoint provenance plus pre/post hash stability; scoped re-review pending.",
+        "Isolated integration branch codex/meco-evaluation-plan-integration now includes reviewed counterfactual v2 fitting (through 6d6372d59), timing/fault and episode ledger (through 02836b20d), contact accounting (through 5e78817ba), D0 calibration/qualification bundle (through e8687f0ac), synthetic Phase 5 profile harness (through a9fd9ec6d), and frozen Section 7 matrix (through 260fdfbe3). Manual integration fixes at 41e5f31c3 enforce exact protocol-bound resume, frozen training-assignment validation, supervisor warm-start CLI plumbing, and shared candidate feature dimensions. Static Python compilation and git diff --check passed; no tests or simulator evaluation were run."
       ]
     },
     {
@@ -125,7 +126,8 @@
         "Scoped static review approved contact-rate commits 948d4f101 and c530fb92d: per-tick accounting and Torch/fused 2-/6-robot HIP wiring are consistent; runtime HIP parity and empirical calibration remain unverified",
         "D0 calibration bundle follow-up 8b1f496cc entered scoped re-review for retention-manifest hash binding, unchanged v1 schema, and strict safety calibration intake",
         "Section 7 A/B matrix correction 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf submitted for scoped static re-review; no tests or simulator evaluations performed.",
-        "Scoped static re-review approved Section 7 A/B matrix correction 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf: C1/D1 use matched CV mode, each condition validates frozen checkpoint/config/protocol/source provenance, and checkpoint/source drift is checked before and after evaluation; runtime experiments remain outstanding."
+        "Scoped static re-review approved Section 7 A/B matrix correction 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf: C1/D1 use matched CV mode, each condition validates frozen checkpoint/config/protocol/source provenance, and checkpoint/source drift is checked before and after evaluation; runtime experiments remain outstanding.",
+        "Integrated branch through 260fdfbe3 is undergoing a fresh scoped static review after manual cross-branch conflict resolution; previously approved feature-branch reviews do not replace this integrated review. Runtime replay, dashboard-current simulator validation, D0 calibration runs, ONNX/Hailo hardware checks, and matrix experiments remain outstanding."
       ]
     }
   ]
