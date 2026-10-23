@@ -26,6 +26,7 @@ def _run(root, *, qualified=(), diagnostic=False, sources=None):
     stats = {"sources": sources or {"sim": "fixture-digest"}, "updates": 7,
              "algorithm": "ppo", "architecture": "fixture",
              "curriculum_state": {"qualified": list(qualified), "consecutive_passes": {"pickup_simple": 3},
+                                  "consecutive_protocol": {"pickup_simple": "fixture-v1"},
                                   "last_qualified_checkpoint": {name: "policy" for name in qualified},
                                   "qualified_protocol": {name: "fixture-v1" for name in qualified}},
              "stats": [{"update": 7, "scenario_id": "pickup_simple"}]}

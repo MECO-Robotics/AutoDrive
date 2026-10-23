@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import math
 
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "d9a4a80119cedaf0d77a1037032bda54e28c91474c813d940f943e19cd413470"
+_EXPECTED_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
+
 
 def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) -> bytes:
     """Return a read-only curriculum summary and registry metadata."""
@@ -73,17 +76,23 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
                 canonical_streak = run.get("consecutive_passes", {}).get(scenario, 0)
                 canonical_policy = run.get("last_qualified_checkpoint", {}).get(scenario)
                 canonical_protocol = run.get("qualified_protocol", {}).get(scenario)
-                groups = [(evaluation_id, rows) for (name, evaluation_id), rows in evaluation_groups.items()
-                          if name == scenario and evaluation_id]
-                groups.sort(key=lambda item: max((row.get("update", -1) for row in item[1]), default=-1),
-                            reverse=True)
+                consecutive_protocol = run.get("consecutive_protocol", {}).get(scenario)
+                groups = []
+                for (name, evaluation_id), proof_rows in evaluation_groups.items():
+                    if name != scenario:
+                        continue
+                    updates = {row.get("update") for row in proof_rows}
+                    update = next(iter(updates)) if len(updates) == 1 else None
+                    groups.append((update, evaluation_id, proof_rows))
+                groups.sort(key=lambda item: item[0] if type(item[0]) is int else -1, reverse=True)
                 chain = []
-                binding = None
-                for evaluation_id, proof_rows in groups:
+                binding_protocol = None
+                for item_update, evaluation_id, proof_rows in groups:
                     categories = {row.get("category"): row for row in proof_rows}
                     names = [row.get("category") for row in proof_rows]
                     candidate = (proof_rows[0].get("policy_id"), proof_rows[0].get("protocol_id")) if proof_rows else None
-                    valid = (candidate and candidate[0] and candidate[1]
+                    valid = (type(item_update) is int and isinstance(evaluation_id, str) and evaluation_id
+                             and candidate and candidate[0] and candidate[1]
                              and len(names) == len(definition.required_categories)
                              and len(set(names)) == len(names)
                              and set(names) == set(definition.required_categories)
@@ -92,18 +101,21 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
                                      and row.get("protocol_id") == candidate[1]
                                      and _category_passes(row, definition, row.get("category"), CURRICULUM_VERSION)
                                      for row in proof_rows))
-                    if not valid:
+                    if not valid or run.get("evaluation_history_incomplete"):
                         break
-                    if binding is None:
-                        binding = candidate
-                    if candidate != binding or evaluation_id in [item["evaluation_id"] for item in chain]:
+                    if binding_protocol is None:
+                        binding_protocol = candidate[1]
+                    if (candidate[1] != binding_protocol
+                            or evaluation_id in [item["evaluation_id"] for item in chain]
+                            or chain and item_update != chain[-1]["update"] - 1):
                         break
                     chain.append({"evaluation_id": evaluation_id, "policy_id": candidate[0],
-                                  "protocol_id": candidate[1]})
+                                  "protocol_id": candidate[1], "update": item_update})
                 streak = min(len(chain), required)
                 if (scenario in raw_qualified and type(canonical_streak) is int
                         and canonical_streak >= required and streak >= required
-                        and binding == (canonical_policy, canonical_protocol)):
+                        and binding_protocol == canonical_protocol == consecutive_protocol
+                        and chain and chain[0]["policy_id"] == canonical_policy):
                     qualified_candidates.add(scenario)
                 # Evaluation details accompany the run so the UI can show why a gate is unmet.
                 run.setdefault("qualification_streaks", {})[scenario] = {
@@ -150,6 +162,8 @@ def _curriculum_report_root(run_dir, project_root=None, curriculum_root=None):
 
     project = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
     selected = Path(curriculum_root) if curriculum_root is not None else Path(run_dir)
+    if _contains_symlink(selected):
+        return None
     resolved = selected.resolve()
     if not (resolved == project or project in resolved.parents):
         return None
@@ -162,7 +176,7 @@ def _has_curriculum_data(root):
     from pathlib import Path
 
     root = Path(root)
-    if any((root / name).is_file() for name in
+    if any((root / name).is_file() and not (root / name).is_symlink() for name in
            ("orchestration.json", "queue-status.json", "queue.json", "manifest.json")):
         return True
     for current, dirs, files in __import__("os").walk(root, followlinks=False):
@@ -172,16 +186,62 @@ def _has_curriculum_data(root):
     return False
 
 
-def _three_pass_provenance():
+def _contains_symlink(path):
     from pathlib import Path
-    path = Path(__file__).resolve().parents[1] / "docs" / "MECO_THREE_PASS_PROVENANCE.json"
+    absolute = Path(path).absolute()
+    return any(part.is_symlink() for part in (absolute, *absolute.parents))
+
+
+def _three_pass_provenance():
+    import hashlib
+    from pathlib import Path
+    project = Path(__file__).resolve().parents[1]
+    relative_manifest = "docs/MECO_THREE_PASS_PROVENANCE.json"
+    unknown = {"status": "untrusted", "tranches": [],
+               "message": "Provenance evidence failed integrity checks."}
     try:
+        path = _verified_repo_file(project, relative_manifest)
+        if path is None:
+            return unknown
+        if hashlib.sha256(path.read_bytes()).hexdigest() != _EXPECTED_THREE_PASS_PROVENANCE_SHA256:
+            return unknown
         data = json.loads(path.read_text())
         if data.get("schema") != "meco-three-pass-provenance-v1":
-            raise ValueError("unsupported provenance schema")
+            return unknown
+        plan = _verified_repo_file(project, data.get("plan_path"))
+        if plan is None or hashlib.sha256(plan.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256:
+            return unknown
+        if data.get("plan_sha256") != _EXPECTED_PLAN_SHA256:
+            return unknown
+        for tranche in data.get("tranches", []):
+            if not isinstance(tranche, dict):
+                return unknown
+            for section in ("planner", "reviewer"):
+                details = tranche.get(section)
+                artifact = _verified_repo_file(
+                    project, details.get("artifact") if isinstance(details, dict) else None)
+                if (artifact is None or hashlib.sha256(artifact.read_bytes()).hexdigest()
+                        != details.get("artifact_sha256")):
+                    return unknown
         return data
-    except (OSError, ValueError, TypeError):
-        return {"status": "unknown", "tranches": []}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return unknown
+
+
+def _verified_repo_file(project, relative_path):
+    from pathlib import Path
+    if not isinstance(relative_path, str) or not relative_path:
+        return None
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    lexical = project / relative
+    if _contains_symlink(lexical):
+        return None
+    resolved = lexical.resolve()
+    if resolved != project and project not in resolved.parents:
+        return None
+    return resolved if resolved.is_file() and not resolved.is_symlink() else None
 
 
 def _category_passes(row, definition, category, curriculum_version):
