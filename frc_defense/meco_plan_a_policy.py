@@ -146,6 +146,8 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     # Intake rows bind a sensed target slot and require a bearing-aligned
     # capture neighborhood. Score rows bind to a safe score-grid endpoint;
     # ferry rows require carried fuel and bind to the current ferry endpoint;
+    # dumper ferry rows are excluded while carrying because its native action
+    # can release fuel before reaching that selected endpoint;
     # defense rows bind to an observed opponent endpoint. Drive can use any
     # reachable legal node. In Plan A's adapter, action 7 becomes a traversal
     # command only when paired with this explicit frozen planner goal.
@@ -223,7 +225,8 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     ferry_heading_legal = ((not dumper_with_fuel) |
                            (ferry_heading_error <= math.pi / 4.))
     ferry_mask = (((graph.xy - ferry_target).norm(dim=-1) <= resolution * .72) &
-                  reachable & action_mask[6] & (possession > 0) & ferry_heading_legal)
+                  reachable & action_mask[6] & (possession > 0) & ferry_heading_legal &
+                  (not dumper_with_fuel))
     defense_mask = (((graph.xy - opponent_target).norm(dim=-1) <= resolution * .72) &
                     reachable & action_mask[5])
     # Fixed eight-column descriptor layout per graph node: drive, four

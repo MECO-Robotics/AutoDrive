@@ -74,10 +74,13 @@ route. The simulator still uses XY AD* with swept SE(2) checks and dynamic
 robot arbitration. Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
 grid endpoints and heading bins within 5 degrees of the HUB-facing direction;
-ferry support requires carried fuel, the current ferry endpoint, and a heading
-inside the simulator's 45-degree release cone; defense support is restricted to
-the current intercept/post endpoint. Each selected graph heading is passed as
-an explicit terminal target. At the XY endpoint, the controller pauses
+ferry support requires carried fuel, a controllable current ferry endpoint,
+and a heading inside the simulator's 45-degree release cone; carrying dumper
+ferry pairs are excluded because native dumper action 6 can release fuel
+anywhere before reaching the selected endpoint. The slot-3 pass-event censor
+remains for any observed early release. Defense support is restricted to the
+current intercept/post endpoint. Each selected graph heading is passed as an
+explicit terminal target. At the XY endpoint, the controller pauses
 translation, samples static rectangular rotation clearance every 5 degrees,
 and checks observed robots with circumscribed footprints, stopping drift, and a
 constant-velocity point forecast over estimated turn time. The forecast has no
