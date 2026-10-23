@@ -88,13 +88,22 @@ def _pose_clear(scratch, point, heading, length, width, robot_obstacles):
     return static_clear & circle_clear
 
 
-def _cost_map_digest(cost_map) -> str:
-    """Hash map dimensions and canonical row-major float64 little-endian data."""
+def _cost_map_digest(cost_map, *, resolution: float,
+                     field_length: float, field_width: float) -> str:
+    """Hash raster geometry and canonical row-major float64 map data."""
     values = cost_map.detach().to(device="cpu", dtype=torch.float64).contiguous()
     nx, ny = values.shape
     packed_values = struct.pack(f"<{values.numel()}d", *values.reshape(-1).tolist())
-    payload = (b"autodrive.learned_traversal_cost_map.v1\0" +
-               struct.pack("<II", nx, ny) + packed_values)
+    # Cell (i, j) is at ((i + .5) * resolution, (j + .5) * resolution).
+    # Encode the field origin and full affine index-to-meter transform, along
+    # with the field bounds, so the same matrix on another grid hashes apart.
+    geometry = struct.pack(
+        "<11d", float(resolution), float(field_length), float(field_width),
+        0.0, 0.0,
+        float(resolution), 0.0, float(resolution) * 0.5,
+        0.0, float(resolution), float(resolution) * 0.5)
+    payload = (b"autodrive.learned_traversal_cost_map.xy_cell_center_affine_v2\0" +
+               struct.pack("<II", nx, ny) + geometry + packed_values)
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -241,10 +250,22 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
         effective_map = learned_map * learned_cost_scale
         if not bool(torch.isfinite(effective_map).all().item()):
             raise ValueError("scaled learned_traversal_cost must remain finite")
-        digest = _cost_map_digest(learned_map)
+        resolution = float(env.planner.resolution)
+        field_length = float(env.sim.field_length)
+        field_width = float(env.sim.field_width)
+        digest = _cost_map_digest(learned_map, resolution=resolution,
+                                  field_length=field_length,
+                                  field_width=field_width)
+        geometry_provenance = (
+            f"grid=xy_cell_center_affine_v2:r={resolution.hex()}:"
+            f"L={field_length.hex()}:W={field_width.hex()}:"
+            "origin=(0x0.0p+0,0x0.0p+0):"
+            f"transform=((r,0,{(resolution * 0.5).hex()}),"
+            f"(0,r,{(resolution * 0.5).hex()}))")
         cost_provenance = (
-            f"{learned_cost_provenance}:schema=xy_grid_f64le_v1:"
-            f"sha256={digest}:scale={learned_cost_scale:g}:"
+            f"{learned_cost_provenance}:schema=xy_grid_f64le_v2:"
+            f"{geometry_provenance}:"
+            f"sha256={digest}:scale={learned_cost_scale.hex()}:"
             "path_integral_grid_edge_v2")
     if not items:
         return ()
