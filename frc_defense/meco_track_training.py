@@ -25,7 +25,7 @@ from torch import nn
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .curriculum_training import source_identity
 from .training_curriculum import get_scenario
-from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES,
+from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
     RouteFeasibleCandidates, build_route_feasible_candidates)
 from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
@@ -33,7 +33,8 @@ from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, integrate_frozen_routes, project_pose_penalty)
 from .meco_tracks import (MECO_TRACKS, make_meco_track,
     candidate_policy_logits, predict_opponent_endpoint,
-    sample_candidate_action, score_candidates, build_safe_action_candidates)
+    sample_candidate_action, score_candidates, build_safe_action_candidates,
+    candidate_digest)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     SUPPORT_ORDER)
@@ -143,6 +144,14 @@ def _model_id(model):
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
+
+
+def _candidate_replay_digest(table, route_cost, risk_cost):
+    payload = {"table_digest": candidate_digest(table),
+        "route_cost": route_cost.detach().cpu().reshape(-1).tolist(),
+        "risk_cost": risk_cost.detach().cpu().reshape(-1).tolist()}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def _episode_id(run_id: str, episode: int) -> str:
@@ -321,7 +330,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       *, route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND,
                       action_ticks=12, candidate_k=16, deterministic=False, value_head=None,
                       record_path_penalty=False,
-                      p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05):
+                      p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
+                      commitment: CandidateCommitment | None = None):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
         return _prepare_plan_a_decision(track, model, env, graph, episode_id,
@@ -331,7 +341,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
             p_points_per_grid_edge=p_points_per_grid_edge)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
-        episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k)
+        episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
+        commitment=(commitment if track in ("C1", "C2") else None))
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     graph_data = _graph_inputs(track, graph, env, raster)
     path_geometry = _path_geometry(env)
@@ -374,6 +385,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
+            "candidate_digest": candidate_digest(candidate_set.table),
+            "candidate_replay_digest": _candidate_replay_digest(
+                candidate_set.table, route_cost, risk_cost),
             "raster": raster, "globals": globals_, "graph": graph_data,
             "decision": decision, "action": action, "logprob": logprob,
             "entropy": entropy, "hidden_next": decision["hidden"],
@@ -504,6 +518,24 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
                 raise RuntimeError("Plan A rollout log-probability does not replay under frozen support")
+        for row in rows:
+            if track not in ("C1", "C2") or row.get("candidate_set") is None:
+                continue
+            expected = row.get("candidate_digest")
+            actual = candidate_digest(row["candidate_set"].table)
+            if not expected or expected != actual:
+                raise RuntimeError("Plan C immutable candidate table changed between rollout and PPO update")
+            replay_digest = _candidate_replay_digest(row["candidate_set"].table,
+                row["route_cost"], row["risk_cost"])
+            if replay_digest != row.get("candidate_replay_digest"):
+                raise RuntimeError("Plan C candidate route/risk costs changed between rollout and PPO update")
+            replay = _policy_inputs_for_row(track, model, row,
+                                            row["hidden_before"], config)
+            replay_logprob = torch.distributions.Categorical(
+                logits=replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
+            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
+                                  atol=5e-5, rtol=5e-5):
+                raise RuntimeError("Plan C rollout log-probability does not replay under frozen candidate table")
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))
@@ -672,6 +704,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "completed_updates": update})
     update_heartbeat()
     hidden = None
+    commitment = None
     task_successes = 0
     task_failures = 0
     task_episodes = 0
@@ -693,6 +726,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         action_ticks=config.action_ticks, candidate_k=config.candidate_k,
                         p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                         p_points_per_grid_edge=config.p_points_per_grid_edge,
+                        commitment=commitment,
                         value_head=value_head)
                     action_index = int(prepared["action"][0].item())
                     hidden = prepared["hidden_next"].detach()
@@ -716,6 +750,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                float(selected_row[cols["goal_y_m"]]))
                     goal_heading = None
+                selected_candidate_id = (candidate.table.candidate_ids[action_index]
+                    if "support" not in prepared else None)
                 (reward, ended, timeout, executed_trace, heading_error,
                  goal_distance, heading_opportunity, native_preempted) = _run_macro_step(
                     env, action, config.action_ticks, goal_xy,
@@ -730,6 +766,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "globals": prepared["globals"].detach(),
                     "graph": prepared["graph"],
                     "candidate_set": prepared["candidate_set"],
+                    "candidate_digest": prepared.get("candidate_digest"),
+                    "candidate_replay_digest": prepared.get("candidate_replay_digest"),
+                    "candidate_commitment": (None if candidate.commitment is None
+                                              else asdict(candidate.commitment)),
                     **({"support": prepared["support"],
                         "support_digest": prepared["support"].support_digest,
                         "route_cost_nodes": prepared["route_cost_nodes"].detach(),
@@ -757,9 +797,27 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "path_geometry": prepared["path_geometry"],
                     "candidate_recall": (None if "support" in prepared
                                           else candidate.candidate_recall)}
-                rows.append(row)
                 goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                  (heading_error is None or heading_error <= .1))
+                rows.append(row)
+                if config.track in ("C1", "C2"):
+                    if selected_candidate_id and selected_candidate_id.startswith("continue:"):
+                        commitment = candidate.commitment
+                    elif selected_candidate_id is not None:
+                        route = candidate.route_records[action_index]
+                        source_xy = route.get("source_fuel_xy_m")
+                        sequence = candidate.observation.sequence
+                        commitment = CandidateCommitment(
+                            candidate_id=selected_candidate_id,
+                            action_index=int(action),
+                            goal_variant=int(route.get("goal_variant", 0)),
+                            source_xy_m=(None if source_xy is None else
+                                         (float(source_xy[0]), float(source_xy[1]))),
+                            created_sequence=sequence,
+                            expires_sequence=sequence + CANDIDATE_BOUNDARY[
+                                "commitment_expiry_macro_actions"] * config.action_ticks)
+                    if goal_complete or ended or timeout:
+                        commitment = None
                 hard_failure = remasked or native_preempted
                 if forced_pending_goal:
                     if hard_failure:
@@ -806,6 +864,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         action_ticks=config.action_ticks, candidate_k=config.candidate_k,
                         p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                         p_points_per_grid_edge=config.p_points_per_grid_edge,
+                        commitment=commitment,
                         deterministic=True,
                         value_head=value_head)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
@@ -829,8 +888,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     actor_loss_skipped_execution_failures=sum(
                         bool(row["execution_failure"]) for row in rows))
             else:
-                stats["within_candidate_pool_recall"] = sum(
-                    row["candidate_recall"]["within_candidate_pool_recall"]
+                stats["candidate_recall"] = sum(
+                    row["candidate_recall"]["candidate_recall"]
                     for row in rows) / len(rows)
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
@@ -1028,7 +1087,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
-            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C and D1/D2: configurable K=8/16/32 candidate table"}},
+            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2: stable configurable K=8/16/32 ordinary prefix, one appended snapshot-revalidated continue row when committed, and independently route-qualified expanded-goal coverage oracle; D1/D2: unchanged per-macro K=8/16/32 table without commitment carryover"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
@@ -1074,6 +1133,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         graph = (None if is_production_d0 else
                                  build_legal_pose_graph(env, slot=3))
                         hidden = None
+                        commitment = None
                         actions_count = [0] * 8
                         routes_seen = []
                         executed_action_trace = []
@@ -1110,7 +1170,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     deterministic=True, p_mode=override_mode,
                                     p_cost_scale=p_cost_scale,
                                     p_points_per_grid_edge=p_points_per_grid_edge,
-                                    record_path_penalty=True)
+                                    record_path_penalty=True,
+                                    commitment=(commitment if model_track in ("C1", "C2") else None))
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
@@ -1198,6 +1259,24 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
                             hard_failure = remasked or native_preempted
+                            if policy in ("C1", "C2") and prepared is not None:
+                                selected_id = candidate_set.table.candidate_ids[choice]
+                                if selected_id.startswith("continue:"):
+                                    commitment = candidate_set.commitment
+                                else:
+                                    route = candidate_set.route_records[choice]
+                                    source_xy = route.get("source_fuel_xy_m")
+                                    sequence = candidate_set.observation.sequence
+                                    commitment = CandidateCommitment(
+                                        candidate_id=selected_id, action_index=int(action),
+                                        goal_variant=int(route.get("goal_variant", 0)),
+                                        source_xy_m=(None if source_xy is None else
+                                            (float(source_xy[0]), float(source_xy[1]))),
+                                        created_sequence=sequence,
+                                        expires_sequence=sequence + CANDIDATE_BOUNDARY[
+                                            "commitment_expiry_macro_actions"] * action_ticks)
+                                if goal_complete or hard_failure or ended or timeout:
+                                    commitment = None
                             route_id = (pending_eval_goal["route_id"] if forced_eval_goal
                                         else routes_seen[-1].get("candidate_id")
                                         if routes_seen else None)

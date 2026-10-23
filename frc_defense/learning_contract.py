@@ -64,10 +64,14 @@ class CandidateTable:
     feature_names: tuple[str, ...]
     route_costs: tuple[float | None, ...] | None = None
     schema_version: int = 2
+    context_digest: str = ""
 
     def __post_init__(self) -> None:
         if self.schema_version != 2 or not self.snapshot_id:
             raise ValueError("unsupported schema or empty snapshot_id")
+        if self.context_digest and (len(self.context_digest) != 64 or any(
+                char not in "0123456789abcdef" for char in self.context_digest)):
+            raise ValueError("context_digest must be an empty string or lowercase SHA-256")
         ids = tuple(self.candidate_ids)
         names = tuple(self.feature_names)
         features = tuple(tuple(None if value is None else _finite_tuple((value,), "candidate feature")[0]

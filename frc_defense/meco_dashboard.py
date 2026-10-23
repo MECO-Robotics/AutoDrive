@@ -380,6 +380,7 @@ def _comparison(report):
             "matched_status": "diagnostic matched" if report.get("diagnostic") is True else "non-diagnostic matched",
             "policy_manifest": report["policy_manifest"],
             "control_definitions": report["control_definitions"],
+            "candidate_boundary": report.get("candidate_boundary"),
             "route_cost_provenance": route_provenance_summary,
             "policy_metrics": {policy: {category: _summarize([
                 _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
@@ -525,6 +526,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                "matched_status": rows[-1]["matched_status"],
                "record_count": len(rows[-1]["seeds"]) * len(rows[-1]["categories"]),
                "route_cost_provenance": rows[-1]["route_cost_provenance"],
+               "candidate_boundary": rows[-1].get("candidate_boundary"),
                "policy_metrics": rows[-1]["policy_metrics"]}
               for key, rows in sorted(grouped.items())]
     latest_by_policy = {}

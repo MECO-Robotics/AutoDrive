@@ -24,9 +24,12 @@
         `<td>${esc(run.run_id || "—")}<small>Evidence ${esc(evidence.evaluation_id || "—")}</small></td>`+
         `<td>${esc(run.latest_checkpoint?.path || "—")}<small>${esc(run.latest_checkpoint?.bytes ?? "")} bytes</small></td>`+
         `<td><small>Source ${esc(run.source_identity_sha256 || evidence.source_hash || "—")}</small>`+
-        `<small>Policy ${esc(evidence.policy_manifest?.policy_id || "—")}</small>`+
-        `<small>Eval weights ${esc(evidence.policy_manifest?.checkpoint_sha256 || "deterministic")}</small>`+
-        `<small>Protocol ${esc(evidence.protocol_id || "—")}</small></td>`+
+      `<small>Policy ${esc(evidence.policy_manifest?.policy_id || "—")}</small>`+
+      `<small>Eval weights ${esc(evidence.policy_manifest?.checkpoint_sha256 || "deterministic")}</small>`+
+      `<small>Protocol ${esc(evidence.protocol_id || "—")}</small>`+
+      `<small>Candidate contract ${pretty({pool: run.candidate_boundary?.selectable_pool,
+        oracle: run.candidate_boundary?.reference_pool,
+        commitment: run.candidate_boundary?.continue_gap})}</small></td>`+
         `<td><small>Route P provenance ${pretty(evidence.route_cost_provenance || {})}</small>`+
         `<small>${pretty(evidence.records || run.latest_training_metrics || {})}</small></td></tr>`;
     }).join("");
@@ -45,6 +48,9 @@
     document.querySelector("#groups").innerHTML = groups.length ? groups.map(g =>
       `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
       `<p>${esc(g.evaluation_ids?.join(", "))}</p><small>Protocol ${esc(g.protocol_id)} · ${esc(g.record_count)} records per policy</small>`+
+      `<small>Candidate contract ${pretty({pool: g.candidate_boundary?.selectable_pool,
+        oracle: g.candidate_boundary?.reference_pool,
+        commitment: g.candidate_boundary?.continue_gap})}</small>`+
       `<pre>${pretty(g.policy_metrics)}</pre></article>`).join("") : "<p class='muted'>No fully matched, validated comparison is available.</p>";
     const errors = data.errors || [];
     document.querySelector("#errors").innerHTML = errors.length ? errors.map(e => `<li>${esc(e.source || "status")}: ${esc(e.error)}</li>`).join("") : "<li>None reported.</li>";

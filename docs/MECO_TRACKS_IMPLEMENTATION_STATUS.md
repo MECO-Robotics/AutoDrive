@@ -45,17 +45,30 @@ candidate table.
 
 ## Deliberate limits
 
-The Plan C/D1/D2 candidate service exposes K=8/16/32 tables from eight existing action
-primitives, with stable collection-offset rows, a current-snapshot AD* route
-query, ETA/risk features, and selected XY endpoint override. Its recall report
-is explicitly within this same pool; K32 is not an independent or larger
-oracle. It does not enumerate arbitrary behaviors or measure recall against a
-distinct >32 reference set. Static endpoint clearance encloses the robot and
-extended intake at every yaw. A sensed-target bearing supplies a nonbinding
-`capture_estimate`; it is not a feasibility mask because the native controller
-does not command or guarantee the inferred terminal heading. Dynamic future
-swept-robot collision remains outside this candidate feasibility check, and
-the simulator's native intake/action executor remains authoritative.
+The Plan C/D1/D2 candidate service keeps the original stable K=8/16/32 prefix
+over eight action primitives and six collection offsets. C1/C2 may append one
+`continue` row after that prefix when a task commitment is active; the row
+recomputes target matching, phase legality, endpoint safety, and AD* route cost
+from the current snapshot. Commitments expire after ten macro actions and are
+cleared on target loss, invalid route/action, goal completion, episode reset,
+or expiry. Intake commitments match the same sensed fuel by position rather
+than relying on the changing top-four buffer index. D1/D2 retain their prior
+per-macro behavior without commitment carryover.
+
+The selectable table is bound to its candidate IDs, features, masks, route
+costs, and commitment descriptor by a SHA-256 digest retained in PPO rollout
+rows; C1/C2 log probabilities are recomputed against that frozen table before
+updates. K8 ordinary row IDs/order remain unchanged. Candidate coverage is
+measured against an independently enumerated, route-qualified expanded goal
+set (32 stable rows plus 18 additional offsets per sensed target). It reports
+feasible-row coverage and selected/oracle minimum and mean route costs, not
+regret or simulator optimality.
+Static endpoint clearance encloses the robot and extended intake at every yaw.
+A sensed-target bearing supplies a nonbinding `capture_estimate`; it is not a
+feasibility mask because the native controller does not command or guarantee
+the inferred terminal heading. Dynamic future swept-robot collision remains
+outside this candidate feasibility check, and the simulator's native
+intake/action executor remains authoritative.
 
 Plan A and Plan C share the deterministic legal SE(2) graph inputs for A2/A3
 (`node_features`, directed `edges`, `edge_mask`, and `region_ids`). The bounded

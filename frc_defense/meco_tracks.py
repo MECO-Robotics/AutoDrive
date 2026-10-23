@@ -45,7 +45,8 @@ def candidate_digest(table: CandidateTable) -> str:
     payload = {"snapshot_id": table.snapshot_id, "candidate_ids": table.candidate_ids,
                "features": table.features, "valid_mask": table.valid_mask,
                "feature_names": table.feature_names, "route_costs": table.route_costs,
-               "schema_version": table.schema_version}
+               "schema_version": table.schema_version,
+               "context_digest": table.context_digest}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
                                      allow_nan=False).encode()).hexdigest()
 

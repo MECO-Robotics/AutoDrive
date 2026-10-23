@@ -1,13 +1,17 @@
 """Snapshot-bound simulator candidates with route and capture-geometry estimates.
 
 The existing eight masked actions remain the behavior primitives. K=16/32 add
-stable, locally offset collection approach goals. The selected endpoint is
-passed to AD* while the simulator retains action legality and mechanisms. K32
-reports within-pool coverage only; it is not an independent oracle.
+stable, locally offset collection approach goals; C1/C2 can append a
+snapshot-revalidated continue candidate after the K-prefix. A separate expanded
+goal set is route-qualified as a bounded candidate-coverage oracle. The selected
+endpoint is passed to AD* while the simulator retains action legality and
+mechanisms.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
+import json
 import math
 
 import torch
@@ -22,20 +26,23 @@ ROUTE_COST_POINTS_PER_SECOND = 0.05
 RISK_RADIUS_M = 2.0
 RISK_MAX_POINTS = 0.75
 CANDIDATE_BOUNDARY = {
-    "version": 5,
+    "version": 6,
     "capacity": [8, 16, 32],
     "source": "existing simulator action slots",
     "configurable_k": True,
     "k16_k32_supported": True,
-    "within_candidate_pool_recall_only": True,
-    "reference_pool": "route-qualified K32 from the same sensed action slots and fixed offsets",
-    "recall_limit": "K32 recall is tautologically 1; no distinct >32 reference pool is measured",
+    "within_candidate_pool_recall_only": False,
+    "reference_pool": "independent route-qualified oracle over all sensed targets, 18 approach offsets per target, and base behaviors",
+    "recall_limit": "bounded deterministic oracle, not a simulator-optimality oracle",
     "expanded_goals": "bounded collection approach offsets",
     "execution": "selected XY endpoint overrides planner goal; action mask/mechanisms remain simulator-owned",
     "heading_execution": "no terminal heading command; sensed-target bearing is used for graph lookup and nonbinding estimate; native controller owns orientation",
     "future_swept_dynamic_collision_check": False,
-    "continue_behavior_candidate": False,
-    "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
+    "continue_behavior_candidate": True,
+    "continue_gap": "one dynamically revalidated continue row follows the stable K-prefix; target loss, route invalidity, expiry, completion, phase incompatibility, and episode reset clear it",
+    "selectable_pool": "stable ordinary 32-row prefix at K=8/16/32 plus at most one appended continue row; K8 ordinary IDs and order are preserved",
+    "commitment_expiry_macro_actions": 10,
+    "commitment_target_matching_tolerance_m": 1.0,
     "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
     "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
     "plan_a_policy_support": "all reachable legal SE(2) graph nodes crossed with currently executable drive/intake/score/ferry/defense behaviors; carrying dumper ferry pairs are excluded because native release may preempt the selected endpoint",
@@ -51,7 +58,33 @@ CANDIDATE_BOUNDARY = {
     "plan_a_candidate_k": "not used; candidate_k applies only to Plan C candidate scorers",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
-                  "risk_penalty_points", "target_heading_rad")
+                  "risk_penalty_points", "target_heading_rad",
+                  "is_continue", "commitment_switch_cost")
+
+
+@dataclass(frozen=True)
+class CandidateCommitment:
+    """Task-level choice carried between snapshots and requalified each time."""
+    candidate_id: str
+    action_index: int
+    goal_variant: int
+    source_xy_m: tuple[float, float] | None
+    created_sequence: int
+    expires_sequence: int
+
+    def __post_init__(self):
+        if (not isinstance(self.candidate_id, str) or not self.candidate_id
+                or type(self.action_index) is not int or self.action_index not in range(8)
+                or type(self.goal_variant) is not int or self.goal_variant not in range(7)
+                or type(self.created_sequence) is not int or self.created_sequence < 0
+                or type(self.expires_sequence) is not int
+                or self.expires_sequence <= self.created_sequence):
+            raise ValueError("invalid Plan C commitment descriptor")
+        if self.source_xy_m is not None:
+            source = tuple(float(value) for value in self.source_xy_m)
+            if len(source) != 2 or not all(math.isfinite(value) for value in source):
+                raise ValueError("commitment source position must be a finite XY pair")
+            object.__setattr__(self, "source_xy_m", source)
 
 
 @dataclass(frozen=True)
@@ -64,6 +97,7 @@ class RouteFeasibleCandidates:
     risk_cost_points: torch.Tensor
     route_records: tuple[dict, ...]
     candidate_recall: dict
+    commitment: CandidateCommitment | None = None
 
 
 def _candidate_target(env, action: int, base: SafeActionCandidates):
@@ -233,7 +267,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     action_ticks: int = 12,
                                     candidate_k: int = 8,
                                     learned_traversal_cost=None,
-                                    learned_cost_scale: float = 1.0) -> RouteFeasibleCandidates:
+                                    learned_cost_scale: float = 1.0,
+                                    commitment: CandidateCommitment | None = None) -> RouteFeasibleCandidates:
     """Build the current bounded decision table and qualify every route row.
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
@@ -269,12 +304,52 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     for variant, (forward, lateral) in enumerate(offsets, 1):
         for action in range(4):
             specs.append((action, variant, forward, lateral))
+    # Reconcile a carried task against this snapshot before adding it. Intake
+    # commitments follow the same sensed target by position, not a transient
+    # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
+    active_commitment = commitment
+    continue_spec = None
+    if active_commitment is not None:
+        action = active_commitment.action_index
+        if sequence >= active_commitment.expires_sequence or not base.table.valid_mask[action]:
+            active_commitment = None
+        elif action < 4:
+            source = active_commitment.source_xy_m
+            matches = []
+            if source is not None:
+                for index in range(4):
+                    row = base.table.features[index]
+                    if base.table.valid_mask[index] and row[2] is not None and row[3] is not None:
+                        gap = math.hypot(float(row[2]) - source[0], float(row[3]) - source[1])
+                        matches.append((gap, index))
+            if not matches or min(matches)[0] > CANDIDATE_BOUNDARY["commitment_target_matching_tolerance_m"]:
+                active_commitment = None
+            else:
+                action = min(matches)[1]
+                continue_spec = (action, active_commitment.goal_variant, 0., 0.)
+        else:
+            continue_spec = (action, active_commitment.goal_variant, 0., 0.)
+    continue_index = None
+    if continue_spec is not None:
+        continue_index = len(specs)
+        specs.append(continue_spec)
+    oracle_offsets = ((.50, 0.), (-.50, 0.), (0., .50), (0., -.50),
+        (.50, .50), (.50, -.50), (-.50, .50), (-.50, -.50),
+        (.68, 0.), (-.68, 0.), (0., .68), (0., -.68),
+        (.68, .25), (.68, -.25), (-.68, .25), (-.68, -.25),
+        (.25, .68), (-.25, .68))
+    oracle_start_index = len(specs)
+    for variant, (forward, lateral) in enumerate(oracle_offsets, 7):
+        for action in range(4):
+            specs.append((action, variant, forward, lateral))
     targets, headings, route_queries, goal_nodes = [], [], [], []
     hbins, requested, ids = [], [], []
     for row_index, (action, variant, forward_offset, lateral_offset) in enumerate(specs):
         target, heading, allowed, intake = _candidate_target(env, action, base)
-        candidate_id = (base.table.candidate_ids[action] if not variant else
-                        f"{base.table.candidate_ids[action]}:approach:{variant}")
+        is_continue = continue_index is not None and row_index == continue_index
+        candidate_id = ("continue:" + active_commitment.candidate_id if is_continue else
+                        (base.table.candidate_ids[action] if not variant else
+                         f"{base.table.candidate_ids[action]}:approach:{variant}"))
         ids.append(candidate_id)
         if variant:
             forward = target.new_tensor((math.cos(heading), math.sin(heading)))
@@ -361,7 +436,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         # a duplicate column name.
         row[13] = eta
         row.extend((None if goal_nodes[row_index] is None else float(goal_nodes[row_index]),
-                    distance, risk, float(headings[row_index])))
+                    distance, risk, float(headings[row_index]), float(is_continue),
+                    float(active_commitment is not None and not is_continue)))
         rows.append(tuple(row))
         route_costs.append(0. if eta is None else eta * ROUTE_COST_POINTS_PER_SECOND)
         risk_costs.append(0. if risk is None else risk)
@@ -369,11 +445,18 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         routes.append({"candidate_id": candidate_id,
             "action_index": action,
             "candidate_row": row_index,
+            "is_continue_candidate": bool(is_continue),
+            "commitment_id": (active_commitment.candidate_id
+                              if active_commitment is not None else None),
             "goal_variant": variant,
             "route_status": "not_queried" if result is None else result.status,
             "feasible": valid, "route_feasible": route_ok,
             "capture_estimate": capture_estimate,
             "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
+            "source_fuel_xy_m": ([float(base.table.features[action][2]),
+                                  float(base.table.features[action][3])]
+                if action < 4 and base.table.features[action][2] is not None
+                and base.table.features[action][3] is not None else None),
             "goal_heading_rad": float(headings[row_index]),
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
@@ -385,32 +468,76 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "route_cost_units": (None if result is None else result.cost_units),
             "route_cost_provenance": (None if result is None
                 else result.cost_provenance)})
-    if not any(valid_mask[:candidate_k]):
+    if continue_index is not None and not valid_mask[continue_index]:
+        active_commitment = None
+        for index, row in enumerate(rows):
+            if index != continue_index:
+                updated = list(row)
+                updated[-1] = 0.
+                rows[index] = tuple(updated)
+    selectable_indices = list(range(candidate_k))
+    if continue_index is not None and valid_mask[continue_index]:
+        selectable_indices.append(continue_index)
+    if not any(valid_mask[index] for index in selectable_indices):
         raise RuntimeError("candidate service found no feasible row, including safe fallback")
     fallback = base.fallback_candidate_id
-    if fallback not in ids or not valid_mask[ids.index(fallback)]:
+    if fallback not in ids or ids.index(fallback) not in selectable_indices or not valid_mask[ids.index(fallback)]:
         hold = ids.index("hold")
         if valid_mask[hold]:
             fallback = "hold"
         else:
-            fallback = min((i for i, valid in enumerate(valid_mask[:candidate_k]) if valid),
+            fallback = min((i for i in selectable_indices if valid_mask[i]),
                            key=lambda i: route_costs[i] + risk_costs[i])
             fallback = ids[fallback]
     names = base.table.feature_names + EXTRA_FEATURES
-    reference_ids = {ids[i] for i, valid in enumerate(valid_mask) if valid}
-    requested_ids = {ids[i] for i, valid in enumerate(valid_mask[:candidate_k]) if valid}
-    recall = {"candidate_capacity": candidate_k, "reference_pool_capacity": 32,
-              "valid_executable_candidates": sum(valid_mask[:candidate_k]),
-              "reference_scope": "within_candidate_pool",
-              "within_candidate_pool_recall_measured": True,
-              "route_feasible_rows_in_reference_pool": len(reference_ids),
-              "within_candidate_pool_recall": (len(requested_ids & reference_ids) / len(reference_ids) if reference_ids else 1.),
-              "recall_limitation": "K32 is the same candidate pool; its recall is tautologically 1 and no distinct >32 reference is measured"}
-    table = CandidateTable(base.observation.snapshot_id, tuple(ids[:candidate_k]),
-        tuple(rows[:candidate_k]), tuple(valid_mask[:candidate_k]), names,
-        route_costs=tuple(route_costs[:candidate_k]), schema_version=base.table.schema_version)
+    # Independent higher-budget oracle: all 32 stable rows plus 18 separately
+    # route-qualified offsets for each sensed target. Oracle rows never enter
+    # model order and never affect the K8 baseline.
+    oracle_ids = {ids[i] for i in range(32) if valid_mask[i]}
+    oracle_ids.update(ids[i] for i in range(oracle_start_index, len(ids)) if valid_mask[i])
+    oracle_capacity = 32 + 4 * len(oracle_offsets)
+    oracle_count = len(oracle_ids)
+    requested_ids = {ids[i] for i in range(candidate_k) if valid_mask[i]}
+    oracle_indices = [i for i in range(32) if valid_mask[i]] + [
+        i for i in range(oracle_start_index, len(ids)) if valid_mask[i]]
+    oracle_cost_values = [route_costs[i] for i in oracle_indices]
+    selected_cost_values = [route_costs[i] for i in range(candidate_k) if valid_mask[i]]
+    recall = {"candidate_capacity": candidate_k,
+              "reference_pool_capacity": oracle_capacity,
+              "valid_executable_candidates": len(requested_ids),
+              "reference_scope": "independent_expanded_goal_oracle",
+              "within_candidate_pool_recall_measured": False,
+              "route_feasible_rows_in_reference_pool": oracle_count,
+              "oracle_route_evaluated": True,
+              "candidate_recall": (len(requested_ids & oracle_ids) / oracle_count if oracle_count else 1.),
+              "oracle_min_route_cost_points": min(oracle_cost_values) if oracle_cost_values else None,
+              "oracle_mean_route_cost_points": (sum(oracle_cost_values) / len(oracle_cost_values)
+                                                if oracle_cost_values else None),
+              "selected_min_route_cost_points": min(selected_cost_values) if selected_cost_values else None,
+              "selected_mean_route_cost_points": (sum(selected_cost_values) / len(selected_cost_values)
+                                                  if selected_cost_values else None),
+              "recall_limitation": "bounded deterministic expanded-goal oracle; not a simulator-optimality oracle"}
+    selected_indices = list(range(candidate_k))
+    if continue_index is not None and continue_index in selectable_indices:
+        selected_indices.append(continue_index)
+    commitment_digest = ("" if active_commitment is None else hashlib.sha256(
+        json.dumps({"candidate_id": active_commitment.candidate_id,
+            "action_index": active_commitment.action_index,
+            "goal_variant": active_commitment.goal_variant,
+            "source_xy_m": active_commitment.source_xy_m,
+            "created_sequence": active_commitment.created_sequence,
+            "expires_sequence": active_commitment.expires_sequence},
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest())
+    table = CandidateTable(base.observation.snapshot_id,
+        tuple(ids[i] for i in selected_indices), tuple(rows[i] for i in selected_indices),
+        tuple(valid_mask[i] for i in selected_indices), names,
+        route_costs=tuple(route_costs[i] for i in selected_indices),
+        schema_version=base.table.schema_version, context_digest=commitment_digest)
+    if active_commitment is not None and continue_index is not None:
+        active_commitment = replace(active_commitment,
+            action_index=int(specs[continue_index][0]))
     return RouteFeasibleCandidates(base.observation, table, fallback,
-        tuple(spec[0] for spec in specs[:candidate_k]),
-        torch.tensor(route_costs[:candidate_k], device=env.device, dtype=torch.float32),
-        torch.tensor(risk_costs[:candidate_k], device=env.device, dtype=torch.float32),
-        tuple(routes[:candidate_k]), recall)
+        tuple(specs[i][0] for i in selected_indices),
+        torch.tensor([route_costs[i] for i in selected_indices], device=env.device, dtype=torch.float32),
+        torch.tensor([risk_costs[i] for i in selected_indices], device=env.device, dtype=torch.float32),
+        tuple(routes[i] for i in selected_indices), recall, active_commitment)
