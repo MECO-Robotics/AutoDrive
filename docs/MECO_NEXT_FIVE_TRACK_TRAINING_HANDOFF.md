@@ -2,9 +2,10 @@
 
 Use this checkout as the source for the next matched five-track campaign after
 the active run is deliberately stopped. The integrated source includes the
-reviewed A1/A2/A3 action/log-probability fix, Phase 2 Plan A v3 warm-start
-support, Phase 4 factors, and Phase 5 scorer-timing correction. The current
-active workers were not changed or restarted during this integration.
+reviewed A1/A2/A3 action/log-probability fix, Plan A P-map propagation into
+focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
+factors, and Phase 5 scorer-timing correction. The current active workers
+were not changed or restarted during this integration.
 
 ## Campaign setup
 
@@ -19,6 +20,11 @@ active workers were not changed or restarted during this integration.
   available for A1/A2/A3; it supervises sampled U+B returns, leaves P
   unlabelled, and does not provide exhaustive node coverage. Record each
   weights artifact hash in the supervisor configuration.
+- The selected A1/A2/A3 P map now reaches the native focal slot-3 AD* planner
+  on eligible replans. CUDA stream-captured calls with a P override raise and
+  abort; no graph-compatible fallback is implemented. Require a seeded
+  replay that inspects executed routes before treating P route behavior as
+  validated. P oracle targets and exhaustive coverage remain unavailable.
 - Keep the factor matrix separate from training. Phase 4 evaluation requires
   the documented supported scenarios/categories, identical checkpoint bundle,
   seeds, controls, and device across factor and no-factor conditions.
@@ -27,8 +33,8 @@ active workers were not changed or restarted during this integration.
 
 ## Evidence status
 
-The merged changes have feature-branch static review, but this integration still
-needs its own scoped review. No tests or simulator evaluation were run for this
-integration. Feature runtime behavior, matched five-track outcomes, Phase 4
-factor results, calibration, and qualification remain unverified; do not treat
-the timing correction as physical or hardware profiling evidence.
+The merged changes have feature-branch and integrated static review, but no
+simulator evaluation has been run for this integration. Feature runtime
+behavior, matched five-track outcomes, Phase 4 factor results, calibration,
+and qualification remain unverified; do not treat the timing correction as
+physical or hardware profiling evidence.
