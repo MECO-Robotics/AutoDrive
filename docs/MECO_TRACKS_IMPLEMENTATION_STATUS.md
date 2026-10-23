@@ -245,7 +245,9 @@ bout outcome, not a causal intake-failure measure.
 Dashboard ingestion accepts v3 and v4 ledgers. V3 records retain their available
 bout count/acquisition summaries, while the v4-only unsuccessful count stays
 null for those records. Summary coverage reports how many episode records
-contribute an observed unsuccessful-bout count.
+contribute an observed unsuccessful-bout count. Scoped implementation and
+integrated review approved this metric at candidate HEAD `cc08989b8`; fresh
+simulator-record validation remains pending.
 
 ## Separate Plan A P route warm start (code path only)
 
