@@ -447,15 +447,57 @@ class MecoSupervisor:
             self.request_stop = True
         return self.request_stop
 
+    def _recover_task_outcome(self, track, assignment):
+        checkpoint_path = self.output / track / "latest.pt"
+        checkpoint = _checkpoint_info(checkpoint_path)
+        target_update = assignment.get("target_update")
+        progress = checkpoint.get("task_progress") if isinstance(checkpoint, dict) else None
+        checkpoint_assignment = checkpoint.get("task_assignment", {}) if isinstance(
+            checkpoint, dict) else {}
+        if (not isinstance(checkpoint, dict)
+                or checkpoint.get("update") != target_update
+                or not isinstance(progress, dict)
+                or progress.get("assignment_id") != assignment.get("assignment_id")
+                or checkpoint_assignment.get("assignment_id") != assignment.get("assignment_id")
+                or checkpoint_assignment.get("target_update") != target_update
+                or progress.get("cycle") != assignment.get("cycle")
+                or progress.get("scenario_id") != assignment.get("scenario_id")
+                or progress.get("category") != assignment.get("category")):
+            raise RuntimeError(
+                f"{track} checkpoint cannot recover task outcome for pending assignment "
+                f"{assignment.get('assignment_id')}")
+        counters = [progress.get(name) for name in (
+            "episodes", "successes", "failures", "aborted_no_legal_support")]
+        if (any(type(value) is not int or value < 0 for value in counters)
+                or progress["successes"] + progress["failures"] != progress["episodes"]):
+            raise RuntimeError(f"{track} checkpoint has invalid task outcome counters")
+        outcome = {key: progress[key] for key in (
+            "assignment_id", "cycle", "scenario_id", "category", "episodes",
+            "successes", "failures", "aborted_no_legal_support")}
+        outcome["completed_updates"] = target_update
+        outcome_path = self.output / track / "task-outcomes.json"
+        try:
+            current = json.loads(outcome_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            current = {}
+        if current != outcome:
+            _atomic_json(outcome_path, outcome)
+        manifest_path = self.output / track / "run.json"
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        manifest.update(schema_version=1, run_id=checkpoint.get("run_id"),
+            track=track, status="complete", completed_updates=target_update,
+            task_assignment=assignment, task_outcomes=outcome,
+            recovered_task_outcome=True, recovered_utc=_utc())
+        _atomic_json(manifest_path, manifest)
+        return outcome
+
     def _complete_task_cycle(self, assignment):
         results = {}
         for track in MECO_TRACKS:
-            try:
-                payload = json.loads((self.output / track / "task-outcomes.json").read_text())
-            except (OSError, json.JSONDecodeError):
-                payload = {}
-            if payload.get("assignment_id") == assignment["assignment_id"]:
-                results[track] = payload
+            results[track] = self._recover_task_outcome(track, assignment)
         missing = set(MECO_TRACKS) - set(results)
         if missing:
             raise RuntimeError(f"task outcome records missing for matched lanes: {sorted(missing)}")

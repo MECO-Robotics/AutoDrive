@@ -788,6 +788,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     resume_rng_torch = None
     resume_rng_python = None
     resume_rng_device = None
+    resume_task_progress = None
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema_version") != 1 or payload.get("sources") != sources:
@@ -813,6 +814,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 and prior_task.get("assignment_id") != task_assignment.get("assignment_id")):
             raise ValueError("checkpoint task assignment differs within the same scheduled cycle")
         run_id = payload["run_id"]
+        resume_task_progress = payload.get("task_progress")
         if run_id_override and run_id_override != run_id:
             raise ValueError("resume run ID mismatch")
         resume_rng_torch = payload["rng_torch"]
@@ -890,10 +892,36 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     task_failures = 0
     task_episodes = 0
     task_aborts = 0
+    if (isinstance(resume_task_progress, dict)
+            and task_assignment.get("assignment_id") is not None
+            and resume_task_progress.get("assignment_id") ==
+                task_assignment.get("assignment_id")):
+        for name in ("episodes", "successes", "failures", "aborted_no_legal_support"):
+            count = resume_task_progress.get(name)
+            if type(count) is not int or count < 0:
+                raise ValueError(f"checkpoint task progress has invalid {name}")
+        task_episodes = resume_task_progress["episodes"]
+        task_successes = resume_task_progress["successes"]
+        task_failures = resume_task_progress["failures"]
+        task_aborts = resume_task_progress["aborted_no_legal_support"]
     empty_support_diagnostics = []
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
     abort_path = Path(abort_file) if abort_file else None
+
+    def task_progress_payload():
+        return {"assignment_id": task_assignment.get("assignment_id"),
+            "cycle": task_assignment.get("cycle"),
+            "scenario_id": task_scenario, "category": task_category,
+            "episodes": task_episodes, "successes": task_successes,
+            "failures": task_failures,
+            "aborted_no_legal_support": task_aborts}
+
+    def task_outcomes_payload():
+        return {**task_progress_payload(), "completed_updates": update}
+
+    def persist_task_outcomes():
+        _atomic_json(output / "task-outcomes.json", task_outcomes_payload())
 
     def abort_empty_support(exc, rows, update_number, update_events):
         nonlocal episode, task_aborts, hidden, commitment, episode_generation
@@ -1136,6 +1164,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),
+                "task_progress": task_progress_payload(),
                 "value_head": value_head.state_dict(), "optimizer": optimizer.state_dict(),
                 "rng_torch": torch.get_rng_state(), "rng_python": random.getstate(),
                 "rng_device": torch.cuda.get_rng_state(torch.device(config.device)) if config.device.startswith("cuda") else None,
@@ -1143,6 +1172,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             _atomic_torch(output / "latest.pt", payload)
             _atomic_json(output / "stats.json", {"run_id": run_id, "track": config.track,
                 "update": update, "episode": episode, "history": history})
+            persist_task_outcomes()
         worker_status = ("stopped" if stop_path and stop_path.exists() else
                          "aborted_due_to_sibling_failure"
                          if abort_path and abort_path.exists() and update < chunk_target
@@ -1150,11 +1180,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         run_manifest.update(status=worker_status,
                             completed_updates=update,
                             stopped_utc=datetime.now(timezone.utc).isoformat())
-        run_manifest["task_outcomes"] = {"assignment_id": task_assignment.get("assignment_id"),
-            "scenario_id": task_scenario, "category": task_category,
-            "episodes": task_episodes, "successes": task_successes,
-            "failures": task_failures,
-            "aborted_no_legal_support": task_aborts}
+        run_manifest["task_outcomes"] = task_outcomes_payload()
         _atomic_json(output / "task-outcomes.json", run_manifest["task_outcomes"])
         _atomic_json(output / "run.json", run_manifest)
         update_heartbeat()
