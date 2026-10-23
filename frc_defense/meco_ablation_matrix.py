@@ -57,6 +57,87 @@ def _canonical_hash(value: Any) -> str:
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _checkpoint_hashes(checkpoints: dict[str, str]) -> dict[str, str]:
+    return {track: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for track, path in sorted(checkpoints.items())}
+
+
+def _source_identity_hash(source_identity: dict) -> str:
+    return hashlib.sha256(json.dumps(source_identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+
+
+def _checkpoint_configuration_provenance(checkpoints: dict[str, str]):
+    """Freeze exact saved config/protocol metadata before any condition runs."""
+    import torch
+
+    config_hashes, protocol_ids = {}, {}
+    shared_config = None
+    for track in MECO_TRACKS:
+        payload = torch.load(checkpoints[track], map_location="cpu",
+                             weights_only=False)
+        config = payload.get("config")
+        if not isinstance(config, dict) or config.get("track") != track:
+            raise ValueError(f"{track} checkpoint has no matching saved configuration")
+        immutable = {key: value for key, value in config.items() if key != "updates"}
+        config_hashes[track] = hashlib.sha256(json.dumps(immutable,
+            sort_keys=True, allow_nan=False).encode()).hexdigest()
+        shared = {key: value for key, value in immutable.items()
+                  if key not in ("track", "device", "output")}
+        if shared_config is None:
+            shared_config = shared
+        elif shared != shared_config:
+            raise ValueError("checkpoints do not share immutable training settings")
+        protocol_ids[track] = payload.get("protocol_id")
+    if any(not isinstance(value, str) or not value for value in protocol_ids.values()):
+        raise ValueError("checkpoint is missing its supervisor protocol ID")
+    if any(value != protocol_ids[MECO_TRACKS[0]] for value in protocol_ids.values()):
+        raise ValueError("checkpoints do not share one supervisor protocol")
+    return config_hashes, protocol_ids, shared_config
+
+
+def _validate_condition_manifest(report: dict, *,
+                                 frozen_checkpoint_hashes: dict[str, str],
+                                 frozen_source_hash: str,
+                                 expected_configs: dict[str, str] | None,
+                                 expected_protocols: dict[str, str] | None,
+                                 expected_shared_config: dict | None):
+    """Reject an evaluation whose loaded bundle differs from matrix inputs."""
+    manifest = report.get("policy_manifest")
+    if not isinstance(manifest, dict) or set(MECO_TRACKS) - set(manifest):
+        raise ValueError("evaluation manifest is missing one or more learned tracks")
+    if report.get("source_identity_sha256") != frozen_source_hash:
+        raise ValueError("evaluation source identity differs from frozen matrix provenance")
+    observed_configs, observed_protocols = {}, {}
+    for track in MECO_TRACKS:
+        policy = manifest[track]
+        if policy.get("checkpoint_sha256") != frozen_checkpoint_hashes[track]:
+            raise ValueError(f"evaluation loaded a different {track} checkpoint hash")
+        if policy.get("source_identity_sha256") != frozen_source_hash:
+            raise ValueError(f"evaluation {track} manifest has a different source identity")
+        config_hash = policy.get("training_configuration_sha256")
+        protocol_id = policy.get("training_protocol_id")
+        if not isinstance(config_hash, str) or not config_hash:
+            raise ValueError(f"evaluation manifest lacks {track} configuration hash")
+        observed_configs[track] = config_hash
+        if not isinstance(protocol_id, str) or not protocol_id:
+            raise ValueError(f"evaluation manifest lacks {track} training protocol ID")
+        observed_protocols[track] = protocol_id
+        if expected_configs is not None and config_hash != expected_configs[track]:
+            raise ValueError(f"{track} checkpoint configuration changed between conditions")
+        if expected_protocols is not None and protocol_id != expected_protocols[track]:
+            raise ValueError(f"{track} checkpoint protocol changed between conditions")
+    if any(value != observed_protocols[MECO_TRACKS[0]]
+           for value in observed_protocols.values()):
+        raise ValueError("five evaluation checkpoints do not share one protocol")
+    shared_config = report.get("shared_training_configuration")
+    if not isinstance(shared_config, dict):
+        raise ValueError("evaluation report lacks its shared training configuration")
+    if expected_shared_config is not None and shared_config != expected_shared_config:
+        raise ValueError("shared training configuration changed between conditions")
+    return observed_configs, observed_protocols, shared_config
+
+
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
@@ -163,10 +244,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
     output_root = Path(output_dir)
-    bundle_hashes = {track: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-                     for track, path in sorted(checkpoints.items())}
-    source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
-        allow_nan=False).encode()).hexdigest()
+    bundle_hashes = _checkpoint_hashes(checkpoints)
+    source_hash = _source_identity_hash(source_identity())
+    config_hashes, protocol_ids, frozen_shared_config = (
+        _checkpoint_configuration_provenance(checkpoints))
     conditions = default_conditions(scenario_id,
         inference_disable_tick=inference_disable_tick)
     condition_specs = [asdict(condition) for condition in conditions]
@@ -174,6 +255,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
         "source_identity_sha256": source_hash,
+        "training_configuration_sha256": config_hashes,
+        "training_protocol_ids": protocol_ids,
+        "shared_training_configuration": frozen_shared_config,
         "conditions": condition_specs,
         "unsupported_conditions_open": ["explicit_feint_behavior",
             "sensor_delay_ablation", "separate_low_confidence_profile",
@@ -182,7 +266,14 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     matrix_protocol["matrix_id"] = matrix_id
     results: dict[str, dict] = {}
     evaluation_reports: dict[str, dict] = {}
+    expected_configs = config_hashes
+    expected_protocols = protocol_ids
+    expected_shared_config = frozen_shared_config
     for condition in conditions:
+        if _checkpoint_hashes(checkpoints) != bundle_hashes:
+            raise ValueError("checkpoint files drifted from frozen matrix inputs before a condition")
+        if _source_identity_hash(source_identity()) != source_hash:
+            raise ValueError("source identity drifted from frozen matrix inputs before a condition")
         spec = asdict(condition)
         condition_id = _canonical_hash({"matrix_id": matrix_id,
             "condition": spec, "checkpoint_sha256": bundle_hashes,
@@ -196,6 +287,16 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
             output=str(report_path))
+        observed_configs, observed_protocols, shared_config = _validate_condition_manifest(
+            report, frozen_checkpoint_hashes=bundle_hashes,
+            frozen_source_hash=source_hash,
+            expected_configs=expected_configs,
+            expected_protocols=expected_protocols,
+            expected_shared_config=expected_shared_config)
+        if _checkpoint_hashes(checkpoints) != bundle_hashes:
+            raise ValueError("checkpoint files drifted while an evaluation condition was running")
+        if _source_identity_hash(source_identity()) != source_hash:
+            raise ValueError("source identity drifted while an evaluation condition was running")
         report["experiment_matrix"] = {"matrix_id": matrix_id,
             "condition_id": condition_id, "condition": spec}
         _atomic_json(report_path, report)
@@ -219,7 +320,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     architecture = evaluation_reports[architecture_name]
     for contrast_name, pairs in POLICY_CONTRASTS.items():
         condition_name = ("controls_default_d1_current_d2_cv_k16"
-                          if contrast_name in ("D1_vs_D2", "C1_vs_D1")
+                          if contrast_name == "D1_vs_D2"
                           else architecture_name)
         selected_report = evaluation_reports[condition_name]
         for candidate, reference in pairs:
@@ -295,11 +396,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     common_provenance = {
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
-            track: results[architecture_name]["policy_manifest"][track][
-                "training_configuration_sha256"] for track in MECO_TRACKS},
+            track: config_hashes[track] for track in MECO_TRACKS},
         "training_protocol_ids": {
-            track: results[architecture_name]["policy_manifest"][track][
-                "training_protocol_id"] for track in MECO_TRACKS},
+            track: protocol_ids[track] for track in MECO_TRACKS},
         "source_identity_sha256": source_hash,
         "seed_list": list(seeds),
         "category_list": list(categories),

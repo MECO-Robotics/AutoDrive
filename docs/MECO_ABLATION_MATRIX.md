@@ -11,7 +11,7 @@ audited independently of the full matrix JSON.
 
 | Condition | Paired comparison or measurement |
 | --- | --- |
-| Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; P=0 versions for A1/A2/A3 |
+| Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; P=0 versions for A1/A2/A3. C1/D1 both use CV here. |
 | Default controls, K=16 | D1=current-pose vs D2=bounded-CV prediction |
 | Matched prediction, K=16 | All five learned tracks under current-pose and CV modes |
 | Candidate K sweep | C1/C2 candidate recall at K=8, 16, and 32 against the recorded bounded expanded-goal reference pool |
@@ -19,6 +19,11 @@ audited independently of the full matrix JSON.
 
 Evaluation overrides do not rewrite checkpoint configuration. All five
 checkpoints must already share the same training configuration and protocol.
+The matrix freezes those per-track config hashes and protocol IDs from the
+checkpoint files before starting; each evaluation report and each subsequent
+condition must match them. Checkpoint and source hashes are rechecked before
+and after every condition. Any provenance drift aborts matrix construction
+before contrast rows are assembled.
 The K sweep changes the runtime candidate capacity for every evaluated policy;
 Plan A continues to use its full legal-graph support and does not use K.
 P=0 is an inference-time ablation of the same A checkpoint, not a separately
