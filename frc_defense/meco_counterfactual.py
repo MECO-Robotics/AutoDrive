@@ -48,11 +48,16 @@ def _hash(value):
 
 
 def _tensor_digest(tensor):
-    value = tensor.detach().contiguous().cpu()
+    if tensor.layout != torch.strided:
+        raise TypeError(f"unsupported tensor layout for state digest: {tensor.layout}")
+    # `contiguous()` may preserve arbitrary strides on size-one dimensions.
+    # Clone with an explicit format so the byte reinterpretation below always
+    # sees canonical dense storage, including degenerate singleton shapes.
+    value = tensor.detach().to(device="cpu").clone(memory_format=torch.contiguous_format)
     digest = hashlib.sha256()
     digest.update(str(value.dtype).encode())
     digest.update(json.dumps(list(value.shape)).encode())
-    digest.update(value.view(torch.uint8).numpy().tobytes())
+    digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 

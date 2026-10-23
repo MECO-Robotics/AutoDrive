@@ -288,3 +288,11 @@ The failed collector run produced no validated dataset. The fixes have scoped
 static review and compilation only; seeded simulator collection, route-v2
 fitting, current-dashboard replay inspection, and a new all-five training run
 remain pending.
+
+The next current-source counterfactual collection exposed a digest failure on a
+tensor with singleton dimensions and a non-unit final stride: `contiguous()`
+preserved the degenerate stride, so the tensor could not be reinterpreted as
+bytes. `_tensor_digest` now rejects non-strided layouts and clones supported
+tensors into explicit contiguous format before hashing their flattened logical
+bytes. The failed collection did not produce a validated dataset. This fix is
+awaiting scoped review; collection and simulator validation remain outstanding.
