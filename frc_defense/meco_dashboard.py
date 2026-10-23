@@ -287,10 +287,14 @@ def _collection_action_bouts(record):
     if not isinstance(bouts, dict):
         raise ValueError("available collection_action_bouts must be an object")
     count, acquired = bouts.get("count"), bouts.get("acquired_count")
+    unsuccessful = bouts.get("unsuccessful_collection_action_bouts")
     proportion = bouts.get("acquired_proportion")
     if (type(count) is not int or count < 0
             or type(acquired) is not int or acquired < 0 or acquired > count):
         raise ValueError("invalid available collection_action_bouts counts")
+    if (type(unsuccessful) is not int or unsuccessful < 0
+            or unsuccessful > count or acquired + unsuccessful != count):
+        raise ValueError("invalid unsuccessful_collection_action_bouts count")
     if count == 0:
         if proportion is not None:
             raise ValueError("zero collection action bouts must have null proportion")
@@ -300,6 +304,7 @@ def _collection_action_bouts(record):
             or abs(float(proportion) - acquired / count) > 1e-12):
         raise ValueError("invalid available collection_action_bouts proportion")
     return {"count": count, "acquired_count": acquired,
+            "unsuccessful_collection_action_bouts": unsuccessful,
             "acquired_proportion": proportion}
 
 
@@ -309,12 +314,15 @@ def _summarize_collection_action_bouts(rows):
               if value is not None]
     count = sum(value["count"] for value in values) if values else None
     acquired = sum(value["acquired_count"] for value in values) if values else None
+    unsuccessful = (sum(value["unsuccessful_collection_action_bouts"] for value in values)
+                    if values else None)
     return {
         "available_records": len(values),
         "count": count,
         "acquired_count": acquired,
+        "unsuccessful_collection_action_bouts": unsuccessful,
         "acquired_proportion": (acquired / count if count else None),
-        "semantics": "descriptive acquisition proportion among contiguous executed collection-action bouts; not failed-collection rate or causal policy success",
+        "semantics": "unsuccessful_collection_action_bouts counts finalized focal collection-action bouts with authoritative acquired quantity known to be zero; it is a descriptive bout outcome, not causal intake failure",
     }
 
 

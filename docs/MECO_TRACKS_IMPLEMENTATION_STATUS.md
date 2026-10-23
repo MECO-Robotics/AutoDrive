@@ -238,6 +238,11 @@ event, while abandoned fuel remains null because this evaluator has no
 authoritative abandoned-event producer. This implementation has only received
 static checks; simulator-record validation remains outstanding.
 
+The `unsuccessful_collection_action_bouts` count includes only finalized bouts
+whose authoritative focal acquired quantity is known to be zero. It is null
+when collection-bout acquisition evidence is unavailable. This is a descriptive
+bout outcome, not a causal intake-failure measure.
+
 ## Separate Plan A P route warm start (code path only)
 
 The v2 counterfactual dataset and v3 Plan A U+B weights keep their explicit

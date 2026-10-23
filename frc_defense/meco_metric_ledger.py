@@ -240,6 +240,9 @@ class MecoEpisodeMetricLedger:
                 "count": len(self.collection_bouts) if self.collection_bouts_available else None,
                 "acquired_count": (sum(row["acquired"] is True for row in self.collection_bouts)
                                    if self.collection_bouts_available else None),
+                "unsuccessful_collection_action_bouts": (
+                    sum(row["acquired"] is False for row in self.collection_bouts)
+                    if self.collection_bouts_available else None),
                 "acquired_proportion": (
                     sum(row["acquired"] is True for row in self.collection_bouts) /
                     len(self.collection_bouts)

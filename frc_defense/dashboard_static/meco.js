@@ -101,6 +101,7 @@
           return `<tr><th scope="row">${esc(policy)}</th><td>${esc(category)}</td>`+
             `<td>${esc(bouts?.available_records ?? "—")}</td>`+
             `<td>${esc(bouts?.acquired_count ?? "—")} / ${esc(bouts?.count ?? "—")}</td>`+
+            `<td>${esc(bouts?.unsuccessful_collection_action_bouts ?? "unavailable")}</td>`+
             `<td>${esc(shown)}</td></tr>`;
         })).join("");
       return `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
@@ -108,9 +109,9 @@
       `<small>Candidate contract ${pretty({pool: g.candidate_boundary?.selectable_pool,
         oracle: g.candidate_boundary?.reference_pool,
         commitment: g.candidate_boundary?.continue_gap})}</small>`+
-      `<h4>Collection action bouts — descriptive acquisition proportion</h4>`+
-      `<p class="muted">Counts include available episode records only. This is descriptive and does not indicate failed collection or causal policy success.</p>`+
-      `<div class="table-wrap"><table><thead><tr><th>Policy</th><th>Category</th><th>Available records</th><th>Acquired / bouts</th><th>Acquired proportion</th></tr></thead><tbody>${boutRows}</tbody></table></div>`+
+      `<h4>Collection action bouts — descriptive bout outcomes</h4>`+
+      `<p class="muted">Counts include available episode records only. Unsuccessful bouts are finalized bouts whose authoritative acquired quantity is zero; this is a bout outcome, not causal intake failure.</p>`+
+      `<div class="table-wrap"><table><thead><tr><th>Policy</th><th>Category</th><th>Available records</th><th>Acquired / bouts</th><th>Unsuccessful collection action bouts</th><th>Acquired proportion</th></tr></thead><tbody>${boutRows}</tbody></table></div>`+
       `<pre>${pretty(g.policy_metrics)}</pre></article>`;
     }).join("") : "<p class='muted'>No fully matched, validated comparison is available.</p>";
     const errors = data.errors || [];
