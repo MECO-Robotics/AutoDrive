@@ -422,7 +422,7 @@ def _qualification_status(project: Path, errors: list):
         "final_test_isolated", "failure")}
 
 
-def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
+def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_root=None, now=None,
                     campaign_passes=None,
                     process_probe=_process_alive):
     now = time.time() if now is None else float(now)
@@ -606,7 +606,8 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 ("not_applicable" if policy in CONTROLS or policy in ABLATIONS else "not_started"),
             "evaluation_state": evidence["matched_status"] if evidence else "not_evaluated",
             "run": latest_run, "latest_evidence": evidence})
-    qualification = _qualification_status(root.parents[1], errors)
+    qualification = _qualification_status(
+        Path(project_root).resolve() if project_root is not None else root.parents[1], errors)
     return {"schema_version": STATUS_SCHEMA_VERSION,
         "generated_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "checkpoint_root": str(root), "evaluation_root": str(eval_root),
@@ -620,14 +621,17 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         "errors": errors[:20]}
 
 
-def meco_status_payload(project_root: Path | str) -> bytes:
-    """Serialize status from fixed checkout-local MECO directories only."""
+def meco_status_payload(project_root: Path | str, *, data_root: Path | str | None = None) -> bytes:
+    """Read run evidence from data_root while keeping workflow evidence checkout-local."""
     project = Path(project_root).resolve()
-    checkpoint_root = (project / "checkpoints" / "meco-five").resolve()
-    evaluation_root = (project / "evaluations" / "meco-five").resolve()
-    if not _inside(checkpoint_root, project) or not _inside(evaluation_root, project):
-        raise ValueError("MECO status roots must remain inside the selected project checkout")
-    payload = _collect_status(checkpoint_root, evaluation_root)
+    data_project = Path(data_root).resolve() if data_root is not None else project
+    if not data_project.is_dir():
+        raise ValueError("MECO data root must be an existing directory")
+    checkpoint_root = (data_project / "checkpoints" / "meco-five").resolve()
+    evaluation_root = (data_project / "evaluations" / "meco-five").resolve()
+    if not _inside(checkpoint_root, data_project) or not _inside(evaluation_root, data_project):
+        raise ValueError("MECO status roots must remain inside the selected data root")
+    payload = _collect_status(checkpoint_root, evaluation_root, project_root=data_project)
     pass_path = project / "docs" / "MECO_CAMPAIGN_PASSES.json"
     passes, pass_error = _read_json(pass_path)
     valid_passes = None
@@ -663,6 +667,7 @@ def meco_status_payload(project_root: Path | str) -> bytes:
             valid_passes["phase4_planner_status"] = factor_status["planner_status"]
             valid_passes["phase4_factors"] = factor_status["factors"]
     payload["implementation_passes"] = valid_passes
+    payload["campaign_ledger_path"] = str(pass_path)
     if valid_passes is None:
         payload["errors"].append({"source": str(pass_path.relative_to(project)),
             "error": pass_error or "invalid implementation pass status manifest"})

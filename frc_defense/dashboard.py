@@ -66,7 +66,15 @@ def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False):
         yield slot
 
 
-def create_handler(run_dir: Path):
+def create_handler(run_dir: Path, *, meco_data_root: Path | None = None):
+    # MECO's campaign ledger remains paired with this checkout; only live run
+    # and evaluation evidence may be read from the explicitly selected root.
+    selected_meco_data_root = (Path(meco_data_root).resolve()
+                               if meco_data_root is not None else None)
+    if (selected_meco_data_root is not None
+            and not selected_meco_data_root.is_dir()):
+        raise ValueError("--meco-data-root must name an existing directory")
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             content_encoding=None
@@ -172,7 +180,9 @@ def create_handler(run_dir: Path):
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/meco-status":
                 try:
-                    body = meco_status_payload(Path(__file__).resolve().parents[1])
+                    body = meco_status_payload(
+                        Path(__file__).resolve().parents[1],
+                        data_root=selected_meco_data_root)
                     self.send_response(200)
                 except (OSError, ValueError):
                     body = json.dumps({"schema_version": 1, "policies": [],
@@ -839,10 +849,14 @@ def main():
     parser.add_argument("--also-host", action="append", default=[],
                         help="Bind an additional address on the same port")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--meco-data-root", type=Path, default=None,
+                        help="Read MECO checkpoints/evaluations from this project root; workflow ledger stays in this dashboard checkout")
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), create_handler(Path(args.run_dir)))
+    server = ThreadingHTTPServer((args.host, args.port), create_handler(
+        Path(args.run_dir), meco_data_root=args.meco_data_root))
     for host in args.also_host:
-        extra = ThreadingHTTPServer((host, args.port), create_handler(Path(args.run_dir)))
+        extra = ThreadingHTTPServer((host, args.port), create_handler(
+            Path(args.run_dir), meco_data_root=args.meco_data_root))
         threading.Thread(target=extra.serve_forever, daemon=True).start()
     hosts = [args.host, *args.also_host]
     print("FRC training dashboard: " + ", ".join(
