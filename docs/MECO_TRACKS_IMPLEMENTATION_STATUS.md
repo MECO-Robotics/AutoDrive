@@ -565,6 +565,6 @@ table carries one prediction-mode risk tensor; the analyzer does not present
 the same tensor as two independent controls. The script is outside the
 `frc_defense` source-identity tree and therefore does not change existing
 training artifact identities. Scoped review approved implementation commit
-`ba7b65b0`; integrated review and runtime replay remain pending. Static
-`py_compile` and diff checks only; no tests, simulator, or GPU execution were
-performed.
+`ba7b65b0`; integrated review approved exact candidate HEAD `c5dc562c9`.
+Runtime replay and analysis remain pending. Static `py_compile` and diff checks
+only; no tests, simulator, or GPU execution were performed.
