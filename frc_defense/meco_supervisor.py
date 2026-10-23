@@ -367,34 +367,35 @@ class MecoSupervisor:
                             task_assignment):
         processes = {}
         logs = {}
-        for track in tracks:
-            if self.request_stop:
-                break
-            if source_identity() != self.sources:
-                raise RuntimeError("source identity changed; refusing to continue queued training")
-            remaining_updates = target_update - self._completed_updates(track)
-            if remaining_updates <= 0:
-                statuses[track] = "complete"
-                continue
-            base_config = self.configs[track]
-            config = MecoTrainConfig(**{**asdict(base_config),
-                "updates": min(self.chunk_updates, remaining_updates)})
-            latest = self.output / track / "latest.pt"
-            command = _train_command(config=config, output=self.output / track,
-                run_id=self.run_ids[track], stop_file=self.stop_file,
-                resume=latest if latest.is_file() else None,
-                protocol_id=self.protocol_id, task_assignment=task_assignment)
-            log_path = self.output / track / "supervisor.log"
-            logs[track] = log_path.open("ab")
-            processes[track] = subprocess.Popen(command, cwd=ROOT,
-                stdout=logs[track], stderr=subprocess.STDOUT,
-                start_new_session=True)
-            self.worker_pids[track] = processes[track].pid
-            statuses[track] = "running"
-        self._write_queued_manifests(statuses)
-        self._publish(cycle=cycle, phase="training", statuses=statuses)
         failed = {}
         try:
+            for track in tracks:
+                if self.request_stop:
+                    break
+                if source_identity() != self.sources:
+                    raise RuntimeError("source identity changed; refusing to continue queued training")
+                remaining_updates = target_update - self._completed_updates(track)
+                if remaining_updates <= 0:
+                    statuses[track] = "complete"
+                    continue
+                base_config = self.configs[track]
+                config = MecoTrainConfig(**{**asdict(base_config),
+                    "updates": min(self.chunk_updates, remaining_updates)})
+                latest = self.output / track / "latest.pt"
+                command = _train_command(config=config, output=self.output / track,
+                    run_id=self.run_ids[track], stop_file=self.stop_file,
+                    resume=latest if latest.is_file() else None,
+                    protocol_id=self.protocol_id, task_assignment=task_assignment)
+                log_path = self.output / track / "supervisor.log"
+                logs[track] = log_path.open("ab")
+                process = subprocess.Popen(command, cwd=ROOT,
+                    stdout=logs[track], stderr=subprocess.STDOUT,
+                    start_new_session=True)
+                processes[track] = process
+                self.worker_pids[track] = process.pid
+                statuses[track] = "running"
+            self._write_queued_manifests(statuses)
+            self._publish(cycle=cycle, phase="training", statuses=statuses)
             while processes:
                 self._observe_stop()
                 if self.request_stop and not self.stop_file.exists():
@@ -423,22 +424,35 @@ class MecoSupervisor:
                     time.sleep(.5)
         except BaseException:
             # Child processes are detached into their own sessions. On every
-            # supervisor failure, persist stop intent and reap them before the
-            # output-root lock can be released.
-            self.stop_file.parent.mkdir(parents=True, exist_ok=True)
-            self.stop_file.touch(exist_ok=True)
+            # setup or runtime failure, persist stop intent and reap all workers
+            # before the output-root lock can be released. If stop-file creation
+            # fails, terminate groups directly rather than waiting on a signal
+            # path that cannot reach the children.
+            stop_file_ready = False
+            try:
+                self.stop_file.parent.mkdir(parents=True, exist_ok=True)
+                self.stop_file.touch(exist_ok=True)
+                stop_file_ready = True
+            except OSError:
+                pass
+            for process in processes.values():
+                if process.poll() is None and not stop_file_ready:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except OSError:
+                        pass
             for process in processes.values():
                 if process.poll() is None:
                     try:
-                        process.wait(timeout=30.)
+                        process.wait(timeout=30. if stop_file_ready else 5.)
                     except subprocess.TimeoutExpired:
                         try:
                             os.killpg(process.pid, signal.SIGTERM)
                             process.wait(timeout=5.)
-                        except (ProcessLookupError, subprocess.TimeoutExpired):
+                        except (OSError, subprocess.TimeoutExpired):
                             try:
                                 os.killpg(process.pid, signal.SIGKILL)
-                            except ProcessLookupError:
+                            except OSError:
                                 pass
                             process.wait()
             raise
@@ -446,8 +460,9 @@ class MecoSupervisor:
             for track, process in list(processes.items()):
                 self.worker_pids.pop(track, None)
                 self._refresh_progress(track)
-                if not logs[track].closed:
-                    logs[track].close()
+            for log in logs.values():
+                if not log.closed:
+                    log.close()
         if failed:
             raise RuntimeError(f"training workers failed: {failed}")
 

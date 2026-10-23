@@ -169,7 +169,11 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
     if not _endpoint_clear(env, center, float(hbin) * 2 * math.pi / 8,
                            intake_extended=intake_extended):
         return None, None, hbin
-    return node, center, hbin
+    # A2/A3 consume the legal node's heading as part of its SE(2) feature.
+    # If the sensed target bearing had to fall back to another legal heading,
+    # keep the candidate feature aligned with the actual node identity.
+    selected_hbin = int(graph.heading_bin[node].item())
+    return node, center, selected_hbin
 
 
 def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,

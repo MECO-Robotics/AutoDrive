@@ -723,9 +723,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             raise ValueError("paired checkpoints have different supervisor protocols")
         policy_manifest[track] = {"policy_id": _model_id(model),
             "checkpoint_sha256": checkpoint_digest,
-            "p_mode": track_p_mode,
-            "p_cost_scale": track_p_scale,
-            "p_points_per_grid_edge": track_p_edge_points,
+            "p_mode": track_p_mode if track in ("A1", "A2", "A3") else None,
+            "p_cost_scale": track_p_scale if track in ("A1", "A2", "A3") else None,
+            "p_points_per_grid_edge": (track_p_edge_points
+                                       if track in ("A1", "A2", "A3") else None),
             "training_protocol_id": payload.get("protocol_id"),
             "training_configuration_sha256": hashlib.sha256(json.dumps(
                 immutable_track_config, sort_keys=True, allow_nan=False).encode()).hexdigest(),
@@ -875,7 +876,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "policy_id": policy_manifest[policy]["policy_id"],
                             "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
                             "p_mode": ("p0" if policy.endswith("_P0") else
-                                       p_mode if policy in MECO_TRACKS else None),
+                                       p_mode if policy in ("A1", "A2", "A3") else None),
                             "protocol_id": protocol, "split": "validation",
                             "source_identity_sha256": hashlib.sha256(json.dumps(
                                 sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),

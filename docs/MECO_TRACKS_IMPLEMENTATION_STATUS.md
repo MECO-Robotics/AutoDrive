@@ -49,19 +49,24 @@ does not command or guarantee the inferred terminal heading. Dynamic future
 swept-robot collision remains outside this candidate feasibility check, and
 the simulator's native intake/action executor remains authoritative.
 
-A1 scores a dense field but this slice has no qualified legal-pose lattice or
-SE(2) transition mask. The A1 adapter can gather scores only for candidate
-rows that supply explicit goal coordinates, heading bins, and behavior IDs;
-the caller remains responsible for supplying actually feasible poses. A2 and
-A3 require an explicit deterministic legal graph (`node_features`, directed
-`edges`, `edge_mask`, and `region_ids`); they fail when that graph is absent.
-The repository's current XY AD* search and experimental XY route probe are not
-silently treated as this interface.
+A1 gathers legal-pose heading values for route candidates. A2 and A3 consume
+the corresponding node from the same deterministic legal graph
+(`node_features`, directed `edges`, `edge_mask`, and `region_ids`). If a sensed
+target bearing has no legal heading at an otherwise legal XY cell, the row's
+heading feature is taken from the selected legal node; inferred bearing remains
+separate metadata and does not make the endpoint feasible.
 
-The Plan A traversal penalty field is returned separately and is not treated
-as an endpoint penalty. A deterministic planner must integrate it over a
-verified route before the Plan A policy is considered operational. Candidate
-ranking currently uses dense utility and behavior scores only.
+For A1-A3, the nonnegative Plan A traversal field is projected to the weighted
+XY AD* API by averaging only legal heading bins at each cell. A preliminary
+current-observation score supplies the map used for route selection, then the
+selected route's retained geometry is integrated against the current model
+field and subtracted once from candidate logits. PPO recomputes that integral
+differentiably over the frozen rollout route. `p_mode=p0` is an explicit
+matched ablation with no learned route weight and a zero differentiable path
+term. This is an XY projection of the SE(2) field, not heading-conditioned
+traversal inside AD*; the projection, units, scale, route provenance, and P=0
+mode are recorded in the protocol and evaluation evidence. C1/C2 keep their
+candidate-only scoring path.
 
 The code now has a matched PPO/evaluation harness and a resumable five-lane
 supervisor, but no training/evaluation run is claimed here. Its task scheduler

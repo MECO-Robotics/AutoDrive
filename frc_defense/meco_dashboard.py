@@ -14,6 +14,10 @@ TRACKS = ("A1", "A2", "A3", "C1", "C2")
 ABLATIONS = ("A1_P0", "A2_P0", "A3_P0")
 CONTROLS = ("D0", "D1", "D2")
 POLICIES = TRACKS + ABLATIONS + CONTROLS
+PENALTY_PROJECTION = "mean_over_legal_heading_bins_xy_grid_v1"
+PENALTY_MAP_UNITS = "dimensionless_additive_penalty_per_cardinal_grid_step"
+PENALTY_PATH_UNITS = "normalized_grid_edge_units"
+PENALTY_PPO_CONTRACT = "current_policy_penalty_integrated_on_frozen_rollout_routes"
 STATUS_SCHEMA_VERSION = 1
 HEARTBEAT_STALE_SECONDS = 90
 QUEUE_STALE_SECONDS = 180
@@ -207,6 +211,10 @@ def _comparison(report):
             or not isinstance(report.get("plan_a_penalty"), dict)
             or report["plan_a_penalty"].get("trained_mode") not in ("learned", "p0")
             or report["plan_a_penalty"].get("p0_ablation_mode") != "p0"
+            or report["plan_a_penalty"].get("projection") != PENALTY_PROJECTION
+            or report["plan_a_penalty"].get("map_units") != PENALTY_MAP_UNITS
+            or report["plan_a_penalty"].get("path_units") != PENALTY_PATH_UNITS
+            or report["plan_a_penalty"].get("ppo_recomputation") != PENALTY_PPO_CONTRACT
             or not _finite_number(report["plan_a_penalty"].get("cost_scale"))
             or report["plan_a_penalty"].get("cost_scale") < 0
             or not _finite_number(report["plan_a_penalty"].get("points_per_grid_edge"))
@@ -277,6 +285,41 @@ def _comparison(report):
                 or any(not _finite_number(value) for value in metrics.values()
                        if type(value) in (int, float))):
             return None
+        if row["policy"] == "D0":
+            trace, actions = row.get("executed_action_trace"), row.get("actions")
+            ticks = row.get("elapsed_ticks")
+            if (row.get("action_source") != "production_deterministic"
+                    or row.get("controller_cadence") != "native_20ms_physics_step"
+                    or row.get("action_count_semantics") != "executed_per_physics_step"
+                    or type(ticks) is not int or ticks < 1
+                    or not isinstance(trace, list) or len(trace) != ticks
+                    or any(type(action) is not int or not 0 <= action < 8 for action in trace)
+                    or not isinstance(actions, list) or len(actions) != 8
+                    or any(type(count) is not int or count < 0 for count in actions)):
+                return None
+            histogram = [trace.count(action) for action in range(8)]
+            if actions != histogram:
+                return None
+        if row["policy"] in ("A1", "A2", "A3") + ABLATIONS:
+            expected_mode = "p0" if row["policy"] in ABLATIONS else row["p_mode"]
+            route_trace = row.get("route_trace")
+            if (expected_mode not in ("learned", "p0")
+                    or not isinstance(route_trace, list) or not route_trace):
+                return None
+            for route in route_trace:
+                penalty = route.get("ppo_path_penalty_points") if isinstance(route, dict) else None
+                if (not isinstance(route, dict)
+                        or route.get("p_mode") != expected_mode
+                        or route.get("ppo_path_penalty_units") != "reward_points"
+                        or route.get("ppo_path_penalty_points") is None
+                        or not _finite_number(penalty)
+                        or route.get("p_map_scale") != report["plan_a_penalty"]["cost_scale"]
+                        or route.get("p_points_per_grid_edge") != report["plan_a_penalty"]["points_per_grid_edge"]
+                        or route.get("path_points_m") is None
+                        or route.get("route_cost_units") != PENALTY_PATH_UNITS):
+                    return None
+                if expected_mode == "p0" and abs(float(penalty)) > 1e-9:
+                    return None
         key = (row["category"], row["seed"], row["policy"])
         if key in found:
             return None
