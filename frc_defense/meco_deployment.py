@@ -243,7 +243,9 @@ def benchmark(track: str, checkpoint: Path, device_name: str, iterations=200, wa
     host_inputs = dummy_inputs(track, "cpu")
     inputs = tuple(x.to(device) for x in host_inputs)
     with torch.inference_mode():
-        for _ in range(warmup): model(*inputs)
+        for _ in range(warmup):
+            warm_outputs = model(*inputs)
+            _pipeline(warm_outputs, track)
         _sync(device)
         if device.type == "cuda": torch.cuda.reset_peak_memory_stats(device)
         model_ms, pipeline_ms, age_ms = [], [], []
