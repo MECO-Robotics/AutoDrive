@@ -656,7 +656,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     planner_force_goal_replan=False,
                     planner_route_trace: list | None = None,
                     safety_counts: dict | None = None,
-                    metric_ledger: MecoEpisodeMetricLedger | None = None):
+                    metric_ledger: MecoEpisodeMetricLedger | None = None,
+                    return_execution_flags: bool = False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -755,9 +756,12 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         final_goal_distance = float((env.sim.pose[0, 3, :2] - torch.as_tensor(
             goal_xy, device=env.device, dtype=env.sim.pose.dtype)).norm())
     native_goal_preempted &= final_goal_distance is not None and final_goal_distance > .04
-    return (total, ended, timeout, executed_actions, final_heading_error,
+    result = (total, ended, timeout, executed_actions, final_heading_error,
             final_goal_distance, heading_alignment_opportunity, native_goal_preempted,
             selected_target_lost)
+    if return_execution_flags:
+        return (*result, selected_target_action_remasked)
+    return result
 
 
 def _reset_episode(env, seed: int):

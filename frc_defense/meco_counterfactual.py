@@ -435,14 +435,15 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
         planner_traversal_cost_override=planner_traversal_cost_override,
         planner_traversal_cost_scale=planner_traversal_cost_scale,
         planner_force_goal_replan=planner_force_goal_replan,
-        planner_route_trace=planner_route_trace)
+        planner_route_trace=planner_route_trace,
+        return_execution_flags=return_execution_flags)
     reward, ended, timeout = values[:3]
     result = (float(reward.detach().cpu().item()), bool(ended), bool(timeout),
             list(values[3]), values[4], values[5], bool(values[7]))
     if return_execution_flags:
         requested_action = int(action)
         remasked = any(item != requested_action for item in values[3])
-        return (*result, bool(values[8]), remasked)
+        return (*result, bool(values[8]), remasked, bool(values[9]))
     return result
 
 
@@ -1595,12 +1596,14 @@ def _replay_plan_a_expert_goal_source_row(record, base_manifest):
                     record.get("teacher_selected_goal_descriptor_sha256")):
             raise RuntimeError("expert-goal selector result changed on replay")
         (reward, ended, timeout, trace, _, _, preempted,
-         selected_target_lost, action_remasked) = _reward_step(env,
+         selected_target_lost, action_remasked,
+         selected_target_action_remasked) = _reward_step(env,
             selected["action"], record["macro_ticks"], goal_xy=selected["goal_xy_m"],
             goal_heading=selected["goal_heading_rad"],
             allow_action7_traversal=(selected["action"] == 7),
             planner_force_goal_replan=True, return_execution_flags=True)
-        if preempted or selected_target_lost or action_remasked:
+        if (preempted or selected_target_lost or action_remasked or
+                selected_target_action_remasked):
             raise RuntimeError("explicit expert-goal execution was preempted, lost, or remasked")
         if (trace != record.get("executed_action_trace") or
                 record.get("executed_action") != selected["action"] or
@@ -1609,6 +1612,7 @@ def _replay_plan_a_expert_goal_source_row(record, base_manifest):
                 record.get("execution_failure") is not False or
                 record.get("selected_target_lost") is not False or
                 record.get("action_remasked") is not False or
+                record.get("selected_target_action_remasked") is not False or
                 record.get("native_goal_preempted") is not False):
             raise RuntimeError("expert-goal execution trace/outcome changed on replay")
         return {"teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
@@ -1644,12 +1648,14 @@ def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
         try:
             pair, selected = _select_plan_a_expert_goal_v1(replay["support"])
             (reward, ended, timeout, trace, _, _, preempted,
-             selected_target_lost, action_remasked) = _reward_step(env,
+             selected_target_lost, action_remasked,
+             selected_target_action_remasked) = _reward_step(env,
                 selected["action"], base["macro_ticks"], goal_xy=selected["goal_xy_m"],
                 goal_heading=selected["goal_heading_rad"],
                 allow_action7_traversal=(selected["action"] == 7),
                 planner_force_goal_replan=True, return_execution_flags=True)
-            if preempted or selected_target_lost or action_remasked:
+            if (preempted or selected_target_lost or action_remasked or
+                    selected_target_action_remasked):
                 raise RuntimeError("selected explicit expert goal was preempted, lost, or remasked")
             output_rows.append({"schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
                 "target_schema": PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
@@ -1662,10 +1668,12 @@ def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
                 "teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
                 "selected_pair_index": pair, "executed_action": selected["action"],
                 "executed_action_trace": trace, "gross_macro_return": reward,
-                "execution_failure": bool(preempted or selected_target_lost or action_remasked),
+                "execution_failure": bool(preempted or selected_target_lost or
+                    action_remasked or selected_target_action_remasked),
                 "native_goal_preempted": preempted,
                 "selected_target_lost": selected_target_lost,
                 "action_remasked": action_remasked,
+                "selected_target_action_remasked": selected_target_action_remasked,
                 "terminal": bool(ended or timeout), "u_status": "unavailable",
                 "u_target": None,
                 "u_unavailable_reason": "no independent expert goal-value oracle",
