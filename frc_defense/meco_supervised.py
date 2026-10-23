@@ -758,7 +758,9 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
                                  expected_sources: dict):
     """Read the separate executed-route P schema without weakening v2 checks."""
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
-        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY,
+        PLAN_A_P_ROUTE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
+        CONTINUATION_POLICY,
         _artifact_identity_sha256, _device_identity,
         _require_native_extension_manifest_identity,
         _verify_native_fuel_extension)
@@ -777,16 +779,25 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
         raise ValueError("legacy Plan A P dataset lacks native HIP identity; recollect it")
     if manifest.get("native_extension_identity_schema") != 1:
         raise ValueError("legacy Plan A P dataset lacks native identity schema v1; recollect it")
-    if (manifest.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
-            manifest.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
+    oracle_v3 = manifest.get("schema") == PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA
+    expected_schema = (PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA if oracle_v3
+                       else PLAN_A_P_ROUTE_DATASET_SCHEMA)
+    expected_target = (PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA if oracle_v3
+                       else PLAN_A_P_ROUTE_TARGET_SCHEMA)
+    if (manifest.get("schema") != expected_schema or
+            manifest.get("target_schema") != expected_target or
             manifest.get("source_counterfactual_schema") != "meco-counterfactual-trajectory-v3" or
             manifest.get("p_intervention_generator") != "seeded_smooth_positive_xy_maps_v1" or
-            manifest.get("plan_a_p_oracle_target") !=
-                "exact_simulator_gross_horizon_return_for_executed_native_adstar_route" or
-            manifest.get("plan_a_p_supervision_semantics") !=
-                "within_prefix_route_pairwise_preference; no per-cell oracle target" or
-            manifest.get("plan_a_p_target") !=
-                "within-prefix executed-route preference from simulator gross horizon return" or
+            (not oracle_v3 and manifest.get("plan_a_p_oracle_target") !=
+                "exact_simulator_gross_horizon_return_for_executed_native_adstar_route") or
+            (not oracle_v3 and manifest.get("plan_a_p_supervision_semantics") !=
+                "within_prefix_route_pairwise_preference; no per-cell oracle target") or
+            (not oracle_v3 and manifest.get("plan_a_p_target") !=
+                "within-prefix executed-route preference from simulator gross horizon return") or
+            (oracle_v3 and (manifest.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION or
+                manifest.get("plan_a_p_target") != manifest.get("plan_a_p_oracle_target") or
+                manifest.get("plan_a_p_supervision_semantics") !=
+                    "non_tied sampled executed-path cost preference; lower independent oracle cost is preferred")) or
             manifest.get("plan_a_p_prior") != 0.0 or
             manifest.get("plan_a_p_unlabelled_reason") is not None or
             manifest.get("records_have_exact_weighted_route_replay") is not True or
@@ -833,8 +844,8 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
     unique, by_seed = set(), {}
     route_count = 0
     for row in rows:
-        if (row.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
-                row.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
+        if (row.get("schema") != expected_schema or
+                row.get("target_schema") != expected_target or
                 row.get("scenario_id") != scenario or row.get("category") != category or
                 row.get("protocol_id") != protocol_id or
                 row.get("qualification_protocol_sha256") != protocol_sha or
@@ -910,6 +921,42 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
                 if route.get("map_scale") != (None if expected_seed is None else
                                                 manifest["p_intervention_scale"]):
                     raise ValueError("Plan A P route scale differs from its manifest")
+                if oracle_v3:
+                    oracle = route.get("independent_cost_oracle")
+                    base_grid = oracle.get("base_bump_cost_grid") if isinstance(oracle, dict) else None
+                    effective_grid = oracle.get("effective_cost_grid") if isinstance(oracle, dict) else None
+                    snapshot_costs = oracle.get("route_snapshot_costs_grid_edges") if isinstance(oracle, dict) else None
+                    valid_base = (isinstance(base_grid, list) and bool(base_grid) and
+                        all(isinstance(column, list) and len(column) == len(base_grid[0])
+                            and all(_finite_number(value) and value >= 0 for value in column)
+                            for column in base_grid))
+                    valid_effective = (isinstance(effective_grid, list) and valid_base and
+                        len(effective_grid) == len(base_grid) and
+                        all(isinstance(column, list) and len(column) == len(base_grid[0])
+                            and all(_finite_number(value) and value >= 0 for value in column)
+                            for column in effective_grid))
+                    if (not isinstance(oracle, dict) or
+                            oracle.get("version") != PLAN_A_P_ROUTE_ORACLE_VERSION or
+                            oracle.get("route_trace_sha256") != route["route_trace_sha256"] or
+                            oracle.get("selected_goal_descriptor_sha256") !=
+                                descriptor["descriptor_sha256"] or
+                            oracle.get("intervention_map_sha256") != route.get("map_sha256") or
+                            not _finite_number(oracle.get("route_cost_grid_edges")) or
+                            not _finite_number(oracle.get("resolution_m")) or oracle["resolution_m"] <= 0 or
+                            not valid_base or not valid_effective or
+                            oracle.get("grid_shape") != [len(base_grid), len(base_grid[0]) if valid_base else 0] or
+                            not isinstance(snapshot_costs, list) or
+                            len(snapshot_costs) != len(route["route_trace"]) or
+                            any(not _finite_number(value) or value < 0 for value in snapshot_costs) or
+                            oracle["route_cost_grid_edges"] != sum(snapshot_costs) / len(snapshot_costs) or
+                            oracle.get("intervention_scale") !=
+                                (manifest["p_intervention_scale"] if expected_seed is not None else 0.) or
+                            oracle.get("grid_inputs_sha256") != _canonical_hash({
+                                "traversability": oracle.get("base_traversability_cost_grid"),
+                                "base": oracle.get("base_bump_cost_grid"),
+                                "effective": oracle.get("effective_cost_grid"),
+                                "resolution_m": oracle.get("resolution_m")})):
+                        raise ValueError("invalid independent Plan A P route-cost oracle provenance")
                 previous_tick = -1
                 for snapshot in route["route_trace"]:
                     points = snapshot.get("route_points_m")
@@ -1350,6 +1397,39 @@ def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
                         if replayed.get(key) != archived.get(key):
                             raise RuntimeError(
                                 f"Plan A P strict replay mismatch at {key}")
+                    from .meco_counterfactual import (PLAN_A_P_ROUTE_ORACLE_VERSION,
+                        _plan_a_p_intervention_map, _plan_a_p_oracle_grid,
+                        _plan_a_p_oracle_integral, _hash)
+                    if manifest.get("schema") == "meco-counterfactual-plan-a-p-route-oracle-v3":
+                        route = archived["native_route"]
+                        seed = archived.get("intervention_seed")
+                        p_map = None if seed is None else _plan_a_p_intervention_map(env, seed)
+                        env._meco_oracle_p_scale = float(manifest["p_intervention_scale"])
+                        traversability_grid, base_grid, effective_grid = _plan_a_p_oracle_grid(env, p_map)
+                        resolution = float(env.planner.resolution)
+                        costs = [_plan_a_p_oracle_integral(effective_grid,
+                            snapshot["route_points_m"], resolution)
+                            for snapshot in route["route_trace"]]
+                        oracle = route.get("independent_cost_oracle", {})
+                        regenerated = {"version": PLAN_A_P_ROUTE_ORACLE_VERSION,
+                            "implementation": "frc_defense.meco_counterfactual._plan_a_p_oracle_integral",
+                            "grid_shape": [len(base_grid), len(base_grid[0])],
+                            "resolution_m": resolution,
+                            "base_traversability_cost_grid": traversability_grid,
+                            "base_bump_cost_grid": base_grid,
+                            "effective_cost_grid": effective_grid,
+                            "grid_inputs_sha256": _hash({"traversability": traversability_grid,
+                                "base": base_grid,
+                                "effective": effective_grid, "resolution_m": resolution}),
+                            "route_snapshot_costs_grid_edges": costs,
+                            "route_cost_grid_edges": sum(costs) / len(costs),
+                            "route_trace_sha256": route["route_trace_sha256"],
+                            "selected_goal_descriptor_sha256": descriptor["descriptor_sha256"],
+                            "intervention_map_sha256": route["map_sha256"],
+                            "intervention_scale": (float(manifest["p_intervention_scale"])
+                                if seed is not None else 0.)}
+                        if regenerated != oracle:
+                            raise RuntimeError("Plan A P independent oracle label differs after strict replay")
                     verified.append(archived)
                 route_groups.append(verified)
             materialized.append({"raster": raster, "globals": globals_,
@@ -1389,7 +1469,7 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
         value_checkpoint: Path, output: Path, *, qualification_protocol: Path,
         updates: int = 10, learning_rate: float = 1e-4, device: str = "cpu",
         route_margin: float = 0.02, map_regularization: float = 0.001,
-        minimum_coverage_fraction: float = 0.01):
+        minimum_coverage_fraction: float = 0.01, oracle_labels: bool = False):
     """Fit the P head from strict simulator outcomes for executed weighted routes."""
     if (track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1 or
             not math.isfinite(learning_rate) or learning_rate <= 0 or
@@ -1401,7 +1481,9 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
     from .curriculum_training import source_identity
     from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
-        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY, _device_identity)
+        PLAN_A_P_ROUTE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
+        CONTINUATION_POLICY, _device_identity)
     _prepare_native_gpu_runtime(device)
     sources = source_identity()
     value_payload = validate_counterfactual_plan_a_value_artifact(track,
@@ -1411,6 +1493,8 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
         _read_plan_a_p_route_dataset(dataset,
             qualification_protocol=qualification_protocol,
             expected_sources=sources))
+    if oracle_labels != (manifest["schema"] == PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA):
+        raise ValueError("Plan A P fitter and dataset label schema differ")
     if manifest["device"] != _device_identity(device):
         raise ValueError("P route replay/training device differs from frozen dataset")
     if value_payload.get("protocol_id") != protocol_id:
@@ -1490,7 +1574,12 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
                 variants = list(unique.values())
                 for index, left in enumerate(variants):
                     for right in variants[index + 1:]:
-                        delta = left["gross_horizon_return"] - right["gross_horizon_return"]
+                        if oracle_labels:
+                            left_cost = left["native_route"]["independent_cost_oracle"]["route_cost_grid_edges"]
+                            right_cost = right["native_route"]["independent_cost_oracle"]["route_cost_grid_edges"]
+                            delta = right_cost - left_cost
+                        else:
+                            delta = left["gross_horizon_return"] - right["gross_horizon_return"]
                         if delta == 0.:
                             continue
                         better, worse = (left, right) if delta > 0 else (right, left)
@@ -1524,18 +1613,26 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
         raise ValueError("Plan A P executed paths do not meet the configured legal-grid coverage floor")
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during Plan A P fitting")
-    payload = {"schema": COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA,
-        "schema_version": 1,
-        "artifact_kind": "weights_only_counterfactual_plan_a_p_route_v1",
+    payload = {"schema": ("meco-counterfactual-plan-a-p-oracle-warm-start-weights-v1"
+                           if oracle_labels else COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA),
+        "schema_version": 2 if oracle_labels else 1,
+        "artifact_kind": ("weights_only_counterfactual_plan_a_p_oracle_v1"
+                          if oracle_labels else "weights_only_counterfactual_plan_a_p_route_v1"),
         "track": track, "model_schema_version": 1, "model": model.state_dict(),
         "dataset_sha256": data_hash, "dataset_manifest_sha256": manifest_hash,
-        "dataset_schema": PLAN_A_P_ROUTE_DATASET_SCHEMA,
-        "target_schema": PLAN_A_P_ROUTE_TARGET_SCHEMA,
+        "dataset_schema": (PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA if oracle_labels
+                            else PLAN_A_P_ROUTE_DATASET_SCHEMA),
+        "target_schema": (PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA if oracle_labels
+                          else PLAN_A_P_ROUTE_TARGET_SCHEMA),
         "source_counterfactual_dataset_sha256": manifest["source_counterfactual_dataset_sha256"],
         "value_checkpoint_sha256": hashlib.sha256(Path(value_checkpoint).read_bytes()).hexdigest(),
-        "label_provenance": "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions",
-        "target_semantics": "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return",
-        "loss_semantics": "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization",
+        "label_provenance": ("strict replay and independent recomputation of base bump plus effective P grid path integrals; sampled executed paths only"
+                             if oracle_labels else "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions"),
+        "target_semantics": ("within_prefix_non_tied_sampled_executed_path_cost_preference_lower_is_better"
+                             if oracle_labels else "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return"),
+        "loss_semantics": ("softplus_predicted_integrated_P_cost_preference_against_independent_oracle_cost_labels_plus_mean_P_regularization"
+                           if oracle_labels else "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization"),
+        "p_oracle_version": PLAN_A_P_ROUTE_ORACLE_VERSION if oracle_labels else None,
         "p_map_initialization": "softplus_inverse_of_0.02_on_penalty_output_channel",
         "p_route_pair_count": pair_count,
         "p_route_group_count": sum(len(sample["route_groups"]) for sample in replayed),
@@ -1592,6 +1689,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             expected_sources=expected_sources,
             expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") == COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA:
+        return validate_counterfactual_plan_a_p_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
+    if payload.get("schema") == "meco-counterfactual-plan-a-p-oracle-warm-start-weights-v1":
         return validate_counterfactual_plan_a_p_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
@@ -1868,7 +1970,9 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
     """Validate an executed-route P-only warm-start artifact."""
-    from .meco_counterfactual import PLAN_A_P_ROUTE_DATASET_SCHEMA
+    from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_VERSION)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     mode = payload.get("prediction_mode")
     _, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
@@ -1879,19 +1983,23 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
                 any(char not in "0123456789abcdef" for char in value)):
             raise ValueError(f"Plan A P artifact has invalid {key}")
     losses = payload.get("mean_route_loss_by_epoch")
+    oracle_v3 = payload.get("schema") == "meco-counterfactual-plan-a-p-oracle-warm-start-weights-v1"
     if (track not in ("A1", "A2", "A3") or
-            payload.get("schema") != COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA or
-            payload.get("schema_version") != 1 or
-            payload.get("artifact_kind") != "weights_only_counterfactual_plan_a_p_route_v1" or
+            payload.get("schema") != ("meco-counterfactual-plan-a-p-oracle-warm-start-weights-v1"
+                if oracle_v3 else COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA) or
+            payload.get("schema_version") != (2 if oracle_v3 else 1) or
+            payload.get("artifact_kind") != ("weights_only_counterfactual_plan_a_p_oracle_v1"
+                if oracle_v3 else "weights_only_counterfactual_plan_a_p_route_v1") or
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
-            payload.get("dataset_schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
-            payload.get("target_schema") != "meco-executed-route-gross-return-ranking-v1" or
-            payload.get("label_provenance") !=
-                "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions" or
-            payload.get("target_semantics") !=
-                "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return" or
-            payload.get("loss_semantics") !=
-                "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization" or
+            payload.get("dataset_schema") != (PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA if oracle_v3 else PLAN_A_P_ROUTE_DATASET_SCHEMA) or
+            payload.get("target_schema") != (PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA if oracle_v3 else "meco-executed-route-gross-return-ranking-v1") or
+            payload.get("label_provenance") != ("strict replay and independent recomputation of base bump plus effective P grid path integrals; sampled executed paths only" if oracle_v3 else
+                "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions") or
+            payload.get("target_semantics") != ("within_prefix_non_tied_sampled_executed_path_cost_preference_lower_is_better" if oracle_v3 else
+                "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return") or
+            payload.get("loss_semantics") != ("softplus_predicted_integrated_P_cost_preference_against_independent_oracle_cost_labels_plus_mean_P_regularization" if oracle_v3 else
+                "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization") or
+            (oracle_v3 and payload.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION) or
             payload.get("p_map_initialization") !=
                 "softplus_inverse_of_0.02_on_penalty_output_channel" or
             payload.get("p_mode") != "learned" or
@@ -2051,6 +2159,24 @@ def main(argv=None):
     plan_a_p.add_argument("--route-margin", type=float, default=0.02)
     plan_a_p.add_argument("--map-regularization", type=float, default=0.001)
     plan_a_p.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
+    p_routes_v3 = commands.add_parser("collect-plan-a-p-routes-v3")
+    p_routes_v3.add_argument("--dataset", type=Path, required=True)
+    p_routes_v3.add_argument("--output", type=Path, required=True)
+    p_routes_v3.add_argument("--qualification-protocol", type=Path, required=True)
+    p_routes_v3.add_argument("--p-cost-scale", type=float, default=1.0)
+    p_routes_v3.add_argument("--intervention-maps", type=int, default=3)
+    plan_a_p_v3 = commands.add_parser("warm-start-plan-a-p-v3")
+    plan_a_p_v3.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    plan_a_p_v3.add_argument("--dataset", type=Path, required=True)
+    plan_a_p_v3.add_argument("--value-checkpoint", type=Path, required=True)
+    plan_a_p_v3.add_argument("--output", type=Path, required=True)
+    plan_a_p_v3.add_argument("--qualification-protocol", type=Path, required=True)
+    plan_a_p_v3.add_argument("--updates", type=int, default=10)
+    plan_a_p_v3.add_argument("--learning-rate", type=float, default=1e-4)
+    plan_a_p_v3.add_argument("--device", default="cpu")
+    plan_a_p_v3.add_argument("--route-margin", type=float, default=0.02)
+    plan_a_p_v3.add_argument("--map-regularization", type=float, default=0.001)
+    plan_a_p_v3.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
     args = parser.parse_args(argv)
     if args.command == "collect":
         result = collect_dataset(args.output, scenario_id=args.scenario,
@@ -2089,6 +2215,21 @@ def main(argv=None):
             device=args.device, route_margin=args.route_margin,
             map_regularization=args.map_regularization,
             minimum_coverage_fraction=args.minimum_coverage_fraction)
+    elif args.command == "collect-plan-a-p-routes-v3":
+        from .meco_counterfactual import collect_plan_a_p_routes_v3
+        result = collect_plan_a_p_routes_v3(args.output, dataset=args.dataset,
+            qualification_protocol=args.qualification_protocol,
+            p_cost_scale=args.p_cost_scale,
+            intervention_maps=args.intervention_maps)
+    elif args.command == "warm-start-plan-a-p-v3":
+        result = warm_start_counterfactual_plan_a_p_v1(args.track, args.dataset,
+            args.value_checkpoint, args.output,
+            qualification_protocol=args.qualification_protocol,
+            updates=args.updates, learning_rate=args.learning_rate,
+            device=args.device, route_margin=args.route_margin,
+            map_regularization=args.map_regularization,
+            minimum_coverage_fraction=args.minimum_coverage_fraction,
+            oracle_labels=True)
     else:
         result = warm_start_counterfactual_v2(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,

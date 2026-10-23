@@ -266,6 +266,28 @@ paths to cover at least the configured fraction of legal XY cells (default
 P warm-start outcomes therefore
 remain unqualified until the dataset, fit, and representative replay gates run.
 
+## Separate Plan A P independent route-cost oracle v3 (static implementation)
+
+The additive `meco-counterfactual-plan-a-p-route-oracle-v3` contract preserves
+the v2 reward-ranked/P0 collector and fitter. The v3 collector records the
+planner's frozen base bump-cost grid, the regenerated intervention map and
+scale, grid resolution, selected descriptor, and every executed route-trace
+snapshot. A separate pure-Python segment/grid integrator scores each snapshot
+in normalized grid-edge units from the declared base bump grid plus the exact
+effective P map. It never reads AD* g/f/path costs or simulator returns. Labels
+are preferences between sampled executed paths only; lower independent cost
+is preferred, exact ties are omitted, and the labels do not establish route
+optimality or per-cell supervision.
+
+`collect-plan-a-p-routes-v3` emits the new schema. The existing strict branch
+replay materializer regenerates and re-integrates each cost grid and rejects
+any mismatch before fitting. `warm-start-plan-a-p-v3` trains only on non-tied
+oracle cost comparisons and stamps oracle version, dataset and route provenance,
+and sampled executed-path coverage in a weights-only artifact. This tranche has
+received static compilation and diff checks only. No P-oracle collection,
+fit, simulator evaluation, or dashboard replay has run; runtime qualification
+and exhaustive legal-grid coverage remain outstanding.
+
 ## Runtime failure follow-up (2026-10-23)
 
 The first live five-track batch stopped before a cycle completed. A2 failed at

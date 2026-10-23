@@ -38,6 +38,9 @@ DATASET_SCHEMA = "meco-counterfactual-trajectory-v3"
 TARGET_SCHEMA = "meco-matched-prefix-gross-return-v3"
 PLAN_A_P_ROUTE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-v2"
 PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
+PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-oracle-v3"
+PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA = "meco-executed-route-independent-cost-v1"
+PLAN_A_P_ROUTE_ORACLE_VERSION = "base-bump-plus-effective-p-grid-edge-integral-v1"
 # v2 hashes all canonical environment state except the root environment's
 # CUDA-graph execution cache (`env._physics_graphs`). Captured graph objects are
 # device/runtime execution machinery, not simulator state; every other field
@@ -1330,4 +1333,138 @@ def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
     return {"path": str(output), "record_count": len(result_rows),
         "route_group_count": manifest["route_group_count"],
         "dataset_sha256": manifest["dataset_sha256"],
-        "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA}
+            "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA}
+
+
+def _plan_a_p_oracle_integral(cost_grid, points, resolution_m):
+    """Independent CPU reference for grid-cell traversal cost in edge units."""
+    nx, ny = len(cost_grid), len(cost_grid[0])
+    total = 0.0
+    for first, second in zip(points, points[1:]):
+        x0, y0 = map(float, first)
+        x1, y1 = map(float, second)
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length == 0.:
+            continue
+        cuts = [0., 1.]
+        if dx:
+            low, high = sorted((x0, x1))
+            cuts.extend((cell * resolution_m - x0) / dx
+                for cell in range(math.floor(low / resolution_m) + 1,
+                                  math.ceil(high / resolution_m))
+                if 0. < (cell * resolution_m - x0) / dx < 1.)
+        if dy:
+            low, high = sorted((y0, y1))
+            cuts.extend((cell * resolution_m - y0) / dy
+                for cell in range(math.floor(low / resolution_m) + 1,
+                                  math.ceil(high / resolution_m))
+                if 0. < (cell * resolution_m - y0) / dy < 1.)
+        cuts.sort()
+        for start, end in zip(cuts, cuts[1:]):
+            middle = (start + end) * .5
+            ix = min(nx - 1, max(0, math.floor((x0 + dx * middle) / resolution_m)))
+            iy = min(ny - 1, max(0, math.floor((y0 + dy * middle) / resolution_m)))
+            total += float(cost_grid[ix][iy]) * length * (end - start) / resolution_m
+    return total
+
+
+def _plan_a_p_oracle_grid(env, intervention_map):
+    base = env.planner._bump_cost.detach().cpu().to(torch.float64).tolist()
+    traversability = [[1.0 for _ in column] for column in base]
+    if intervention_map is None:
+        effective = [[float(value) for value in column] for column in base]
+    else:
+        p_map = intervention_map.detach().cpu().to(torch.float64).tolist()
+        scale = float(getattr(env, "_meco_oracle_p_scale", 1.0))
+        effective = [[float(base[ix][iy]) + scale * float(p_map[ix][iy])
+                      for iy in range(len(base[ix]))] for ix in range(len(base))]
+    return traversability, base, effective
+
+
+def collect_plan_a_p_routes_v3(output: Path, *, dataset: Path,
+        qualification_protocol: Path, p_cost_scale=1.0,
+        intervention_maps=3):
+    """Collect executed P0/probe routes with independent frozen-grid cost labels.
+
+    The v2 reward-ranked collector remains the source of the matched replay
+    branches. This additive schema records a pure-Python route-cost oracle.
+    """
+    temporary = Path(output).with_suffix(Path(output).suffix + ".routes-v2")
+    collect_plan_a_p_routes_v1(temporary, dataset=dataset,
+        qualification_protocol=qualification_protocol, p_cost_scale=p_cost_scale,
+        intervention_maps=intervention_maps)
+    manifest_path = temporary.with_suffix(temporary.suffix + ".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    rows = [json.loads(line) for line in temporary.read_text().splitlines() if line]
+    from .curriculum_training import source_identity
+    manifest.update(schema=PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        target_schema=PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA,
+        p_oracle_version=PLAN_A_P_ROUTE_ORACLE_VERSION,
+        p_oracle_implementation="frc_defense.meco_counterfactual._plan_a_p_oracle_integral",
+        p_oracle_inputs="archived planner bump grid plus exact regenerated effective P map; xy resolution; executed route trace",
+        plan_a_p_supervision_semantics="non_tied sampled executed-path cost preference; lower independent oracle cost is preferred",
+        plan_a_p_oracle_target="mean per-snapshot integral of base bump cost plus scaled effective P map along executed path in normalized grid-edge units",
+        plan_a_p_target="mean per-snapshot integral of base bump cost plus scaled effective P map along executed path in normalized grid-edge units",
+        plan_a_p_unlabelled_reason=None)
+    for row in rows:
+        for group in row["plan_a_p_route_groups"]:
+            for outcome in group["outcomes"]:
+                route = outcome["native_route"]
+                # The original branch data contains the exact intervention seed
+                # and scale; regenerate the map only after replaying that branch.
+                replay = replay_counterfactual_branch(row, manifest)
+                try:
+                    env = replay["env"]
+                    seed = outcome["intervention_seed"]
+                    p_map = None if seed is None else _plan_a_p_intervention_map(env, seed)
+                    scale = float(manifest["p_intervention_scale"])
+                    env._meco_oracle_p_scale = scale
+                    traversability_grid, base_grid, effective_grid = _plan_a_p_oracle_grid(env, p_map)
+                    resolution = float(env.planner.resolution)
+                    per_snapshot = [_plan_a_p_oracle_integral(effective_grid,
+                        snap["route_points_m"], resolution)
+                        for snap in route["route_trace"]]
+                finally:
+                    close = getattr(replay["env"], "close", None)
+                    if callable(close):
+                        close()
+                evidence = {"version": PLAN_A_P_ROUTE_ORACLE_VERSION,
+                    "implementation": "frc_defense.meco_counterfactual._plan_a_p_oracle_integral",
+                    "grid_shape": [len(base_grid), len(base_grid[0])],
+                    "resolution_m": resolution,
+                    "base_traversability_cost_grid": traversability_grid,
+                    "base_bump_cost_grid": base_grid,
+                    "effective_cost_grid": effective_grid,
+                    "grid_inputs_sha256": _hash({"traversability": traversability_grid,
+                        "base": base_grid,
+                        "effective": effective_grid, "resolution_m": resolution}),
+                    "route_snapshot_costs_grid_edges": per_snapshot,
+                    "route_cost_grid_edges": sum(per_snapshot) / len(per_snapshot),
+                    "route_trace_sha256": route["route_trace_sha256"],
+                    "selected_goal_descriptor_sha256": route["selected_goal_descriptor_sha256"],
+                    "intervention_map_sha256": route["map_sha256"],
+                    "intervention_scale": scale if seed is not None else 0.0}
+                route["independent_cost_oracle"] = evidence
+    if source_identity() != manifest["sources"]:
+        raise RuntimeError("source/runtime changed during Plan A P oracle collection")
+    for row in rows:
+        row["schema"] = PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA
+        row["target_schema"] = PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA
+    payload = "".join(json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n"
+                      for row in rows).encode()
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(payload)
+    manifest["dataset_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest["record_count"] = len(rows)
+    manifest["oracle_label_count"] = sum(len(group["outcomes"])
+        for row in rows for group in row["plan_a_p_route_groups"])
+    output.with_suffix(output.suffix + ".manifest.json").write_text(
+        json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+    temporary.unlink(missing_ok=True)
+    manifest_path.unlink(missing_ok=True)
+    return {"path": str(output), "record_count": len(rows),
+        "schema": PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        "oracle_label_count": manifest["oracle_label_count"],
+        "dataset_sha256": manifest["dataset_sha256"]}
