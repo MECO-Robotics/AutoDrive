@@ -28,6 +28,7 @@ import torch
 from .curriculum_training import source_identity
 from .meco_candidates import CANDIDATE_BOUNDARY
 from .meco_track_training import CHUNK_RESET_POLICY, MecoTrainConfig, ROOT
+from .meco_task_scheduler import MecoTaskScheduler
 from .meco_tracks import MECO_TRACKS
 
 
@@ -63,7 +64,8 @@ def _checkpoint_info(path: Path):
 
 
 def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
-                   stop_file: Path, resume: Path | None, protocol_id: str):
+                   stop_file: Path, resume: Path | None, protocol_id: str,
+                   task_assignment: dict):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "train",
         "--track", config.track, "--scenario", config.scenario_id,
         "--category", config.category, "--updates", str(config.updates),
@@ -77,6 +79,8 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--route-cost-points-per-second", str(config.route_cost_points_per_second),
         "--output", str(output), "--stop-file", str(stop_file), "--run-id", run_id,
         "--protocol-id", protocol_id]
+    command.extend(("--task-assignment-json", json.dumps(
+        task_assignment, sort_keys=True, allow_nan=False)))
     if resume is not None:
         command.extend(("--resume", str(resume)))
     return command
@@ -102,7 +106,8 @@ class MecoSupervisor:
                  candidate_k: int,
                  evaluation_categories: tuple[str, ...], evaluation_episodes: int,
                  evaluation_seed: int, evaluation_device: str | None,
-                 cycles: int, stop_file: str | None):
+                 cycles: int, stop_file: str | None,
+                 stage_exposure_chunks: int = 10):
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
         if any(device.startswith("cuda") for device in devices) and not torch.cuda.is_available():
@@ -121,6 +126,7 @@ class MecoSupervisor:
         self.category = category
         self.seed = seed
         self.candidate_k = candidate_k
+        self.stage_exposure_chunks = stage_exposure_chunks
         self.chunk_updates = chunk_updates
         self.evaluation_categories = evaluation_categories
         self.evaluation_episodes = evaluation_episodes
@@ -136,6 +142,7 @@ class MecoSupervisor:
         self.evaluator_job = None
         self.pending_evaluations = []
         self.last_evaluation = None
+        self.current_assignment = None
         self.run_ids = {}
         self.worker_pids = {}
         self.completed_updates = {track: 0 for track in MECO_TRACKS}
@@ -167,7 +174,10 @@ class MecoSupervisor:
             "evaluation_seed": evaluation_seed,
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "chunk_reset_policy": CHUNK_RESET_POLICY,
-            "D0_control": "curriculum teacher proxy; not production AutoDrive controller"})
+            "task_scheduler": {"version": 1,
+                "stage_exposure_chunks": stage_exposure_chunks,
+                "semantics": "DAG exposure progression; not promotion qualification"},
+            "D0_control": "production deterministic slot-3 controller; native 20 ms cadence; outside candidate table"})
 
     def _lane_payload(self, track, statuses):
         return {"track": track, "run_id": self.run_ids[track],
@@ -190,6 +200,14 @@ class MecoSupervisor:
     def _completed_updates(self, track):
         return self.completed_updates.get(track, 0)
 
+    def _task_scheduler_status(self):
+        if not hasattr(self, "task_scheduler"):
+            return None
+        state = self.task_scheduler.state
+        return {key: state[key] for key in (
+            "completed_cycle", "pending_assignment", "exposure_chunks",
+            "category_exposures", "recovery_pressure")}
+
     def _refresh_progress(self, track):
         payload = _checkpoint_info(self.output / track / "latest.pt")
         if payload:
@@ -204,6 +222,8 @@ class MecoSupervisor:
             "cycle": cycle, "phase": phase,
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "lanes": [self._lane_payload(track, statuses) for track in MECO_TRACKS],
+            "task_assignment": self.current_assignment,
+            "task_scheduler": self._task_scheduler_status(),
             "evaluation": self._evaluation_status()}
         _atomic_json(self.queue_path, queue)
         _atomic_json(self.status_path, {"schema_version": 1,
@@ -214,6 +234,8 @@ class MecoSupervisor:
             "completed_cycles": self.completed_cycles,
             "completed_training_chunks": self.completed_chunks,
             "lanes": [self._lane_payload(track, statuses) for track in MECO_TRACKS],
+            "task_assignment": self.current_assignment,
+            "task_scheduler": self._task_scheduler_status(),
             "evaluation": evaluation, "error": error,
             "stop_requested": self.request_stop,
             "candidate_boundary": CANDIDATE_BOUNDARY})
@@ -276,8 +298,42 @@ class MecoSupervisor:
             "evaluation_seed": self.evaluation_seed,
             "evaluation_device": self.evaluation_device,
             "chunk_reset_policy": CHUNK_RESET_POLICY,
+            "task_scheduler": {"version": 1,
+                "stage_exposure_chunks": self.stage_exposure_chunks,
+                "semantics": "DAG exposure progression; not promotion qualification"},
             "candidate_boundary": CANDIDATE_BOUNDARY}
         self.configuration_hash = _hash(self.configuration)
+        self.scheduler_path = self.output / "task-scheduler-state.json"
+        if self.scheduler_path.is_file():
+            scheduler_state = json.loads(self.scheduler_path.read_text())
+            self.task_scheduler = MecoTaskScheduler(self.seed,
+                self.stage_exposure_chunks, scheduler_state)
+        else:
+            self.task_scheduler = MecoTaskScheduler(self.seed,
+                self.stage_exposure_chunks)
+            _atomic_json(self.scheduler_path, self.task_scheduler.state)
+
+    def _task_for_cycle(self, cycle, target_update):
+        assignment = self.task_scheduler.schedule(cycle, target_update)
+        self.current_assignment = assignment
+        _atomic_json(self.scheduler_path, self.task_scheduler.state)
+        return assignment
+
+    def _complete_task_cycle(self, assignment):
+        results = {}
+        for track in MECO_TRACKS:
+            try:
+                payload = json.loads((self.output / track / "task-outcomes.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            if payload.get("assignment_id") == assignment["assignment_id"]:
+                results[track] = payload
+        missing = set(MECO_TRACKS) - set(results)
+        if missing:
+            raise RuntimeError(f"task outcome records missing for matched lanes: {sorted(missing)}")
+        self.task_scheduler.complete(assignment, results)
+        self.current_assignment = None
+        _atomic_json(self.scheduler_path, self.task_scheduler.state)
 
     def _write_queued_manifests(self, statuses):
         for track in MECO_TRACKS:
@@ -298,7 +354,8 @@ class MecoSupervisor:
                     candidate_boundary=CANDIDATE_BOUNDARY, protocol_id=self.protocol_id)
                 _atomic_json(manifest_path, manifest)
 
-    def _run_training_batch(self, tracks, cycle, statuses, target_update):
+    def _run_training_batch(self, tracks, cycle, statuses, target_update,
+                            task_assignment):
         processes = {}
         logs = {}
         for track in tracks:
@@ -317,7 +374,7 @@ class MecoSupervisor:
             command = _train_command(config=config, output=self.output / track,
                 run_id=self.run_ids[track], stop_file=self.stop_file,
                 resume=latest if latest.is_file() else None,
-                protocol_id=self.protocol_id)
+                protocol_id=self.protocol_id, task_assignment=task_assignment)
             log_path = self.output / track / "supervisor.log"
             logs[track] = log_path.open("ab")
             processes[track] = subprocess.Popen(command, cwd=ROOT,
@@ -478,7 +535,8 @@ class MecoSupervisor:
             _atomic_json(manifest_path, manifest)
             statuses[track] = "stopped"
 
-    def _train_to_update(self, target_update, cycle, statuses, order):
+    def _train_to_update(self, target_update, cycle, statuses, order,
+                         task_assignment):
         remaining = [track for track in order
                      if self._completed_updates(track) < target_update]
         while remaining and not self.request_stop:
@@ -489,7 +547,8 @@ class MecoSupervisor:
                 if selected is not None:
                     batch.append(selected)
                     remaining.remove(selected)
-            self._run_training_batch(batch, cycle, statuses, target_update)
+            self._run_training_batch(batch, cycle, statuses, target_update,
+                                     task_assignment)
             remaining = [track for track in order
                          if self._completed_updates(track) < target_update]
             self._poll_evaluator(cycle, statuses)
@@ -536,13 +595,35 @@ class MecoSupervisor:
         try:
             statuses = {track: ("complete" if self._completed_updates(track) == matched_update
                                else "queued") for track in MECO_TRACKS}
-            if any(self._completed_updates(track) < matched_update for track in MECO_TRACKS):
-                cycle = self.completed_cycles
+            pending = self.task_scheduler.state.get("pending_assignment")
+            needs_catchup = (pending is not None or
+                any(self._completed_updates(track) < matched_update for track in MECO_TRACKS))
+            if needs_catchup:
+                if pending is not None:
+                    cycle = pending["cycle"]
+                    catchup_target = pending["target_update"]
+                    assignment = self._task_for_cycle(cycle, catchup_target)
+                else:
+                    catchup_target = ((matched_update + self.chunk_updates - 1)
+                                      // self.chunk_updates) * self.chunk_updates
+                    cycle = max(1, (catchup_target - 1) // self.chunk_updates + 1)
+                    assignment = self._task_for_cycle(cycle, catchup_target)
+                ahead = {track: self._completed_updates(track)
+                         for track in MECO_TRACKS
+                         if self._completed_updates(track) > catchup_target}
+                if ahead:
+                    raise RuntimeError(f"lane checkpoints exceed pending task frontier: {ahead}")
                 target_order = list(MECO_TRACKS)
                 self._publish(cycle=cycle, phase="catching_up", statuses=statuses)
-                self._train_to_update(matched_update, cycle, statuses, target_order)
-                if not self.request_stop:
+                if any(self._completed_updates(track) < catchup_target for track in target_order):
+                    self._train_to_update(catchup_target, cycle, statuses,
+                                          target_order, assignment)
+                if not self.request_stop and all(
+                        self._completed_updates(track) == catchup_target
+                        for track in target_order):
+                    self._complete_task_cycle(assignment)
                     statuses = {track: "complete" for track in MECO_TRACKS}
+                    self.completed_cycles = cycle
                     self._queue_evaluation(cycle)
                     self._start_next_evaluation()
             cycles_run = 0
@@ -552,6 +633,7 @@ class MecoSupervisor:
                     break
                 target_update = max(self.completed_updates.values()) + self.chunk_updates
                 cycle = target_update // self.chunk_updates
+                assignment = self._task_for_cycle(cycle, target_update)
                 # Rotate the first scheduled track each cycle to avoid a fixed
                 # ordering advantage when the final device batch is partial.
                 offset = (cycle - 1) % len(MECO_TRACKS)
@@ -559,9 +641,11 @@ class MecoSupervisor:
                 statuses = {track: ("complete" if self._completed_updates(track) >= target_update
                                     else "queued") for track in MECO_TRACKS}
                 self._publish(cycle=cycle, phase="queued", statuses=statuses)
-                self._train_to_update(target_update, cycle, statuses, order)
+                self._train_to_update(target_update, cycle, statuses, order,
+                                      assignment)
                 if self.request_stop:
                     break
+                self._complete_task_cycle(assignment)
                 self.completed_cycles = cycle
                 cycles_run += 1
                 self._queue_evaluation(cycle)
@@ -607,6 +691,8 @@ def _parser():
     parser.add_argument("--category", default="single")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--chunk-updates", type=int, default=100)
+    parser.add_argument("--stage-exposure-chunks", type=int, default=10,
+        help="chunks exposed per scenario before its dependants can enter training mixture")
     parser.add_argument("--rollout-steps", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--action-ticks", type=int, default=12)
@@ -646,7 +732,8 @@ def main(argv=None):
         candidate_k=args.candidate_k,
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,
-        cycles=args.cycles, stop_file=args.stop_file)
+        cycles=args.cycles, stop_file=args.stop_file,
+        stage_exposure_chunks=args.stage_exposure_chunks)
     print(json.dumps(supervisor.run(), indent=2))
 
 

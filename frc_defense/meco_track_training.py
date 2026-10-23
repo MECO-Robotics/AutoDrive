@@ -35,7 +35,8 @@ ROOT = Path(__file__).resolve().parents[1]
 OBSERVATION_DT = .02
 DEFAULT_CATEGORIES = {"pickup_simple": ("single", "cluster")}
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
-    "scenario seed = master seed + cumulative completed updates + 1")
+    "shared scheduled task seed initializes the episode; subsequent episode seeds "
+    "are task seed + global episode index")
 
 
 @dataclass(frozen=True)
@@ -280,8 +281,20 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
 
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                stop_file: str | None = None, run_id_override: str | None = None,
-               protocol_id: str | None = None):
+               protocol_id: str | None = None,
+               task_assignment: dict | None = None):
     config.validate()
+    task_assignment = dict(task_assignment or {})
+    task_scenario = task_assignment.get("scenario_id", config.scenario_id)
+    task_category = task_assignment.get("category", config.category)
+    task_seed = task_assignment.get("seed")
+    if task_seed is None:
+        task_seed = config.seed
+    task_definition = get_scenario(task_scenario)
+    if task_category not in task_definition.required_categories:
+        raise ValueError("scheduled task category is not registered for scenario")
+    if type(task_seed) is not int or task_seed < 0:
+        raise ValueError("scheduled task seed must be nonnegative")
     torch.set_num_threads(1)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -320,15 +333,20 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         value_head.load_state_dict(payload["value_head"])
         optimizer.load_state_dict(payload["optimizer"])
         update, episode, history = payload["update"], payload["episode"], payload["history"]
+        prior_task = payload.get("task_assignment") or {}
+        if (task_assignment.get("assignment_id") is not None
+                and prior_task.get("cycle") == task_assignment.get("cycle")
+                and prior_task.get("assignment_id") != task_assignment.get("assignment_id")):
+            raise ValueError("checkpoint task assignment differs within the same scheduled cycle")
         run_id = payload["run_id"]
         if run_id_override and run_id_override != run_id:
             raise ValueError("resume run ID mismatch")
         resume_rng_torch = payload["rng_torch"]
         resume_rng_python = payload["rng_python"]
         resume_rng_device = payload["rng_device"]
-    env = make_curriculum_env(config.scenario_id, config.category, 1,
-        config.device, config.seed)
-    chunk_seed = config.seed + update + 1
+    env = make_curriculum_env(task_scenario, task_category, 1,
+        config.device, task_seed)
+    chunk_seed = task_seed
     _reset_episode(env, chunk_seed)
     if resume_rng_torch is not None:
         torch.set_rng_state(resume_rng_torch)
@@ -343,7 +361,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             close()
         raise
     run_manifest = {"schema_version": 1, "run_id": run_id,
-        "config": asdict(config), "updates_semantics": "updates per invocation chunk",
+        "config": asdict(config), "task_assignment": task_assignment,
+        "updates_semantics": "updates per invocation chunk",
         "protocol_id": protocol_id,
         "configuration_sha256": hashlib.sha256(json.dumps(
             {key: value for key, value in asdict(config).items() if key != "updates"},
@@ -368,6 +387,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "completed_updates": update})
     update_heartbeat()
     hidden = None
+    task_successes = 0
+    task_failures = 0
+    task_episodes = 0
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
     try:
@@ -408,8 +430,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "reward": reward.detach().reshape(()), "done": ended or timeout,
                     "candidate_recall": candidate.candidate_recall})
                 if ended or timeout:
+                    outcome = env.curriculum_metrics.outcomes()["success"]
+                    success = bool(outcome.reshape(-1)[0].item())
+                    task_episodes += 1
+                    task_successes += int(success)
+                    task_failures += int(not success)
                     episode += 1
-                    episode_seed = config.seed + episode
+                    episode_seed = task_seed + episode
                     _reset_episode(env, episode_seed)
                     hidden = None
                     episode_generation = _episode_id(run_id, episode)
@@ -429,7 +456,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             update += 1
             update_heartbeat()
             stats.update(update=update, episode=episode, track=config.track,
-                         scenario_id=config.scenario_id, category=config.category,
+                         scenario_id=task_scenario, category=task_category,
+                         task_assignment_id=task_assignment.get("assignment_id"),
                          learning_rate=config.learning_rate,
                          candidate_k=config.candidate_k,
                          within_candidate_pool_recall=sum(
@@ -440,6 +468,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
                 "protocol_id": protocol_id,
+                "task_assignment": task_assignment,
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),
@@ -453,6 +482,11 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         run_manifest.update(status="stopped" if stop_path and stop_path.exists() else "complete",
                             completed_updates=update,
                             stopped_utc=datetime.now(timezone.utc).isoformat())
+        run_manifest["task_outcomes"] = {"assignment_id": task_assignment.get("assignment_id"),
+            "scenario_id": task_scenario, "category": task_category,
+            "episodes": task_episodes, "successes": task_successes,
+            "failures": task_failures}
+        _atomic_json(output / "task-outcomes.json", run_manifest["task_outcomes"])
         _atomic_json(output / "run.json", run_manifest)
         update_heartbeat()
     except BaseException as exc:
@@ -777,6 +811,7 @@ def _parser():
     train.add_argument("--stop-file")
     train.add_argument("--run-id")
     train.add_argument("--protocol-id")
+    train.add_argument("--task-assignment-json")
     ev = commands.add_parser("evaluate")
     ev.add_argument("--scenario", default="pickup_simple")
     ev.add_argument("--categories", default="single,cluster")
@@ -802,8 +837,12 @@ def main(argv=None):
             candidate_k=args.candidate_k,
             route_cost_points_per_second=args.route_cost_points_per_second,
             output=args.output)
+        assignment = (json.loads(args.task_assignment_json)
+            if args.task_assignment_json else {"scenario_id": args.scenario,
+                "category": args.category, "seed": config.seed})
         result = train_meco(config, resume=args.resume, stop_file=args.stop_file,
-                            run_id_override=args.run_id, protocol_id=args.protocol_id)
+                            run_id_override=args.run_id, protocol_id=args.protocol_id,
+                            task_assignment=assignment)
         print(json.dumps(result, indent=2))
         return
     checkpoints = {track: getattr(args, f"{track.lower()}_checkpoint") for track in MECO_TRACKS}

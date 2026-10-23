@@ -3,7 +3,9 @@
 `frc_defense/meco_tracks.py` contains isolated experimental model and scoring
 interfaces for the five tracks in the [evaluation plan](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md).
 These modules do not change the production controller or make any promotion or
-deployment claim.
+deployment claim. Paired evaluation includes the production deterministic D0
+slot-3 controller at native 20 ms cadence; it is not constrained by the MECO
+candidate table.
 
 ## Implemented in this slice
 
@@ -35,13 +37,17 @@ deployment claim.
 
 ## Deliberate limits
 
-The eight-row source is an integration seam for the current curriculum
-simulator, not the plan's general feasible candidate generator. It does not
-enumerate arbitrary goal poses or behaviors, compute AD* route ETA, guarantee
-capture-pose clearance, or measure candidate recall against an oracle. Its
-`route_time_s` is unavailable and route costs are `null`; the current adapter
-must not claim route-cost parity or subtract a fabricated cost. Existing action
-masks and executors still define which action can be selected.
+The candidate service now exposes K=8/16/32 tables from eight existing action
+primitives, with stable collection-offset rows, a current-snapshot AD* route
+query, ETA/risk features, and selected XY endpoint override. Its recall report
+is explicitly within this same pool; K32 is not an independent or larger
+oracle. It does not enumerate arbitrary behaviors or measure recall against a
+distinct >32 reference set. Static endpoint clearance encloses the robot and
+extended intake at every yaw. A sensed-target bearing supplies a nonbinding
+`capture_estimate`; it is not a feasibility mask because the native controller
+does not command or guarantee the inferred terminal heading. Dynamic future
+swept-robot collision remains outside this candidate feasibility check, and
+the simulator's native intake/action executor remains authoritative.
 
 A1 scores a dense field but this slice has no qualified legal-pose lattice or
 SE(2) transition mask. The A1 adapter can gather scores only for candidate
@@ -57,12 +63,17 @@ as an endpoint penalty. A deterministic planner must integrate it over a
 verified route before the Plan A policy is considered operational. Candidate
 ranking currently uses dense utility and behavior scores only.
 
-The module does not yet provide the plan's end-to-end matched PPO experiment,
-supervised warm start, paired held-out evaluation suite, D0 production
-controller variance, Hailo/ONNX export or hardware profiling. The document's
-baseline freezes, defender-family splits, route-costed candidate recall,
-full-game metrics, simulator records, and confidence-interval decision gates
-remain required before any performance conclusion.
+The code now has a matched PPO/evaluation harness and a resumable five-lane
+supervisor, but no training/evaluation run is claimed here. Its task scheduler
+samples the registered curriculum DAG through `task_mixture`, persists a
+shared task/category/seed assignment across all five learned tracks, tracks
+category exposure, and biases practice toward recent failed categories plus
+their ancestors. Stage unlocks mean exposure only; they do not update
+`CurriculumState.qualified` or satisfy outcome gates. The periodic supervisor
+evaluation remains a diagnostic comparison and does not implement the full
+held-out defender-family protocol. Baseline freezes, qualified retention,
+full-game metrics, simulator records, confidence-interval promotion gates,
+supervised warm start, Hailo/ONNX export, and hardware profiling remain open.
 
 ## Adapter calls
 
