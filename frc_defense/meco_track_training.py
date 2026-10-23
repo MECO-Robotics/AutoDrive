@@ -206,6 +206,25 @@ def _json_number(value):
     return value if math.isfinite(value) else str(value)
 
 
+def _logits_evidence(tensor):
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    return [_json_number(value) for value in tensor.detach().reshape(-1).cpu().tolist()]
+
+
+def _candidate_identity_evidence(candidate_set):
+    if candidate_set is None:
+        return None
+    table = candidate_set.table
+    features = table.features
+    canonical = json.dumps(features, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False)
+    return {"candidate_ids": list(table.candidate_ids),
+        "valid_mask": [bool(value) for value in table.valid_mask],
+        "feature_names": list(table.feature_names),
+        "features_sha256": hashlib.sha256(canonical.encode()).hexdigest()}
+
+
 def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
                                *, update_number, output):
     saved_logprob = row["logprob"].reshape(())
@@ -216,23 +235,78 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
     rollout_logits = row.get("rollout_logits")
     replay_logits = replay.get("logits")
     max_logits_delta = None
+    finite_valid_max_logits_delta = None
+    per_index_logits_delta = None
+    candidate_set = row.get("candidate_set")
+    valid_mask = (list(candidate_set.table.valid_mask)
+                  if candidate_set is not None else [])
     if (isinstance(rollout_logits, torch.Tensor) and
             isinstance(replay_logits, torch.Tensor) and
             rollout_logits.shape == replay_logits.shape):
-        max_logits_delta = float((rollout_logits.detach() -
-            replay_logits.detach()).abs().max().cpu())
+        rollout_flat = rollout_logits.detach().reshape(-1)
+        replay_flat = replay_logits.detach().reshape(-1)
+        deltas = (rollout_flat - replay_flat).abs()
+        max_logits_delta = float(deltas.max().cpu()) if deltas.numel() else None
+        finite = torch.isfinite(rollout_flat) & torch.isfinite(replay_flat)
+        if valid_mask and len(valid_mask) == finite.numel():
+            finite &= torch.tensor(valid_mask, device=finite.device, dtype=torch.bool)
+        finite_deltas = deltas[finite]
+        finite_valid_max_logits_delta = (float(finite_deltas.max().cpu())
+            if finite_deltas.numel() else None)
+        per_index_logits_delta = [
+            (_json_number(deltas[index].cpu())
+             if bool(finite[index].cpu()) else None)
+            for index in range(deltas.numel())]
     named_tensors = {"rollout_logits": rollout_logits,
         "replay_logits": replay_logits, "rollout_logprob": saved_logprob,
         "replay_logprob": replay_scalar, "chosen_action": row.get("action"),
         "raster": row.get("raster"), "globals": row.get("globals"),
         "hidden_before": row.get("hidden_before"),
         "hidden_next": row.get("hidden_next")}
-    payload = {"schema_version": 1, "track": track,
+    replay_fingerprints = {"raster": _tensor_evidence(row.get("raster")),
+        "globals": _tensor_evidence(row.get("globals")),
+        "hidden": _tensor_evidence(row.get("hidden_before")),
+        "candidate_features": _candidate_identity_evidence(candidate_set),
+        "route_cost": _tensor_evidence(row.get("route_cost")),
+        "risk_cost": _tensor_evidence(row.get("risk_cost")),
+        "model_parameters_sha256": _model_id(model)}
+    repeated_replay = []
+    if track in ("C1", "C2"):
+        # Only pay for these extra model forwards on an actual strict-guard
+        # mismatch. Each pass reuses the identical saved row and hidden state.
+        for repeat_index in range(3):
+            try:
+                repeated = _policy_inputs_for_row(track, model, row,
+                    row["hidden_before"], None)
+                repeated_logits = repeated["logits"]
+                repeated_logprob = torch.distributions.Categorical(
+                    logits=repeated_logits).log_prob(
+                        row["action"].reshape(1)).reshape(())
+                repeated_replay.append({"repeat": repeat_index + 1,
+                    "logits": _logits_evidence(repeated_logits),
+                    "logprob": _json_number(repeated_logprob.detach().cpu()),
+                    "logits_fingerprint": _tensor_evidence(repeated_logits)})
+            except Exception as exc:
+                repeated_replay.append({"repeat": repeat_index + 1,
+                    "error": f"{type(exc).__name__}: {exc}"})
+    payload = {"schema_version": 2, "track": track,
         "update": int(update_number), "episode_id": row.get("episode_id"),
         "absolute_logprob_delta": _json_number(absolute_delta),
         "relative_logprob_delta": _json_number(relative_delta),
         "max_logits_delta": (None if max_logits_delta is None else
                              _json_number(max_logits_delta)),
+        "finite_valid_max_logits_delta": (None if finite_valid_max_logits_delta is None
+                                          else _json_number(finite_valid_max_logits_delta)),
+        "per_index_logits_delta": per_index_logits_delta,
+        "rollout_logits_values": _logits_evidence(rollout_logits),
+        "replay_logits_values": _logits_evidence(replay_logits),
+        "candidate_table": _candidate_identity_evidence(candidate_set),
+        "rollout_fingerprints": row.get("replay_fingerprints"),
+        "replay_fingerprints": replay_fingerprints,
+        "repeated_exact_row_replays": repeated_replay,
+        "model_parameters_match_rollout": (
+            (row.get("replay_fingerprints") or {}).get("model_parameters_sha256") ==
+            replay_fingerprints.get("model_parameters_sha256")),
         "chosen_action": int(row["action"].reshape(-1)[0].detach().cpu()),
         "model_training": bool(model.training),
         "tensors": {name: _tensor_evidence(tensor)
@@ -1277,6 +1351,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 and sibling_abort_marker() is None:
             rows = []
             update_empty_support_events = []
+            rollout_model_fingerprint = (_model_id(model)
+                if config.track in ("C1", "C2") else None)
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
                     raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
@@ -1357,6 +1433,19 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "candidate_set": prepared["candidate_set"],
                     "candidate_digest": prepared.get("candidate_digest"),
                     "candidate_replay_digest": prepared.get("candidate_replay_digest"),
+                    # Diagnostic instrumentation adds five tensor SHA-256
+                    # copies and one candidate-feature JSON hash per C-track
+                    # decision; model parameters are hashed once per update.
+                    "replay_fingerprints": (
+                        {"raster": _tensor_evidence(prepared["raster"]),
+                         "globals": _tensor_evidence(prepared["globals"]),
+                         "hidden": _tensor_evidence(hidden_before),
+                         "candidate_features": _candidate_identity_evidence(
+                             prepared["candidate_set"]),
+                         "route_cost": _tensor_evidence(prepared["route_cost"]),
+                         "risk_cost": _tensor_evidence(prepared["risk_cost"]),
+                         "model_parameters_sha256": rollout_model_fingerprint}
+                        if config.track in ("C1", "C2") else None),
                     "candidate_commitment": (None if candidate is None or
                                               candidate.commitment is None
                                               else asdict(candidate.commitment)),
