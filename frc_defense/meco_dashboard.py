@@ -567,20 +567,74 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
     bundle_id = status.get("bundle_id")
     valid_bundle = (isinstance(bundle_id, str)
                     and re.fullmatch(r"[0-9a-f]{64}", bundle_id))
+    # Qualification provenance is intentionally projected field by field. In
+    # particular, the calibration seed pools and raw qualification evidence
+    # remain private to the qualification artifact.
+    from .meco_qualification import CALIBRATED_PROTOCOL_VERSION, PROTOCOL_VERSION
+    from .training_curriculum import SCENARIOS, _ancestors
+
+    protocol_version = status.get("protocol_version")
+    scenario_id = status.get("scenario_id")
+    calibration_id = status.get("calibration_id")
+    calibration_ids = status.get("calibration_ids")
+    retention_scenario_ids = status.get("retention_scenario_ids")
+    safety_gate_status = status.get("safety_gate_status")
+    valid_hash = lambda value: (type(value) is str
+                                and re.fullmatch(r"[0-9a-f]{64}", value) is not None)
+    valid_scenario = type(scenario_id) is str and scenario_id in SCENARIOS
+    closure = ({scenario_id, *_ancestors(scenario_id)} if valid_scenario else set())
+    expected_calibration_keys = {name for name in SCENARIOS if name in closure}
+    expected_retention = [name for name in SCENARIOS
+                          if name in closure and name != scenario_id]
+    valid_calibration_ids = (
+        type(calibration_ids) is dict and len(calibration_ids) <= 32
+        and all(type(key) is str and key in SCENARIOS and valid_hash(value)
+                for key, value in calibration_ids.items()))
+    valid_retention_ids = (
+        type(retention_scenario_ids) is list and len(retention_scenario_ids) <= 32
+        and all(type(name) is str and name in SCENARIOS
+                for name in retention_scenario_ids)
+        and len(set(retention_scenario_ids)) == len(retention_scenario_ids))
+    if protocol_version == CALIBRATED_PROTOCOL_VERSION:
+        combined_calibration_id = (hashlib.sha256(json.dumps(calibration_ids,
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if valid_calibration_ids else None)
+        valid_calibration = (valid_hash(calibration_id) and valid_calibration_ids
+            and set(calibration_ids) == expected_calibration_keys
+            and all(calibration_ids[name] for name in expected_calibration_keys)
+            and calibration_id == combined_calibration_id
+            and valid_retention_ids and retention_scenario_ids == expected_retention
+            and safety_gate_status == "metrics_schema_verified"
+            and status.get("gate_calibration_status") == "calibrated_baseline_frozen")
+    elif protocol_version == PROTOCOL_VERSION:
+        valid_calibration = (calibration_id is None and valid_calibration_ids
+            and not calibration_ids and valid_retention_ids
+            and not retention_scenario_ids
+            and safety_gate_status == "not_calibrated"
+            and status.get("gate_calibration_status")
+                == "provisional_pending_baseline_variance_review")
+    else:
+        valid_calibration = False
     if (status.get("schema_version") != 1
             or status.get("split") not in ("validation", "test")
+            or not valid_scenario
             or not isinstance(status.get("protocol_id"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", status["protocol_id"])
             or (not valid_bundle and not failed_round)
+            or (status.get("checkpoint_sha256") is not None
+                and not valid_hash(status.get("checkpoint_sha256")))
             or not isinstance(status.get("confidence_intervals"), dict)
-            or not isinstance(status.get("promotion"), dict)):
+            or not isinstance(status.get("promotion"), dict)
+            or not valid_calibration):
         errors.append({"source": str(path.relative_to(project)),
                        "error": "qualification status has invalid provenance"})
         return None
     return {key: status.get(key) for key in (
         "updated_utc", "evaluation_id", "scenario_id", "candidate_policy", "split",
         "protocol_id", "bundle_id", "checkpoint_sha256", "gate_definition",
-        "gate_calibration_status", "confidence_intervals", "promotion", "streak", "qualified",
+        "gate_calibration_status", "protocol_version", "calibration_id",
+        "calibration_ids", "retention_scenario_ids", "safety_gate_status",
+        "confidence_intervals", "promotion", "streak", "qualified",
         "final_test_isolated", "failure")}
 
 
