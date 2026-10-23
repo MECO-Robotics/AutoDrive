@@ -999,7 +999,7 @@ class TensorThreeVsThreeEnv(
             heading_delta = torch.atan2(
                 torch.sin(planner_goal_heading - current_heading),
                 torch.cos(planner_goal_heading - current_heading))
-            fractions = torch.linspace(0., 1., 9, device=self.device,
+            fractions = torch.linspace(0., 1., 37, device=self.device,
                                       dtype=self.sim.pose.dtype)
             sweep_headings = current_heading[0] + heading_delta[0] * fractions
             sweep_lengths = planner_lengths[0, 3].expand_as(sweep_headings)
@@ -1009,14 +1009,50 @@ class TensorThreeVsThreeEnv(
             goal_cell = (goal_ix * self.planner.ny + goal_iy).reshape(1, 1)
             static_clear = ~blocked.flatten(1).gather(
                 1, goal_cell.expand(blocked.shape[0], 1)).any()
-            obstacles = self._perceived_robot_obstacles().reshape(
-                self.n, NUM_ROBOTS, NUM_ROBOTS, 3)[0, 3]
-            obstacle_valid = obstacles[:, 2] > 0.
-            rotation_radius = .5 * torch.sqrt(
+            known_ids = torch.stack(self._team_robot_ids)[self.team_ids][0, 3]
+            known_xy = self.sim.pose[0, known_ids, :2]
+            known_valid = known_ids != 3
+            known_radius = .5 * torch.sqrt(
+                self.sim.length[0, known_ids].square() +
+                self.sim.width[0, known_ids].square())
+            known_velocity = self.sim.velocity[0, known_ids, :2]
+            opp_xy = self.opponent_pose[0, 3, :2].unsqueeze(0)
+            opp_size = self.opponent_size[0, 3, :2]
+            opp_valid = (self.opponent_valid[0, 3] &
+                         torch.isfinite(opp_xy[0]).all() &
+                         torch.isfinite(opp_size).all() & (opp_size > 0.).all())
+            opp_radius = .5 * torch.sqrt(opp_size.square().sum())
+            opp_velocity = self.opponent_velocity[0, 3, :2].unsqueeze(0)
+            obstacle_xy = torch.cat((known_xy, opp_xy), dim=0)
+            obstacle_valid = torch.cat((known_valid, opp_valid.reshape(1)))
+            obstacle_radius = torch.cat((known_radius, opp_radius.reshape(1)))
+            obstacle_velocity = torch.cat((known_velocity, opp_velocity), dim=0)
+            # Wait for chassis translation to settle before turning. Then bound
+            # the remaining stopping drift and each observed obstacle's motion
+            # over the full commanded rotation duration.
+            chassis_speed = self.sim.velocity[0, 3, :2].norm()
+            chassis_accel = self.sim.accel[0, 3].clamp_min(.1)
+            stopped = chassis_speed <= .05
+            stopping_drift = chassis_speed.square() / (2. * chassis_accel) + chassis_speed * self.dt
+            turn_angle = heading_delta[0].abs()
+            turn_omega = self.sim.omega_limit[0, 3].clamp_min(.1)
+            turn_alpha = self.sim.alpha[0, 3].clamp_min(.1)
+            accel_turn_time = 2. * torch.sqrt(turn_angle / turn_alpha)
+            cruise_turn_time = turn_angle / turn_omega + turn_omega / turn_alpha
+            turn_seconds = torch.where(turn_angle <= turn_omega.square() / turn_alpha,
+                                       accel_turn_time, cruise_turn_time) + .1
+            relative_xy = obstacle_xy - targets[0, 3]
+            relative_velocity = obstacle_velocity
+            closest_time = (-(relative_xy * relative_velocity).sum(-1) /
+                            relative_velocity.square().sum(-1).clamp_min(1e-8))
+            closest_time = torch.minimum(closest_time.clamp_min(0.), turn_seconds)
+            closest_xy = relative_xy + relative_velocity * closest_time[:, None]
+            robot_radius = .5 * torch.sqrt(
                 self.sim.length[0, 3].square() + self.sim.width[0, 3].square())
-            dynamic_clear = ((targets[0, 3] - obstacles[:, :2]).norm(dim=-1) >
-                             rotation_radius + obstacles[:, 2] + .05) | ~obstacle_valid
-            can_align = static_clear & dynamic_clear.all()
+            clearance = (closest_xy.norm(dim=-1) >
+                         robot_radius + obstacle_radius + stopping_drift + .08)
+            dynamic_clear = clearance | ~obstacle_valid
+            can_align = static_clear & dynamic_clear.all() & stopped
             # Pause at the endpoint if the turn is currently obstructed. The
             # native physics collision and route guards remain authoritative.
             command[:, 3] = torch.where(at_heading_goal[:, None],

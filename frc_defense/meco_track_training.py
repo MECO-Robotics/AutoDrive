@@ -394,6 +394,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     total = torch.zeros((), device=env.device)
     ended = timeout = False
     executed_actions = []
+    heading_alignment_opportunity = False
+    native_goal_preempted = False
     for _ in range(action_ticks):
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
@@ -401,6 +403,24 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading)
         executed_actions.append(int(env.last_actions[0, 3].item()))
+        if goal_xy is not None:
+            current_xy = env.sim.pose[0, 3, :2]
+            goal_distance = float((current_xy - torch.as_tensor(
+                goal_xy, device=env.device, dtype=current_xy.dtype)).norm())
+            heading_alignment_opportunity |= goal_distance <= .04
+            if action_index == 4 and int((env.piece_owner[0] == 3).sum().item()) > 0:
+                team = int(env.team_ids[3])
+                x = float(current_xy[0])
+                in_score_zone = (x <= float(env.alliance_zone_depth) if team == 0 else
+                                 x >= float(env.field_length - env.alliance_zone_depth))
+                bump_clear = bool(env._robots_clear_of_bumps(
+                    env.sim.pose[:, :, :2])[0, 3])
+                native_goal_preempted |= in_score_zone and bump_clear and goal_distance > .04
+                native_goal_preempted |= (int(env.fuel_scored_event[0].sum().item()) > 0 and
+                                          goal_distance > .04)
+            if action_index == 6:
+                native_goal_preempted |= (
+                    int(env.fuel_passed_event[0].sum().item()) > 0 and goal_distance > .04)
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
@@ -408,12 +428,18 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             break
     env._last_obs = env.observe()
     final_heading_error = None
+    final_goal_distance = None
     if goal_heading is not None:
         difference = torch.atan2(
             torch.sin(env.sim.pose[0, 3, 2] - float(goal_heading)),
             torch.cos(env.sim.pose[0, 3, 2] - float(goal_heading))).abs()
         final_heading_error = float(difference)
-    return total, ended, timeout, executed_actions, final_heading_error
+    if goal_xy is not None:
+        final_goal_distance = float((env.sim.pose[0, 3, :2] - torch.as_tensor(
+            goal_xy, device=env.device, dtype=env.sim.pose.dtype)).norm())
+    native_goal_preempted &= final_goal_distance is not None and final_goal_distance > .04
+    return (total, ended, timeout, executed_actions, final_heading_error,
+            final_goal_distance, heading_alignment_opportunity, native_goal_preempted)
 
 
 def _reset_episode(env, seed: int):
@@ -662,6 +688,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         chunk_target = update + config.updates
         while update < chunk_target and not (stop_path and stop_path.exists()):
             rows = []
+            pending_goal = None
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
                     raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
@@ -678,7 +705,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     hidden = prepared["hidden_next"].detach()
                     value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
-                if "support" in prepared:
+                forced_pending_goal = pending_goal is not None
+                if forced_pending_goal:
+                    action = pending_goal["action"]
+                    goal_xy = pending_goal["goal_xy"]
+                    goal_heading = pending_goal["goal_heading"]
+                elif "support" in prepared:
                     support = prepared["support"]
                     action = int(support.action_ids[action_index].item())
                     node = int(support.pair_node_ids[action_index].item())
@@ -691,13 +723,17 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                float(selected_row[cols["goal_y_m"]]))
                     goal_heading = None
-                reward, ended, timeout, executed_trace, heading_error = _run_macro_step(
+                (reward, ended, timeout, executed_trace, heading_error,
+                 goal_distance, heading_opportunity, native_preempted) = _run_macro_step(
                     env, action, config.action_ticks, goal_xy,
                     goal_heading=goal_heading,
                     allow_action7_traversal=(prepared is not None and
                                               "support" in prepared and action == 7))
                 update_heartbeat()
-                rows.append({"raster": prepared["raster"].detach(),
+                remasked = any(item != action for item in executed_trace)
+                sampled_fallback = (prepared.get("fallback_used", False)
+                                    if not forced_pending_goal else False)
+                row = {"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
                     "graph": prepared["graph"],
                     "candidate_set": prepared["candidate_set"],
@@ -710,11 +746,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                        if "support" in prepared else {}),
                     "route_cost": prepared["route_cost"].detach(),
                     "risk_cost": prepared["risk_cost"].detach(),
-                    "execution_failure": (prepared.get("fallback_used", False) or
-                                          any(item != action for item in executed_trace) or
-                                          (heading_error is not None and heading_error > .1)),
+                    "execution_failure": (forced_pending_goal or sampled_fallback or
+                                          remasked or native_preempted),
                     "executed_action_trace": executed_trace,
                     "terminal_heading_error": heading_error,
+                    "terminal_goal_distance_m": goal_distance,
+                    "heading_alignment_opportunity": heading_opportunity,
+                    "native_goal_preempted": native_preempted,
+                    "forced_pending_goal": forced_pending_goal,
+                    "executed_high_level_action": action,
                     "action": torch.tensor([action_index], device=config.device),
                     "logprob": prepared["logprob"].detach().reshape(()),
                     "hidden_before": hidden_before,
@@ -723,8 +763,32 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "legal_lookup": graph.lookup,
                     "path_geometry": prepared["path_geometry"],
                     "candidate_recall": (None if "support" in prepared
-                                          else candidate.candidate_recall)})
+                                          else candidate.candidate_recall)}
+                rows.append(row)
+                goal_complete = (goal_distance is not None and goal_distance <= .04 and
+                                 (heading_error is None or heading_error <= .1))
+                hard_failure = remasked or native_preempted
+                if forced_pending_goal:
+                    if hard_failure:
+                        pending_goal["origin_row"]["execution_failure"] = True
+                        pending_goal = None
+                    elif goal_complete:
+                        pending_goal = None
+                    elif ended or timeout:
+                        pending_goal["origin_row"]["execution_failure"] = True
+                        pending_goal = None
+                elif ("support" in prepared and not goal_complete and
+                      not hard_failure and not (ended or timeout)):
+                    pending_goal = {"action": action, "goal_xy": goal_xy,
+                        "goal_heading": goal_heading, "origin_row": row,
+                        "support_digest": prepared["support"].support_digest}
+                elif ("support" in prepared and not goal_complete and
+                      not hard_failure and (ended or timeout)):
+                    row["execution_failure"] = True
                 if ended or timeout:
+                    if pending_goal is not None:
+                        pending_goal["origin_row"]["execution_failure"] = True
+                        pending_goal = None
                     outcome = env.curriculum_metrics.outcomes()["success"]
                     success = bool(outcome.reshape(-1)[0].item())
                     task_episodes += 1
@@ -735,6 +799,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     _reset_episode(env, episode_seed)
                     hidden = None
                     episode_generation = _episode_id(run_id, episode)
+            if pending_goal is not None:
+                # Do not carry an uncompleted action across PPO optimizer
+                # boundaries, which would make its old policy density stale.
+                pending_goal["origin_row"]["execution_failure"] = True
             if rows[-1]["done"]:
                 bootstrap_value = torch.zeros_like(rows[-1]["value"])
             else:
@@ -1020,6 +1088,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         execution_failures = []
                         last_candidate_recall = None
                         elapsed = 0
+                        pending_eval_goal = None
                         while elapsed < env.horizon:
                             prepared = None
                             if is_production_d0:
@@ -1063,6 +1132,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 logits = _d1_d2_scores(candidate_set, env, policy)
                                 choice = int(logits.argmax(-1).item())
                                 action_source = policy.lower()
+                            routes_before_choice = len(routes_seen)
                             if prepared is not None and "support" in prepared:
                                 support = prepared["support"]
                                 action = int(support.action_ids[choice].item())
@@ -1110,30 +1180,67 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                            float(selected_row[cols["goal_y_m"]]))
                                 routes_seen.append(candidate_set.route_records[choice])
-                            actions_count[action] += 1
-                            selected_action_trace.append(action)
                             goal_heading = (float(support.goal_heading[node].item())
                                             if prepared is not None and "support" in prepared
                                             else None)
-                            _, ended, timeout, actual_trace, heading_error = _run_macro_step(
+                            forced_eval_goal = pending_eval_goal is not None
+                            if forced_eval_goal:
+                                action = pending_eval_goal["action"]
+                                goal_xy = pending_eval_goal["goal_xy"]
+                                goal_heading = pending_eval_goal["goal_heading"]
+                                if len(routes_seen) > routes_before_choice:
+                                    routes_seen.pop()
+                            actions_count[action] += 1
+                            selected_action_trace.append(action)
+                            (_, ended, timeout, actual_trace, heading_error,
+                             goal_distance, heading_opportunity,
+                             native_preempted) = _run_macro_step(
                                 env, action, action_ticks, goal_xy,
                                 goal_heading=goal_heading,
                                 allow_action7_traversal=(prepared is not None and
                                                           "support" in prepared and action == 7))
-                            if ((prepared is not None and prepared.get("fallback_used", False)) or
-                                    any(item != action for item in actual_trace) or
-                                    (heading_error is not None and heading_error > .1)):
+                            goal_complete = (goal_distance is not None and goal_distance <= .04 and
+                                             (heading_error is None or heading_error <= .1))
+                            remasked = any(item != action for item in actual_trace)
+                            hard_failure = remasked or native_preempted
+                            route_id = (pending_eval_goal["route_id"] if forced_eval_goal
+                                        else routes_seen[-1].get("candidate_id")
+                                        if routes_seen else None)
+                            if ((not forced_eval_goal and prepared is not None and
+                                 prepared.get("fallback_used", False)) or hard_failure):
                                 execution_failures.append({
                                     "selected_action": action,
                                     "executed_action_trace": actual_trace,
                                     "terminal_heading_error": heading_error,
+                                    "terminal_goal_distance_m": goal_distance,
+                                        "heading_alignment_opportunity": heading_opportunity,
+                                        "reason": ("native_behavior_preempted_selected_goal"
+                                                   if native_preempted else
+                                                   "action_was_remasked"),
+                                        "native_goal_preempted": native_preempted,
                                     "policy_fallback": (prepared.get("fallback_used", False)
                                                         if prepared is not None else False),
-                                    "route_id": (routes_seen[-1].get("candidate_id")
-                                                 if routes_seen else None)})
+                                    "route_id": route_id})
+                                if pending_eval_goal is not None:
+                                    pending_eval_goal = None
+                            elif not goal_complete and not forced_eval_goal:
+                                pending_eval_goal = {"action": action, "goal_xy": goal_xy,
+                                    "goal_heading": goal_heading, "route_id": route_id}
+                            elif goal_complete and forced_eval_goal:
+                                pending_eval_goal = None
                             elapsed += action_ticks
                             update_evaluation_status("running", len(records))
                             if ended or timeout:
+                                if pending_eval_goal is not None:
+                                    execution_failures.append({
+                                        "selected_action": pending_eval_goal["action"],
+                                        "executed_action_trace": [],
+                                        "terminal_goal_distance_m": goal_distance,
+                                        "terminal_heading_error": heading_error,
+                                        "heading_alignment_opportunity": heading_opportunity,
+                                        "reason": "selected_goal_incomplete_at_episode_end",
+                                        "route_id": pending_eval_goal["route_id"]})
+                                    pending_eval_goal = None
                                 break
                         outcomes = env.curriculum_metrics.outcomes()
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
@@ -1177,7 +1284,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints",
-            "plan_a_heading_contract": "selected legal graph heading is an explicit terminal target; simulator pauses at XY goal, checks swept static orientation and conservative observed-robot clearance, then aligns under native physics; intake uses target capture geometry, score uses hub-facing tolerance, ferry uses native release-facing tolerance",
+            "plan_a_heading_contract": "selected legal graph heading is an explicit terminal target; selected goals persist across macro steps until XY and heading completion; simulator pauses at XY goal, samples the rectangular chassis sweep every 5 degrees, requires chassis translation to settle, and checks circumscribed footprint clearance against observed teammates/opponent predicted over turn time plus stopping drift; native scoring/ferry preemption is recorded as execution failure and excluded from actor credit; intake uses target capture geometry, score uses hub-facing tolerance, ferry uses native release-facing tolerance",
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "ablations": ["A1_P0", "A2_P0", "A3_P0"],
             "controls": ["D0", "D1", "D2"] if include_controls else [],
