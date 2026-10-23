@@ -1,6 +1,6 @@
 """Opt-in offense PPO, paired evaluations, and observed-teacher export.
 
-The standard 137-observation/8-action ActorCritic uses generic NN execution.
+All seven selectable architectures use generic NN execution and sensor tracks.
 Draft scenario targets and scripted teachers remain unqualified until measured.
 """
 from __future__ import annotations
@@ -21,15 +21,23 @@ from torch.nn import functional as F
 
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario, teacher_actions
 from .tensor_training_runtime import ActorCritic, _gae_advantages
+from .curriculum_policy import ARCHITECTURES, PerceptionActorCritic, make_policy
+from .architecture_inputs import PerceptionInputs
+from .discrete_sac import (DiscreteSAC, ScenarioReplayBuffer, make_sac_optimizers,
+                           sac_update)
 from .training_curriculum import (SCENARIOS, CURRICULUM_VERSION, CategoryResult, EvaluationResult,
     CurriculumState, eligible_scenarios, evaluate_promotion, seed_partition, task_mixture)
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    architecture: str = 'baseline_mlp'
+    algorithm: str = 'ppo'
+    disable_miopen: bool = False
+    minibatch_size: int = 0
     updates: int = 1
     num_envs: int = 4
     rollout_steps: int = 16
@@ -43,14 +51,31 @@ class TrainingConfig:
     eval_every: int = 10
     imitation_coef: float = 0.
     learning_rate: float = 3e-4
+    learning_rate_start: float = 3e-3
+    learning_rate_decay_updates: int = 75
     gamma: float = .993
     gae_lambda: float = .95
     clip_coef: float = .2
     value_coef: float = .5
     entropy_coef: float = .01
     max_grad_norm: float = .5
+    sac_replay_capacity: int = 4096
+    sac_batch_size: int = 256
+    sac_warmup_steps: int = 1024
+    sac_updates_per_transition: float = .25
+    sac_target_tau: float = .005
+    sac_initial_alpha: float = .2
+    sac_target_entropy_fraction: float = .98
 
     def validate(self):
+        if self.architecture not in ARCHITECTURES:
+            raise ValueError('unknown architecture')
+        if self.algorithm not in ('ppo', 'sac'):
+            raise ValueError('algorithm must be ppo or sac')
+        if self.algorithm == 'sac' and self.imitation_coef != 0:
+            raise ValueError('imitation_coef is only supported by PPO')
+        if type(self.disable_miopen) is not bool or type(self.minibatch_size) is not int or self.minibatch_size < 0:
+            raise ValueError('invalid backend or minibatch configuration')
         for name in ('updates', 'num_envs', 'rollout_steps', 'epochs', 'action_ticks', 'evaluation_episodes'):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f'{name} must be a positive integer')
@@ -58,12 +83,29 @@ class TrainingConfig:
             raise ValueError('seed and eval_every must be nonnegative integers')
         if self.horizon is not None and (type(self.horizon) is not int or self.horizon < 1):
             raise ValueError('horizon must be positive or None')
-        for name in ('imitation_coef', 'learning_rate', 'gamma', 'gae_lambda', 'clip_coef', 'value_coef', 'entropy_coef', 'max_grad_norm'):
+        for name in ('imitation_coef', 'learning_rate', 'learning_rate_start', 'gamma', 'gae_lambda', 'clip_coef', 'value_coef', 'entropy_coef', 'max_grad_norm'):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
-        if self.learning_rate == 0 or self.max_grad_norm == 0 or self.gamma > 1 or self.gae_lambda > 1:
+        if (self.learning_rate == 0 or self.learning_rate_start == 0 or
+                self.learning_rate_start < self.learning_rate or self.max_grad_norm == 0 or
+                self.gamma > 1 or self.gae_lambda > 1):
             raise ValueError('invalid learning rate, gradient norm, or discount')
+        if type(self.learning_rate_decay_updates) is not int or self.learning_rate_decay_updates < 1:
+            raise ValueError('learning_rate_decay_updates must be a positive integer')
+        if self.algorithm == 'sac':
+            if (type(self.sac_replay_capacity) is not int or type(self.sac_batch_size) is not int or
+                    type(self.sac_warmup_steps) is not int or self.sac_replay_capacity < 1 or
+                    self.sac_batch_size < 1 or self.sac_warmup_steps < self.sac_batch_size or
+                    self.sac_replay_capacity < self.sac_warmup_steps):
+                raise ValueError('SAC replay capacity and warmup must cover a full batch')
+            for name in ('sac_updates_per_transition', 'sac_target_tau', 'sac_initial_alpha',
+                         'sac_target_entropy_fraction'):
+                value = getattr(self, name)
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be finite and positive')
+            if self.sac_target_tau > 1 or self.sac_target_entropy_fraction > 1:
+                raise ValueError('SAC target rates must be at most one')
 
 
 def source_identity():
@@ -118,6 +160,17 @@ def _policy_id(policy):
     return digest.hexdigest()
 
 
+def _stage_learning_rate(update, stats, config):
+    stage_start = max((row['update'] + 1 for row in stats
+                       if row.get('promotion', {}).get('promoted')), default=1)
+    if config.learning_rate_decay_updates == 1:
+        return config.learning_rate
+    progress = min(max((update - stage_start) /
+                       (config.learning_rate_decay_updates - 1), 0.), 1.)
+    return math.exp(math.log(config.learning_rate_start) + progress *
+                    (math.log(config.learning_rate) - math.log(config.learning_rate_start)))
+
+
 def _rng_state():
     return {'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else [],
             'python': random.getstate()}
@@ -134,11 +187,12 @@ def _restore_rng(state):
 def load_checkpoint(path, *, config=None, device='cpu', restore_rng=False):
     """Return (standard policy, optimizer, payload); reject incompatible resumes."""
     payload = torch.load(path, map_location='cpu', weights_only=False)
-    expected={'checkpoint_version','sources','config','policy','optimizer','policy_id','rng','scheduler_rng','update','curriculum_state','current','recovery','train_seed_counter','stats','qualified_artifacts'}
+    expected={'checkpoint_version','sources','config','policy','optimizer','replay_buffer','policy_id','rng','scheduler_rng','update','curriculum_state','current','recovery','train_seed_counter','stats','qualified_artifacts'}
     if not isinstance(payload,dict) or set(payload)!=expected: raise ValueError('invalid checkpoint schema')
     if payload.get('checkpoint_version') != CHECKPOINT_VERSION or payload.get('sources') != source_identity():
         raise ValueError('checkpoint format/source identity mismatch')
     saved = TrainingConfig(**payload['config']); saved.validate()
+    if saved.disable_miopen: torch.backends.cudnn.enabled=False
     if config is not None:
         config.validate()
         mutable = {'updates', 'output'}
@@ -158,9 +212,24 @@ def load_checkpoint(path, *, config=None, device='cpu', restore_rng=False):
     artifacts=payload['qualified_artifacts']
     if not isinstance(artifacts,dict) or set(artifacts)!=payload['curriculum_state'].qualified or any(not isinstance(p,str) or not Path(p).is_file() for p in artifacts.values()):
         raise ValueError('missing historical qualified checkpoint artifacts')
-    policy = ActorCritic(137,8,action_kind='categorical').to(device)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=saved.learning_rate)
-    policy.load_state_dict(payload['policy']); optimizer.load_state_dict(payload['optimizer'])
+    if saved.algorithm == 'sac':
+        policy = DiscreteSAC(saved.architecture, saved.sac_initial_alpha).to(device)
+        optimizer = make_sac_optimizers(policy, saved.learning_rate)
+    else:
+        policy = make_policy(saved.architecture).to(device)
+        optimizer = torch.optim.Adam(policy.parameters(), lr=saved.learning_rate)
+    policy.load_state_dict(payload['policy'])
+    if saved.algorithm == 'sac':
+        if not isinstance(payload['optimizer'], dict) or set(payload['optimizer']) != set(optimizer):
+            raise ValueError('invalid SAC optimizer state')
+        for name, item in optimizer.items():
+            item.load_state_dict(payload['optimizer'][name])
+        if not isinstance(payload['replay_buffer'], dict):
+            raise ValueError('missing SAC replay state')
+    else:
+        if payload['replay_buffer'] is not None:
+            raise ValueError('PPO checkpoint cannot contain SAC replay')
+        optimizer.load_state_dict(payload['optimizer'])
     if _policy_id(policy) != payload['policy_id']:
         raise ValueError('policy identity mismatch')
     if restore_rng:
@@ -187,45 +256,79 @@ def _held_step(env, actions, alive, ticks):
 
 
 def _collect(policy, env, config):
+    actor = policy.actor if isinstance(policy, DiscreteSAC) else policy
+    builder = PerceptionInputs(env, (3,)) if isinstance(actor, PerceptionActorCritic) else None
     rows = []; alive = torch.ones(env.n, device=env.device, dtype=torch.bool)
     steps=config.rollout_steps if config.horizon is not None else max(config.rollout_steps,math.ceil(env.horizon/config.action_ticks))
     for _ in range(steps):
         valid = alive.clone(); obs = env._last_obs[:,3].clone(); mask = obs[:,-8:].bool()
+        inputs = ({k:v.clone() for k,v in builder(env._last_obs).items()} if builder else obs)
         with torch.no_grad():
-            action, logprob, value = policy.sample(obs, action_mask=mask)
-            teacher = teacher_actions(env,env._last_obs)[:,3].clone()
+            action, logprob, value = policy.sample(inputs, action_mask=mask)
+            teacher = (teacher_actions(env,env._last_obs)[:,3].clone()
+                       if config.algorithm == 'ppo' else torch.zeros_like(action))
         actions = torch.full((env.n,6),7,device=env.device,dtype=torch.long); actions[:,3] = action
         next_obs,reward,done,truncated,alive = _held_step(env,actions,alive,config.action_ticks)
-        with torch.no_grad(): next_value = policy(next_obs[:,3])[2]
-        rows.append({'obs':obs,'mask':mask,'action':action,'logprob':logprob,'value':value,
-                     'next_value':next_value,'reward':reward,'done':done | ~valid,'truncated':truncated,
-                     'valid':valid,'teacher':teacher})
+        row={'obs':inputs,'mask':mask,'action':action,'logprob':logprob,'value':value,
+                     'next_value':None,'reward':reward,'done':done | ~valid,'truncated':truncated,
+                     'valid':valid,'teacher':teacher}
+        if config.algorithm == 'sac':
+            row['next_obs']=({k:v.clone() for k,v in builder(next_obs).items()}
+                             if builder else next_obs[:,3].clone())
+            row['next_mask']=next_obs[:,3,-8:].bool().clone()
+            row['next_value']=torch.zeros_like(value)
+        else:
+            next_value_input=builder(next_obs) if builder else next_obs[:,3]
+            with torch.no_grad(): row['next_value'] = policy(next_value_input)[-1]
+        rows.append(row)
         if not bool(alive.any()): break
     # The environment is deliberately discarded at this update boundary.
     # Remaining worlds are timeouts, not true physical terminations.
     rows[-1]['truncated'] |= alive
-    batch = {key:torch.stack([r[key] for r in rows]) for key in rows[0]}
+    batch = {key:({k:torch.stack([r[key][k] for r in rows]) for k in rows[0][key]}
+                  if isinstance(rows[0][key],dict) else torch.stack([r[key] for r in rows])) for key in rows[0]}
     advantages = _gae_advantages(batch['reward'],batch['done'],batch['truncated'],batch['value'],
                                  batch['next_value'],config.gamma,config.gae_lambda)
     batch['returns'] = advantages + batch['value']; batch['advantages'] = advantages
-    return {k:v.reshape((-1,)+v.shape[2:])[batch['valid'].reshape(-1)] for k,v in batch.items()}
+    def flatten(value):
+        if isinstance(value,dict): return {k:flatten(v) for k,v in value.items()}
+        return value.reshape((-1,)+value.shape[2:])[batch['valid'].reshape(-1)]
+    return {k:flatten(v) for k,v in batch.items()}
 
 
 def _ppo_update(policy, optimizer, batch, config, update):
     advantage = batch['advantages']; advantage = (advantage-advantage.mean()) / advantage.std(unbiased=False).clamp_min(1e-8)
     imitation_weight = config.imitation_coef / (1 + update/100)
+    losses=[]
+    approx_kl_total=advantage.new_zeros(()); clip_fraction_total=advantage.new_zeros(())
+    optimized_samples=0
     for _ in range(config.epochs):
-        logprob,entropy,value,logits = policy.score(batch['obs'],batch['action'],batch['mask'])
-        ratio = (logprob-batch['logprob']).exp()
-        actor = -torch.minimum(ratio*advantage, ratio.clamp(1-config.clip_coef,1+config.clip_coef)*advantage).mean()
-        critic = .5*F.mse_loss(value,batch['returns'])
-        imitation = F.cross_entropy(logits,batch['teacher'])
-        loss = actor + config.value_coef*critic - config.entropy_coef*entropy.mean() + imitation_weight*imitation
-        if not torch.isfinite(loss): raise ValueError('nonfinite PPO loss')
-        optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(policy.parameters(),config.max_grad_norm); optimizer.step()
-    return {'loss':float(loss.detach()),'policy_loss':float(actor.detach()),'value_loss':float(critic.detach()),
-            'entropy':float(entropy.mean().detach()),'imitation_weight':imitation_weight,'valid_rows':len(advantage),
-            'reward':float(batch['reward'].sum())}
+        order=(torch.randperm(len(advantage),device=advantage.device) if config.minibatch_size else
+               torch.arange(len(advantage),device=advantage.device))
+        size=config.minibatch_size or len(advantage)
+        for indices in order.split(size):
+            observations=({k:v[indices] for k,v in batch['obs'].items()} if isinstance(batch['obs'],dict)
+                          else batch['obs'][indices])
+            logprob,entropy,value,logits = policy.score(observations,batch['action'][indices],batch['mask'][indices])
+            ratio = (logprob-batch['logprob'][indices]).exp()
+            logratio=logprob-batch['logprob'][indices]
+            approx_kl_total+=((ratio-1.)-logratio).detach().sum()
+            clip_fraction_total+=((ratio-1.).abs()>config.clip_coef).sum()
+            optimized_samples+=len(indices)
+            actor = -torch.minimum(ratio*advantage[indices], ratio.clamp(1-config.clip_coef,1+config.clip_coef)*advantage[indices]).mean()
+            critic = .5*F.mse_loss(value,batch['returns'][indices])
+            imitation = F.cross_entropy(logits,batch['teacher'][indices])
+            loss = actor + config.value_coef*critic - config.entropy_coef*entropy.mean() + imitation_weight*imitation
+            if not torch.isfinite(loss): raise ValueError('nonfinite PPO loss')
+            optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(policy.parameters(),config.max_grad_norm); optimizer.step()
+            losses.append((len(indices),float(loss.detach()),float(actor.detach()),float(critic.detach()),float(entropy.mean().detach())))
+    total=sum(row[0] for row in losses)
+    averaged=[sum(row[0]*row[column] for row in losses)/total for column in range(1,5)]
+    return dict(zip(('loss','policy_loss','value_loss','entropy'),averaged)) | {
+            'imitation_weight':imitation_weight,'valid_rows':len(advantage),'reward':float(batch['reward'].sum()),
+            'approx_kl':float((approx_kl_total/max(1,optimized_samples)).item()),
+            'clip_fraction':float((clip_fraction_total/max(1,optimized_samples)).item())}
+
 
 
 def _wilson(successes, count):
@@ -237,12 +340,14 @@ def _wilson(successes, count):
 
 def _episode(policy, name, category, seed, device, horizon, action_ticks, *, demonstration=False):
     env=make_curriculum_env(name,category,1,device,seed,horizon=horizon)
+    actor=policy.actor if isinstance(policy,DiscreteSAC) else policy
+    builder=PerceptionInputs(env,(3,)) if isinstance(actor,PerceptionActorCritic) else None
     frames=[]; decisions=0
     stride=max(1,math.ceil(env.horizon/action_ticks/64))
     while True:
         obs=env._last_obs[:,3]; mask=obs[:,-8:].bool()
         with torch.no_grad():
-            action=(teacher_actions(env,env._last_obs)[:,3] if policy == 'teacher' else policy.sample(obs,deterministic=True,action_mask=mask)[0])
+            action=(teacher_actions(env,env._last_obs)[:,3] if policy == 'teacher' else policy.sample(builder(env._last_obs) if builder else obs,deterministic=True,action_mask=mask)[0])
         if demonstration or decisions%stride == 0:
             frame={'tick':int(env.steps[0]),'action':int(action[0]),'mask':mask[0].tolist(),
                    'hub_active':bool(env.hub_active[0,1]),'metrics':{k:v.tolist() for k,v in env.curriculum_metrics.outcomes().items()}}
@@ -292,7 +397,8 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
                 temporary=Path(stream.name); stream.write(checkpoint_bytes)
             frozen.parent.mkdir(parents=True,exist_ok=True); os.replace(temporary,frozen)
         if hashlib.sha256(frozen.read_bytes()).hexdigest() != checkpoint_hash: raise ValueError('frozen checkpoint digest mismatch')
-    if policy != 'teacher' and not isinstance(policy,ActorCritic): raise ValueError('expected standard ActorCritic, checkpoint, or teacher')
+    if policy != 'teacher' and not isinstance(policy,(ActorCritic,DiscreteSAC)):
+        raise ValueError('expected standard policy, SAC policy, checkpoint, or teacher')
     identity=_policy_id(policy) if policy != 'teacher' else 'generic-observed-teacher'
     suite=protocol_id(action_ticks=action_ticks,device=device,_sources=sources); round_id=evaluation_id or uuid.uuid4().hex
     results=[];records=[];saved_rng=_rng_state()
@@ -323,6 +429,8 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
     finally: _restore_rng(saved_rng)
     if source_identity()!=sources: raise ValueError('source/runtime changed during evaluation; no current report published')
     report={'curriculum_version':CURRICULUM_VERSION,'sources':sources,'protocol_id':suite,
+            'algorithm':getattr(policy,'algorithm','teacher' if policy == 'teacher' else 'ppo'),
+            'architecture':getattr(policy,'architecture','baseline_mlp') if policy != 'teacher' else 'deterministic_teacher',
             'policy_id':identity,'test_seed_index0_reserved':True,'checkpoint_file_sha256':checkpoint_hash,'evaluation_id':round_id,'split':split,
             'dt':.02,'action_ticks':action_ticks,'strategic_rate_hz':1/(.02*action_ticks),
             'diagnostic':horizon is not None or episodes<100 or categories is not None or split!='validation',
@@ -336,20 +444,46 @@ def _decode_result(data):
 
 
 def train_curriculum(config: TrainingConfig, *, resume=None):
-    config.validate();torch.set_num_threads(1);sources=source_identity()
+    config.validate();torch.set_num_threads(1)
+    if config.disable_miopen: torch.backends.cudnn.enabled=False
+    sources=source_identity()
     output=Path(config.output);output.mkdir(parents=True,exist_ok=True)
     if resume is None and (output/'latest.pt').exists():
         raise ValueError('output already contains latest.pt; choose a fresh directory or resume explicitly')
     if resume:
         policy,optimizer,payload=load_checkpoint(resume,config=config,device=config.device,restore_rng=True)
+        replay = ScenarioReplayBuffer(config.sac_replay_capacity) if config.algorithm == 'sac' else None
+        if replay is not None: replay.load_state_dict(payload['replay_buffer'])
         state=payload['curriculum_state'];artifacts=dict(payload['qualified_artifacts']);current=payload['current'];recovery=payload['recovery'];counter=payload['train_seed_counter']
         scheduler=random.Random();scheduler.setstate(payload['scheduler_rng']);start=payload['update'];stats=list(payload['stats'])
     else:
         torch.manual_seed(config.seed);random.seed(config.seed)
-        policy=ActorCritic(137,8,action_kind='categorical').to(config.device)
-        optimizer=torch.optim.Adam(policy.parameters(),lr=config.learning_rate)
+        if config.algorithm == 'sac':
+            policy=DiscreteSAC(config.architecture,config.sac_initial_alpha).to(config.device)
+            optimizer=make_sac_optimizers(policy,config.learning_rate)
+            replay=ScenarioReplayBuffer(config.sac_replay_capacity)
+        else:
+            policy=make_policy(config.architecture).to(config.device)
+            optimizer=torch.optim.Adam(policy.parameters(),lr=config.learning_rate)
+            replay=None
         state=CurriculumState();artifacts={};current='pickup_simple';recovery=[];counter=0;start=0;stats=[];scheduler=random.Random(config.seed)
+    def checkpoint_payload():
+        optimizer_state = ({name:item.state_dict() for name,item in optimizer.items()}
+                           if isinstance(optimizer,dict) else optimizer.state_dict())
+        return {'checkpoint_version':CHECKPOINT_VERSION,'sources':sources,'config':asdict(config),
+                'policy':policy.state_dict(),'optimizer':optimizer_state,
+                'replay_buffer':replay.state_dict() if replay is not None else None,
+                'policy_id':_policy_id(policy),
+                'rng':_rng_state(),'scheduler_rng':scheduler.getstate(),'update':update,
+                'curriculum_state':state.to_dict(),'current':current,'recovery':recovery,
+                'qualified_artifacts':artifacts,'train_seed_counter':counter,'stats':stats}
+
     for update in range(start+1,config.updates+1):
+        stage_lr = _stage_learning_rate(update,stats,config)
+        optimizer_groups=(group for item in optimizer.values() for group in item.param_groups) \
+            if isinstance(optimizer,dict) else iter(optimizer.param_groups)
+        for group in optimizer_groups:
+            group['lr']=stage_lr
         eligible=set(eligible_scenarios(state));upcoming=tuple(s for s in SCENARIOS if s in eligible and s not in state.qualified and s!=current)
         practice=tuple(s for s in recovery if s in eligible and not (_ancestors(s) & set(recovery)))
         mixture=task_mixture(state,practice or (current,),upcoming if not practice else ())
@@ -364,14 +498,45 @@ def train_curriculum(config: TrainingConfig, *, resume=None):
         # Factory uses the normal reset path; each update starts a fresh seeded
         # batch so an atomic checkpoint needs no simulator state.
         batch=_collect(policy,env,config);before=_policy_id(policy)
-        metrics=_ppo_update(policy,optimizer,batch,config,update)
-        row={'update':update,'scenario_id':name,'category':category,'seed':seed,'policy_changed':before!=_policy_id(policy),**metrics}
+        if config.algorithm == 'sac':
+            replay.add_batch(batch,name)
+            if len(replay) >= config.sac_warmup_steps:
+                gradient_steps=max(1,round(batch['action'].shape[0]*config.sac_updates_per_transition))
+                updates_metrics=[sac_update(policy,optimizer,replay.sample(config.sac_batch_size,config.device),
+                    gamma=config.gamma,tau=config.sac_target_tau,
+                    target_entropy_fraction=config.sac_target_entropy_fraction)
+                    for _ in range(gradient_steps)]
+                metric_names=tuple(updates_metrics[0])
+                metric_values=torch.stack([
+                    torch.stack([item[key] for item in updates_metrics]).mean()
+                    for key in metric_names
+                ]).detach().cpu().tolist()
+                metrics=dict(zip(metric_names,metric_values))
+            else:
+                metrics={'actor_loss':None,'critic_loss':None,'alpha_loss':None,
+                         'alpha':float(policy.alpha.detach()),'entropy':None,'valid_action_count':None}
+                gradient_steps=0
+            metrics.update({'sac_updates':gradient_steps,'replay_size':len(replay),
+                            'replay_scenarios':len(replay.scenario_indices),
+                            'approx_kl':None,'clip_fraction':None})
+        else:
+            metrics=_ppo_update(policy,optimizer,batch,config,update)
+        row={'update':update,'algorithm':config.algorithm,'learning_rate':stage_lr,
+             'scenario_id':name,'category':category,'seed':seed,
+             'policy_changed':before!=_policy_id(policy),**metrics}
+        stats.append(row)
         promoted_name=None
         if config.eval_every and update%config.eval_every==0:
+            # Preserve completed optimization if paired validation is interrupted.
+            # A resumed run retries qualification at its next scheduled gate.
+            row['evaluation_pending']=True
+            if source_identity()!=sources: raise ValueError('source/runtime changed before evaluation')
+            _atomic_checkpoint(output/'latest.pt',checkpoint_payload())
             names=tuple(s for s in SCENARIOS if s in _ancestors(current)|{current})
             report=evaluate_curriculum(policy,names,episodes=config.evaluation_episodes,master_seed=config.seed,
                 device=config.device,horizon=config.horizon,action_ticks=config.action_ticks,
                 output=output/f'evaluation-{update}.json',evaluation_id=f'update-{update}-{_policy_id(policy)}')
+            row['evaluation_pending']=False
             if not report['diagnostic']:
                 decoded={r.scenario_id:r for r in map(_decode_result,report['evaluation_results'])}
                 decision=evaluate_promotion(state,decoded[current],retention_results=tuple(decoded[s] for s in _ancestors(current)))
@@ -382,12 +547,8 @@ def train_curriculum(config: TrainingConfig, *, resume=None):
                     artifacts[current]=str((output/'qualified'/current/f'{_policy_id(policy)}.pt').resolve())
                     available=[s for s in eligible_scenarios(state) if s not in state.qualified]
                     if available: current=available[0]
-        stats.append(row)
         if source_identity()!=sources: raise ValueError('source/runtime changed during training; refusing incompatible checkpoint')
-        payload={'checkpoint_version':CHECKPOINT_VERSION,'sources':sources,'config':asdict(config),
-                 'policy':policy.state_dict(),'optimizer':optimizer.state_dict(),'policy_id':_policy_id(policy),
-                 'rng':_rng_state(),'scheduler_rng':scheduler.getstate(),'update':update,
-                 'curriculum_state':state.to_dict(),'current':current,'recovery':recovery,'qualified_artifacts':artifacts,'train_seed_counter':counter,'stats':stats}
+        payload=checkpoint_payload()
         if promoted_name is not None:
             artifact=Path(artifacts[promoted_name])
             if artifact.exists():
@@ -396,8 +557,12 @@ def train_curriculum(config: TrainingConfig, *, resume=None):
             else: _atomic_checkpoint(artifact,payload)
             _atomic_checkpoint(output/'last-qualified.pt',payload)
         _atomic_checkpoint(output/'latest.pt',payload)
-        _atomic_json(output/'stats.json',{'updates':update,'diagnostic':config.horizon is not None,'dt':.02,'action_ticks':config.action_ticks,'strategic_rate_hz':1/(.02*config.action_ticks),'stats':stats,'curriculum_state':state.to_dict(),'sources':payload['sources']})
-    return {'updates':config.updates,'diagnostic':config.horizon is not None,'dt':.02,'action_ticks':config.action_ticks,'strategic_rate_hz':1/(.02*config.action_ticks),'checkpoint':str(output/'latest.pt') if config.updates>start else str(resume),'policy_id':_policy_id(policy),
+        _atomic_json(output/'stats.json',{'algorithm':config.algorithm,'config':asdict(config),
+            'updates':update,'current':current,'diagnostic':config.horizon is not None,'dt':.02,
+            'action_ticks':config.action_ticks,'strategic_rate_hz':1/(.02*config.action_ticks),
+            'stats':stats,'architecture':config.architecture,
+            'curriculum_state':state.to_dict(),'sources':payload['sources']})
+    return {'algorithm':config.algorithm,'architecture':config.architecture,'updates':config.updates,'diagnostic':config.horizon is not None,'dt':.02,'action_ticks':config.action_ticks,'strategic_rate_hz':1/(.02*config.action_ticks),'checkpoint':str(output/'latest.pt') if config.updates>start else str(resume),'policy_id':_policy_id(policy),
             'curriculum_state':state.to_dict(),'current':current,'recovery':recovery,'qualified_artifacts':artifacts,'stats':stats}
 
 
@@ -431,6 +596,20 @@ def main(argv=None):
         ('seed',int,7),('action-ticks',int,12),('evaluation-episodes',int,100),('eval-every',int,10),('imitation-coef',float,0.)]:
         train.add_argument('--'+option,type=kind,default=default)
     train.add_argument('--device',default='cpu');train.add_argument('--output',default=str(ROOT/'checkpoints/curriculum-offense'))
+    train.add_argument('--architecture',choices=tuple(ARCHITECTURES),default='baseline_mlp')
+    train.add_argument('--algorithm',choices=('ppo','sac'),default='ppo')
+    train.add_argument('--learning-rate',type=float,default=3e-4)
+    train.add_argument('--learning-rate-start',type=float,default=3e-3)
+    train.add_argument('--learning-rate-decay-updates',type=int,default=75)
+    train.add_argument('--disable-miopen',action='store_true')
+    train.add_argument('--minibatch-size',type=int,default=0)
+    train.add_argument('--sac-replay-capacity',type=int,default=4096)
+    train.add_argument('--sac-batch-size',type=int,default=256)
+    train.add_argument('--sac-warmup-steps',type=int,default=1024)
+    train.add_argument('--sac-updates-per-transition',type=float,default=.25)
+    train.add_argument('--sac-target-tau',type=float,default=.005)
+    train.add_argument('--sac-initial-alpha',type=float,default=.2)
+    train.add_argument('--sac-target-entropy-fraction',type=float,default=.98)
     train.add_argument('--resume');train.add_argument('--horizon',type=int)
     evaluate=commands.add_parser('evaluate');evaluate.add_argument('--checkpoint');evaluate.add_argument('--policy',choices=('teacher',))
     for command in (evaluate,commands.add_parser('teacher')):

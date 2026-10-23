@@ -71,6 +71,9 @@ def test_actual_update_resume_rng_and_configuration(trained):
     assert continued['updates']==2
     assert len(continued['stats'])==2
     assert all(torch.isfinite(torch.tensor(row['loss'])) for row in continued['stats'])
+    for row in continued['stats']:
+        assert torch.isfinite(torch.tensor(row['approx_kl']))
+        assert 0. <= row['clip_fraction'] <= 1.
     assert continued['stats'][1]['seed'] != continued['stats'][0]['seed']
     _,_,restored=runner.load_checkpoint(continued['checkpoint'])
     assert restored['update']==restored['train_seed_counter']==2
@@ -159,3 +162,12 @@ def test_new_run_never_overwrites_existing_checkpoint(trained):
     with pytest.raises(ValueError,match='already contains'):
         runner.train_curriculum(config)
     assert Path(summary['checkpoint']).read_bytes()==before
+
+
+def test_log_learning_rate_decays_and_restarts_on_stage_promotion():
+    config=runner.TrainingConfig(learning_rate_start=.003,learning_rate=.0003,
+                                learning_rate_decay_updates=75)
+    assert runner._stage_learning_rate(1,[],config)==pytest.approx(.003)
+    assert runner._stage_learning_rate(75,[],config)==pytest.approx(.0003)
+    stats=[{'update':25,'promotion':{'promoted':True}}]
+    assert runner._stage_learning_rate(26,stats,config)==pytest.approx(.003)
