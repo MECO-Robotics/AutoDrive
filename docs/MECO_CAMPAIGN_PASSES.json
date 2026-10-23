@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan — active implementation batches",
+  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -107,7 +107,7 @@
         "ONNX parity follow-up adds fixed-contract graph/runtime dtype checks and overflow-safe finite-error summaries; re-review pending, static-only, parity remains unrun.",
         "ONNX parity follow-up validates exact ONNX graph input/output metadata dimensions against seeded input tensors and checkpoint-backed output shapes; symbolic/unknown dimensions fail closed. Scoped re-review approved at aff14b925; static only, runtime export/parity remain pending.",
         "Fresh post-fix Plan A route acceptance evaluation 583164ed7eeb4528a2553b2ce7230032 completed at offense_vs_scripted_pressure / active-trench-level-4-reactive, seed 20261024, ROCm cuda:0, current source identity bead22b508466d1587ba6a328178be5fbe45139fda7d9fe8c09cc44d440ee29a. Random-initialized checkpoint only: A1 applied learned P map for 500/500 macros with finite route traces; A1_P0 applied no map for 0/500. Both completed 6000 ticks and scored zero. Dashboard backend/frontend were verified current before replay; report dashboard_verified=false and the full-comparison dashboard classifies this scoped two-policy artifact invalid because it lacks the required five-track/control matrix. Wiring evidence only, no learning-performance claim.",
-         "Section 6 collection-action-bout implementation committed in isolated worktree codex/meco-collection-bout-metric; schema v3 records tick bounds, action sequence/counts, acquired quantity, closure reason and closed-bout aggregates. Static checks only; no simulator or tests run."
+        "Section 6 collection-action-bout implementation committed in isolated worktree codex/meco-collection-bout-metric; schema v3 records tick bounds, action sequence/counts, acquired quantity, closure reason and closed-bout aggregates. Static checks only; no simulator or tests run."
       ]
     },
     {
@@ -181,7 +181,8 @@
         "Full integration review approved HEAD 5f8642b2f after the scoped reviewer approved decision-boundary fix 3ecf4b33a: changed eligible P map/version/scale/goal/action signatures trigger one focal slot-3 off-cadence AD* replan, and route telemetry remains bound to the map actually applied. This resolves the b2d1b50f3 cadence blocker. Static review only; simulator route replay, P oracle labels, and exhaustive coverage remain outstanding.",
         "Scoped reviewer approved Plan A unreachable-ETA correction fbdce1687: valid support endpoints retain finite CV risk, unreachable nodes remain inert/missing, empty horizon is null, and evaluator record progress count is corrected. Static review only. Initial seeded acceptance evaluation a26927e4cf03462a9a0e063ebd0f8c58 failed before producing records at active/trench/level_4_reactive, seed 20261024, ROCm WX9100 device 0 because unreachable route ETA inf was treated as a prediction horizon; corrected code needs a fresh dashboard-current simulator replay.",
         "Scoped re-review approved dashboard stalled-state integration through 71187450e: transient D state is only reported as OS state; stalled requires stale heartbeat plus a confirmed unchanged update frontier and fresh same-run queue/manifest evidence; missing procfs, wrong command/run ID and stale queue fail closed. Static review only; dashboard runtime verification after restart remains pending.",
-        "Section 6 collection-action-bout implementation submitted for separate scoped static review; check action/event sampling alignment, partial-macro/error closure, missing-signal null semantics and aggregate/provenance contract. Simulator validation remains pending."
+        "Section 6 collection-action-bout implementation submitted for separate scoped static review; check action/event sampling alignment, partial-macro/error closure, missing-signal null semantics and aggregate/provenance contract. Simulator validation remains pending.",
+        "Scoped reviewer approved collection-action-bout commit 572df38b3eead8c719acb8831fac4e76d2b99eaf: executed action sequence/counts and half-open tick bounds align; focal acquired-event quantities gate acquired=true; missing signals fail closed; HUB denial remains separate. Evaluation exceptions do not serialize partial episode records. Static review only; representative simulator validation pending."
       ]
     }
   ],
