@@ -94,6 +94,22 @@ def _verify_native_fuel_extension(identity):
     if identity is None or identity.get("status") == "missing":
         return
     path = Path(identity["path"])
+    if identity.get("status") == "unprepared":
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            if any(key in identity for key in ("candidate_device", "candidate_inode",
+                    "candidate_size", "candidate_mtime_ns")):
+                raise RuntimeError("unprepared native HIP extension appeared or disappeared")
+            return
+        except OSError as exc:
+            raise RuntimeError("unprepared native HIP extension path is unavailable") from exc
+        candidate = (identity.get("candidate_device"), identity.get("candidate_inode"),
+            identity.get("candidate_size"), identity.get("candidate_mtime_ns"))
+        actual = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if candidate != actual:
+            raise RuntimeError("unprepared native HIP extension path changed")
+        return
     try:
         stat = path.stat()
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
