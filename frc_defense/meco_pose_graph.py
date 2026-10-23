@@ -182,9 +182,14 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
     slots = torch.cat(candidate_slot)
     is_rotation = torch.cat(candidate_rot)
     path = torch.stack((node_grid[src], node_grid[dst]), dim=1)
+    # `length`/`width` above are heading-sized vectors used by _blocked;
+    # transition source indices are legal-node IDs, so map them through each
+    # node's heading bin before indexing the footprint dimensions.
+    edge_length = length[heading_bins[src]]
+    edge_width = width[heading_bins[src]]
     edge_heading = headings[src]
     edge_clear = planner._footprint_path_clear(path, edge_heading,
-        length[src], width[src])
+        edge_length, edge_width)
     # A discrete 45-degree rotation has a 22.5-degree swept midpoint. Check
     # this orientation on the same field grid before admitting the turn edge.
     mid_heading = torch.atan2(torch.sin(headings[src] +
@@ -195,7 +200,7 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
                     torch.cos(headings[dst] - headings[src])) * .5))
     mid_clear = planner._footprint_path_clear(
         node_grid[src, None].expand(-1, 2, -1), mid_heading,
-        length[src], width[src])
+        edge_length, edge_width)
     edge_clear &= ~is_rotation | mid_clear
 
     # Store a fixed maximum degree of 10 (8 translations + 2 turns).
