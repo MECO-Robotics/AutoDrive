@@ -643,11 +643,15 @@ class TensorThreeVsThreeEnv(
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
         if planner_goal_override is not None:
+            if self.n != 1:
+                raise ValueError("planner goal overrides currently require a single-world environment")
             if planner_goal_override_action is None:
                 raise ValueError("planner goal override requires its paired action index")
             goal = torch.as_tensor(planner_goal_override, device=self.device,
                                    dtype=targets.dtype).reshape(2)
-            expected_action = int(planner_goal_override_action)
+            if type(planner_goal_override_action) is not int:
+                raise ValueError("planner goal override action must be an integer")
+            expected_action = planner_goal_override_action
             if not 0 <= expected_action < 8:
                 raise ValueError("planner goal override action must be in [0, 7]")
             if not bool(torch.isfinite(goal).all()) or not (

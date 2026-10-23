@@ -2,8 +2,8 @@
 
 The existing eight masked actions remain the behavior primitives. K=16/32 add
 stable, locally offset collection approach goals. The selected endpoint is
-passed to AD* while the simulator retains action legality and mechanisms. A
-route-qualified K=32 table provides a bounded same-observation recall oracle.
+passed to AD* while the simulator retains action legality and mechanisms. K32
+reports within-pool coverage only; it is not an independent oracle.
 """
 from __future__ import annotations
 
@@ -27,15 +27,16 @@ CANDIDATE_BOUNDARY = {
     "source": "existing simulator action slots",
     "configurable_k": True,
     "k16_k32_supported": True,
-    "higher_budget_oracle_recall_measured": True,
-    "oracle": "within_candidate_pool: route-qualified K32 from the same sensed action slots",
+    "within_candidate_pool_recall_only": True,
+    "reference_pool": "route-qualified K32 from the same sensed action slots and fixed offsets",
+    "recall_limit": "K32 recall is tautologically 1; no distinct >32 reference pool is measured",
     "expanded_goals": "bounded collection approach offsets",
     "execution": "selected XY endpoint overrides planner goal; action mask/mechanisms remain simulator-owned",
-    "heading_execution": "candidate heading is scored/feasibility-checked; current action controller owns heading",
+    "heading_execution": "no terminal heading command; collect pose checks use target bearing and the native controller owns orientation",
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": False,
     "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
-    "capture_feasibility": "expanded collect endpoints checked against the simulator intake envelope",
+    "capture_feasibility": "expanded collect endpoints checked at sensed-target bearing with a 10cm inset and 5 degree uncertainty",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m", "route_time_s",
                   "risk_penalty_points", "target_heading_rad")
@@ -164,8 +165,8 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
 
 
 def _capture_pose_possible(env, base: SafeActionCandidates, action: int,
-                           goal_xy, heading_bin: int) -> bool:
-    """Match the simulator's existing bounded dumper intake capture envelope."""
+                           goal_xy) -> bool:
+    """Conservatively check capture at the native target-bearing orientation."""
     if action >= 4:
         return True
     row = base.table.features[action]
@@ -174,16 +175,22 @@ def _capture_pose_possible(env, base: SafeActionCandidates, action: int,
     slot = 3
     fuel = goal_xy.new_tensor((row[2], row[3]))
     delta = fuel - goal_xy
-    heading = heading_bin * (2. * math.pi / 8.)
+    distance = float(delta.norm().item())
+    if not math.isfinite(distance):
+        return False
+    heading = math.atan2(float(delta[1]), float(delta[0])) if distance > 1e-8 else 0.
     forward = delta[0] * math.cos(heading) + delta[1] * math.sin(heading)
-    lateral = -delta[0] * math.sin(heading) + delta[1] * math.cos(heading)
     radius = (float(env.fuel_physics.config.radius) if env.fuel_physics is not None
               else float(env._fuel_radius))
     half_length = float(env.sim.length[0, slot]) * .5
     half_width = float(env.sim.width[0, slot]) * .5
-    return (-half_length - .075 - radius <= float(forward) <=
-            half_length + .35 + .3048 + radius and
-            abs(float(lateral)) <= half_width + .075 + radius)
+    # Bound small orientation/control error by shrinking the capture envelope
+    # 10 cm and checking the lateral displacement implied by a 5 degree error.
+    margin = .10
+    lateral_uncertainty = distance * math.sin(math.radians(5.))
+    return (-half_length - .075 - radius + margin <= float(forward) <=
+            half_length + .35 + .3048 + radius - margin and
+            lateral_uncertainty <= half_width + .075 + radius - margin)
 
 
 def _opponent_prediction(env, slot=3, horizon=0.):
@@ -204,7 +211,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
     perceived robot obstacles. The endpoint is additionally checked in the
-    requested terminal heading against the static legal SE(2) lattice. ETA is
+    target-bearing heading against the static legal SE(2) lattice. The native
+    controller owns terminal orientation; this adapter does not command it. ETA is
     distance/speed plus heading-change/turn-rate. Dynamic interaction is a
     point-prediction risk cost; full time-varying swept-robot planning remains
     out of scope and is recorded in provenance.
@@ -244,12 +252,31 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             forward = target.new_tensor((math.cos(heading), math.sin(heading)))
             left = target.new_tensor((-math.sin(heading), math.cos(heading)))
             target = target + forward * forward_offset + left * lateral_offset
+        if action < 4:
+            fuel_row = base.table.features[action]
+            if fuel_row[2] is not None and fuel_row[3] is not None:
+                delta = target.new_tensor((fuel_row[2], fuel_row[3])) - target
+                if float(delta.norm()) > 1e-8:
+                    heading = math.atan2(float(delta[1]), float(delta[0]))
         node, center, hbin = _goal_node(env, graph, target, heading,
                                         intake_extended=intake)
         allowed &= node is not None
         if center is not None:
             target = center
-            allowed &= _capture_pose_possible(env, base, action, target, hbin)
+            if action < 4:
+                fuel_row = base.table.features[action]
+                if fuel_row[2] is not None and fuel_row[3] is not None:
+                    delta = target.new_tensor((fuel_row[2], fuel_row[3])) - target
+                    if float(delta.norm()) > 1e-8:
+                        heading = math.atan2(float(delta[1]), float(delta[0]))
+                    # Resolve the legal heading bin again from the actual
+                    # target bearing at the snapped endpoint.
+                    node, center, hbin = _goal_node(env, graph, target, heading,
+                                                    intake_extended=intake)
+                    allowed &= node is not None
+                    if center is not None:
+                        target = center
+                    allowed &= _capture_pose_possible(env, base, action, target)
         targets.append(target)
         headings.append(heading)
         goal_nodes.append(node)
@@ -327,19 +354,15 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                            key=lambda i: route_costs[i] + risk_costs[i])
             fallback = ids[fallback]
     names = base.table.feature_names + EXTRA_FEATURES
-    oracle_ids = {ids[i] for i, valid in enumerate(valid_mask) if valid}
+    reference_ids = {ids[i] for i, valid in enumerate(valid_mask) if valid}
     requested_ids = {ids[i] for i, valid in enumerate(valid_mask[:candidate_k]) if valid}
-    executable_tracks = sum(valid_mask[i] for i, (action, _, _, _) in enumerate(specs[:candidate_k]) if action < 4)
-    sensed = int(env.track_mask[0, 3].sum().item())
-    recall = {"candidate_capacity": candidate_k, "oracle_capacity": 32,
+    recall = {"candidate_capacity": candidate_k, "reference_pool_capacity": 32,
               "valid_executable_candidates": sum(valid_mask[:candidate_k]),
-              "sensed_track_oracle_count": sensed,
-              "executable_track_rows": sum(valid_mask[i] for i, (action, _, _, _) in enumerate(specs[:candidate_k]) if action < 4),
-              "track_candidate_coverage_proxy": (executable_tracks / sensed if sensed else None),
-              "oracle_scope": "within_candidate_pool",
+              "reference_scope": "within_candidate_pool",
               "within_candidate_pool_recall_measured": True,
-              "route_feasible_rows_in_K32": len(oracle_ids),
-              "within_candidate_pool_recall": (len(requested_ids & oracle_ids) / len(oracle_ids) if oracle_ids else 1.)}
+              "route_feasible_rows_in_reference_pool": len(reference_ids),
+              "within_candidate_pool_recall": (len(requested_ids & reference_ids) / len(reference_ids) if reference_ids else 1.),
+              "recall_limitation": "K32 is the same candidate pool; its recall is tautologically 1 and no distinct >32 reference is measured"}
     table = CandidateTable(base.observation.snapshot_id, tuple(ids[:candidate_k]),
         tuple(rows[:candidate_k]), tuple(valid_mask[:candidate_k]), names,
         route_costs=tuple(route_costs[:candidate_k]), schema_version=base.table.schema_version)

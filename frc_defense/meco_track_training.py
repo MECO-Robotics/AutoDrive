@@ -591,7 +591,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
-            "candidate_contract": "configurable K=8/16/32; verified static terminal SE(2) pose and current-snapshot AD* route"}},
+            "candidate_contract": "configurable K=8/16/32; verified static legal XY and target-bearing heading bin; heading is not commanded; current-snapshot AD* route"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
