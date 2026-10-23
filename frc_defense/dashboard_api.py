@@ -73,6 +73,8 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
         if isinstance(raw_qualified, list):
             for scenario, definition in SCENARIOS.items():
                 required = definition.gate.consecutive_evaluations if definition else 0
+                eval_every = run.get("eval_every")
+                cadence_valid = type(eval_every) is int and eval_every > 0
                 canonical_streak = run.get("consecutive_passes", {}).get(scenario, 0)
                 canonical_policy = run.get("last_qualified_checkpoint", {}).get(scenario)
                 canonical_protocol = run.get("qualified_protocol", {}).get(scenario)
@@ -91,7 +93,9 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
                     categories = {row.get("category"): row for row in proof_rows}
                     names = [row.get("category") for row in proof_rows]
                     candidate = (proof_rows[0].get("policy_id"), proof_rows[0].get("protocol_id")) if proof_rows else None
-                    valid = (type(item_update) is int and isinstance(evaluation_id, str) and evaluation_id
+                    valid = (cadence_valid and type(item_update) is int and item_update > 0
+                             and item_update % eval_every == 0
+                             and isinstance(evaluation_id, str) and evaluation_id
                              and candidate and candidate[0] and candidate[1]
                              and len(names) == len(definition.required_categories)
                              and len(set(names)) == len(names)
@@ -107,7 +111,7 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
                         binding_protocol = candidate[1]
                     if (candidate[1] != binding_protocol
                             or evaluation_id in [item["evaluation_id"] for item in chain]
-                            or chain and item_update != chain[-1]["update"] - 1):
+                            or chain and item_update != chain[-1]["update"] - eval_every):
                         break
                     chain.append({"evaluation_id": evaluation_id, "policy_id": candidate[0],
                                   "protocol_id": candidate[1], "update": item_update})
@@ -135,7 +139,8 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
         valid_runs.append({
             "run": run.get("run"), "algorithm": run.get("algorithm"),
             "architecture": run.get("architecture"), "status": "stale" if stale else queue_status or "saved",
-            "updates": run.get("updates", 0), "current": run.get("current"),
+            "updates": run.get("updates", 0), "eval_every": run.get("eval_every"),
+            "current": run.get("current"),
             "qualified": valid_qualified, "consecutive_passes": run.get("consecutive_passes", {}),
             "qualification_streaks": run.get("qualification_streaks", {}),
             "diagnostic": run.get("diagnostic", False),
