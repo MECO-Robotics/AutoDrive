@@ -12,7 +12,8 @@
         "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
-        "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open"
+        "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
+        "Phase 2 counterfactual v2 warm-start consumer plan completed: strict replay-backed v2-only A U+B and C candidate pairwise fitting from within-prefix gross_horizon_return; P remains null/zero, v1 contract unchanged"
       ]
     },
     {
@@ -38,7 +39,8 @@
         "Counterfactual v2 digest re-review identified a remaining custom torch.Tensor / torch.Generator subclass state caveat; digest hardening follow-up is in progress in the isolated worktree",
         "Counterfactual v2 digest subclass remediation committed at 5e4dba876d7950ff653cf9520990f286c7657561; torch tensor/generator fast paths are exact-type only, subclasses are generically inspected and fail closed on opaque bases",
         "Section 6 metric ledger implementation b246e31efb9b7809c8751f762136c5a445f296ae received scoped static approval; heading opportunity-versus-terminal endpoint semantics are being clarified in a narrow follow-up before integration",
-        "Section 6 heading metric clarification committed as 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432: heading attempts are separate from joint endpoint success, which now requires terminal XY <=0.04m and heading error <=0.1rad; static re-review pending"
+        "Section 6 heading metric clarification committed as 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432: heading attempts are separate from joint endpoint success, which now requires terminal XY <=0.04m and heading error <=0.1rad; static re-review pending",
+        "Phase 2 v2 warm-start consumer implementation started in isolated worktree from approved planner checklist; v2 data labels are not yet consumed by training"
       ]
     },
     {
@@ -56,7 +58,8 @@
         "Scoped static re-review approved counterfactual v2 digest commit 5e4dba876d7950ff653cf9520990f286c7657561; Section 6 metric-ledger review remains in progress",
         "Scoped static review approved Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae with one heading endpoint interpretation clarification requested; follow-up review pending",
         "Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432 submitted for scoped re-review",
-        "Scoped static re-review approved Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432; joint endpoint now requires the documented XY and heading thresholds"
+        "Scoped static re-review approved Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432; joint endpoint now requires the documented XY and heading thresholds",
+        "Phase 2 v2 warm-start consumer reviewer pass is pending implementation; required checks cover transcript replay/digest gates, exact support/candidate mapping, target semantics, and weights-only artifact provenance"
       ]
     }
   ]
