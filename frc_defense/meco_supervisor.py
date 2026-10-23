@@ -29,7 +29,7 @@ from .curriculum_training import source_identity
 from .meco_candidates import CANDIDATE_BOUNDARY
 from .meco_track_training import CHUNK_RESET_POLICY, MecoTrainConfig, ROOT
 from .meco_task_scheduler import MecoTaskScheduler
-from .meco_tracks import MECO_TRACKS
+from .meco_tracks import MECO_TRACKS, PREDICTION_MODES, prediction_contract
 
 
 def _utc():
@@ -65,7 +65,8 @@ def _checkpoint_info(path: Path):
 
 def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
                    stop_file: Path, resume: Path | None, protocol_id: str,
-                   task_assignment: dict):
+                   task_assignment: dict, warm_start: Path | None = None,
+                   qualification_protocol: Path | None = None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "train",
         "--track", config.track, "--scenario", config.scenario_id,
         "--category", config.category, "--updates", str(config.updates),
@@ -80,21 +81,27 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--p-mode", config.p_mode,
         "--p-cost-scale", str(config.p_cost_scale),
         "--p-points-per-grid-edge", str(config.p_points_per_grid_edge),
+        "--prediction-mode", config.prediction_mode,
         "--output", str(output), "--stop-file", str(stop_file), "--run-id", run_id,
         "--protocol-id", protocol_id]
     command.extend(("--task-assignment-json", json.dumps(
         task_assignment, sort_keys=True, allow_nan=False)))
     if resume is not None:
         command.extend(("--resume", str(resume)))
+    if warm_start is not None:
+        command.extend(("--warm-start", str(warm_start),
+                        "--qualification-protocol", str(qualification_protocol)))
     return command
 
 
 def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
-                        device, output):
+                        device, output, prediction_mode=None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "evaluate",
         "--scenario", scenario, "--categories", ",".join(categories),
         "--episodes", str(episodes), "--seed", str(seed), "--device", device,
         "--output", str(output)]
+    if prediction_mode is not None:
+        command.extend(("--prediction-mode", prediction_mode))
     for track in MECO_TRACKS:
         command.extend((f"--{track.lower()}-checkpoint", str(checkpoints[track])))
     return command
@@ -111,7 +118,11 @@ class MecoSupervisor:
                  evaluation_seed: int, evaluation_device: str | None,
                  cycles: int, stop_file: str | None,
                  stage_exposure_chunks: int = 10, p_mode: str = "learned",
-                 p_cost_scale: float = 1.0, p_points_per_grid_edge: float = .05):
+                 p_cost_scale: float = 1.0, p_points_per_grid_edge: float = .05,
+                 prediction_mode: str = "cv",
+                 evaluation_prediction_mode: str | None = None,
+                 warm_start_artifacts: dict[str, str] | None = None,
+                 qualification_protocol: str | None = None):
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
         if any(device.startswith("cuda") for device in devices) and not torch.cuda.is_available():
@@ -126,6 +137,25 @@ class MecoSupervisor:
                 or self.evaluation_output != expected_evaluation_root):
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
+        self.warm_start_paths = {}
+        self.warm_start_hashes = {}
+        self.qualification_protocol_path = (Path(qualification_protocol).expanduser().resolve()
+            if qualification_protocol else None)
+        self.qualification_protocol_id = None
+        self.qualification_protocol_sha256 = None
+        self.qualification_protocol = None
+        warm_start_artifacts = dict(warm_start_artifacts or {})
+        if warm_start_artifacts and set(warm_start_artifacts) != set(MECO_TRACKS):
+            raise ValueError("provide one warm-start artifact for every MECO track")
+        if warm_start_artifacts and self.qualification_protocol_path is None:
+            raise ValueError("per-track warm starts require --qualification-protocol")
+        if self.qualification_protocol_path is not None:
+            from .meco_supervised import _load_protocol
+            (self.qualification_protocol, self.qualification_protocol_id,
+             self.qualification_protocol_sha256, self.qualification_protocol_path) = _load_protocol(
+                self.qualification_protocol_path)
+            if self.qualification_protocol.get("master_seed") != seed:
+                raise ValueError("supervisor seed must match the frozen qualification protocol master seed")
         self.scenario = scenario
         self.category = category
         self.seed = seed
@@ -133,6 +163,13 @@ class MecoSupervisor:
         self.p_mode = p_mode
         self.p_cost_scale = p_cost_scale
         self.p_points_per_grid_edge = p_points_per_grid_edge
+        if prediction_mode not in PREDICTION_MODES:
+            raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+        self.prediction_mode = prediction_mode
+        if (evaluation_prediction_mode is not None and
+                evaluation_prediction_mode not in PREDICTION_MODES):
+            raise ValueError(f"evaluation_prediction_mode must be one of {PREDICTION_MODES}")
+        self.evaluation_prediction_mode = evaluation_prediction_mode
         self.stage_exposure_chunks = stage_exposure_chunks
         self.chunk_updates = chunk_updates
         self.evaluation_categories = evaluation_categories
@@ -163,12 +200,23 @@ class MecoSupervisor:
                 max_grad_norm=max_grad_norm, route_cost_points_per_second=route_cost_weight,
                 p_mode=p_mode, p_cost_scale=p_cost_scale,
                 p_points_per_grid_edge=p_points_per_grid_edge,
+                prediction_mode=prediction_mode,
                 candidate_k=candidate_k,
                 output=str(self.output / track))
             config.validate()
             self.configs[track] = config
         self.sources = source_identity()
         self.source_hash = _hash(self.sources)
+        if warm_start_artifacts:
+            from .meco_supervised import validate_warm_start_artifact
+            for track in MECO_TRACKS:
+                artifact = Path(warm_start_artifacts[track]).expanduser().resolve()
+                validate_warm_start_artifact(track, artifact,
+                    qualification_protocol=self.qualification_protocol_path,
+                    expected_sources=self.sources,
+                    expected_prediction_mode=self.prediction_mode)
+                self.warm_start_paths[track] = artifact
+                self.warm_start_hashes[track] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         self.hyperparameters = asdict(next(iter(self.configs.values())))
         self.hyperparameters.pop("track")
         self.hyperparameters.pop("device")
@@ -181,6 +229,10 @@ class MecoSupervisor:
             "devices": devices, "evaluation_categories": evaluation_categories,
             "evaluation_episodes": evaluation_episodes,
             "evaluation_seed": evaluation_seed,
+            "evaluation_prediction_mode": evaluation_prediction_mode,
+            "qualification_protocol_id": self.qualification_protocol_id,
+            "qualification_protocol_sha256": self.qualification_protocol_sha256,
+            "warm_start_artifact_sha256": dict(sorted(self.warm_start_hashes.items())),
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "chunk_reset_policy": CHUNK_RESET_POLICY,
             "task_scheduler": {"version": 1,
@@ -226,7 +278,12 @@ class MecoSupervisor:
         now = _utc()
         queue = {"schema_version": 1, "updated_utc": now,
             "supervisor_id": self.supervisor_id, "protocol_id": self.protocol_id,
+            "prediction_mode": self.prediction_mode,
+            "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
+            "qualification_protocol_id": self.qualification_protocol_id,
+            "qualification_protocol_sha256": self.qualification_protocol_sha256,
+            "warm_start_artifact_sha256": dict(sorted(self.warm_start_hashes.items())),
             "configuration_sha256": self.configuration_hash,
             "cycle": cycle, "phase": phase,
             "candidate_boundary": CANDIDATE_BOUNDARY,
@@ -237,7 +294,12 @@ class MecoSupervisor:
         _atomic_json(self.queue_path, queue)
         _atomic_json(self.status_path, {"schema_version": 1,
             "supervisor_id": self.supervisor_id, "protocol_id": self.protocol_id,
+            "prediction_mode": self.prediction_mode,
+            "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
+            "qualification_protocol_id": self.qualification_protocol_id,
+            "qualification_protocol_sha256": self.qualification_protocol_sha256,
+            "warm_start_artifact_sha256": dict(sorted(self.warm_start_hashes.items())),
             "configuration_sha256": self.configuration_hash,
             "heartbeat_utc": now, "status": phase, "cycle": cycle,
             "completed_cycles": self.completed_cycles,
@@ -295,6 +357,12 @@ class MecoSupervisor:
                     requested.pop(key, None)
                 if saved != requested:
                     raise ValueError(f"{track} checkpoint has a different immutable configuration")
+                if track in self.warm_start_hashes:
+                    initialization = payload.get("initialization") or {}
+                    if (initialization.get("mode") != "weights_only_supervised_warm_start" or
+                            initialization.get("warm_start_artifact_sha256") !=
+                            self.warm_start_hashes[track]):
+                        raise ValueError(f"{track} checkpoint was not initialized from the configured warm-start artifact")
                 self.run_ids[track] = payload["run_id"]
                 self.completed_updates[track] = int(payload.get("update", 0))
             else:
@@ -306,6 +374,11 @@ class MecoSupervisor:
             "evaluation_episodes": self.evaluation_episodes,
             "evaluation_seed": self.evaluation_seed,
             "evaluation_device": self.evaluation_device,
+            "prediction_mode": self.prediction_mode,
+            "evaluation_prediction_mode": self.evaluation_prediction_mode,
+            "qualification_protocol_id": self.qualification_protocol_id,
+            "qualification_protocol_sha256": self.qualification_protocol_sha256,
+            "warm_start_artifact_sha256": dict(sorted(self.warm_start_hashes.items())),
             "chunk_reset_policy": CHUNK_RESET_POLICY,
             "task_scheduler": {"version": 1,
                 "stage_exposure_chunks": self.stage_exposure_chunks,
@@ -388,10 +461,17 @@ class MecoSupervisor:
                 config = MecoTrainConfig(**{**asdict(base_config),
                     "updates": min(self.chunk_updates, remaining_updates)})
                 latest = self.output / track / "latest.pt"
+                warm_artifact = (self.warm_start_paths.get(track)
+                    if not latest.is_file() else None)
+                if warm_artifact is not None and hashlib.sha256(
+                        warm_artifact.read_bytes()).hexdigest() != self.warm_start_hashes[track]:
+                    raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
                 command = _train_command(config=config, output=self.output / track,
                     run_id=self.run_ids[track], stop_file=self.stop_file,
                     resume=latest if latest.is_file() else None,
-                    protocol_id=self.protocol_id, task_assignment=task_assignment)
+                    protocol_id=self.protocol_id, task_assignment=task_assignment,
+                    warm_start=warm_artifact,
+                    qualification_protocol=self.qualification_protocol_path)
                 log_path = self.output / track / "supervisor.log"
                 logs[track] = log_path.open("ab")
                 process = subprocess.Popen(command, cwd=ROOT,
@@ -507,7 +587,8 @@ class MecoSupervisor:
         job = self.pending_evaluations.pop(0)
         command = _evaluation_command(checkpoints=job["checkpoints"], scenario=self.scenario,
             categories=self.evaluation_categories, episodes=self.evaluation_episodes,
-            seed=job["seed"], device=self.evaluation_device, output=job["output"])
+            seed=job["seed"], device=self.evaluation_device, output=job["output"],
+            prediction_mode=self.evaluation_prediction_mode)
         try:
             self.evaluator_job = job
             self.evaluator_log = job["output"].with_suffix(".log").open("ab")
@@ -781,6 +862,10 @@ def _parser():
     parser.add_argument("--p-mode", choices=("learned", "p0"), default="learned")
     parser.add_argument("--p-cost-scale", type=float, default=1.0)
     parser.add_argument("--p-points-per-grid-edge", type=float, default=.05)
+    parser.add_argument("--prediction-mode", choices=PREDICTION_MODES, default="cv",
+        help="shared Plan A/C forecast mode; default cv preserves current learned behavior")
+    parser.add_argument("--evaluation-prediction-mode", choices=PREDICTION_MODES,
+        help="evaluate D1 and D2 under the same forecast mode; default preserves D1=current, D2=cv")
     parser.add_argument("--evaluation-categories", default="single,cluster")
     parser.add_argument("--evaluation-episodes", type=int, default=1)
     parser.add_argument("--evaluation-seed", type=int, default=20261024)
@@ -807,6 +892,8 @@ def main(argv=None):
         route_cost_weight=args.route_cost_weight,
         p_mode=args.p_mode, p_cost_scale=args.p_cost_scale,
         p_points_per_grid_edge=args.p_points_per_grid_edge,
+        prediction_mode=args.prediction_mode,
+        evaluation_prediction_mode=args.evaluation_prediction_mode,
         candidate_k=args.candidate_k,
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,

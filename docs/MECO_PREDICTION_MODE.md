@@ -1,0 +1,12 @@
+# MECO opponent prediction mode
+
+MECO Plan A, Plan C, D1, and D2 now use the shared `current|cv` prediction contract in `frc_defense/meco_tracks.py`.
+
+- Learned A/C training defaults to `cv`, preserving its prior route-arrival forecast. `current` uses the finite sensed opponent pose. `cv` uses the observed velocity capped at 3 m/s when the track age is at most 0.5 seconds; otherwise it falls back to the finite sensed pose. A missing or nonfinite pose adds no risk penalty.
+- Candidate-based policies forecast to each candidate's route ETA. Plan A forecasts separately to each graph node's route ETA. Those horizons, observed age, forecast use, and fallback are retained in candidate route metadata or the selected Plan A route record.
+- D1 defaults to `current`; D2 defaults to `cv`. The MECO evaluator accepts `--prediction-mode current|cv` to run both controls with the same mode. Without that override, the historical D1/D2 control mapping is preserved.
+- The mode, forecast contract, and training configuration digest are stored with each checkpoint/run; evaluation records include control and learned modes. These additions do not alter the frozen qualification protocol artifact.
+
+Example: `python3 -m frc_defense.meco_track_training evaluate ... --prediction-mode current`.
+
+The former standalone `curriculum_training evaluate --policy d2` diagnostic retains its fixed one-second D2 behavior and separate identity.
