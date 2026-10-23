@@ -392,6 +392,8 @@ class TensorThreeVsThreeEnv(
         self._planner_controller_mode_key=tuple(
             i for i,mode in enumerate(modes) if mode!="none")
         self._planner_controller_modes_dirty=False
+        self._planner_traversal_request_signature=None
+        self._last_applied_planner_traversal_signature=None
         self._route_segment_indices=torch.arange(
             self.planner.max_points-1,device=self.device)
         self._last_obs = torch.zeros((self.n, NUM_ROBOTS, OBS_DIM), device=self.device)
@@ -461,6 +463,8 @@ class TensorThreeVsThreeEnv(
         self.steps.zero_(); self.planner_ticks.fill_(self.replan_interval-1)
         self._planner_tick_scalar=self.replan_interval-1; self._planner_tick_aligned=True
         self._full_batch_step_scalar=0
+        self._planner_traversal_request_signature=None
+        self._last_applied_planner_traversal_signature=None
         self.hub_active.fill_(True); self.auto_fuel_scores.zero_(); self.fuel_score_count.zero_()
         for tensor in (self.fuel_acquisition_count, self.fuel_denied_count,
                        self.fuel_acquired_event, self.fuel_scored_event,
@@ -490,6 +494,9 @@ class TensorThreeVsThreeEnv(
     def reset_done(self, mask):
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
         self.sim.reset_done(mask)
+        if self.n == 1 and bool(mask[0]):
+            self._planner_traversal_request_signature=None
+            self._last_applied_planner_traversal_signature=None
         pose=self._hub_line_spawn_poses()
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
@@ -691,6 +698,9 @@ class TensorThreeVsThreeEnv(
                 raise ValueError("planner traversal cost action requires a cost map")
             planner_traversal_cost = None
             planner_traversal_cost_scale = 1.0
+            traversal_signature=None
+            traversal_request_changed=False
+            self._planner_traversal_request_signature=None
         else:
             if (self.device.type == "cuda" and
                     torch.cuda.is_current_stream_capturing()):
@@ -740,6 +750,34 @@ class TensorThreeVsThreeEnv(
                 if version is not None:
                     self._validated_planner_traversal_cost = (
                         planner_traversal_cost, version, planner_traversal_cost_scale)
+            # A macro freezes one map tensor and reuses it for every physics
+            # tick. Track both request and application separately so a changed
+            # map/goal/action triggers once at the decision boundary and a
+            # rejected override is not retried on every tick of that macro.
+            try:
+                traversal_version = planner_traversal_cost._version
+            except RuntimeError:
+                traversal_version = None
+            if isinstance(planner_goal_override, (tuple, list)):
+                traversal_goal = tuple(float(value) for value in planner_goal_override)
+            else:
+                traversal_goal = tuple(float(value) for value in
+                    goal.detach().cpu().tolist())
+            traversal_signature = {
+                "map": planner_traversal_cost,
+                "version": traversal_version,
+                "scale": planner_traversal_cost_scale,
+                "goal": traversal_goal,
+                "action": planner_traversal_cost_override_action,
+            }
+            previous_request = self._planner_traversal_request_signature
+            traversal_request_changed = (previous_request is None or
+                previous_request["map"] is not planner_traversal_cost or
+                previous_request["version"] != traversal_version or
+                previous_request["scale"] != planner_traversal_cost_scale or
+                previous_request["goal"] != traversal_goal or
+                previous_request["action"] != planner_traversal_cost_override_action)
+            self._planner_traversal_request_signature=traversal_signature
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((self.sweeping_enabled &
@@ -778,6 +816,22 @@ class TensorThreeVsThreeEnv(
                 replan=active
             flat_active=(replan[:,None]&planner_robot_mask[None]).reshape(-1)
             replan_due=bool(flat_active.any())
+        applied_signature=self._last_applied_planner_traversal_signature
+        traversal_differs_from_applied=(traversal_signature is not None and
+            (applied_signature is None or
+             applied_signature["map"] is not traversal_signature["map"] or
+             applied_signature["version"] != traversal_signature["version"] or
+             applied_signature["scale"] != traversal_signature["scale"] or
+             applied_signature["goal"] != traversal_signature["goal"] or
+             applied_signature["action"] != traversal_signature["action"]))
+        traversal_override_eligible=(traversal_request_changed and
+            traversal_differs_from_applied and self.n == 1 and bool(active[0]) and
+            bool(planner_goal_override_mask[0, 3]))
+        if traversal_override_eligible and not replan_due:
+            replan_due=True
+            flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
+                                    dtype=torch.bool)
+            flat_active[3]=True
         start=self.sim.pose[:,:,:2].reshape(-1,2); goal=targets.reshape(-1,2)
         heading=self.sim.pose[:,:,2].reshape(-1)
         # Plan with the intake extended whenever collection is requested,
@@ -798,7 +852,7 @@ class TensorThreeVsThreeEnv(
             def plan_focal_traversal_override(active_mask, obstacles, *,
                                                static_active_mask=False):
                 if planner_traversal_cost is None:
-                    return
+                    return False
                 rows = self.n * NUM_ROBOTS
                 if active_mask is None:
                     selected = torch.ones((rows,), device=self.device,
@@ -812,6 +866,8 @@ class TensorThreeVsThreeEnv(
                              planner_robot_mask.reshape(rows) &
                              active[:, None].expand(-1, NUM_ROBOTS).reshape(rows))
                 selected &= focal & permitted
+                if not bool(selected[3]):
+                    return False
                 if self.sweeping_enabled:
                     self.planner.plan_waypoints(
                         start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
@@ -830,6 +886,8 @@ class TensorThreeVsThreeEnv(
                         static_active_mask=static_active_mask,
                         learned_traversal_cost=planner_traversal_cost,
                         learned_cost_scale=planner_traversal_cost_scale)
+                self._last_applied_planner_traversal_signature=traversal_signature
+                return True
 
             if self.sweeping_enabled:
                 self.planner.plan_waypoints(
@@ -843,8 +901,12 @@ class TensorThreeVsThreeEnv(
                     start,goal,heading,lengths,widths,speed=speeds,
                     lateral_friction=lateral,acceleration=accel,
                     active_mask=flat_active,robot_obstacles=robot_obstacles)
-            plan_focal_traversal_override(flat_active, robot_obstacles,
+            focal_was_planned=(flat_active is None or
+                (self.n == 1 and bool(flat_active[3])))
+            traversal_override_applied=plan_focal_traversal_override(flat_active, robot_obstacles,
                 static_active_mask=bool(getattr(self, "_capture_planner_retries", False)))
+            if focal_was_planned and not traversal_override_applied:
+                self._last_applied_planner_traversal_signature=None
             # A depot approach can be a narrow field-edge route. If the other
             # chassis collectively seal its only entrance, retry that failed
             # route against static field geometry; near-term robot contention

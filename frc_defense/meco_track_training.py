@@ -1673,15 +1673,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 route_points = path_batch[0, 3, :route_length].detach().cpu().tolist()
                                 observed_goal = goals_batch[0, 3].detach().cpu().tolist()
                                 p0_macro = policy.endswith("_P0")
-                                applied_map = (prepared.get("planner_traversal_cost")
-                                    if prepared is not None and not use_d1_fallback
-                                    and not prepared.get("fallback_used", False) else None)
-                                if p0_macro:
-                                    applied_map = None
+                                applied_signature = getattr(env,
+                                    "_last_applied_planner_traversal_signature", None)
+                                applied_map = (None if p0_macro or applied_signature is None
+                                               else applied_signature["map"])
                                 map_sha256 = None
                                 map_scale = None
                                 map_shape = None
                                 map_dtype = None
+                                map_goal = None
+                                map_action = None
                                 if applied_map is not None:
                                     # Match _run_macro_step's frozen map: cast to the
                                     # simulator pose dtype before cloning and routing.
@@ -1694,8 +1695,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     map_identity = json.dumps({"shape": map_shape,
                                         "dtype": map_dtype}, sort_keys=True).encode() + b"\0" + map_bytes
                                     map_sha256 = hashlib.sha256(map_identity).hexdigest()
-                                    map_scale = float(prepared.get(
-                                        "planner_traversal_cost_scale", 1.))
+                                    map_scale = float(applied_signature["scale"])
+                                    map_goal = list(applied_signature["goal"])
+                                    map_action = int(applied_signature["action"])
                                 executed_planner_route_trace.append({
                                     "macro_index": len(executed_planner_route_trace),
                                     "start_tick": elapsed,
@@ -1706,10 +1708,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "selected_goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
                                     "observed_goal_xy_m": [float(v) for v in observed_goal],
                                     "p_mode": "p0" if p0_macro else p_mode,
+                                    "p_map_applied": applied_map is not None,
                                     "p_map_sha256": map_sha256,
                                     "p_map_shape": map_shape,
                                     "p_map_dtype": map_dtype,
                                     "p_map_scale": map_scale,
+                                    "p_map_applied_goal_xy_m": map_goal,
+                                    "p_map_applied_action": map_action,
                                     "route_length": route_length,
                                     "route_points_m": route_points,
                                 })
@@ -1931,9 +1936,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "selected_goal": "macro-selected goal passed to the executor",
                 "observed_goal": "slot-3 planner.last_goal after macro execution",
                 "actions": "selected macro action and actual per-physics-step env.last_actions trace",
-                "p_map_sha256": "SHA256 of canonical shape/dtype metadata plus contiguous CPU tensor bytes for the effective frozen map after the executor's simulator-pose-dtype cast; null when no map was applied, including P0",
+                "p_map_sha256": "SHA256 of canonical shape/dtype metadata plus contiguous CPU tensor bytes for the effective frozen map used by the latest focal route; null when that route was replanned without P, including P0",
+                "p_map_applied": "whether the latest focal route was produced with a P map",
                 "p_map_shape_and_dtype": "tensor shape and dtype paired with p_map_sha256; null when no map was applied, including P0",
-                "p_map_scale": "scale passed with that map; null when no map was applied, including P0",
+                "p_map_scale": "scale used with the map for the latest focal route; null when no map was applied, including P0",
+                "p_map_applied_goal_and_action": "goal and action signature paired with the map used for the latest focal route; may differ from the current macro selected goal/action when the planner retains its prior route",
                 "trajectory_claim": "route planner snapshot, not an exact actuator trajectory",
             },
             "training_protocol_ids": ([common_training_protocol]
