@@ -491,6 +491,163 @@ def _finite_number(value):
     return (type(value) in (int, float) and math.isfinite(value))
 
 
+def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
+        source_dataset: Path, *, qualification_protocol: Path,
+        expected_sources: dict, annotation_source_path: Path, device: str):
+    """Load only explicit, source-bound expert goal/behavior annotations.
+
+    This is a strict data contract, not a label synthesizer or fitter. In
+    particular, an observed action alone cannot identify an expert goal or a
+    goal value and is rejected. U is available only when the annotation gives
+    a finite value and declares complete uncensored support; B is an explicit
+    selected feasible behavior preference, never an optimality claim.
+    """
+    import hashlib
+    dataset, legal_node_dataset, source_dataset = map(
+        lambda path: Path(path).resolve(), (dataset, legal_node_dataset, source_dataset))
+    manifest_path = dataset.with_suffix(dataset.suffix + ".manifest.json")
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    data_bytes = dataset.read_bytes()
+    data_sha = hashlib.sha256(data_bytes).hexdigest()
+    legal_path = legal_node_dataset.with_suffix(legal_node_dataset.suffix + ".manifest.json")
+    legal_manifest_bytes = legal_path.read_bytes()
+    legal_manifest = json.loads(legal_manifest_bytes)
+    legal_bytes = legal_node_dataset.read_bytes()
+    legal_sha = hashlib.sha256(legal_bytes).hexdigest()
+    annotation_source_sha = hashlib.sha256(Path(annotation_source_path).resolve().read_bytes()).hexdigest()
+    from .meco_counterfactual import (_read_counterfactual_dataset,
+        PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA)
+    source_rows, source_sha, source_manifest_sha, protocol, protocol_id, protocol_sha, source_manifest = \
+        _read_counterfactual_dataset(source_dataset,
+            qualification_protocol=qualification_protocol, expected_sources=expected_sources)
+    annotation_source = manifest.get("annotation_source")
+    if (manifest.get("schema") != PLAN_A_EXPERT_GOAL_DATASET_SCHEMA or
+            manifest.get("target_schema") != PLAN_A_EXPERT_GOAL_TARGET_SCHEMA or
+            manifest.get("target_semantics") != PLAN_A_EXPERT_GOAL_SEMANTICS or
+            manifest.get("split") != "train" or
+            manifest.get("source_dataset_sha256") != source_sha or
+            manifest.get("source_manifest_sha256") != source_manifest_sha or
+            manifest.get("legal_node_dataset_sha256") != legal_sha or
+            manifest.get("legal_node_manifest_sha256") != hashlib.sha256(legal_manifest_bytes).hexdigest() or
+            manifest.get("protocol_id") != protocol_id or
+            manifest.get("qualification_protocol_sha256") != protocol_sha or
+            manifest.get("sources") != expected_sources or
+            manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+            manifest.get("dataset_sha256") != data_sha or
+            not isinstance(annotation_source, dict) or
+            not isinstance(annotation_source.get("source_id"), str) or not annotation_source["source_id"] or
+            not isinstance(annotation_source.get("sha256"), str) or len(annotation_source["sha256"]) != 64 or
+            annotation_source.get("sha256") != annotation_source_sha or
+            any(char not in "0123456789abcdef" for char in annotation_source["sha256"]) or
+            manifest.get("support_order") != SUPPORT_ORDER):
+        raise ValueError("expert-goal annotation manifest/source/protocol binding mismatch")
+    if (legal_manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            legal_manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            legal_manifest.get("split") != "train" or
+            legal_manifest.get("source_dataset_sha256") != source_sha or
+            legal_manifest.get("source_manifest_sha256") != source_manifest_sha or
+            legal_manifest.get("protocol_id") != protocol_id or
+            legal_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            legal_manifest.get("support_order") != SUPPORT_ORDER or
+            legal_manifest.get("sources") != expected_sources or
+            legal_manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+            legal_manifest.get("dataset_sha256") != legal_sha):
+        raise ValueError("expert-goal annotations do not bind the frozen legal-node source")
+    replayed_legal, _, replayed_legal_sha, _ = _read_and_replay_plan_a_legal_node_dataset(
+        legal_node_dataset, source_dataset, qualification_protocol, device, track=None)
+    if replayed_legal_sha != legal_sha:
+        raise ValueError("bound legal-node dataset changed during replay validation")
+    legal_rows = [sample["row"] for sample in replayed_legal]
+    if len(legal_rows) != legal_manifest.get("record_count") or not legal_rows:
+        raise ValueError("bound legal-node dataset row count mismatch")
+    legal_by_key = {}
+    for legal in legal_rows:
+        key = (legal.get("scenario_id"), legal.get("category"),
+               legal.get("seed"), legal.get("decision_index"))
+        if key in legal_by_key:
+            raise ValueError("bound legal-node dataset contains duplicate branch identities")
+        legal_by_key[key] = legal
+    source_by_key = {(r.get("scenario_id"), r.get("category"), r.get("seed"), r.get("decision_index")): r
+                     for r in source_rows}
+    rows = [json.loads(line) for line in data_bytes.decode("utf-8").splitlines() if line.strip()]
+    if not rows or len(rows) != manifest.get("record_count"):
+        raise ValueError("expert-goal annotation row count mismatch or empty data")
+    allowed = _protocol_train_seeds(protocol, source_manifest["scenario_id"], source_manifest["category"])
+    seen = set()
+    for row in rows:
+        key = (row.get("scenario_id"), row.get("category"), row.get("seed"), row.get("decision_index"))
+        if (row.get("schema") != PLAN_A_EXPERT_GOAL_DATASET_SCHEMA or
+                row.get("target_schema") != PLAN_A_EXPERT_GOAL_TARGET_SCHEMA or
+                row.get("annotation_source_id") != annotation_source["source_id"] or
+                key in seen or key not in legal_by_key or key not in source_by_key or
+                type(key[2]) is not int or key[2] not in allowed):
+            raise ValueError("expert-goal row is malformed, duplicated, or outside bound train support")
+        seen.add(key)
+        legal, source = legal_by_key[key], source_by_key[key]
+        if (row.get("support_digest") != legal.get("support_digest") or
+                row.get("snapshot_id") != source.get("snapshot_id") or
+                row.get("state_sha256") != source.get("simulator_state_sha256") or
+                legal.get("support_digest") is None):
+            raise ValueError("expert annotation does not identify the exact replay support/execution state")
+        if (not isinstance(source.get("teacher_selected_goal_descriptor_sha256"), str) or
+                len(source["teacher_selected_goal_descriptor_sha256"]) != 64 or
+                row.get("executed_goal_descriptor_sha256") !=
+                    source["teacher_selected_goal_descriptor_sha256"]):
+            raise ValueError("source row has no replay-bound executed-goal identity; recollect with explicit goal provenance")
+        executed_action = row.get("executed_action")
+        if (type(executed_action) is not int or executed_action != source.get("teacher_action") or
+                row.get("selected_behavior_id") != ACTION_TO_BEHAVIOR.get(executed_action)):
+            raise ValueError("annotation behavior/action does not match the replayed teacher execution")
+        goal = row.get("selected_goal")
+        if not isinstance(goal, dict) or type(goal.get("node_id")) is not int:
+            raise ValueError("action-only row rejected: explicit selected legal goal annotation is required")
+        node = goal["node_id"]
+        pose = next((p for p in legal.get("canonical_poses", []) if p.get("node_id") == node), None)
+        if pose is None or node not in legal.get("feasible_node_ids", []):
+            raise ValueError("annotated goal is not reachable and feasible in exact replay support")
+        if (goal.get("x_m"), goal.get("y_m"), goal.get("heading_bin")) != (
+                pose.get("x_m"), pose.get("y_m"), pose.get("heading_bin")):
+            raise ValueError("annotated goal pose differs from replayed canonical legal goal")
+        if goal.get("descriptor_sha256") != row.get("executed_goal_descriptor_sha256"):
+            raise ValueError("annotated legal goal differs from the replay-bound executed goal")
+        behavior = row.get("selected_behavior_id")
+        if type(behavior) is not int:
+            raise ValueError("explicit selected feasible behavior annotation is required")
+        matching = [p for p in legal.get("pairs", []) if p.get("node_id") == node and
+                    p.get("behavior_id") == behavior]
+        if not matching or not any(p.get("status") == "available" for p in matching):
+            raise ValueError("annotated behavior is not feasible and available in exact support")
+        node_target = next((item for item in legal.get("node_u_targets", [])
+                            if item.get("node_id") == node), None)
+        if node_target is None:
+            raise ValueError("annotated goal has no legal-node target support record")
+        censored = row.get("censored_feasible_behavior_ids")
+        if (not isinstance(censored, list) or any(type(x) is not int for x in censored) or
+                len(set(censored)) != len(censored) or
+                set(censored) != set(node_target.get("censored_feasible_behavior_ids", []))):
+            raise ValueError("annotation censoring inventory differs from replayed feasible support")
+        u = row.get("u_target")
+        u_status = row.get("u_status")
+        if u_status == "available":
+            if (not _finite_number(u) or censored or
+                    node_target.get("status") != "available" or
+                    set(node_target.get("feasible_behavior_ids", [])) !=
+                    set(node_target.get("available_behavior_ids", []))):
+                raise ValueError("U target must be finite and uncensored across feasible behavior support")
+        elif u_status in ("unavailable", "censored"):
+            if u is not None or (u_status == "censored" and not censored):
+                raise ValueError("unavailable/censored U target has inconsistent value or support")
+        else:
+            raise ValueError("U target status must be explicitly available, unavailable, or censored")
+        row["u_mask"] = u_status == "available"
+        row["b_mask"] = True
+        row["u_target"] = u if row["u_mask"] else None
+        row["b_target"] = behavior
+        row["target_semantics"] = PLAN_A_EXPERT_GOAL_SEMANTICS
+    return rows, manifest, data_sha, hashlib.sha256(manifest_bytes).hexdigest()
+
+
 def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
                                  expected_sources: dict):
     """Validate v2 bytes and frozen identities before any replay is attempted."""
@@ -2410,11 +2567,14 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
             raster = torch.tensor(observation.raster, dtype=torch.float32, device=device).reshape(
                 1, *observation.raster_shape)
             globals_ = torch.tensor(observation.globals, dtype=torch.float32, device=device).reshape(1, 7)
-            graph_inputs = _graph_inputs(track, graph, env, raster) or {}
-            graph_inputs = {k: v.to(device) for k, v in graph_inputs.items()}
-            samples.append({"row": row, "support": support, "graph": graph,
-                "graph_inputs": graph_inputs, "raster": raster, "globals": globals_,
-                "field_length": float(env.sim.field_length), "field_width": float(env.sim.field_width)})
+            if track is None:
+                samples.append({"row": row, "support": support, "graph": graph})
+            else:
+                graph_inputs = _graph_inputs(track, graph, env, raster) or {}
+                graph_inputs = {k: v.to(device) for k, v in graph_inputs.items()}
+                samples.append({"row": row, "support": support, "graph": graph,
+                    "graph_inputs": graph_inputs, "raster": raster, "globals": globals_,
+                    "field_length": float(env.sim.field_length), "field_width": float(env.sim.field_width)})
         finally:
             close = getattr(replay["env"], "close", None)
             if callable(close): close()
