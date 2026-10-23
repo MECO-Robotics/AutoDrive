@@ -1176,7 +1176,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
     from .meco_phase4 import validate_phase4_factor
+    from .meco_device import normalized_device_info
     phase4_factor = validate_phase4_factor(phase4_factor)
+    execution_device = normalized_device_info(device)
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1354,6 +1356,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "contract": prediction_contract(effective_prediction_mode)},
         "inference_disable_tick": inference_disable_tick,
         "phase4_factor": phase4_factor,
+        "execution_device": execution_device,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
             "points_per_grid_edge": p_points_per_grid_edge,
@@ -1388,6 +1391,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             return
         _atomic_json(status_path, {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "split": split, "status": status,
+            "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "output_file": output_path.name,
             "progress": {"completed_records": completed,
@@ -1401,15 +1405,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     component_timing_ms = {name: [] for name in (
         "legal_graph_build", "policy_decision_pipeline", "d1_fallback_pipeline",
         "simulator_macro_step")}
-    timing_device = torch.device(device)
+    timing_device = torch.device(execution_device["device"])
     timing_provenance = {
         "clock": "host perf_counter wall time, device synchronized before and after each measured component",
         "cuda_synchronization": timing_device.type == "cuda",
         "warmup_count": 0,
         "warmup_policy": "no unrecorded simulator warmup; all measured decisions belong to reported episodes",
-        "device": str(timing_device),
-        "accelerator_backend": ("ROCm" if torch.version.hip else
-                                "CUDA" if torch.version.cuda else "CPU"),
+        **execution_device,
         "device_name": (torch.cuda.get_device_name(timing_device)
                         if timing_device.type == "cuda" else "CPU"),
         "instrumentation": "component intervals include completion of asynchronous device work; decision pipeline is combined candidate/feature/model/scoring preparation and is not inference-only",
@@ -1847,6 +1849,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
+            "execution_device": execution_device,
             "candidate_k_checkpoint": checkpoint_candidate_k,
             "candidate_k_evaluation_override": candidate_k_override,
             "prediction": {"model": PREDICTION_MODEL_ID,

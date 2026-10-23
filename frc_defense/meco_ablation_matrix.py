@@ -18,10 +18,11 @@ from typing import Any
 
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
+from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 2
+MATRIX_SCHEMA_VERSION = 3
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -108,13 +109,23 @@ def _validate_condition_manifest(report: dict, *,
                                  frozen_source_hash: str,
                                  expected_configs: dict[str, str] | None,
                                  expected_protocols: dict[str, str] | None,
-                                 expected_shared_config: dict | None):
+                                 expected_shared_config: dict | None,
+                                 expected_device: dict[str, str]):
     """Reject an evaluation whose loaded bundle differs from matrix inputs."""
     manifest = report.get("policy_manifest")
     if not isinstance(manifest, dict) or set(MECO_TRACKS) - set(manifest):
         raise ValueError("evaluation manifest is missing one or more learned tracks")
     if report.get("source_identity_sha256") != frozen_source_hash:
         raise ValueError("evaluation source identity differs from frozen matrix provenance")
+    if report.get("execution_device") != expected_device:
+        raise ValueError("evaluation report device/backend differs from frozen matrix provenance")
+    component_timing = report.get("component_timing")
+    timing_provenance = (component_timing.get("provenance")
+                         if isinstance(component_timing, dict) else None)
+    if (not isinstance(timing_provenance, dict)
+            or timing_provenance.get("device") != expected_device["device"]
+            or timing_provenance.get("accelerator_backend") != expected_device["accelerator_backend"]):
+        raise ValueError("evaluation timing provenance device/backend differs from frozen matrix provenance")
     observed_configs, observed_protocols = {}, {}
     for track in MECO_TRACKS:
         policy = manifest[track]
@@ -260,6 +271,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
     output_root = Path(output_dir)
+    execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)
     source_hash = _source_identity_hash(source_identity())
     config_hashes, protocol_ids, frozen_shared_config = (
@@ -272,6 +284,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
         "source_identity_sha256": source_hash,
+        "execution_device": execution_device,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
@@ -295,7 +308,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         spec = asdict(condition)
         condition_id = _canonical_hash({"matrix_id": matrix_id,
             "condition": spec, "checkpoint_sha256": bundle_hashes,
-            "source_identity_sha256": source_hash, "seed_list": list(seeds)})
+            "source_identity_sha256": source_hash, "seed_list": list(seeds),
+            "execution_device": execution_device})
         report_path = output_root / f"{condition_id}.evaluation.json"
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=categories, episodes=len(seeds), master_seed=seeds[0],
@@ -313,7 +327,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             frozen_source_hash=source_hash,
             expected_configs=expected_configs,
             expected_protocols=expected_protocols,
-            expected_shared_config=expected_shared_config)
+            expected_shared_config=expected_shared_config,
+            expected_device=execution_device)
         if _checkpoint_hashes(checkpoints) != bundle_hashes:
             raise ValueError("checkpoint files drifted while an evaluation condition was running")
         if _source_identity_hash(source_identity()) != source_hash:
@@ -328,6 +343,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "report_path": str(report_path),
             "checkpoint_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
+            "execution_device": execution_device,
             "policy_manifest": report["policy_manifest"],
             "effective_candidate_k": report["candidate_k"],
             "prediction": report["prediction"],
@@ -464,6 +480,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "protocol": matrix_protocol,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
+        "execution_device": execution_device,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
             track: results[architecture_name]["policy_manifest"][track][

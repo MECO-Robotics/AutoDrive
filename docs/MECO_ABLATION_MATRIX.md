@@ -45,6 +45,12 @@ diagnostic paired records; they do not replace the calibrated held-out
 qualification gate and the matrix does not calculate promotion confidence
 intervals.
 
+The matrix and each condition ID bind a normalized execution device and
+backend. For example, an unindexed `cuda` request resolves to its active CUDA
+ordinal before the protocol is frozen. Each evaluator protocol and report
+records the same identity, and matrix validation rejects a report with a
+different device or backend.
+
 ## Open conditions
 
 The following plan conditions are not represented as completed experiments:
