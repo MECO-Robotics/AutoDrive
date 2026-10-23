@@ -3,7 +3,9 @@ from dataclasses import replace
 import pytest
 import torch
 
-from frc_defense.experimental_route_evaluation import RouteQuery, evaluate_routes
+from frc_defense.experimental_route_evaluation import (
+    RouteQuery, _scratch_planner, evaluate_routes,
+)
 from frc_defense.tensor_adstar import TensorADStar
 from frc_defense.tensor_3v3 import TensorThreeVsThreeEnv
 
@@ -148,3 +150,62 @@ def test_route_endpoint_must_reach_the_requested_goal(env, monkeypatch):
     result = evaluate_routes(env, [query], endpoint_tolerance_m=0.05)[0]
     assert result.status == "no_path"
     assert result.distance_m is None
+
+
+def test_at_goal_rejects_exact_static_overlap_even_when_raster_cell_is_clear(env):
+    env.sim.pose[0, 3, 0] = 13.19
+    env.sim.field_colliders[0] = torch.tensor([13.63, 1.35, .02, .02])
+    goal = (13.19, 1.35)
+    query = RouteQuery("static-overlap", "episode-1:0", 0, 3, goal)
+    scratch = _scratch_planner(env, [(query, torch.tensor(goal))])
+    heading = env.sim.pose[0, 3, 2:3]
+    length, width = env.sim.length[0, 3:4], env.sim.width[0, 3:4]
+    blocked = scratch._blocked(heading, length, width)
+    gx, gy = scratch._indices(torch.tensor([goal]))
+    assert not blocked[0, gx[0], gy[0]]
+
+    result = evaluate_routes(env, [query])[0]
+
+    assert result.status == "no_path" and not result.feasible
+    assert result.distance_m is None
+
+
+def test_at_goal_rejects_exact_observed_robot_circle_overlap(env):
+    env.sim.pose[0, 3, 0] = 13.19
+    goal = (13.19, 1.35)
+    env.opponent_pose[0, 3, :2] = torch.tensor([13.79, 1.35])
+    env.opponent_size[0, 3, :2] = torch.tensor([.4, .4])
+    env.opponent_valid[0, 3] = True
+    query = RouteQuery("dynamic-overlap", "episode-1:0", 0, 3, goal)
+    scratch = _scratch_planner(env, [(query, torch.tensor(goal))])
+    heading = env.sim.pose[0, 3, 2:3]
+    length, width = env.sim.length[0, 3:4], env.sim.width[0, 3:4]
+    blocked = scratch._blocked(heading, length, width)
+    blocked = scratch._block_robot_obstacles(
+        blocked, length, width, env._perceived_robot_obstacles()[3:4])
+    gx, gy = scratch._indices(torch.tensor([goal]))
+    assert not blocked[0, gx[0], gy[0]]
+
+    result = evaluate_routes(env, [query])[0]
+
+    assert result.status == "no_path" and not result.feasible
+    assert result.distance_m is None
+
+
+def test_blocked_raster_start_can_escape_through_live_planner(env):
+    env.sim.pose[0, 3, 0] = 13.19
+    env.sim.field_colliders[0] = torch.tensor([12.70, 1.35, .02, .02])
+    start = env.sim.pose[0, 3]
+    goal = (14.3, float(start[1]))
+    query = RouteQuery("escape", "episode-1:0", 0, 3, goal)
+    scratch = _scratch_planner(env, [(query, torch.tensor(goal))])
+    heading = start[2:3]
+    length, width = env.sim.length[0, 3:4], env.sim.width[0, 3:4]
+    blocked = scratch._blocked(heading, length, width)
+    sx, sy = scratch._indices(start[None, :2])
+    assert blocked[0, sx[0], sy[0]]
+
+    result = evaluate_routes(env, [query], endpoint_tolerance_m=.1)[0]
+
+    assert result.status == "feasible" and result.feasible
+    assert result.distance_m is not None and result.distance_m > 0
