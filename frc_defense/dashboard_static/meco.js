@@ -27,7 +27,8 @@
         `<small>Policy ${esc(evidence.policy_manifest?.policy_id || "—")}</small>`+
         `<small>Eval weights ${esc(evidence.policy_manifest?.checkpoint_sha256 || "deterministic")}</small>`+
         `<small>Protocol ${esc(evidence.protocol_id || "—")}</small></td>`+
-        `<td><small>${pretty(evidence.records || run.latest_training_metrics || {})}</small></td></tr>`;
+        `<td><small>Route P provenance ${pretty(evidence.route_cost_provenance || {})}</small>`+
+        `<small>${pretty(evidence.records || run.latest_training_metrics || {})}</small></td></tr>`;
     }).join("");
     const groups = data.comparison_groups || [];
     const evaluatorRuns = data.evaluation_runs || [];

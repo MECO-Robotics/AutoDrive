@@ -18,6 +18,9 @@ PENALTY_PROJECTION = "mean_over_legal_heading_bins_xy_grid_v1"
 PENALTY_MAP_UNITS = "dimensionless_additive_penalty_per_cardinal_grid_step"
 PENALTY_PATH_UNITS = "normalized_grid_edge_units"
 PENALTY_PPO_CONTRACT = "current_policy_penalty_integrated_on_frozen_rollout_routes"
+LEARNED_ROUTE_COST_PREFIX = (
+    "meco_legal_heading_penalty_projection_v1:schema=xy_grid_f64le_v2:")
+LEGACY_ROUTE_COST_PROVENANCE = "legacy_bump_cost_path_integral_v2"
 STATUS_SCHEMA_VERSION = 1
 HEARTBEAT_STALE_SECONDS = 90
 QUEUE_STALE_SECONDS = 180
@@ -249,6 +252,7 @@ def _comparison(report):
     expected = {(category, seed, policy) for category in categories
                 for seed in seeds for policy in POLICIES}
     found = {}
+    route_provenance_summary = {}
     for row in records:
         if (not isinstance(row, dict) or row.get("scenario_id") != scenario
                 or row.get("category") not in categories
@@ -318,8 +322,38 @@ def _comparison(report):
                         or route.get("path_points_m") is None
                         or route.get("route_cost_units") != PENALTY_PATH_UNITS):
                     return None
-                if expected_mode == "p0" and abs(float(penalty)) > 1e-9:
-                    return None
+                route_provenance = route.get("route_cost_provenance")
+                if expected_mode == "p0":
+                    if (abs(float(penalty)) > 1e-9
+                            or route_provenance != LEGACY_ROUTE_COST_PROVENANCE):
+                        return None
+                    summary = route_provenance_summary.setdefault(row["policy"], {
+                        "mode": "p0", "route_cost_source": "legacy_no_learned_map",
+                        "projection": None, "map_scale": 0.,
+                        "route_records": 0,
+                        "sample_map_digests": []})
+                else:
+                    scale_suffix = f"scale={float(report['plan_a_penalty']['cost_scale']).hex()}:path_integral_grid_edge_v2"
+                    digest_match = (re.search(r"sha256=([0-9a-f]{64}):", route_provenance)
+                                    if isinstance(route_provenance, str) else None)
+                    if (not isinstance(route_provenance, str)
+                            or not route_provenance.startswith(LEARNED_ROUTE_COST_PREFIX)
+                            or digest_match is None
+                            or not route_provenance.endswith(scale_suffix)):
+                        return None
+                    summary = route_provenance_summary.setdefault(row["policy"], {
+                        "mode": "learned", "route_cost_source": "weighted_ad_star_map",
+                        "projection": PENALTY_PROJECTION,
+                        "map_scale": report["plan_a_penalty"]["cost_scale"],
+                        "route_records": 0,
+                        "sample_map_digests": [], "_digest_samples": set()})
+                    digest = digest_match.group(1)
+                    if (digest not in summary["_digest_samples"]
+                            and len(summary["sample_map_digests"]) < 3):
+                        summary["_digest_samples"].add(digest)
+                        if len(summary["sample_map_digests"]) < 3:
+                            summary["sample_map_digests"].append(digest)
+                summary["route_records"] += 1
         key = (row["category"], row["seed"], row["policy"])
         if key in found:
             return None
@@ -335,6 +369,8 @@ def _comparison(report):
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     except (TypeError, ValueError):
         return None
+    for summary in route_provenance_summary.values():
+        summary.pop("_digest_samples", None)
     return {"evaluation_id": report["evaluation_id"],
             "generated_utc": report.get("generated_utc"),
             "comparison_group": comparison_group,
@@ -344,6 +380,7 @@ def _comparison(report):
             "matched_status": "diagnostic matched" if report.get("diagnostic") is True else "non-diagnostic matched",
             "policy_manifest": report["policy_manifest"],
             "control_definitions": report["control_definitions"],
+            "route_cost_provenance": route_provenance_summary,
             "policy_metrics": {policy: {category: _summarize([
                 _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
                 for category in categories} for policy in POLICIES}}
@@ -487,6 +524,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                "diagnostic": any(row["diagnostic"] for row in rows),
                "matched_status": rows[-1]["matched_status"],
                "record_count": len(rows[-1]["seeds"]) * len(rows[-1]["categories"]),
+               "route_cost_provenance": rows[-1]["route_cost_provenance"],
                "policy_metrics": rows[-1]["policy_metrics"]}
               for key, rows in sorted(grouped.items())]
     latest_by_policy = {}
@@ -500,6 +538,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 "diagnostic": comparison["diagnostic"],
                 "matched_status": comparison["matched_status"],
                 "policy_manifest": comparison["policy_manifest"][policy],
+                "route_cost_provenance": comparison["route_cost_provenance"].get(policy),
                 "records": metrics}
     policies = []
     for policy in POLICIES:
