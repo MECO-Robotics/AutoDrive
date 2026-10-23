@@ -23,7 +23,8 @@ import torch
 from torch import nn
 
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
-from .curriculum_training import get_scenario, source_identity
+from .curriculum_training import source_identity
+from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES,
     ROUTE_COST_POINTS_PER_SECOND,
     RouteFeasibleCandidates, build_route_feasible_candidates)
