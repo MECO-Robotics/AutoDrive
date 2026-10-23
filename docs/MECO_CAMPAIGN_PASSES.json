@@ -65,7 +65,8 @@
         "D0 target-scoped calibration bundle committed as da1f7d236 in isolated worktree: protocol binds target+prerequisite closure, per-scenario calibration IDs/seed pools/gates/splits; only target can promote, ancestors collect retention under the same protocol; scoped review pending",
         "D0 bundle reviewer found retention policy_manifest bundle_id is not recomputed at consumption and v1 protocol_document output shape changed while PROTOCOL_VERSION remains v1; implementer follow-up will bind retention manifests and dispatch v1/v2 schemas explicitly",
         "Section 7 A/B matrix implementation started in isolated branch codex/meco-ablation-matrix; scope covers exact paired checkpoint/seed/condition contracts and supported forecast, P0, K=8/16/32 and fallback factors",
-        "Low-level contact-rate instrumentation committed as 948d4f101 in isolated worktree: records focal robot/field/wall contact ticks per active physics tick after collisions, including fused six-robot HIP flags; reports unsupported illegal-transition/footprint metrics null; scoped review pending"
+        "Low-level contact-rate instrumentation committed as 948d4f101 in isolated worktree: records focal robot/field/wall contact ticks per active physics tick after collisions, including fused six-robot HIP flags; reports unsupported illegal-transition/footprint metrics null; scoped review pending",
+        "Contact-rate reviewer found the default fused two-robot HIP path does not set per-robot robot-contact flags, causing silently zero robot-contact rate; implementer follow-up required; qualification consumer acceptance remains separate"
       ]
     },
     {
@@ -107,7 +108,8 @@
         "D0 target-scoped bundle da1f7d236 submitted for scoped review; safety metrics remain pending, so calibrated promotion still fails closed",
         "D0 bundle review pending two fixes: recompute retention policy bundle identity and preserve generated v1 protocol schema unchanged under explicit v1/v2 dispatch",
         "Section 7 experiment-matrix code will receive scoped review for common checkpoint/source/config/seed identity, immutable factor contracts, same-checkpoint K/prediction/fault overrides, and honest unsupported-factor status",
-        "Contact-rate instrumentation 948d4f101 submitted for scoped static review; no simulator validation run and contacts remain distinct from policy-rule violations"
+        "Contact-rate instrumentation 948d4f101 submitted for scoped static review; no simulator validation run and contacts remain distinct from policy-rule violations",
+        "Contact-rate commit 948d4f101 is not approved yet: two-robot fused HIP path must update per-robot flags (or be rejected for safety evaluation), and D0 consumer schema remains to be integrated"
       ]
     }
   ]
