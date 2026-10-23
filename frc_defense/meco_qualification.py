@@ -99,110 +99,150 @@ def protocol_cases(scenario_id: str, split: str, *, episodes: int = MIN_EPISODES
     return tuple(cases)
 
 
+def _scenario_closure(target: str) -> tuple[str, ...]:
+    closure = {target, *_ancestors(target)}
+    return tuple(scenario for scenario in SCENARIOS if scenario in closure)
+
+
+def _retention_scenarios(target: str) -> tuple[str, ...]:
+    return tuple(scenario for scenario in _scenario_closure(target) if scenario != target)
+
+
+def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tuple[dict, dict, str]:
+    """Validate every D0 report and return its IDs, exact seed pools, and shared source."""
+    if set(reports) != set(scenarios):
+        raise ValueError("D0 calibration bundle must cover the target and every prerequisite exactly")
+    ids, pools, source_hash = {}, {}, None
+    calibration_seed_union = set()
+    for scenario in scenarios:
+        report = reports[scenario]
+        if (not isinstance(report, dict) or report.get("calibration") is not True
+                or report.get("scenario_id") != scenario
+                or report.get("protocol_version") != "meco-d0-calibration-v1"):
+            raise ValueError(f"D0 calibration bundle report is invalid for {scenario}")
+        unsigned = {key: value for key, value in report.items() if key != "calibration_id"}
+        digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        if report.get("calibration_id") != digest:
+            raise ValueError(f"D0 calibration report digest is invalid for {scenario}")
+        episodes, repetitions, master_seed = (report.get("episodes_per_category_stratum"),
+            report.get("repetitions"), report.get("master_seed"))
+        if (type(episodes) is not int or episodes < MIN_EPISODES
+                or type(repetitions) is not int or repetitions < 2
+                or type(master_seed) is not int or master_seed < 0):
+            raise ValueError(f"D0 calibration report settings are invalid for {scenario}")
+        cases = protocol_cases(scenario, "calibration", episodes=episodes,
+                               master_seed=master_seed)
+        expected_case_ids = [{"category": c.category, "layout_id": c.layout_id,
+            "defender_family": c.defender_family, "start_condition": c.start_condition,
+            "sensor_profile": c.sensor_profile} for c in cases]
+        if report.get("case_ids") != expected_case_ids:
+            raise ValueError(f"D0 calibration case coverage is invalid for {scenario}")
+        expected_rows = {(rep, c.category, c.layout_id, c.defender_family,
+            c.start_condition, c.sensor_profile, seed)
+            for rep in range(repetitions) for c in cases for seed in c.seeds}
+        rows = report.get("records")
+        if not isinstance(rows, list) or len(rows) != len(expected_rows):
+            raise ValueError(f"D0 calibration raw coverage is incomplete for {scenario}")
+        found = set()
+        for row in rows:
+            key = (row.get("repetition"), row.get("category"), row.get("layout_id"),
+                row.get("defender_family"), row.get("start_condition"),
+                row.get("sensor_profile"), row.get("seed"))
+            metric = row.get("metrics", {}).get("useful_throughput")
+            if (key not in expected_rows or key in found or row.get("policy") != REFERENCE_POLICY
+                    or row.get("split") != "calibration"
+                    or row.get("policy_id") != "D0_production_deterministic"
+                    or row.get("checkpoint_sha256") is not None
+                    or type(metric) not in (int, float) or not math.isfinite(metric) or metric < 0):
+                raise ValueError(f"D0 calibration raw row is invalid for {scenario}")
+            found.add(key)
+        if found != expected_rows:
+            raise ValueError(f"D0 calibration seed/repetition coverage is incomplete for {scenario}")
+        current_source = report.get("source_identity_sha256")
+        if (not isinstance(current_source, str) or len(current_source) != 64
+                or any(c not in "0123456789abcdef" for c in current_source)
+                or report.get("policy_manifest", {}).get(REFERENCE_POLICY, {}).get("policy_id")
+                    != "D0_production_deterministic"
+                or any(row.get("source_identity_sha256") != current_source for row in rows)):
+            raise ValueError(f"D0 calibration source/controller provenance is invalid for {scenario}")
+        if source_hash is None:
+            source_hash = current_source
+        elif source_hash != current_source:
+            raise ValueError("D0 calibration bundle mixes source identities")
+        seeds = {seed for case in cases for seed in case.seeds}
+        if calibration_seed_union & seeds:
+            raise ValueError("D0 calibration seed pools overlap across prerequisite scenarios")
+        calibration_seed_union.update(seeds)
+        ids[scenario] = digest
+        pools[scenario] = {"master_seed": master_seed, "episodes": episodes,
+            "repetitions": repetitions, "cases": [
+                {"category": c.category, "layout_id": c.layout_id,
+                 "defender_family": c.defender_family,
+                 "start_condition": c.start_condition,
+                 "sensor_profile": c.sensor_profile, "seeds": list(c.seeds)}
+                for c in cases]}
+    return ids, pools, source_hash
+
+
 def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPISODES,
                       master_seed: int = 20261024, calibration_report: dict | None = None,
                       minimum_useful_gain: dict[str, float] | None = None,
                       safety_noninferiority_margins: dict[str, float] | None = None) -> dict:
-    """Canonical protocol document; its digest is the protocol identity."""
-    scenarios = (tuple(SCENARIOS) if scenario_id is None else (scenario_id,))
-    if any(scenario not in SCENARIOS for scenario in scenarios):
+    """Canonical target-scoped protocol; the digest is the protocol identity."""
+    if scenario_id is not None and scenario_id not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario_id}")
+    calibrated = calibration_report is not None
+    if calibrated and scenario_id is None:
+        raise ValueError("calibrated protocol requires an explicit promotion target")
+    target = scenario_id
+    scenarios = (_scenario_closure(target) if calibrated else
+        tuple(SCENARIOS) if target is None else (target,))
     cases = [asdict(case) | {"seeds": list(case.seeds)} for scenario in scenarios
              for split in ("train", "validation", "test")
              for case in protocol_cases(scenario, split,
                  episodes=TRAIN_SEED_POOL_SIZE if split == "train" else episodes,
                  master_seed=master_seed)]
-    calibrated = calibration_report is not None
     if calibrated:
-        if (calibration_report.get("calibration") is not True
-                or calibration_report.get("scenario_id") not in scenarios
-                or calibration_report.get("protocol_version") != "meco-d0-calibration-v1"):
-            raise ValueError("calibrated protocol requires a matching D0 calibration report")
-        if tuple(scenarios) != (calibration_report["scenario_id"],):
-            raise ValueError("calibrated protocols are frozen one scenario at a time")
-        unsigned = {key: value for key, value in calibration_report.items()
-                    if key != "calibration_id"}
-        calibration_id = hashlib.sha256(json.dumps(unsigned, sort_keys=True,
-            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-        if calibration_report.get("calibration_id") != calibration_id:
-            raise ValueError("D0 calibration report digest is invalid")
-        cal_scenario = calibration_report["scenario_id"]
-        cal_episodes = calibration_report.get("episodes_per_category_stratum")
-        cal_repetitions = calibration_report.get("repetitions")
-        cal_master_seed = calibration_report.get("master_seed")
-        if (type(cal_episodes) is not int or cal_episodes < MIN_EPISODES
-                or type(cal_repetitions) is not int or cal_repetitions < 2
-                or type(cal_master_seed) is not int or cal_master_seed < 0):
-            raise ValueError("D0 calibration report has invalid seed/repetition settings")
-        cal_cases = protocol_cases(cal_scenario, "calibration", episodes=cal_episodes,
-                                   master_seed=cal_master_seed)
-        expected_cal_ids = [{"category": c.category, "layout_id": c.layout_id,
-            "defender_family": c.defender_family, "start_condition": c.start_condition,
-            "sensor_profile": c.sensor_profile} for c in cal_cases]
-        if calibration_report.get("case_ids") != expected_cal_ids:
-            raise ValueError("D0 calibration case coverage does not match its seed protocol")
-        expected_count = sum(len(c.seeds) for c in cal_cases) * cal_repetitions
-        cal_records = calibration_report.get("records")
-        if not isinstance(cal_records, list) or len(cal_records) != expected_count:
-            raise ValueError("D0 calibration report has incomplete raw record coverage")
-        expected_rows = {(rep, c.category, c.layout_id, c.defender_family,
-            c.start_condition, c.sensor_profile, seed)
-            for rep in range(cal_repetitions) for c in cal_cases for seed in c.seeds}
-        found_rows = set()
-        for row in cal_records:
-            key = (row.get("repetition"), row.get("category"), row.get("layout_id"),
-                   row.get("defender_family"), row.get("start_condition"),
-                   row.get("sensor_profile"), row.get("seed"))
-            if key not in expected_rows or key in found_rows or row.get("policy") != REFERENCE_POLICY:
-                raise ValueError("D0 calibration raw row identity is invalid or duplicated")
-            if (row.get("split") != "calibration"
-                    or row.get("policy_id") != "D0_production_deterministic"
-                    or row.get("checkpoint_sha256") is not None
-                    or row.get("source_identity_sha256") != calibration_report.get("source_identity_sha256")):
-                raise ValueError("D0 calibration raw row provenance is invalid")
-            metric = row.get("metrics", {}).get("useful_throughput")
-            if type(metric) not in (int, float) or not math.isfinite(metric) or metric < 0:
-                raise ValueError("D0 calibration raw outcome is invalid")
-            found_rows.add(key)
-        if found_rows != expected_rows:
-            raise ValueError("D0 calibration raw seed/repetition coverage is incomplete")
-        source_hash = calibration_report.get("source_identity_sha256")
-        if (not isinstance(source_hash, str) or len(source_hash) != 64
-                or any(char not in "0123456789abcdef" for char in source_hash)
-                or calibration_report.get("policy_manifest", {}).get(REFERENCE_POLICY, {}).get(
-                    "policy_id") != "D0_production_deterministic"):
-            raise ValueError("D0 calibration report lacks source/controller provenance")
-        expected = {category for scenario in scenarios
-                    for category in SCENARIOS[scenario].required_categories}
+        reports = ({calibration_report["scenario_id"]: calibration_report}
+                   if isinstance(calibration_report, dict) and "scenario_id" in calibration_report
+                   else calibration_report)
+        if not isinstance(reports, dict):
+            raise ValueError("calibration input must be a report or scenario-to-report bundle")
+        calibration_ids, calibration_seed_pools, source_hash = _calibration_report_index(
+            reports, scenarios)
+        categories = set(SCENARIOS[target].required_categories)
         if (not isinstance(minimum_useful_gain, dict)
-                or set(minimum_useful_gain) != expected
-                or any(type(value) not in (int, float) or not math.isfinite(value)
-                       or value < 0 for value in minimum_useful_gain.values())):
-            raise ValueError("provide a nonnegative minimum useful-throughput gain for every category")
+                or set(minimum_useful_gain) != categories
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                       for value in minimum_useful_gain.values())):
+            raise ValueError("provide a nonnegative useful-throughput gain for every target category")
         if (not isinstance(safety_noninferiority_margins, dict)
-                or not safety_noninferiority_margins
                 or set(safety_noninferiority_margins) != SAFETY_METRIC_NAMES
-                or any(not isinstance(key, str) or not key.startswith("safety_")
-                       or type(value) not in (int, float)
-                       or not math.isfinite(value) or not 0 <= value <= 1
-                       for key, value in safety_noninferiority_margins.items())):
-            raise ValueError("provide nonnegative safety noninferiority margins")
+                or any(type(value) not in (int, float) or not math.isfinite(value)
+                       or not 0 <= value <= 1 for value in safety_noninferiority_margins.values())):
+            raise ValueError("provide the exact supported safety metric names and margins")
+        baseline_id = hashlib.sha256(json.dumps(calibration_ids, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+    else:
+        calibration_ids, calibration_seed_pools, source_hash, baseline_id = {}, {}, None, None
     body = {"protocol_version": CALIBRATED_PROTOCOL_VERSION if calibrated else PROTOCOL_VERSION,
-        "curriculum_version": CURRICULUM_VERSION,
+        "promotion_target_scenario": target,
         "scenario_ids": list(scenarios),
+        "retention_scenario_ids": list(_retention_scenarios(target)) if calibrated else [],
         "scenario_versions": {scenario: SCENARIOS[scenario].version for scenario in scenarios},
         "episodes_per_category_stratum": episodes,
         "master_seed": master_seed,
         "training": {"layouts": list(TRAIN_LAYOUTS),
-                     "defender_families": ["none", *TRAIN_DEFENDER_FAMILIES],
-                     "seed_pool_size": TRAIN_SEED_POOL_SIZE,
-                     "runtime_seed_binding": "MecoTaskScheduler selects these exact train-split seeds by scenario cycle modulo pool size; scheduler master_seed must match this protocol",
-                     "runtime_seed_lists_enforced": True},
+            "defender_families": ["none", *TRAIN_DEFENDER_FAMILIES],
+            "seed_pool_size": TRAIN_SEED_POOL_SIZE,
+            "runtime_seed_binding": "MecoTaskScheduler selects these exact train-split seeds by scenario cycle modulo pool size; scheduler master_seed must match this protocol",
+            "runtime_seed_lists_enforced": True},
         "validation": {"layouts": list(VALIDATION_LAYOUTS),
-                       "defender_families": ["none", *VALIDATION_DEFENDER_FAMILIES]},
+            "defender_families": ["none", *VALIDATION_DEFENDER_FAMILIES]},
         "final_test": {"layouts": list(FINAL_TEST_LAYOUTS),
-                       "defender_families": ["none", *FINAL_TEST_DEFENDER_FAMILIES],
-                       "isolated_until_selected_frozen_bundle": True},
+            "defender_families": ["none", *FINAL_TEST_DEFENDER_FAMILIES],
+            "isolated_until_selected_frozen_bundle": True},
         "start_conditions": {"train": list(TRAIN_START_CONDITIONS),
             "validation": list(VALIDATION_START_CONDITIONS),
             "test": list(FINAL_TEST_START_CONDITIONS)},
@@ -211,14 +251,14 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             "test": list(FINAL_TEST_SENSOR_PROFILES)},
         "paired_reference_policy": REFERENCE_POLICY,
         "gate_calibration_status": ("calibrated_baseline_frozen" if calibrated
-                                     else "provisional_pending_baseline_variance_review"),
-        "calibration_id": calibration_report.get("calibration_id") if calibrated else None,
-        "calibration_source_identity_sha256": calibration_report.get("source_identity_sha256") if calibrated else None,
+            else "provisional_pending_baseline_variance_review"),
+        "calibration_id": baseline_id, "calibration_ids": calibration_ids,
+        "calibration_seed_pools": calibration_seed_pools,
+        "calibration_source_identity_sha256": source_hash,
         "minimum_useful_gain": minimum_useful_gain if calibrated else None,
         "safety_noninferiority_margins": safety_noninferiority_margins if calibrated else None,
         "safety_gate_status": "awaiting_runtime_contact_metric_support" if calibrated else "not_calibrated",
-        "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate)
-                             for scenario in scenarios},
+        "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate) for scenario in scenarios},
         "cases": cases}
     body["protocol_id"] = hashlib.sha256(json.dumps(body, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -226,7 +266,7 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
 
 
 def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
-    """Validate the complete calibrated protocol contract before use."""
+    """Validate a target-scoped calibrated protocol for target or retention use."""
     if not isinstance(protocol, dict) or protocol.get("protocol_version") != CALIBRATED_PROTOCOL_VERSION:
         raise ValueError("promotion requires a calibrated v2 protocol")
     body = {key: value for key, value in protocol.items() if key != "protocol_id"}
@@ -234,10 +274,17 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     if protocol.get("protocol_id") != digest:
         raise ValueError("qualification protocol file hash is invalid")
-    if protocol.get("scenario_ids") != [scenario]:
-        raise ValueError("calibrated protocol must cover exactly the report scenario")
-    if scenario not in SCENARIOS:
-        raise ValueError("calibrated protocol names an unknown scenario")
+    target = protocol.get("promotion_target_scenario")
+    if target not in SCENARIOS or scenario not in _scenario_closure(target):
+        raise ValueError("scenario is outside the calibrated target/prerequisite closure")
+    scenarios = _scenario_closure(target)
+    if protocol.get("scenario_ids") != list(scenarios):
+        raise ValueError("calibrated protocol prerequisite closure is invalid")
+    if protocol.get("retention_scenario_ids") != list(_retention_scenarios(target)):
+        raise ValueError("calibrated protocol retention scenario list is invalid")
+    if (protocol.get("scenario_versions") != {name: SCENARIOS[name].version for name in scenarios}
+            or protocol.get("promotion_gates") != {name: asdict(SCENARIOS[name].gate) for name in scenarios}):
+        raise ValueError("calibrated protocol scenario versions/gates are invalid")
     if (protocol.get("gate_calibration_status") != "calibrated_baseline_frozen"
             or protocol.get("safety_gate_status") != "awaiting_runtime_contact_metric_support"):
         raise ValueError("calibrated protocol status fields are invalid or unsupported")
@@ -246,7 +293,38 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         if (not isinstance(value, str) or len(value) != 64
                 or any(char not in "0123456789abcdef" for char in value)):
             raise ValueError(f"calibrated protocol has invalid {field}")
-    categories = set(SCENARIOS[scenario].required_categories)
+    ids = protocol.get("calibration_ids")
+    pools = protocol.get("calibration_seed_pools")
+    if not isinstance(ids, dict) or set(ids) != set(scenarios) or not isinstance(pools, dict) or set(pools) != set(scenarios):
+        raise ValueError("calibrated protocol is missing prerequisite calibration reports")
+    if any(not isinstance(value, str) or len(value) != 64
+           or any(c not in "0123456789abcdef" for c in value) for value in ids.values()):
+        raise ValueError("calibrated protocol contains an invalid calibration report ID")
+    combined_id = hashlib.sha256(json.dumps(ids, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    if protocol.get("calibration_id") != combined_id:
+        raise ValueError("calibration bundle identity mismatch")
+    calibration_seeds = set()
+    for name in scenarios:
+        pool = pools[name]
+        if (not isinstance(pool, dict) or type(pool.get("master_seed")) is not int
+                or pool["master_seed"] < 0 or type(pool.get("episodes")) is not int
+                or pool["episodes"] < MIN_EPISODES or type(pool.get("repetitions")) is not int
+                or pool["repetitions"] < 2):
+            raise ValueError(f"calibration seed pool is invalid for {name}")
+        expected_pool = [{"category": c.category, "layout_id": c.layout_id,
+            "defender_family": c.defender_family, "start_condition": c.start_condition,
+            "sensor_profile": c.sensor_profile, "seeds": list(c.seeds)}
+            for c in protocol_cases(name, "calibration", episodes=pool["episodes"],
+                master_seed=pool["master_seed"])]
+        if pool.get("cases") != expected_pool:
+            raise ValueError(f"calibration seed pool case table is invalid for {name}")
+        for case in expected_pool:
+            for seed in case["seeds"]:
+                if seed % 4 != 3 or seed in calibration_seeds:
+                    raise ValueError("calibration seed pools overlap or use a non-calibration partition")
+                calibration_seeds.add(seed)
+    categories = set(SCENARIOS[target].required_categories)
     gain_margins = protocol.get("minimum_useful_gain")
     safety_margins = protocol.get("safety_noninferiority_margins")
     if (not isinstance(gain_margins, dict) or set(gain_margins) != categories
@@ -261,18 +339,23 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
     if type(episodes) is not int or episodes < MIN_EPISODES or type(master_seed) is not int:
         raise ValueError("calibrated protocol episode or seed settings are invalid")
     expected_cases = [asdict(case) | {"seeds": list(case.seeds)}
-        for split in ("train", "validation", "test")
-        for case in protocol_cases(scenario, split,
+        for name in scenarios for split in ("train", "validation", "test")
+        for case in protocol_cases(name, split,
             episodes=TRAIN_SEED_POOL_SIZE if split == "train" else episodes,
             master_seed=master_seed)]
     if protocol.get("cases") != expected_cases:
         raise ValueError("calibrated protocol case table or exact seed lists are invalid")
+    protocol_seeds = {seed for row in expected_cases for seed in row["seeds"]}
+    if calibration_seeds & protocol_seeds:
+        raise ValueError("calibration seed pools overlap train/validation/test seeds")
 
 
 _EVIDENCE_FIELDS = ("schema_version", "qualification", "evaluation_id", "protocol_id",
     "scenario_id", "split", "candidate_policy", "bundle_id", "policy_manifest",
+    "retention_scenario_ids",
     "source_identity_sha256", "gate_definition", "gate_calibration_status",
-    "protocol_version", "calibration_id", "minimum_useful_gain",
+    "protocol_version", "calibration_id", "calibration_ids", "calibration_seed_pools",
+    "minimum_useful_gain",
     "safety_noninferiority_margins", "safety_gate_status",
     "safety_metrics_schema", "safety_metrics_source_identity_sha256",
     "paired_reference_policy", "paired", "episodes_per_category_stratum",
@@ -292,6 +375,8 @@ def _validate_evidence_digest(report: dict) -> None:
 
 def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
     bindings = ("protocol_id", "protocol_version", "calibration_id",
+        "calibration_ids", "calibration_seed_pools",
+        "retention_scenario_ids",
         "gate_calibration_status", "minimum_useful_gain",
         "safety_noninferiority_margins", "safety_gate_status",
         "episodes_per_category_stratum", "master_seed")
@@ -533,6 +618,8 @@ def consume_validation_round(report: dict, *, protocol: dict,
     if report.get("qualification") is not True or report.get("split") != "validation":
         raise ValueError("only qualification validation reports may advance promotion")
     scenario = report.get("scenario_id")
+    if scenario != protocol.get("promotion_target_scenario"):
+        raise ValueError("only the frozen target scenario may advance promotion")
     _validate_v2_protocol(protocol, scenario)
     _validate_evidence_digest(report)
     _validate_report_protocol_binding(report, protocol)
@@ -546,6 +633,8 @@ def consume_validation_round(report: dict, *, protocol: dict,
         raise ValueError("frozen qualification protocol mismatch")
     if protocol.get("promotion_gates", {}).get(scenario) != asdict(SCENARIOS[scenario].gate):
         raise ValueError("qualification gate definition differs from the frozen protocol")
+    if report.get("gate_definition") != protocol.get("promotion_gates", {}).get(scenario):
+        raise ValueError("qualification report gate definition differs from the frozen protocol")
     expected_cases = tuple(case for case in protocol_cases(scenario, "validation",
         episodes=protocol["episodes_per_category_stratum"],
         master_seed=protocol["master_seed"]))
@@ -667,10 +756,17 @@ def _retention_result(report, protocol, primary):
     if report.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256"):
         raise ValueError("retention report source identity differs from calibrated protocol")
     scenario = report["scenario_id"]
+    if report.get("gate_definition") != protocol.get("promotion_gates", {}).get(scenario):
+        raise ValueError("retention report gate definition differs from the frozen protocol")
     cases = protocol_cases(scenario, "validation",
         episodes=protocol["episodes_per_category_stratum"],
         master_seed=protocol["master_seed"])
     candidate = report["candidate_policy"]
+    expected_case_ids = [{"category": c.category, "layout_id": c.layout_id,
+        "defender_family": c.defender_family, "start_condition": c.start_condition,
+        "sensor_profile": c.sensor_profile} for c in cases]
+    if report.get("case_ids") != expected_case_ids:
+        raise ValueError("retention report case coverage differs from the frozen protocol")
     records = _validate_case_rows(report, cases, candidate)
     categories = []
     for category in SCENARIOS[scenario].required_categories:
@@ -729,6 +825,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         raise ValueError("qualification needs exactly the selected candidate checkpoint")
     if scenario_id not in protocol.get("scenario_ids", ()):
         raise ValueError("scenario is not in the frozen qualification protocol")
+    if split == "validation" and scenario_id != protocol.get("promotion_target_scenario") and not collect_only:
+        raise ValueError("validation promotion is target-only; prerequisites are retention evidence")
     if split == "validation":
         _validate_v2_protocol(protocol, scenario_id)
     if protocol.get("promotion_gates", {}).get(scenario_id) != asdict(SCENARIOS[scenario_id].gate):
@@ -805,6 +903,9 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "gate_calibration_status": protocol["gate_calibration_status"],
         "protocol_version": protocol.get("protocol_version"),
         "calibration_id": protocol.get("calibration_id"),
+        "calibration_ids": protocol.get("calibration_ids"),
+        "calibration_seed_pools": protocol.get("calibration_seed_pools"),
+        "retention_scenario_ids": protocol.get("retention_scenario_ids"),
         "minimum_useful_gain": protocol.get("minimum_useful_gain"),
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
@@ -900,6 +1001,7 @@ def main(argv=None):
     create.add_argument("--master-seed", type=int, default=20261024)
     create.add_argument("--scenario")
     create.add_argument("--calibration-report")
+    create.add_argument("--calibration-bundle-json")
     create.add_argument("--minimum-useful-gain-json")
     create.add_argument("--safety-margins-json")
     calibrate = commands.add_parser("calibrate-d0")
@@ -909,6 +1011,10 @@ def main(argv=None):
     calibrate.add_argument("--master-seed", type=int, default=20261024)
     calibrate.add_argument("--device", default="cpu")
     calibrate.add_argument("--output", required=True)
+    bundle = commands.add_parser("bundle-calibrations")
+    bundle.add_argument("--report", action="append", required=True,
+        help="D0 calibration report path; repeat once for target and each prerequisite")
+    bundle.add_argument("--output", required=True)
     run = commands.add_parser("run-validation")
     run.add_argument("--scenario", required=True)
     run.add_argument("--candidate-policy", choices=POLICIES, required=True)
@@ -927,7 +1033,12 @@ def main(argv=None):
     test.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
     if args.command == "create-protocol":
-        calibration = _load_json(args.calibration_report) if args.calibration_report else None
+        if args.calibration_report and args.calibration_bundle_json:
+            raise ValueError("use either one calibration report or a calibration bundle")
+        calibration_path = args.calibration_bundle_json or args.calibration_report
+        calibration = _load_json(calibration_path) if calibration_path else None
+        if isinstance(calibration, dict) and "calibration_reports" in calibration:
+            calibration = calibration["calibration_reports"]
         gain_margins = _load_json(args.minimum_useful_gain_json) if args.minimum_useful_gain_json else None
         safety_margins = _load_json(args.safety_margins_json) if args.safety_margins_json else None
         write_immutable_report(args.output, protocol_document(
@@ -941,6 +1052,16 @@ def main(argv=None):
         report_digest = write_immutable_report(args.output, report)
         print(json.dumps({"calibration_id": report["calibration_id"],
             "report_sha256": report_digest, "output": args.output}, indent=2))
+        return
+    if args.command == "bundle-calibrations":
+        reports = [_load_json(path) for path in args.report]
+        indexed = {report.get("scenario_id"): report for report in reports}
+        if None in indexed or len(indexed) != len(reports):
+            raise ValueError("calibration report scenarios must be present and unique")
+        bundle_report = {"schema_version": 1, "calibration_reports": indexed}
+        digest = write_immutable_report(args.output, bundle_report)
+        print(json.dumps({"scenario_ids": sorted(indexed),
+            "bundle_sha256": digest, "output": args.output}, indent=2))
         return
     protocol = _load_json(args.protocol)
     state_path = Path(args.state)
@@ -1037,6 +1158,9 @@ def _write_dashboard_status(state_path, scenario, candidate_policy, report, stat
         "gate_calibration_status": report["gate_calibration_status"],
         "protocol_version": report.get("protocol_version"),
         "calibration_id": report.get("calibration_id"),
+        "calibration_ids": report.get("calibration_ids"),
+        "calibration_seed_pools": report.get("calibration_seed_pools"),
+        "retention_scenario_ids": report.get("retention_scenario_ids"),
         "minimum_useful_gain": report.get("minimum_useful_gain"),
         "safety_noninferiority_margins": report.get("safety_noninferiority_margins"),
         "safety_gate_status": report.get("safety_gate_status"),

@@ -53,6 +53,8 @@
       `<small>Checkpoint ${esc(qualification.checkpoint_sha256 || "—")} · final-test isolated ${qualification.final_test_isolated ? "yes" : "no"}</small>`+
       `<small>Gate calibration ${esc(qualification.gate_calibration_status || "unknown")}</small>`+
       `<small>Protocol ${esc(qualification.protocol_version || "unknown")} · calibration ${esc(qualification.calibration_id || "not frozen")}</small>`+
+      `<small>Calibration reports ${pretty(qualification.calibration_ids || {})}</small>`+
+      `<small>Retention scenarios ${esc((qualification.retention_scenario_ids || []).join(", ") || "none")}</small>`+
       `<small>Safety gate ${esc(qualification.safety_gate_status || "unknown")}</small>`+
       `<small>Gate ${pretty(qualification.gate_definition || {})}</small>`+
       `<pre>${pretty({failure: qualification.failure, promotion: qualification.promotion, paired_clustered_confidence_intervals: qualification.confidence_intervals})}</pre></article>` :
