@@ -1,4 +1,4 @@
-"""Snapshot-bound simulator candidates with route and terminal-pose checks.
+"""Snapshot-bound simulator candidates with route and capture-geometry estimates.
 
 The existing eight masked actions remain the behavior primitives. K=16/32 add
 stable, locally offset collection approach goals. The selected endpoint is
@@ -32,7 +32,7 @@ CANDIDATE_BOUNDARY = {
     "recall_limit": "K32 recall is tautologically 1; no distinct >32 reference pool is measured",
     "expanded_goals": "bounded collection approach offsets",
     "execution": "selected XY endpoint overrides planner goal; action mask/mechanisms remain simulator-owned",
-    "heading_execution": "no terminal heading command; collect pose checks use target bearing and the native controller owns orientation",
+    "heading_execution": "no terminal heading command; sensed-target bearing is used for graph lookup and nonbinding estimate; native controller owns orientation",
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": False,
     "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
@@ -212,9 +212,10 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     """Build the current bounded decision table and qualify every route row.
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
-    perceived robot obstacles. The endpoint is additionally checked in the
-    target-bearing heading against the static legal SE(2) lattice. The native
-    controller owns terminal orientation; this adapter does not command it. ETA is
+    perceived robot obstacles. The inferred target-bearing heading selects a
+    legal graph node and contributes an estimate only; endpoint footprint
+    clearance is checked at every yaw. The native controller owns terminal
+    orientation; this adapter does not command it. ETA is
     distance/speed plus heading-change/turn-rate. Dynamic interaction is a
     point-prediction risk cost; full time-varying swept-robot planning remains
     out of scope and is recorded in provenance.
