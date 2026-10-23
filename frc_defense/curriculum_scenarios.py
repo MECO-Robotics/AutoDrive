@@ -10,14 +10,46 @@ import torch
 from .architecture_scenarios import reset_scenario
 from .curriculum_metrics import CurriculumMetrics
 from .fuel_physics_runtime import reset_fuel_physics
+from .meco_phase4 import validate_phase4_factor
 from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
+_PHASE4_SENSOR_STATE_FIELDS = (
+    'track_pos', 'track_vel', 'track_age', 'track_mask', 'track_confidence',
+    'track_spatial_extent', 'track_angular_extent', 'track_merged',
+    'perception_quality_state', 'opponent_pose', 'opponent_velocity',
+    'opponent_size', 'opponent_valid', 'opponent_age',
+)
+
 
 class CurriculumEnv(TensorThreeVsThreeEnv):
+    def _phase4_capture_sensor_frame(self, observation=None):
+        frame = {name: getattr(self, name).clone()
+                 for name in _PHASE4_SENSOR_STATE_FIELDS}
+        frame['observation'] = (self._last_obs if observation is None else observation).clone()
+        return frame
+
+    def _phase4_restore_sensor_frame(self, frame):
+        for name in _PHASE4_SENSOR_STATE_FIELDS:
+            getattr(self, name).copy_(frame[name])
+        self._last_obs = frame['observation'].clone()
+
     def step(self, actions, active_mask=None, **kwargs):
         requested = torch.ones(self.n, device=self.device, dtype=torch.bool) if active_mask is None else torch.as_tensor(active_mask, device=self.device, dtype=torch.bool)
-        observation, reward, done, truncated, info = super().step(actions, requested & ~self.curriculum_finished, **kwargs)
+        active_requested = requested & ~self.curriculum_finished
+        delay = int(getattr(self, 'phase4_observation_delay_ticks', 0))
+        observation, reward, done, truncated, info = super().step(actions, active_requested, **kwargs)
+        if delay:
+            current = self._phase4_capture_sensor_frame(observation)
+            self._phase4_current_sensor_frame = current
+            history = self._phase4_observation_history
+            history.append(current)
+            if len(history) > delay + 1:
+                history.pop(0)
+            delayed = history[0]
+            self._phase4_restore_sensor_frame(delayed)
+            observation = delayed['observation']
+            self.phase4_runtime_metrics['delayed_observation_ticks'] += int(active_requested.sum().item())
         success = self.curriculum_metrics.outcomes()['success']
         newly_finished = success & ~self.curriculum_finished & requested
         self.curriculum_metrics.delta += 5. * newly_finished.float()
@@ -42,6 +74,36 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         for slot in pressure['slots']:
             commands[:, slot] = 0.
             level = pressure['level']
+            factor = getattr(self, 'phase4_factor_config', None)
+            if factor and slot == 0 and factor['kind'] in (
+                    'feinting_opponent', 'abrupt_opponent_policy_change'):
+                tick = factor['reversal_tick'] if factor['kind'] == 'feinting_opponent' else factor['switch_tick']
+                after_switch = self.steps >= tick
+                if factor['kind'] == 'feinting_opponent':
+                    sign = torch.where(after_switch, -1., 1.)
+                    anchor = self.phase4_defender_anchor[:, slot, :2]
+                    target = anchor.clone()
+                    target[:, 1] += sign * float(factor['telegraph_distance_m'])
+                    commands[:, slot, :2] = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+                    if bool(after_switch.any()) and self.phase4_runtime_metrics['feint_reversal_tick'] is None:
+                        self.phase4_runtime_metrics['feint_reversal_tick'] = int(tick)
+                else:
+                    if factor['behavior_a'] == 'orbit':
+                        phase = self.match_elapsed * 1.2 + pressure['phase']
+                        target = self.phase4_defender_anchor[:, slot, :2].clone()
+                        target[:, 1] += torch.sin(phase) * .6
+                        target[:, 0] += torch.cos(phase * .7 + slot) * .8
+                        behavior_a_commands = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+                    else:
+                        behavior_a_commands = torch.zeros_like(commands[:, slot, :2])
+                    delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
+                    valid = self.opponent_valid[:, slot]
+                    behavior_b_commands = torch.where(valid[:, None], delta.clamp(-1.5, 1.5), 0.)
+                    commands[:, slot, :2] = torch.where(after_switch[:, None],
+                        behavior_b_commands, behavior_a_commands)
+                    if bool(after_switch.any()) and self.phase4_runtime_metrics['policy_change_tick'] is None:
+                        self.phase4_runtime_metrics['policy_change_tick'] = int(tick)
+                continue
             if level == 2 or (level == 5 and slot == 0) or pressure['family'] == 'orbiting_interceptor':
                 phase = self.match_elapsed * 1.2 + pressure['phase']
                 target = self.sim.pose[:, slot, :2].clone()
@@ -64,11 +126,18 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                 commands[:, slot, :2] = torch.where(valid[:, None], delta.clamp(-1.5, 1.5), 0.)
         return torch.where(active[:, None, None], commands, 0.)
 
+    def _reset_phase4_observation_buffer(self, observation=None):
+        delay = int(getattr(self, 'phase4_observation_delay_ticks', 0))
+        current = self._phase4_capture_sensor_frame(observation)
+        self._phase4_current_sensor_frame = current
+        self._phase4_observation_history = [self._phase4_capture_sensor_frame(
+            current['observation']) for _ in range(delay + 1)]
+
 
 def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True,
                         production_d0=False, layout_id='2026_rebuilt',
                         defender_family='category_scripted', start_condition='scenario_defined',
-                        sensor_profile='standard'):
+                        sensor_profile='standard', phase4_factor=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -87,6 +156,11 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         raise ValueError('after_release requires fuel_physics=True for an actual airborne initial release')
     if category not in definition.required_categories:
         raise ValueError(f'unknown category for {scenario_id}: {category}')
+    phase4_factor = validate_phase4_factor(phase4_factor)
+    if phase4_factor is not None and (scenario_id not in (
+            'offense_vs_scripted_pressure', 'full_match_offense')
+            or not category.endswith('level_4_reactive')):
+        raise ValueError('Phase 4 adversarial factors require a level_4_reactive pressure category')
     requested_device = torch.device(device)
     if requested_device.type == 'cuda' and requested_device.index is not None:
         # Native simulator kernels use the current device/stream at setup.
@@ -114,6 +188,13 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         velocity_noise=.10 if sensor_profile == 'noisy' else .05,
         field_layout=layout_id,
         replan_interval=10)
+    env.phase4_factor_config = phase4_factor
+    env.phase4_observation_delay_ticks = (phase4_factor['delay_ticks']
+        if phase4_factor and phase4_factor['kind'] == 'observation_delay' else 0)
+    env.phase4_confidence_cap = (phase4_factor['fuel_confidence_cap']
+        if phase4_factor and phase4_factor['kind'] == 'independent_low_confidence' else None)
+    env.phase4_runtime_metrics = {'delayed_observation_ticks': 0,
+        'feint_reversal_tick': None, 'policy_change_tick': None}
     env.curriculum = {'scenario_id': scenario_id, 'scenario_version': definition.version,
         'category': category, 'learner_slot': 3, 'seed': int(seed),
         'time_budget_s': definition.time_budget_s, 'pressure': pressure,
@@ -394,6 +475,8 @@ def reset_curriculum_scenario(env, seed):
         else:
             env._update_perception(torch.ones(env.n, device=env.device, dtype=torch.bool))
             env._last_obs = env.observe()
+    env.phase4_defender_anchor = env.sim.pose.clone()
+    env._reset_phase4_observation_buffer(env._last_obs)
     return env._last_obs
 
 

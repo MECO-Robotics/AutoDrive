@@ -63,6 +63,13 @@
       `<article class="group"><h3>${esc(pass.pass)} · ${esc(pass.status)}</h3>`+
       `<small>Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
       "<p class='muted'>No three-pass workflow evidence is available.</p>";
+    document.querySelector("#phase4-factors").innerHTML = workflow?.phase4_factors?.length
+      ? workflow.phase4_factors.map(factor =>
+        `<article class="group"><h3>${esc(factor.factor_id)} · ${esc(factor.status)}</h3>`+
+        `<p>${esc(factor.summary)}</p><small>Planner ${esc(factor.planner_status)} · `+
+        `implementation ${esc(factor.implementation_status || factor.status)} · `+
+        `review ${esc(factor.review_status)} · evaluation ${esc(factor.evaluation_status)}</small></article>`).join("")
+      : "<p class='muted'>No Phase 4 factor plan is recorded.</p>";
     const qualification = data.qualification;
     document.querySelector("#qualification").innerHTML = qualification ?
       `<article class="group"><h3>${esc(qualification.scenario_id)} · ${esc(qualification.split)} · ${esc(qualification.failure ? "round failed / streak reset" : qualification.qualified ? (qualification.gate_calibration_status === "calibrated_baseline_frozen" ? "qualified under calibrated gates" : "qualified under provisional gates") : qualification.promotion?.passed ? "streaking" : "not qualified")}</h3>`+

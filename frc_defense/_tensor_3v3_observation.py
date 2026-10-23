@@ -671,6 +671,11 @@ class TensorThreeVsThreeObservationMixin:
                                  active[:, None, None])
         if not fused_opponents:
             self.opponent_valid &= ~((self.opponent_age > 1.) & active[:, None])
+        confidence_cap = getattr(self, "phase4_confidence_cap", None)
+        if confidence_cap is not None:
+            # Preserve detections, geometry, velocity, age, dropout, and noise;
+            # only the confidence scalar supplied to policies is degraded.
+            self.track_confidence[:, 3].clamp_(max=float(confidence_cap))
 
     def _candidates(self, candidate_mask=None):
         candidate_mask = self.track_mask if candidate_mask is None else candidate_mask

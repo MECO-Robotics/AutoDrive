@@ -17,10 +17,12 @@ import tempfile
 from typing import Any
 
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
+from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
+from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 1
+MATRIX_SCHEMA_VERSION = 3
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -37,6 +39,7 @@ class MatrixCondition:
     control_prediction_mode: str | None
     candidate_k: int
     inference_disable_tick: int | None = None
+    phase4_factor: dict | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -50,6 +53,11 @@ class MatrixCondition:
                 (type(self.inference_disable_tick) is not int or
                  self.inference_disable_tick <= 0)):
             raise ValueError("inference disable tick must be a positive integer")
+        if self.phase4_factor is not None:
+            if (not isinstance(self.phase4_factor, dict) or
+                    self.phase4_factor.get("kind") not in PHASE4_FACTORS or
+                    self.phase4_factor != PHASE4_FACTORS[self.phase4_factor["kind"]]):
+                raise ValueError("Phase 4 factor differs from its frozen contract")
 
 
 def _canonical_hash(value: Any) -> str:
@@ -101,13 +109,23 @@ def _validate_condition_manifest(report: dict, *,
                                  frozen_source_hash: str,
                                  expected_configs: dict[str, str] | None,
                                  expected_protocols: dict[str, str] | None,
-                                 expected_shared_config: dict | None):
+                                 expected_shared_config: dict | None,
+                                 expected_device: dict[str, str]):
     """Reject an evaluation whose loaded bundle differs from matrix inputs."""
     manifest = report.get("policy_manifest")
     if not isinstance(manifest, dict) or set(MECO_TRACKS) - set(manifest):
         raise ValueError("evaluation manifest is missing one or more learned tracks")
     if report.get("source_identity_sha256") != frozen_source_hash:
         raise ValueError("evaluation source identity differs from frozen matrix provenance")
+    if report.get("execution_device") != expected_device:
+        raise ValueError("evaluation report device/backend differs from frozen matrix provenance")
+    component_timing = report.get("component_timing")
+    timing_provenance = (component_timing.get("provenance")
+                         if isinstance(component_timing, dict) else None)
+    if (not isinstance(timing_provenance, dict)
+            or timing_provenance.get("device") != expected_device["device"]
+            or timing_provenance.get("accelerator_backend") != expected_device["accelerator_backend"]):
+        raise ValueError("evaluation timing provenance device/backend differs from frozen matrix provenance")
     observed_configs, observed_protocols = {}, {}
     for track in MECO_TRACKS:
         policy = manifest[track]
@@ -154,9 +172,10 @@ def _atomic_json(path: Path, payload: dict) -> None:
         Path(temp_name).unlink(missing_ok=True)
 
 
-def default_conditions(scenario_id: str, *, inference_disable_tick: int | None = None
+def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None = None,
+                       inference_disable_tick: int | None = None
                        ) -> tuple[MatrixCondition, ...]:
-    """Return the plan's supported architecture, prediction, K, and fault cases."""
+    """Return the plan's architecture/prediction/K/fault cases and eligible Phase 4 factors."""
     horizon = math.ceil(get_scenario(scenario_id).time_budget_s / .02)
     fault_tick = inference_disable_tick
     if fault_tick is None:
@@ -173,6 +192,14 @@ def default_conditions(scenario_id: str, *, inference_disable_tick: int | None =
         MatrixCondition("inference_disabled_fallback_current_k16", "current",
                         "current", 16, fault_tick),
     )
+    phase4_supported = (scenario_id in ("offense_vs_scripted_pressure",
+        "full_match_offense") and categories is not None and bool(categories)
+        and all(category.endswith("level_4_reactive") for category in categories))
+    if phase4_supported:
+        conditions += tuple(MatrixCondition(
+            f"phase4_{name}", "cv", "cv", 16,
+            phase4_factor=phase4_factor_config(name))
+            for name in PHASE4_FACTORS)
     for condition in conditions:
         condition.validate()
     return conditions
@@ -244,24 +271,28 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
     output_root = Path(output_dir)
+    execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)
     source_hash = _source_identity_hash(source_identity())
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
-    conditions = default_conditions(scenario_id,
+    conditions = default_conditions(scenario_id, categories=categories,
         inference_disable_tick=inference_disable_tick)
+    phase4_enabled = any(condition.phase4_factor is not None for condition in conditions)
     condition_specs = [asdict(condition) for condition in conditions]
     matrix_protocol = {"schema_version": MATRIX_SCHEMA_VERSION,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
         "source_identity_sha256": source_hash,
+        "execution_device": execution_device,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
         "conditions": condition_specs,
-        "unsupported_conditions_open": ["explicit_feint_behavior",
-            "sensor_delay_ablation", "separate_low_confidence_profile",
-            "abrupt_opponent_policy_change"]}
+        "phase4_factor_schema": ("meco-phase4-four-factor-v1" if phase4_enabled else None),
+        "unsupported_conditions_open": ([] if phase4_enabled else [
+            "explicit_feint_behavior", "sensor_delay_ablation",
+            "separate_low_confidence_profile", "abrupt_opponent_policy_change"])}
     matrix_id = _canonical_hash(matrix_protocol)
     matrix_protocol["matrix_id"] = matrix_id
     results: dict[str, dict] = {}
@@ -277,7 +308,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         spec = asdict(condition)
         condition_id = _canonical_hash({"matrix_id": matrix_id,
             "condition": spec, "checkpoint_sha256": bundle_hashes,
-            "source_identity_sha256": source_hash, "seed_list": list(seeds)})
+            "source_identity_sha256": source_hash, "seed_list": list(seeds),
+            "execution_device": execution_device})
         report_path = output_root / f"{condition_id}.evaluation.json"
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=categories, episodes=len(seeds), master_seed=seeds[0],
@@ -286,13 +318,17 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             prediction_mode=condition.prediction_mode,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
+            phase4_factor=condition.phase4_factor,
             output=str(report_path))
+        if report.get("phase4_factor") != condition.phase4_factor:
+            raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         observed_configs, observed_protocols, shared_config = _validate_condition_manifest(
             report, frozen_checkpoint_hashes=bundle_hashes,
             frozen_source_hash=source_hash,
             expected_configs=expected_configs,
             expected_protocols=expected_protocols,
-            expected_shared_config=expected_shared_config)
+            expected_shared_config=expected_shared_config,
+            expected_device=execution_device)
         if _checkpoint_hashes(checkpoints) != bundle_hashes:
             raise ValueError("checkpoint files drifted while an evaluation condition was running")
         if _source_identity_hash(source_identity()) != source_hash:
@@ -307,9 +343,11 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "report_path": str(report_path),
             "checkpoint_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
+            "execution_device": execution_device,
             "policy_manifest": report["policy_manifest"],
             "effective_candidate_k": report["candidate_k"],
             "prediction": report["prediction"],
+            "phase4_factor": condition.phase4_factor,
             "fault": report["inference_disable_fault"]}
         evaluation_reports[condition.condition_name] = {
             "report": report, "records": condition_records,
@@ -391,9 +429,40 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             records=fault_records, candidate_policy=candidate_policy,
             reference_policy=track))
 
+    # Each Phase 4 treatment is paired against the same-checkpoint, same-seed
+    # no-factor scenario condition. Every row covers all five learned tracks
+    # and D0/D1/D2 controls; the factor is the only condition-level difference.
+    if phase4_enabled:
+        baseline = evaluation_reports[architecture_name]
+        factor_policies = (*MECO_TRACKS, "D0", "D1", "D2")
+        for name in PHASE4_FACTORS:
+            treatment_name = f"phase4_{name}"
+            treatment = evaluation_reports[treatment_name]
+            for policy in factor_policies:
+                for category in categories:
+                    for seed in seeds:
+                        treated = treatment["records"].get((policy, category, seed))
+                        control = baseline["records"].get((policy, category, seed))
+                        if treated is None or control is None:
+                            raise ValueError(
+                                f"Phase 4 paired contrast lacks {policy}/{category}/{seed}")
+                        contrasts.append({"contrast": "phase4_factor_vs_no_factor",
+                            "factor": name,
+                            "factor_sha256": phase4_factor_digest(
+                                treatment["report"].get("phase4_factor")),
+                            "candidate_policy": policy, "reference_policy": policy,
+                            "paired": True,
+                            "condition_ids": {"factor": treatment["condition_id"],
+                                "baseline": baseline["condition_id"]},
+                            "category": category, "seed": seed,
+                            "factor_metrics": _record_metrics(treated),
+                            "baseline_metrics": _record_metrics(control),
+                            "factor_runtime": treated.get("phase4_factor_runtime")})
+
     # Repeat the frozen bundle identity on every contrast so a contrast row
     # remains auditable when copied out of the matrix-level report.
     common_provenance = {
+        "execution_device": execution_device,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
             track: config_hashes[track] for track in MECO_TRACKS},
@@ -412,6 +481,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "protocol": matrix_protocol,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
+        "execution_device": execution_device,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
             track: results[architecture_name]["policy_manifest"][track][
@@ -426,7 +496,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "Candidate recall is relative to the declared bounded route-qualified reference pool, not a simulator-optimality oracle.",
             "P=0 is an inference-time ablation using the same learned A checkpoint.",
             "Fault rows hand off at the first 12-step macro boundary at or after the requested tick.",
-            "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions are open."],
+            ("All four Phase 4 factors use explicit same-seed baseline pairs; metrics remain diagnostic until held-out evaluation and calibrated gates." if phase4_enabled else
+             "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require the registered level_4_reactive pressure categories.")],
     }
     matrix_report["report_sha256"] = _canonical_hash(matrix_report)
     output_root.mkdir(parents=True, exist_ok=True)
