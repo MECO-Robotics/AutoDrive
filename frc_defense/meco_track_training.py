@@ -768,7 +768,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "candidate_set": prepared["candidate_set"],
                     "candidate_digest": prepared.get("candidate_digest"),
                     "candidate_replay_digest": prepared.get("candidate_replay_digest"),
-                    "candidate_commitment": (None if candidate.commitment is None
+                    "candidate_commitment": (None if candidate is None or
+                                              candidate.commitment is None
                                               else asdict(candidate.commitment)),
                     **({"support": prepared["support"],
                         "support_digest": prepared["support"].support_digest,
