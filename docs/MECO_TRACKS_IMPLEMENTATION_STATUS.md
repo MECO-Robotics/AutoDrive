@@ -143,10 +143,12 @@ shared candidate commitment carryover. Evaluation may retain a selected Plan A g
 macros, as recorded in the evaluation contract. Intake headings must satisfy
 their target capture geometry. P integrates the root-pose-to-root-node
 connector as well as graph edges.
-Action 7 remains a native no-op hold. The Plan A adapter permits it to traverse
-only when paired with the selected frozen planner goal; the existing route,
-obstacle, and action-safety checks remain in force. Dumper drive pairs are
-masked while carrying fuel because native action 7 redirects that role to ferry.
+Action 7 holds unless the Plan A adapter pairs it with the selected frozen
+planner goal; that explicit goal is the only way action 7 traverses, and the
+existing route, obstacle, and action-safety checks remain in force. Legal
+dumper traversal remains supported while carrying fuel. Carrying dumper ferry
+action 6 remains excluded because it can release fuel before reaching the
+selected endpoint.
 If the native action executor remasks the sampled action during a macro, the
 transition is recorded as an execution failure and excluded from the PPO actor
 loss while remaining available to the critic. Dynamic route mismatch beyond

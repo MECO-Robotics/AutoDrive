@@ -272,7 +272,10 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
                                   device=device, dtype=torch.long).repeat(n)
     reachable_rows = reachable[:, None].expand(-1, 8)
     valid_matrix = torch.stack((
-        reachable & action_mask[7] & (not dumper_with_fuel),
+        # A loaded dumper may still select a legal traversal goal. The native
+        # action is only allowed to move through the paired explicit-goal
+        # override in the Plan A adapter; without that override action 7 holds.
+        reachable & action_mask[7],
         intake_mask[:, 0], intake_mask[:, 1], intake_mask[:, 2], intake_mask[:, 3],
         score_mask, ferry_mask, defense_mask), -1)
     valid = valid_matrix.reshape(-1) & reachable_rows.reshape(-1)
