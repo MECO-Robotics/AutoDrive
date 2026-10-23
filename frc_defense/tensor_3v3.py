@@ -663,8 +663,9 @@ class TensorThreeVsThreeEnv(
                     0. <= float(goal[1]) < float(self.sim.field_width)):
                 raise ValueError("planner_goal_override must be a finite in-field XY endpoint")
             targets = targets.clone()
+            override_permitted = expected_action != 7 or bool(planner_goal_override_traversal)
             planner_goal_override_mask[:, 3] = (
-                (action[:, 3] == expected_action) & bool(planner_goal_override_traversal))
+                (action[:, 3] == expected_action) & override_permitted)
             targets[:, 3] = torch.where(planner_goal_override_mask[:, 3, None],
                                          goal[None], targets[:, 3])
         raster_mask=((self._deterministic_mode_mask &
