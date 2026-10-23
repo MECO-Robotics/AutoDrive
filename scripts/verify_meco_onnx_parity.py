@@ -77,18 +77,40 @@ def _compare_outputs(track, torch_outputs, onnx_outputs, atol, rtol):
         actual = np.asarray(actual_value)
         item = {"name": name, "torch_shape": list(expected.shape),
                 "onnx_shape": list(actual.shape),
+                "torch_dtype": str(expected.dtype), "onnx_dtype": str(actual.dtype),
                 "torch_finite": bool(np.isfinite(expected).all()),
                 "onnx_finite": bool(np.isfinite(actual).all()),
-                "max_abs_error": None, "max_rel_error": None, "allclose": False}
-        if expected.shape != actual.shape:
+                "max_abs_error": None, "max_rel_error": None,
+                "error_summary_overflow": False, "allclose": False}
+        if expected.dtype != actual.dtype:
+            item["error"] = "dtype_mismatch"
+        elif expected.shape != actual.shape:
             item["error"] = "shape_mismatch"
         elif item["torch_finite"] and item["onnx_finite"]:
-            delta = np.abs(expected.astype(np.float64) - actual.astype(np.float64))
-            denominator = np.maximum(np.abs(expected.astype(np.float64)), np.finfo(np.float64).tiny)
-            item["max_abs_error"] = float(delta.max(initial=0.0))
-            item["max_rel_error"] = float((delta / denominator).max(initial=0.0))
-            item["allclose"] = bool(np.allclose(expected, actual, atol=atol, rtol=rtol,
-                                                 equal_nan=False))
+            # Long-double intermediates avoid float64 subtraction/multiplication
+            # overflow when finite model outputs have very different magnitudes.
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                expected_wide = expected.astype(np.longdouble)
+                actual_wide = actual.astype(np.longdouble)
+                delta = np.abs(expected_wide - actual_wide)
+                denominator = np.maximum(np.abs(expected_wide), np.finfo(np.longdouble).tiny)
+                max_abs = delta.max(initial=np.longdouble(0.0))
+                max_rel = (delta / denominator).max(initial=np.longdouble(0.0))
+                tolerance = (np.longdouble(atol) +
+                             np.longdouble(rtol) * np.abs(expected_wide))
+                arithmetic_finite = (bool(np.isfinite(delta).all()) and
+                                     bool(np.isfinite(tolerance).all()) and
+                                     bool(np.isfinite(max_rel)))
+                float64_max = np.longdouble(np.finfo(np.float64).max)
+                serializable_summary = (arithmetic_finite and max_abs <= float64_max
+                                        and max_rel <= float64_max)
+                if serializable_summary:
+                    item["max_abs_error"] = float(max_abs)
+                    item["max_rel_error"] = float(max_rel)
+                    item["allclose"] = bool(np.all(delta <= tolerance))
+                else:
+                    item["error_summary_overflow"] = True
+                    item["error"] = "finite_error_exceeds_serializable_range"
         else:
             item["error"] = "nonfinite_output"
         reports.append(item)
@@ -162,12 +184,27 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             if provider not in actual_providers:
                 raise RuntimeError(
                     f"requested provider {provider!r} is not active in the session")
-            graph_inputs = [entry.name for entry in session.get_inputs()]
-            graph_outputs = [entry.name for entry in session.get_outputs()]
+            graph_input_values = session.get_inputs()
+            graph_output_values = session.get_outputs()
+            graph_inputs = [entry.name for entry in graph_input_values]
+            graph_outputs = [entry.name for entry in graph_output_values]
             if graph_inputs != list(names):
                 raise ValueError(f"ONNX input names/order mismatch: {graph_inputs!r}")
             if graph_outputs != list(OUTPUT_NAMES[track]):
                 raise ValueError(f"ONNX output names/order mismatch: {graph_outputs!r}")
+            onnx_types = {torch.float32: "tensor(float)", torch.float64: "tensor(double)",
+                          torch.int64: "tensor(int64)", torch.int32: "tensor(int32)",
+                          torch.bool: "tensor(bool)"}
+            expected_input_types = [onnx_types.get(tensor.dtype) for tensor in inputs]
+            actual_input_types = [entry.type for entry in graph_input_values]
+            actual_output_types = [entry.type for entry in graph_output_values]
+            item["input_types"] = {"expected": expected_input_types,
+                                   "onnx": actual_input_types}
+            item["output_types"] = {"expected": ["tensor(float)"] * len(OUTPUT_NAMES[track]),
+                                    "onnx": actual_output_types}
+            if (None in expected_input_types or actual_input_types != expected_input_types
+                    or actual_output_types != item["output_types"]["expected"]):
+                raise ValueError("ONNX input/output tensor type mismatch")
             feeds = {name: tensor.numpy() for name, tensor in zip(names, inputs)}
             with torch.inference_mode():
                 torch_outputs = model(*inputs)
@@ -197,8 +234,26 @@ def main() -> int:
     if args.seed < 0 or not np.isfinite(args.atol) or not np.isfinite(args.rtol) \
             or args.atol < 0 or args.rtol < 0:
         parser.error("seed and tolerances must be finite and nonnegative")
-    report = verify(args.checkpoint_root, args.onnx_root, args.seed,
-                    args.provider, args.atol, args.rtol)
+    try:
+        report = verify(args.checkpoint_root, args.onnx_root, args.seed,
+                        args.provider, args.atol, args.rtol)
+    except Exception as exc:
+        # Preserve a machine-readable failure record even if setup fails before
+        # the per-track evidence loop (for example source inventory or ORT API).
+        report = {
+            "schema": "meco-onnx-numerical-parity-v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "status": "failed",
+            "scope": {"required_tracks": list(MECO_TRACKS),
+                      "tracks_requested": list(MECO_TRACKS)},
+            "checkpoint_root": str(args.checkpoint_root.resolve()),
+            "onnx_root": str(args.onnx_root.resolve()),
+            "input_seed": args.seed,
+            "requested_provider": args.provider,
+            "tolerance": {"atol": args.atol, "rtol": args.rtol},
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(limit=12),
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(json.dumps({"status": report["status"], "evidence": str(args.output)}, indent=2))
