@@ -84,7 +84,9 @@ def _module_file_sha256(path):
 
 def _state_value(value, seen, path):
     """Canonicalize mutable simulator/environment state; unknown state fails closed."""
-    if isinstance(value, torch.Tensor):
+    # Subclasses use generic object inspection below so extra Python state is
+    # included and opaque native state fails closed.
+    if type(value) is torch.Tensor:
         object_id = id(value)
         if object_id in seen:
             return {"ref": seen[object_id]}
@@ -92,7 +94,7 @@ def _state_value(value, seen, path):
         seen[object_id] = stable_id
         return {"object_id": stable_id, "tensor": _tensor_digest(value),
                 "device": str(value.device), "requires_grad": value.requires_grad}
-    if isinstance(value, torch.Generator):
+    if type(value) is torch.Generator:
         object_id = id(value)
         if object_id in seen:
             return {"ref": seen[object_id]}
