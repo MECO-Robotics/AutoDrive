@@ -226,10 +226,13 @@ def _sync(device):
     if device.type == "cuda": torch.cuda.synchronize(device)
 
 
-def _pipeline(model, track, inputs, device):
-    """Synthetic diagnostic: scorer output plus raw argmax, not policy action."""
-    outputs = model(*inputs)
-    utility = outputs[0]
+def _pipeline(outputs, track):
+    """Synthetic diagnostic over an existing scorer result, not a policy action."""
+    if isinstance(outputs, dict):
+        output_name = "utility" if track.startswith("A") else "candidate_utility"
+        utility = outputs[output_name]
+    else:
+        utility = outputs[0]
     return torch.argmax(utility.flatten(start_dim=1), dim=-1)
 
 
@@ -240,7 +243,9 @@ def benchmark(track: str, checkpoint: Path, device_name: str, iterations=200, wa
     host_inputs = dummy_inputs(track, "cpu")
     inputs = tuple(x.to(device) for x in host_inputs)
     with torch.inference_mode():
-        for _ in range(warmup): model(*inputs)
+        for _ in range(warmup):
+            warm_outputs = model(*inputs)
+            _pipeline(warm_outputs, track)
         _sync(device)
         if device.type == "cuda": torch.cuda.reset_peak_memory_stats(device)
         model_ms, pipeline_ms, age_ms = [], [], []
@@ -249,7 +254,7 @@ def benchmark(track: str, checkpoint: Path, device_name: str, iterations=200, wa
             out = model(*inputs)
             _sync(device)
             middle = time.perf_counter_ns()
-            _pipeline(model, track, inputs, device)
+            _pipeline(out, track)
             _sync(device)
             end = time.perf_counter_ns()
             model_ms.append((middle-start)/1e6)
