@@ -443,11 +443,11 @@ this worktree.
 Planner and implementation are complete in isolated worktree
 `codex/meco-d0-calibration-shards` at commits `8d18502c5` and `7c1ba15fa`. The
 source identity hash was corrected to match the evaluator's existing
-serialization. Scoped feature-branch review approved `7c1ba15fa`; integrated
-review remains pending. Shards are immutable, resumable, deterministically
-assigned and merge only after exact tuple coverage and normalized runtime
-checks. No calibration, GPU collection, simulator evaluation, or protocol
-creation was run. Runtime evidence remains pending.
+serialization. Scoped review approved feature commit `7c1ba15fa` and integrated
+HEAD `997a04aaa`. Shards are immutable, resumable, deterministically assigned
+and merge only after exact tuple coverage and normalized runtime checks. No
+calibration, GPU collection, simulator evaluation, or protocol creation was
+run. Runtime evidence remains pending.
 
 ## GPU-only defaults and snapshot capture follow-up (2026-10-23)
 
