@@ -23,6 +23,7 @@ LEARNED_ROUTE_COST_PREFIX = (
 LEGACY_ROUTE_COST_PROVENANCE = "legacy_bump_cost_path_integral_v2"
 STATUS_SCHEMA_VERSION = 1
 HEARTBEAT_STALE_SECONDS = 90
+WORKER_STALL_SECONDS = 600
 QUEUE_STALE_SECONDS = 180
 EVALUATION_HEARTBEAT_STALE_SECONDS = 90
 MAX_STATUS_FILE_BYTES = 32 * 1024 * 1024
@@ -65,42 +66,52 @@ def _read_json_within(path: Path, root: Path):
     return _read_json(path)
 
 
-def _process_alive(pid) -> bool:
+def _process_evidence(pid, *, expected_run_id=None):
+    """Read raw procfs state and confirm that PID is a MECO trainer."""
     if type(pid) is not int or pid <= 0:
-        return False
+        return {"confirmed": False, "state": None, "error": "invalid PID"}
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return {"confirmed": False, "state": None, "error": "process missing"}
     except PermissionError:
         pass
     except OSError:
-        return False
-    # Require the expected worker in Linux procfs; PID existence alone can be
-    # a recycled process and is not evidence that the MECO trainer is alive.
+        return {"confirmed": False, "state": None, "error": "process unavailable"}
     try:
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
-        return b"meco_track_training" in command
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
     except OSError:
-        return False
-
-
-def _process_state(pid, *, alive=None):
-    """Return the Linux process state for a confirmed MECO worker PID."""
-    if alive is None:
-        alive = _process_alive(pid)
-    if not alive or type(pid) is not int or pid <= 0:
-        return None
+        return {"confirmed": False, "state": None, "error": "proc command unavailable"}
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
-        return None
+        return {"confirmed": False, "state": None, "error": "proc state unavailable"}
     # comm is parenthesized and can itself contain spaces or closing parens.
     closing = stat.rfind(")")
     if closing < 0:
-        return None
+        return {"confirmed": False, "state": None, "error": "proc state malformed"}
     fields = stat[closing + 1:].split()
-    return fields[0] if fields and len(fields[0]) == 1 else None
+    process_state = fields[0] if fields and len(fields[0]) == 1 else None
+    if process_state is None:
+        return {"confirmed": False, "state": None, "error": "proc state malformed"}
+    is_trainer = any(b"meco_track_training" in argument for argument in arguments)
+    has_expected_run = (expected_run_id is None or
+        isinstance(expected_run_id, str) and
+        any(argument == b"--run-id" and index + 1 < len(arguments)
+            and arguments[index + 1] == expected_run_id.encode()
+            for index, argument in enumerate(arguments)))
+    if not is_trainer or not has_expected_run:
+        return {"confirmed": False, "state": process_state,
+                "error": "PID command/run-ID mismatch"}
+    if process_state not in {"D", "R", "S", "I", "P", "W"}:
+        return {"confirmed": False, "state": process_state,
+                "error": "process is not in an active state"}
+    return {"confirmed": True, "state": process_state, "error": None}
+
+
+def _process_alive(pid) -> bool:
+    """Confirm a live PID still names a MECO trainer in procfs."""
+    return _process_evidence(pid)["confirmed"]
 
 
 def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
@@ -108,24 +119,31 @@ def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
     heartbeat, error = _read_json_within(run_dir / "heartbeat.json", data_root)
     if not heartbeat:
         return {"state": "missing", "age_seconds": None, "fresh": False,
-                "process_alive": False, "error": error if error else None}
+                "process_alive": False, "process_confirmed": False,
+                "process_state": None, "error": error if error else None}
     stamp = _utc_timestamp(heartbeat.get("heartbeat_utc"))
     age = None if stamp is None else max(0., now - stamp)
     fresh = age is not None and age <= HEARTBEAT_STALE_SECONDS and stamp <= now + 5.
     pid = heartbeat.get("pid")
     alive = bool(process_probe(pid))
-    process_state = _process_state(pid, alive=alive)
+    process = _process_evidence(pid, expected_run_id=heartbeat.get("run_id"))
+    process_confirmed = (process["confirmed"] if process_probe is _process_alive else alive)
     track = manifest.get("track", manifest.get("config", {}).get("track")
                          if isinstance(manifest.get("config"), dict) else None)
     consistent = (heartbeat.get("schema_version") == 1
                   and heartbeat.get("run_id") == manifest.get("run_id")
                   and heartbeat.get("track") == track)
-    state = ("stalled" if alive and process_state == "D" and consistent else
-             "confirmed" if fresh and alive and consistent else
+    state = ("confirmed" if fresh and process_confirmed and consistent else
              "stale" if stamp is not None else "invalid")
     return {"state": state, "age_seconds": age, "fresh": fresh,
             "process_alive": alive, "pid": pid if type(pid) is int else None,
-            "process_state": process_state,
+            "process_confirmed": process_confirmed,
+            "process_state": process["state"],
+            "process_error": process["error"],
+            "run_id": heartbeat.get("run_id"),
+            "provenance_consistent": consistent,
+            "completed_updates": heartbeat.get("completed_updates")
+                if type(heartbeat.get("completed_updates")) is int else None,
             "error": None if consistent else "heartbeat provenance mismatch"}
 
 
@@ -146,10 +164,16 @@ def _queue_state(root: Path, now: float, data_root: Path):
             if (not isinstance(lane, dict) or lane.get("track") not in TRACKS
                     or not isinstance(lane.get("run_id"), str)):
                 continue
+            pid = lane.get("pid") if type(lane.get("pid")) is int else None
+            process = _process_evidence(pid, expected_run_id=lane["run_id"])
             lanes[lane["track"]] = {"run_id": lane["run_id"],
                 "status": lane.get("status", "unknown"),
-                "pid": lane.get("pid") if type(lane.get("pid")) is int else None,
-                "process_state": _process_state(lane.get("pid")),
+                "pid": pid,
+                "process_confirmed": process["confirmed"],
+                "process_state": process["state"],
+                "process_error": process["error"],
+                "worker_state": ("unconfirmed" if lane.get("status") in ("running", "stalled")
+                                 else lane.get("status", "unknown")),
                 "device": lane.get("device") if isinstance(lane.get("device"), str) else None,
                 "run_directory": lane.get("run_directory") if isinstance(
                     lane.get("run_directory"), str) else None,
@@ -159,10 +183,10 @@ def _queue_state(root: Path, now: float, data_root: Path):
                     if type(lane.get("chunk_updates")) is int else None}
     else:
         error = "queue lanes are malformed"
-    worker_state = ("stalled" if any(lane.get("process_state") == "D"
-                                      for lane in lanes.values()) else
-                    "active" if any(lane.get("pid") is not None
-                                     for lane in lanes.values()) else
+    active_lanes = [lane for lane in lanes.values()
+                    if lane.get("status") in ("running", "stalled")]
+    worker_state = ("unknown" if not fresh else
+                    "unconfirmed" if active_lanes else
                     "queued" if any(lane.get("status") == "queued"
                                      for lane in lanes.values()) else "idle")
     return {"state": "fresh" if fresh else "stale", "worker_state": worker_state,
@@ -174,6 +198,52 @@ def _queue_state(root: Path, now: float, data_root: Path):
             "supervisor_id": payload.get("supervisor_id")
                 if isinstance(payload.get("supervisor_id"), str) else None,
             "error": error if not fresh else None}
+
+
+def _worker_stalled(*, manifest, heartbeat, stats, latest, lane, queue, now):
+    """Require fresh matching queue/worker provenance and a static update frontier."""
+    if (manifest.get("status") != "running"
+            or queue.get("state") != "fresh"
+            or queue.get("phase") not in ("training", "catching_up")
+            or not heartbeat.get("process_confirmed")
+            or heartbeat.get("fresh")
+            or not heartbeat.get("provenance_consistent")
+            or heartbeat.get("run_id") != manifest.get("run_id")
+            or type(heartbeat.get("pid")) is not int
+            or lane.get("status") != "running"
+            or lane.get("run_id") != manifest.get("run_id")
+            or lane.get("pid") != heartbeat.get("pid")
+            or lane.get("completed_updates") != heartbeat.get("completed_updates")):
+        return False, None
+
+    frontier = heartbeat.get("completed_updates")
+    if type(frontier) is not int:
+        return False, None
+    if isinstance(stats, dict):
+        if stats.get("run_id") != manifest.get("run_id") or stats.get("update") != frontier:
+            return False, None
+        if not isinstance(latest, dict):
+            return False, None
+        update_stamp = _utc_timestamp(latest.get("update_utc"))
+    else:
+        update_stamp = None
+
+    started = _utc_timestamp(manifest.get("started_utc"))
+    if started is None:
+        return False, None
+    chunk_start = manifest.get("chunk_start_update")
+    if update_stamp is None:
+        if frontier != chunk_start:
+            return False, None
+        frontier_stamp = started
+    else:
+        frontier_stamp = max(started, update_stamp)
+    unchanged_seconds = max(0., now - frontier_stamp)
+    stale_seconds = heartbeat.get("age_seconds")
+    if (stale_seconds is None or stale_seconds <= HEARTBEAT_STALE_SECONDS
+            or unchanged_seconds < WORKER_STALL_SECONDS):
+        return False, unchanged_seconds
+    return True, unchanged_seconds
 
 
 def _safe_metrics(record):
@@ -488,15 +558,6 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                 continue
             heartbeat = _heartbeat(path, manifest, now, data_root, process_probe)
             state = manifest.get("status", "unknown")
-            if state == "running":
-                state = ("stalled" if heartbeat["state"] == "stalled" else
-                         "running" if heartbeat["state"] == "confirmed" else "unconfirmed")
-            elif state == "queued":
-                lane = queue["lanes"].get(track, {})
-                state = ("queued" if queue["state"] == "fresh"
-                         and lane.get("run_id") == manifest.get("run_id") else "unconfirmed")
-            elif state not in ("complete", "stopped", "failed", "unknown"):
-                state = "unknown"
             stats, stats_error = _read_json_within(path / "stats.json", data_root)
             latest = None
             if stats:
@@ -507,6 +568,25 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                         latest = {key: candidate[key] for key in (
                             "update", "episode", "entropy", "rollout_return",
                             "policy_loss", "value_loss", "update_utc") if key in candidate}
+            lane = queue["lanes"].get(track, {})
+            if state == "running":
+                stalled, unchanged_seconds = _worker_stalled(
+                    manifest=manifest, heartbeat=heartbeat, stats=stats,
+                    latest=latest, lane=lane, queue=queue, now=now)
+                heartbeat["unchanged_update_frontier_seconds"] = unchanged_seconds
+                heartbeat["worker_stall_threshold_seconds"] = WORKER_STALL_SECONDS
+                state = ("stalled" if stalled else
+                         "running" if heartbeat["state"] == "confirmed" else "unconfirmed")
+            elif state == "queued":
+                state = ("queued" if queue["state"] == "fresh"
+                         and lane.get("run_id") == manifest.get("run_id") else "unconfirmed")
+            elif state not in ("complete", "stopped", "failed", "unknown"):
+                state = "unknown"
+            if (lane.get("run_id") == manifest.get("run_id")
+                    and lane.get("pid") == heartbeat.get("pid")):
+                lane["worker_state"] = (state if state in ("running", "stalled") else
+                                         "unconfirmed" if manifest.get("status") == "running" else
+                                         state)
             checkpoint = path / "latest.pt"
             checkpoint_info = None
             if checkpoint.is_file() and _inside(checkpoint, root):
@@ -532,6 +612,18 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                 "latest_training_metrics": latest,
                 "latest_checkpoint": checkpoint_info,
                 "error": stats_error if stats is None and (path / "stats.json").exists() else None})
+
+    if queue.get("state") == "fresh":
+        active_lanes = [lane for lane in queue.get("lanes", {}).values()
+                        if lane.get("status") in ("running", "stalled")]
+        queue["worker_state"] = ("stalled" if any(lane.get("worker_state") == "stalled"
+                                                    for lane in active_lanes) else
+                                  "unconfirmed" if any(lane.get("worker_state") != "running"
+                                                       for lane in active_lanes) else
+                                  "active" if active_lanes else
+                                  "queued" if any(lane.get("status") == "queued"
+                                                  for lane in queue.get("lanes", {}).values())
+                                  else "idle")
 
     comparisons = []
     evaluation_runs = []
@@ -624,7 +716,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
     for policy in POLICIES:
         runs = run_by_track.get(policy, [])
         runs.sort(key=lambda row: (
-            row.get("training_state") in ("running", "queued", "unconfirmed"),
+            row.get("training_state") in ("running", "queued", "unconfirmed", "stalled"),
             row.get("heartbeat", {}).get("fresh", False),
             row.get("manifest_state") == "queued",
             row.get("completed_updates", 0), row["run_id"] or ""))
@@ -655,6 +747,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
         "data_root": str(data_root),
         "checkpoint_root": str(root), "evaluation_root": str(eval_root),
         "heartbeat_stale_seconds": HEARTBEAT_STALE_SECONDS,
+        "worker_stall_seconds": WORKER_STALL_SECONDS,
         "queue_stale_seconds": QUEUE_STALE_SECONDS,
         "evaluation_heartbeat_stale_seconds": EVALUATION_HEARTBEAT_STALE_SECONDS,
         "queue": queue, "policies": policies, "evaluation_runs": evaluation_runs,

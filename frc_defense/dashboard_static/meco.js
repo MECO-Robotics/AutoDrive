@@ -12,7 +12,8 @@
       `Live data ${data.data_root || "unavailable"} · checkpoints ${data.checkpoint_root || "unavailable"} · evaluations ${data.evaluation_root || "unavailable"} · three-pass ledger ${data.campaign_ledger_path || "unavailable"}`;
     const activeLanes = Object.entries(data.queue?.lanes || {})
       .filter(([, lane]) => lane.pid).map(([track, lane]) =>
-        `${track} pid ${lane.pid}${lane.process_state ? ` OS ${lane.process_state}` : ""}`);
+        `${track} pid ${lane.pid} ${lane.process_confirmed ? "confirmed" : "unconfirmed"}`+
+        `${lane.process_state ? ` OS ${lane.process_state}` : " OS unknown"}`);
     const queuePhase = data.queue?.phase;
     const cycle = Number(data.queue?.cycle);
     const isAdvancingCycle = data.queue?.state === "fresh" &&
@@ -25,9 +26,9 @@
       const chunk = Number(lane.chunk_updates);
       const target = isAdvancingCycle && Number.isFinite(chunk) && chunk > 0
         ? cycle * chunk : null;
-      const status = lane.process_state === "D" ? "stalled" :
+      const status = data.queue?.state !== "fresh" ? "unconfirmed" :
         lane.status === "complete" && hasKnownUpdates && target !== null && updates < target
-          ? "queued" : lane.status || "unknown";
+          ? "queued" : lane.worker_state || lane.status || "unknown";
       return `${track} ${status} ${hasKnownUpdates ? updates : "—"}${target === null || !hasKnownUpdates ? "" : `/${target}`}`;
     });
     const queueEval = data.queue?.evaluation || {};
@@ -41,7 +42,8 @@
       const run = p.run || {}, evidence = p.latest_evidence || {};
       return `<tr><td><strong>${esc(p.policy_id)}</strong><small>${esc(p.kind)}</small></td>`+
         `<td><span class="state" data-state="${esc(p.training_state)}">${esc(p.training_state)}</span>`+
-        `<small>${esc(run.completed_updates ?? "")} updates · heartbeat ${esc(run.heartbeat?.state || "n/a")}</small></td>`+
+        `<small>${esc(run.completed_updates ?? "")} updates · heartbeat ${esc(run.heartbeat?.state || "n/a")} · `+
+        `age ${esc(run.heartbeat?.age_seconds ?? "?")}s · OS ${esc(run.heartbeat?.process_state || "unknown")}</small></td>`+
         `<td><span class="state">${esc(p.evaluation_state)}</span></td>`+
         `<td>${esc(run.run_id || "—")}<small>Evidence ${esc(evidence.evaluation_id || "—")}</small></td>`+
         `<td>${esc(run.latest_checkpoint?.path || "—")}<small>${esc(run.latest_checkpoint?.bytes ?? "")} bytes</small></td>`+
