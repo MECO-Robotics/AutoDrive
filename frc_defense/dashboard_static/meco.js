@@ -96,7 +96,8 @@
           const bouts = metrics?.collection_action_bouts;
           const proportion = bouts?.acquired_proportion;
           const shown = typeof proportion === "number" && Number.isFinite(proportion)
-            ? `${(proportion * 100).toFixed(1)}%` : "unavailable";
+            ? `${(proportion * 100).toFixed(1)}%`
+            : bouts?.count === 0 ? "N/A (zero bouts)" : "unavailable";
           return `<tr><th scope="row">${esc(policy)}</th><td>${esc(category)}</td>`+
             `<td>${esc(bouts?.available_records ?? "—")}</td>`+
             `<td>${esc(bouts?.acquired_count ?? "—")} / ${esc(bouts?.count ?? "—")}</td>`+
