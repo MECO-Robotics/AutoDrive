@@ -826,6 +826,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "graph": {"nodes": graph.node_count, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
+        "actor_execution_contract": (
+            "A1/A2/A3: each macro executes the action sampled at that observation; "
+            "the saved PPO log-probability is for that action; a fresh action is "
+            "sampled at the next macro boundary. Incomplete goals are not censored. "
+            "Sampled fallback, native remask, and native goal preemption are "
+            "critic-only and counted separately by reason. C1/C2 semantics unchanged."),
         "prediction_contract": prediction_contract(config.prediction_mode),
         "qualification_protocol_id": qualification_protocol_id,
         "qualification_protocol_sha256": qualification_protocol_sha256,
@@ -854,7 +860,6 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         chunk_target = update + config.updates
         while update < chunk_target and not (stop_path and stop_path.exists()):
             rows = []
-            pending_goal = None
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
                     raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
@@ -873,12 +878,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     hidden = prepared["hidden_next"].detach()
                     value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
-                forced_pending_goal = pending_goal is not None
-                if forced_pending_goal:
-                    action = pending_goal["action"]
-                    goal_xy = pending_goal["goal_xy"]
-                    goal_heading = pending_goal["goal_heading"]
-                elif "support" in prepared:
+                if "support" in prepared:
                     support = prepared["support"]
                     action = int(support.action_ids[action_index].item())
                     node = int(support.pair_node_ids[action_index].item())
@@ -901,8 +901,14 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                               "support" in prepared and action == 7))
                 update_heartbeat()
                 remasked = any(item != action for item in executed_trace)
-                sampled_fallback = (prepared.get("fallback_used", False)
-                                    if not forced_pending_goal else False)
+                sampled_fallback = bool(prepared.get("fallback_used", False))
+                failure_reasons = []
+                if sampled_fallback:
+                    failure_reasons.append("sampled_fallback")
+                if remasked:
+                    failure_reasons.append("action_remasked")
+                if native_preempted:
+                    failure_reasons.append("native_goal_preempted")
                 row = {"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
                     "graph": prepared["graph"],
@@ -921,15 +927,14 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                        if "support" in prepared else {}),
                     "route_cost": prepared["route_cost"].detach(),
                     "risk_cost": prepared["risk_cost"].detach(),
-                    "execution_failure": (forced_pending_goal or sampled_fallback or
-                                          remasked or native_preempted),
+                    "execution_failure": bool(failure_reasons),
+                    "execution_failure_reasons": failure_reasons,
                     "prediction": prepared.get("prediction"),
                     "executed_action_trace": executed_trace,
                     "terminal_heading_error": heading_error,
                     "terminal_goal_distance_m": goal_distance,
                     "heading_alignment_opportunity": heading_opportunity,
                     "native_goal_preempted": native_preempted,
-                    "forced_pending_goal": forced_pending_goal,
                     "executed_high_level_action": action,
                     "action": torch.tensor([action_index], device=config.device),
                     "logprob": prepared["logprob"].detach().reshape(()),
@@ -966,27 +971,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     # Match evaluation semantics: a remasked action or native
                     # goal preemption invalidates the carried task commitment.
                     commitment = None
-                if forced_pending_goal:
-                    if hard_failure:
-                        pending_goal["origin_row"]["execution_failure"] = True
-                        pending_goal = None
-                    elif goal_complete:
-                        pending_goal = None
-                    elif ended or timeout:
-                        pending_goal["origin_row"]["execution_failure"] = True
-                        pending_goal = None
-                elif ("support" in prepared and not goal_complete and
-                      not hard_failure and not (ended or timeout)):
-                    pending_goal = {"action": action, "goal_xy": goal_xy,
-                        "goal_heading": goal_heading, "origin_row": row,
-                        "support_digest": prepared["support"].support_digest}
-                elif ("support" in prepared and not goal_complete and
-                      not hard_failure and (ended or timeout)):
-                    row["execution_failure"] = True
                 if ended or timeout:
-                    if pending_goal is not None:
-                        pending_goal["origin_row"]["execution_failure"] = True
-                        pending_goal = None
                     outcome = env.curriculum_metrics.outcomes()["success"]
                     success = bool(outcome.reshape(-1)[0].item())
                     task_episodes += 1
@@ -997,10 +982,6 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     _reset_episode(env, episode_seed)
                     hidden = None
                     episode_generation = _episode_id(run_id, episode)
-            if pending_goal is not None:
-                # Do not carry an uncompleted action across PPO optimizer
-                # boundaries, which would make its old policy density stale.
-                pending_goal["origin_row"]["execution_failure"] = True
             if rows[-1]["done"]:
                 bootstrap_value = torch.zeros_like(rows[-1]["value"])
             else:
@@ -1033,6 +1014,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     policy_support_pair_count=rows[0]["support"].pair_count,
                     policy_support_digests=[row["support"].support_digest for row in rows],
                     execution_failure_count=sum(bool(row["execution_failure"]) for row in rows),
+                    execution_failure_reason_counts={
+                        reason: sum(reason in row["execution_failure_reasons"] for row in rows)
+                        for reason in ("sampled_fallback", "action_remasked", "native_goal_preempted")},
                     actor_loss_skipped_execution_failures=sum(
                         bool(row["execution_failure"]) for row in rows))
             else:

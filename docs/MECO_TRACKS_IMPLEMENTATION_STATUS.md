@@ -90,22 +90,27 @@ grid endpoints and heading bins within 5 degrees of the HUB-facing direction;
 ferry support requires carried fuel, a controllable current ferry endpoint,
 and a heading inside the simulator's 45-degree release cone; carrying dumper
 ferry pairs are excluded because native dumper action 6 can release fuel
-anywhere before reaching the selected endpoint. The slot-3 pass-event censor
-remains for any observed early release. Defense support is restricted to the
+anywhere before reaching the selected endpoint. Evaluation records any observed
+early slot-3 release before the selected endpoint as an execution event.
+Defense support is restricted to the
 current intercept/post endpoint. Each selected graph heading is passed as an
 explicit terminal target. At the XY endpoint, the controller pauses
 translation, samples static rectangular rotation clearance every 5 degrees,
 and checks observed robots with circumscribed footprints, stopping drift, and a
 constant-velocity point forecast over estimated turn time. The forecast has no
 uncertainty inflation, and the 5-degree samples do not prove continuous swept
-clearance; native route and collision checks remain authoritative. Blocked
-turns wait while Plan A retains the selected goal across macros. A goal that is
-still incomplete at the PPO rollout boundary is censored from actor loss;
-observed slot-3 score or pass events before the selected endpoint are also
-recorded as execution failures and censored. C1/C2/D1/D2 keep their existing
-per-macro evaluation semantics. Intake headings must satisfy their target
-capture geometry. P integrates the root-pose-to-root-node connector as well as
-graph edges.
+clearance; native route and collision checks remain authoritative. During PPO
+training, every macro action is the action sampled at that observation and its
+own sampled log probability; the next macro boundary samples a fresh action.
+This keeps the executed action paired with its policy density and reward. An
+incomplete goal at a macro or rollout boundary is not itself an execution
+failure. A sampled deterministic fallback, native action remask, or native goal
+preemption remains critic-only and is counted by reason in update stats; none
+is credited as a successful execution. C1/C2/D1/D2 retain their existing
+per-macro action semantics. Evaluation may retain a selected Plan A goal over
+macros, as recorded in the evaluation contract. Intake headings must satisfy
+their target capture geometry. P integrates the root-pose-to-root-node
+connector as well as graph edges.
 Action 7 remains a native no-op hold. The Plan A adapter permits it to traverse
 only when paired with the selected frozen planner goal; the existing route,
 obstacle, and action-safety checks remain in force. Dumper drive pairs are
