@@ -485,7 +485,8 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     """Validate v2 bytes and frozen identities before any replay is attempted."""
     from .meco_counterfactual import (DATASET_SCHEMA as cf_dataset_schema,
         TARGET_SCHEMA as cf_target_schema, CONTINUATION_POLICY,
-        _device_identity)
+        _artifact_identity_sha256, _device_identity,
+        _verify_native_fuel_extension)
 
     path = Path(path).resolve()
     manifest_path = path.with_suffix(path.suffix + ".manifest.json")
@@ -541,6 +542,17 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             manifest.get("plan_a_p_unlabelled_reason") !=
             "simulator executor does not execute P-modified routes"):
         raise ValueError("counterfactual target semantics differ from v2 pairwise contract")
+    native_extension_identity = manifest.get("native_extension_identity")
+    if (device_metadata["device"].startswith("cuda") and
+            not isinstance(native_extension_identity, dict)):
+        raise ValueError("GPU counterfactual artifact has no native HIP binary identity")
+    if manifest.get("artifact_identity_sha256") != _artifact_identity_sha256(
+            manifest.get("source_identity_sha256"), native_extension_identity):
+        raise ValueError("counterfactual artifact identity digest mismatch")
+    try:
+        _verify_native_fuel_extension(native_extension_identity)
+    except RuntimeError as exc:
+        raise ValueError(f"counterfactual native HIP artifact identity mismatch: {exc}") from exc
     data_bytes = path.read_bytes()
     data_sha = hashlib.sha256(data_bytes).hexdigest()
     if data_sha != manifest.get("dataset_sha256"):

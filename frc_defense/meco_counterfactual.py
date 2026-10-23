@@ -80,6 +80,49 @@ def _hash(value):
                             allow_nan=False).encode()).hexdigest()
 
 
+def _native_fuel_extension_identity():
+    """Return the loaded native HIP binary identity without triggering a build."""
+    from . import fuel_physics_hip
+    extension = fuel_physics_hip._EXT
+    if extension is None:
+        return None
+    path = Path(extension.__file__).resolve()
+    before = path.stat()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    after = path.stat()
+    identity = {"module": "autodrive_fuel_physics_hip", "path": str(path),
+        "sha256": digest, "device": after.st_dev, "inode": after.st_ino,
+        "size": after.st_size, "mtime_ns": after.st_mtime_ns}
+    if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        raise RuntimeError("native HIP extension changed while its identity was read")
+    return identity
+
+
+def _verify_native_fuel_extension(identity):
+    """Fail closed if the loaded extension or its on-disk path was replaced."""
+    if identity is None:
+        return
+    current = _native_fuel_extension_identity()
+    if current is not None and current != identity:
+        raise RuntimeError("loaded native HIP extension identity changed")
+    path = Path(identity["path"])
+    try:
+        stat = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError("loaded native HIP extension path is unavailable") from exc
+    disk_identity = {**identity, "device": stat.st_dev, "inode": stat.st_ino,
+        "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": digest}
+    if disk_identity != identity:
+        raise RuntimeError("native HIP extension path was replaced during collection or replay")
+
+
+def _artifact_identity_sha256(sources_sha256, native_extension_identity):
+    return _hash({"source_identity_sha256": sources_sha256,
+        "native_extension_identity": native_extension_identity})
+
+
 def _tensor_digest(tensor):
     if tensor.layout != torch.strided:
         raise TypeError(f"unsupported tensor layout for state digest: {tensor.layout}")
@@ -534,6 +577,7 @@ def _replay_counterfactual_branch_seeded(record, manifest):
     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                               horizon=horizon_ticks)
     try:
+        _verify_native_fuel_extension(manifest.get("native_extension_identity"))
         graph = build_legal_pose_graph(env, slot=3)
         episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
         _reset_episode(env, seed)
@@ -759,6 +803,8 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "split": "train", "scenario_id": scenario_id, "category": category,
         "seeds": list(seeds), "sources": sources,
         "source_identity_sha256": _hash(sources), "device": device_metadata,
+        "native_extension_identity": None,
+        "artifact_identity_sha256": None,
         "state_digest_schema": STATE_DIGEST_SCHEMA,
         "prediction_mode": prediction_mode,
         "prediction_contract": prediction_contract(prediction_mode),
@@ -784,6 +830,14 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             env = make_curriculum_env(scenario_id, category, 1, device, seed,
                                       horizon=horizon_ticks)
             try:
+                loaded_extension = _native_fuel_extension_identity()
+                if device_metadata["device"].startswith("cuda") and loaded_extension is None:
+                    raise RuntimeError("GPU counterfactual collection did not load the native HIP extension")
+                if manifest["native_extension_identity"] is None:
+                    manifest["native_extension_identity"] = loaded_extension
+                    manifest["artifact_identity_sha256"] = _artifact_identity_sha256(
+                        manifest["source_identity_sha256"], loaded_extension)
+                _verify_native_fuel_extension(manifest["native_extension_identity"])
                 graph = build_legal_pose_graph(env, slot=3)
                 episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
                 _reset_episode(env, seed)
@@ -871,6 +925,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                         candidate_k=candidate_k, prediction_mode=prediction_mode,
                         max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
                         gamma_per_macro=gamma_per_macro)
+                    _verify_native_fuel_extension(manifest["native_extension_identity"])
                     c_outcomes.append({"descriptor": descriptor, **outcome})
                 c_pairs = [{"left_id": left["descriptor"]["candidate_id"],
                     "right_id": right["descriptor"]["candidate_id"],
@@ -890,6 +945,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                         candidate_k=candidate_k, prediction_mode=prediction_mode,
                         max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
                         gamma_per_macro=gamma_per_macro)
+                    _verify_native_fuel_extension(manifest["native_extension_identity"])
                     a_outcomes.append({"descriptor": descriptor, **outcome,
                         "p_target": None, "p_prior": 0.0,
                         "p_unlabelled_reason": manifest["plan_a_p_unlabelled_reason"]})
@@ -908,6 +964,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     "plan_a_pairwise_preferences": a_pairs,
                     "branch_teacher_action_reference": item["teacher_action"],
                     "teacher_prefix_provenance": CONTINUATION_POLICY})
+    _verify_native_fuel_extension(manifest["native_extension_identity"])
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during counterfactual collection")
     output = Path(output)
@@ -1037,6 +1094,7 @@ def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
             for intervention_id, seed in variants:
                 outcome = _execute_plan_a_p_route_branch(source_row,
                     base_manifest, descriptor, seed, p_cost_scale=p_cost_scale)
+                _verify_native_fuel_extension(manifest.get("native_extension_identity"))
                 outcomes.append({"intervention_id": intervention_id,
                     "intervention_seed": seed, **outcome})
             route_groups.append({"descriptor": descriptor, "outcomes": outcomes})
@@ -1047,6 +1105,7 @@ def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
             "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA,
             "target_schema": PLAN_A_P_ROUTE_TARGET_SCHEMA,
             "plan_a_p_route_groups": route_groups})
+    _verify_native_fuel_extension(manifest.get("native_extension_identity"))
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during Plan A P route collection")
     output = Path(output)
