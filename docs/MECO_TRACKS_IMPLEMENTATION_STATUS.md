@@ -296,3 +296,13 @@ bytes. `_tensor_digest` now rejects non-strided layouts and clones supported
 tensors into explicit contiguous format before hashing their flattened logical
 bytes. The failed collection did not produce a validated dataset. This fix passed scoped review in isolated commit 6dd5a5311 and was integrated as
 dc153a54a; collection and simulator validation remain outstanding.
+
+The next collector attempt exposed a Plan C indexing error: the native
+`_perceived_fuel(3)` API correctly returns batched `[world, track, ...]`
+buffers, while the expanded-target and commitment consumers treated the first
+dimension as a track dimension after partially indexing only the mask. Commit
+`7ba2d89de` retains `env.n == 1`, validates aligned batched position, velocity,
+and mask shapes, and explicitly selects world 0 for both consumers. The failed
+attempt produced no validated dataset. This correction awaits independent
+scoped review; only static compile/diff checks were run, with simulator
+collection and replay still outstanding.
