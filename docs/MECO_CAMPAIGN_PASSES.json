@@ -127,7 +127,8 @@
         "D0 calibration bundle follow-up 8b1f496cc entered scoped re-review for retention-manifest hash binding, unchanged v1 schema, and strict safety calibration intake",
         "Section 7 A/B matrix correction 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf submitted for scoped static re-review; no tests or simulator evaluations performed.",
         "Scoped static re-review approved Section 7 A/B matrix correction 4bd9f02e51175dd45cc01a8b677da43c3a40b5bf: C1/D1 use matched CV mode, each condition validates frozen checkpoint/config/protocol/source provenance, and checkpoint/source drift is checked before and after evaluation; runtime experiments remain outstanding.",
-        "Integrated branch through 260fdfbe3 is undergoing a fresh scoped static review after manual cross-branch conflict resolution; previously approved feature-branch reviews do not replace this integrated review. Runtime replay, dashboard-current simulator validation, D0 calibration runs, ONNX/Hailo hardware checks, and matrix experiments remain outstanding."
+        "Integrated branch through 260fdfbe3 is undergoing a fresh scoped static review after manual cross-branch conflict resolution; previously approved feature-branch reviews do not replace this integrated review. Runtime replay, dashboard-current simulator validation, D0 calibration runs, ONNX/Hailo hardware checks, and matrix experiments remain outstanding.",
+        "Scoped static integrated review approved branch codex/meco-evaluation-plan-integration through 260fdfbe3: supervisor warm-start/protocol CLI, frozen training-assignment checks, exact resume protocol binding, Section 7 separate learned/control modes, K overrides, same-seed inference-disable telemetry, and per-condition provenance checks have no remaining blocker. Runtime simulator validation, representative replay, hardware/ONNX checks, calibrated safety evidence, and actual matrix experiments remain outstanding."
       ]
     }
   ]
