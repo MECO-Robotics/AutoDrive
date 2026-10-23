@@ -7,7 +7,11 @@ legality, and only the deterministic arbiter may execute an action.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+import math
 from typing import Mapping
+import uuid
 
 import torch
 from torch import nn
@@ -26,6 +30,29 @@ SAFE_ACTION_FEATURES = (
     "target_distance_m", "nearby_sensed_track_count", "track_confidence",
     "track_age_s", "opponent_distance_m", "route_time_s",
 )
+
+
+def observation_digest(snapshot: ObservationSnapshot) -> str:
+    payload = {"snapshot_id": snapshot.snapshot_id, "episode_id": snapshot.episode_id,
+               "sequence": snapshot.sequence, "timestamp": snapshot.timestamp,
+               "raster_shape": snapshot.raster_shape, "raster": snapshot.raster,
+               "globals": snapshot.globals, "schema_version": snapshot.schema_version}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def candidate_digest(table: CandidateTable) -> str:
+    payload = {"snapshot_id": table.snapshot_id, "candidate_ids": table.candidate_ids,
+               "features": table.features, "valid_mask": table.valid_mask,
+               "feature_names": table.feature_names, "route_costs": table.route_costs,
+               "schema_version": table.schema_version}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def new_meco_episode_id(label="episode") -> str:
+    """Return an opaque, one-run generation ID suitable for snapshot binding."""
+    return f"{uuid.uuid4().hex}:{label}"
 
 
 def _groups(channels: int) -> int:
@@ -55,6 +82,8 @@ class RecurrentTrack(nn.Module):
     def forward(self, features, hidden=None):
         if hidden is None:
             hidden = features.new_zeros((features.shape[0], HIDDEN))
+        elif hidden.shape != (features.shape[0], HIDDEN) or not bool(torch.isfinite(hidden).all()):
+            raise ValueError("GRU hidden state must be finite with shape [batch, 64]")
         return self.gru(features, hidden)
 
 
@@ -106,7 +135,7 @@ class SE2MessageBlock(nn.Module):
             raise ValueError("invalid SE(2) graph tensor shapes or dtypes")
         if bool((edge_mask & ((edges < 0) | (edges >= nodes.shape[1]))).any()):
             raise ValueError("a legal SE(2) edge references an out-of-range node")
-        safe = edges.clamp(0, nodes.shape[1] - 1)
+        safe = torch.where(edge_mask, edges, torch.zeros_like(edges))
         expanded = nodes[:, :, None, :].expand(-1, -1, safe.shape[-1], -1)
         neighbors = expanded.gather(1, safe[..., None].expand(-1, -1, -1, nodes.shape[-1]))
         messages = self.message(neighbors)
@@ -115,42 +144,75 @@ class SE2MessageBlock(nn.Module):
         return self.norm(nodes + self.update(torch.cat((nodes, aggregate), -1)))
 
 
+def _se2_node_inputs(node_features, globals_):
+    """Encode headings as sin/cos so bins 7 and 0 obey angular wraparound."""
+    if (node_features.ndim != 3 or node_features.shape[-1] != 9
+            or globals_.shape != (node_features.shape[0], 7)):
+        raise ValueError("SE(2) nodes require six raster values, x/y, heading-bin and seven globals")
+    if not bool(torch.isfinite(node_features).all()) or not bool(torch.isfinite(globals_).all()):
+        raise ValueError("SE(2) node features and globals must be finite")
+    if bool(((node_features[..., 6:8] < 0.) | (node_features[..., 6:8] > 1.)).any()):
+        raise ValueError("SE(2) node x/y coordinates must be normalized to [0, 1]")
+    heading = node_features[..., 8]
+    if bool(((heading < 0.) | (heading > 7.) | (heading != heading.round())).any()):
+        raise ValueError("heading bins must be integers in [0, 7]")
+    angle = heading * (2. * math.pi / 8.)
+    heading_vector = torch.stack((angle.sin(), angle.cos()), -1)
+    return torch.cat((node_features[..., :8], heading_vector,
+                      globals_[:, None, :].expand(-1, node_features.shape[1], -1)), -1)
+
+
+def _pool_regions(nodes, region_ids, region_tokens):
+    batch, count, width = nodes.shape
+    if (region_ids.shape != (batch, count) or region_ids.dtype != torch.long
+            or bool(((region_ids < 0) | (region_ids >= region_tokens)).any())):
+        raise ValueError("region IDs must be integer indices within the configured regions")
+    pooled = nodes.new_zeros((batch, region_tokens, width))
+    counts = nodes.new_zeros((batch, region_tokens, 1))
+    pooled.scatter_add_(1, region_ids[..., None].expand_as(nodes), nodes)
+    counts.scatter_add_(1, region_ids[..., None], nodes.new_ones((batch, count, 1)))
+    occupied = counts.squeeze(-1) > 0
+    if not bool(occupied.any(-1).all()):
+        raise ValueError("each SE(2) graph must contain at least one legal node")
+    pooled = pooled / counts.clamp_min(1.)
+    return pooled, occupied
+
+
 class A2StructuredSE2UNetGRU(nn.Module):
-    """A2: structured heading-aware transition net, regional attention, and GRU."""
+    """A2: SE(2) graph U-Net with wrapped headings, regional attention, and GRU."""
     track_id = "A2"
 
     def __init__(self, region_tokens=64, heads=4):
         super().__init__()
-        if not 32 <= region_tokens <= 128 or HIDDEN % heads:
+        if not 32 <= region_tokens <= 128 or heads < 1 or HIDDEN % heads:
             raise ValueError("A2 requires 32–128 regions and a dividing attention head count")
         self.region_tokens = region_tokens
-        self.lift = nn.Sequential(nn.Linear(6 + 7 + 3, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, HIDDEN))
-        self.layers = nn.ModuleList([SE2MessageBlock(), SE2MessageBlock()])
-        self.region_embedding = nn.Embedding(region_tokens, HIDDEN)
+        self.lift = nn.Sequential(nn.Linear(17, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, HIDDEN))
+        self.fine_layers = nn.ModuleList([SE2MessageBlock(), SE2MessageBlock()])
+        self.coarse_layer = SE2MessageBlock()
         self.attention = nn.MultiheadAttention(HIDDEN, heads, batch_first=True)
         self.context = RecurrentTrack()
-        self.decoder = nn.Sequential(nn.Linear(HIDDEN * 2, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, 2))
+        self.decoder = nn.Sequential(nn.Linear(HIDDEN * 3, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, 2))
         self.behavior_head = nn.Linear(HIDDEN, 5)
 
-    def forward(self, node_features, edges, edge_mask, region_ids, globals_, hidden=None, **_):
-        nodes = self.lift(torch.cat((node_features, globals_[:, None, :].expand(-1, node_features.shape[1], -1)), -1))
-        for layer in self.layers:
+    def forward(self, node_features, edges, edge_mask, region_ids, globals_,
+                coarse_edges, coarse_edge_mask, hidden=None, **_):
+        nodes = self.lift(_se2_node_inputs(node_features, globals_))
+        for layer in self.fine_layers:
             nodes = layer(nodes, edges, edge_mask)
         batch, count, _ = nodes.shape
-        if region_ids.shape != (batch, count) or bool(((region_ids < 0) | (region_ids >= self.region_tokens)).any()):
-            raise ValueError("A2 region IDs must map each node to a configured region")
-        ids = region_ids
-        sums = nodes.new_zeros((batch, self.region_tokens, HIDDEN))
-        counts = nodes.new_zeros((batch, self.region_tokens, 1))
-        sums.scatter_add_(1, ids[..., None].expand_as(nodes), nodes)
-        counts.scatter_add_(1, ids[..., None], nodes.new_ones((batch, count, 1)))
-        tokens = sums / counts.clamp_min(1.) + self.region_embedding.weight[None]
-        attended, _ = self.attention(tokens, tokens, tokens, need_weights=False)
-        state = self.context(attended.mean(1), hidden)
-        decoded = self.decoder(torch.cat((nodes, state[:, None].expand(-1, count, -1)), -1))
+        coarse, occupied = _pool_regions(nodes, region_ids, self.region_tokens)
+        coarse = self.coarse_layer(coarse, coarse_edges, coarse_edge_mask)
+        attended, _ = self.attention(coarse, coarse, coarse,
+                                     key_padding_mask=~occupied, need_weights=False)
+        state = self.context((attended * occupied[..., None]).sum(1) /
+                             occupied.sum(1, keepdim=True).clamp_min(1.), hidden)
+        upsampled = coarse.gather(1, region_ids[..., None].expand(-1, -1, HIDDEN))
+        decoded = self.decoder(torch.cat((nodes, upsampled,
+                                          state[:, None].expand(-1, count, -1)), -1))
         return {"utility": decoded[..., 0], "penalty": F.softplus(decoded[..., 1]),
                 "behavior_logits": self.behavior_head(state), "hidden": state,
-                "region_tokens": tokens}
+                "region_tokens": coarse, "occupied_regions": occupied}
 
 
 class A3HierarchicalSE2GNNGRU(nn.Module):
@@ -159,10 +221,10 @@ class A3HierarchicalSE2GNNGRU(nn.Module):
 
     def __init__(self, region_tokens=64, heads=4):
         super().__init__()
-        if region_tokens != 64 or HIDDEN % heads:
+        if region_tokens != 64 or heads < 1 or HIDDEN % heads:
             raise ValueError("A3 prototype fixes 64 region tokens")
         self.region_tokens = region_tokens
-        self.lift = nn.Sequential(nn.Linear(16, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, HIDDEN))
+        self.lift = nn.Sequential(nn.Linear(17, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, HIDDEN))
         self.layers = nn.ModuleList([SE2MessageBlock() for _ in range(3)])
         self.region_attention = nn.MultiheadAttention(HIDDEN, heads, batch_first=True)
         self.context = RecurrentTrack()
@@ -171,26 +233,21 @@ class A3HierarchicalSE2GNNGRU(nn.Module):
         self.behavior_head = nn.Linear(HIDDEN, 5)
 
     def forward(self, node_features, edges, edge_mask, region_ids, globals_, hidden=None, **_):
-        nodes = self.lift(torch.cat((node_features, globals_[:, None].expand(-1, node_features.shape[1], -1)), -1))
+        nodes = self.lift(_se2_node_inputs(node_features, globals_))
         for layer in self.layers:
             nodes = layer(nodes, edges, edge_mask)
         batch, count, _ = nodes.shape
-        if region_ids.shape != (batch, count) or bool(((region_ids < 0) | (region_ids >= self.region_tokens)).any()):
-            raise ValueError("A3 region IDs must map each node to a configured region")
-        ids = region_ids
-        pooled = nodes.new_zeros((batch, self.region_tokens, HIDDEN))
-        counts = nodes.new_zeros((batch, self.region_tokens, 1))
-        pooled.scatter_add_(1, ids[..., None].expand_as(nodes), nodes)
-        counts.scatter_add_(1, ids[..., None], nodes.new_ones((batch, count, 1)))
-        pooled = pooled / counts.clamp_min(1.)
-        regions, _ = self.region_attention(pooled, pooled, pooled, need_weights=False)
-        state = self.context(regions.mean(1), hidden)
+        pooled, occupied = _pool_regions(nodes, region_ids, self.region_tokens)
+        regions, _ = self.region_attention(pooled, pooled, pooled,
+                                           key_padding_mask=~occupied, need_weights=False)
+        state = self.context((regions * occupied[..., None]).sum(1) /
+                             occupied.sum(1, keepdim=True).clamp_min(1.), hidden)
         contextual = self.region_decoder(torch.cat((regions, state[:, None].expand(-1, self.region_tokens, -1)), -1))
-        node_context = contextual.gather(1, ids[..., None].expand(-1, -1, HIDDEN))
+        node_context = contextual.gather(1, region_ids[..., None].expand(-1, -1, HIDDEN))
         outputs = self.node_head(nodes + node_context)
         return {"utility": outputs[..., 0], "penalty": F.softplus(outputs[..., 1]),
                 "behavior_logits": self.behavior_head(state), "hidden": state,
-                "region_tokens": regions}
+                "region_tokens": regions, "occupied_regions": occupied}
 
 
 class CandidateMLPGRU(nn.Module):
@@ -222,7 +279,7 @@ class C2MapCrossAttentionGRU(nn.Module):
 
     def __init__(self, candidate_features: int, tokens=64, heads=4):
         super().__init__()
-        if candidate_features < 1 or not 32 <= tokens <= 128 or HIDDEN % heads:
+        if candidate_features < 1 or not 32 <= tokens <= 128 or heads < 1 or HIDDEN % heads:
             raise ValueError("invalid C2 dimensions")
         self.tokens = tokens
         self.map_encoder = nn.Sequential(ConvBlock(6, 32), nn.AvgPool2d(2, ceil_mode=True),
@@ -265,7 +322,21 @@ class DecisionRequest:
     now: float
     max_age: float
     fallback_candidate_id: str
-    expected_model_id: str | None = None
+    expected_model_id: str
+
+    def __post_init__(self):
+        if not self.expected_model_id:
+            raise ValueError("expected_model_id is required")
+        try:
+            uuid.UUID(self.observation.episode_id.split(":", 1)[0])
+        except (ValueError, AttributeError):
+            raise ValueError("episode_id must begin with a unique UUID generation")
+        if self.observation.snapshot_id != f"{self.observation.episode_id}:{self.observation.sequence}":
+            raise ValueError("observation snapshot ID must bind episode generation and sequence")
+        if self.candidates.snapshot_id != self.observation.snapshot_id:
+            raise ValueError("candidate table must bind the exact observation snapshot")
+        if not math.isfinite(self.now) or not math.isfinite(self.max_age) or self.max_age < 0.:
+            raise ValueError("decision time and maximum age must be finite and nonnegative")
 
 
 def choose_candidate(request: DecisionRequest, output: ScorerSnapshot | None) -> tuple[str, str]:
@@ -282,8 +353,11 @@ def choose_candidate(request: DecisionRequest, output: ScorerSnapshot | None) ->
                 not output.matches(request.observation, table,
                                    now=request.now, max_age=request.max_age)):
             raise ValueError("missing, stale, or mismatched scorer result")
-        if request.expected_model_id is not None and output.model_id != request.expected_model_id:
+        if output.model_id != request.expected_model_id:
             raise ValueError("scorer model identity mismatch")
+        if (output.observation_digest != observation_digest(request.observation)
+                or output.candidate_digest != candidate_digest(table)):
+            raise ValueError("scorer content digest mismatch")
         if request.fallback_candidate_id not in table.candidate_ids:
             raise ValueError("fallback is absent from candidate table")
         fallback = table.candidate_ids.index(request.fallback_candidate_id)
@@ -300,6 +374,18 @@ def choose_candidate(request: DecisionRequest, output: ScorerSnapshot | None) ->
         return request.fallback_candidate_id, "deterministic_fallback"
 
 
+def make_scorer_snapshot(model_id: str, observation: ObservationSnapshot,
+                         candidates: CandidateTable, scores, timestamp: float) -> ScorerSnapshot:
+    """Bind scorer output to exact observation, feature rows, mask, IDs, and order."""
+    if candidates.snapshot_id != observation.snapshot_id:
+        raise ValueError("candidate table and observation snapshot differ")
+    return ScorerSnapshot(model_id, observation.snapshot_id, candidates.candidate_ids,
+                          tuple(float(score) for score in scores), float(timestamp),
+                          schema_version=2,
+                          observation_digest=observation_digest(observation),
+                          candidate_digest=candidate_digest(candidates))
+
+
 def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
                             route_cost: torch.Tensor | None = None,
                             risk_cost: torch.Tensor | None = None) -> torch.Tensor:
@@ -310,12 +396,12 @@ def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
         raise ValueError("valid candidate utilities must be finite")
     value = utility
     if route_cost is not None:
-        if route_cost.shape != value.shape or not bool(torch.isfinite(route_cost).all()):
-            raise ValueError("route costs must be finite and match utility")
+        if route_cost.shape != value.shape or not bool(torch.isfinite(route_cost[valid_mask]).all()):
+            raise ValueError("valid route costs must be finite and match utility")
         value = value - route_cost
     if risk_cost is not None:
-        if risk_cost.shape != value.shape or not bool(torch.isfinite(risk_cost).all()):
-            raise ValueError("risk costs must be finite and match utility")
+        if risk_cost.shape != value.shape or not bool(torch.isfinite(risk_cost[valid_mask]).all()):
+            raise ValueError("valid risk costs must be finite and match utility")
         value = value - risk_cost
     if not bool(valid_mask.any(dim=-1).all()):
         raise ValueError("each row must include at least one feasible candidate")
@@ -361,6 +447,13 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
     if track in ("A2", "A3"):
         if graph is None:
             raise ValueError(f"{track} requires a deterministic legal SE(2) graph")
+        expected = ({"node_features", "edges", "edge_mask", "region_ids",
+                     "coarse_edges", "coarse_edge_mask"} if track == "A2" else
+                    {"node_features", "edges", "edge_mask", "region_ids"})
+        if set(graph) != expected:
+            raise ValueError(f"{track} graph tensors must be exactly {sorted(expected)}")
+        if "globals_" in graph or "hidden" in graph:
+            raise ValueError("graph data cannot override observation state or recurrent context")
         inputs.update(graph)
     output = model(**inputs)
     if track in ("C1", "C2"):
@@ -397,22 +490,36 @@ def _gather_dense_candidates(output, table, raster_shape):
     sx_col = _required_column(columns, "field_length_m")
     sy_col = _required_column(columns, "field_width_m")
     utility = output["utility"]
-    penalty = output["penalty"]
     scores = []
+    field_dimensions = None
     behavior_logits = output["behavior_logits"]
-    for row in table.features:
+    for row_index, row in enumerate(table.features):
         vals = (row[x_col], row[y_col], row[heading_col], row[behavior_col], row[sx_col], row[sy_col])
         if any(value is None for value in vals):
+            if table.valid_mask[row_index]:
+                raise ValueError("valid dense-pose candidate is missing required pose fields")
             scores.append(utility.new_tensor(float("nan")))
             continue
         x, y, heading, behavior, field_length, field_width = map(float, vals)
         if field_length <= 0. or field_width <= 0.:
             raise ValueError("candidate field dimensions must be positive")
-        col = max(0, min(width - 1, int(x / field_length * width)))
-        line = max(0, min(height - 1, int(y / field_width * height)))
-        hbin = max(0, min(7, int(heading)))
-        bidx = max(0, min(4, int(behavior)))
-        scores.append(utility[0, hbin, line, col] - penalty[0, hbin, line, col] + behavior_logits[0, bidx])
+        if field_dimensions is None:
+            field_dimensions = (field_length, field_width)
+        elif (field_length, field_width) != field_dimensions:
+            raise ValueError("candidate rows must share exact field dimensions")
+        if not (0. <= x < field_length and 0. <= y < field_width):
+            raise ValueError("candidate goal pose is outside the configured field")
+        if heading != round(heading) or not 0. <= heading < 8.:
+            raise ValueError("candidate heading_bin must be an integer in [0, 7]")
+        if behavior != round(behavior) or not 0. <= behavior < 5.:
+            raise ValueError("candidate behavior_index must be an integer in [0, 4]")
+        col = int(x / field_length * width)
+        line = int(y / field_width * height)
+        hbin = int(heading)
+        bidx = int(behavior)
+        # P(q) is a traversal-field output; it belongs in deterministic route
+        # integration, not as an endpoint penalty. Keep it available in `raw`.
+        scores.append(utility[0, hbin, line, col] + behavior_logits[0, bidx])
     return torch.stack(scores)[None]
 
 
@@ -420,19 +527,22 @@ def _gather_graph_candidates(output, table):
     columns = _table_columns(table)
     node_col = _required_column(columns, "legal_node_index")
     behavior_col = _required_column(columns, "behavior_index")
-    utility, penalty = output["utility"], output["penalty"]
+    utility = output["utility"]
     behavior_logits = output["behavior_logits"]
     scores = []
-    for row in table.features:
+    for row_index, row in enumerate(table.features):
         node, behavior = row[node_col], row[behavior_col]
         if node is None or behavior is None:
+            if table.valid_mask[row_index]:
+                raise ValueError("valid graph candidate is missing node or behavior index")
             scores.append(utility.new_tensor(float("nan")))
         else:
-            idx, bidx = int(node), max(0, min(4, int(behavior)))
-            if idx < 0 or idx >= utility.shape[1]:
-                scores.append(utility.new_tensor(float("nan")))
-            else:
-                scores.append(utility[0, idx] - penalty[0, idx] + behavior_logits[0, bidx])
+            if float(node) != round(float(node)) or not 0 <= float(node) < utility.shape[1]:
+                raise ValueError("candidate legal_node_index must reference an existing graph node")
+            if float(behavior) != round(float(behavior)) or not 0 <= float(behavior) < 5:
+                raise ValueError("candidate behavior_index must be an integer in [0, 4]")
+            idx, bidx = int(node), int(behavior)
+            scores.append(utility[0, idx] + behavior_logits[0, bidx])
     return torch.stack(scores)[None]
 
 
@@ -522,7 +632,8 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
                          distance, None, None, None, None, None))
     if len(ids) != 8:
         raise RuntimeError("candidate source must preserve all eight action rows")
-    snap = build_observation_snapshot(env, world=world, slot=slot, episode_id=episode_id)
+    generation = new_meco_episode_id(episode_id or "curriculum")
+    snap = build_observation_snapshot(env, world=world, slot=slot, episode_id=generation)
     table = CandidateTable(snap.snapshot_id, tuple(ids), tuple(rows),
                            tuple(bool(x) for x in mask.cpu().tolist()), SAFE_ACTION_FEATURES,
                            route_costs=(None,) * 8)

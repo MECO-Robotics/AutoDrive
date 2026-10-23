@@ -9,8 +9,10 @@ deployment claim.
 
 - **A1:** multiscale raster U-Net + GRU, producing eight heading-bin utility
   fields, nonnegative traversal penalties, and five behavior logits.
-- **A2:** masked directed SE(2) transition message passing, regional pooling
-  and self-attention, GRU context, and per-node utility/penalty outputs.
+- **A2:** structured SE(2) graph U-Net with fine and coarse directed transition
+  message passing, connectivity-aware region pooling, regional self-attention,
+  GRU context, skip fusion, and per-node utility/penalty outputs. Heading bins
+  use circular sine/cosine encoding; 7-to-0 wraparound is continuous.
 - **A3:** hierarchical SE(2) graph message passing, 64-region pooling and
   attention, GRU context, and per-node utility/penalty outputs.
 - **C1:** shared candidate-feature scorer with seven-scalar global encoder and
@@ -21,8 +23,10 @@ deployment claim.
   distribution**, so stochastic callers can obtain action, log probability,
   and entropy for PPO. Missing feature values are accompanied by explicit
   unavailable indicators.
-- A stale/mismatched-output gate checks snapshot identity, candidate ordering,
-  timestamp age, and optional model identity. Invalid output uses the listed
+- A stale/mismatched-output gate checks a unique UUID episode generation,
+  exact observation and candidate content digests, candidate ordering,
+  timestamp age, and model identity. Bound scorer outputs use schema v2 with
+  required SHA-256 digests. Invalid output uses the listed
   valid deterministic fallback. Scores cannot change the candidate mask.
 - `build_safe_action_candidates` exposes the curriculum simulator's existing
   eight masked action rows in canonical row order. `deterministic_candidate_scores`
@@ -48,6 +52,11 @@ A3 require an explicit deterministic legal graph (`node_features`, directed
 The repository's current XY AD* search and experimental XY route probe are not
 silently treated as this interface.
 
+The Plan A traversal penalty field is returned separately and is not treated
+as an endpoint penalty. A deterministic planner must integrate it over a
+verified route before the Plan A policy is considered operational. Candidate
+ranking currently uses dense utility and behavior scores only.
+
 The module does not yet provide the plan's end-to-end matched PPO experiment,
 supervised warm start, paired held-out evaluation suite, D0 production
 controller variance, Hailo/ONNX export or hardware profiling. The document's
@@ -64,8 +73,11 @@ result = score_candidates("C1", model, raster=raster, globals_=globals_,
 action, log_probability, entropy = sample_candidate_action(result["logits"])
 ```
 
-For A2/A3, `score_candidates` also requires a `graph` mapping with the legal
-graph tensors. Preserve the returned GRU `hidden` state between decisions and
+For A2, `score_candidates` requires fine and coarse graph transition tensors;
+A3 requires fine graph tensors. Node coordinates must be normalized to the
+field, heading bins must be integer values from 0 through 7, and valid pose and
+node indices are rejected if they fall outside their declared domains. Empty
+regions are excluded from attention. Preserve the returned GRU `hidden` state between decisions and
 reset it on episode reset or tracking-loss events. Resetting is the caller's
 responsibility in this prototype.
 

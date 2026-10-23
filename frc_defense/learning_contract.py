@@ -111,12 +111,22 @@ class ScorerSnapshot:
     scores: tuple[float, ...]
     timestamp: float
     schema_version: int = 1
+    observation_digest: str = ""
+    candidate_digest: str = ""
 
     def __post_init__(self) -> None:
         ids = tuple(self.candidate_ids)
         scores = _finite_tuple(self.scores, "scores")
-        if self.schema_version != 1 or not self.model_id or not self.snapshot_id:
+        if self.schema_version not in (1, 2) or not self.model_id or not self.snapshot_id:
             raise ValueError("unsupported schema or empty scorer identity")
+        digests = (self.observation_digest, self.candidate_digest)
+        if self.schema_version == 2:
+            if any(not isinstance(digest, str) or len(digest) != 64
+                   or any(char not in "0123456789abcdef" for char in digest)
+                   for digest in digests):
+                raise ValueError("schema v2 scorer requires SHA-256 input digests")
+        elif any(digests):
+            raise ValueError("input digests require scorer schema v2")
         if not math.isfinite(self.timestamp) or self.timestamp < 0:
             raise ValueError("scorer timestamp must be finite and nonnegative")
         if not ids or len(ids) != len(scores):
