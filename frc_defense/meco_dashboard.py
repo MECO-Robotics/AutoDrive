@@ -58,6 +58,13 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _read_json_within(path: Path, root: Path):
+    """Read a status file only when its resolved path remains under root."""
+    if not _inside(path, root):
+        return None, "path resolves outside selected MECO data root"
+    return _read_json(path)
+
+
 def _process_alive(pid) -> bool:
     if type(pid) is not int or pid <= 0:
         return False
@@ -78,8 +85,9 @@ def _process_alive(pid) -> bool:
         return False
 
 
-def _heartbeat(run_dir: Path, manifest: dict, now: float, process_probe=_process_alive):
-    heartbeat, error = _read_json(run_dir / "heartbeat.json")
+def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
+               process_probe=_process_alive):
+    heartbeat, error = _read_json_within(run_dir / "heartbeat.json", data_root)
     if not heartbeat:
         return {"state": "missing", "age_seconds": None, "fresh": False,
                 "process_alive": False, "error": error if error else None}
@@ -100,9 +108,9 @@ def _heartbeat(run_dir: Path, manifest: dict, now: float, process_probe=_process
             "error": None if consistent else "heartbeat provenance mismatch"}
 
 
-def _queue_state(root: Path, now: float):
+def _queue_state(root: Path, now: float, data_root: Path):
     path = root / "queue-status.json"
-    payload, error = _read_json(path)
+    payload, error = _read_json_within(path, data_root)
     if payload is None:
         return {"state": "unavailable", "age_seconds": None,
                 "lanes": {}, "error": error}
@@ -387,10 +395,10 @@ def _comparison(report):
                 for category in categories} for policy in POLICIES}}
 
 
-def _qualification_status(project: Path, errors: list):
+def _qualification_status(project: Path, errors: list, data_root: Path):
     root = project / "qualifications" / "meco"
     path = root / "qualification-status.json"
-    status, error = _read_json(path)
+    status, error = _read_json_within(path, data_root)
     if status is None:
         if error and path.exists():
             errors.append({"source": str(path.relative_to(project)), "error": error})
@@ -422,13 +430,17 @@ def _qualification_status(project: Path, errors: list):
         "final_test_isolated", "failure")}
 
 
-def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
+def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_root=None, now=None,
                     campaign_passes=None,
                     process_probe=_process_alive):
     now = time.time() if now is None else float(now)
     root = checkpoint_root.resolve()
     eval_root = evaluation_root.resolve()
-    queue = _queue_state(root, now)
+    data_root = (Path(project_root).resolve() if project_root is not None
+                 else root.parents[1].resolve())
+    if not _inside(root, data_root) or not _inside(eval_root, data_root):
+        raise ValueError("MECO status roots must remain inside the selected data root")
+    queue = _queue_state(root, now, data_root)
     run_by_track = {track: [] for track in TRACKS}
     errors = []
     if root.is_dir():
@@ -436,7 +448,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         for path in sorted(root.iterdir()):
             if not path.is_dir() or not _inside(path, root):
                 continue
-            manifest, error = _read_json(path / "run.json")
+            manifest, error = _read_json_within(path / "run.json", data_root)
             if manifest is None:
                 if (path / "run.json").exists():
                     errors.append({"source": path.name, "error": error or "invalid run manifest"})
@@ -445,7 +457,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
             track = manifest.get("track", config.get("track") if isinstance(config, dict) else None)
             if track not in TRACKS:
                 continue
-            heartbeat = _heartbeat(path, manifest, now, process_probe)
+            heartbeat = _heartbeat(path, manifest, now, data_root, process_probe)
             state = manifest.get("status", "unknown")
             if state == "running":
                 state = "running" if heartbeat["state"] == "confirmed" else "unconfirmed"
@@ -455,7 +467,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                          and lane.get("run_id") == manifest.get("run_id") else "unconfirmed")
             elif state not in ("complete", "stopped", "failed", "unknown"):
                 state = "unknown"
-            stats, stats_error = _read_json(path / "stats.json")
+            stats, stats_error = _read_json_within(path / "stats.json", data_root)
             latest = None
             if stats:
                 history = stats.get("history", [])
@@ -495,7 +507,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
     evaluation_runs = []
     if eval_root.is_dir():
         for status_path in sorted(eval_root.glob("*.status.json")):
-            status, error = _read_json(status_path)
+            status, error = _read_json_within(status_path, data_root)
             if status is None:
                 errors.append({"source": status_path.name, "error": error or "invalid evaluator status"})
                 continue
@@ -505,7 +517,8 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
             output_name = status.get("output_file")
             safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
             report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
-            report, _ = _read_json(report_path) if safe_name and _inside(report_path, eval_root) else (None, None)
+            report, _ = (_read_json_within(report_path, data_root)
+                         if safe_name else (None, None))
             valid_report = _comparison(report) if report is not None else None
             consistent = (status.get("schema_version") == 1
                 and isinstance(status.get("evaluation_id"), str)
@@ -533,9 +546,9 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         for path in sorted(eval_root.glob("*.json")):
             if path.name.endswith(".status.json"):
                 continue
-            if not path.is_file() or not _inside(path, eval_root):
+            if not path.is_file() or not _inside(path, data_root):
                 continue
-            report, error = _read_json(path)
+            report, error = _read_json_within(path, data_root)
             if report is None:
                 errors.append({"source": path.name, "error": error or "invalid evaluation"})
                 continue
@@ -606,9 +619,10 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 ("not_applicable" if policy in CONTROLS or policy in ABLATIONS else "not_started"),
             "evaluation_state": evidence["matched_status"] if evidence else "not_evaluated",
             "run": latest_run, "latest_evidence": evidence})
-    qualification = _qualification_status(root.parents[1], errors)
+    qualification = _qualification_status(data_root, errors, data_root)
     return {"schema_version": STATUS_SCHEMA_VERSION,
         "generated_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "data_root": str(data_root),
         "checkpoint_root": str(root), "evaluation_root": str(eval_root),
         "heartbeat_stale_seconds": HEARTBEAT_STALE_SECONDS,
         "queue_stale_seconds": QUEUE_STALE_SECONDS,
@@ -620,14 +634,17 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         "errors": errors[:20]}
 
 
-def meco_status_payload(project_root: Path | str) -> bytes:
-    """Serialize status from fixed checkout-local MECO directories only."""
+def meco_status_payload(project_root: Path | str, *, data_root: Path | str | None = None) -> bytes:
+    """Read run evidence from data_root while keeping workflow evidence checkout-local."""
     project = Path(project_root).resolve()
-    checkpoint_root = (project / "checkpoints" / "meco-five").resolve()
-    evaluation_root = (project / "evaluations" / "meco-five").resolve()
-    if not _inside(checkpoint_root, project) or not _inside(evaluation_root, project):
-        raise ValueError("MECO status roots must remain inside the selected project checkout")
-    payload = _collect_status(checkpoint_root, evaluation_root)
+    data_project = Path(data_root).resolve() if data_root is not None else project
+    if not data_project.is_dir():
+        raise ValueError("MECO data root must be an existing directory")
+    checkpoint_root = (data_project / "checkpoints" / "meco-five").resolve()
+    evaluation_root = (data_project / "evaluations" / "meco-five").resolve()
+    if not _inside(checkpoint_root, data_project) or not _inside(evaluation_root, data_project):
+        raise ValueError("MECO status roots must remain inside the selected data root")
+    payload = _collect_status(checkpoint_root, evaluation_root, project_root=data_project)
     pass_path = project / "docs" / "MECO_CAMPAIGN_PASSES.json"
     passes, pass_error = _read_json(pass_path)
     valid_passes = None
@@ -663,6 +680,7 @@ def meco_status_payload(project_root: Path | str) -> bytes:
             valid_passes["phase4_planner_status"] = factor_status["planner_status"]
             valid_passes["phase4_factors"] = factor_status["factors"]
     payload["implementation_passes"] = valid_passes
+    payload["campaign_ledger_path"] = str(pass_path)
     if valid_passes is None:
         payload["errors"].append({"source": str(pass_path.relative_to(project)),
             "error": pass_error or "invalid implementation pass status manifest"})
