@@ -41,6 +41,47 @@ Calibration seed pools are checked against train, validation, and test, and the
 bundle rejects overlaps among reports. Keep the same source checkout and
 runtime for the entire bundle.
 
+For long calibrations, use deterministic shards. The planner freezes the full
+case table, settings, source identity, runtime, and exact `(repetition, case,
+seed)` assignment in each immutable manifest. Each shard checkpoints complete
+case/repetition groups to a digest-checked `.partial` file and resumes only
+when that file still matches its manifest. A completed shard is immutable.
+Generate manifests on the indexed device that will execute each shard:
+
+```bash
+python -m frc_defense.meco_qualification plan-d0-calibration-shards \
+  --scenario "$scenario" --episodes 100 --repetitions 3 \
+  --master-seed 20261024 --shard-count 8 --device "$DEVICE" \
+  --manifest-dir "qualifications/meco/shards/${scenario}-${DEVICE//:/-}"
+```
+
+Run every manifest once, retaining its shard artifact, then merge all shard
+artifacts into the ordinary immutable v2 calibration report before bundling:
+
+```bash
+for manifest in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/*.json; do
+  shard_id=$(basename "$manifest" .json)
+  python -m frc_defense.meco_qualification calibrate-d0-shard \
+    --manifest "$manifest" --device "$DEVICE" \
+    --output "qualifications/meco/shards/${scenario}-${DEVICE//:/-}/artifacts/${shard_id}.artifact.json"
+done
+shards=()
+for artifact in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/artifacts/*.artifact.json; do
+  shards+=(--shard "$artifact")
+done
+python -m frc_defense.meco_qualification merge-d0-calibration-shards \
+  "${shards[@]}" --output "qualifications/meco/d0-calibration-${scenario}.json"
+```
+
+The merge requires every shard index exactly once, checks that each assigned
+tuple appears once and that no unexpected tuple appears, validates source,
+controller, safety, and normalized runtime provenance, and recomputes the v2
+summary from raw merged records. Shards may use different CUDA ordinals only
+when backend, GPU model, and the remaining runtime identity match. The merged
+v2 report records normalized runtime identity and each row's exact shard
+device. Shard manifests and shard outputs are not accepted as calibration
+reports by protocol creation or bundle intake.
+
 The bundle is rejected if any prerequisite is missing, extra, duplicated, or
 has an overlapping calibration seed pool.
 

@@ -22,6 +22,8 @@ from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
 PROTOCOL_VERSION = "meco-qualification-v1"
 CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
 D0_CALIBRATION_VERSION = "meco-d0-calibration-v2"
+D0_CALIBRATION_SHARD_MANIFEST = "meco-d0-calibration-shard-manifest-v1"
+D0_CALIBRATION_SHARD_ARTIFACT = "meco-d0-calibration-shard-v1"
 MIN_EPISODES = 100
 TRAIN_SEED_POOL_SIZE = 100
 BOOTSTRAP_REPLICATES = 10_000
@@ -117,6 +119,9 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
     calibration_seed_union = set()
     for scenario in scenarios:
         report = reports[scenario]
+        if isinstance(report, dict) and report.get("artifact_type") in (
+                D0_CALIBRATION_SHARD_MANIFEST, D0_CALIBRATION_SHARD_ARTIFACT):
+            raise ValueError("D0 calibration shard artifacts must be merged before protocol intake")
         if (not isinstance(report, dict) or report.get("schema_version") != 2
                 or report.get("calibration") is not True
                 or report.get("scenario_id") != scenario
@@ -183,6 +188,13 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
                 or not isinstance(runtime_device.get("device_name"), str)
                 or not runtime_device["device_name"].strip()):
             raise ValueError(f"D0 calibration did not record a verified GPU device for {scenario}")
+        normalized_runtime = report.get("normalized_runtime_identity")
+        if normalized_runtime is not None:
+            if (_normalized_calibration_runtime(runtime_device) != normalized_runtime
+                    or any(row.get("calibration_runtime_device") is None
+                        or _normalized_calibration_runtime(row["calibration_runtime_device"])
+                            != normalized_runtime for row in rows)):
+                raise ValueError(f"D0 calibration normalized runtime provenance is invalid for {scenario}")
         for row in rows:
             metrics = row.get("metrics")
             safety_keys = ({key for key in metrics
@@ -531,6 +543,448 @@ def _require_calibration_gpu(device: str) -> dict:
         "backend": "hip" if torch.version.hip else "cuda",
         "torch_version": str(torch.__version__),
         "hip_version": str(torch.version.hip) if torch.version.hip is not None else None}
+
+
+def _canonical_sha256(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()).hexdigest()
+
+
+def _calibration_source_identity_sha256() -> str:
+    from .curriculum_training import source_identity
+    return _canonical_sha256(source_identity())
+
+
+def _calibration_case_table(scenario_id, episodes, repetitions, master_seed):
+    cases = protocol_cases(scenario_id, "calibration", episodes=episodes,
+                           master_seed=master_seed)
+    return [{"category": case.category, "layout_id": case.layout_id,
+        "defender_family": case.defender_family,
+        "start_condition": case.start_condition,
+        "sensor_profile": case.sensor_profile, "seeds": list(case.seeds)}
+        for case in cases]
+
+
+def _calibration_shard_config(scenario_id, episodes, repetitions, master_seed):
+    return {"scenario_id": scenario_id, "split": "calibration",
+        "episodes_per_category_stratum": episodes, "repetitions": repetitions,
+        "master_seed": master_seed, "seed_partition_code": 3,
+        "repeat_semantics": "same exact calibration seeds repeated independently",
+        "policy": REFERENCE_POLICY, "policy_id": "D0_production_deterministic",
+        "evaluation_policies": [], "control_policies": [REFERENCE_POLICY],
+        "include_controls": True}
+
+
+def _validate_d0_calibration_case_table(scenario_id, episodes, master_seed, cases):
+    calibration_seeds = {seed for case in cases for seed in case["seeds"]}
+    if any(seed % 4 != 3 for seed in calibration_seeds):
+        raise ValueError("calibration seed partition is not isolated")
+    for split in ("train", "validation", "test"):
+        other = {seed for case in protocol_cases(scenario_id, split,
+            episodes=episodes, master_seed=master_seed) for seed in case.seeds}
+        if calibration_seeds & other:
+            raise ValueError(f"calibration seeds overlap the {split} partition")
+
+
+def _calibration_work_units(case_table, repetitions):
+    return [{"repetition": repetition, **{key: case[key] for key in (
+        "category", "layout_id", "defender_family", "start_condition",
+        "sensor_profile")}, "seed": seed}
+        for repetition in range(repetitions) for case in case_table
+        for seed in case["seeds"]]
+
+
+def _unit_key(unit) -> str:
+    return _canonical_sha256(unit)
+
+
+def _normalized_calibration_runtime(runtime_device):
+    if not isinstance(runtime_device, dict):
+        raise ValueError("calibration runtime identity is missing")
+    device = runtime_device.get("device")
+    if (not isinstance(device, str) or not device.startswith("cuda:")
+            or not device[5:].isdigit()):
+        raise ValueError("calibration runtime device must be an indexed CUDA/HIP device")
+    normalized = {key: value for key, value in runtime_device.items() if key != "device"}
+    normalized["device_model"] = runtime_device.get("device_name")
+    if (runtime_device.get("backend") not in ("cuda", "hip")
+            or not isinstance(normalized["device_model"], str)
+            or not normalized["device_model"].strip()):
+        raise ValueError("calibration runtime backend/device model is invalid")
+    return normalized
+
+
+def _d0_calibration_shard_manifests(*, scenario_id, episodes, repetitions,
+                                    master_seed, shard_count, device):
+    if type(repetitions) is not int or repetitions < 2:
+        raise ValueError("D0 calibration requires at least two repetitions")
+    if type(episodes) is not int or episodes < MIN_EPISODES:
+        raise ValueError(f"D0 calibration requires at least {MIN_EPISODES} episodes per stratum")
+    if type(master_seed) is not int or master_seed < 0:
+        raise ValueError("calibration master seed must be a nonnegative integer")
+    if type(shard_count) is not int or shard_count < 1:
+        raise ValueError("calibration shard count must be a positive integer")
+    runtime = _require_calibration_gpu(device)
+    cases = _calibration_case_table(scenario_id, episodes, repetitions, master_seed)
+    config = _calibration_shard_config(scenario_id, episodes, repetitions, master_seed)
+    _validate_d0_calibration_case_table(scenario_id, episodes, master_seed, cases)
+    protocol_identity = _canonical_sha256({"protocol_version": D0_CALIBRATION_VERSION,
+        "config": config, "case_table": cases})
+    source_identity = _calibration_source_identity_sha256()
+    units = _calibration_work_units(cases, repetitions)
+    if shard_count > len(units):
+        raise ValueError("calibration shard count cannot exceed the number of work units")
+    buckets = [[] for _ in range(shard_count)]
+    # Stable hash ranking plus round-robin assignment gives deterministic,
+    # disjoint, near-balanced shards without Python's randomized hash().
+    ranked_units = sorted(units, key=lambda unit: _unit_key({
+        "protocol": protocol_identity, "unit": unit}))
+    for rank, unit in enumerate(ranked_units):
+        buckets[rank % shard_count].append(unit)
+    common = {"schema_version": 1,
+        "artifact_type": D0_CALIBRATION_SHARD_MANIFEST,
+        "protocol_version": D0_CALIBRATION_VERSION,
+        "config": config, "case_table": cases,
+        "protocol_identity_sha256": protocol_identity,
+        "source_identity_sha256": source_identity,
+        "runtime_device": runtime,
+        "normalized_runtime_identity": _normalized_calibration_runtime(runtime),
+        "shard_count": shard_count,
+        "work_unit_count": len(units)}
+    manifests = []
+    for shard_index, assigned in enumerate(buckets):
+        body = {**common, "shard_index": shard_index,
+            "work_units": assigned}
+        body["manifest_id"] = _canonical_sha256(body)
+        manifests.append(body)
+    return manifests
+
+
+def _validate_d0_shard_manifest(manifest):
+    if (not isinstance(manifest, dict) or manifest.get("schema_version") != 1
+            or manifest.get("artifact_type") != D0_CALIBRATION_SHARD_MANIFEST
+            or manifest.get("protocol_version") != D0_CALIBRATION_VERSION):
+        raise ValueError("unsupported D0 calibration shard manifest")
+    body = {key: value for key, value in manifest.items() if key != "manifest_id"}
+    if manifest.get("manifest_id") != _canonical_sha256(body):
+        raise ValueError("D0 calibration shard manifest digest is invalid")
+    config, cases = manifest.get("config"), manifest.get("case_table")
+    if not isinstance(config, dict) or config.get("split") != "calibration":
+        raise ValueError("D0 calibration shard config is invalid")
+    expected_config = _calibration_shard_config(config.get("scenario_id"),
+        config.get("episodes_per_category_stratum"), config.get("repetitions"),
+        config.get("master_seed"))
+    if config != expected_config:
+        raise ValueError("D0 calibration shard settings differ from the frozen command contract")
+    expected_cases = _calibration_case_table(config.get("scenario_id"),
+        config.get("episodes_per_category_stratum"), config.get("repetitions"),
+        config.get("master_seed"))
+    if cases != expected_cases:
+        raise ValueError("D0 calibration shard case table differs from frozen protocol")
+    _validate_d0_calibration_case_table(config["scenario_id"],
+        config["episodes_per_category_stratum"], config["master_seed"], cases)
+    expected_protocol_identity = _canonical_sha256({
+        "protocol_version": D0_CALIBRATION_VERSION, "config": config,
+        "case_table": expected_cases})
+    if manifest.get("protocol_identity_sha256") != expected_protocol_identity:
+        raise ValueError("D0 calibration shard protocol identity is invalid")
+    if (type(manifest.get("shard_count")) is not int or manifest["shard_count"] < 1
+            or type(manifest.get("shard_index")) is not int
+            or not 0 <= manifest["shard_index"] < manifest["shard_count"]):
+        raise ValueError("D0 calibration shard index/count is invalid")
+    current_units = _calibration_work_units(expected_cases, config["repetitions"])
+    if manifest["shard_count"] > len(current_units):
+        raise ValueError("calibration shard count exceeds the work unit count")
+    all_buckets = [[] for _ in range(manifest["shard_count"])]
+    ranked_units = sorted(current_units, key=lambda unit: _unit_key({
+        "protocol": expected_protocol_identity, "unit": unit}))
+    for rank, unit in enumerate(ranked_units):
+        all_buckets[rank % manifest["shard_count"]].append(unit)
+    if (manifest.get("work_unit_count") != len(current_units)
+            or manifest.get("work_units") != all_buckets[manifest["shard_index"]]):
+        raise ValueError("D0 calibration shard assignment is invalid")
+    runtime = manifest.get("runtime_device")
+    if manifest.get("normalized_runtime_identity") != _normalized_calibration_runtime(runtime):
+        raise ValueError("D0 calibration shard normalized runtime identity is invalid")
+    for key in ("source_identity_sha256",):
+        digest = manifest.get(key)
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("D0 calibration shard source identity is invalid")
+    return manifest
+
+
+def _validate_d0_shard_entries(artifact, manifest, *, require_complete):
+    expected = {_unit_key(unit): unit for unit in manifest["work_units"]}
+    found = {}
+    for entry in artifact.get("entries", []):
+        if not isinstance(entry, dict):
+            raise ValueError("D0 calibration shard entry is malformed")
+        unit_key = entry.get("work_unit_sha256")
+        unit = expected.get(unit_key)
+        row = entry.get("record")
+        if unit is None or unit_key in found or not isinstance(row, dict):
+            raise ValueError("D0 calibration shard has unexpected or duplicate work unit")
+        if any(row.get(field) != value for field, value in unit.items()):
+            raise ValueError("D0 calibration shard record differs from its assigned work unit")
+        if (row.get("policy") != REFERENCE_POLICY
+                or row.get("split") != "calibration"
+                or row.get("policy_id") != "D0_production_deterministic"
+                or row.get("checkpoint_sha256") is not None
+                or row.get("scenario_id") != manifest["config"]["scenario_id"]
+                or row.get("source_identity_sha256") != manifest["source_identity_sha256"]
+                or row.get("calibration_runtime_device") != manifest["runtime_device"]):
+            raise ValueError("D0 calibration shard record provenance is invalid")
+        metrics = row.get("metrics")
+        if (not isinstance(metrics, dict)
+                or type(metrics.get("useful_throughput")) not in (int, float)
+                or not math.isfinite(metrics["useful_throughput"])
+                or metrics["useful_throughput"] < 0
+                or {key for key in metrics if isinstance(key, str) and key.startswith("safety_")}
+                    != SAFETY_METRIC_NAMES
+                or any(type(metrics.get(name)) not in (int, float)
+                    or not math.isfinite(metrics[name]) or not 0 <= metrics[name] <= 1
+                    for name in SAFETY_METRIC_NAMES)):
+            raise ValueError("D0 calibration shard row metrics are invalid")
+        found[unit_key] = entry
+    if require_complete and set(found) != set(expected):
+        raise ValueError("D0 calibration shard record coverage is incomplete")
+    return [found[_unit_key(unit)] for unit in manifest["work_units"] if _unit_key(unit) in found]
+
+
+def _validate_d0_shard_artifact(artifact, manifest):
+    if (not isinstance(artifact, dict) or artifact.get("schema_version") != 1
+            or artifact.get("artifact_type") != D0_CALIBRATION_SHARD_ARTIFACT
+            or artifact.get("manifest_id") != manifest["manifest_id"]
+            or artifact.get("manifest") != manifest):
+        raise ValueError("D0 calibration shard artifact does not match its manifest")
+    unsigned = {key: value for key, value in artifact.items() if key != "artifact_sha256"}
+    if artifact.get("artifact_sha256") != _canonical_sha256(unsigned):
+        raise ValueError("D0 calibration shard artifact digest is invalid")
+    entries = _validate_d0_shard_entries(artifact, manifest, require_complete=True)
+    if (not isinstance(artifact.get("policy_manifest"), dict)
+            or artifact.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or artifact.get("safety_metrics_source_identity_sha256") != manifest["source_identity_sha256"]):
+        raise ValueError("D0 calibration shard policy/safety provenance is invalid")
+    return entries
+
+
+def _d0_calibration_shard_artifact(manifest, entries, policy_manifest):
+    artifact = {"schema_version": 1,
+        "artifact_type": D0_CALIBRATION_SHARD_ARTIFACT,
+        "manifest_id": manifest["manifest_id"], "manifest": manifest,
+        "policy_manifest": policy_manifest,
+        "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": manifest["source_identity_sha256"],
+        "entries": entries}
+    artifact["artifact_sha256"] = _canonical_sha256(artifact)
+    return artifact
+
+
+def run_d0_calibration_shard(manifest, *, device: str, output: str | Path) -> dict:
+    """Run or resume one immutable D0 calibration shard artifact."""
+    _validate_d0_shard_manifest(manifest)
+    runtime = _require_calibration_gpu(device)
+    if runtime != manifest["runtime_device"]:
+        raise ValueError("runtime device identity differs from D0 calibration shard manifest")
+    if _calibration_source_identity_sha256() != manifest["source_identity_sha256"]:
+        raise ValueError("source identity differs from D0 calibration shard manifest")
+    destination = Path(output)
+    if destination.is_file():
+        completed = _load_json(destination)
+        _validate_d0_shard_artifact(completed, manifest)
+        return completed
+    partial_path = destination.with_suffix(destination.suffix + ".partial")
+    entries = []
+    policy_manifest = None
+    if partial_path.is_file():
+        partial = _load_json(partial_path)
+        if (partial.get("schema_version") != 1
+                or partial.get("artifact_type") != "meco-d0-calibration-shard-progress-v1"
+                or partial.get("manifest") != manifest
+                or partial.get("manifest_id") != manifest["manifest_id"]
+                or partial.get("runtime_device") != runtime
+                or partial.get("source_identity_sha256") != manifest["source_identity_sha256"]):
+            raise ValueError("D0 calibration resume state does not match its immutable manifest")
+        partial_unsigned = {key: value for key, value in partial.items() if key != "progress_sha256"}
+        if partial.get("progress_sha256") != _canonical_sha256(partial_unsigned):
+            raise ValueError("D0 calibration resume state digest is invalid")
+        entries = _validate_d0_shard_entries(partial, manifest, require_complete=False)
+        policy_manifest = partial.get("policy_manifest")
+        if entries and not isinstance(policy_manifest, dict):
+            raise ValueError("D0 calibration resume state is missing its policy manifest")
+    completed_units = {entry["work_unit_sha256"] for entry in entries}
+    config = manifest["config"]
+    cases_by_key = {(case["category"], case["layout_id"], case["defender_family"],
+        case["start_condition"], case["sensor_profile"]): case
+        for case in manifest["case_table"]}
+    # The checkpoint boundary is one case/repetition group. An interruption
+    # during a group leaves that group absent and safely rerunnable.
+    groups = {}
+    for unit in manifest["work_units"]:
+        key = (unit["repetition"], unit["category"], unit["layout_id"],
+            unit["defender_family"], unit["start_condition"], unit["sensor_profile"])
+        groups.setdefault(key, []).append(unit)
+    from .meco_track_training import evaluate_meco
+    for group_key, units in groups.items():
+        missing = [unit for unit in units if _unit_key(unit) not in completed_units]
+        if not missing:
+            continue
+        repetition, category, layout_id, defender_family, start_condition, sensor_profile = group_key
+        result = evaluate_meco({}, scenario_id=config["scenario_id"],
+            categories=(category,), episodes=len(missing),
+            master_seed=config["master_seed"],
+            episode_seeds=tuple(unit["seed"] for unit in missing),
+            device=device, split="calibration", evaluation_policies=(),
+            control_policies=(REFERENCE_POLICY,), include_controls=True,
+            qualification_case={"layout_id": layout_id,
+                "defender_family": defender_family,
+                "start_condition": start_condition,
+                "sensor_profile": sensor_profile})
+        if (result.get("source_identity_sha256") != manifest["source_identity_sha256"]
+                or result.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                or result.get("safety_metrics_source_identity_sha256") != manifest["source_identity_sha256"]):
+            raise ValueError("D0 calibration shard evaluator provenance differs from its manifest")
+        current_policy_manifest = result.get("policy_manifest")
+        if (not isinstance(current_policy_manifest, dict)
+                or current_policy_manifest.get(REFERENCE_POLICY, {}).get("policy_id")
+                    != config["policy_id"]):
+            raise ValueError("D0 calibration shard did not evaluate the production deterministic controller")
+        if policy_manifest is not None and policy_manifest != current_policy_manifest:
+            raise ValueError("D0 policy manifest changed while resuming calibration shard")
+        policy_manifest = current_policy_manifest
+        rows_by_seed = {}
+        for row in result.get("records", []):
+            if row.get("policy") != REFERENCE_POLICY or row.get("seed") in rows_by_seed:
+                raise ValueError("D0 calibration shard evaluator returned unexpected/duplicate records")
+            rows_by_seed[row["seed"]] = row
+        if set(rows_by_seed) != {unit["seed"] for unit in missing}:
+            raise ValueError("D0 calibration shard evaluator returned incomplete seed coverage")
+        for unit in missing:
+            record = {"repetition": repetition, **rows_by_seed[unit["seed"]],
+                "calibration_runtime_device": runtime}
+            entries.append({"work_unit_sha256": _unit_key(unit), "record": record})
+        progress = {"schema_version": 1,
+            "artifact_type": "meco-d0-calibration-shard-progress-v1",
+            "manifest_id": manifest["manifest_id"], "manifest": manifest,
+            "runtime_device": runtime,
+            "source_identity_sha256": manifest["source_identity_sha256"],
+            "policy_manifest": policy_manifest,
+            "entries": sorted(entries, key=lambda entry: entry["work_unit_sha256"])}
+        progress["progress_sha256"] = _canonical_sha256(progress)
+        _atomic_json(partial_path, progress)
+        completed_units.update(entry["work_unit_sha256"] for entry in entries)
+    artifact = _d0_calibration_shard_artifact(manifest, entries, policy_manifest)
+    _validate_d0_shard_artifact(artifact, manifest)
+    write_immutable_report(destination, artifact)
+    partial_path.unlink(missing_ok=True)
+    return artifact
+
+
+def _d0_calibration_summary(cases, repetitions, records, scenario_id):
+    summaries = {}
+    for case in cases:
+        key = (case["category"], case["layout_id"], case["defender_family"],
+               case["start_condition"], case["sensor_profile"])
+        by_seed = {}
+        for row in records:
+            if (row["category"], row["layout_id"], row["defender_family"],
+                row["start_condition"], row["sensor_profile"]) == key:
+                by_seed.setdefault(row["seed"], []).append(
+                    float(row["metrics"]["useful_throughput"]))
+        expected = set(case["seeds"])
+        if set(by_seed) != expected or any(len(values) != repetitions for values in by_seed.values()):
+            raise ValueError("merged calibration report has incomplete repeated seed coverage")
+        seed_means = [sum(by_seed[seed]) / repetitions for seed in case["seeds"]]
+        repeat_variances = [_variance(by_seed[seed]) for seed in case["seeds"]]
+        summaries["/".join(key)] = {"category": case["category"],
+            "layout_id": case["layout_id"], "defender_family": case["defender_family"],
+            "start_condition": case["start_condition"], "sensor_profile": case["sensor_profile"],
+            "seed_count": len(case["seeds"]), "repetition_count": repetitions,
+            "mean_useful_throughput": sum(seed_means) / len(seed_means),
+            "between_seed_variance": _variance(seed_means),
+            "mean_within_seed_repeat_variance": sum(repeat_variances) / len(repeat_variances),
+            "seed_digest": hashlib.sha256(json.dumps(list(case["seeds"]),
+                separators=(",", ":")).encode()).hexdigest()}
+    return summaries
+
+
+def _merged_d0_calibration_report(manifests, artifacts):
+    first = manifests[0]
+    count = first["shard_count"]
+    if len(manifests) != count or len(artifacts) != count:
+        raise ValueError("D0 calibration merge requires every shard exactly once")
+    by_index = {}
+    for manifest, artifact in zip(manifests, artifacts):
+        _validate_d0_shard_manifest(manifest)
+        if manifest["manifest_id"] in by_index.values():
+            raise ValueError("D0 calibration merge contains a duplicate manifest")
+        if manifest["shard_count"] != count:
+            raise ValueError("D0 calibration merge mixes shard counts")
+        index = manifest["shard_index"]
+        if index in by_index:
+            raise ValueError("D0 calibration merge contains a duplicate shard index")
+        by_index[index] = manifest["manifest_id"]
+        _validate_d0_shard_artifact(artifact, manifest)
+    if set(by_index) != set(range(count)):
+        raise ValueError("D0 calibration merge is missing a shard index")
+    common_fields = ("protocol_version", "config", "case_table", "protocol_identity_sha256",
+        "source_identity_sha256", "normalized_runtime_identity", "shard_count", "work_unit_count")
+    base = manifests[0]
+    for manifest in manifests[1:]:
+        if any(manifest.get(key) != base.get(key) for key in common_fields):
+            raise ValueError("D0 calibration shard manifests disagree on protocol/source/runtime identity")
+    if _calibration_source_identity_sha256() != base["source_identity_sha256"]:
+        raise ValueError("calibration source identity changed since shard planning")
+    runtime_identity = base["normalized_runtime_identity"]
+    if (runtime_identity.get("backend") not in ("cuda", "hip")
+            or runtime_identity.get("device_model") != base["runtime_device"].get("device_name")):
+        raise ValueError("calibration shard runtime identity is inconsistent")
+    policy_manifests = [artifact.get("policy_manifest") for artifact in artifacts]
+    if any(value != policy_manifests[0] for value in policy_manifests[1:]):
+        raise ValueError("D0 calibration shards disagree on controller policy manifest")
+    entries = []
+    for manifest, artifact in zip(manifests, artifacts):
+        entries.extend(_validate_d0_shard_artifact(artifact, manifest))
+    expected_units = _calibration_work_units(base["case_table"], base["config"]["repetitions"])
+    expected_keys = {_unit_key(unit) for unit in expected_units}
+    actual_keys = [entry["work_unit_sha256"] for entry in entries]
+    if set(actual_keys) != expected_keys or len(actual_keys) != len(expected_keys):
+        raise ValueError("D0 calibration merge has missing, duplicate, or unexpected work units")
+    records = [dict(entry["record"]) for entry in sorted(entries,
+        key=lambda entry: (entry["record"]["repetition"], entry["record"]["category"],
+            entry["record"]["layout_id"], entry["record"]["defender_family"],
+            entry["record"]["start_condition"], entry["record"]["sensor_profile"],
+            entry["record"]["seed"]))]
+    config = base["config"]
+    case_table = base["case_table"]
+    summaries = _d0_calibration_summary(case_table, config["repetitions"], records,
+        config["scenario_id"])
+    for record in records:
+        # The evaluator's D0 identity is stable; the shard artifact binds that
+        # policy ID even though D0 has no checkpoint file.
+        if record.get("policy_id") != config["policy_id"]:
+            raise ValueError("D0 calibration shard policy identity changed")
+    # Reconstruct the exact schema-v2 case identities consumed by protocol intake.
+    body = {"schema_version": 2, "calibration": True,
+        "protocol_version": D0_CALIBRATION_VERSION, "scenario_id": config["scenario_id"],
+        "master_seed": config["master_seed"], "split": "calibration",
+        "seed_partition_code": 3,
+        "episodes_per_category_stratum": config["episodes_per_category_stratum"],
+        "repetitions": config["repetitions"],
+        "repeat_semantics": config["repeat_semantics"],
+        "case_ids": [{key: case[key] for key in ("category", "layout_id", "defender_family",
+            "start_condition", "sensor_profile")} for case in case_table],
+        "policy_manifest": policy_manifests[0],
+        "source_identity_sha256": base["source_identity_sha256"],
+        "runtime_device": dict(base["runtime_device"]),
+        "normalized_runtime_identity": runtime_identity,
+        "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": base["source_identity_sha256"],
+        "summary": summaries, "records": records,
+        "generated_utc": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).isoformat()}
+    body["calibration_id"] = _canonical_sha256(body)
+    return body
 
 
 def derive_useful_gain_margins(reports: dict, target: str, declaration: dict) -> tuple[dict, dict]:
@@ -1235,6 +1689,16 @@ def _load_json(path):
     return value
 
 
+def _write_immutable_or_verify(path, payload):
+    destination = Path(path)
+    if destination.exists():
+        existing = _load_json(destination)
+        if existing != payload:
+            raise ValueError(f"immutable artifact already exists with different content: {destination}")
+        return _canonical_sha256(payload)
+    return write_immutable_report(destination, payload)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MECO frozen qualification and promotion")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1257,6 +1721,24 @@ def main(argv=None):
     calibrate.add_argument("--device", required=True,
         help="explicit GPU device (for example cuda:0); CPU calibration is unsupported")
     calibrate.add_argument("--output", required=True)
+    plan_shards = commands.add_parser("plan-d0-calibration-shards")
+    plan_shards.add_argument("--scenario", required=True)
+    plan_shards.add_argument("--episodes", type=int, default=MIN_EPISODES)
+    plan_shards.add_argument("--repetitions", type=int, default=3)
+    plan_shards.add_argument("--master-seed", type=int, default=20261024)
+    plan_shards.add_argument("--shard-count", type=int, required=True)
+    plan_shards.add_argument("--device", required=True,
+        help="explicit GPU device used to bind manifests, for example cuda:0")
+    plan_shards.add_argument("--manifest-dir", required=True)
+    run_shard = commands.add_parser("calibrate-d0-shard")
+    run_shard.add_argument("--manifest", required=True)
+    run_shard.add_argument("--device", required=True,
+        help="the exact indexed GPU device bound by the manifest")
+    run_shard.add_argument("--output", required=True)
+    merge_shards = commands.add_parser("merge-d0-calibration-shards")
+    merge_shards.add_argument("--shard", action="append", required=True,
+        help="completed shard artifact; provide every shard exactly once")
+    merge_shards.add_argument("--output", required=True)
     bundle = commands.add_parser("bundle-calibrations")
     bundle.add_argument("--report", action="append", required=True,
         help="D0 calibration report path; repeat once for target and each prerequisite")
@@ -1300,6 +1782,40 @@ def main(argv=None):
         report_digest = write_immutable_report(args.output, report)
         print(json.dumps({"calibration_id": report["calibration_id"],
             "report_sha256": report_digest, "output": args.output}, indent=2))
+        return
+    if args.command == "plan-d0-calibration-shards":
+        manifests = _d0_calibration_shard_manifests(
+            scenario_id=args.scenario, episodes=args.episodes,
+            repetitions=args.repetitions, master_seed=args.master_seed,
+            shard_count=args.shard_count, device=args.device)
+        manifest_dir = Path(args.manifest_dir)
+        for manifest in manifests:
+            name = f"d0-calibration-{args.scenario}-shard-{manifest['shard_index']:04d}-of-{args.shard_count:04d}.json"
+            _write_immutable_or_verify(manifest_dir / name, manifest)
+        print(json.dumps({"manifest_count": len(manifests),
+            "work_unit_count": manifests[0]["work_unit_count"],
+            "manifest_ids": [manifest["manifest_id"] for manifest in manifests],
+            "manifest_dir": str(manifest_dir)}, indent=2))
+        return
+    if args.command == "calibrate-d0-shard":
+        manifest = _load_json(args.manifest)
+        artifact = run_d0_calibration_shard(manifest, device=args.device,
+            output=args.output)
+        print(json.dumps({"manifest_id": artifact["manifest_id"],
+            "artifact_sha256": artifact["artifact_sha256"],
+            "entry_count": len(artifact["entries"]), "output": args.output}, indent=2))
+        return
+    if args.command == "merge-d0-calibration-shards":
+        artifacts = [_load_json(path) for path in args.shard]
+        manifests = [artifact.get("manifest") for artifact in artifacts]
+        if any(manifest is None for manifest in manifests):
+            raise ValueError("D0 calibration shard artifact is missing its manifest")
+        report = _merged_d0_calibration_report(manifests, artifacts)
+        report_digest = write_immutable_report(args.output, report)
+        print(json.dumps({"calibration_id": report["calibration_id"],
+            "report_sha256": report_digest,
+            "scenario_id": report["scenario_id"],
+            "output": args.output}, indent=2))
         return
     if args.command == "bundle-calibrations":
         reports = [_load_json(path) for path in args.report]
