@@ -74,6 +74,10 @@ robot arbitration. Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
 grid endpoints; ferry support requires carried fuel and the current ferry
 endpoint; defense support is restricted to the current intercept/post endpoint.
+Action 7 remains a native no-op hold. The Plan A adapter permits it to traverse
+only when paired with the selected frozen planner goal; the existing route,
+obstacle, and action-safety checks remain in force. Dumper drive pairs are
+masked while carrying fuel because native action 7 redirects that role to ferry.
 If the native action executor remasks the sampled action during a macro, the
 transition is recorded as an execution failure and excluded from the PPO actor
 loss while remaining available to the critic. Dynamic route mismatch beyond

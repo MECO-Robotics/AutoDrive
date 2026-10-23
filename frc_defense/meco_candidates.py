@@ -42,6 +42,7 @@ CANDIDATE_BOUNDARY = {
     "plan_a_support_order": "legal_graph_node_ascending_then_behavior_0_to_4_then_descriptor_ascending_v2",
     "plan_a_support_membership": "one model-independent shortest-path pass over legal SE(2) graph plus vectorized behavior-specific endpoint/target constraints; independent of learned P",
     "plan_a_intake_descriptor": "intake pairs retain exact sensed target slot and require a bearing-aligned capture-geometry envelope",
+    "plan_a_drive_semantics": "action 7 is a no-op hold natively; the Plan A adapter permits traversal only when the sampled action 7 is paired with its explicit validated planner goal, retaining native route and obstacle guards; dumper drive is masked while carrying fuel because native action 7 redirects that role to ferry",
     "plan_a_goal_constraints": "score pairs require a safe score-grid endpoint; ferry pairs require carried fuel and current ferry endpoint; defense pairs require the current intercept/post endpoint",
     "plan_a_ppo": "sample and recompute log probability over the exact frozen node-major support mask and order",
     "plan_a_route_metadata": "frozen shortest-path parent tree and edge distances; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks",

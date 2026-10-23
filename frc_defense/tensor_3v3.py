@@ -623,7 +623,8 @@ class TensorThreeVsThreeEnv(
 
     def step(self, actions, active_mask=None, *, capture_observation=True,
              capture_info=True, _active_count=None, _return_info=None,
-             planner_goal_override=None, planner_goal_override_action=None):
+             planner_goal_override=None, planner_goal_override_action=None,
+             planner_goal_override_traversal=False):
         full_batch=active_mask is None
         if full_batch and self._full_batch_step_scalar is not None:
             self._full_batch_step_scalar+=1
@@ -642,6 +643,7 @@ class TensorThreeVsThreeEnv(
         self._prepare_raster_cursor(active)
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
+        planner_goal_override_mask = torch.zeros_like(action, dtype=torch.bool)
         if planner_goal_override is not None:
             if self.n != 1:
                 raise ValueError("planner goal overrides currently require a single-world environment")
@@ -654,12 +656,16 @@ class TensorThreeVsThreeEnv(
             expected_action = planner_goal_override_action
             if not 0 <= expected_action < 8:
                 raise ValueError("planner goal override action must be in [0, 7]")
+            if planner_goal_override_traversal and expected_action != 7:
+                raise ValueError("planner goal traversal is only valid for action 7")
             if not bool(torch.isfinite(goal).all()) or not (
                     0. <= float(goal[0]) < float(self.sim.field_length) and
                     0. <= float(goal[1]) < float(self.sim.field_width)):
                 raise ValueError("planner_goal_override must be a finite in-field XY endpoint")
             targets = targets.clone()
-            targets[:, 3] = torch.where((action[:, 3] == expected_action)[:, None],
+            planner_goal_override_mask[:, 3] = (
+                (action[:, 3] == expected_action) & bool(planner_goal_override_traversal))
+            targets[:, 3] = torch.where(planner_goal_override_mask[:, 3, None],
                                          goal[None], targets[:, 3])
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
@@ -944,7 +950,12 @@ class TensorThreeVsThreeEnv(
         stop_radius = torch.where(deterministic_scorer, .02,
                                   torch.where(deterministic_picker, 0., .3))
         command=torch.where(distance<=stop_radius[...,None],torch.zeros_like(command),command)
-        command=torch.where((action==7)[...,None],torch.zeros_like(command),command)
+        # Action 7 is native hold when no explicit strategic goal was supplied.
+        # The MECO planner adapter may pair action 7 with a validated target to
+        # traverse the existing guarded AD* route, without changing ordinary
+        # native hold semantics.
+        hold_action7=(action==7)&~planner_goal_override_mask
+        command=torch.where(hold_action7[...,None],torch.zeros_like(command),command)
         trench_route_length=self.planner.last_lengths.reshape(self.n,6)
         trench_route_goal=self.planner.last_goal.reshape(self.n,6,2)
         trench_forward=torch.stack((trench_heading.cos(),trench_heading.sin()),-1)

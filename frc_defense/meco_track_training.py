@@ -386,7 +386,8 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
-def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None):
+def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
+                    allow_action7_traversal=False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -395,7 +396,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None):
     for _ in range(action_ticks):
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
-            planner_goal_override_action=action_index if goal_xy is not None else None)
+            planner_goal_override_action=action_index if goal_xy is not None else None,
+            planner_goal_override_traversal=allow_action7_traversal)
         executed_actions.append(int(env.last_actions[0, 3].item()))
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
@@ -680,7 +682,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                float(selected_row[cols["goal_y_m"]]))
                 reward, ended, timeout, executed_trace = _run_macro_step(
-                    env, action, config.action_ticks, goal_xy)
+                    env, action, config.action_ticks, goal_xy,
+                    allow_action7_traversal=("support" in prepared and action == 7))
                 update_heartbeat()
                 rows.append({"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -1092,7 +1095,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             actions_count[action] += 1
                             selected_action_trace.append(action)
                             _, ended, timeout, actual_trace = _run_macro_step(
-                                env, action, action_ticks, goal_xy)
+                                env, action, action_ticks, goal_xy,
+                                allow_action7_traversal=("support" in prepared and action == 7))
                             if (prepared is not None and prepared.get("fallback_used", False)) or any(item != action for item in actual_trace):
                                 execution_failures.append({
                                     "selected_action": action,

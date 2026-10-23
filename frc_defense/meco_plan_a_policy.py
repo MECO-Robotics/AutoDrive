@@ -72,6 +72,7 @@ def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
     """Recompute the integrity digest for frozen PPO support/path metadata."""
     digest = hashlib.sha256(SUPPORT_ORDER.encode())
     digest.update(support.snapshot_id.encode())
+    digest.update(f"root_node={support.root_node};fallback_pair={support.fallback_pair}".encode())
     for name, tensor in _plan_a_support_tensors(support, graph).items():
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
@@ -141,7 +142,8 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     # capture neighborhood. Score rows bind to a safe score-grid endpoint;
     # ferry rows require carried fuel and bind to the current ferry endpoint;
     # defense rows bind to an observed opponent endpoint. Drive can use any
-    # reachable legal node because action 7 has no goal-specific mechanism.
+    # reachable legal node. In Plan A's adapter, action 7 becomes a traversal
+    # command only when paired with this explicit frozen planner goal.
     target_indices, target_available, _ = env._candidates()
     fuel_ids = target_indices[0, 3]
     fuel_valid = target_available[0, 3]
@@ -149,6 +151,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     score_points = env._score_grid_points[0, 3]
     score_clear = env._score_grid_clear[0, 3]
     possession = int((env.piece_owner[0] == 3).sum().item())
+    dumper_with_fuel = bool(env._dumper_mask[3]) and possession > 0
     ferry_target = env._ferry_targets_for_current_motion()[0, 3]
     opponent_valid = bool(env.opponent_valid[0, 3])
     robot_xy = env.sim.pose[0, 3, :2]
@@ -213,7 +216,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
                                   device=device, dtype=torch.long).repeat(n)
     reachable_rows = reachable[:, None].expand(-1, 8)
     valid_matrix = torch.stack((
-        reachable & action_mask[7],
+        reachable & action_mask[7] & (not dumper_with_fuel),
         intake_mask[:, 0], intake_mask[:, 1], intake_mask[:, 2], intake_mask[:, 3],
         score_mask, ferry_mask, defense_mask), -1)
     valid = valid_matrix.reshape(-1) & reachable_rows.reshape(-1)
@@ -282,6 +285,6 @@ def graph_path_integral(node_cost: torch.Tensor, support: PlanAActionSupport):
     total = node_cost * support.parent_edge_m
     # Double the covered ancestor span each round. Keep the jump table and
     # aggregate recurrence aligned so shared path prefixes are counted once.
-    for parent in support.ancestor_jumps[:-1]:
+    for parent in support.ancestor_jumps:
         total = total + total.index_select(0, parent)
     return total
