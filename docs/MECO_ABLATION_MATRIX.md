@@ -18,7 +18,7 @@ same-category, same-seed, same-stratum comparisons.
 
 | Condition | Paired comparison or measurement |
 | --- | --- |
-| Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; P=0 versions for A1/A2/A3. C1/D1 both use CV here. |
+| Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; A1/D0, A2/D0, A3/D0, C1/D0, C2/D0; P=0 versions for A1/A2/A3. C1/D1 both use CV here. |
 | Default controls, K=16 | D1=current-pose vs D2=bounded-CV prediction |
 | Matched prediction, K=16 | All five learned tracks under current-pose and CV modes |
 | Candidate K sweep | C1/C2 candidate recall at K=8, 16, and 32 against the recorded bounded expanded-goal reference pool |
@@ -35,6 +35,16 @@ The K sweep changes the runtime candidate capacity for every evaluated policy;
 Plan A continues to use its full legal-graph support and does not use K.
 P=0 is an inference-time ablation of the same A checkpoint, not a separately
 trained checkpoint.
+
+Each learned-track/D0 contrast contains paired outcome rows from
+`architecture_matched_cv_k16`, keyed by the exact same category and seed. Rows
+retain each record's policy ID and metrics, with condition, evaluation report,
+qualification, checkpoint bundle, source, and device provenance. Interpret
+these as architecture-condition outcomes: learned tracks use CV, while D0
+retains its production deterministic behavior and is not assigned the learned
+track CV mode. They are not prediction-mode-matched architecture contrasts.
+The matrix harness only assembles and records these comparisons; its output
+does not establish that any track wins or has passed simulation qualification.
 
 Example invocation:
 

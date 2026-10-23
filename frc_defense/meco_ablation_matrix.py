@@ -308,6 +308,80 @@ def _contrast_pair(*, name: str, condition_id: str, report: dict,
         "paired_episode_rows": rows}
 
 
+def _architecture_track_vs_d0(*, track: str, condition_id: str,
+                              report: dict, records: dict,
+                              categories: tuple[str, ...],
+                              seeds: tuple[int, ...]) -> dict:
+    """Build exact architecture-condition pairs; D0 retains its current control."""
+    if track not in MECO_TRACKS:
+        raise ValueError(f"unknown learned track for D0 contrast: {track}")
+    if (report.get("categories") != list(categories) or
+            report.get("seeds") != list(seeds)):
+        raise ValueError("architecture D0 contrast report category/seed coverage differs")
+    expected = {(policy, category, seed)
+                for policy in (track, "D0")
+                for category in categories for seed in seeds}
+    observed = {key for key in records if key[0] in (track, "D0")}
+    if observed != expected:
+        raise ValueError(
+            f"architecture D0 contrast coverage differs for {track}: "
+            f"missing={sorted(expected - observed)}, extra={sorted(observed - expected)}")
+    rows = []
+    for category in categories:
+        for seed in seeds:
+            candidate = records.get((track, category, seed))
+            reference = records.get(("D0", category, seed))
+            if candidate is None or reference is None:
+                raise ValueError(
+                    f"architecture condition {track}/D0 lacks paired records for {category}/{seed}")
+            candidate_metrics = _record_metrics(candidate)
+            reference_metrics = _record_metrics(reference)
+            candidate_policy_id = candidate.get("policy_id")
+            reference_policy_id = reference.get("policy_id")
+            if (not isinstance(candidate_metrics, dict) or
+                    not isinstance(reference_metrics, dict) or
+                    not isinstance(candidate_policy_id, str) or not candidate_policy_id or
+                    not isinstance(reference_policy_id, str) or not reference_policy_id):
+                raise ValueError(
+                    f"architecture D0 contrast lacks policy IDs/metrics for {category}/{seed}")
+            rows.append({"category": category, "seed": seed,
+                "candidate_policy": track, "reference_policy": "D0",
+                "candidate_record_policy_id": candidate_policy_id,
+                "reference_record_policy_id": reference_policy_id,
+                "candidate_metrics": candidate_metrics,
+                "reference_metrics": reference_metrics})
+    prediction = report.get("prediction", {})
+    d0_manifest = report.get("policy_manifest", {}).get("D0", {})
+    candidate_k = report.get("candidate_k", {})
+    if (prediction.get("learned_mode") != "cv" or
+            candidate_k.get("effective") != 16 or
+            d0_manifest.get("policy_id") != "D0_production_deterministic" or
+            d0_manifest.get("prediction_mode") == "cv"):
+        raise ValueError(
+            "architecture D0 contrast report does not prove CV/K=16 learned tracks "
+            "and production deterministic D0 semantics")
+    return {"contrast": f"{track}_vs_D0_architecture_condition",
+        "comparison_scope": "architecture_condition_outcomes",
+        "candidate_policy": track, "reference_policy": "D0",
+        "paired": True, "condition_id": condition_id,
+        "condition_name": "architecture_matched_cv_k16",
+        "condition_semantics": {
+            "learned_track_prediction_mode": prediction.get("learned_mode", "cv"),
+            "d0_prediction_mode": d0_manifest.get("prediction_mode"),
+            "d0_policy_id": d0_manifest.get("policy_id"),
+            "fairness_caveat": (
+                "Architecture-condition outcome contrast: learned tracks use CV; "
+                "D0 is the production deterministic controller and is not assigned "
+                "the learned-track CV prediction mode. This is not a "
+                "prediction-mode-matched architecture comparison.")},
+        "report_provenance": {"evaluation_id": report["evaluation_id"],
+            "protocol_id": report["protocol_id"],
+            "source_identity_sha256": report["source_identity_sha256"],
+            "seed_list": list(report["seeds"]),
+            "policy_manifest": report["policy_manifest"]},
+        "paired_episode_rows": rows}
+
+
 def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                categories: tuple[str, ...], seeds: tuple[int, ...],
                device: str, output_dir: str | Path,
@@ -490,6 +564,13 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 report=selected_report["report"],
                 records=selected_report["records"],
                 candidate_policy=candidate, reference_policy=reference))
+    # Architecture-condition outcomes: all five learned tracks against D0 on
+    # exact common category/seed records. D0 keeps its production behavior.
+    for track in MECO_TRACKS:
+        contrasts.append(_architecture_track_vs_d0(
+            track=track, condition_id=architecture["condition_id"],
+            report=architecture["report"], records=architecture["records"],
+            categories=categories, seeds=seeds))
     # Matched forecast mode is an episode-paired cross-condition contrast.
     current = evaluation_reports["matched_prediction_current_k16"]
     cv = architecture
@@ -646,6 +727,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "Paired rows are reported without confidence intervals; use the calibrated qualification gate for promotion.",
             "Candidate recall is relative to the declared bounded route-qualified reference pool, not a simulator-optimality oracle.",
             "P=0 is an inference-time ablation using the same learned A checkpoint.",
+            "A1/A2/A3/C1/C2 versus D0 rows are architecture-condition outcomes paired on exact category/seed; learned tracks use CV while D0 retains its production deterministic behavior, so these are not prediction-mode-matched contrasts.",
             "Fault rows hand off at the first 12-step macro boundary at or after the requested tick.",
             ("Each Phase 4 factor replaces only registered slot-0 pressure behavior and is paired with the no-factor row at the same category and seed; unsupported categories are listed explicitly. Metrics remain diagnostic until held-out evaluation and calibrated gates." if phase4_enabled else
              "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require registered level_1 through level_5 pressure categories; level_0 has no scripted pressure slot.")],
