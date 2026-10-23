@@ -23,6 +23,28 @@ _PHASE4_SENSOR_STATE_FIELDS = (
 
 
 class CurriculumEnv(TensorThreeVsThreeEnv):
+    def _phase4_apply_confidence_cap(self):
+        """Cap only sensed FUEL confidence for the learner robot."""
+        cap = getattr(self, 'phase4_confidence_cap', None)
+        if cap is None:
+            return
+        sensed = self.track_mask[:, 3]
+        confidence = self.track_confidence[:, 3]
+        reduced = sensed & (confidence > float(cap))
+        confidence.copy_(torch.where(sensed, confidence.clamp(max=float(cap)), confidence))
+        metrics = getattr(self, 'phase4_runtime_metrics', None)
+        if metrics is not None:
+            metrics['confidence_cap_refresh_count'] += 1
+            metrics['confidence_cap_sensed_track_count'] = int(sensed.sum().item())
+            metrics['confidence_cap_reduced_track_values'] += int(reduced.sum().item())
+            metrics['confidence_cap_final_mean'] = (
+                float(confidence[sensed].mean().item()) if bool(sensed.any()) else None)
+
+    def _update_perception(self, active, active_count=None):
+        result = super()._update_perception(active, active_count=active_count)
+        self._phase4_apply_confidence_cap()
+        return result
+
     def _phase4_capture_sensor_frame(self, observation=None):
         frame = {name: getattr(self, name).clone()
                  for name in _PHASE4_SENSOR_STATE_FIELDS}
@@ -194,7 +216,15 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     env.phase4_confidence_cap = (phase4_factor['fuel_confidence_cap']
         if phase4_factor and phase4_factor['kind'] == 'independent_low_confidence' else None)
     env.phase4_runtime_metrics = {'delayed_observation_ticks': 0,
-        'feint_reversal_tick': None, 'policy_change_tick': None}
+        'feint_reversal_tick': None, 'policy_change_tick': None,
+        'confidence_cap_requested': env.phase4_confidence_cap,
+        'confidence_cap_applied': None,
+        'confidence_cap_refresh_count': 0,
+        'confidence_cap_sensed_track_count': 0,
+        'confidence_cap_reduced_track_values': 0,
+        'confidence_cap_final_mean': None}
+    if env.phase4_confidence_cap is not None:
+        env.phase4_runtime_metrics['confidence_cap_applied'] = float(env.phase4_confidence_cap)
     env.curriculum = {'scenario_id': scenario_id, 'scenario_version': definition.version,
         'category': category, 'learner_slot': 3, 'seed': int(seed),
         'time_budget_s': definition.time_budget_s, 'pressure': pressure,

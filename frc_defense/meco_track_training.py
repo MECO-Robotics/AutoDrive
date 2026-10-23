@@ -2119,7 +2119,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "fuel_track_confidence_mean": float(
                                     env.track_confidence[0, 3][env.track_mask[0, 3]].mean().item())
                                     if bool(env.track_mask[0, 3].any()) else None,
-                                "confidence_semantics": "cap applied only to track_confidence; positions, velocities, ages, masks, dropout and noise unchanged",
+                                "confidence_semantics": "requested and applied caps are reported separately; refresh count and reduced sensed-track values prove application; final mean is over sensed learner tracks; positions, velocities, ages, masks, dropout and noise are unchanged",
                             } if phase4_factor is not None else None),
                             "phase4_response_metrics": ({name: metrics.get(name)
                                 for name in ("success", "useful_throughput",

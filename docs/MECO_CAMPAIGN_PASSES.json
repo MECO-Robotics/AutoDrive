@@ -235,9 +235,9 @@
         "status": "in_progress",
         "planner_status": "complete",
         "implementation_status": "complete",
-        "review_status": "complete",
+        "review_status": "pending",
         "evaluation_status": "pending",
-        "summary": "Caps only learner FUEL track_confidence at 0.2; preserves track geometry, age, mask, dropout, and noise."
+        "summary": "Caps only sensed learner slot-3 FUEL track_confidence at 0.2 after initial reset perception and each sensor refresh; delayed history captures capped state. Runtime reports requested/applied cap, refreshes, reduced sensed values, sensed count, and final mean. Geometry, velocity, age, mask, dropout, and noise are unchanged; stale and other-robot confidence is untouched. Evaluation and review remain pending."
       },
       {
         "factor_id": "abrupt_opponent_policy_change",
