@@ -190,6 +190,57 @@ def _candidate_replay_digest(table, route_cost, risk_cost):
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _tensor_evidence(tensor):
+    """Return stable identity and runtime metadata for a saved policy tensor."""
+    if not isinstance(tensor, torch.Tensor):
+        return {"present": False}
+    value = tensor.detach().contiguous()
+    digest = hashlib.sha256(value.cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
+    return {"present": True, "sha256": digest, "shape": list(value.shape),
+        "dtype": str(value.dtype), "device": str(value.device)}
+
+
+def _json_number(value):
+    value = float(value)
+    return value if math.isfinite(value) else str(value)
+
+
+def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
+                               *, update_number, output):
+    saved_logprob = row["logprob"].reshape(())
+    replay_scalar = replay_logprob.reshape(())
+    absolute_delta = float((replay_scalar - saved_logprob).abs().detach().cpu())
+    relative_delta = absolute_delta / max(
+        abs(float(saved_logprob.detach().cpu())), 1e-12)
+    rollout_logits = row.get("rollout_logits")
+    replay_logits = replay.get("logits")
+    max_logits_delta = None
+    if (isinstance(rollout_logits, torch.Tensor) and
+            isinstance(replay_logits, torch.Tensor) and
+            rollout_logits.shape == replay_logits.shape):
+        max_logits_delta = float((rollout_logits.detach() -
+            replay_logits.detach()).abs().max().cpu())
+    named_tensors = {"rollout_logits": rollout_logits,
+        "replay_logits": replay_logits, "rollout_logprob": saved_logprob,
+        "replay_logprob": replay_scalar, "chosen_action": row.get("action"),
+        "raster": row.get("raster"), "globals": row.get("globals"),
+        "hidden_before": row.get("hidden_before"),
+        "hidden_next": row.get("hidden_next")}
+    payload = {"schema_version": 1, "track": track,
+        "update": int(update_number), "episode_id": row.get("episode_id"),
+        "absolute_logprob_delta": _json_number(absolute_delta),
+        "relative_logprob_delta": _json_number(relative_delta),
+        "max_logits_delta": (None if max_logits_delta is None else
+                             _json_number(max_logits_delta)),
+        "chosen_action": int(row["action"].reshape(-1)[0].detach().cpu()),
+        "model_training": bool(model.training),
+        "tensors": {name: _tensor_evidence(tensor)
+                    for name, tensor in named_tensors.items()}}
+    path = Path(output) / f"ppo-logprob-replay-failure-{track}-update-{update_number:08d}.json"
+    _atomic_json(path, payload)
+    return path, payload
+
+
 def _episode_id(run_id: str, episode: int) -> str:
     return f"{uuid.uuid4().hex}:{run_id}-episode-{episode:08d}"
 
@@ -808,7 +859,8 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
     return decision
 
 
-def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value):
+def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
+                *, update_number, diagnostic_output):
     rewards = torch.stack([row["reward"] for row in rows])
     dones = torch.tensor([row["done"] for row in rows], device=rewards.device,
                          dtype=rewards.dtype)
@@ -835,7 +887,15 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
-                raise RuntimeError("Plan A rollout log-probability does not replay under frozen support")
+                path, diagnostic = _logprob_replay_diagnostic(track, model, row,
+                    replay, replay_logprob, update_number=update_number,
+                    output=diagnostic_output)
+                raise RuntimeError(
+                    "Plan A rollout log-probability does not replay under frozen support; "
+                    f"abs_delta={diagnostic['absolute_logprob_delta']}, "
+                    f"rel_delta={diagnostic['relative_logprob_delta']}, "
+                    f"max_logits_delta={diagnostic['max_logits_delta']}, "
+                    f"action={diagnostic['chosen_action']}, diagnostics={path}")
         for row in rows:
             if track not in ("C1", "C2") or row.get("candidate_set") is None:
                 continue
@@ -853,7 +913,15 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
-                raise RuntimeError("Plan C rollout log-probability does not replay under frozen candidate table")
+                path, diagnostic = _logprob_replay_diagnostic(track, model, row,
+                    replay, replay_logprob, update_number=update_number,
+                    output=diagnostic_output)
+                raise RuntimeError(
+                    "Plan C rollout log-probability does not replay under frozen candidate table; "
+                    f"abs_delta={diagnostic['absolute_logprob_delta']}, "
+                    f"rel_delta={diagnostic['relative_logprob_delta']}, "
+                    f"max_logits_delta={diagnostic['max_logits_delta']}, "
+                    f"action={diagnostic['chosen_action']}, diagnostics={path}")
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))
@@ -1305,6 +1373,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "selected_target_track_lost": selected_target_lost,
                     "executed_high_level_action": action,
                     "action": torch.tensor([action_index], device=config.device),
+                    "rollout_logits": prepared["decision"]["logits"].detach(),
                     "logprob": prepared["logprob"].detach().reshape(()),
                     "hidden_before": hidden_before,
                     "hidden_next": hidden.detach().clone(), "value": value,
@@ -1382,7 +1451,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             "empty-support bootstrap discarded the rollout to preserve episode boundaries") from exc
                     bootstrap_value = torch.zeros_like(rows[-1]["value"])
             stats = _ppo_update(config.track, model, value_head, optimizer, rows,
-                                config, bootstrap_value)
+                                config, bootstrap_value, update_number=update,
+                                diagnostic_output=output)
             update += 1
             update_heartbeat()
             stats.update(update=update, episode=episode, track=config.track,
