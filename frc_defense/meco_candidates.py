@@ -322,7 +322,7 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     if not valid_collect_actions:
         return []
     fallback_action = valid_collect_actions[0]
-    points, _, sensed = env._perceived_fuel(0)
+    points, _, sensed = env._perceived_fuel(3)
     sensed_ids = torch.nonzero(sensed[0], as_tuple=False).flatten().tolist()
     pose_xy = env.sim.pose[0, 3, :2]
     confidence = env.track_confidence[0, 3]
@@ -432,7 +432,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             source = active_commitment.source_xy_m
             matches = []
             if source is not None:
-                points, _, sensed = env._perceived_fuel(0)
+                points, _, sensed = env._perceived_fuel(3)
                 for track in torch.nonzero(sensed[0], as_tuple=False).flatten().tolist():
                     point = points[track]
                     gap = math.hypot(float(point[0]) - source[0], float(point[1]) - source[1])
