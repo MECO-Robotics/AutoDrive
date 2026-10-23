@@ -392,9 +392,9 @@ class MecoSupervisor:
         try:
             self.evaluator_job = job
             self.evaluator_log = job["output"].with_suffix(".log").open("ab")
-        self.evaluator = subprocess.Popen(command, cwd=ROOT,
-            stdout=self.evaluator_log, stderr=subprocess.STDOUT,
-            start_new_session=True)
+            self.evaluator = subprocess.Popen(command, cwd=ROOT,
+                stdout=self.evaluator_log, stderr=subprocess.STDOUT,
+                start_new_session=True)
         except OSError as exc:
             if self.evaluator_log is not None:
                 self.evaluator_log.close()
