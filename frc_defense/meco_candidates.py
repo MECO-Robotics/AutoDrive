@@ -27,21 +27,23 @@ from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
 CANDIDATE_BOUNDARY = {
-    "version": 7,
+    "version": 8,
     "capacity": [8, 16, 32],
-    "source": "existing simulator action slots",
+    "source": "all currently sensed fuel tracks plus existing simulator action slots",
     "configurable_k": True,
     "k16_k32_supported": True,
     "within_candidate_pool_recall_only": False,
-    "reference_pool": "independent route-qualified oracle over all sensed targets, 18 approach offsets per target, and base behaviors",
-    "recall_limit": "bounded deterministic oracle, not a simulator-optimality oracle",
-    "expanded_goals": "bounded collection approach offsets",
-    "execution": "selected XY endpoint overrides planner goal; action mask/mechanisms remain simulator-owned",
+    "reference_pool": "all route-qualified ordinary rows plus independent 18-offset route-qualified oracle rows for every currently sensed target",
+    "recall_limit": "snapshot-bounded deterministic oracle over currently sensed tracks, not a simulator-optimality oracle",
+    "expanded_goals": "one selectable direct approach per sensed target in stable distance/buffer order, followed by bounded approach offsets; oracle adds 18 offsets per sensed target",
+    "execution": "selected XY endpoint and sensed track identity are preserved in candidate provenance; paired native collect action uses the endpoint override; action mask/mechanisms remain simulator-owned",
+    "target_execution_boundary": "native collector is geometric and may collect any physically contacted eligible fuel; selected sensed target is an intended route goal, not an exclusive pickup constraint",
+    "selectable_order": "legacy eight action rows, then direct goals for sensed targets beyond the native top-four ordered by robot distance and sensor buffer index, then legacy offsets; K8 prefix is unchanged",
     "heading_execution": "no terminal heading command; sensed-target bearing is used for graph lookup and nonbinding estimate; native controller owns orientation",
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": True,
     "continue_gap": "one dynamically revalidated continue row follows the stable K-prefix; target loss, route invalidity, expiry, completion, phase incompatibility, and episode reset clear it",
-    "selectable_pool": "stable ordinary 32-row prefix at K=8/16/32 plus at most one appended continue row; K8 ordinary IDs and order are preserved",
+    "selectable_pool": "ordinary prefix at K=8/16/32 plus at most one appended continue row; K8 IDs/order remain unchanged, while K16/K32 prioritize direct recall of sensed targets beyond top-four before approach-offset variants",
     "commitment_expiry_macro_actions": 10,
     "commitment_target_matching_tolerance_m": 1.0,
     "commitment_switch_cost_points": 0.10,
@@ -114,7 +116,8 @@ class RouteFeasibleCandidates:
     commitment: CandidateCommitment | None = None
 
 
-def _candidate_target(env, action: int, base: SafeActionCandidates):
+def _candidate_target(env, action: int, base: SafeActionCandidates, *,
+                      target_row=None):
     slot = 3
     pose = env.sim.pose[0, slot]
     xy = pose[:2].clone()
@@ -122,7 +125,7 @@ def _candidate_target(env, action: int, base: SafeActionCandidates):
     valid = bool(base.table.valid_mask[action])
     intake = action < 4
     if action < 4:
-        row = base.table.features[action]
+        row = base.table.features[action] if target_row is None else target_row
         if row[2] is None or row[3] is None:
             return xy, heading, False, True
         fuel = torch.tensor((row[2], row[3]), device=env.device, dtype=xy.dtype)
@@ -236,7 +239,8 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
 
 
 def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
-                           goal_xy, goal_heading: float | None = None) -> dict:
+                           goal_xy, goal_heading: float | None = None, *,
+                           target_row=None) -> dict:
     """Qualify sensed-target geometry in the candidate's inferred heading frame.
 
     This is a conservative candidate eligibility proxy, not a command to the
@@ -246,7 +250,7 @@ def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
     if action >= 4:
         return {"status": "not_applicable", "basis": "non_collection_action",
                 "feasible": True}
-    row = base.table.features[action]
+    row = base.table.features[action] if target_row is None else target_row
     if row[2] is None or row[3] is None:
         return {"status": "unavailable", "basis": "target_not_sensed",
                 "feasible": False, "reason": "target_not_sensed"}
@@ -302,6 +306,60 @@ def _opponent_prediction(env, slot=3, horizon=0., mode="cv"):
         velocity_xy=velocity, age_s=age, horizon_s=max(0., float(horizon)))
 
 
+def _additional_sensed_target_rows(env, base: SafeActionCandidates):
+    """Return candidate rows for sensed tracks omitted by the native top four.
+
+    The action id stays a native collect class; the goal endpoint and the
+    sensor buffer identity live in this candidate row. Native intake remains
+    geometric and authoritative, so this does not turn a sensor track into an
+    exclusive piece reservation.
+    """
+    base_track_ids = {int(base.table.features[i][1]) for i in range(4)
+                      if base.table.valid_mask[i] and
+                      base.table.features[i][1] is not None}
+    valid_collect_actions = [i for i in range(4) if base.table.valid_mask[i]]
+    if not valid_collect_actions:
+        return []
+    fallback_action = valid_collect_actions[0]
+    points, _, sensed = env._perceived_fuel(0)
+    sensed_ids = torch.nonzero(sensed[0], as_tuple=False).flatten().tolist()
+    pose_xy = env.sim.pose[0, 3, :2]
+    confidence = env.track_confidence[0, 3]
+    ages = env.track_age[0, 3]
+    opponent_distance = None
+    if bool(env.opponent_valid[0, 3]):
+        opponent_distance = (points - env.opponent_pose[0, 3, :2]).norm(dim=-1)
+    distances = (points - pose_xy).norm(dim=-1)
+    ordered = sorted((int(i) for i in sensed_ids if int(i) not in base_track_ids),
+                     key=lambda i: (float(distances[i]), i))
+    nearby = (((points[:, None, :] - points[None, :, :]).norm(dim=-1) < 1.25)
+              & sensed[0][None, :]).sum(-1)
+    field_length, field_width = float(env.sim.field_length), float(env.sim.field_width)
+    template = base.table.features[fallback_action]
+    result = []
+    for track in ordered:
+        target = points[track]
+        delta = target - pose_xy
+        angle = torch.atan2(delta[1], delta[0])
+        heading_bin = int(torch.round(torch.remainder(angle, 2. * math.pi) *
+                                      (8. / (2. * math.pi))).item()) % 8
+        row = list(template)
+        row[0] = float(fallback_action)
+        row[1] = float(track)
+        row[2], row[3] = float(target[0]), float(target[1])
+        row[4] = float(heading_bin)
+        row[6], row[7] = field_length, field_width
+        row[8] = float(distances[track])
+        row[9] = float(nearby[track])
+        row[10] = float(confidence[track].clamp(0., 1.))
+        row[11] = float(ages[track].clamp_min(0.))
+        row[12] = (None if opponent_distance is None else
+                   float(opponent_distance[track]))
+        row[13] = None
+        result.append((fallback_action, tuple(row), track))
+    return result
+
+
 @torch.no_grad()
 def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     graph: LegalPoseGraph, *, episode_id: str,
@@ -342,12 +400,24 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             base.table.features, base.table.valid_mask, base.table.feature_names,
             route_costs=base.table.route_costs),
         base.fallback_candidate_id, base.action_indices)
-    specs = [(action, 0, 0., 0.) for action in range(8)]
+    target_rows = {int(base.table.features[action][1]): base.table.features[action]
+                   for action in range(4) if base.table.valid_mask[action] and
+                   base.table.features[action][1] is not None}
+    specs = [(action, 0, 0., 0.,
+              (int(base.table.features[action][1])
+               if action < 4 and base.table.features[action][1] is not None else None))
+             for action in range(8)]
+    additional_targets = _additional_sensed_target_rows(env, base)
+    for action, row, track in additional_targets:
+        target_rows[track] = row
+        specs.append((action, 0, 0., 0., track))
     offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
                (.34, 0.), (-.34, 0.))
     for variant, (forward, lateral) in enumerate(offsets, 1):
         for action in range(4):
-            specs.append((action, variant, forward, lateral))
+            track = (int(base.table.features[action][1])
+                     if base.table.features[action][1] is not None else None)
+            specs.append((action, variant, forward, lateral, track))
     # Reconcile a carried task against this snapshot before adding it. Intake
     # commitments follow the same sensed target by position, not a transient
     # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
@@ -355,24 +425,31 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     continue_spec = None
     if active_commitment is not None:
         action = active_commitment.action_index
-        if sequence >= active_commitment.expires_sequence or not base.table.valid_mask[action]:
+        if sequence >= active_commitment.expires_sequence:
             active_commitment = None
         elif action < 4:
             source = active_commitment.source_xy_m
             matches = []
             if source is not None:
-                for index in range(4):
-                    row = base.table.features[index]
-                    if base.table.valid_mask[index] and row[2] is not None and row[3] is not None:
-                        gap = math.hypot(float(row[2]) - source[0], float(row[3]) - source[1])
-                        matches.append((gap, index))
+                points, _, sensed = env._perceived_fuel(0)
+                for track in torch.nonzero(sensed[0], as_tuple=False).flatten().tolist():
+                    point = points[track]
+                    gap = math.hypot(float(point[0]) - source[0], float(point[1]) - source[1])
+                    matches.append((gap, int(track)))
             if not matches or min(matches)[0] > CANDIDATE_BOUNDARY["commitment_target_matching_tolerance_m"]:
                 active_commitment = None
             else:
-                action = min(matches)[1]
-                continue_spec = (action, active_commitment.goal_variant, 0., 0.)
+                track = min(matches)[1]
+                action = next((i for i in range(4) if base.table.valid_mask[i]), None)
+                if action is None:
+                    active_commitment = None
+                else:
+                    continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
         else:
-            continue_spec = (action, active_commitment.goal_variant, 0., 0.)
+            if not base.table.valid_mask[action]:
+                active_commitment = None
+            else:
+                continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
     continue_index = None
     if continue_spec is not None:
         continue_index = len(specs)
@@ -383,25 +460,40 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         (.68, .25), (.68, -.25), (-.68, .25), (-.68, -.25),
         (.25, .68), (-.25, .68))
     oracle_start_index = len(specs)
+    oracle_track_ids = sorted(target_rows)
     for variant, (forward, lateral) in enumerate(oracle_offsets, 7):
-        for action in range(4):
-            specs.append((action, variant, forward, lateral))
+        for track in oracle_track_ids:
+            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
+            if action is not None:
+                specs.append((action, variant, forward, lateral, track))
     targets, headings, route_queries, goal_nodes = [], [], [], []
     capture_estimates = []
     hbins, requested, ids = [], [], []
-    for row_index, (action, variant, forward_offset, lateral_offset) in enumerate(specs):
-        target, heading, allowed, intake = _candidate_target(env, action, base)
+    for row_index, (action, variant, forward_offset, lateral_offset,
+                    target_track) in enumerate(specs):
+        candidate_row = target_rows.get(target_track) if target_track is not None else None
+        target, heading, allowed, intake = _candidate_target(
+            env, action, base, target_row=candidate_row)
         is_continue = continue_index is not None and row_index == continue_index
-        candidate_id = ("continue:" + active_commitment.candidate_id if is_continue else
-                        (base.table.candidate_ids[action] if not variant else
-                         f"{base.table.candidate_ids[action]}:approach:{variant}"))
+        if is_continue:
+            candidate_id = "continue:" + active_commitment.candidate_id
+        elif target_track is not None:
+            base_tracks = {int(base.table.features[i][1]) for i in range(4)
+                           if base.table.features[i][1] is not None}
+            candidate_id = (base.table.candidate_ids[action] if not variant and
+                            target_track in base_tracks else
+                            f"collect:track:{target_track}" if not variant else
+                            f"collect:track:{target_track}:approach:{variant}")
+        else:
+            candidate_id = (base.table.candidate_ids[action] if not variant else
+                            f"{base.table.candidate_ids[action]}:approach:{variant}")
         ids.append(candidate_id)
         if variant:
             forward = target.new_tensor((math.cos(heading), math.sin(heading)))
             left = target.new_tensor((-math.sin(heading), math.cos(heading)))
             target = target + forward * forward_offset + left * lateral_offset
         if action < 4:
-            fuel_row = base.table.features[action]
+            fuel_row = candidate_row or base.table.features[action]
             if fuel_row[2] is not None and fuel_row[3] is not None:
                 delta = target.new_tensor((fuel_row[2], fuel_row[3])) - target
                 if float(delta.norm()) > 1e-8:
@@ -412,7 +504,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         if center is not None:
             target = center
             if action < 4:
-                fuel_row = base.table.features[action]
+                fuel_row = candidate_row or base.table.features[action]
                 if fuel_row[2] is not None and fuel_row[3] is not None:
                     delta = target.new_tensor((fuel_row[2], fuel_row[3])) - target
                     if float(delta.norm()) > 1e-8:
@@ -425,7 +517,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                     if center is not None:
                         target = center
         capture_estimate = _capture_pose_estimate(env, base, action, target,
-                                                   goal_heading=heading)
+            goal_heading=heading, target_row=candidate_row)
         if action < 4:
             allowed &= bool(capture_estimate["feasible"])
         capture_estimates.append(capture_estimate)
@@ -454,8 +546,9 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     routes = []
     route_costs = []
     risk_costs = []
-    for row_index, (action, variant, _, _) in enumerate(specs):
-        old = base.table.features[action]
+    for row_index, (action, variant, _, _, target_track) in enumerate(specs):
+        old = (target_rows[target_track] if target_track is not None
+               else base.table.features[action])
         candidate_id = ids[row_index]
         result = result_by_id.get(candidate_id)
         distance = result.distance_m if result is not None and result.feasible else None
@@ -513,10 +606,11 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "feasible": valid, "route_feasible": route_ok,
             "capture_estimate": capture_estimate,
             "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
-            "source_fuel_xy_m": ([float(base.table.features[action][2]),
-                                  float(base.table.features[action][3])]
-                if action < 4 and base.table.features[action][2] is not None
-                and base.table.features[action][3] is not None else None),
+            "source_fuel_xy_m": ([float(old[2]), float(old[3])]
+                if action < 4 and old[2] is not None and old[3] is not None else None),
+            "sensor_track_buffer_index": (target_track if action < 4 else None),
+            "target_identity_execution": ("route_goal_with_native_geometric_capture"
+                if target_track is not None and action < 4 else "native_action_target"),
             "goal_heading_rad": float(headings[row_index]),
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
@@ -553,15 +647,19 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                            key=lambda i: route_costs[i] + risk_costs[i])
             fallback = ids[fallback]
     names = base.table.feature_names + EXTRA_FEATURES
-    # Independent higher-budget oracle: all 32 stable rows plus 18 separately
-    # route-qualified offsets for each sensed target. Oracle rows never enter
+    # Higher-budget reference: every ordinary candidate plus 18 separately
+    # route-qualified offsets for every sensed target. Oracle rows never enter
     # model order and never affect the K8 baseline.
-    oracle_ids = {ids[i] for i in range(32) if valid_mask[i]}
+    oracle_ids = {ids[i] for i in range(oracle_start_index)
+                  if i != continue_index and valid_mask[i]}
     oracle_ids.update(ids[i] for i in range(oracle_start_index, len(ids)) if valid_mask[i])
-    oracle_capacity = 32 + 4 * len(oracle_offsets)
+    oracle_ids.discard(ids[continue_index] if continue_index is not None else "")
+    oracle_capacity = (8 + len(additional_targets) + 4 * len(offsets) +
+                       len(oracle_track_ids) * len(oracle_offsets))
     oracle_count = len(oracle_ids)
     requested_ids = {ids[i] for i in range(candidate_k) if valid_mask[i]}
-    oracle_indices = [i for i in range(32) if valid_mask[i]] + [
+    oracle_indices = [i for i in range(oracle_start_index)
+                      if i != continue_index and valid_mask[i]] + [
         i for i in range(oracle_start_index, len(ids)) if valid_mask[i]]
     oracle_cost_values = [route_costs[i] for i in oracle_indices]
     selected_cost_values = [route_costs[i] for i in range(candidate_k) if valid_mask[i]]
