@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from frc_defense.curriculum_training import D1HandWeightedPolicy, _d1_identity
+from frc_defense.curriculum_training import D1HandWeightedPolicy, _d1_artifacts, _d1_identity
+from frc_defense.learning_contract import ObservationSnapshot
 
 
 def _sensor_fixture(mask):
@@ -48,3 +49,30 @@ def test_d1_rejects_a_mask_with_no_legal_fallback():
 def test_d1_identity_is_stable_and_versioned_by_weights():
     assert _d1_identity() == _d1_identity()
     assert len(_d1_identity()) == 64
+
+
+def test_scorer_snapshot_ids_are_scoped_to_evaluation_run(monkeypatch):
+    import frc_defense.curriculum_training as training
+
+    def snapshot(_env, *, episode_id, sequence):
+        return ObservationSnapshot(
+            snapshot_id=f'{episode_id}:{sequence}', episode_id=episode_id,
+            sequence=sequence, timestamp=0., raster_shape=(6, 1, 1),
+            raster=(0.,) * 6, globals=(0.,) * 7)
+
+    monkeypatch.setattr(training, 'build_observation_snapshot', snapshot)
+    env = SimpleNamespace(steps=torch.tensor([0]))
+    obs = torch.zeros((1, 137))
+    obs[0, -8:] = 1.
+    trace = {
+        'candidate_distance': torch.zeros((1, 4)),
+        'candidate_nearby_tracks': torch.zeros((1, 4)),
+        'candidate_confidence': torch.zeros((1, 4)),
+        'candidate_age': torch.zeros((1, 4)),
+        'action_scores': torch.zeros((1, 8)),
+    }
+    first = _d1_artifacts(env, obs, trace, scenario='pickup_simple',
+                          category='single', seed=9, evaluation_id='run-a')
+    second = _d1_artifacts(env, obs, trace, scenario='pickup_simple',
+                           category='single', seed=9, evaluation_id='run-b')
+    assert first['scorer_snapshot']['snapshot_id'] != second['scorer_snapshot']['snapshot_id']

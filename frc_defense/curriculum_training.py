@@ -94,10 +94,13 @@ def _d1_identity():
                   'choices': 'masked-eight-action-interface-v1'})
 
 
-def _d1_artifacts(env, observation, trace, *, scenario, category, seed):
+def _d1_artifacts(env, observation, trace, *, scenario, category, seed,
+                  evaluation_id):
     """Serialize D1's exact action ordering and score snapshot for audit."""
     tick = int(env.steps[0].item())
-    episode_id = f'{scenario}:{category}:seed-{seed}'
+    # Bind every observation/scorer snapshot to the enclosing evaluation so a
+    # delayed result from a repeated same-seed run cannot match this run.
+    episode_id = f'{evaluation_id}:{scenario}:{category}:seed-{seed}'
     observation_snapshot = build_observation_snapshot(
         env, episode_id=episode_id, sequence=tick)
     snapshot_id = observation_snapshot.snapshot_id
@@ -435,7 +438,9 @@ def _wilson(successes, count):
     return [max(0.,center-radius),min(1.,center+radius)]
 
 
-def _episode(policy, name, category, seed, device, horizon, action_ticks, *, demonstration=False):
+def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
+             demonstration=False, evaluation_id=None):
+    evaluation_id = evaluation_id or uuid.uuid4().hex
     env=make_curriculum_env(name,category,1,device,seed,horizon=horizon)
     actor=policy.actor if isinstance(policy,DiscreteSAC) else policy
     builder=PerceptionInputs(env,(3,)) if isinstance(actor,PerceptionActorCritic) else None
@@ -466,7 +471,8 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *, dem
                     'candidate_confidence':trace['candidate_confidence'][0].tolist(),
                     'candidate_age':trace['candidate_age'][0].tolist()}
                 frame.update(_d1_artifacts(env, obs, trace, scenario=name,
-                                           category=category, seed=seed))
+                                           category=category, seed=seed,
+                                           evaluation_id=evaluation_id))
             if demonstration: frame['observation']=obs[0].tolist()
             frames.append(frame)
         actions=torch.full((1,6),7,device=env.device,dtype=torch.long); actions[:,3]=action
@@ -529,7 +535,8 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
             seeds=(seed_partition(name,split,episodes+1,master_seed=master_seed)[1:] if split=='test'
                    else seed_partition(name,split,episodes,master_seed=master_seed));category_results=[]
             for category in chosen:
-                learner=[_episode(policy,name,category,s,device,horizon,action_ticks) for s in seeds]
+                learner=[_episode(policy,name,category,s,device,horizon,action_ticks,
+                                  evaluation_id=round_id) for s in seeds]
                 reference=[_episode('teacher',name,category,s,device,horizon,action_ticks) for s in seeds]
                 successes=sum(bool(e['outcome']['success']) for e in learner)
                 reference_successes=sum(bool(e['outcome']['success']) for e in reference)

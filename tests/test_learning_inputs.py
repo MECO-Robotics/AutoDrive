@@ -60,3 +60,17 @@ def test_snapshot_does_not_read_hidden_fuel_or_opponent_positions():
     after = build_observation_snapshot(env)
     assert before.raster == after.raster
     assert before.globals == after.globals
+
+
+def test_ally_channel_uses_explicit_current_team_telemetry():
+    env = _env()
+    before = build_observation_snapshot(env)
+    # Ally slots 4/5 are the documented team telemetry input, so moving one
+    # changes only the ally raster channel and never the sensor track channels.
+    env.sim.pose[0, 4, :2] = torch.tensor([6., 3.])
+    after = build_observation_snapshot(env)
+    before_raster = torch.tensor(before.raster).reshape(before.raster_shape)
+    after_raster = torch.tensor(after.raster).reshape(after.raster_shape)
+    assert not torch.equal(before_raster[2], after_raster[2])
+    assert torch.equal(before_raster[:2], after_raster[:2])
+    assert torch.equal(before_raster[4:], after_raster[4:])

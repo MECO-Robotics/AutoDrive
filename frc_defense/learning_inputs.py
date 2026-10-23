@@ -62,9 +62,11 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     """Pack `[6,H,W]` tracks and the proposal's seven global scalars.
 
     Signed-time cells contain negative track age (seconds before this snapshot);
-    current ally telemetry has age zero. The method reads own/team telemetry
-    and simulated sensor tracks only. Simulator truth is used neither to fill
-    FUEL cells nor to locate opponents.
+    current ally telemetry has age zero. Ally positions come from the
+    simulator's explicit team telemetry channel (`sim.pose` for own-team slots),
+    which must be shared with every comparison policy. Hardware qualification
+    requires confirming an equivalent localization feed. Simulator truth is
+    used neither to fill FUEL cells nor to locate opponents.
     """
     if not 0 <= world < env.n or not 0 <= slot < 6:
         raise ValueError("world/slot is outside the curriculum environment")
