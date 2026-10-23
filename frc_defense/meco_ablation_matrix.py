@@ -326,6 +326,14 @@ def _architecture_track_vs_d0(*, track: str, condition_id: str,
         raise ValueError(
             f"architecture D0 contrast coverage differs for {track}: "
             f"missing={sorted(expected - observed)}, extra={sorted(observed - expected)}")
+    policy_manifest = report.get("policy_manifest", {})
+    candidate_manifest = policy_manifest.get(track, {})
+    d0_manifest = policy_manifest.get("D0", {})
+    candidate_manifest_id = candidate_manifest.get("policy_id")
+    d0_manifest_id = d0_manifest.get("policy_id")
+    if (not isinstance(candidate_manifest_id, str) or not candidate_manifest_id or
+            not isinstance(d0_manifest_id, str) or not d0_manifest_id):
+        raise ValueError("architecture D0 contrast report lacks candidate/D0 manifest policy IDs")
     rows = []
     for category in categories:
         for seed in seeds:
@@ -344,6 +352,11 @@ def _architecture_track_vs_d0(*, track: str, condition_id: str,
                     not isinstance(reference_policy_id, str) or not reference_policy_id):
                 raise ValueError(
                     f"architecture D0 contrast lacks policy IDs/metrics for {category}/{seed}")
+            if (candidate_policy_id != candidate_manifest_id or
+                    reference_policy_id != d0_manifest_id):
+                raise ValueError(
+                    f"architecture D0 record policy ID differs from report manifest "
+                    f"for {track}/{category}/{seed}")
             rows.append({"category": category, "seed": seed,
                 "candidate_policy": track, "reference_policy": "D0",
                 "candidate_record_policy_id": candidate_policy_id,
@@ -351,7 +364,6 @@ def _architecture_track_vs_d0(*, track: str, condition_id: str,
                 "candidate_metrics": candidate_metrics,
                 "reference_metrics": reference_metrics})
     prediction = report.get("prediction", {})
-    d0_manifest = report.get("policy_manifest", {}).get("D0", {})
     candidate_k = report.get("candidate_k", {})
     if (prediction.get("learned_mode") != "cv" or
             candidate_k.get("effective") != 16 or

@@ -13,15 +13,17 @@ def paired_inputs():
         for category in categories:
             for seed in seeds:
                 records[(policy, category, seed)] = {
-                    "policy_id": f"{policy}-id",
+                    "policy_id": ("D0_production_deterministic" if policy == "D0" else "A1-id"),
                     "metrics": {"score": seed + (1 if policy == "A1" else 0)},
                 }
     report = {
         "categories": list(categories), "seeds": list(seeds),
         "evaluation_id": "eval-1", "protocol_id": "protocol-1",
         "source_identity_sha256": "source-hash",
-        "policy_manifest": {"D0": {"policy_id": "D0_production_deterministic",
-                                     "prediction_mode": None}},
+        "policy_manifest": {
+            **{track: {"policy_id": f"{track}-id"} for track in MECO_TRACKS},
+            "D0": {"policy_id": "D0_production_deterministic", "prediction_mode": None},
+        },
         "prediction": {"learned_mode": "cv", "control_modes": {"D1": "current", "D2": "cv"}},
         "candidate_k": {"effective": 16},
     }
@@ -52,7 +54,7 @@ def test_architecture_track_d0_rows_preserve_exact_pair_and_provenance(paired_in
         (category, seed) for category in categories for seed in seeds]
     first = contrast["paired_episode_rows"][0]
     assert first["candidate_record_policy_id"] == f"{track}-id"
-    assert first["reference_record_policy_id"] == "D0-id"
+    assert first["reference_record_policy_id"] == "D0_production_deterministic"
     assert first["candidate_metrics"] == {"score": (12 if track == "A1" else 13)}
     assert first["reference_metrics"] == {"score": 11}
     semantics = contrast["condition_semantics"]
@@ -89,5 +91,14 @@ def test_architecture_d0_pair_requires_metrics_and_record_policy_ids(paired_inpu
     categories, seeds, records, report = paired_inputs
     records[("D0", "cluster", 11)]["metrics"] = None
     with pytest.raises(ValueError, match="lacks policy IDs/metrics"):
+        _architecture_track_vs_d0(track="A1", condition_id="c", report=report,
+            records=records, categories=categories, seeds=seeds)
+
+
+@pytest.mark.parametrize("policy", ["A1", "D0"])
+def test_architecture_d0_pair_rejects_record_policy_id_not_in_manifest(paired_inputs, policy):
+    categories, seeds, records, report = paired_inputs
+    records[(policy, "cluster", 11)]["policy_id"] = "stale-or-foreign-policy"
+    with pytest.raises(ValueError, match="differs from report manifest"):
         _architecture_track_vs_d0(track="A1", condition_id="c", report=report,
             records=records, categories=categories, seeds=seeds)
