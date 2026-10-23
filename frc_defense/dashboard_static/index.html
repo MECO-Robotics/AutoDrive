@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#11171d" />
     <title>AutoDrive · Training monitor</title>
-    <link rel="stylesheet" href="/assets/dashboard.css?v=replay-delete-1" />
+    <link rel="stylesheet" href="/assets/dashboard.css?v=curriculum-monitor-1" />
   </head>
   <body>
     <header class="topbar">
@@ -15,6 +15,7 @@
       </a>
       <nav class="topnav" aria-label="Main navigation">
         <a href="#scenario">Scenario</a>
+        <a href="#curriculum">Curriculum</a>
         <a href="#training">Training</a>
         <a href="#analysis">Analysis</a>
         <a href="/info">Field guide</a>
@@ -33,6 +34,26 @@
     </header>
 
     <main class="page-shell">
+      <section class="curriculum-section" id="curriculum" aria-labelledby="curriculumHeading">
+        <div class="section-heading">
+          <div>
+            <h1 id="curriculumHeading">Offense curriculum</h1>
+            <p class="lede">Opt-in research progress and measured evaluation evidence · read only</p>
+          </div>
+          <span class="curriculum-state" id="curriculumState" aria-live="polite">Loading curriculum…</span>
+        </div>
+        <div id="curriculumRuns" class="curriculum-runs">
+          <p class="empty-note">Loading saved curriculum runs…</p>
+        </div>
+        <h2>MECO learning tracks</h2>
+        <div id="mecoTracks" class="curriculum-runs" aria-live="polite"></div>
+        <h2>Three pass provenance</h2>
+        <div id="threePassProvenance" class="curriculum-runs"></div>
+        <details class="curriculum-map">
+          <summary>Curriculum stages and outcome gates</summary>
+          <ol id="curriculumStages"></ol>
+        </details>
+      </section>
       <section
         class="run-section"
         id="training"
@@ -434,6 +455,6 @@
       </section>
     </main>
 
-    <script type="module" src="/assets/dashboard.js?v=replay-delete-1"></script>
+    <script type="module" src="/assets/dashboard.js?v=curriculum-monitor-1"></script>
   </body>
 </html>

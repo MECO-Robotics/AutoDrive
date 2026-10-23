@@ -1328,6 +1328,132 @@ async function pollTraining() {
   }
 }
 
+function curriculumNode(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value != null) node.textContent = String(value);
+  return node;
+}
+
+function renderCurriculum(data) {
+  const root = $("curriculumRuns");
+  root.replaceChildren();
+  const stages = $("curriculumStages");
+  stages.replaceChildren();
+  const tracks = $("mecoTracks");
+  tracks.replaceChildren();
+  for (const lane of data.tracks || []) {
+    const card = curriculumNode("article", "curriculum-card");
+    card.append(curriculumNode("h3", "", lane.track || "unknown track"));
+    card.append(curriculumNode("p", "curriculum-summary",
+      `Status: ${lane.status || "unknown"} · updates: ${lane.updates ?? "unknown"} · device: ${lane.device || "unknown"} · current: ${lane.current || "unknown"} · evaluation: ${lane.evaluation || "unknown"}`));
+    tracks.append(card);
+  }
+  const provenance = $("threePassProvenance");
+  provenance.replaceChildren();
+  const passes = data.three_pass_provenance;
+  if (!passes || passes.status === "unknown") {
+    provenance.append(curriculumNode("p", "empty-note", "Three pass provenance unknown."));
+  } else {
+    provenance.append(curriculumNode("p", "curriculum-summary",
+      `Plan SHA-256: ${passes.plan_sha256 || "unknown"} · scope: ${passes.scope || "unknown"}`));
+    for (const tranche of passes.tranches || []) {
+      const card = curriculumNode("article", "curriculum-card");
+      card.append(curriculumNode("h3", "", `${tranche.requirement_id || "unknown requirement"}: ${tranche.title || "unknown"}`));
+      card.append(curriculumNode("p", "curriculum-summary",
+        `Planner: ${tranche.planner?.status || "unknown"} · Implementer: ${tranche.implementer?.commit || "unknown"} · Reviewer: ${tranche.reviewer?.verdict || "unknown"} (${tranche.reviewer?.approved_commit || "unknown"})`));
+      card.append(curriculumNode("p", "empty-note", tranche.limits || "Review scope unknown."));
+      provenance.append(card);
+    }
+  }
+  for (const [id, scenario] of Object.entries(data.scenarios || {})) {
+    const item = curriculumNode("li", "curriculum-stage");
+    const heading = curriculumNode("strong", "", `Stage ${scenario.stage} · ${id}`);
+    const criteria = curriculumNode("p", "", scenario.success_criterion);
+    const throughputGate = scenario.throughput_ratio > 0
+      ? ` · throughput ratio ${scenario.throughput_ratio.toFixed(2)}` : "";
+    const minimumThroughput = scenario.min_useful_throughput > 0
+      ? ` · useful throughput ${scenario.min_useful_throughput}` : "";
+    const requirements = curriculumNode("p", "curriculum-summary",
+      `Requires: ${scenario.prerequisites.join(", ") || "none"} · Categories: ${scenario.required_categories.join(", ")} · Gate: ${scenario.min_episodes} episodes per category, ${Math.round(100 * scenario.success_rate)}% success${throughputGate}${minimumThroughput}, ${scenario.consecutive_evaluations} consecutive validations`);
+    item.append(heading, criteria, requirements);
+    stages.append(item);
+  }
+  const state = $("curriculumState");
+  const errors = [...(data.errors || [])];
+  if (data.error) errors.push({ error: data.error });
+  if (errors.length) {
+    state.textContent = "Evidence needs attention";
+    const note = curriculumNode("p", "curriculum-error", "Some saved curriculum data could not be read; affected evidence is excluded.");
+    root.append(note);
+  } else if (!data.runs?.length) {
+    state.textContent = "No curriculum runs yet";
+    root.append(curriculumNode("p", "empty-note", "No saved offense curriculum run or queued lane was found."));
+  } else {
+    state.textContent = `${data.runs.length} saved or queued run${data.runs.length === 1 ? "" : "s"}`;
+  }
+  for (const run of data.runs || []) {
+    const card = curriculumNode("article", "curriculum-card");
+    const heading = curriculumNode("div", "curriculum-card-heading");
+    heading.append(curriculumNode("h2", "", run.run || "Unnamed run"));
+    heading.append(curriculumNode("span", `curriculum-badge ${run.status === "stale" ? "is-stale" : ""}`, run.status || "saved"));
+    card.append(heading);
+    const summary = curriculumNode("p", "curriculum-summary", `${run.algorithm || "training"} · ${run.architecture || "architecture unknown"} · ${Number(run.updates) || 0} completed updates · current: ${run.current || "pending"}`);
+    card.append(summary);
+    const qualified = (run.qualified || []).map((id) => `${id} (${data.scenarios?.[id]?.stage || "?"})`);
+    const streaks = Object.entries(run.qualification_streaks || {}).map(([name, evidence]) =>
+      `${name} ${evidence.streak}/${evidence.required} (${evidence.evaluation_ids.join(", ") || "no bound evaluations"})`);
+    const metrics = curriculumNode("p", "curriculum-metrics", `Qualified stages: ${qualified.join(", ") || "none"} · Pass streaks: ${streaks.join(", ") || "none"}${run.diagnostic ? " · diagnostic training run" : ""}`);
+    card.append(metrics);
+    const rows = run.latest_evaluations || [];
+    if (rows.length) {
+      const list = curriculumNode("ul", "curriculum-evidence");
+      for (const row of rows) {
+        const percent = Number.isFinite(row.success_rate) ? `${(100 * row.success_rate).toFixed(1)}% success` : "success unavailable";
+        const reference = Number.isFinite(row.reference_success_rate) ? ` · reference ${(100 * row.reference_success_rate).toFixed(1)}%` : " · reference success unavailable";
+        const throughput = Number.isFinite(row.useful_throughput) && Number.isFinite(row.reference_throughput)
+          ? ` · useful throughput ${row.useful_throughput.toPrecision(3)} / reference ${row.reference_throughput.toPrecision(3)}`
+          : " · throughput unavailable";
+        const ratio = Number.isFinite(row.throughput_ratio) ? ` · paired ratio ${row.throughput_ratio.toFixed(3)}` : " · paired ratio unavailable";
+        const flags = [row.diagnostic ? "diagnostic" : "non-diagnostic", row.paired ? "paired" : "unpaired", row.reference_qualified ? "reference qualified" : "reference unqualified"];
+        const provenance = row.source_fingerprint ? ` · source ${row.source_fingerprint.slice(0, 12)}` : " · source unknown";
+        const group = row.comparison_group ? ` · evidence group ${row.comparison_group.slice(0, 12)}` : "";
+        const details = `${row.scenario || "unknown scenario"} / ${row.category || "unknown category"} · update ${row.update ?? "?"} · ${percent}${reference}${throughput}${ratio} · ${flags.join(" · ")} · protocol ${row.protocol_id || "unknown"} · split ${row.split || "unknown"}${provenance}${group}`;
+        list.append(curriculumNode("li", "", details));
+      }
+      card.append(list);
+    } else {
+      card.append(curriculumNode("p", "empty-note", run.status === "queued" ? "Queued; no evaluation evidence yet." : "No saved evaluation evidence yet."));
+    }
+    root.append(card);
+  }
+  if (errors.length) {
+    root.append(curriculumNode("p", "curriculum-error", `${errors.length} saved curriculum record${errors.length === 1 ? "" : "s"} could not be verified; file details are hidden.`));
+  }
+  if ((data.runs || []).some((run) => run.status === "stale")) {
+    state.textContent = "Queue status may be stale";
+    const age = Number(data.queue?.age_seconds);
+    root.prepend(curriculumNode("p", "curriculum-warning", Number.isFinite(age)
+      ? `Queue record is ${Math.floor(age)} seconds old; status may be stale.`
+      : "Queue status is stale; confirm the current state from the trainer."));
+  }
+}
+
+async function pollCurriculum() {
+  try {
+    const response = await fetch("/api/curriculum-status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`Curriculum request failed (${response.status})`);
+    renderCurriculum(await response.json());
+  } catch (error) {
+    $("curriculumState").textContent = "Curriculum unavailable";
+    $("curriculumRuns").replaceChildren(curriculumNode("p", "curriculum-error", `Could not load curriculum status: ${error.message}`));
+  } finally {
+    setTimeout(pollCurriculum, 30000);
+  }
+}
+
+pollCurriculum();
+
 $("play").addEventListener("click", () => {
   if (!frames.length) return;
   if (!playing && index >= frames.length - 1) {

@@ -12,7 +12,7 @@ import secrets
 import threading
 import math
 from contextlib import contextmanager
-from .dashboard_api import field_layout_payload
+from .dashboard_api import field_layout_payload, curriculum_status_payload
 
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -65,7 +65,7 @@ def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False):
         yield slot
 
 
-def create_handler(run_dir: Path):
+def create_handler(run_dir: Path, curriculum_root: Path | None = None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             content_encoding=None
@@ -155,6 +155,10 @@ def create_handler(run_dir: Path):
                 else:
                     body=json.dumps({"status":"waiting","algorithm":"generational",
                                      "campaign":campaign}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif parsed.path == "/api/curriculum-status":
+                body = curriculum_status_payload(run_dir, curriculum_root=curriculum_root)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/field-layout":
@@ -813,14 +817,16 @@ def status_path_age(run_dir: Path) -> float:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", default="checkpoints/tensor-ppo")
+    parser.add_argument("--curriculum-root", type=Path,
+                        help="Explicit curriculum report root (must be inside this project)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--also-host", action="append", default=[],
                         help="Bind an additional address on the same port")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), create_handler(Path(args.run_dir)))
+    server = ThreadingHTTPServer((args.host, args.port), create_handler(Path(args.run_dir), args.curriculum_root))
     for host in args.also_host:
-        extra = ThreadingHTTPServer((host, args.port), create_handler(Path(args.run_dir)))
+        extra = ThreadingHTTPServer((host, args.port), create_handler(Path(args.run_dir), args.curriculum_root))
         threading.Thread(target=extra.serve_forever, daemon=True).start()
     hosts = [args.host, *args.also_host]
     print("FRC training dashboard: " + ", ".join(
