@@ -21,10 +21,10 @@ def initialize_fuel_physics(env, config=True):
         env.fuel_physics is not None and env.n <= 8 and
         os.environ.get("AUTODRIVE_HIP_PHYSICS_GRAPH", "1") != "0")
     env._physics_graphs = {}
-    env._physics_graph_command = torch.empty(
+    env._physics_graph_command = torch.zeros(
         (env.n, env.sim.num_robots, 3), device=env.device,
         dtype=env.sim.pose.dtype)
-    env._physics_graph_active = torch.empty(
+    env._physics_graph_active = torch.zeros(
         (env.n,), device=env.device, dtype=torch.bool)
     radius = (env.fuel_physics.config.radius if env.fuel_physics is not None
               else env._fuel_radius)

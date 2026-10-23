@@ -337,3 +337,17 @@ replay checks and digest fields are unchanged; no schema bump is needed. This
 correction passed independent scoped review in isolated commit b627f3a3b and
 was integrated as 0379776b7. Static compile/diff/JSON checks only; collection,
 simulator evaluation, and dashboard replay remain outstanding.
+
+A fresh retry at `pickup_scattered/dense`, seed `3540116847380660224`,
+source integration commit `72fe1059c`, attempted output
+`...artifacts-20261023-r6/pickup-scattered-dense-3540116847380660224-cf-v2.jsonl`
+and failed in `_branch_return` with `RuntimeError: strict prefix replay parity
+mismatch at simulator_state_sha256`; no validated file was written. Repeating
+the same-seed reset comparison produced equal global RNG hashes, while
+`_state_value` differed only at `_physics_graph_command.tensor`. The graph
+command and active-mask buffers were uninitialized `torch.empty` scratch; both
+are copied from commands/active masks before any captured graph replay, and the
+CPU path does not use them. They now start at zero, preserving the strict state
+digest and replay parity checks without exclusions or a schema change. This
+fix is in isolated worktree `codex/meco-r6-scratch-init`; review is pending.
+Static compile/diff/JSON checks only; no tests or simulator replay were run.
