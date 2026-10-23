@@ -35,7 +35,7 @@ from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
 from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
     MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA, MECO_MAX_INFERENCE_AGE_S,
-    candidate_policy_logits,
+    candidate_policy_logits, ordered_candidate_mask_digest,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
     PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
@@ -366,14 +366,16 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         ordered_inputs = {name: model_inputs[name] for name in MECO_INPUT_NAMES[track]}
         pair_nodes = support.pair_node_ids.detach().cpu().tolist()
         behaviors = support.behavior_ids.detach().cpu().tolist()
-        candidate_ids = tuple(f"node:{node}:behavior:{behavior}"
-                              for node, behavior in zip(pair_nodes, behaviors))
+        descriptors = support.descriptor_ids.detach().cpu().tolist()
+        candidate_ids = tuple(f"node:{node}:behavior:{behavior}:descriptor:{descriptor}"
+                              for node, behavior, descriptor in zip(pair_nodes, behaviors, descriptors))
         candidate_mask = tuple(bool(value) for value in
                                support.valid_mask.detach().cpu().tolist())
         request_dispatch = time.monotonic()
         request = None
         if request_dispatch <= safe.observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
             try:
+                request_sequence, generation_id = model.next_request_identity()
                 request = MecoInferenceRequest(
                     track=track, snapshot_id=safe.observation.snapshot_id,
                     checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
@@ -388,7 +390,12 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                                        for name in MECO_INPUT_NAMES[track]),
                     candidate_ids=candidate_ids,
                     valid_mask=candidate_mask,
-                    fallback_index=support.fallback_pair)
+                    fallback_index=support.fallback_pair,
+                    request_sequence=request_sequence, generation_id=generation_id,
+                    candidate_mask_digest=ordered_candidate_mask_digest(
+                        candidate_ids, candidate_mask),
+                    legal_pose_order_digest=support.support_digest,
+                    model_id=f"meco:{track}")
             except Exception:
                 request = None
         response = (model.infer(request, ordered_inputs, now=time.monotonic())
@@ -397,10 +404,18 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                 or response.track != track
                 or response.checkpoint_sha256 != model.checkpoint_sha256
                 or response.protocol_id != model.protocol_id
+                or response.model_id != request.model_id
+                or response.request_sequence != request.request_sequence
+                or response.generation_id != request.generation_id
+                or response.snapshot_id != request.snapshot_id
+                or response.candidate_mask_digest != request.candidate_mask_digest
+                or response.legal_pose_order_digest != request.legal_pose_order_digest
+                or response.expires_monotonic != request.expires_monotonic
                 or response.observation_timestamp != safe.observation.timestamp
                 or response.capture_monotonic != safe.observation.capture_monotonic
                 or response.dispatch_monotonic != request_dispatch
                 or not math.isfinite(response.completed_monotonic)
+                or response.completed_monotonic < request.dispatch_monotonic
                 or response.completed_monotonic > safe.observation.capture_monotonic
                     + PRODUCTION_INFERENCE_MAX_AGE_S):
             production_inference_failed = True
@@ -414,6 +429,22 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                    "hidden": hidden_input}
         else:
             raw = response.outputs
+        inference_provenance = {"schema": MECO_INFERENCE_SCHEMA,
+            "model_id": f"meco:{track}", "checkpoint_sha256": model.checkpoint_sha256,
+            "protocol_id": model.protocol_id,
+            "observation_timestamp": safe.observation.timestamp,
+            "request_sequence": request.request_sequence if request else None,
+            "generation_id": request.generation_id if request else None,
+            "snapshot_id": safe.observation.snapshot_id,
+            "candidate_mask_digest": request.candidate_mask_digest if request else None,
+            "legal_pose_order_digest": support.support_digest,
+            "captured_monotonic": safe.observation.capture_monotonic,
+            "dispatch_monotonic": request.dispatch_monotonic if request else None,
+            "completed_monotonic": response.completed_monotonic if response else None,
+            "expires_monotonic": request.expires_monotonic if request else None,
+            "status": "accepted" if response is not None and not production_inference_failed
+                     else "deterministic_fallback",
+            "counters": model.inference_counters}
     else:
         raw = model(raster=raster, globals_=globals_, hidden=hidden_before,
                     **(graph_data or {}))
@@ -460,7 +491,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
         "risk_cost_nodes": risk_nodes, "graph_object": graph,
         "planner_object": env.planner, "fallback_used": fallback_used,
-        "prediction": prediction_metadata}
+        "prediction": prediction_metadata,
+        "inference_provenance": inference_provenance if isinstance(model, ProductionMecoAdapter) else None}
 
 
 def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
@@ -1847,6 +1879,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     break
                                 continue
                             obs = env._last_obs
+                            prepared = None
                             use_d1_fallback = inference_fault_run and inference_fault_reached
                             if (policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")) and not use_d1_fallback:
                                 model_track = policy[:2] if policy.endswith("_P0") else policy
@@ -1920,6 +1953,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 routes_seen.append({"candidate_id": f"node:{node}:behavior:{behavior_index}:descriptor:{descriptor}",
                                     "support_order": SUPPORT_ORDER,
                                     "support_digest": support.support_digest,
+                                    "inference_provenance": prepared.get("inference_provenance"),
                                     "policy_fallback": prepared.get("fallback_used", False),
                                     "behavior": ("drive", "intake", "score", "ferry", "defense")[behavior_index],
                                     "behavior_descriptor": descriptor,
@@ -1950,7 +1984,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 selected_row = candidate_set.table.features[choice]
                                 goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                            float(selected_row[cols["goal_y_m"]]))
-                                routes_seen.append(candidate_set.route_records[choice])
+                                routes_seen.append({**candidate_set.route_records[choice],
+                                    "inference_provenance": (prepared.get("decision", {}).get(
+                                        "inference_provenance") if prepared is not None else None)})
                                 selected_target_track = candidate_set.route_records[
                                     choice].get("sensor_track_buffer_index")
                                 selected_target_xy = candidate_set.route_records[

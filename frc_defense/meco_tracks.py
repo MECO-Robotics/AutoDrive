@@ -10,6 +10,9 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import queue
+import threading
+from types import MappingProxyType
 import time
 from typing import Mapping
 import uuid
@@ -22,7 +25,7 @@ from .learning_contract import CandidateTable, ObservationSnapshot, ScorerSnapsh
 from .learning_inputs import build_observation_snapshot
 
 
-MECO_INFERENCE_SCHEMA = "meco-inference-v1"
+MECO_INFERENCE_SCHEMA = "meco-inference-v2"
 MECO_MAX_INFERENCE_AGE_S = 0.25
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
@@ -51,6 +54,11 @@ class MecoInferenceRequest:
     candidate_ids: tuple[str, ...]
     valid_mask: tuple[bool, ...]
     fallback_index: int
+    request_sequence: int = 0
+    generation_id: str = ""
+    candidate_mask_digest: str = ""
+    legal_pose_order_digest: str = ""
+    model_id: str = ""
     schema: str = MECO_INFERENCE_SCHEMA
 
     def __post_init__(self):
@@ -58,7 +66,9 @@ class MecoInferenceRequest:
                 or self.observation_schema != 1 or not self.snapshot_id):
             raise ValueError("unsupported MECO track or observation schema")
         if (len(self.checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.checkpoint_sha256)
-                or not self.protocol_id):
+                or not self.protocol_id or type(self.request_sequence) is not int
+                or self.request_sequence < 1 or not self.generation_id
+                or self.model_id != f"meco:{self.track}"):
             raise ValueError("checkpoint SHA-256 and protocol identity are required")
         if (not math.isfinite(self.observation_timestamp) or self.observation_timestamp < 0
                 or not math.isfinite(self.capture_monotonic) or self.capture_monotonic < 0
@@ -79,6 +89,14 @@ class MecoInferenceRequest:
                 or not 0 <= self.fallback_index < len(self.candidate_ids)
                 or not self.valid_mask[self.fallback_index]):
             raise ValueError("candidate ordering, mask, or deterministic fallback is invalid")
+        expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
+        if self.candidate_mask_digest != expected_mask_digest:
+            raise ValueError("candidate IDs/mask digest does not match request ordering")
+        if self.track.startswith("A") and (len(self.legal_pose_order_digest) != 64
+                or any(c not in "0123456789abcdef" for c in self.legal_pose_order_digest)):
+            raise ValueError("Plan A request requires the canonical legal-pose order digest")
+        if self.track.startswith("C") and self.legal_pose_order_digest:
+            raise ValueError("Plan C request cannot carry a Plan A legal-pose digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,23 +106,38 @@ class MecoInferenceResponse:
     track: str
     checkpoint_sha256: str
     protocol_id: str
+    model_id: str
     observation_timestamp: float
     capture_monotonic: float
     dispatch_monotonic: float
     completed_monotonic: float
+    expires_monotonic: float
+    request_sequence: int
+    generation_id: str
+    snapshot_id: str
+    candidate_mask_digest: str
+    legal_pose_order_digest: str
     outputs: Mapping[str, torch.Tensor]
+
+
+def ordered_candidate_mask_digest(candidate_ids, valid_mask):
+    payload = {"candidate_ids": tuple(candidate_ids), "valid_mask": tuple(valid_mask)}
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":"),
+                           ensure_ascii=False).encode()).hexdigest()
 
 
 def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
                                 table: CandidateTable,
                                 observation_timestamp: float,
                                 capture_monotonic: float,
-                                inputs: Mapping[str, torch.Tensor]) -> MecoInferenceRequest:
+                                inputs: Mapping[str, torch.Tensor],
+                                legal_pose_order_digest: str = "") -> MecoInferenceRequest:
     """Freeze request identity/order/shapes from current planner tensors."""
     names = MECO_INPUT_NAMES[adapter.track]
     if tuple(inputs) != names:
         raise ValueError("inputs must be supplied in the track's canonical order")
     dispatch = time.monotonic()
+    sequence, generation = adapter.next_request_identity()
     return MecoInferenceRequest(track=adapter.track, snapshot_id=table.snapshot_id,
         checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
         observation_schema=1, observation_timestamp=float(observation_timestamp),
@@ -113,7 +146,10 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
         input_names=names,
         input_shapes=tuple(tuple(inputs[name].shape) for name in names),
         candidate_ids=table.candidate_ids, valid_mask=table.valid_mask,
-        fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1))
+        fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1),
+        request_sequence=sequence, generation_id=generation,
+        candidate_mask_digest=ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask),
+        legal_pose_order_digest=legal_pose_order_digest, model_id=f"meco:{adapter.track}")
 
 
 class ProductionMecoAdapter:
@@ -141,10 +177,27 @@ class ProductionMecoAdapter:
         self.track, self.model = track, model
         self.device = next(iter(devices))
         self.checkpoint_sha256, self.protocol_id = checkpoint_sha256, protocol_id
+        self._request_lock = threading.Lock()
+        self._request_sequence = 0
+        self._generation_id = uuid.uuid4().hex
+        self._broker = _AsyncInferenceBroker(self)
+
+    def next_request_identity(self):
+        with self._request_lock:
+            self._request_sequence += 1
+            return self._request_sequence, self._generation_id
+
+    @property
+    def inference_counters(self):
+        return self._broker.counters()
 
     def infer(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
+        return self._broker.submit_and_wait(request, inputs, now=now)
+
+    def _infer_sync(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
         try:
-            if (request.track != self.track or request.checkpoint_sha256 != self.checkpoint_sha256
+            if (request.track != self.track or request.model_id != f"meco:{self.track}"
+                    or request.checkpoint_sha256 != self.checkpoint_sha256
                     or request.protocol_id != self.protocol_id or request.observation_schema != 1
                     or not math.isfinite(now) or now < request.dispatch_monotonic
                     or now - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
@@ -222,11 +275,134 @@ class ProductionMecoAdapter:
             if (done - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or done > request.expires_monotonic):
                 return None
-            return MecoInferenceResponse(MECO_INFERENCE_SCHEMA, self.track,
-                self.checkpoint_sha256, self.protocol_id, request.observation_timestamp,
-                request.capture_monotonic, request.dispatch_monotonic, done, values)
+            return MecoInferenceResponse(schema=MECO_INFERENCE_SCHEMA,
+                track=self.track, checkpoint_sha256=self.checkpoint_sha256,
+                protocol_id=self.protocol_id, model_id=request.model_id,
+                observation_timestamp=request.observation_timestamp,
+                capture_monotonic=request.capture_monotonic,
+                dispatch_monotonic=request.dispatch_monotonic,
+                completed_monotonic=done, expires_monotonic=request.expires_monotonic,
+                request_sequence=request.request_sequence,
+                generation_id=request.generation_id, snapshot_id=request.snapshot_id,
+                candidate_mask_digest=request.candidate_mask_digest,
+                legal_pose_order_digest=request.legal_pose_order_digest,
+                outputs=MappingProxyType(dict(values)))
         except Exception:
             return None
+
+
+class _AsyncInferenceBroker:
+    """One-worker, single-pending-request broker with replace-oldest semantics."""
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.pending = queue.Queue(maxsize=1)
+        self.lock = threading.Lock()
+        self.latest_published_sequence = 0
+        self.latest_submitted_sequence = 0
+        self.dropped = 0
+        self.late = 0
+        self.faults = 0
+        self.thread = threading.Thread(target=self._run,
+            name=f"meco-inference-{adapter.track}", daemon=True)
+        self.thread.start()
+
+    def counters(self):
+        with self.lock:
+            return {"dropped_requests": self.dropped,
+                    "late_responses": self.late,
+                    "inference_faults": self.faults,
+                    "generation_id": self.adapter._generation_id,
+                    "last_published_sequence": self.latest_published_sequence}
+
+    def submit_and_wait(self, request, inputs, *, now):
+        if (request.generation_id != self.adapter._generation_id
+                or request.request_sequence <= 0
+                or request.request_sequence > self.adapter._request_sequence
+                or request.checkpoint_sha256 != self.adapter.checkpoint_sha256
+                or request.protocol_id != self.adapter.protocol_id
+                or request.model_id != f"meco:{self.adapter.track}"):
+            with self.lock:
+                self.faults += 1
+            return None
+        try:
+            frozen_inputs = {name: tensor.detach().clone()
+                             for name, tensor in inputs.items()}
+        except Exception:
+            with self.lock:
+                self.faults += 1
+            return None
+        item = {"request": request, "inputs": frozen_inputs,
+                "event": threading.Event(), "response": None,
+                "discarded": False, "late_counted": False}
+        with self.lock:
+            if request.request_sequence <= self.latest_submitted_sequence:
+                self.faults += 1
+                return None
+            self.latest_submitted_sequence = request.request_sequence
+        try:
+            self.pending.put_nowait(item)
+        except queue.Full:
+            try:
+                replaced_item = self.pending.get_nowait()
+                self.pending.task_done()
+            except queue.Empty:
+                replaced_item = None
+            if replaced_item is not None:
+                with self.lock:
+                    self.dropped += 1
+                    replaced_item["discarded"] = True
+                replaced_item["event"].set()
+            try:
+                self.pending.put_nowait(item)
+            except queue.Full:
+                with self.lock:
+                    self.dropped += 1
+                    item["discarded"] = True
+                return None
+        remaining = max(0., request.expires_monotonic - time.monotonic())
+        item["event"].wait(remaining)
+        response = item["response"]
+        if response is None:
+            if not item["discarded"] and time.monotonic() >= request.expires_monotonic:
+                self._mark_late(item)
+            return None
+        return response
+
+    def _mark_late(self, item):
+        with self.lock:
+            if not item["late_counted"]:
+                self.late += 1
+                item["late_counted"] = True
+
+    def _run(self):
+        while True:
+            item = self.pending.get()
+            request = item["request"]
+            try:
+                if (request.generation_id != self.adapter._generation_id
+                        or time.monotonic() > request.expires_monotonic):
+                    self._mark_late(item)
+                    continue
+                response = self.adapter._infer_sync(request, item["inputs"],
+                                                    now=time.monotonic())
+                late_response = False
+                with self.lock:
+                    if (response is None or time.monotonic() > request.expires_monotonic
+                            or request.request_sequence != self.latest_submitted_sequence
+                            or request.request_sequence <= self.latest_published_sequence):
+                        if response is None:
+                            self.faults += 1
+                        else:
+                            late_response = True
+                    else:
+                        # Publish only after the complete output mapping is validated.
+                        item["response"] = response
+                        self.latest_published_sequence = request.request_sequence
+                if late_response:
+                    self._mark_late(item)
+            finally:
+                item["event"].set()
+                self.pending.task_done()
 
 
 MECO_TRACKS = ("A1", "A2", "A3", "C1", "C2")
@@ -732,19 +908,10 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                         and capture_monotonic is not None
                         and dispatch <= capture_monotonic + MECO_MAX_INFERENCE_AGE_S):
                     try:
-                        inference_request = MecoInferenceRequest(
-                            track=track, snapshot_id=table.snapshot_id,
-                            checkpoint_sha256=model.checkpoint_sha256,
-                            protocol_id=model.protocol_id, observation_schema=1,
+                        inference_request = make_meco_inference_request(
+                            model, table=table,
                             observation_timestamp=observation_timestamp,
-                            capture_monotonic=capture_monotonic,
-                            dispatch_monotonic=dispatch,
-                            expires_monotonic=capture_monotonic + MECO_MAX_INFERENCE_AGE_S,
-                            input_names=MECO_INPUT_NAMES[track],
-                            input_shapes=tuple(tuple(ordered_inputs[name].shape)
-                                               for name in MECO_INPUT_NAMES[track]),
-                            candidate_ids=table.candidate_ids,
-                            valid_mask=table.valid_mask, fallback_index=fallback_index)
+                            capture_monotonic=capture_monotonic, inputs=ordered_inputs)
                         inference_now = time.monotonic()
                     except Exception:
                         inference_request = None
@@ -752,7 +919,9 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 or inference_request.track != track
                 or inference_request.snapshot_id != table.snapshot_id
                 or inference_request.candidate_ids != table.candidate_ids
-                or inference_request.valid_mask != table.valid_mask):
+                or inference_request.valid_mask != table.valid_mask
+                or inference_request.candidate_mask_digest !=
+                   ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask)):
             response = None
         else:
             # Keep exact track-specific tensor order as part of the wire contract.
@@ -761,12 +930,20 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             if response is not None and (
                     response.schema != MECO_INFERENCE_SCHEMA
                     or response.track != inference_request.track
+                    or response.model_id != inference_request.model_id
                     or response.checkpoint_sha256 != inference_request.checkpoint_sha256
                     or response.protocol_id != inference_request.protocol_id
+                    or response.request_sequence != inference_request.request_sequence
+                    or response.generation_id != inference_request.generation_id
+                    or response.snapshot_id != inference_request.snapshot_id
+                    or response.candidate_mask_digest != inference_request.candidate_mask_digest
+                    or response.legal_pose_order_digest != inference_request.legal_pose_order_digest
                     or response.observation_timestamp != inference_request.observation_timestamp
                     or response.capture_monotonic != inference_request.capture_monotonic
                     or response.dispatch_monotonic != inference_request.dispatch_monotonic
                     or not math.isfinite(response.completed_monotonic)
+                    or response.completed_monotonic < inference_request.dispatch_monotonic
+                    or response.expires_monotonic != inference_request.expires_monotonic
                     or response.completed_monotonic > inference_request.expires_monotonic
                     or response.completed_monotonic - inference_request.capture_monotonic
                        > MECO_MAX_INFERENCE_AGE_S):
@@ -784,9 +961,29 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 if fallback < 0 or fallback >= len(table.candidate_ids) or not table.valid_mask[fallback]:
                     raise ValueError("invalid deterministic fallback for failed inference")
                 logits[0, fallback] = 0.
+            provenance = {"schema": MECO_INFERENCE_SCHEMA,
+                "model_id": f"meco:{track}",
+                "checkpoint_sha256": model.checkpoint_sha256,
+                "protocol_id": model.protocol_id,
+                "request_sequence": (inference_request.request_sequence
+                                     if inference_request is not None else None),
+                "generation_id": (inference_request.generation_id
+                                  if inference_request is not None else None),
+                "snapshot_id": table.snapshot_id,
+                "candidate_mask_digest": (inference_request.candidate_mask_digest
+                    if inference_request is not None else None),
+                "captured_monotonic": (inference_request.capture_monotonic
+                    if inference_request is not None else capture_monotonic),
+                "dispatch_monotonic": (inference_request.dispatch_monotonic
+                    if inference_request is not None else None),
+                "completed_monotonic": None,
+                "expires_monotonic": (inference_request.expires_monotonic
+                    if inference_request is not None else None),
+                "counters": model.inference_counters}
             return {"logits": logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
-                    "inference_status": "deterministic_fallback"}
+                    "inference_status": "deterministic_fallback",
+                    "inference_provenance": provenance}
         output = response.outputs
     else:
         output = model(**inputs)
@@ -798,9 +995,24 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         utility = _gather_graph_candidates(output, table)[0]
     valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
     logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+    provenance = ({"schema": MECO_INFERENCE_SCHEMA,
+        "model_id": inference_request.model_id,
+        "checkpoint_sha256": inference_request.checkpoint_sha256,
+        "protocol_id": inference_request.protocol_id,
+        "request_sequence": inference_request.request_sequence,
+        "generation_id": inference_request.generation_id,
+        "snapshot_id": inference_request.snapshot_id,
+        "candidate_mask_digest": inference_request.candidate_mask_digest,
+        "captured_monotonic": inference_request.capture_monotonic,
+        "dispatch_monotonic": inference_request.dispatch_monotonic,
+        "completed_monotonic": response.completed_monotonic,
+        "expires_monotonic": inference_request.expires_monotonic,
+        "counters": model.inference_counters}
+        if isinstance(model, ProductionMecoAdapter) else None)
     return {"logits": logits, "utility": utility, "hidden": output["hidden"],
             "uncertainty": output.get("uncertainty"), "raw": output,
-            "inference_status": "accepted" if isinstance(model, ProductionMecoAdapter) else "trainer_direct"}
+            "inference_status": "accepted" if isinstance(model, ProductionMecoAdapter) else "trainer_direct",
+            "inference_provenance": provenance}
 
 
 def _table_columns(table: CandidateTable):

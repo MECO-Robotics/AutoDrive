@@ -88,7 +88,7 @@ end-to-end simulator or robot measurements.
 
 ## Production inference request boundary (Phase 5A)
 
-`meco-inference-v1` in `frc_defense.meco_tracks` is the versioned request and
+`meco-inference-v2` in `frc_defense.meco_tracks` is the versioned request and
 response boundary for checkpoint-backed scorers. `meco_track_training`
 dispatches A1–A3 through the adapter in `_prepare_plan_a_decision`, where the
 real full legal pose/behavior support is bound to the request. C1/C2 decisions
@@ -120,6 +120,24 @@ exceed that age. Simulation time is never subtracted from host monotonic time.
 The monotonic freshness marker is carried explicitly in requests/responses and
 is excluded from deterministic content digests.
 
+The v2 request also binds `model_id`, a per-adapter monotonic request sequence,
+and an adapter generation ID. C1/C2 bind the ordered candidate IDs and mask
+digest. A1/A2/A3 bind the ordered legal node/pose/behavior support digest,
+including descriptor order. The response echoes these identities and the
+expiry time. Consumers reject any identity, digest, sequence, or timestamp
+mismatch, including a result superseded by a newer submitted request.
+
+Production inference runs through a per-adapter asynchronous broker with one
+worker and one replaceable pending slot. Inputs are cloned before enqueueing;
+an older pending request is discarded when a newer request arrives. Expired
+requests are rejected before execution and responses are published only after
+all outputs pass shape, device, finiteness, and freshness checks. The action
+boundary waits only until the request's capture-derived expiry; if no complete
+matching result arrives, the deterministic route/risk/feasibility fallback is
+used. Each decision carries request/checkpoint/protocol/snapshot provenance and
+the broker's dropped, late, and fault counters. Plan A's P path-cost semantics
+remain active, with zero P on inference failure.
+
 `load_production_adapter` requires an explicit available `cuda:N` device and
 moves the checkpoint model to that device. PyTorch uses the same spelling for
 CUDA and ROCm/HIP devices. Missing accelerators and CPU fallback are rejected.
@@ -128,7 +146,10 @@ device models, and inference rejects CPU tensors or tensors on another device.
 Existing training calls still use their direct model path and do not establish
 production qualification.
 
-This is an implemented interface and static validation boundary, not evidence
+This async broker is an implementation pass with review and runtime evidence
+pending. It has only static compilation and diff checks so far; no simulator,
+fault-injection, or replay evaluation has exercised queue replacement,
+freshness rejection, or fallback behavior. This is not evidence
 of ONNX parity, Hailo operator support, accelerator execution, full planner
 latency, simulator fallback behavior, or robot actuation. The synthetic export
 and profile harness remains diagnostic and its zero tensors are never passed

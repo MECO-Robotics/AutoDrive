@@ -452,3 +452,26 @@ or dashboard replay were run. Qualification, evaluation, and promotion evidence
 remain pending. The GPU-only contract applies to simulator/model/evaluator
 compute; orchestration, tensor serialization, checkpoint map-location, and RNG
 handling may still use the host CPU.
+
+## §4 asynchronous versioned inference contract (implementation pass)
+
+The production A and C evaluator paths now use `meco-inference-v2` through a
+per-adapter asynchronous broker. Requests bind the model ID, checkpoint hash,
+protocol ID, adapter generation and monotonic request sequence, observation
+snapshot, captured/dispatch/completion/expiry times, and canonical input order
+and shapes. C requests bind their ordered candidate IDs and feasibility-mask
+digest. Plan A requests bind the exact legal graph node/pose/behavior support
+digest and include sensed-target descriptor IDs in the canonical candidate
+ordering. The single pending slot replaces an older queued request; the worker
+rejects expired requests and publishes only complete validated responses.
+Action-boundary consumers verify all echoed identity and digest fields and
+reject late or superseded responses. Decisions expose request provenance and
+dropped, late, and inference-fault counters. Existing feasibility, route/risk,
+deterministic fallback, and Plan A P path-cost behavior are preserved; there is
+no CPU model fallback.
+
+Three-pass ledger: Planner complete; implementer implemented in the isolated
+worktree; independent reviewer pending. Runtime evidence pending. This pass ran
+`py_compile` and `git diff --check` only. No tests or simulator evaluation
+were run, so queue replacement, stale/out-of-order rejection, and fallback
+behavior have not yet been validated in simulation or replay.
