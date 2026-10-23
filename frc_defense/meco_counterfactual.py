@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import enum
+from contextlib import contextmanager
 import inspect
 import platform
 from pathlib import Path
@@ -43,6 +44,34 @@ PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
 # remains subject to the same fail-closed traversal as v1.
 STATE_DIGEST_SCHEMA = "meco-full-environment-state-v2"
 DEFAULT_GAMMA = 0.993
+COUNTERFACTUAL_DISCOUNT_SEMANTICS = (
+    "one discount transition per macro decision, independent of macro duration; "
+    "first branch reward exponent 0 and each continuation decision increments "
+    "exponent once, including a final partial macro")
+
+
+@contextmanager
+def _counterfactual_rng_scope(seed):
+    """Seed simulator RNGs for reproducible collection/replay, then restore callers."""
+    if type(seed) is not int or seed < 0:
+        raise ValueError("counterfactual seed must be a nonnegative integer")
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        random.seed(seed)
+        np.random.seed(seed % (2 ** 32))
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.random.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
 
 
@@ -471,6 +500,13 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
 
 
 def replay_counterfactual_branch(record, manifest):
+    """Replay under the record seed while restoring the caller's RNG streams."""
+    seed = record.get("seed") if isinstance(record, dict) else None
+    with _counterfactual_rng_scope(seed):
+        return _replay_counterfactual_branch_seeded(record, manifest)
+
+
+def _replay_counterfactual_branch_seeded(record, manifest):
     """Replay a v2 prefix with strict digest/trace parity and return branch inputs."""
     from .meco_track_training import _reset_episode
 
@@ -598,6 +634,21 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
                    action_ticks, decision_index, prefix, descriptor, kind,
                    candidate_k, prediction_mode, max_c_candidates,
                    max_a_pairs, gamma_per_macro):
+    """Evaluate one branch with isolated, reproducible RNG streams."""
+    with _counterfactual_rng_scope(seed):
+        return _branch_return_seeded(scenario_id=scenario_id, category=category,
+            seed=seed, device=device, horizon_ticks=horizon_ticks,
+            action_ticks=action_ticks, decision_index=decision_index,
+            prefix=prefix, descriptor=descriptor, kind=kind,
+            candidate_k=candidate_k, prediction_mode=prediction_mode,
+            max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
+            gamma_per_macro=gamma_per_macro)
+
+
+def _branch_return_seeded(*, scenario_id, category, seed, device, horizon_ticks,
+                   action_ticks, decision_index, prefix, descriptor, kind,
+                   candidate_k, prediction_mode, max_c_candidates,
+                   max_a_pairs, gamma_per_macro):
     from .meco_track_training import _reset_episode
     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                               horizon=horizon_ticks)
@@ -663,7 +714,7 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
             "discounted_horizon_return": discounted,
             "continuation_policy": CONTINUATION_POLICY,
             "continuation_macro_horizon": continuation_decisions,
-            "discount_semantics": "gamma_per_macro_decision; first branch reward exponent 0; each continuation decision increments exponent once, including a final partial macro",
+            "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
             "terminal": bool(ended or timeout)}
     finally:
         close = getattr(env, "close", None)
@@ -717,7 +768,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "plan_a_support_order": SUPPORT_ORDER,
         "horizon_physics_ticks": horizon_ticks, "max_macro_ticks": action_ticks,
         "gamma_per_macro": gamma_per_macro,
-        "discount_semantics": "one discount transition per macro decision, independent of macro duration; first branch reward exponent 0 and each continuation decision increments exponent once, including a final partial macro",
+        "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
         "continuation_policy": CONTINUATION_POLICY,
         "max_plan_c_descriptors_per_prefix": max_c_candidates,
         "max_plan_a_pairs_per_prefix": max_a_pairs,
@@ -729,133 +780,134 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "source_runtime_device_bound": True}
     rows = []
     for seed in seeds:
-        env = make_curriculum_env(scenario_id, category, 1, device, seed,
-                                  horizon=horizon_ticks)
-        try:
-            graph = build_legal_pose_graph(env, slot=3)
-            episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
-            _reset_episode(env, seed)
-            prefix = []
-            elapsed_ticks = 0
-            while elapsed_ticks < horizon_ticks:
-                macro_ticks = min(action_ticks, horizon_ticks - elapsed_ticks)
-                item = _prefix_snapshot(env, graph, episode_id,
-                    action_ticks=macro_ticks, candidate_k=candidate_k,
-                    prediction_mode=prediction_mode,
-                    max_c_candidates=max_c_candidates,
-                    max_a_pairs=max_a_pairs)
-                prefix.append(item)
-                reward, ended, timeout, trace, heading_error, goal_distance, preempted = _reward_step(
-                    env, item["teacher_action"], macro_ticks)
-                if len(trace) != macro_ticks and not (ended or timeout):
-                    raise RuntimeError("teacher prefix macro ended before its allotted ticks")
-                item.update(prefix_goal_xy_m=None, prefix_goal_heading_rad=None,
-                    prefix_action7_traversal=False, executed_action_trace=trace,
-                    prefix_gross_return=reward,
-                    prefix_terminal_heading_error=heading_error,
-                    prefix_terminal_goal_distance_m=goal_distance,
-                    prefix_native_goal_preempted=preempted,
-                    prefix_candidate_commitment=None)
-                if ended or timeout:
-                    break
-                elapsed_ticks += len(trace)
-        finally:
-            close = getattr(env, "close", None)
-            if callable(close):
-                close()
-        for decision_index, item in enumerate(prefix):
-            prefix_transcript = [{
-                "predecision_simulator_state_sha256": row["simulator_state_sha256"],
-                "predecision_observation_sha256": row["observation_sha256"],
-                "safe_observation_sha256": row["safe_observation_sha256"],
-                "candidate_digest": row["candidate_digest"],
-                "candidate_replay_digest": row["candidate_replay_digest"],
-                "support_digest": row["support_digest"],
-                "snapshot_id": row["snapshot_id"],
-                "macro_ticks": row["macro_ticks"],
-                "action": row["teacher_action"],
-                "goal_xy_m": row["prefix_goal_xy_m"],
-                "goal_heading_rad": row["prefix_goal_heading_rad"],
-                "allow_action7_traversal": row["prefix_action7_traversal"],
-                "candidate_commitment": row["prefix_candidate_commitment"],
-                "executed_action_trace": row["executed_action_trace"],
-                "gross_macro_return": row["prefix_gross_return"]}
-                for row in prefix[:decision_index]]
-            group = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
-                "scenario_id": scenario_id, "category": category, "seed": seed,
-                "decision_index": decision_index,
-                "prefix_sha256": _hash(prefix_transcript),
-                "prefix_transcript_sha256": _hash(prefix_transcript),
-                "protocol_id": protocol_id,
-                "qualification_protocol_sha256": protocol_sha,
-                "source_identity_sha256": manifest["source_identity_sha256"],
-                "device": device_metadata,
-                "predecision_simulator_state_sha256": item["simulator_state_sha256"],
-                "predecision_observation_sha256": item["observation_sha256"],
-                "candidate_digest": item["candidate_digest"],
-                "candidate_replay_digest": item["candidate_replay_digest"],
-                "support_digest": item["support_digest"],
-                "macro_ticks": item["macro_ticks"],
-                "macro_start_tick": sum(row["macro_ticks"] for row in prefix[:decision_index]),
-                "max_macro_ticks": action_ticks,
-                "horizon_physics_ticks": horizon_ticks,
-                "gamma_per_macro": gamma_per_macro,
-                "discount_semantics": manifest["discount_semantics"],
-                "branch_state": {
-                    "snapshot_id": item["snapshot_id"],
-                    "simulator_state_sha256": item["simulator_state_sha256"],
-                    "observation_sha256": item["observation_sha256"],
-                    "safe_observation_sha256": item["safe_observation_sha256"],
+        with _counterfactual_rng_scope(seed):
+            env = make_curriculum_env(scenario_id, category, 1, device, seed,
+                                      horizon=horizon_ticks)
+            try:
+                graph = build_legal_pose_graph(env, slot=3)
+                episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
+                _reset_episode(env, seed)
+                prefix = []
+                elapsed_ticks = 0
+                while elapsed_ticks < horizon_ticks:
+                    macro_ticks = min(action_ticks, horizon_ticks - elapsed_ticks)
+                    item = _prefix_snapshot(env, graph, episode_id,
+                        action_ticks=macro_ticks, candidate_k=candidate_k,
+                        prediction_mode=prediction_mode,
+                        max_c_candidates=max_c_candidates,
+                        max_a_pairs=max_a_pairs)
+                    prefix.append(item)
+                    reward, ended, timeout, trace, heading_error, goal_distance, preempted = _reward_step(
+                        env, item["teacher_action"], macro_ticks)
+                    if len(trace) != macro_ticks and not (ended or timeout):
+                        raise RuntimeError("teacher prefix macro ended before its allotted ticks")
+                    item.update(prefix_goal_xy_m=None, prefix_goal_heading_rad=None,
+                        prefix_action7_traversal=False, executed_action_trace=trace,
+                        prefix_gross_return=reward,
+                        prefix_terminal_heading_error=heading_error,
+                        prefix_terminal_goal_distance_m=goal_distance,
+                        prefix_native_goal_preempted=preempted,
+                        prefix_candidate_commitment=None)
+                    if ended or timeout:
+                        break
+                    elapsed_ticks += len(trace)
+            finally:
+                close = getattr(env, "close", None)
+                if callable(close):
+                    close()
+            for decision_index, item in enumerate(prefix):
+                prefix_transcript = [{
+                    "predecision_simulator_state_sha256": row["simulator_state_sha256"],
+                    "predecision_observation_sha256": row["observation_sha256"],
+                    "safe_observation_sha256": row["safe_observation_sha256"],
+                    "candidate_digest": row["candidate_digest"],
+                    "candidate_replay_digest": row["candidate_replay_digest"],
+                    "support_digest": row["support_digest"],
+                    "snapshot_id": row["snapshot_id"],
+                    "macro_ticks": row["macro_ticks"],
+                    "action": row["teacher_action"],
+                    "goal_xy_m": row["prefix_goal_xy_m"],
+                    "goal_heading_rad": row["prefix_goal_heading_rad"],
+                    "allow_action7_traversal": row["prefix_action7_traversal"],
+                    "candidate_commitment": row["prefix_candidate_commitment"],
+                    "executed_action_trace": row["executed_action_trace"],
+                    "gross_macro_return": row["prefix_gross_return"]}
+                    for row in prefix[:decision_index]]
+                group = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
+                    "scenario_id": scenario_id, "category": category, "seed": seed,
+                    "decision_index": decision_index,
+                    "prefix_sha256": _hash(prefix_transcript),
+                    "prefix_transcript_sha256": _hash(prefix_transcript),
+                    "protocol_id": protocol_id,
+                    "qualification_protocol_sha256": protocol_sha,
+                    "source_identity_sha256": manifest["source_identity_sha256"],
+                    "device": device_metadata,
+                    "predecision_simulator_state_sha256": item["simulator_state_sha256"],
+                    "predecision_observation_sha256": item["observation_sha256"],
                     "candidate_digest": item["candidate_digest"],
                     "candidate_replay_digest": item["candidate_replay_digest"],
-                    "support_digest": item["support_digest"]},
-                "prefix_transcript": prefix_transcript}
-            c_outcomes = []
-            for descriptor in item["candidate_descriptors"]:
-                outcome = _branch_return(scenario_id=scenario_id, category=category,
-                    seed=seed, device=device, horizon_ticks=horizon_ticks,
-                    action_ticks=action_ticks, decision_index=decision_index,
-                    prefix=prefix, descriptor=descriptor, kind="C",
-                    candidate_k=candidate_k, prediction_mode=prediction_mode,
-                    max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-                    gamma_per_macro=gamma_per_macro)
-                c_outcomes.append({"descriptor": descriptor, **outcome})
-            c_pairs = [{"left_id": left["descriptor"]["candidate_id"],
-                "right_id": right["descriptor"]["candidate_id"],
-                "gross_horizon_return_difference": left["gross_horizon_return"] - right["gross_horizon_return"],
-                "preferred_id": (left["descriptor"]["candidate_id"]
-                    if left["gross_horizon_return"] > right["gross_horizon_return"] else
-                    right["descriptor"]["candidate_id"]
-                    if right["gross_horizon_return"] > left["gross_horizon_return"] else None)}
-                for index, left in enumerate(c_outcomes)
-                for right in c_outcomes[index + 1:]]
-            a_outcomes = []
-            for descriptor in item["plan_a_descriptors"]:
-                outcome = _branch_return(scenario_id=scenario_id, category=category,
-                    seed=seed, device=device, horizon_ticks=horizon_ticks,
-                    action_ticks=action_ticks, decision_index=decision_index,
-                    prefix=prefix, descriptor=descriptor, kind="A",
-                    candidate_k=candidate_k, prediction_mode=prediction_mode,
-                    max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-                    gamma_per_macro=gamma_per_macro)
-                a_outcomes.append({"descriptor": descriptor, **outcome,
-                    "p_target": None, "p_prior": 0.0,
-                    "p_unlabelled_reason": manifest["plan_a_p_unlabelled_reason"]})
-            a_pairs = [{"left_descriptor_sha256": left["descriptor"]["descriptor_sha256"],
-                "right_descriptor_sha256": right["descriptor"]["descriptor_sha256"],
-                "gross_horizon_return_difference": left["gross_horizon_return"] - right["gross_horizon_return"],
-                "preferred_descriptor_sha256": (left["descriptor"]["descriptor_sha256"]
-                    if left["gross_horizon_return"] > right["gross_horizon_return"] else
-                    right["descriptor"]["descriptor_sha256"]
-                    if right["gross_horizon_return"] > left["gross_horizon_return"] else None)}
-                for index, left in enumerate(a_outcomes)
-                for right in a_outcomes[index + 1:]]
-            rows.append({**group, "plan_c_counterfactuals": c_outcomes,
-                "plan_c_pairwise_labels": c_pairs,
-                "plan_a_sampled_node_behavior_labels": a_outcomes,
-                "plan_a_pairwise_preferences": a_pairs,
-                "branch_teacher_action_reference": item["teacher_action"],
-                "teacher_prefix_provenance": CONTINUATION_POLICY})
+                    "support_digest": item["support_digest"],
+                    "macro_ticks": item["macro_ticks"],
+                    "macro_start_tick": sum(row["macro_ticks"] for row in prefix[:decision_index]),
+                    "max_macro_ticks": action_ticks,
+                    "horizon_physics_ticks": horizon_ticks,
+                    "gamma_per_macro": gamma_per_macro,
+                    "discount_semantics": manifest["discount_semantics"],
+                    "branch_state": {
+                        "snapshot_id": item["snapshot_id"],
+                        "simulator_state_sha256": item["simulator_state_sha256"],
+                        "observation_sha256": item["observation_sha256"],
+                        "safe_observation_sha256": item["safe_observation_sha256"],
+                        "candidate_digest": item["candidate_digest"],
+                        "candidate_replay_digest": item["candidate_replay_digest"],
+                        "support_digest": item["support_digest"]},
+                    "prefix_transcript": prefix_transcript}
+                c_outcomes = []
+                for descriptor in item["candidate_descriptors"]:
+                    outcome = _branch_return(scenario_id=scenario_id, category=category,
+                        seed=seed, device=device, horizon_ticks=horizon_ticks,
+                        action_ticks=action_ticks, decision_index=decision_index,
+                        prefix=prefix, descriptor=descriptor, kind="C",
+                        candidate_k=candidate_k, prediction_mode=prediction_mode,
+                        max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
+                        gamma_per_macro=gamma_per_macro)
+                    c_outcomes.append({"descriptor": descriptor, **outcome})
+                c_pairs = [{"left_id": left["descriptor"]["candidate_id"],
+                    "right_id": right["descriptor"]["candidate_id"],
+                    "gross_horizon_return_difference": left["gross_horizon_return"] - right["gross_horizon_return"],
+                    "preferred_id": (left["descriptor"]["candidate_id"]
+                        if left["gross_horizon_return"] > right["gross_horizon_return"] else
+                        right["descriptor"]["candidate_id"]
+                        if right["gross_horizon_return"] > left["gross_horizon_return"] else None)}
+                    for index, left in enumerate(c_outcomes)
+                    for right in c_outcomes[index + 1:]]
+                a_outcomes = []
+                for descriptor in item["plan_a_descriptors"]:
+                    outcome = _branch_return(scenario_id=scenario_id, category=category,
+                        seed=seed, device=device, horizon_ticks=horizon_ticks,
+                        action_ticks=action_ticks, decision_index=decision_index,
+                        prefix=prefix, descriptor=descriptor, kind="A",
+                        candidate_k=candidate_k, prediction_mode=prediction_mode,
+                        max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
+                        gamma_per_macro=gamma_per_macro)
+                    a_outcomes.append({"descriptor": descriptor, **outcome,
+                        "p_target": None, "p_prior": 0.0,
+                        "p_unlabelled_reason": manifest["plan_a_p_unlabelled_reason"]})
+                a_pairs = [{"left_descriptor_sha256": left["descriptor"]["descriptor_sha256"],
+                    "right_descriptor_sha256": right["descriptor"]["descriptor_sha256"],
+                    "gross_horizon_return_difference": left["gross_horizon_return"] - right["gross_horizon_return"],
+                    "preferred_descriptor_sha256": (left["descriptor"]["descriptor_sha256"]
+                        if left["gross_horizon_return"] > right["gross_horizon_return"] else
+                        right["descriptor"]["descriptor_sha256"]
+                        if right["gross_horizon_return"] > left["gross_horizon_return"] else None)}
+                    for index, left in enumerate(a_outcomes)
+                    for right in a_outcomes[index + 1:]]
+                rows.append({**group, "plan_c_counterfactuals": c_outcomes,
+                    "plan_c_pairwise_labels": c_pairs,
+                    "plan_a_sampled_node_behavior_labels": a_outcomes,
+                    "plan_a_pairwise_preferences": a_pairs,
+                    "branch_teacher_action_reference": item["teacher_action"],
+                    "teacher_prefix_provenance": CONTINUATION_POLICY})
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during counterfactual collection")
     output = Path(output)
