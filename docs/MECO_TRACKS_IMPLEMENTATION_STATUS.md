@@ -282,8 +282,14 @@ optimality or per-cell supervision.
 `collect-plan-a-p-routes-v3` emits the new schema. The existing strict branch
 replay materializer regenerates and re-integrates each cost grid and rejects
 any mismatch before fitting. `warm-start-plan-a-p-v3` trains only on non-tied
-oracle cost comparisons and stamps oracle version, dataset and route provenance,
-and sampled executed-path coverage in a weights-only artifact. This tranche has
+oracle cost comparisons. Its prediction is the independently replayed base
+bump-grid integral plus the learned scaled P-map integral; both terms and the
+oracle labels use normalized grid-edge units. The base term is recomputed from
+the strict replay's frozen grid and each archived path trace, then added once to
+the differentiable P term. This keeps the fixed base route cost from being
+omitted or counted twice. The command and function require an available explicit
+CUDA device. The weights-only artifact stamps oracle version, dataset and route
+provenance, and sampled executed-path coverage. This tranche has
 received static compilation and diff checks only. No P-oracle collection,
 fit, simulator evaluation, or dashboard replay has run; runtime qualification
 and exhaustive legal-grid coverage remain outstanding.

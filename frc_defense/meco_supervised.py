@@ -1410,6 +1410,9 @@ def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
                         costs = [_plan_a_p_oracle_integral(effective_grid,
                             snapshot["route_points_m"], resolution)
                             for snapshot in route["route_trace"]]
+                        base_costs = [_plan_a_p_oracle_integral(base_grid,
+                            snapshot["route_points_m"], resolution)
+                            for snapshot in route["route_trace"]]
                         oracle = route.get("independent_cost_oracle", {})
                         regenerated = {"version": PLAN_A_P_ROUTE_ORACLE_VERSION,
                             "implementation": "frc_defense.meco_counterfactual._plan_a_p_oracle_integral",
@@ -1430,7 +1433,14 @@ def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
                                 if seed is not None else 0.)}
                         if regenerated != oracle:
                             raise RuntimeError("Plan A P independent oracle label differs after strict replay")
-                    verified.append(archived)
+                        replayed_outcome = dict(archived)
+                        # Keep the fixed base-grid contribution beside the label so
+                        # training predicts total cost = replayed base + learned P.
+                        replayed_outcome["_replayed_base_route_cost_grid_edges"] = (
+                            sum(base_costs) / len(base_costs))
+                    else:
+                        replayed_outcome = archived
+                    verified.append(replayed_outcome)
                 route_groups.append(verified)
             materialized.append({"raster": raster, "globals": globals_,
                 "graph": graph_values, "graph_object": graph,
@@ -1467,7 +1477,7 @@ def _plan_a_p_output_parameters(model, track):
 
 def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
         value_checkpoint: Path, output: Path, *, qualification_protocol: Path,
-        updates: int = 10, learning_rate: float = 1e-4, device: str = "cpu",
+        updates: int = 10, learning_rate: float = 1e-4, device: str | None = None,
         route_margin: float = 0.02, map_regularization: float = 0.001,
         minimum_coverage_fraction: float = 0.01, oracle_labels: bool = False):
     """Fit the P head from strict simulator outcomes for executed weighted routes."""
@@ -1478,6 +1488,20 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
             not math.isfinite(minimum_coverage_fraction) or
             not 0 < minimum_coverage_fraction <= 1):
         raise ValueError("invalid Plan A P route warm-start configuration")
+    if oracle_labels:
+        if not isinstance(device, str) or not device.strip():
+            raise ValueError("Plan A P oracle warm-start requires an explicit CUDA device")
+        try:
+            requested_device = torch.device(device)
+        except (TypeError, RuntimeError) as exc:
+            raise ValueError("Plan A P oracle warm-start requires an explicit CUDA device") from exc
+        if (requested_device.type != "cuda" or requested_device.index is None or
+                not torch.cuda.is_available() or
+                requested_device.index >= torch.cuda.device_count()):
+            raise ValueError("Plan A P oracle warm-start requires an available explicit CUDA device")
+        device = str(requested_device)
+    elif device is None:
+        device = "cpu"
     from .curriculum_training import source_identity
     from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
@@ -1587,10 +1611,18 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
                         for outcome in (better, worse):
                             records = [{"path_points_m": snapshot["route_points_m"]}
                                 for snapshot in outcome["native_route"]["route_trace"]]
-                            route_costs.append(integrate_frozen_routes(penalty_map,
+                            predicted_p_cost = integrate_frozen_routes(penalty_map,
                                 records, sample["resolution_m"],
                                 map_scale=sample["p_cost_scale"],
-                                points_per_grid_edge=1.).mean())
+                                points_per_grid_edge=1.).mean()
+                            if oracle_labels:
+                                base_cost = outcome.get(
+                                    "_replayed_base_route_cost_grid_edges")
+                                if (not _finite_number(base_cost) or base_cost < 0.):
+                                    raise ValueError(
+                                        "Plan A P oracle outcome lacks replayed base-grid cost")
+                                predicted_p_cost = predicted_p_cost + float(base_cost)
+                            route_costs.append(predicted_p_cost)
                         costs = torch.stack(route_costs)
                         route_losses.append(F.softplus(
                             (costs[0] - costs[1] + route_margin)))
@@ -1630,7 +1662,7 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
                              if oracle_labels else "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions"),
         "target_semantics": ("within_prefix_non_tied_sampled_executed_path_cost_preference_lower_is_better"
                              if oracle_labels else "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return"),
-        "loss_semantics": ("softplus_predicted_integrated_P_cost_preference_against_independent_oracle_cost_labels_plus_mean_P_regularization"
+        "loss_semantics": ("softplus_predicted_total_route_cost_preference; total=independently_replayed_base_bump_grid_integral+learned_scaled_P_integral; independent oracle total-cost labels; plus mean_P_regularization"
                            if oracle_labels else "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization"),
         "p_oracle_version": PLAN_A_P_ROUTE_ORACLE_VERSION if oracle_labels else None,
         "p_map_initialization": "softplus_inverse_of_0.02_on_penalty_output_channel",
@@ -1997,7 +2029,7 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
                 "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions") or
             payload.get("target_semantics") != ("within_prefix_non_tied_sampled_executed_path_cost_preference_lower_is_better" if oracle_v3 else
                 "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return") or
-            payload.get("loss_semantics") != ("softplus_predicted_integrated_P_cost_preference_against_independent_oracle_cost_labels_plus_mean_P_regularization" if oracle_v3 else
+            payload.get("loss_semantics") != ("softplus_predicted_total_route_cost_preference; total=independently_replayed_base_bump_grid_integral+learned_scaled_P_integral; independent oracle total-cost labels; plus mean_P_regularization" if oracle_v3 else
                 "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization") or
             (oracle_v3 and payload.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION) or
             payload.get("p_map_initialization") !=
@@ -2173,7 +2205,8 @@ def main(argv=None):
     plan_a_p_v3.add_argument("--qualification-protocol", type=Path, required=True)
     plan_a_p_v3.add_argument("--updates", type=int, default=10)
     plan_a_p_v3.add_argument("--learning-rate", type=float, default=1e-4)
-    plan_a_p_v3.add_argument("--device", default="cpu")
+    plan_a_p_v3.add_argument("--device", required=True,
+        help="explicit CUDA device, for example cuda:0; CPU is not supported")
     plan_a_p_v3.add_argument("--route-margin", type=float, default=0.02)
     plan_a_p_v3.add_argument("--map-regularization", type=float, default=0.001)
     plan_a_p_v3.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
