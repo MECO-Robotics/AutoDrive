@@ -35,15 +35,21 @@ Example invocation:
 python3 scripts/run_meco_ablation_matrix.py \
   --scenario SCENARIO_ID --categories CATEGORY_A,CATEGORY_B \
   --episodes 20 --seed 20261024 \
+  --qualification-protocol qualifications/meco/protocol.json \
   --a1-checkpoint PATH --a2-checkpoint PATH --a3-checkpoint PATH \
   --c1-checkpoint PATH --c2-checkpoint PATH
 ```
 
 The runner uses the explicit contiguous seed list beginning at `--seed` and
-writes one evaluation JSON per condition plus a matrix JSON. These are
-diagnostic paired records; they do not replace the calibrated held-out
-qualification gate and the matrix does not calculate promotion confidence
-intervals.
+writes one evaluation JSON per condition plus a matrix JSON. When
+`--qualification-protocol` is supplied, every category/seed must be assigned
+by that frozen protocol to exactly one validation or test split; training or
+unassigned seeds are rejected. The matrix records the protocol ID and hash
+plus each category/seed split assignment. Without that option, the matrix is
+explicitly marked `diagnostic_only_unbound_seeds`; it makes no held-out claim.
+In either mode these are diagnostic paired records; they do not replace the
+calibrated qualification gate and the matrix does not calculate promotion
+confidence intervals.
 
 The matrix and each condition ID bind a normalized execution device and
 backend. For example, an unindexed `cuda` request resolves to its active CUDA
@@ -65,8 +71,9 @@ noisy or shifted layouts cover these distinct conditions.
 
 - Confirm all five checkpoint files have the intended common training
   configuration/protocol and inspect recorded file hashes.
-- Confirm the exact scenario, categories, and seed list are the held-out split
-  approved for this diagnostic.
+- When a qualification protocol is provided, confirm the scenario, categories,
+  and per-seed validation/test assignments in `seed_split_assignments`. Without
+  one, treat the matrix as diagnostic-only and make no held-out claim.
 - Inspect `conditions` and verify all condition IDs include the same checkpoint
   bundle, source identity, and seeds.
 - Inspect each contrast's `common_bundle_provenance` and

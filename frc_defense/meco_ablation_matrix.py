@@ -22,7 +22,7 @@ from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 3
+MATRIX_SCHEMA_VERSION = 4
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -102,6 +102,28 @@ def _checkpoint_configuration_provenance(checkpoints: dict[str, str]):
     if any(value != protocol_ids[MECO_TRACKS[0]] for value in protocol_ids.values()):
         raise ValueError("checkpoints do not share one supervisor protocol")
     return config_hashes, protocol_ids, shared_config
+
+
+def _held_out_seed_assignments(protocol: dict, scenario_id: str,
+                               categories: tuple[str, ...],
+                               seeds: tuple[int, ...]) -> dict[str, dict[str, str]]:
+    """Require each requested case seed to belong to its frozen validation/test split."""
+    assignments = {}
+    for category in categories:
+        cases = [case for case in protocol.get("cases", [])
+                 if case.get("scenario_id") == scenario_id
+                 and case.get("category") == category]
+        category_assignments = {}
+        for seed in seeds:
+            splits = {case["split"] for case in cases
+                      if seed in case.get("seeds", [])}
+            if len(splits) != 1 or not splits <= {"validation", "test"}:
+                raise ValueError(
+                    f"matrix seed {seed} for {scenario_id}/{category} is not assigned "
+                    "to exactly one frozen validation/test split")
+            category_assignments[str(seed)] = next(iter(splits))
+        assignments[category] = category_assignments
+    return assignments
 
 
 def _validate_condition_manifest(report: dict, *,
@@ -255,7 +277,8 @@ def _contrast_pair(*, name: str, condition_id: str, report: dict,
 def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                categories: tuple[str, ...], seeds: tuple[int, ...],
                device: str, output_dir: str | Path,
-               inference_disable_tick: int | None = None) -> dict:
+               inference_disable_tick: int | None = None,
+               qualification_protocol: str | Path | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco
@@ -270,6 +293,20 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
+    qualification_provenance = None
+    if qualification_protocol is None:
+        seed_split_assignments = None
+        evaluation_design = "diagnostic_only_unbound_seeds"
+    else:
+        from .meco_supervised import _load_protocol
+        protocol, protocol_id, protocol_sha256, protocol_path = _load_protocol(
+            Path(qualification_protocol))
+        seed_split_assignments = _held_out_seed_assignments(
+            protocol, scenario_id, categories, seeds)
+        evaluation_design = "frozen_protocol_held_out"
+        qualification_provenance = {"protocol_id": protocol_id,
+            "protocol_sha256": protocol_sha256,
+            "protocol_file": protocol_path.name}
     output_root = Path(output_dir)
     execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)
@@ -283,6 +320,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     matrix_protocol = {"schema_version": MATRIX_SCHEMA_VERSION,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
+        "evaluation_design": evaluation_design,
+        "qualification_protocol": qualification_provenance,
+        "seed_split_assignments": seed_split_assignments,
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
         "training_configuration_sha256": config_hashes,
@@ -334,12 +374,18 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         if _source_identity_hash(source_identity()) != source_hash:
             raise ValueError("source identity drifted while an evaluation condition was running")
         report["experiment_matrix"] = {"matrix_id": matrix_id,
-            "condition_id": condition_id, "condition": spec}
+            "condition_id": condition_id, "condition": spec,
+            "evaluation_design": evaluation_design,
+            "qualification_protocol": qualification_provenance,
+            "seed_split_assignments": seed_split_assignments}
         _atomic_json(report_path, report)
         condition_records = _records_by_key(report)
         results[condition.condition_name] = {"condition_id": condition_id,
             "evaluation_id": report["evaluation_id"],
             "protocol_id": report["protocol_id"],
+            "evaluation_design": evaluation_design,
+            "qualification_protocol": qualification_provenance,
+            "seed_split_assignments": seed_split_assignments,
             "report_path": str(report_path),
             "checkpoint_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
@@ -463,6 +509,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     # remains auditable when copied out of the matrix-level report.
     common_provenance = {
         "execution_device": execution_device,
+        "evaluation_design": evaluation_design,
+        "qualification_protocol": qualification_provenance,
+        "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
             track: config_hashes[track] for track in MECO_TRACKS},
@@ -479,6 +528,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     matrix_report = {"schema_version": MATRIX_SCHEMA_VERSION,
         "matrix_id": matrix_id,
         "protocol": matrix_protocol,
+        "evaluation_design": evaluation_design,
+        "qualification_protocol": qualification_provenance,
+        "seed_split_assignments": seed_split_assignments,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,

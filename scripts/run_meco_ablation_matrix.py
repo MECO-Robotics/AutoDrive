@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
                         default=ROOT / "evaluations" / "meco-ablation-matrix")
     parser.add_argument("--inference-disable-tick", type=int,
                         help="requested physics tick for the paired D1 fallback condition")
+    parser.add_argument("--qualification-protocol", type=Path,
+                        help="frozen protocol whose validation/test seeds the matrix must use")
     for track in MECO_TRACKS:
         parser.add_argument(f"--{track.lower()}-checkpoint", required=True, type=Path)
     return parser
@@ -44,7 +46,8 @@ def main(argv=None) -> int:
         categories=categories,
         seeds=tuple(args.seed + index for index in range(args.episodes)),
         device=args.device, output_dir=args.output_dir,
-        inference_disable_tick=args.inference_disable_tick)
+        inference_disable_tick=args.inference_disable_tick,
+        qualification_protocol=args.qualification_protocol)
     print(json.dumps({"matrix_id": report["matrix_id"],
         "conditions": len(report["conditions"]),
         "contrasts": len(report["contrasts"]),
