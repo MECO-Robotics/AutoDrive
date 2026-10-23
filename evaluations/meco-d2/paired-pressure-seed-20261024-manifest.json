@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "source_revision": "eea11a7e223a4c59b6a2dd2cf64d8945d960a87e",
+  "protocol_id": "f208592fe80ce2cc5bb40c8ac19f3141f9f4b5377eb5d5f94e19cf1299bcbfb7",
+  "scenario": "offense_vs_scripted_pressure",
+  "category": "active/open/level_2_patrol",
+  "master_seed": 20261024,
+  "paired_episode_seed": 9167415603265273857,
+  "action_ticks": 12,
+  "horizon_steps": 120,
+  "dashboard_verified": false,
+  "dashboard_replay_generated": false,
+  "results": [
+    {
+      "policy": "d1_hand_weighted",
+      "evaluation_id": "d47ac1af809d4e6fa3f5e272e27ccd84",
+      "record": "d1-pressure-paired-seed-20261024.json",
+      "scenario": "offense_vs_scripted_pressure",
+      "category": "active/open/level_2_patrol",
+      "master_seed": 20261024,
+      "episode_seed": 9167415603265273857,
+      "horizon_steps": 120,
+      "terminal_tick": 120,
+      "success": false,
+      "acquisitions": 2.0,
+      "prediction_frames": 0,
+      "prediction_used_frames": 0,
+      "frames_with_positive_collection_penalty": 0,
+      "collection_penalty_total": 0
+    },
+    {
+      "policy": "d2_predictive_hand_weighted",
+      "evaluation_id": "c9a487bd91da4057aa4b6ced0a7f68a2",
+      "record": "d2-pressure-paired-seed-20261024.json",
+      "scenario": "offense_vs_scripted_pressure",
+      "category": "active/open/level_2_patrol",
+      "master_seed": 20261024,
+      "episode_seed": 9167415603265273857,
+      "horizon_steps": 120,
+      "terminal_tick": 120,
+      "success": false,
+      "acquisitions": 2.0,
+      "prediction_frames": 10,
+      "prediction_used_frames": 10,
+      "frames_with_positive_collection_penalty": 6,
+      "collection_penalty_total": 2.189192980527878
+    }
+  ],
+  "interpretation": "One paired diagnostic seed only; this is evidence that D2 exercised its observed-track prediction and retained outcomes, not a comparative performance qualification."
+}

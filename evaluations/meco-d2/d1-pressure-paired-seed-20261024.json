@@ -1,0 +1,4489 @@
+{
+  "curriculum_version": "1",
+  "sources": {
+    "frc_defense/__init__.py": "bb70af740dfcb5a594f6120e6f476d8c8a9ecde641c4243988930afbc56f143c",
+    "frc_defense/_tensor_3v3_actions.py": "847e95dd1b3c3e2360030d342c86fcdb4419864db5946cd80393097536cf40b3",
+    "frc_defense/_tensor_3v3_constants.py": "fc8898550d31a08a05195cdebe6802afc4563e87019ddcd77e7eea716f9a410a",
+    "frc_defense/_tensor_3v3_gamepieces.py": "480042250dcf281142929c62abf8bac60c007c498fb6105d517c55d7f645746a",
+    "frc_defense/_tensor_3v3_navigation.py": "2ba32799494c5e9154cc0c53b84b8173fde67277dd17127d3819f06339233bde",
+    "frc_defense/_tensor_3v3_observation.py": "cf577cb17b673c065081adcd23dc9549def0e9a6e81889ed7b50efbc69e89306",
+    "frc_defense/adstar.py": "cbe97564714bedcacdfa07f601804e16ee2b41edf02b8b2b85fe4ec2a9257f41",
+    "frc_defense/architecture_benchmark.py": "a7cb8822b4b86f9b82c94b4a3b3baec5bdd4b68d9117e3db1573e1818f9e5513",
+    "frc_defense/architecture_cnn.py": "a65aa9474284e9fa764925f3bda78567c8fd93e5680a05629166ba18899cab3c",
+    "frc_defense/architecture_dense.py": "e2f3f05e843ea1bdff776877a76723648f85ab052b52ba9146be5ac1a6e73088",
+    "frc_defense/architecture_entities.py": "bbc18996306698fb56c480a2fbb27d172067f7767ee16e98526dd553307ac26b",
+    "frc_defense/architecture_inputs.py": "bf64d5ba484a99ffc1a329e2ff9ec49d00ba12f1c25d7e56645c3f55d553d210",
+    "frc_defense/architecture_offense_scenario.py": "71056cd8992ce49ac89032ee7ce43ef409a40ce816f92349651529c9f47f5ecf",
+    "frc_defense/architecture_scenarios.py": "922addf8e9fdd0fdc65d0f96853f2f487cf6d80628f8db782b34438c4eb1747c",
+    "frc_defense/csrc/fuel_physics_hip.cpp": "ad799f6b4565cce4d9eeff287a3af49d8e77d746b85ee1eb65b21b847116d30c",
+    "frc_defense/csrc/fuel_physics_hip_kernel.cu": "2cd531d4573ef7f52bbb2e4e028e3f4afbcb5723999d65193b45ac935a26933f",
+    "frc_defense/csrc/fuel_sleep_hip.cpp": "a4802381963ba419298429949fba49b80aad83884244b49bf7d72e0d64549935",
+    "frc_defense/csrc/fuel_sleep_hip_kernel.cu": "3372624c149b985ea0be9879df6ff98f4d304c493e506025b614fb3b864ea69f",
+    "frc_defense/csrc/tensor_3v3_gamepieces_hip_hip.cpp": "0b0db22ff1a7dc555f2256d7d5ff88f798fddb475953d7a5ebfe5f7ab17e4d18",
+    "frc_defense/csrc/tensor_3v3_pickup_grid_hip.cpp": "8908f2397b9e9250bba1a1db4fac933ea8b3f411a80c3c72fe95ac32eddd0779",
+    "frc_defense/csrc/tensor_3v3_pickup_grid_hip_hip.cpp": "e2bfdd6d2f3cc97ef34b53907ff65758d8f902fa1edaa276f05e3a2f5a39476c",
+    "frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.cu": "4f11f2f670b6081c154701f8cb4aa76b514da4c21b4416de30e122fd0c526615",
+    "frc_defense/csrc/tensor_3v3_pickup_grid_hip_kernel.hip": "8350dbcefc9e32937898134ad068ef022f9be9e205627ffccb6734b76b2a2bd3",
+    "frc_defense/csrc/tensor_adstar_hip.cpp": "6ad3cae0b5401118e5defd7c98f1910a27ea18a6c418e67949489bf9f707b6a4",
+    "frc_defense/csrc/tensor_adstar_hip_hip.cpp": "232ecd7613cba9e67251b00ce2ba5fca13797eab43207fa5eb85abb61d1e6a47",
+    "frc_defense/csrc/tensor_adstar_hip_kernel.cu": "4bbb96caa9b9307bde086fd04037b725ec74e47ae36ffd1f782f06db1f5a745e",
+    "frc_defense/csrc/tensor_adstar_occupancy_hip.cpp": "d251d94dbdbbafc25504a3e2d13b73a5a1fbcd6ab4292207feadf9aa9918ebbb",
+    "frc_defense/csrc/tensor_adstar_occupancy_hip_hip.cpp": "78d4851dd49088e3cb494507541f90f1d54843ea0fda0b7dbf1ffae55d88e84f",
+    "frc_defense/csrc/tensor_adstar_occupancy_hip_kernel.cu": "709ed9b714d478bb6df3603c4f20b66d98fceca0923e2585731a87e852a46dae",
+    "frc_defense/csrc/tensor_adstar_occupancy_proto_hip.cpp": "78d4851dd49088e3cb494507541f90f1d54843ea0fda0b7dbf1ffae55d88e84f",
+    "frc_defense/csrc/tensor_adstar_reference_hip.cpp": "15fb338ea66614f3d83df6161251461f3b939e91605cb25b3f9164c949927b7f",
+    "frc_defense/csrc/tensor_adstar_reference_hip_hip.cpp": "e25958e617c01fd3da9ab41c0d3f1181e2c0cb62d9cb2414983505f35a7712e6",
+    "frc_defense/csrc/tensor_adstar_reference_kernel.cu": "9235fb612f26bff9931768b928a1fd9664d51b68f7881e1938141f5190adc7cd",
+    "frc_defense/csrc/tensor_adstar_route_kernel.cu": "0d0caf3fdcae81a9ed3172c54e386a6e39966e4174a718678f1b378321df7cef",
+    "frc_defense/csrc/tensor_collision_3v3_hip_hip.cpp": "d8e86446a3c4b478d9ff3ee0b6186d945f5f3f26aac3124d480f4284e67cd5ef",
+    "frc_defense/csrc/tensor_collision_hip.cpp": "72407dd90af5b2e1d85582ea5f1b821678bdd58cad88d1725c9ef2ee9080849d",
+    "frc_defense/csrc/tensor_collision_hip_hip.cpp": "f15995a156ad80c308c2efdb9762a3cb1b7d1a87722d9aaab929832a3537727f",
+    "frc_defense/csrc/tensor_collision_hip_kernel.cu": "a09301eaeadc82fdef7dcf861cdecb6853108194a8d39b498c18e5ba3cbccc8e",
+    "frc_defense/csrc/tensor_collision_multi_hip.cpp": "9ef432f83e39a52a2ecf849e86c45e3533ee80a8a1d2bcbd7912c8892729f147",
+    "frc_defense/csrc/tensor_collision_multi_hip_kernel.cu": "d1a6eb2761432b987fc9796e62068e29f1f24cdf298d561c1b19847ac8e7dc2d",
+    "frc_defense/csrc/tensor_collision_multi_hip_kernel.hip": "84b4cb2accd5a201fc641c401183c729d3907da73383fc31ebdf0ea8bc4c4a9a",
+    "frc_defense/csrc/tensor_collision_pipeline_hip.cpp": "0a957feea40ac091f4ba47fe15810a31d54e9f763fd636dc1afcdf54443bd27d",
+    "frc_defense/csrc/tensor_collision_pipeline_hip_hip.cpp": "95bdd2a7507e717994af04f17433e898716c2eb60736dbf14963a092cb199ec8",
+    "frc_defense/csrc/tensor_collision_pipeline_hip_kernel.cu": "1cc2187f8de03e1bb7432638388bd364782b719cb12e1da986d2eb736af50983",
+    "frc_defense/csrc/tensor_collision_pipeline_proto.cpp": "bf7dcac0a65673375df707f821276b860269c20a23fba8d65b3bc0b6912dcf2e",
+    "frc_defense/csrc/tensor_collision_pipeline_proto_kernel.cu": "1cc2187f8de03e1bb7432638388bd364782b719cb12e1da986d2eb736af50983",
+    "frc_defense/csrc/tensor_fuel_candidate_rank.cpp": "e58f8efa7288b7bca1c2cf767f2edc372adb739810768d659d354791e3c0056a",
+    "frc_defense/csrc/tensor_fuel_candidate_rank_hip.cpp": "7cf78bbdadf2ac87beb0ab7b6141bc9a9aa4acc8cb39fe49b83c23ba3399b4a9",
+    "frc_defense/csrc/tensor_fuel_candidate_rank_kernel.cu": "9109b3985810a5db2bb11272f6d90b512c0886af1dbcc71f227fedfcf0fb820e",
+    "frc_defense/csrc/tensor_fuel_candidate_rank_kernel.hip": "84fe093233bcad48ea8bda9705400f874c48c1746122af6e108afd29528a5d55",
+    "frc_defense/csrc/tensor_gamepieces_hip.cpp": "af0f8324355cd78fdfe4c3dee3c79b808f6f9a1acb52e4338acb7d07b335c985",
+    "frc_defense/csrc/tensor_gamepieces_hip_hip.cpp": "c70da06135367b95fd00a8b74f80a027feddefc5b4bfbefefd5439c619d998fe",
+    "frc_defense/csrc/tensor_gamepieces_hip_kernel.cu": "5d90ab345ee95afc71beeb8de3fa94c98f025cecc1336007ddadd273a01086a6",
+    "frc_defense/csrc/tensor_gamepieces_hip_kernel.hip": "49096b1833401419b495e8f7603a2740a1f9867d67702f7fcc429558f5b553a9",
+    "frc_defense/csrc/tensor_perception_commit_proto.cpp": "202bffe62f5c91cde7b97f7314c8afe331bfb92064c5533c76ec872f27ff34ce",
+    "frc_defense/csrc/tensor_perception_commit_proto_hip.cpp": "12ffeefbbc7ee7cb013ba8f3c8f363229ed668f952a68e6e6432f61840ee0a80",
+    "frc_defense/csrc/tensor_perception_commit_proto_kernel.cu": "aa176f3a42dc64fa6457dad8c0aabba1cbedeeabb6343547249a4beca840697f",
+    "frc_defense/csrc/tensor_perception_hip.cpp": "9dec1986352c41ec1a8fa221c740da18a0f9d7e6eddd24947bdda90d3c05473f",
+    "frc_defense/csrc/tensor_perception_hip_hip.cpp": "686e72e24e44b3d00dd7b7e2d8703880aaf733434675e8e3a84edd23687741cd",
+    "frc_defense/csrc/tensor_perception_hip_kernel.cu": "b1a5d63bc520e0079ab9ed6400cf826b4712aec5deaec6894c352e1837e0c7cd",
+    "frc_defense/csrc/tensor_strategic_observation_full_proto.cpp": "7230e5da5cda694506cf0da961178b61517de23af453378e4d5ea2a39405062f",
+    "frc_defense/csrc/tensor_strategic_observation_full_proto_hip.cpp": "201d0b83d9132bd588f0f14d216542d7910f77682ca3fde22965e6862f693fa5",
+    "frc_defense/csrc/tensor_strategic_observation_full_proto_kernel.cu": "bb54fb8e18b4dc5ccaaa9274337793c4c1058ea60301b78be405bf534368deac",
+    "frc_defense/csrc/tensor_strategic_observation_proto.cpp": "eb4f0637508e9cf1133cfda6d02ee9b3672eba4bd194a0313b8d3fdbb54e12a0",
+    "frc_defense/csrc/tensor_strategic_observation_proto_hip.cpp": "0c021939d6083131b3c7a94a2fd6fc4fd4fddecd5ab417237ad3fd8769a1beda",
+    "frc_defense/csrc/tensor_strategic_observation_proto_kernel.cu": "57c42cf8934dadda0fa81ee1ddd11213de33b234ebeed59d6852694b959c6d9e",
+    "frc_defense/csrc/tensor_swerve_pose_hip.cpp": "41596f98ff5ea39be3995600969adfe65f1db4d452f0bc2a8407342911e91939",
+    "frc_defense/csrc/tensor_swerve_pose_hip_hip.cpp": "fbc44a9758235ceb5fdf7fa17f7dfdf0bfd32f7cd2a572c6b9e42091a82da83f",
+    "frc_defense/csrc/tensor_swerve_pose_kernel.cu": "64799969b10641eef8da31f65322be3daf74476f92691118c8d2577a2903c3fe",
+    "frc_defense/csrc/tensor_swerve_pose_proto_hip_hip.cpp": "4db92601faa40aac7820c80ff3d5d85295b5448cb60a81b4b1bea7ac4d9b4ea2",
+    "frc_defense/curriculum_metrics.py": "f2ede317b5a3d0a83f90fb221c9a8d5a56b92da432736f9f82321e43ebfb0ef9",
+    "frc_defense/curriculum_policy.py": "c471c20dd27ce4c013c1e6a42009e917e9e54f7f8181ca78eb486b6ddb4ce47b",
+    "frc_defense/curriculum_scenarios.py": "87eacd797864b8863c8c55f7bb5b6effa80fc52cbbd76c63fe5aa36411044ea5",
+    "frc_defense/curriculum_training.py": "6a7914fec95e46e0b6594ce93a211274c28af1f62ae3450d4bfb3d85b7d58329",
+    "frc_defense/dashboard.py": "7f65d3a94a55c352ed132fa70ec85af5043b519ade7cf4772c9ce15879f5a3ee",
+    "frc_defense/dashboard_api.py": "58f3501b5a14a259ed14947dd4de2544f3223e952e33f70c76520f53727ce2c6",
+    "frc_defense/dashboard_simulation.py": "1b0c3e5427e248fc72752a1b04c633bdf5c10552596aca5bf8ad6429b56d6736",
+    "frc_defense/discrete_sac.py": "370d465826dedd1e9877ab12d39e4ed7964c0b57c85ec139adfbba7d2c0114fc",
+    "frc_defense/experimental_route_evaluation.py": "8f9aec1a3f17fd48a17cd2971b0132525ca3ff31761805dd29dc977fc9eb418c",
+    "frc_defense/field.py": "07eb5e9fe4c61ddb306a4b06f3b04f628f796c5ad556dd9142add2bae9e7a0a7",
+    "frc_defense/fuel_physics.py": "16b8c0a3c07a624f65d1c9f19eab52b4f316e76cf52ff34a4eb606a42ddaa5e5",
+    "frc_defense/fuel_physics_hip.py": "d81c7e44b2d72dba8dbd5d9d064dfc8e356a102c2819bdc3a7facfdfa91603a9",
+    "frc_defense/fuel_physics_runtime.py": "ddc049c2f7be000de33029a84309f6f65798e6e30c26147e5d0d6bc825015385",
+    "frc_defense/fuel_physics_sleep.py": "cd96ee4f2c07e9289634c13a5991fe0dfddbb150d874969e82a3513f8a4411bb",
+    "frc_defense/gamepiece_actions.py": "74c47eb546565f46712bd5328c50c71b07275b897cb1ef3fc9216b67d4ad260c",
+    "frc_defense/learning_contract.py": "70b037f98c998b983e837315be930713f040a362ca39cc8ee4c483e307ff8200",
+    "frc_defense/learning_inputs.py": "9788c5a6b6c815d465843b08b4495d1a401a619b37137133edc8ad13f4680528",
+    "frc_defense/observation.py": "3b51a60864e90cc8a773a3a5109a0601a4450c63708f718df07346da8d817db6",
+    "frc_defense/reward.py": "033b29fa26602afe78161f11408e06bf4be334c9e4c6a90887f9756a330c476d",
+    "frc_defense/runtime.py": "961f4e7db5cd4e1a23a9597e1901878c20d8ffeceb7077f69eaf763b2ebe3bc7",
+    "frc_defense/tensor_3v3.py": "6f718045cababce6626dfde85b8c61bcef568c5dfde5a32353d5cda3a90ae0c7",
+    "frc_defense/tensor_3v3_pickup_grid_hip.py": "155e703bbb4140ced2b3a03ac69f375223891ce8af450fcd83fd54257a41154c",
+    "frc_defense/tensor_adstar.py": "fe014a1e2ba3e408553a6bd327bd5aea1574c3d8adb3fab559186aff1342db6e",
+    "frc_defense/tensor_collision.py": "0dec094b73ae97344c2212aab724511d75de4784b0a7a3bcefce61547e5e9bd1",
+    "frc_defense/tensor_collision_multi_hip.py": "3802da4d7f46fe77d22187e79769ab0fc624ee895c574fe138b53dd72e83d1de",
+    "frc_defense/tensor_collision_pipeline.py": "5d54668a44a73eb95251563970c2a7fa9a52f760630d826f2f36c35a468273b6",
+    "frc_defense/tensor_defense_gamepieces.py": "3916a45d8c8925f76c2ebecc43050d3a58b0e51a988c4d48ded644f03cd503d4",
+    "frc_defense/tensor_defense_observation.py": "4bc7c2fce381aab1bdf906f1faf92f5c91e685302697a70dfbd3efddc4c20dc5",
+    "frc_defense/tensor_defense_opponent.py": "f8ba7b7739a16959d29d5e818b09671c6600239fa2204ab25167b347ff729ada",
+    "frc_defense/tensor_defense_reset.py": "4e91ab6a68ebe42969cb465045f363adf098a599905465a6d35ed6d4bae3f035",
+    "frc_defense/tensor_defense_step.py": "fecad83d24c4f50b7fb82af1a5857acd6bfe72ee1fcb341034f14f6d8bdba30d",
+    "frc_defense/tensor_fuel_candidate_rank.py": "b6f40b95702ae92f5d662e8d65a0f5db227645418cec46b061bed6fb70fa3edb",
+    "frc_defense/tensor_gamepieces.py": "ca7f20d46594158e335c2e5f9161dd79ab52f48bce9ec7466a77d605862ee212",
+    "frc_defense/tensor_perception.py": "a8e709c9b73041c210bbb2585a8dfe15996bbbd330699ffb81456b583851e319",
+    "frc_defense/tensor_perception_commit_proto.py": "8d7d72c3e17d7cd7c638b4cfd5785d0691d87eafc68c636fc438b81005ad696a",
+    "frc_defense/tensor_physics.py": "933b65a6ce84d6dbe169d401f526f159d0a8ae04546a385d11e02b46c5be3e29",
+    "frc_defense/tensor_physics_collision.py": "83f12c64576aab6e4981b3a0b1dd92d745768f0f888005964487630f489d3f2b",
+    "frc_defense/tensor_sim.py": "6cfba93527c1f8a8d68962ff05696c1e1611109c7e6d5c0c3a3990e08217958c",
+    "frc_defense/tensor_strategic_observation_full_proto.py": "e1bad4261f4c5fd233fbc533ab3a58b5443f24380dedcb2e6e5dc05478d42b7c",
+    "frc_defense/tensor_strategic_observation_proto.py": "7644a4fbc8a63ee06f5eb5de0305e208681329ba9bdfc6c72a3d4256e2a045be",
+    "frc_defense/tensor_swerve_pose_hip.py": "decad6b03ba04ca35fe71c5e8a4f915db431909e21b81f12b8f3b9a0717a48ae",
+    "frc_defense/tensor_training.py": "c40ec83e971832c055d2b2ec9591eaa8629af5080b7bfa6077de55dcef64a847",
+    "frc_defense/tensor_training_3v3.py": "812bad237e1022f0c8070a6351cde85235ac2ea2095ad02930b3a74748611e6e",
+    "frc_defense/tensor_training_evaluation.py": "72036f22011a03fdbcd5ac8f235608ee3a37716b18b8c449f1b289c2b0500483",
+    "frc_defense/tensor_training_evaluation_reporting.py": "57b1a50cd9889b9849e46fe3dc29be074aec2b557ce1adb70f55d49e09fb63fd",
+    "frc_defense/tensor_training_generational.py": "0e44284fd9bf4623b46ebd872b02d8d911c477860c3496d71bd0111bba96a7f6",
+    "frc_defense/tensor_training_ppo.py": "0d0b3beeafd7eaf10397ecd76c63c29fecf651c494006595799c11600ee9ffda",
+    "frc_defense/tensor_training_runtime.py": "380cd37ef064585109affd017fe1c13dccaba23fc835ca5ed5bb1cc39705309c",
+    "frc_defense/training_curriculum.py": "3d32c8b47a3122807989b435257dfba8d21d9c5ca451556d7620eb47e05392a4",
+    "frc_defense/types.py": "4b3d5e436380ca509ae996c3a5fb39b7ba10dc65c36d6c95ca731b4d7c058c8f",
+    "_runtime_environment": {}
+  },
+  "protocol_id": "f208592fe80ce2cc5bb40c8ac19f3141f9f4b5377eb5d5f94e19cf1299bcbfb7",
+  "algorithm": "d1_hand_weighted",
+  "architecture": "candidate_action_ranker",
+  "policy_provenance": {
+    "kind": "hand_weighted_candidate_action_ranker",
+    "candidate_source": "per-snapshot-four-nearest-valid-sensor-track-buffer-slots",
+    "action_source": "masked curriculum eight-action interface",
+    "weights": {
+      "proximity": 1.0,
+      "nearby_tracks": 0.12,
+      "confidence": 0.1,
+      "track_age": -0.05,
+      "score": 0.65,
+      "ferry": 0.2,
+      "intercept": -0.25,
+      "hold": -0.5
+    },
+    "prediction": null,
+    "uses_hidden_fuel_or_opponent_truth": false
+  },
+  "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+  "test_seed_index0_reserved": true,
+  "checkpoint_file_sha256": null,
+  "evaluation_id": "d47ac1af809d4e6fa3f5e272e27ccd84",
+  "split": "validation",
+  "dt": 0.02,
+  "action_ticks": 12,
+  "strategic_rate_hz": 4.166666666666667,
+  "diagnostic": true,
+  "dashboard_verified": false,
+  "evaluation_results": [
+    {
+      "evaluation_id": "d47ac1af809d4e6fa3f5e272e27ccd84",
+      "scenario_id": "offense_vs_scripted_pressure",
+      "split": "validation",
+      "categories": [
+        {
+          "category": "active/open/level_2_patrol",
+          "episodes": 1,
+          "successes": 0,
+          "useful_throughput": 0.0,
+          "reference_throughput": 0.0,
+          "paired": true,
+          "reference_qualified": false,
+          "reference_protocol_id": "f208592fe80ce2cc5bb40c8ac19f3141f9f4b5377eb5d5f94e19cf1299bcbfb7",
+          "seeds": [
+            9167415603265273857
+          ],
+          "reference_seeds": [
+            9167415603265273857
+          ]
+        }
+      ],
+      "checkpoint_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+      "scenario_version": "1",
+      "curriculum_version": "1",
+      "protocol_id": "f208592fe80ce2cc5bb40c8ac19f3141f9f4b5377eb5d5f94e19cf1299bcbfb7"
+    }
+  ],
+  "records": [
+    {
+      "scenario_id": "offense_vs_scripted_pressure",
+      "category": "active/open/level_2_patrol",
+      "success_interval_95": [
+        0.0,
+        0.7934567085261071
+      ],
+      "reference_successes": 0,
+      "reference_interval_95": [
+        0.0,
+        0.7934567085261071
+      ],
+      "reference_qualified": false,
+      "teacher": "generic NN execution; qualification is category-specific",
+      "learner": [
+        {
+          "scenario_id": "offense_vs_scripted_pressure",
+          "scenario_version": "1",
+          "category": "active/open/level_2_patrol",
+          "seed": 9167415603265273857,
+          "physics": true,
+          "dt": 0.02,
+          "action_ticks": 12,
+          "strategic_rate_hz": 4.166666666666667,
+          "horizon_steps": 120,
+          "configuration": {
+            "scenario_id": "offense_vs_scripted_pressure",
+            "scenario_version": "1",
+            "category": "active/open/level_2_patrol",
+            "learner_slot": 3,
+            "seed": 9167415603265273857,
+            "time_budget_s": 120.0,
+            "pressure": {
+              "level": 2,
+              "style": "level_2_patrol",
+              "slots": [
+                0
+              ],
+              "phase": 5.384689808252905,
+              "anchor_y": 6.800000190734863
+            },
+            "targets": {
+              "amount": 4,
+              "batch_size": 2,
+              "cycles": 2
+            },
+            "allowed_actions": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              6,
+              7
+            ],
+            "schedule": [
+              [
+                0.0,
+                true
+              ]
+            ],
+            "route": "open",
+            "reference_qualified": false,
+            "execution": "generic_nn",
+            "limitations": [
+              "Draft budgets and targets require scripted-reference qualification.",
+              "Uncontrolled robot bodies remain off-field and are restored after each step."
+            ]
+          },
+          "control_modes": [
+            "nn",
+            "none",
+            "none",
+            "nn",
+            "none",
+            "none"
+          ],
+          "robot_fuel_capacities": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ],
+          "robot_types": [
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper"
+          ],
+          "execution": "generic_nn",
+          "terminal": {
+            "phase": "terminal",
+            "tick": 120,
+            "executed_action": 3,
+            "pose": [
+              15.809901237487793,
+              6.738468647003174,
+              3.1380884647369385
+            ],
+            "hub_active": true,
+            "metrics": {
+              "success": [
+                false
+              ],
+              "useful_throughput": [
+                0.0
+              ],
+              "distinct_retained": [
+                2.0
+              ],
+              "current_staged": [
+                0.0
+              ],
+              "completed_cycles": [
+                0
+              ],
+              "score_cycles": [
+                0
+              ],
+              "ferry_cycles": [
+                0
+              ],
+              "inactive_staged": [
+                0.0
+              ],
+              "scores": [
+                0.0
+              ],
+              "acquisitions": [
+                2.0
+              ],
+              "deliveries": [
+                0.0
+              ],
+              "route_seen": [
+                false
+              ],
+              "elapsed": [
+                2.399998426437378
+              ],
+              "team_conversions": [
+                0.0
+              ],
+              "staged_conversions": [
+                0.0
+              ],
+              "initial_staged_conversions": [
+                0.0
+              ],
+              "inactive_deliveries": [
+                0.0
+              ],
+              "active_seconds": [
+                2.399998426437378
+              ],
+              "inactive_seconds": [
+                0.0
+              ],
+              "post_boundary_scores": [
+                0.0
+              ],
+              "post_boundary_deliveries": [
+                0.0
+              ],
+              "encounter_ticks": [
+                98.0
+              ],
+              "nearest_defender": [
+                0.9005203247070312
+              ]
+            }
+          },
+          "outcome": {
+            "success": false,
+            "useful_throughput": 0.0,
+            "distinct_retained": 2.0,
+            "current_staged": 0.0,
+            "completed_cycles": 0,
+            "score_cycles": 0,
+            "ferry_cycles": 0,
+            "inactive_staged": 0.0,
+            "scores": 0.0,
+            "acquisitions": 2.0,
+            "deliveries": 0.0,
+            "route_seen": false,
+            "elapsed": 2.399998426437378,
+            "team_conversions": 0.0,
+            "staged_conversions": 0.0,
+            "initial_staged_conversions": 0.0,
+            "inactive_deliveries": 0.0,
+            "active_seconds": 2.399998426437378,
+            "inactive_seconds": 0.0,
+            "post_boundary_scores": 0.0,
+            "post_boundary_deliveries": 0.0,
+            "encounter_ticks": 98.0,
+            "nearest_defender": 0.9005203247070312
+          },
+          "frames": [
+            {
+              "tick": 0,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  0.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  0.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.0
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.0
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  0.0
+                ],
+                "nearest_defender": [
+                  18.403709411621094
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  0,
+                  1,
+                  65,
+                  61
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  false,
+                  false
+                ],
+                "candidate_scores": [
+                  0.9634439945220947,
+                  0.8492335677146912,
+                  null,
+                  null
+                ],
+                "action_scores": [
+                  0.9634439945220947,
+                  0.8492335677146912,
+                  null,
+                  null,
+                  null,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.41947296261787415,
+                  0.692476212978363,
+                  15.564061164855957,
+                  15.564061164855957
+                ],
+                "candidate_nearby_tracks": [
+                  2.0,
+                  2.0,
+                  0.0,
+                  0.0
+                ],
+                "candidate_confidence": [
+                  0.18957161903381348,
+                  0.18383346498012543,
+                  0.0,
+                  0.0
+                ],
+                "candidate_age": [
+                  0.0,
+                  0.0,
+                  2.0,
+                  2.0
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:0",
+                "candidate_ids": [
+                  "collect:track:0",
+                  "collect:track:1",
+                  "collect:unavailable-slot:2",
+                  "collect:unavailable-slot:3",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    0.0,
+                    0.41947296261787415,
+                    2.0,
+                    0.18957161903381348,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    1.0,
+                    0.692476212978363,
+                    2.0,
+                    0.18383346498012543,
+                    0.0
+                  ],
+                  [
+                    2.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    3.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  false,
+                  false,
+                  false,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:0",
+                "candidate_ids": [
+                  "collect:track:0",
+                  "collect:track:1",
+                  "collect:unavailable-slot:2",
+                  "collect:unavailable-slot:3",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  0.9634439945220947,
+                  0.8492335677146912,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 0.0,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:0",
+              "executed_action": 0,
+              "next_pose": [
+                14.35993480682373,
+                6.817152500152588,
+                -3.1386003494262695
+              ]
+            },
+            {
+              "tick": 12,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.23999996483325958
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.23999996483325958
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  12.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  3,
+                  0,
+                  6,
+                  2
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.0676857233047485,
+                  1.0062737464904785,
+                  0.7392194867134094,
+                  0.7046627998352051
+                ],
+                "action_scores": [
+                  1.0676857233047485,
+                  1.0062737464904785,
+                  0.7392194867134094,
+                  0.7046627998352051,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.777786374092102,
+                  1.0392745733261108,
+                  1.2854576110839844,
+                  1.3414312601089478
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  2.0,
+                  2.0
+                ],
+                "candidate_confidence": [
+                  0.33188503980636597,
+                  0.4390338063240051,
+                  0.636703610420227,
+                  0.4357353448867798
+                ],
+                "candidate_age": [
+                  0.15999998152256012,
+                  0.15999998152256012,
+                  0.03999999910593033,
+                  0.11999998986721039
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:12",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:6",
+                  "collect:track:2",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    3.0,
+                    0.777786374092102,
+                    4.0,
+                    0.33188503980636597,
+                    0.15999998152256012
+                  ],
+                  [
+                    1.0,
+                    0.0,
+                    1.0392745733261108,
+                    4.0,
+                    0.4390338063240051,
+                    0.15999998152256012
+                  ],
+                  [
+                    2.0,
+                    6.0,
+                    1.2854576110839844,
+                    2.0,
+                    0.636703610420227,
+                    0.03999999910593033
+                  ],
+                  [
+                    3.0,
+                    2.0,
+                    1.3414312601089478,
+                    2.0,
+                    0.4357353448867798,
+                    0.11999998986721039
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:12",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:6",
+                  "collect:track:2",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.0676857233047485,
+                  1.0062737464904785,
+                  0.7392194867134094,
+                  0.7046627998352051,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 0.23999996483325958,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:3",
+              "executed_action": 0,
+              "next_pose": [
+                14.46419620513916,
+                6.925201892852783,
+                3.1397545337677
+              ]
+            },
+            {
+              "tick": 24,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.4800000786781311
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.4800000786781311
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  24.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  3,
+                  0,
+                  6,
+                  7
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.0638536214828491,
+                  1.0209667682647705,
+                  0.7658482193946838,
+                  0.721800684928894
+                ],
+                "action_scores": [
+                  1.0638536214828491,
+                  1.0209667682647705,
+                  0.7658482193946838,
+                  0.721800684928894,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.7523412108421326,
+                  0.9339985251426697,
+                  1.2403475046157837,
+                  1.4497791528701782
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  2.0,
+                  2.0
+                ],
+                "candidate_confidence": [
+                  0.33188503980636597,
+                  0.4390338063240051,
+                  0.7948886156082153,
+                  0.776005744934082
+                ],
+                "candidate_age": [
+                  0.40000003576278687,
+                  0.40000003576278687,
+                  0.0,
+                  0.07999999821186066
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:24",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:6",
+                  "collect:track:7",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    3.0,
+                    0.7523412108421326,
+                    4.0,
+                    0.33188503980636597,
+                    0.40000003576278687
+                  ],
+                  [
+                    1.0,
+                    0.0,
+                    0.9339985251426697,
+                    4.0,
+                    0.4390338063240051,
+                    0.40000003576278687
+                  ],
+                  [
+                    2.0,
+                    6.0,
+                    1.2403475046157837,
+                    2.0,
+                    0.7948886156082153,
+                    0.0
+                  ],
+                  [
+                    3.0,
+                    7.0,
+                    1.4497791528701782,
+                    2.0,
+                    0.776005744934082,
+                    0.07999999821186066
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:24",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:6",
+                  "collect:track:7",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.0638536214828491,
+                  1.0209667682647705,
+                  0.7658482193946838,
+                  0.721800684928894,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 0.4800000786781311,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:3",
+              "executed_action": 0,
+              "next_pose": [
+                14.54088306427002,
+                6.835410118103027,
+                3.1395657062530518
+              ]
+            },
+            {
+              "tick": 36,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.7199998497962952
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.7199998497962952
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  36.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  3,
+                  0,
+                  34,
+                  35
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.0878351926803589,
+                  1.030444860458374,
+                  1.0291253328323364,
+                  0.9907640814781189
+                ],
+                "action_scores": [
+                  1.0878351926803589,
+                  1.030444860458374,
+                  1.0291253328323364,
+                  0.9907640814781189,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.648405909538269,
+                  0.8568674325942993,
+                  1.1480523347854614,
+                  1.3221482038497925
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.33188503980636597,
+                  0.4390338063240051,
+                  0.8358729481697083,
+                  0.8012838959693909
+                ],
+                "candidate_age": [
+                  0.6399999260902405,
+                  0.6399999260902405,
+                  0.0,
+                  0.0
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:36",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:34",
+                  "collect:track:35",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    3.0,
+                    0.648405909538269,
+                    4.0,
+                    0.33188503980636597,
+                    0.6399999260902405
+                  ],
+                  [
+                    1.0,
+                    0.0,
+                    0.8568674325942993,
+                    4.0,
+                    0.4390338063240051,
+                    0.6399999260902405
+                  ],
+                  [
+                    2.0,
+                    34.0,
+                    1.1480523347854614,
+                    4.0,
+                    0.8358729481697083,
+                    0.0
+                  ],
+                  [
+                    3.0,
+                    35.0,
+                    1.3221482038497925,
+                    4.0,
+                    0.8012838959693909,
+                    0.0
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:36",
+                "candidate_ids": [
+                  "collect:track:3",
+                  "collect:track:0",
+                  "collect:track:34",
+                  "collect:track:35",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.0878351926803589,
+                  1.030444860458374,
+                  1.0291253328323364,
+                  0.9907640814781189,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 0.7199998497962952,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:3",
+              "executed_action": 0,
+              "next_pose": [
+                14.827523231506348,
+                6.721884727478027,
+                3.1393730640411377
+              ]
+            },
+            {
+              "tick": 48,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.9599996209144592
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.9599996209144592
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  48.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  0,
+                  42,
+                  21,
+                  56
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.1083729267120361,
+                  1.067231297492981,
+                  1.0544413328170776,
+                  1.0535697937011719
+                ],
+                "action_scores": [
+                  1.1083729267120361,
+                  1.067231297492981,
+                  1.0544413328170776,
+                  1.0535697937011719,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.5911668539047241,
+                  0.9911892414093018,
+                  1.0237089395523071,
+                  1.0352756977081299
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.4390338063240051,
+                  0.850188672542572,
+                  0.8029910326004028,
+                  0.8423582911491394
+                ],
+                "candidate_age": [
+                  0.8799996972084045,
+                  0.0,
+                  0.0,
+                  0.03999999910593033
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:48",
+                "candidate_ids": [
+                  "collect:track:0",
+                  "collect:track:42",
+                  "collect:track:21",
+                  "collect:track:56",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    0.0,
+                    0.5911668539047241,
+                    4.0,
+                    0.4390338063240051,
+                    0.8799996972084045
+                  ],
+                  [
+                    1.0,
+                    42.0,
+                    0.9911892414093018,
+                    4.0,
+                    0.850188672542572,
+                    0.0
+                  ],
+                  [
+                    2.0,
+                    21.0,
+                    1.0237089395523071,
+                    4.0,
+                    0.8029910326004028,
+                    0.0
+                  ],
+                  [
+                    3.0,
+                    56.0,
+                    1.0352756977081299,
+                    4.0,
+                    0.8423582911491394,
+                    0.03999999910593033
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:48",
+                "candidate_ids": [
+                  "collect:track:0",
+                  "collect:track:42",
+                  "collect:track:21",
+                  "collect:track:56",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.1083729267120361,
+                  1.067231297492981,
+                  1.0544413328170776,
+                  1.0535697937011719,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 0.9599996209144592,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:0",
+              "executed_action": 0,
+              "next_pose": [
+                15.305339813232422,
+                6.9225754737854,
+                3.13861346244812
+              ]
+            },
+            {
+              "tick": 60,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.199999451637268
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.199999451637268
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  60.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  80,
+                  70,
+                  56,
+                  51
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.2144999504089355,
+                  1.159922480583191,
+                  1.166166067123413,
+                  1.1524219512939453
+                ],
+                "action_scores": [
+                  1.2144999504089355,
+                  1.159922480583191,
+                  1.166166067123413,
+                  1.1524219512939453,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.5169501304626465,
+                  0.5692216753959656,
+                  0.6235606074333191,
+                  0.6255582571029663
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.7528249025344849,
+                  0.5066393613815308,
+                  0.8423582911491394,
+                  0.7524873614311218
+                ],
+                "candidate_age": [
+                  0.0,
+                  0.15999998152256012,
+                  0.2799999713897705,
+                  0.36000001430511475
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:60",
+                "candidate_ids": [
+                  "collect:track:80",
+                  "collect:track:70",
+                  "collect:track:56",
+                  "collect:track:51",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    80.0,
+                    0.5169501304626465,
+                    4.0,
+                    0.7528249025344849,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    70.0,
+                    0.5692216753959656,
+                    4.0,
+                    0.5066393613815308,
+                    0.15999998152256012
+                  ],
+                  [
+                    2.0,
+                    56.0,
+                    0.6235606074333191,
+                    4.0,
+                    0.8423582911491394,
+                    0.2799999713897705
+                  ],
+                  [
+                    3.0,
+                    51.0,
+                    0.6255582571029663,
+                    4.0,
+                    0.7524873614311218,
+                    0.36000001430511475
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:60",
+                "candidate_ids": [
+                  "collect:track:80",
+                  "collect:track:70",
+                  "collect:track:56",
+                  "collect:track:51",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.2144999504089355,
+                  1.159922480583191,
+                  1.166166067123413,
+                  1.1524219512939453,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 1.199999451637268,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:80",
+              "executed_action": 0,
+              "next_pose": [
+                15.754626274108887,
+                6.928220272064209,
+                3.138159990310669
+              ]
+            },
+            {
+              "tick": 72,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.4399992227554321
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.4399992227554321
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  72.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  60,
+                  84,
+                  3,
+                  11
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.1930651664733887,
+                  1.186891794204712,
+                  1.1369695663452148,
+                  1.0941283702850342
+                ],
+                "action_scores": [
+                  1.1930651664733887,
+                  1.186891794204712,
+                  1.1369695663452148,
+                  1.0941283702850342,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.6063390374183655,
+                  0.6168673634529114,
+                  0.6384482979774475,
+                  0.6483361124992371
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.9053155183792114,
+                  0.8841185569763184,
+                  0.8063600063323975,
+                  0.6545597910881042
+                ],
+                "candidate_age": [
+                  0.0,
+                  0.0,
+                  0.6799998879432678,
+                  1.1599994897842407
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:72",
+                "candidate_ids": [
+                  "collect:track:60",
+                  "collect:track:84",
+                  "collect:track:3",
+                  "collect:track:11",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    60.0,
+                    0.6063390374183655,
+                    4.0,
+                    0.9053155183792114,
+                    0.0
+                  ],
+                  [
+                    1.0,
+                    84.0,
+                    0.6168673634529114,
+                    4.0,
+                    0.8841185569763184,
+                    0.0
+                  ],
+                  [
+                    2.0,
+                    3.0,
+                    0.6384482979774475,
+                    4.0,
+                    0.8063600063323975,
+                    0.6799998879432678
+                  ],
+                  [
+                    3.0,
+                    11.0,
+                    0.6483361124992371,
+                    4.0,
+                    0.6545597910881042,
+                    1.1599994897842407
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:72",
+                "candidate_ids": [
+                  "collect:track:60",
+                  "collect:track:84",
+                  "collect:track:3",
+                  "collect:track:11",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.1930651664733887,
+                  1.186891794204712,
+                  1.1369695663452148,
+                  1.0941283702850342,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 1.4399992227554321,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:60",
+              "executed_action": 0,
+              "next_pose": [
+                15.814530372619629,
+                6.7441935539245605,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 84,
+              "action": 1,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.6799989938735962
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.6799989938735962
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  84.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  46,
+                  94,
+                  30,
+                  55
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.1542495489120483,
+                  1.1925221681594849,
+                  1.1737850904464722,
+                  1.1422308683395386
+                ],
+                "action_scores": [
+                  1.1542495489120483,
+                  1.1925221681594849,
+                  1.1737850904464722,
+                  1.1422308683395386,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.5668211579322815,
+                  0.5979463458061218,
+                  0.6077214479446411,
+                  0.6080484986305237
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.8001453280448914,
+                  0.9071887731552124,
+                  0.797867476940155,
+                  0.8035901188850403
+                ],
+                "candidate_age": [
+                  0.8799996972084045,
+                  0.07999999821186066,
+                  0.15999998152256012,
+                  0.7999997735023499
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:84",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:94",
+                  "collect:track:30",
+                  "collect:track:55",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    46.0,
+                    0.5668211579322815,
+                    4.0,
+                    0.8001453280448914,
+                    0.8799996972084045
+                  ],
+                  [
+                    1.0,
+                    94.0,
+                    0.5979463458061218,
+                    4.0,
+                    0.9071887731552124,
+                    0.07999999821186066
+                  ],
+                  [
+                    2.0,
+                    30.0,
+                    0.6077214479446411,
+                    4.0,
+                    0.797867476940155,
+                    0.15999998152256012
+                  ],
+                  [
+                    3.0,
+                    55.0,
+                    0.6080484986305237,
+                    4.0,
+                    0.8035901188850403,
+                    0.7999997735023499
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:84",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:94",
+                  "collect:track:30",
+                  "collect:track:55",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.1542495489120483,
+                  1.1925221681594849,
+                  1.1737850904464722,
+                  1.1422308683395386,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 1.6799989938735962,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:94",
+              "executed_action": 1,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 96,
+              "action": 1,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.9199987649917603
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.9199987649917603
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  96.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  46,
+                  91,
+                  55,
+                  19
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.1431043148040771,
+                  1.1946189403533936,
+                  1.1309539079666138,
+                  1.1032214164733887
+                ],
+                "action_scores": [
+                  1.1431043148040771,
+                  1.1946189403533936,
+                  1.1309539079666138,
+                  1.1032214164733887,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.5647254586219788,
+                  0.5700300335884094,
+                  0.6061809659004211,
+                  0.6073888540267944
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.8001453280448914,
+                  0.9168855547904968,
+                  0.8035901188850403,
+                  0.7509450316429138
+                ],
+                "candidate_age": [
+                  1.1199995279312134,
+                  0.2799999713897705,
+                  1.0399996042251587,
+                  1.4799991846084595
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:96",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:91",
+                  "collect:track:55",
+                  "collect:track:19",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    46.0,
+                    0.5647254586219788,
+                    4.0,
+                    0.8001453280448914,
+                    1.1199995279312134
+                  ],
+                  [
+                    1.0,
+                    91.0,
+                    0.5700300335884094,
+                    4.0,
+                    0.9168855547904968,
+                    0.2799999713897705
+                  ],
+                  [
+                    2.0,
+                    55.0,
+                    0.6061809659004211,
+                    4.0,
+                    0.8035901188850403,
+                    1.0399996042251587
+                  ],
+                  [
+                    3.0,
+                    19.0,
+                    0.6073888540267944,
+                    4.0,
+                    0.7509450316429138,
+                    1.4799991846084595
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:96",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:91",
+                  "collect:track:55",
+                  "collect:track:19",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.1431043148040771,
+                  1.1946189403533936,
+                  1.1309539079666138,
+                  1.1032214164733887,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 1.9199987649917603,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:91",
+              "executed_action": 1,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 108,
+              "action": 3,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  2.159998655319214
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  2.159998655319214
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  98.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "policy_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+              "candidate_action_trace": {
+                "candidate_indices": [
+                  46,
+                  19,
+                  55,
+                  90
+                ],
+                "candidate_valid": [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                "candidate_scores": [
+                  1.1324700117111206,
+                  1.098092794418335,
+                  1.1205083131790161,
+                  1.1547186374664307
+                ],
+                "action_scores": [
+                  1.1324700117111206,
+                  1.098092794418335,
+                  1.1205083131790161,
+                  1.1547186374664307,
+                  0.6499999761581421,
+                  null,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "candidate_distance": [
+                  0.5613889694213867,
+                  0.5898293852806091,
+                  0.6021804809570312,
+                  0.6066113710403442
+                ],
+                "candidate_nearby_tracks": [
+                  4.0,
+                  4.0,
+                  4.0,
+                  4.0
+                ],
+                "candidate_confidence": [
+                  0.8001453280448914,
+                  0.7509450316429138,
+                  0.8035901188850403,
+                  0.822905421257019
+                ],
+                "candidate_age": [
+                  1.3599992990493774,
+                  1.7199989557266235,
+                  1.2799993753433228,
+                  0.5999999642372131
+                ]
+              },
+              "candidate_table": {
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:108",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:19",
+                  "collect:track:55",
+                  "collect:track:90",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "features": [
+                  [
+                    0.0,
+                    46.0,
+                    0.5613889694213867,
+                    4.0,
+                    0.8001453280448914,
+                    1.3599992990493774
+                  ],
+                  [
+                    1.0,
+                    19.0,
+                    0.5898293852806091,
+                    4.0,
+                    0.7509450316429138,
+                    1.7199989557266235
+                  ],
+                  [
+                    2.0,
+                    55.0,
+                    0.6021804809570312,
+                    4.0,
+                    0.8035901188850403,
+                    1.2799993753433228
+                  ],
+                  [
+                    3.0,
+                    90.0,
+                    0.6066113710403442,
+                    4.0,
+                    0.822905421257019,
+                    0.5999999642372131
+                  ],
+                  [
+                    4.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    5.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    6.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ],
+                  [
+                    7.0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                  ]
+                ],
+                "valid_mask": [
+                  true,
+                  true,
+                  true,
+                  true,
+                  true,
+                  false,
+                  true,
+                  true
+                ],
+                "feature_names": [
+                  "action_index",
+                  "sensor_track_buffer_index",
+                  "target_distance_m",
+                  "nearby_sensed_track_count",
+                  "track_confidence",
+                  "track_age_s"
+                ],
+                "route_costs": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ],
+                "schema_version": 2
+              },
+              "scorer_snapshot": {
+                "model_id": "cdd9cf0d37b7823f36d37f940e6331b5c5a05b3e7bd24a5e16aee4b23adc23c2",
+                "snapshot_id": "d47ac1af809d4e6fa3f5e272e27ccd84:offense_vs_scripted_pressure:active/open/level_2_patrol:seed-9167415603265273857:108",
+                "candidate_ids": [
+                  "collect:track:46",
+                  "collect:track:19",
+                  "collect:track:55",
+                  "collect:track:90",
+                  "score",
+                  "intercept",
+                  "ferry",
+                  "hold"
+                ],
+                "scores": [
+                  1.1324700117111206,
+                  1.098092794418335,
+                  1.1205083131790161,
+                  1.1547186374664307,
+                  0.6499999761581421,
+                  0.0,
+                  0.20000000298023224,
+                  -0.5
+                ],
+                "timestamp": 2.159998655319214,
+                "schema_version": 1
+              },
+              "selected_candidate_id": "collect:track:90",
+              "executed_action": 3,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "phase": "terminal",
+              "tick": 120,
+              "executed_action": 3,
+              "pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  2.399998426437378
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  2.399998426437378
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  98.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "reference": [
+        {
+          "scenario_id": "offense_vs_scripted_pressure",
+          "scenario_version": "1",
+          "category": "active/open/level_2_patrol",
+          "seed": 9167415603265273857,
+          "physics": true,
+          "dt": 0.02,
+          "action_ticks": 12,
+          "strategic_rate_hz": 4.166666666666667,
+          "horizon_steps": 120,
+          "configuration": {
+            "scenario_id": "offense_vs_scripted_pressure",
+            "scenario_version": "1",
+            "category": "active/open/level_2_patrol",
+            "learner_slot": 3,
+            "seed": 9167415603265273857,
+            "time_budget_s": 120.0,
+            "pressure": {
+              "level": 2,
+              "style": "level_2_patrol",
+              "slots": [
+                0
+              ],
+              "phase": 5.384689808252905,
+              "anchor_y": 6.800000190734863
+            },
+            "targets": {
+              "amount": 4,
+              "batch_size": 2,
+              "cycles": 2
+            },
+            "allowed_actions": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              6,
+              7
+            ],
+            "schedule": [
+              [
+                0.0,
+                true
+              ]
+            ],
+            "route": "open",
+            "reference_qualified": false,
+            "execution": "generic_nn",
+            "limitations": [
+              "Draft budgets and targets require scripted-reference qualification.",
+              "Uncontrolled robot bodies remain off-field and are restored after each step."
+            ]
+          },
+          "control_modes": [
+            "nn",
+            "none",
+            "none",
+            "nn",
+            "none",
+            "none"
+          ],
+          "robot_fuel_capacities": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ],
+          "robot_types": [
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper",
+            "dumper"
+          ],
+          "execution": "generic_nn",
+          "terminal": {
+            "phase": "terminal",
+            "tick": 120,
+            "executed_action": 0,
+            "pose": [
+              15.809901237487793,
+              6.738468647003174,
+              3.1380884647369385
+            ],
+            "hub_active": true,
+            "metrics": {
+              "success": [
+                false
+              ],
+              "useful_throughput": [
+                0.0
+              ],
+              "distinct_retained": [
+                2.0
+              ],
+              "current_staged": [
+                0.0
+              ],
+              "completed_cycles": [
+                0
+              ],
+              "score_cycles": [
+                0
+              ],
+              "ferry_cycles": [
+                0
+              ],
+              "inactive_staged": [
+                0.0
+              ],
+              "scores": [
+                0.0
+              ],
+              "acquisitions": [
+                2.0
+              ],
+              "deliveries": [
+                0.0
+              ],
+              "route_seen": [
+                false
+              ],
+              "elapsed": [
+                2.399998426437378
+              ],
+              "team_conversions": [
+                0.0
+              ],
+              "staged_conversions": [
+                0.0
+              ],
+              "initial_staged_conversions": [
+                0.0
+              ],
+              "inactive_deliveries": [
+                0.0
+              ],
+              "active_seconds": [
+                2.399998426437378
+              ],
+              "inactive_seconds": [
+                0.0
+              ],
+              "post_boundary_scores": [
+                0.0
+              ],
+              "post_boundary_deliveries": [
+                0.0
+              ],
+              "encounter_ticks": [
+                98.0
+              ],
+              "nearest_defender": [
+                0.9005203247070312
+              ]
+            }
+          },
+          "outcome": {
+            "success": false,
+            "useful_throughput": 0.0,
+            "distinct_retained": 2.0,
+            "current_staged": 0.0,
+            "completed_cycles": 0,
+            "score_cycles": 0,
+            "ferry_cycles": 0,
+            "inactive_staged": 0.0,
+            "scores": 0.0,
+            "acquisitions": 2.0,
+            "deliveries": 0.0,
+            "route_seen": false,
+            "elapsed": 2.399998426437378,
+            "team_conversions": 0.0,
+            "staged_conversions": 0.0,
+            "initial_staged_conversions": 0.0,
+            "inactive_deliveries": 0.0,
+            "active_seconds": 2.399998426437378,
+            "inactive_seconds": 0.0,
+            "post_boundary_scores": 0.0,
+            "post_boundary_deliveries": 0.0,
+            "encounter_ticks": 98.0,
+            "nearest_defender": 0.9005203247070312
+          },
+          "frames": [
+            {
+              "tick": 0,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  0.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  0.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.0
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.0
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  0.0
+                ],
+                "nearest_defender": [
+                  18.403709411621094
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                14.35993480682373,
+                6.817152500152588,
+                -3.1386003494262695
+              ]
+            },
+            {
+              "tick": 12,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.23999996483325958
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.23999996483325958
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  12.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                14.46419620513916,
+                6.925201892852783,
+                3.1397545337677
+              ]
+            },
+            {
+              "tick": 24,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.4800000786781311
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.4800000786781311
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  24.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                14.54088306427002,
+                6.835410118103027,
+                3.1395657062530518
+              ]
+            },
+            {
+              "tick": 36,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.7199998497962952
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.7199998497962952
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  36.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                14.827523231506348,
+                6.721884727478027,
+                3.1393730640411377
+              ]
+            },
+            {
+              "tick": 48,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  0.9599996209144592
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  0.9599996209144592
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  48.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.305339813232422,
+                6.9225754737854,
+                3.13861346244812
+              ]
+            },
+            {
+              "tick": 60,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.199999451637268
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.199999451637268
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  60.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.754626274108887,
+                6.928220272064209,
+                3.138159990310669
+              ]
+            },
+            {
+              "tick": 72,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.4399992227554321
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.4399992227554321
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  72.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.814530372619629,
+                6.7441935539245605,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 84,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.6799989938735962
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.6799989938735962
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  84.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 96,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  1.9199987649917603
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  1.9199987649917603
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  96.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "tick": 108,
+              "action": 0,
+              "mask": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  2.159998655319214
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  2.159998655319214
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  98.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              },
+              "executed_action": 0,
+              "next_pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ]
+            },
+            {
+              "phase": "terminal",
+              "tick": 120,
+              "executed_action": 0,
+              "pose": [
+                15.809901237487793,
+                6.738468647003174,
+                3.1380884647369385
+              ],
+              "hub_active": true,
+              "metrics": {
+                "success": [
+                  false
+                ],
+                "useful_throughput": [
+                  0.0
+                ],
+                "distinct_retained": [
+                  2.0
+                ],
+                "current_staged": [
+                  0.0
+                ],
+                "completed_cycles": [
+                  0
+                ],
+                "score_cycles": [
+                  0
+                ],
+                "ferry_cycles": [
+                  0
+                ],
+                "inactive_staged": [
+                  0.0
+                ],
+                "scores": [
+                  0.0
+                ],
+                "acquisitions": [
+                  2.0
+                ],
+                "deliveries": [
+                  0.0
+                ],
+                "route_seen": [
+                  false
+                ],
+                "elapsed": [
+                  2.399998426437378
+                ],
+                "team_conversions": [
+                  0.0
+                ],
+                "staged_conversions": [
+                  0.0
+                ],
+                "initial_staged_conversions": [
+                  0.0
+                ],
+                "inactive_deliveries": [
+                  0.0
+                ],
+                "active_seconds": [
+                  2.399998426437378
+                ],
+                "inactive_seconds": [
+                  0.0
+                ],
+                "post_boundary_scores": [
+                  0.0
+                ],
+                "post_boundary_deliveries": [
+                  0.0
+                ],
+                "encounter_ticks": [
+                  98.0
+                ],
+                "nearest_defender": [
+                  0.9005203247070312
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "output": "evaluations/meco-d2/d1-pressure-paired-seed-20261024.json"
+}
