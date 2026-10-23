@@ -102,7 +102,7 @@ class MecoTrainConfig:
     candidate_k: int = 16
     output: str = ""
 
-    def validate(self):
+    def validate(self, *, validate_device: bool = True):
         if self.track not in MECO_TRACKS:
             raise ValueError(f"track must be one of {MECO_TRACKS}")
         definition = get_scenario(self.scenario_id)
@@ -119,7 +119,7 @@ class MecoTrainConfig:
             raise ValueError("p_mode must be 'learned' or 'p0'")
         if self.prediction_mode not in PREDICTION_MODES:
             raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
-        if self.device.startswith("cuda") and not torch.cuda.is_available():
+        if validate_device and self.device.startswith("cuda") and not torch.cuda.is_available():
             raise ValueError("requested ROCm/CUDA device is unavailable")
         for name in ("learning_rate", "gamma", "gae_lambda", "clip_coef",
                      "entropy_coef", "value_coef", "max_grad_norm",

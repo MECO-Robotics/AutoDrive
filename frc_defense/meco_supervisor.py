@@ -153,7 +153,7 @@ class MecoSupervisor:
                  candidate_k: int,
                  evaluation_categories: tuple[str, ...], evaluation_episodes: int,
                  evaluation_seed: int, evaluation_device: str | None,
-                 cycles: int, stop_file: str | None,
+                 cycles: int, stop_file: str | None, devices_explicit: bool = False,
                  stage_exposure_chunks: int = 10, p_mode: str = "learned",
                  p_cost_scale: float = 1.0, p_points_per_grid_edge: float = .05,
                  prediction_mode: str = "cv",
@@ -162,7 +162,8 @@ class MecoSupervisor:
                  qualification_protocol: str | None = None):
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
-        if any(device.startswith("cuda") for device in devices) and not torch.cuda.is_available():
+        if (not devices_explicit and any(device.startswith("cuda") for device in devices)
+                and not torch.cuda.is_available()):
             raise ValueError("a configured ROCm/CUDA device is unavailable")
         if cycles < 0 or chunk_updates < 1 or evaluation_episodes < 1:
             raise ValueError("cycles must be nonnegative; chunk/evaluation counts positive")
@@ -240,7 +241,7 @@ class MecoSupervisor:
                 prediction_mode=prediction_mode,
                 candidate_k=candidate_k,
                 output=str(self.output / track))
-            config.validate()
+            config.validate(validate_device=not devices_explicit)
             self.configs[track] = config
         self.sources = source_identity()
         self.source_hash = _hash(self.sources)
@@ -1047,6 +1048,7 @@ def main(argv=None):
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,
         cycles=args.cycles, stop_file=args.stop_file,
+        devices_explicit=args.devices is not None,
         stage_exposure_chunks=args.stage_exposure_chunks,
         qualification_protocol=args.qualification_protocol,
         warm_start_artifacts=args.warm_start_artifacts)
