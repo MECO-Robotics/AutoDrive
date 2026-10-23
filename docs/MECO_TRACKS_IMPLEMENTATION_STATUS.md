@@ -74,10 +74,12 @@ For collection candidates, a bearing-aligned capture envelope built from the
 sensed target and candidate goal is also an eligibility filter. It uses the
 same effective fuel radius as the native collector predicate
 (`env._fuel_radius`) and fails closed when target geometry is unavailable.
-The inferred heading remains an estimate: the native controller does not
-command or guarantee that terminal heading. Dynamic future swept-robot
-collision remains outside this candidate feasibility check, and the
-simulator's native intake/action executor remains authoritative.
+The selected sensed track supplies the native pickup bearing throughout the
+approach, and endpoint alignment is attempted only after native swept static
+and observed-robot clearance checks. The candidate capture envelope remains
+an eligibility estimate; target loss or a remasked paired action ends the
+macro, and physical pickup remains simulator-authoritative. Dynamic future
+swept-robot collision remains outside candidate feasibility checks.
 
 Plan A and Plan C share the deterministic legal SE(2) graph inputs for A2/A3
 (`node_features`, directed `edges`, `edge_mask`, and `region_ids`). The bounded

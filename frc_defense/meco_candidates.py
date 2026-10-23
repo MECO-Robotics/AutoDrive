@@ -49,14 +49,14 @@ CANDIDATE_BOUNDARY = {
     "commitment_target_matching_tolerance_m": 1.0,
     "commitment_switch_cost_points": 0.10,
     "hysteresis": "when a commitment is active, apply the same fixed switch-cost utility penalty to every feasible non-continue row for C1/C2/D1/D2; continuation remains dynamically revalidated",
-    "route_feasibility": "route and endpoint clearance plus bearing-aligned collection capture-envelope eligibility; inferred terminal heading is not commanded",
-    "capture_estimate": "bearing-aligned capture envelope eligibility proxy from sensed target geometry; excluded candidates are ineligible for Plan C ranking; native controller and simulator retain capture authority",
+    "route_feasibility": "route and endpoint clearance plus bearing-aligned collection capture-envelope eligibility; selected-target pickup bearing is commanded through approach, with terminal alignment subject to native swept-clearance checks",
+    "capture_estimate": "bearing-aligned capture envelope eligibility proxy from sensed target geometry; native controller steers toward the selected track, while physical capture remains simulator-authoritative",
     "capture_feasibility": {
         "basis": "candidate goal XY and target XY projected into inferred target-bearing frame",
         "longitudinal_min_m": "robot_length_m/2 - 0.075 - env._fuel_radius (native collector radius)",
         "longitudinal_max_m": "robot_length_m/2 + 0.35 + 0.3048 + env._fuel_radius (native collector radius)",
         "lateral_max_m": "robot_width_m/2 + 0.075 + env._fuel_radius (native collector radius)",
-        "orientation": "bearing-aligned estimate; native controller chooses orientation",
+        "orientation": "bearing-aligned eligibility geometry; selected target drives native pickup bearing and terminal alignment remains subject to swept-clearance checks",
         "authority": "candidate eligibility proxy only; native gamepiece collision/capture logic is authoritative",
         "missing_target": "ineligible"
     },
@@ -217,10 +217,10 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
         return None, None, hbin
     node = int(graph.lookup[hbin, ix, iy].item())
     if node < 0:
-        # Heading comes from sensed target bearing and is not commanded by the
-        # native controller. It may select model features, but it cannot make
-        # an otherwise legal XY endpoint infeasible. Bind the graph row to the
-        # first legal heading at this cell for A2/A3 node lookup.
+        # The selected sensed target drives native pickup bearing during
+        # execution. This graph heading qualifies the candidate's capture
+        # geometry; bind lookup to the first legal heading at this cell when
+        # that inferred heading is blocked.
         legal_nodes = graph.lookup[:, ix, iy]
         legal_nodes = legal_nodes[legal_nodes >= 0]
         if legal_nodes.numel() == 0:
@@ -374,12 +374,12 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
     perceived robot obstacles. The inferred target-bearing heading selects a
-    legal graph node and contributes an estimate only; endpoint footprint
-    clearance is checked at every yaw. The native controller owns terminal
-    orientation; this adapter does not command it. ETA is
-    distance/speed plus heading-change/turn-rate. Dynamic interaction is a
-    point-prediction risk cost; full time-varying swept-robot planning remains
-    out of scope and is recorded in provenance.
+    legal graph node and contributes an estimate to candidate eligibility;
+    endpoint footprint clearance is checked at every yaw. The paired native
+    executor steers pickup bearing toward the selected sensed track and guards
+    terminal alignment. ETA is distance/speed plus heading-change/turn-rate.
+    Dynamic interaction is a point-prediction risk cost; full time-varying
+    swept-robot planning remains out of scope and is recorded in provenance.
     """
     if env.n != 1 or not isinstance(episode_id, str) or not episode_id:
         raise ValueError("candidate source requires one world and a unique episode_id")

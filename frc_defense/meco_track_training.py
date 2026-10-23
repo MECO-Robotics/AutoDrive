@@ -546,6 +546,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     heading_alignment_opportunity = False
     native_goal_preempted = False
     selected_target_lost = False
+    selected_target_action_remasked = False
     frozen_traversal_cost = (None if planner_traversal_cost_override is None else
         torch.as_tensor(planner_traversal_cost_override, device=env.device,
                         dtype=env.sim.pose.dtype).detach().clone())
@@ -591,6 +592,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         executed_actions.append(int(env.last_actions[0, 3].item()))
         selected_target_lost |= (
             getattr(env, "_last_planner_collection_target_valid", None) is False)
+        selected_target_action_remasked |= (
+            getattr(env, "_last_planner_collection_action_match", None) is False)
         if safety_counts is not None:
             current = _physics_safety_snapshot(env)
             previous = safety_counts.get("_last_snapshot")
@@ -616,7 +619,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
-        if ended or timeout or selected_target_lost:
+        if (ended or timeout or selected_target_lost or
+                selected_target_action_remasked):
             break
     env._last_obs = env.observe()
     final_heading_error = None

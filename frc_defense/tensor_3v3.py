@@ -681,6 +681,7 @@ class TensorThreeVsThreeEnv(
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
         self._last_planner_collection_target_valid = None
+        self._last_planner_collection_action_match = None
         self._last_planner_collection_goal_heading = None
         collection_target_valid = torch.zeros_like(active)
         collection_target_xy = None
@@ -688,14 +689,17 @@ class TensorThreeVsThreeEnv(
             track_index = planner_goal_override_target_track
             collection_target_xy = self.track_pos[:, 3, track_index]
             source_gap = (collection_target_xy - planner_target_source_xy[None]).norm(dim=-1)
-            collection_target_valid = (
-                active & (action[:, 3] == planner_goal_override_action) &
+            target_valid = (
                 self.track_mask[:, 3, track_index] &
                 (self.track_age[:, 3, track_index] <= self.perception_track_timeout) &
                 torch.isfinite(collection_target_xy).all(-1) & (source_gap <= 1.0))
-            if bool((active & (action[:, 3] == planner_goal_override_action)).any()):
+            action_match = action[:, 3] == planner_goal_override_action
+            collection_target_valid = active & target_valid & action_match
+            if bool(active.any()):
                 self._last_planner_collection_target_valid = bool(
-                    collection_target_valid[0].item())
+                    target_valid[0].item())
+                self._last_planner_collection_action_match = bool(
+                    action_match[0].item())
             selected_target_delta = collection_target_xy - self.sim.pose[:, 3, :2]
             selected_target_distance = selected_target_delta.norm(dim=-1, keepdim=True)
             current_forward = torch.stack((self.sim.pose[:, 3, 2].cos(),
