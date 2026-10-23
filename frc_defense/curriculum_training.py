@@ -309,8 +309,16 @@ class TrainingConfig:
 
 
 def source_identity():
+    # Runtime hipify creates these ignored files from the maintained CUDA
+    # sources above. Exclude them so the first HIP extension import cannot
+    # invalidate a training run's source snapshot.
+    generated_sources = {
+        'frc_defense/csrc/fuel_physics_hip_kernel.hip',
+        'frc_defense/csrc/fuel_sleep_hip_kernel.hip',
+    }
     files = sorted(p for p in (ROOT/'frc_defense').rglob('*')
-                   if p.suffix in ('.py','.cpp','.cu','.h','.cuh','.json','.hip','.hpp','.cc'))
+                   if p.suffix in ('.py','.cpp','.cu','.h','.cuh','.json','.hip','.hpp','.cc')
+                   and p.relative_to(ROOT).as_posix() not in generated_sources)
     identity = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     identity['_runtime_environment'] = {k:v for k,v in sorted(os.environ.items())
         if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))}
