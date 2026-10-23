@@ -14,7 +14,9 @@ retain their full no-factor baseline while the factor report lists and
 evaluates only eligible categories. Each treated category and seed is paired
 with its row from `architecture_matched_cv_k16`, using the same five
 checkpoints and D0/D1/D2 controls. Condition IDs bind the factor config,
-category subset, checkpoint hashes, source identity, and seed list.
+category subset, checkpoint hashes, source identity, seed list, and the exact
+`qualification_case` layout, defender family, start condition, and sensor
+profile.
 
 The scripted pressure participant is slot 0 at every supported level. The
 feint and abrupt policy-change treatments replace slot 0's registered script;
