@@ -432,7 +432,8 @@ def _value(value_head, globals_, hidden):
 
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
-                    allow_action7_traversal=False):
+                    allow_action7_traversal=False,
+                    safety_counts: dict | None = None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -447,6 +448,16 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading)
         executed_actions.append(int(env.last_actions[0, 3].item()))
+        if safety_counts is not None:
+            def focal_contact(name):
+                value = getattr(env.sim, name, None)
+                if value is None:
+                    return False
+                focal = value[0, 3] if value.ndim >= 2 and value.shape[1] > 3 else value[0]
+                return bool(focal.any().item()) if isinstance(focal, torch.Tensor) else bool(focal)
+            safety_counts["robot_contact_ticks"] += int(focal_contact("robot_contact"))
+            safety_counts["static_contact_ticks"] += int(
+                focal_contact("field_contact") or focal_contact("wall_contact"))
         if goal_xy is not None:
             current_xy = env.sim.pose[0, 3, :2]
             goal_distance = float((current_xy - torch.as_tensor(
@@ -1037,6 +1048,29 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
     return torch.tensor(values, device=env.device, dtype=torch.float32)[None]
 
 
+def _timing_sync(env):
+    """Synchronize the measured device before/after a host wall interval."""
+    if torch.device(env.device).type == "cuda":
+        torch.cuda.synchronize(env.device)
+
+
+def _timing_summary(samples):
+    """Summarize measured milliseconds using nearest-rank percentiles."""
+    values = sorted(float(value) for value in samples)
+    def percentile(p):
+        if not values:
+            return None
+        return values[max(0, math.ceil(p * len(values)) - 1)]
+    return {"sample_count": len(values), "p50_ms": percentile(.50),
+            "p95_ms": percentile(.95), "p99_ms": percentile(.99),
+            "mean_ms": (sum(values) / len(values)) if values else None}
+
+
+def _metric_snapshot(metrics):
+    return {name: value.detach().cpu().reshape(-1)[0].item()
+            for name, value in metrics.outcomes().items()}
+
+
 @torch.no_grad()
 def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   categories: tuple[str, ...], episodes: int, master_seed: int,
@@ -1046,7 +1080,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   qualification_protocol_id: str | None = None,
                   evaluation_policies: tuple[str, ...] | None = None,
                   control_policies: tuple[str, ...] | None = None,
-                  prediction_mode: str | None = None):
+                  prediction_mode: str | None = None,
+                  inference_disable_tick: int | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -1054,6 +1089,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("split must be train, validation, or test")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    if inference_disable_tick is not None and (type(inference_disable_tick) is not int
+            or inference_disable_tick < 0):
+        raise ValueError("inference_disable_tick must be a nonnegative physics tick")
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1203,6 +1241,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "prediction": {"learned_mode": learned_prediction_mode,
             "control_modes": control_prediction_modes,
             "contract": {mode: prediction_contract(mode) for mode in PREDICTION_MODES}},
+        "inference_disable_fault": {"requested_tick": inference_disable_tick,
+            "fallback": "D1 deterministic scorer using checkpoint prediction mode",
+            "trigger": "first macro decision boundary at or after requested physics tick"},
+        "timing_instrumentation": {"clock": "synchronized host perf_counter wall time",
+            "warmup_count": 0, "decision_boundary": "candidate/feature/model/scoring pipeline"},
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
@@ -1230,10 +1273,28 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "output_file": output_path.name,
             "progress": {"completed_records": completed,
                          "total_records": len(categories) * episodes *
-                             (len(selected) + sum(3 * (track in selected) for track in ("A1", "A2", "A3")) + (len(controls) if include_controls else 0))}})
+                             (len(selected) * (2 if inference_disable_tick is not None else 1) +
+                              sum(3 * (track in selected) for track in ("A1", "A2", "A3")) +
+                              (len(controls) if include_controls else 0))}})
         status_last_written = current
         status_last_completed = completed
     records = []
+    component_timing_ms = {name: [] for name in (
+        "legal_graph_build", "policy_decision_pipeline", "d1_fallback_pipeline",
+        "simulator_macro_step")}
+    timing_device = torch.device(device)
+    timing_provenance = {
+        "clock": "host perf_counter wall time, device synchronized before and after each measured component",
+        "cuda_synchronization": timing_device.type == "cuda",
+        "warmup_count": 0,
+        "warmup_policy": "no unrecorded simulator warmup; all measured decisions belong to reported episodes",
+        "device": str(timing_device),
+        "accelerator_backend": ("ROCm" if torch.version.hip else
+                                "CUDA" if torch.version.cuda else "CPU"),
+        "device_name": (torch.cuda.get_device_name(timing_device)
+                        if timing_device.type == "cuda" else "CPU"),
+        "instrumentation": "component intervals include completion of asynchronous device work; decision pipeline is combined candidate/feature/model/scoring preparation and is not inference-only",
+    }
     try:
         update_evaluation_status("running")
         for category in categories:
@@ -1243,8 +1304,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 # Same simulator reset seed and task for every control and model.
                 policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
                     if track in selected] + (list(controls) if include_controls else []))
-                for policy in policies:
-                    episode_id = _episode_id(f"eval-{eval_id}-{category}-{policy}",
+                policy_runs = [(policy, False) for policy in policies]
+                if inference_disable_tick is not None:
+                    policy_runs.extend((policy, True) for policy in selected)
+                for policy, inference_fault_run in policy_runs:
+                    record_policy = f"{policy}_inference_disabled" if inference_fault_run else policy
+                    episode_id = _episode_id(f"eval-{eval_id}-{category}-{record_policy}",
                                              episode_index)
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
@@ -1254,7 +1319,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         if is_production_d0 and env.control_modes[3] != "deterministic":
                             raise RuntimeError("production D0 evaluation did not receive the deterministic slot-3 controller")
                         graph = (None if is_production_d0 else
-                                 build_legal_pose_graph(env, slot=3))
+                                 None)
+                        if not is_production_d0:
+                            _timing_sync(env)
+                            graph_started = time.perf_counter()
+                            graph = build_legal_pose_graph(env, slot=3)
+                            _timing_sync(env)
+                            component_timing_ms["legal_graph_build"].append(
+                                (time.perf_counter() - graph_started) * 1000.)
                         hidden = None
                         commitment = None
                         actions_count = [0] * 8
@@ -1265,8 +1337,29 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         last_candidate_recall = None
                         elapsed = 0
                         pending_eval_goal = None
+                        inference_fault_reached = False
+                        inference_fault_actual_tick = None
+                        pre_fault_action = None
+                        post_fault_actions = []
+                        post_fault_executed_actions = [0] * 8
+                        post_fault_macro_count = 0
+                        post_fault_safety = {"robot_contact_ticks": 0,
+                                             "static_contact_ticks": 0}
+                        post_fault_metrics_start = None
+                        fault_fallback_count = 0
                         decision_prediction_mode = policy_manifest[policy].get("prediction_mode")
                         while elapsed < env.horizon:
+                            if (inference_fault_run and not inference_fault_reached
+                                    and elapsed >= inference_disable_tick):
+                                inference_fault_reached = True
+                                inference_fault_actual_tick = elapsed
+                                pre_fault_action = (selected_action_trace[-1]
+                                                    if selected_action_trace else None)
+                                hidden = None
+                                commitment = None
+                                pending_eval_goal = None
+                                post_fault_metrics_start = _metric_snapshot(
+                                    env.curriculum_metrics)
                             prepared = None
                             if is_production_d0:
                                 # Native deterministic mode recomputes from
@@ -1284,9 +1377,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     break
                                 continue
                             obs = env._last_obs
-                            if policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0"):
+                            use_d1_fallback = inference_fault_run and inference_fault_reached
+                            if (policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")) and not use_d1_fallback:
                                 model_track = policy[:2] if policy.endswith("_P0") else policy
                                 override_mode = "p0" if policy.endswith("_P0") else p_mode
+                                _timing_sync(env)
+                                decision_started = time.perf_counter()
                                 prepared = _prepare_decision(model_track, loaded[model_track],
                                     env, graph, episode_id, hidden,
                                     route_cost_points_per_second=route_weight,
@@ -1297,6 +1393,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     prediction_mode=decision_prediction_mode,
                                     record_path_penalty=True,
                                     commitment=(commitment if model_track in ("C1", "C2") else None))
+                                _timing_sync(env)
+                                component_timing_ms["policy_decision_pipeline"].append(
+                                    (time.perf_counter() - decision_started) * 1000.)
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
@@ -1304,15 +1403,24 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 hidden = prepared["hidden_next"]
                                 action_source = "model"
                             else:
+                                _timing_sync(env)
+                                fallback_started = time.perf_counter()
                                 candidate_set = build_route_feasible_candidates(env, obs, graph,
                                     episode_id=episode_id, action_ticks=action_ticks,
                                     candidate_k=candidate_k,
                                     prediction_mode=decision_prediction_mode or "current")
                                 last_candidate_recall = candidate_set.candidate_recall
-                                logits = _d1_d2_scores(candidate_set, env, policy,
+                                logits = _d1_d2_scores(candidate_set, env,
+                                    "D1" if use_d1_fallback else policy,
                                     prediction_mode=decision_prediction_mode or "current")
                                 choice = int(logits.argmax(-1).item())
-                                action_source = policy.lower()
+                                _timing_sync(env)
+                                component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
+                                    else "policy_decision_pipeline"].append(
+                                        (time.perf_counter() - fallback_started) * 1000.)
+                                action_source = "d1_inference_disable_fallback" if use_d1_fallback else policy.lower()
+                                if use_d1_fallback:
+                                    fault_fallback_count += 1
                             routes_before_choice = len(routes_seen)
                             plan_a_support = (prepared is not None and
                                               "support" in prepared)
@@ -1376,13 +1484,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     routes_seen.pop()
                             actions_count[action] += 1
                             selected_action_trace.append(action)
+                            if use_d1_fallback:
+                                post_fault_actions.append(action)
+                            _timing_sync(env)
+                            macro_started = time.perf_counter()
                             (_, ended, timeout, actual_trace, heading_error,
                              goal_distance, heading_opportunity,
                              native_preempted) = _run_macro_step(
                                 env, action, action_ticks, goal_xy,
                                 goal_heading=goal_heading,
                                 allow_action7_traversal=(prepared is not None and
-                                                          "support" in prepared and action == 7))
+                                                          "support" in prepared and action == 7),
+                                safety_counts=(post_fault_safety if use_d1_fallback else None))
+                            if use_d1_fallback:
+                                post_fault_macro_count += 1
+                                for executed_action in actual_trace:
+                                    post_fault_executed_actions[executed_action] += 1
+                            _timing_sync(env)
+                            macro_elapsed_ms = (time.perf_counter() - macro_started) * 1000.
+                            component_timing_ms["simulator_macro_step"].append(macro_elapsed_ms)
                             goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
@@ -1447,8 +1567,57 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         outcomes = env.curriculum_metrics.outcomes()
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
                                    for name, value in outcomes.items()}
+                        post_fault_metrics = None
+                        if inference_fault_run and inference_fault_reached:
+                            progress_fields = ("scores", "acquisitions", "deliveries",
+                                "team_conversions", "staged_conversions",
+                                "initial_staged_conversions", "inactive_conversions",
+                                "inactive_deliveries", "post_boundary_scores",
+                                "post_boundary_deliveries", "completed_cycles",
+                                "score_cycles", "ferry_cycles")
+                            post_fault_metrics = {
+                                "final_episode_success": metrics["success"],
+                                "final_episode_useful_throughput": metrics["useful_throughput"],
+                                "progress_delta": {name: metrics[name] -
+                                    post_fault_metrics_start[name]
+                                    for name in progress_fields
+                                    if name in metrics and name in post_fault_metrics_start},
+                                "route_seen_at_episode_end": metrics.get("route_seen"),
+                            }
+                        fault_pair_id = (hashlib.sha256(json.dumps(
+                            {"evaluation_id": eval_id, "scenario": scenario_id,
+                             "category": category, "seed": seed, "policy": policy,
+                             "split": split}, sort_keys=True).encode()).hexdigest()
+                            if inference_disable_tick is not None and policy in selected
+                            else None)
                         records.append({"scenario_id": scenario_id, "category": category,
-                            "seed": seed, "policy": policy,
+                            "seed": seed, "policy": record_policy,
+                            "paired_baseline_policy": policy if inference_fault_run else None,
+                            "paired_record_policy": (policy if inference_fault_run else
+                                f"{policy}_inference_disabled" if fault_pair_id else None),
+                            "inference_disable_pair_id": fault_pair_id,
+                            "inference_disable_fault": ({
+                                "requested_tick": inference_disable_tick,
+                                "actual_trigger_tick": inference_fault_actual_tick,
+                                "reached": inference_fault_reached,
+                                "trigger_semantics": "first macro decision boundary at or after requested physics tick",
+                                "pre_fault_selected_action": pre_fault_action,
+                                "post_fault_selected_actions": post_fault_actions,
+                                "fallback": "deterministic D1 hand-weighted candidate scorer using the checkpoint prediction_mode",
+                                "prediction_mode": decision_prediction_mode,
+                                "model_inference_disabled_after_trigger": inference_fault_reached,
+                                "cleared_state": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                                "fallback_count": fault_fallback_count,
+                                "post_fault_macro_count": post_fault_macro_count,
+                                "post_fault_executed_action_counts": post_fault_executed_actions,
+                                "post_fault_outcome_and_progress_delta": post_fault_metrics,
+                                "post_fault_safety_ticks": post_fault_safety if inference_fault_reached else None,
+                                "post_fault_safety_scope": {
+                                    "robot_contact_ticks": "any robot collision in the simulator world",
+                                    "static_contact_ticks": "field or wall contact for controlled slot 3",
+                                },
+                                "recovery_claim": "not inferred; fallback activation and post-trigger outcome/safety are reported separately",
+                            } if inference_fault_run else None),
                             "action_source": ("production_deterministic" if is_production_d0
                                               else action_source),
                             "controller_cadence": ("native_20ms_physics_step" if is_production_d0
@@ -1518,6 +1687,29 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "D2": "D1 scorer using bounded constant-velocity prediction by default (explicit evaluation override applies); 12-step macro cadence"},
             "policy_manifest": policy_manifest,
             "paired": True, "split": split, "diagnostic": episodes < 100,
+            "inference_disable_fault_design": ({
+                "requested_tick": inference_disable_tick,
+                "paired_same_seed_normal_records": True,
+                "fault_variants": list(selected),
+                "trigger": "first macro decision boundary at or after requested physics tick",
+                "unreached_trigger_is_not_success": True,
+                "fallback": "D1 deterministic scorer using the checkpoint prediction mode",
+                "state_cleared": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                "post_fault_safety": "simulation-wide robot-contact and controlled-slot-3 static-contact physics tick counts",
+                "post_fault_recovery": "not inferred; fallback action counts, outcome/progress deltas, and safety ticks are reported",
+            } if inference_disable_tick is not None else None),
+            "component_timing": {
+                "provenance": timing_provenance,
+                "coverage_note": "episode construction/reset, checkpoint loading, and native D0 per-physics-step execution are outside these component samples",
+                "components": {name: _timing_summary(values)
+                               for name, values in component_timing_ms.items()},
+                "component_boundaries": {
+                    "legal_graph_build": "legal pose graph construction per non-D0 episode",
+                    "policy_decision_pipeline": "candidate/observation/features/model/scoring preparation, or D1/D2 control candidate generation and scoring; intentionally not labeled inference-only",
+                    "d1_fallback_pipeline": "fallback candidate generation and deterministic D1 scoring after fault trigger",
+                    "simulator_macro_step": "one selected action's complete physics-tick macro execution",
+                },
+            },
             "qualification": qualification_case is not None,
             "qualification_case": qualification_case,
             "candidate_boundary": CANDIDATE_BOUNDARY,
@@ -1583,6 +1775,8 @@ def _parser():
     ev.add_argument("--device", default="cpu")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
         help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--inference-disable-tick", type=int,
+        help="also run same-seed learned-policy pairs that disable inference at the first macro boundary at or after this physics tick")
     ev.add_argument("--output", required=True)
     for track in MECO_TRACKS:
         ev.add_argument(f"--{track.lower()}-checkpoint", required=True)
@@ -1619,7 +1813,8 @@ def main(argv=None):
     report = evaluate_meco(checkpoints, scenario_id=args.scenario,
         categories=tuple(item for item in args.categories.split(",") if item),
         episodes=args.episodes, master_seed=args.seed, device=args.device,
-        output=args.output, prediction_mode=args.prediction_mode)
+        output=args.output, prediction_mode=args.prediction_mode,
+        inference_disable_tick=args.inference_disable_tick)
     print(json.dumps({"evaluation_id": report["evaluation_id"],
         "protocol_id": report["protocol_id"], "records": len(report["records"]),
         "output": args.output}, indent=2))

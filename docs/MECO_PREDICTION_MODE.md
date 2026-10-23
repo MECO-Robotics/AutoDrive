@@ -9,4 +9,8 @@ MECO Plan A, Plan C, D1, and D2 now use the shared `current|cv` prediction contr
 
 Example: `python3 -m frc_defense.meco_track_training evaluate ... --prediction-mode current`.
 
+Evaluation reports also include synchronized component wall timings with p50/p95/p99 and sample counts. The decision pipeline combines candidate/observation preparation, model work, and scoring; it is not an inference-only measurement. CUDA/ROCm runs synchronize around each measured component, and no unreported simulator warmup is performed.
+
+For an eval-only same-seed inference fault pair, pass `--inference-disable-tick N`. Each selected learned track gets a normal record and a fault record. The fault takes effect at the first macro decision boundary at or after physics tick `N`; if the episode ends first, the record says the trigger was not reached. At activation, Plan A's pending goal, C1/C2 commitment, and hidden state are cleared. The remaining decisions use the deterministic D1 scorer with that checkpoint's prediction mode. Records retain pre/post actions, a shared pair ID, fallback count, post-fault progress/outcome deltas, world-wide robot-contact ticks, and controlled slot-3 field/wall-contact ticks. Trigger activation does not imply recovery or a successful episode.
+
 The former standalone `curriculum_training evaluate --policy d2` diagnostic retains its fixed one-second D2 behavior and separate identity.
