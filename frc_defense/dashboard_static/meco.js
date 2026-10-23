@@ -36,6 +36,11 @@
       `<p>${esc(run.progress?.completed_records ?? 0)} / ${esc(run.progress?.total_records ?? "?")} records</p>`+
       `<small>Heartbeat ${esc(run.heartbeat_state)} · ${esc(run.heartbeat_age_seconds ?? "?")}s · process ${run.process_alive ? "alive" : "not confirmed"}</small>`+
       `<p>Protocol ${esc(run.protocol_id)} · split ${esc(run.split)} · output ${esc(run.output_file)}</p></article>`).join("") : "<p class='muted'>No evaluator status manifest is available.</p>";
+    const workflow = data.implementation_passes;
+    document.querySelector("#passes").innerHTML = workflow?.passes?.length ? workflow.passes.map(pass =>
+      `<article class="group"><h3>${esc(pass.pass)} · ${esc(pass.status)}</h3>`+
+      `<small>Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
+      "<p class='muted'>No three-pass workflow evidence is available.</p>";
     document.querySelector("#groups").innerHTML = groups.length ? groups.map(g =>
       `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
       `<p>${esc(g.evaluation_ids?.join(", "))}</p><small>Protocol ${esc(g.protocol_id)} · ${esc(g.record_count)} records per policy</small>`+

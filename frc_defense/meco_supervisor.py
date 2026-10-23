@@ -77,6 +77,9 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--clip-coef", str(config.clip_coef), "--entropy-coef", str(config.entropy_coef),
         "--value-coef", str(config.value_coef), "--max-grad-norm", str(config.max_grad_norm),
         "--route-cost-points-per-second", str(config.route_cost_points_per_second),
+        "--p-mode", config.p_mode,
+        "--p-cost-scale", str(config.p_cost_scale),
+        "--p-points-per-grid-edge", str(config.p_points_per_grid_edge),
         "--output", str(output), "--stop-file", str(stop_file), "--run-id", run_id,
         "--protocol-id", protocol_id]
     command.extend(("--task-assignment-json", json.dumps(
@@ -107,7 +110,8 @@ class MecoSupervisor:
                  evaluation_categories: tuple[str, ...], evaluation_episodes: int,
                  evaluation_seed: int, evaluation_device: str | None,
                  cycles: int, stop_file: str | None,
-                 stage_exposure_chunks: int = 10):
+                 stage_exposure_chunks: int = 10, p_mode: str = "learned",
+                 p_cost_scale: float = 1.0, p_points_per_grid_edge: float = .05):
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
         if any(device.startswith("cuda") for device in devices) and not torch.cuda.is_available():
@@ -126,6 +130,9 @@ class MecoSupervisor:
         self.category = category
         self.seed = seed
         self.candidate_k = candidate_k
+        self.p_mode = p_mode
+        self.p_cost_scale = p_cost_scale
+        self.p_points_per_grid_edge = p_points_per_grid_edge
         self.stage_exposure_chunks = stage_exposure_chunks
         self.chunk_updates = chunk_updates
         self.evaluation_categories = evaluation_categories
@@ -154,6 +161,8 @@ class MecoSupervisor:
                 learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
                 clip_coef=clip_coef, entropy_coef=entropy_coef, value_coef=value_coef,
                 max_grad_norm=max_grad_norm, route_cost_points_per_second=route_cost_weight,
+                p_mode=p_mode, p_cost_scale=p_cost_scale,
+                p_points_per_grid_edge=p_points_per_grid_edge,
                 candidate_k=candidate_k,
                 output=str(self.output / track))
             config.validate()
@@ -385,32 +394,60 @@ class MecoSupervisor:
         self._write_queued_manifests(statuses)
         self._publish(cycle=cycle, phase="training", statuses=statuses)
         failed = {}
-        while processes:
-            self._observe_stop()
-            if self.request_stop and not self.stop_file.exists():
-                self.stop_file.parent.mkdir(parents=True, exist_ok=True)
-                self.stop_file.touch()
+        try:
+            while processes:
+                self._observe_stop()
+                if self.request_stop and not self.stop_file.exists():
+                    self.stop_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.stop_file.touch()
+                for track, process in list(processes.items()):
+                    result = process.poll()
+                    if result is None:
+                        continue
+                    logs[track].close()
+                    del processes[track]
+                    self.worker_pids.pop(track, None)
+                    self._refresh_progress(track)
+                    if result != 0:
+                        failed[track] = result
+                        statuses[track] = "failed"
+                    elif self.stop_file.exists():
+                        statuses[track] = "stopped"
+                    else:
+                        statuses[track] = "complete"
+                        self.completed_chunks += 1
+                self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
+                              statuses=statuses, error=failed or None)
+                self._poll_evaluator(cycle, statuses)
+                if processes:
+                    time.sleep(.5)
+        except BaseException:
+            # Child processes are detached into their own sessions. On every
+            # supervisor failure, persist stop intent and reap them before the
+            # output-root lock can be released.
+            self.stop_file.parent.mkdir(parents=True, exist_ok=True)
+            self.stop_file.touch(exist_ok=True)
+            for process in processes.values():
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=30.)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                            process.wait(timeout=5.)
+                        except (ProcessLookupError, subprocess.TimeoutExpired):
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            process.wait()
+            raise
+        finally:
             for track, process in list(processes.items()):
-                result = process.poll()
-                if result is None:
-                    continue
-                logs[track].close()
-                del processes[track]
                 self.worker_pids.pop(track, None)
                 self._refresh_progress(track)
-                if result != 0:
-                    failed[track] = result
-                    statuses[track] = "failed"
-                elif self.stop_file.exists():
-                    statuses[track] = "stopped"
-                else:
-                    statuses[track] = "complete"
-                    self.completed_chunks += 1
-            self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
-                          statuses=statuses, error=failed or None)
-            self._poll_evaluator(cycle, statuses)
-            if processes:
-                time.sleep(.5)
+                if not logs[track].closed:
+                    logs[track].close()
         if failed:
             raise RuntimeError(f"training workers failed: {failed}")
 
@@ -670,6 +707,21 @@ class MecoSupervisor:
                     "queue_status": str(self.queue_path),
                     "supervisor_status": str(self.status_path)}
         except BaseException as exc:
+            if self.evaluator is not None and self.evaluator.poll() is None:
+                try:
+                    os.killpg(self.evaluator.pid, signal.SIGTERM)
+                    self.evaluator.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(self.evaluator.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    self.evaluator.wait()
+                if self.evaluator_log is not None:
+                    self.evaluator_log.close()
+                self.evaluator = None
+                self.evaluator_log = None
+                self.evaluator_job = None
             self._publish(cycle=cycle, phase="failed", statuses=statuses,
                           evaluation=evaluation,
                           error=f"{type(exc).__name__}: {exc}")
@@ -705,6 +757,9 @@ def _parser():
     parser.add_argument("--value-coef", type=float, default=.5)
     parser.add_argument("--max-grad-norm", type=float, default=.5)
     parser.add_argument("--route-cost-weight", type=float, default=.05)
+    parser.add_argument("--p-mode", choices=("learned", "p0"), default="learned")
+    parser.add_argument("--p-cost-scale", type=float, default=1.0)
+    parser.add_argument("--p-points-per-grid-edge", type=float, default=.05)
     parser.add_argument("--evaluation-categories", default="single,cluster")
     parser.add_argument("--evaluation-episodes", type=int, default=1)
     parser.add_argument("--evaluation-seed", type=int, default=20261024)
@@ -729,6 +784,8 @@ def main(argv=None):
         clip_coef=args.clip_coef, entropy_coef=args.entropy_coef,
         value_coef=args.value_coef, max_grad_norm=args.max_grad_norm,
         route_cost_weight=args.route_cost_weight,
+        p_mode=args.p_mode, p_cost_scale=args.p_cost_scale,
+        p_points_per_grid_edge=args.p_points_per_grid_edge,
         candidate_k=args.candidate_k,
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,

@@ -154,7 +154,15 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
         return None, None, hbin
     node = int(graph.lookup[hbin, ix, iy].item())
     if node < 0:
-        return None, None, hbin
+        # Heading comes from sensed target bearing and is not commanded by the
+        # native controller. It may select model features, but it cannot make
+        # an otherwise legal XY endpoint infeasible. Bind the graph row to the
+        # first legal heading at this cell for A2/A3 node lookup.
+        legal_nodes = graph.lookup[:, ix, iy]
+        legal_nodes = legal_nodes[legal_nodes >= 0]
+        if legal_nodes.numel() == 0:
+            return None, None, hbin
+        node = int(legal_nodes[0].item())
     center = graph.xy[node]
     if float((center - xy).norm().item()) > graph.resolution_m * .72:
         return None, None, hbin
@@ -208,7 +216,9 @@ def _opponent_prediction(env, slot=3, horizon=0.):
 def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     graph: LegalPoseGraph, *, episode_id: str,
                                     action_ticks: int = 12,
-                                    candidate_k: int = 8) -> RouteFeasibleCandidates:
+                                    candidate_k: int = 8,
+                                    learned_traversal_cost=None,
+                                    learned_cost_scale: float = 1.0) -> RouteFeasibleCandidates:
     """Build the current bounded decision table and qualify every route row.
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
@@ -291,7 +301,10 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
 
     route_results = evaluate_routes(env, route_queries,
         goal_tolerance_m=graph.resolution_m * .72,
-        endpoint_tolerance_m=graph.resolution_m * .72)
+        endpoint_tolerance_m=graph.resolution_m * .72,
+        learned_traversal_cost=learned_traversal_cost,
+        learned_cost_scale=learned_cost_scale,
+        learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
     result_by_id = {result.candidate_id: result for result in route_results}
     speed = max(float(env.sim.speed[0, 3]), .1)
     omega = max(float(env.sim.omega_limit[0, 3]), .1)
@@ -346,7 +359,13 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
             "endpoint_separation_m": separation, "risk_penalty_points": risk,
-            "intake_extended": action < 4})
+            "intake_extended": action < 4,
+            "path_points_m": (None if result is None else result.path_points_m),
+            "weighted_route_cost_grid_edges": (None if result is None
+                else result.weighted_cost),
+            "route_cost_units": (None if result is None else result.cost_units),
+            "route_cost_provenance": (None if result is None
+                else result.cost_provenance)})
     if not any(valid_mask[:candidate_k]):
         raise RuntimeError("candidate service found no feasible row, including safe fallback")
     fallback = base.fallback_candidate_id

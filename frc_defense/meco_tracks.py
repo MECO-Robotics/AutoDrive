@@ -388,8 +388,9 @@ def make_scorer_snapshot(model_id: str, observation: ObservationSnapshot,
 
 def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
                             route_cost: torch.Tensor | None = None,
-                            risk_cost: torch.Tensor | None = None) -> torch.Tensor:
-    """Gross-reward utilities with deterministic cost subtraction exactly once."""
+                            risk_cost: torch.Tensor | None = None,
+                            path_cost: torch.Tensor | None = None) -> torch.Tensor:
+    """Gross reward minus ETA, risk, and integrated Plan A path costs once."""
     if utility.shape != valid_mask.shape or valid_mask.dtype != torch.bool:
         raise ValueError("utility and boolean feasibility mask shapes must match")
     if not bool(torch.isfinite(utility[valid_mask]).all()):
@@ -403,6 +404,10 @@ def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
         if risk_cost.shape != value.shape or not bool(torch.isfinite(risk_cost[valid_mask]).all()):
             raise ValueError("valid risk costs must be finite and match utility")
         value = value - risk_cost
+    if path_cost is not None:
+        if path_cost.shape != value.shape or not bool(torch.isfinite(path_cost[valid_mask]).all()):
+            raise ValueError("valid path costs must be finite and match utility")
+        value = value - path_cost
     if not bool(valid_mask.any(dim=-1).all()):
         raise ValueError("each row must include at least one feasible candidate")
     return value.masked_fill(~valid_mask, -torch.inf)

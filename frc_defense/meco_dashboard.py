@@ -11,8 +11,9 @@ import time
 
 
 TRACKS = ("A1", "A2", "A3", "C1", "C2")
+ABLATIONS = ("A1_P0", "A2_P0", "A3_P0")
 CONTROLS = ("D0", "D1", "D2")
-POLICIES = TRACKS + CONTROLS
+POLICIES = TRACKS + ABLATIONS + CONTROLS
 STATUS_SCHEMA_VERSION = 1
 HEARTBEAT_STALE_SECONDS = 90
 QUEUE_STALE_SECONDS = 180
@@ -187,6 +188,7 @@ def _comparison(report):
     """Validate a paired all-policy evaluation without inferring quality."""
     if (report.get("schema_version") != 1
             or report.get("tracks") != list(TRACKS)
+            or report.get("ablations") != list(ABLATIONS)
             or report.get("controls") != list(CONTROLS)
             or report.get("paired") is not True
             or not isinstance(report.get("protocol_id"), str)
@@ -199,9 +201,16 @@ def _comparison(report):
             or report.get("split") != "validation"
             or not isinstance(report.get("control_definitions"), dict)
             or report["control_definitions"].get("D0") !=
-               "curriculum teacher proxy; not production AutoDrive controller"
+               "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table"
             or not isinstance(report.get("policy_manifest"), dict)
             or set(report["policy_manifest"]) != set(POLICIES)
+            or not isinstance(report.get("plan_a_penalty"), dict)
+            or report["plan_a_penalty"].get("trained_mode") not in ("learned", "p0")
+            or report["plan_a_penalty"].get("p0_ablation_mode") != "p0"
+            or not _finite_number(report["plan_a_penalty"].get("cost_scale"))
+            or report["plan_a_penalty"].get("cost_scale") < 0
+            or not _finite_number(report["plan_a_penalty"].get("points_per_grid_edge"))
+            or report["plan_a_penalty"].get("points_per_grid_edge") < 0
             or any(not isinstance(value, dict)
                    or not isinstance(value.get("policy_id"), str)
                    or not value.get("policy_id")
@@ -242,14 +251,18 @@ def _comparison(report):
                 or row.get("source_identity_sha256") != report["source_identity_sha256"]
                 or not isinstance(row.get("policy_id"), str)
                 or row.get("policy_id") != report["policy_manifest"].get(row.get("policy"), {}).get("policy_id")
+                or (row.get("p_mode") != report["policy_manifest"].get(row.get("policy"), {}).get("p_mode")
+                    if row.get("policy") in TRACKS + ABLATIONS else row.get("p_mode") is not None)
                 or row.get("checkpoint_sha256") != report["policy_manifest"].get(row.get("policy"), {}).get("checkpoint_sha256")
                 or not isinstance(row.get("metrics"), dict)):
             return None
         provenance = report["policy_manifest"][row["policy"]]
         expected_checkpoint = provenance.get("checkpoint_sha256")
-        if row["policy"] in TRACKS:
+        if row["policy"] in TRACKS or row["policy"] in ABLATIONS:
             if (not isinstance(expected_checkpoint, str)
                     or not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint)):
+                return None
+            if row["policy"] in ABLATIONS and provenance.get("p_mode") != "p0":
                 return None
         elif expected_checkpoint is not None:
             return None
@@ -294,6 +307,7 @@ def _comparison(report):
 
 
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
+                    campaign_passes=None,
                     process_probe=_process_alive):
     now = time.time() if now is None else float(now)
     root = checkpoint_root.resolve()
@@ -467,9 +481,10 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 "latest_training_metrics": None}
         evidence = latest_by_policy.get(policy)
         policies.append({"policy_id": policy,
-            "kind": "learned_track" if policy in TRACKS else "deterministic_control",
+            "kind": ("learned_track" if policy in TRACKS else
+                     "P=0 ablation" if policy in ABLATIONS else "deterministic_control"),
             "training_state": latest_run["training_state"] if latest_run else
-                ("not_applicable" if policy in CONTROLS else "not_started"),
+                ("not_applicable" if policy in CONTROLS or policy in ABLATIONS else "not_started"),
             "evaluation_state": evidence["matched_status"] if evidence else "not_evaluated",
             "run": latest_run, "latest_evidence": evidence})
     return {"schema_version": STATUS_SCHEMA_VERSION,
@@ -479,6 +494,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         "queue_stale_seconds": QUEUE_STALE_SECONDS,
         "evaluation_heartbeat_stale_seconds": EVALUATION_HEARTBEAT_STALE_SECONDS,
         "queue": queue, "policies": policies, "evaluation_runs": evaluation_runs,
+        "implementation_passes": campaign_passes or [],
         "comparison_groups": groups,
         "errors": errors[:20]}
 
@@ -491,4 +507,21 @@ def meco_status_payload(project_root: Path | str) -> bytes:
     if not _inside(checkpoint_root, project) or not _inside(evaluation_root, project):
         raise ValueError("MECO status roots must remain inside the selected project checkout")
     payload = _collect_status(checkpoint_root, evaluation_root)
+    pass_path = project / "docs" / "MECO_CAMPAIGN_PASSES.json"
+    passes, pass_error = _read_json(pass_path)
+    valid_passes = None
+    if (passes is not None and passes.get("schema_version") == 1
+            and passes.get("pass_status_is_agent_liveness") is False
+            and isinstance(passes.get("passes"), list)
+            and [item.get("pass") for item in passes["passes"] if isinstance(item, dict)]
+                == ["planner", "implementer", "reviewer"]
+            and all(item.get("status") in ("pending", "in_progress", "complete", "blocked")
+                    and isinstance(item.get("provenance"), list)
+                    for item in passes["passes"])):
+        valid_passes = {"campaign": passes.get("campaign"),
+            "agent_liveness": False, "passes": passes["passes"]}
+    payload["implementation_passes"] = valid_passes
+    if valid_passes is None:
+        payload["errors"].append({"source": str(pass_path.relative_to(project)),
+            "error": pass_error or "invalid implementation pass status manifest"})
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
