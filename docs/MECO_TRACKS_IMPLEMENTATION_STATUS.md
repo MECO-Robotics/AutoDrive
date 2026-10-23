@@ -178,3 +178,20 @@ No simulator behavior evaluation or dashboard replay is claimed by the
 focused model/contract tests. Any game-behavior training or evaluation must
 retain and inspect an end-to-end simulator record under the repository's
 `AGENTS.md` validation rules.
+
+## Section 6 collection-action bouts
+
+The typed episode metric ledger schema v3 records contiguous focal slot-3
+executed actions 0 through 3 as collection-action bouts. Each closed bout keeps
+its zero-based start and exclusive end outer-step ticks, executed action
+sequence and per-action counts, focal acquired quantity, acquisition result,
+and closure reason. A bout is acquired only when the focal
+`fuel_acquired_event` quantity increases during that bout. Non-collection
+actions close a bout; episode finalization, timeout, or evaluation-error
+cleanup closes any active bout. The record includes bout count, acquired
+count, and acquired proportion; the proportion is null when no bouts occurred.
+Missing executed-action or acquisition signals make this metric unavailable
+instead of reporting zero. HUB denied remains a distinct simulator denied
+event, while abandoned fuel remains null because this evaluator has no
+authoritative abandoned-event producer. This implementation has only received
+static checks; simulator-record validation remains outstanding.

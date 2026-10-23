@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import random
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -513,7 +514,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_heading_override=goal_heading,
             **planner_kwargs)
         if metric_ledger is not None:
-            metric_ledger.observe_outer_step()
+            metric_ledger.observe_outer_step(int(env.last_actions[0, 3].item()))
         executed_actions.append(int(env.last_actions[0, 3].item()))
         if safety_counts is not None:
             current = _physics_safety_snapshot(env)
@@ -1441,6 +1442,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         production_d0=is_production_d0,
                         phase4_factor=phase4_factor,
                         **(qualification_case or {}))
+                    episode_metric_ledger = None
                     try:
                         if (inference_disable_tick is not None and
                                 inference_disable_tick >= env.horizon):
@@ -1506,8 +1508,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                              dtype=torch.long)
                                 _, _, done, truncated, _ = env.step(
                                     native_actions, capture_info=False)
-                                episode_metric_ledger.observe_outer_step()
                                 executed = int(env.last_actions[0, 3].item())
+                                episode_metric_ledger.observe_outer_step(executed)
                                 executed_action_trace.append(executed)
                                 actions_count[executed] += 1
                                 elapsed += 1
@@ -1779,6 +1781,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         outcomes = env.curriculum_metrics.outcomes()
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
                                    for name, value in outcomes.items()}
+                        episode_metric_ledger.close_collection_bout(
+                            "episode_finalization")
                         metric_ledger_record = episode_metric_ledger.to_record()
                         metrics.update(metric_ledger_record["safety_metrics"])
                         post_fault_metrics = None
@@ -1885,6 +1889,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "episode_id": episode_id})
                         update_evaluation_status("running", len(records))
                     finally:
+                        if episode_metric_ledger is not None:
+                            episode_metric_ledger.close_collection_bout(
+                                "evaluation_error" if sys.exc_info()[0] else
+                                "episode_finalization")
                         close = getattr(env, "close", None)
                         if callable(close):
                             close()
@@ -1893,10 +1901,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "safety_metrics_schema": "meco-safety-rates-v1",
             "safety_metrics_source_identity_sha256": source_hash,
             "episode_metric_ledger_schema": {
-                "schema_version": 2,
+                "schema_version": 3,
                 "record_field": "meco_metric_ledger",
                 "scope": "one ledger per evaluation record, focal slot 3",
                 "outer_step_sampling": "fuel event tensors are sampled after each outer CurriculumEnv.step; contact metrics use cumulative low-level TensorPhysics.step counters",
+                "collection_action_bouts": "contiguous focal slot-3 executed actions 0..3; each bout stores inclusive action sequence/counts, zero-based start and exclusive end outer-step ticks, acquired quantity and closure reason; acquisition success means focal fuel_acquired_event increased during the bout; missing action/acquisition signals make this metric unavailable",
+                "collection_action_bout_aggregate": "count, acquired count and acquired proportion are computed over closed bouts; zero-bout proportion is null",
+                "hub_denied": "remains a separate simulator fuel_denied event and is not interpreted as failed collection; abandoned fuel remains unavailable without an authoritative event producer",
                 "safety_metrics_schema": "meco-safety-rates-v1",
                 "safety_metrics": {
                     "safety_robot_contact_rate": "focal slot-3 robot-contact ticks / focal active physics ticks",

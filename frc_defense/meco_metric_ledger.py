@@ -34,6 +34,9 @@ class MecoEpisodeMetricLedger:
     fuel_abandoned: int | None = None
     failed_collection: int | None = None
     fuel_event_steps_available: bool = True
+    collection_bouts_available: bool = True
+    collection_bouts: list[dict] = field(default_factory=list)
+    _active_collection_bout: dict | None = field(default=None, repr=False)
     route_ids: list[str | None] = field(default_factory=list)
     goal_attempts: list[dict] = field(default_factory=list)
     _previous_xy: torch.Tensor | None = field(default=None, repr=False)
@@ -57,7 +60,7 @@ class MecoEpisodeMetricLedger:
             return None
         return int(value[0, 3].detach().item())
 
-    def observe_outer_step(self) -> None:
+    def observe_outer_step(self, executed_action: int | None = None) -> None:
         """Sample per-outer-step game events and evaluator-boundary distance."""
         pose = getattr(getattr(self.env, "sim", None), "pose", None)
         if isinstance(pose, torch.Tensor) and pose.ndim >= 3 and pose.shape[1] > 3:
@@ -68,6 +71,34 @@ class MecoEpisodeMetricLedger:
 
         self.outer_env_steps += 1
         self.elapsed_simulated_seconds += float(getattr(self.env, "dt", .02))
+        acquired_this_step = self._focal_event(self.env, "fuel_acquired_event")
+        if acquired_this_step is None:
+            self.collection_bouts_available = False
+        if executed_action is None or not isinstance(executed_action, int):
+            self.collection_bouts_available = False
+            self.close_collection_bout("action_signal_unavailable")
+        elif 0 <= executed_action <= 3:
+            if self._active_collection_bout is None:
+                self._active_collection_bout = {
+                    "start_tick": self.outer_env_steps - 1,
+                    "end_tick": self.outer_env_steps,
+                    "action_sequence": [],
+                    "action_counts": {str(action): 0 for action in range(4)},
+                    "acquired_quantity": 0,
+                    "acquired_signal_available": acquired_this_step is not None,
+                }
+            bout = self._active_collection_bout
+            bout["end_tick"] = self.outer_env_steps
+            bout["action_sequence"].append(executed_action)
+            bout["action_counts"][str(executed_action)] += 1
+            if acquired_this_step is None:
+                bout["acquired_signal_available"] = False
+                self.collection_bouts_available = False
+            else:
+                bout["acquired_quantity"] += acquired_this_step
+        else:
+            self.close_collection_bout("non_collection_action")
+
         event_names = {
             "fuel_acquired": "fuel_acquired_event",
             "fuel_scored": "fuel_scored_event",
@@ -80,6 +111,18 @@ class MecoEpisodeMetricLedger:
                 self.fuel_event_steps_available = False
             else:
                 setattr(self, field_name, getattr(self, field_name) + value)
+
+    def close_collection_bout(self, reason: str = "episode_finalization") -> None:
+        """Close the active contiguous action-0..3 bout, if one exists."""
+        if self._active_collection_bout is None:
+            return
+        bout = self._active_collection_bout
+        bout["closure_reason"] = reason
+        bout["acquired"] = (
+            bout["acquired_quantity"] > 0
+            if bout["acquired_signal_available"] else None)
+        self.collection_bouts.append(bout)
+        self._active_collection_bout = None
 
     def observe_route(self, route_id: str | None) -> None:
         if self.route_tracking_available:
@@ -113,6 +156,9 @@ class MecoEpisodeMetricLedger:
         })
 
     def to_record(self) -> dict:
+        # Finalize even if the caller is serializing an episode after an
+        # exception or timeout with a partial action macro.
+        self.close_collection_bout("episode_finalization")
         route_switches = None
         route_aba_proxy = None
         if self.route_tracking_available:
@@ -140,12 +186,13 @@ class MecoEpisodeMetricLedger:
             for name, count in contact_counters.items()
         }
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "scope": "focal_slot_3_per_episode",
             "availability": {
                 "route_selection": self.route_tracking_available,
                 "selected_goal_endpoint": self.goal_tracking_available,
                 "fuel_event_outer_step_sampling": self.fuel_event_steps_available,
+                "collection_action_bouts": self.collection_bouts_available,
                 "abandoned_fuel_event": False,
                 "failed_collection_event": False,
                 "safety_contact_tick_rates": (
@@ -186,6 +233,20 @@ class MecoEpisodeMetricLedger:
                     "abandoned": "unavailable: no authoritative episode event writer is connected to this evaluation ledger",
                     "failed_collection": "unavailable: no authoritative failed-intake event is connected to this evaluation ledger",
                 },
+            },
+            "collection_action_bouts": {
+                "action_range_inclusive": [0, 3],
+                "bouts": self.collection_bouts if self.collection_bouts_available else None,
+                "count": len(self.collection_bouts) if self.collection_bouts_available else None,
+                "acquired_count": (sum(row["acquired"] is True for row in self.collection_bouts)
+                                   if self.collection_bouts_available else None),
+                "acquired_proportion": (
+                    sum(row["acquired"] is True for row in self.collection_bouts) /
+                    len(self.collection_bouts)
+                    if self.collection_bouts_available and self.collection_bouts else None),
+                "provenance": "contiguous focal slot-3 executed actions 0..3 sampled after each outer CurriculumEnv.step; acquired iff focal fuel_acquired_event quantity increased during the bout; HUB denied remains a separate fuel.denied simulator event",
+                "unavailable_reason": (None if self.collection_bouts_available else
+                    "one or more outer steps lacked an executed-action or focal fuel_acquired_event signal"),
             },
             "contacts": {
                 "sample_scope": "low_level_physics_tick",
