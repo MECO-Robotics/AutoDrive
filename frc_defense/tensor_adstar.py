@@ -985,6 +985,8 @@ class TensorADStar:
                     bool((learned_cost < 0).any().item()):
                 raise ValueError("learned_traversal_cost must be finite and nonnegative")
             learned_cost = learned_cost * float(learned_cost_scale)
+            if not bool(torch.isfinite(learned_cost).all().item()):
+                raise ValueError("scaled learned_traversal_cost must remain finite")
         def select_rows(value):
             if value is None:
                 return None
@@ -1247,8 +1249,17 @@ class TensorADStar:
             if k % 16 == 0 and not bool(active.any().item()):
                 break
         write_rows(self.potential, value)
-        path,lengths=self._shortcut_path(
-            path,lengths,blocked,start_heading,length,width,speed,acceleration)
+        if learned_cost is None:
+            path,lengths=self._shortcut_path(
+                path,lengths,blocked,start_heading,length,width,speed,acceleration)
+        else:
+            # The legacy LOS/Bézier shortcut knows only occupancy. It could
+            # cross a high-cost learned cell after the weighted search chose a
+            # detour, so retain the searched grid path for learned-cost routes.
+            tail = torch.arange(self.max_points, device=self.device)[None, :] >= lengths[:, None]
+            endpoint = path.gather(
+                1, (lengths - 1).clamp_min(0)[:, None, None].expand(-1, 1, 2))
+            path = torch.where(tail[:, :, None], endpoint, path)
         write_rows(self.last_path, path)
         write_rows(self.last_progress, torch.zeros_like(self.last_progress[:batch_n]))
         write_rows(self.last_lengths, lengths)

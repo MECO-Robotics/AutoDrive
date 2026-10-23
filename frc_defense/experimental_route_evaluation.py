@@ -7,7 +7,9 @@ and returns geometric distance only; it does not estimate travel time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
+import struct
 from types import SimpleNamespace
 from typing import Literal
 
@@ -86,24 +88,66 @@ def _pose_clear(scratch, point, heading, length, width, robot_obstacles):
     return static_clear & circle_clear
 
 
+def _cost_map_digest(cost_map) -> str:
+    """Hash map dimensions and canonical row-major float64 little-endian data."""
+    values = cost_map.detach().to(device="cpu", dtype=torch.float64).contiguous()
+    nx, ny = values.shape
+    packed_values = struct.pack(f"<{values.numel()}d", *values.reshape(-1).tolist())
+    payload = (b"autodrive.learned_traversal_cost_map.v1\0" +
+               struct.pack("<II", nx, ny) + packed_values)
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _path_weighted_cost(scratch, points, learned_cost, scale: float) -> float:
     """Integrate terrain multipliers along points in cardinal-grid-step units.
 
-    Each segment contributes its length / grid resolution times the mean of
-    endpoint cell multipliers. Bump traversal retains the planner's +0.12 cost;
-    learned map values are additional dimensionless cost per cardinal step.
+    Each straight segment is split at every crossed raster boundary, then its
+    length fraction is charged at that cell's multiplier. Bump traversal
+    retains the planner's +0.12 cost; learned map values are additional
+    dimensionless cost per cardinal step.
     """
     if points.shape[0] < 2:
         return 0.0
     terrain = scratch._bump_cost
     if learned_cost is not None:
         terrain = terrain + learned_cost * scale
-    ix, iy = scratch._indices(points)
-    multipliers = terrain[ix, iy]
-    segment_m = (points[1:] - points[:-1]).norm(dim=-1)
-    cost = (segment_m / scratch.resolution) * (
-        multipliers[1:] + multipliers[:-1]) * 0.5
-    return float(cost.sum().item())
+    coordinates = points.detach().to(device="cpu", dtype=torch.float64).tolist()
+    terrain_values = terrain.detach().to(device="cpu", dtype=torch.float64).tolist()
+    resolution = float(scratch.resolution)
+    total = 0.0
+    for first, second in zip(coordinates, coordinates[1:]):
+        x0, y0 = first
+        x1, y1 = second
+        dx, dy = x1 - x0, y1 - y0
+        segment_length = math.hypot(dx, dy)
+        if segment_length == 0.0:
+            continue
+        crossings = {0.0, 1.0}
+        if dx != 0.0:
+            low, high = sorted((x0, x1))
+            first_boundary = math.floor(low / resolution) + 1
+            last_boundary = math.ceil(high / resolution) - 1
+            for cell_boundary in range(first_boundary, last_boundary + 1):
+                fraction = (cell_boundary * resolution - x0) / dx
+                if 0.0 < fraction < 1.0:
+                    crossings.add(fraction)
+        if dy != 0.0:
+            low, high = sorted((y0, y1))
+            first_boundary = math.floor(low / resolution) + 1
+            last_boundary = math.ceil(high / resolution) - 1
+            for cell_boundary in range(first_boundary, last_boundary + 1):
+                fraction = (cell_boundary * resolution - y0) / dy
+                if 0.0 < fraction < 1.0:
+                    crossings.add(fraction)
+        ordered = sorted(crossings)
+        for begin, end in zip(ordered, ordered[1:]):
+            midpoint = (begin + end) * 0.5
+            x = x0 + midpoint * dx
+            y = y0 + midpoint * dy
+            ix = min(max(math.floor(x / resolution), 0), scratch.nx - 1)
+            iy = min(max(math.floor(y / resolution), 0), scratch.ny - 1)
+            total += (segment_length / resolution) * (end - begin) * terrain_values[ix][iy]
+    return total
 
 
 def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> TensorADStar:
@@ -165,7 +209,8 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
     ``learned_cost_scale`` multiplies those values. They affect route choice,
     never occupancy or footprint safety. Results retain XY path points in
     meters and report a path-integrated cost in normalized grid-edge units.
-    The provenance string identifies the producer of the supplied map.
+    Provenance records the producer, scale, raster schema and SHA-256 digest
+    of the normalized map values.
     """
     items = tuple(queries)
     if not math.isfinite(goal_tolerance_m) or goal_tolerance_m < 0:
@@ -180,10 +225,27 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
         raise ValueError("learned_cost_scale must be finite and nonnegative")
     if not isinstance(learned_cost_provenance, str) or not learned_cost_provenance:
         raise ValueError("learned_cost_provenance must be a nonempty string")
-    cost_provenance = (f"{learned_cost_provenance}:scale={learned_cost_scale:g}:"
-                       "path_integral_grid_edge_v1"
-                       if learned_traversal_cost is not None else
-                       "legacy_bump_cost_path_integral_v1")
+    learned_map = None
+    if learned_traversal_cost is None:
+        cost_provenance = "legacy_bump_cost_path_integral_v2"
+    else:
+        learned_map = torch.as_tensor(learned_traversal_cost,
+                                      device=env.device,
+                                      dtype=env.sim.pose.dtype)
+        expected_shape = (env.planner.nx, env.planner.ny)
+        if learned_map.shape != expected_shape:
+            raise ValueError(f"learned_traversal_cost must have shape {expected_shape}")
+        if (not bool(torch.isfinite(learned_map).all().item()) or
+                bool((learned_map < 0).any().item())):
+            raise ValueError("learned_traversal_cost must be finite and nonnegative")
+        effective_map = learned_map * learned_cost_scale
+        if not bool(torch.isfinite(effective_map).all().item()):
+            raise ValueError("scaled learned_traversal_cost must remain finite")
+        digest = _cost_map_digest(learned_map)
+        cost_provenance = (
+            f"{learned_cost_provenance}:schema=xy_grid_f64le_v1:"
+            f"sha256={digest}:scale={learned_cost_scale:g}:"
+            "path_integral_grid_edge_v2")
     if not items:
         return ()
     if len(items) > MAX_ROUTE_QUERY_BATCH:
@@ -272,18 +334,6 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
         if valid_indices.numel():
             valid_queries = [planner_rows[i] for i in valid_indices.tolist()]
             scratch = _scratch_planner(env, valid_queries)
-            learned_map = None
-            if learned_traversal_cost is not None:
-                learned_map = torch.as_tensor(learned_traversal_cost,
-                                              device=device,
-                                              dtype=env.sim.pose.dtype)
-                if learned_map.shape != (scratch.nx, scratch.ny):
-                    raise ValueError(
-                        f"learned_traversal_cost must have shape {(scratch.nx, scratch.ny)}")
-                if (not bool(torch.isfinite(learned_map).all().item()) or
-                        bool((learned_map < 0).any().item())):
-                    raise ValueError(
-                        "learned_traversal_cost must be finite and nonnegative")
             start = starts[valid_indices]
             heading = headings[valid_indices]
             goal = goals[valid_indices]
