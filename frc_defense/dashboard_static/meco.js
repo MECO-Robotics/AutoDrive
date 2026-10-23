@@ -9,7 +9,7 @@
     updated.textContent = `Updated ${data.generated_utc || "unknown"}`;
     updated.dataset.stale = "false";
     document.querySelector("#sources").textContent =
-      `Live data ${data.checkpoint_root || "unavailable"} · three-pass ledger ${data.campaign_ledger_path || "unavailable"}`;
+      `Live data ${data.data_root || "unavailable"} · checkpoints ${data.checkpoint_root || "unavailable"} · evaluations ${data.evaluation_root || "unavailable"} · three-pass ledger ${data.campaign_ledger_path || "unavailable"}`;
     const activeLanes = Object.entries(data.queue?.lanes || {})
       .filter(([, lane]) => lane.pid).map(([track, lane]) => `${track} pid ${lane.pid}`);
     const queuePhase = data.queue?.phase;

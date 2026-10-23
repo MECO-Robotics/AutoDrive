@@ -22,7 +22,10 @@ Phase 4 factor cards describe the code being served.
 
 `--meco-data-root` must resolve to an existing directory. MECO checkpoint and
 evaluation roots are fixed to its `checkpoints/meco-five` and
-`evaluations/meco-five` children; resolved paths must remain within that root.
+`evaluations/meco-five` children. Every nested status, run, heartbeat, stats,
+evaluator, report, and qualification JSON path is resolved and checked against
+that root before it is read, so symlinked status inputs outside the selected
+data root are rejected. The campaign ledger remains checkout-local.
 The default, when the option is omitted, keeps both live data and campaign
 ledger checkout-local. The option only configures the read-only MECO status
 endpoint; other dashboard routes continue to use `--run-dir` as before.
