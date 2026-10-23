@@ -155,6 +155,32 @@ def rebuilt_field(length: float = 651.22 * INCH,
     return tuple(box for box in boxes if 0 <= box.y <= width)
 
 
+def qualification_field(layout_id: str, length: float = 651.22 * INCH,
+                       width: float = 317.7 * INCH) -> tuple[FieldBox, ...]:
+    """Return a named simulator layout; shifted variants change real geometry."""
+    boxes = rebuilt_field(length, width)
+    if layout_id == "2026_rebuilt":
+        return boxes
+    variants = {
+        "2026_rebuilt_shifted_structures_v1": (.28, 1.),
+        "2026_rebuilt_shifted_structures_v2": (.46, 1.),
+        "2026_rebuilt_shifted_structures_v3": (.46, -1.),
+    }
+    if layout_id not in variants:
+        raise ValueError(f"unknown qualification field layout: {layout_id}")
+    center_y = width / 2
+    shift, orientation = variants[layout_id]
+    shifted = []
+    for box in boxes:
+        if "_bump_" in box.name or "_trench_" in box.name:
+            direction = (1. if box.y < center_y else -1.) * orientation
+            shifted.append(FieldBox(box.name, box.x, box.y + direction * shift,
+                                    box.length, box.width, box.color))
+        else:
+            shifted.append(box)
+    return tuple(shifted)
+
+
 def static_collision_boxes(boxes: tuple[FieldBox, ...]) -> tuple[FieldBox, ...]:
     """Return ground-blocking structures, excluding driveable field zones."""
     return tuple(box for box in boxes

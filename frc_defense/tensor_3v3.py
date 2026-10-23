@@ -61,7 +61,8 @@ class TensorThreeVsThreeEnv(
                  behavior_probe_hub_active=True,
                  random_gamepiece_placement=False,
                  field_length=16.54,
-                 field_width=8.07, obstacles=(), fuel_physics=True):
+                 field_width=8.07, obstacles=(), fuel_physics=True,
+                 field_layout="2026_rebuilt"):
         self.n = int(num_envs)
         if self.n < 1:
             raise ValueError("num_envs must be positive")
@@ -236,9 +237,11 @@ class TensorThreeVsThreeEnv(
         self._fused_sensor_rng_used = False
         self._fused_opponent_tracks_used = False
 
-        from .field import (box_observation_radius, bump_boxes, rebuilt_field,
+        from .field import (box_observation_radius, bump_boxes, qualification_field,
                             static_collision_boxes)
-        self.field_boxes = rebuilt_field()
+        self.field_layout_id = str(field_layout)
+        self.field_boxes = qualification_field(self.field_layout_id,
+            field_length, field_width)
         solids = static_collision_boxes(self.field_boxes)
         self.field_feature_boxes = solids + bump_boxes(self.field_boxes)
         colliders = [box.as_tensor() for box in solids]
@@ -482,7 +485,7 @@ class TensorThreeVsThreeEnv(
         self.last_actions.fill_(7)
         self._last_score_intent.zero_()
         self._last_obs = self.observe()
-        return self._last_obs, {"field_layout": "2026_rebuilt", "robots": NUM_ROBOTS}
+        return self._last_obs, {"field_layout": self.field_layout_id, "robots": NUM_ROBOTS}
 
     def reset_done(self, mask):
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)

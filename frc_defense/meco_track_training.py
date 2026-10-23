@@ -977,16 +977,41 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str):
 @torch.no_grad()
 def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   categories: tuple[str, ...], episodes: int, master_seed: int,
-                  device: str = "cpu", include_controls=True, output: str | None = None):
+                  device: str = "cpu", include_controls=True, output: str | None = None,
+                  episode_seeds: tuple[int, ...] | None = None,
+                  split: str = "validation", qualification_case: dict | None = None,
+                  qualification_protocol_id: str | None = None,
+                  evaluation_policies: tuple[str, ...] | None = None,
+                  control_policies: tuple[str, ...] | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
+    if split not in ("validation", "test", "train"):
+        raise ValueError("split must be train, validation, or test")
+    if episode_seeds is not None and (len(episode_seeds) != episodes or
+            len(set(episode_seeds)) != episodes or any(type(seed) is not int
+            or not 0 <= seed < 2**63 for seed in episode_seeds)):
+        raise ValueError("episode_seeds must be a unique exact seed list matching episodes")
+    if qualification_case is not None:
+        required_case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
+        if not isinstance(qualification_case, dict) or set(qualification_case) != required_case_fields:
+            raise ValueError("qualification_case must contain the four frozen stratum identifiers")
+    if qualification_protocol_id is not None and (split == "train" or not isinstance(qualification_protocol_id, str)
+                                                   or not qualification_protocol_id):
+        raise ValueError("qualification protocol identity is only valid for held-out splits")
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category is not registered for scenario")
-    selected = tuple(MECO_TRACKS)
+    selected = tuple(MECO_TRACKS if evaluation_policies is None else evaluation_policies)
+    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
+        raise ValueError("evaluation_policies must be a nonempty unique subset of MECO tracks")
     if set(checkpoints) != set(selected):
-        raise ValueError("evaluation needs exactly one checkpoint for each of A1/A2/A3/C1/C2")
+        raise ValueError("evaluation needs exactly the selected policy checkpoints")
+    controls = tuple(("D0", "D1", "D2") if control_policies is None else control_policies)
+    if len(set(controls)) != len(controls) or not set(controls) <= {"D0", "D1", "D2"}:
+        raise ValueError("control_policies must be a unique subset of D0/D1/D2")
+    if include_controls and "D0" not in controls:
+        raise ValueError("matched evaluation requires D0 as the paired reference")
     sources = source_identity()
     loaded = {}
     policy_manifest = {}
@@ -1066,6 +1091,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     for track in ("A1", "A2", "A3"):
+        if track not in policy_manifest:
+            continue
         base = policy_manifest[track]
         policy_manifest[f"{track}_P0"] = {
             **base,
@@ -1073,7 +1100,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "p_mode": "p0",
             "base_track": track,
         }
-    for control in ("D0", "D1", "D2"):
+    for control in controls:
         control_policy_id = {"D0": "D0_production_deterministic",
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
@@ -1082,6 +1109,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
+        "episode_seeds": list(episode_seeds) if episode_seeds is not None else None,
+        "qualification_case": qualification_case,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
             "points_per_grid_edge": p_points_per_grid_edge,
@@ -1093,6 +1122,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
             "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2: stable configurable K=8/16/32 ordinary prefix, one appended snapshot-revalidated continue row when committed, and independently route-qualified expanded-goal coverage oracle; D1/D2: unchanged per-macro K=8/16/32 table without commitment carryover"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
+    if qualification_protocol_id is not None:
+        protocol = qualification_protocol_id
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
     status_path = (output_path.with_name(output_path.name + ".status.json")
@@ -1108,12 +1139,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 and current - status_last_written < 5.):
             return
         _atomic_json(status_path, {"schema_version": 1, "evaluation_id": eval_id,
-            "protocol_id": protocol, "split": "validation", "status": status,
+            "protocol_id": protocol, "split": split, "status": status,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "output_file": output_path.name,
             "progress": {"completed_records": completed,
                          "total_records": len(categories) * episodes *
-                             (len(selected) + 3 + (3 if include_controls else 0))}})
+                             (len(selected) + sum(3 * (track in selected) for track in ("A1", "A2", "A3")) + (len(controls) if include_controls else 0))}})
         status_last_written = current
         status_last_completed = completed
     records = []
@@ -1121,16 +1152,18 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         update_evaluation_status("running")
         for category in categories:
             for episode_index in range(episodes):
-                seed = master_seed + episode_index
+                seed = (episode_seeds[episode_index] if episode_seeds is not None
+                        else master_seed + episode_index)
                 # Same simulator reset seed and task for every control and model.
-                policies = (list(selected) + ["A1_P0", "A2_P0", "A3_P0"]
-                    + (["D0", "D1", "D2"] if include_controls else []))
+                policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
+                    if track in selected] + (list(controls) if include_controls else []))
                 for policy in policies:
                     episode_id = _episode_id(f"eval-{eval_id}-{category}-{policy}",
                                              episode_index)
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
-                                              production_d0=is_production_d0)
+                        production_d0=is_production_d0,
+                        **(qualification_case or {}))
                     try:
                         if is_production_d0 and env.control_modes[3] != "deterministic":
                             raise RuntimeError("production D0 evaluation did not receive the deterministic slot-3 controller")
@@ -1336,7 +1369,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
-                            "protocol_id": protocol, "split": "validation",
+                            "protocol_id": protocol, "split": split,
+                            **(qualification_case or {}),
                             "source_identity_sha256": hashlib.sha256(json.dumps(
                                 sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
                             "actions": actions_count, "executed_action_trace": executed_action_trace,
@@ -1363,9 +1397,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",
             "plan_a_heading_contract": "selected Plan A goals persist across macro steps until XY and heading completion; C1/C2/D1/D2 retain their original per-macro action semantics. The simulator pauses at the selected XY goal, samples the rectangular chassis sweep every 5 degrees, requires chassis translation to settle, and applies a point-forecast clearance check against known teammate poses and the observed opponent using constant velocity over estimated turn time plus stopping drift. This estimate has no uncertainty inflation, and the 5-degree static samples do not prove continuous swept clearance; native route and collision checks remain authoritative. Slot-3 score/pass events before the selected goal are recorded as execution failures and excluded from Plan A actor credit. The native slot-3 dumper ferry action can release fuel anywhere; Plan A masks that carrying dumper ferry pair, and the event censor remains for any actual early slot-3 pass. Intake uses target capture geometry, score uses hub-facing tolerance, and executable non-dumper ferry actions use the native release-facing tolerance",
-            "seeds": [master_seed + i for i in range(episodes)],
-            "tracks": list(selected), "ablations": ["A1_P0", "A2_P0", "A3_P0"],
-            "controls": ["D0", "D1", "D2"] if include_controls else [],
+            "seeds": (list(episode_seeds) if episode_seeds is not None else
+                      [master_seed + i for i in range(episodes)]),
+            "tracks": list(selected), "ablations": [f"{track}_P0" for track in ("A1", "A2", "A3")
+                if track in selected],
+            "controls": list(controls) if include_controls else [],
             "plan_a_penalty": {"trained_mode": p_mode, "p0_ablation_mode": "p0",
                 "cost_scale": p_cost_scale,
                 "points_per_grid_edge": p_points_per_grid_edge,
@@ -1376,7 +1412,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "D1": "hand-weighted scorer over the shared feasible candidate table; 12-step macro cadence",
                 "D2": "D1 scorer with kinematic opponent endpoint prediction; 12-step macro cadence"},
             "policy_manifest": policy_manifest,
-            "paired": True, "split": "validation", "diagnostic": episodes < 100,
+            "paired": True, "split": split, "diagnostic": episodes < 100,
+            "qualification": qualification_case is not None,
+            "qualification_case": qualification_case,
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "diagnostic_boundary": "matched validation sample only; promotion requires separate held-out gates",
             "source_identity_sha256": hashlib.sha256(json.dumps(

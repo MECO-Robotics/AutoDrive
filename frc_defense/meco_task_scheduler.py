@@ -13,7 +13,8 @@ import json
 import random
 
 from .training_curriculum import (CURRICULUM_VERSION, CurriculumState, SCENARIOS,
-    _ancestors, eligible_scenarios, seed_partition, task_mixture)
+    _ancestors, eligible_scenarios, task_mixture)
+from .meco_qualification import TRAIN_SEED_POOL_SIZE, protocol_cases
 
 
 SCHEDULER_VERSION = 1
@@ -69,6 +70,11 @@ class MecoTaskScheduler:
             raise ValueError("task assignment is not registered in the curriculum DAG")
         if type(assignment.get("seed")) is not int or assignment["seed"] < 0:
             raise ValueError("invalid task seed")
+        train_case = protocol_cases(scenario_id, "train",
+            episodes=TRAIN_SEED_POOL_SIZE, master_seed=self.master_seed)[0]
+        pool_id = _digest({"scenario_id": scenario_id, "seeds": list(train_case.seeds)})
+        if assignment.get("training_seed_pool_id") != pool_id or assignment["seed"] not in train_case.seeds:
+            raise ValueError("task seed is not in the frozen training protocol pool")
         if type(assignment.get("cycle")) is not int or assignment["cycle"] < 1:
             raise ValueError("invalid task cycle")
         target = assignment.get("target_update")
@@ -77,7 +83,8 @@ class MecoTaskScheduler:
         assignment_id = assignment.get("assignment_id")
         expected_id = _digest({"cycle": assignment["cycle"],
             "scenario_id": scenario_id, "category": category,
-            "seed": assignment["seed"], "master_seed": self.master_seed})
+            "seed": assignment["seed"], "master_seed": self.master_seed,
+            "training_seed_pool_id": pool_id})
         if assignment_id != expected_id:
             raise ValueError("task assignment identity is invalid")
 
@@ -135,14 +142,17 @@ class MecoTaskScheduler:
         category = (rng.choice(sorted(recovery_categories)) if recovery_categories
                     else rng.choice(categories))
         selected_recovery = scenario_id in recovery and category in recovery_categories
-        cycle_seed = int.from_bytes(hashlib.sha256(
-            f"{self.master_seed}/meco-task-cycle/{cycle}".encode()).digest()[:8], "big")
-        seed = seed_partition(scenario_id, "train", 1,
-                              master_seed=cycle_seed)[0]
+        train_case = protocol_cases(scenario_id, "train",
+            episodes=TRAIN_SEED_POOL_SIZE, master_seed=self.master_seed)[0]
+        seed = train_case.seeds[(cycle - 1) % len(train_case.seeds)]
+        training_seed_pool_id = _digest({"scenario_id": scenario_id,
+                                          "seeds": list(train_case.seeds)})
         assignment = {"cycle": cycle, "scenario_id": scenario_id,
             "category": category, "seed": seed,
+            "training_seed_pool_id": training_seed_pool_id,
             "assignment_id": _digest({"cycle": cycle, "scenario_id": scenario_id,
-                "category": category, "seed": seed, "master_seed": self.master_seed}),
+                "category": category, "seed": seed, "master_seed": self.master_seed,
+                "training_seed_pool_id": training_seed_pool_id}),
             "sampling_role": ("recovery" if selected_recovery
                 else "ancestor_retention" if recovery
                 else "stage_exposure" if scenario_id not in curriculum_state.qualified

@@ -42,11 +42,21 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         for slot in pressure['slots']:
             commands[:, slot] = 0.
             level = pressure['level']
-            if level == 2 or (level == 5 and slot == 0):
+            if level == 2 or (level == 5 and slot == 0) or pressure['family'] == 'orbiting_interceptor':
                 phase = self.match_elapsed * 1.2 + pressure['phase']
                 target = self.sim.pose[:, slot, :2].clone()
                 target[:, 1] = pressure['anchor_y'] + torch.sin(phase) * .6
+                if pressure['family'] == 'orbiting_interceptor':
+                    target[:, 0] = 10.8 + torch.cos(phase * .7 + slot) * .8
+                    target[:, 1] += slot * .45
                 commands[:, slot, :2] = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+            elif pressure['family'] == 'split_chaser':
+                delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
+                valid = self.opponent_valid[:, slot]
+                phase = self.match_elapsed * .65 + pressure['phase']
+                offset = torch.stack((torch.cos(phase), torch.sin(phase)), -1) * .8
+                commands[:, slot, :2] = torch.where(valid[:, None],
+                    (delta + offset).clamp(-1.5, 1.5), 0.)
             elif level == 4 or (level == 5 and slot == 1):
                 # Only the defender's simulated opponent observation is used.
                 delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
@@ -56,7 +66,9 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
 
 
 def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True,
-                        production_d0=False):
+                        production_d0=False, layout_id='2026_rebuilt',
+                        defender_family='category_scripted', start_condition='scenario_defined',
+                        sensor_profile='standard'):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -65,6 +77,12 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     still applied below, and the same reset path is used in either mode.
     """
     definition = get_scenario(scenario_id)
+    if defender_family not in ('none', 'category_scripted', 'orbiting_interceptor', 'split_chaser'):
+        raise ValueError('unknown scripted defender family')
+    if start_condition not in ('scenario_defined', 'offset_upper_lane', 'offset_lower_lane'):
+        raise ValueError('unknown qualification start condition')
+    if sensor_profile not in ('standard', 'noisy'):
+        raise ValueError('unknown qualification sensor profile')
     if category.endswith('/after_release') and not fuel_physics:
         raise ValueError('after_release requires fuel_physics=True for an actual airborne initial release')
     if category not in definition.required_categories:
@@ -75,7 +93,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         torch.cuda.set_device(requested_device)
     modes = ['none'] * 6
     modes[3] = 'deterministic' if production_d0 else 'nn'
-    pressure = _pressure(category, seed) if scenario_id in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed)
+    pressure = _pressure(category, seed, defender_family) if scenario_id in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, defender_family)
     if scenario_id == 'team_delivery_cycles':
         modes[4] = 'deterministic'
         if category.endswith(('multiple_teammates', 'opponents')):
@@ -91,7 +109,10 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         robot_roles=('defense', 'offense', 'offense', 'offense', 'offense', 'offense'),
         allow_nn_offense=True, dt=.02, horizon=horizon or math.ceil(definition.time_budget_s/.02),
         randomize=False, fuel_count=96, max_fuel_capacity=(30 if scenario_id.startswith('pickup_') else 6), fuel_physics=fuel_physics,
-        perception_dropout=.02, position_noise=.015, velocity_noise=.05,
+        perception_dropout=.04 if sensor_profile == 'noisy' else .02,
+        position_noise=.03 if sensor_profile == 'noisy' else .015,
+        velocity_noise=.10 if sensor_profile == 'noisy' else .05,
+        field_layout=layout_id,
         replan_interval=10)
     env.curriculum = {'scenario_id': scenario_id, 'scenario_version': definition.version,
         'category': category, 'learner_slot': 3, 'seed': int(seed),
@@ -100,17 +121,22 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'route': next((r for r in ('trench', 'bump', 'open') if r in category.split('/')), 'open'),
         'reference_qualified': False,
         'execution': 'production_deterministic_d0' if production_d0 else 'generic_nn',
+        'layout_id': layout_id, 'defender_family': defender_family,
+        'start_condition': start_condition, 'sensor_profile': sensor_profile,
         'limitations': ['Draft budgets and targets require scripted-reference qualification.',
                         'Uncontrolled robot bodies remain off-field and are restored after each step.']}
     reset_curriculum_scenario(env, seed)
     return env
 
 
-def _pressure(category, seed):
+def _pressure(category, seed, family='category_scripted'):
     marker = next((part for part in category.split('/') if part.startswith('level_')), 'level_0')
     level = int(marker.split('_')[1])
+    if family in ('orbiting_interceptor', 'split_chaser'):
+        level = max(level, 4)
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
-            'phase': (int(seed) % 1000) / 1000 * 2 * math.pi, 'anchor_y': 4.035}
+            'phase': (int(seed) % 1000) / 1000 * 2 * math.pi, 'anchor_y': 4.035,
+            'family': family}
 
 
 def _refresh(env):
@@ -307,7 +333,7 @@ def reset_curriculum_scenario(env, seed):
             if env.control_modes[slot] == 'deterministic':
                 env.sim.pose[:, slot] = env.sim.pose.new_tensor((5.5+slot*.9, .8+slot*2.5, math.pi))
     env.planner.avoid_bumps = route != 'bump'
-    pressure = config['pressure'] = _pressure(category, seed) if name in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed)
+    pressure = config['pressure'] = _pressure(category, seed, config['defender_family']) if name in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, config['defender_family'])
     if pressure['level'] == 3 and not active and route == 'open':
         blocked_y = .8 if pressure['style'] != 'level_3_bump' else 2.5
         if pressure['style'] == 'level_3_seeded_choice':
@@ -326,6 +352,12 @@ def reset_curriculum_scenario(env, seed):
     env.curriculum_action_mask = torch.ones((env.n, 6, 8), device=env.device, dtype=torch.bool)
     env.curriculum_action_mask[:, 3] = False
     env.curriculum_action_mask[:, 3, list(config['allowed_actions'])] = True
+    if config['start_condition'] in ('offset_upper_lane', 'offset_lower_lane'):
+        offset = .25 if config['start_condition'] == 'offset_upper_lane' else -.25
+        on_field = ((env.sim.pose[..., 0] >= 0.) & (env.sim.pose[..., 0] <= env.field_length)
+                    & (env.sim.pose[..., 1] >= 0.) & (env.sim.pose[..., 1] <= env.sim.field_width))
+        env.sim.pose[..., 1] += on_field.to(env.sim.pose.dtype) * offset
+        env.piece_pos[..., 1] += env.piece_active.to(env.piece_pos.dtype) * offset
     config['schedule'] = schedule
     env.curriculum_schedule = schedule
     env.match_elapsed.fill_(-env.dt)

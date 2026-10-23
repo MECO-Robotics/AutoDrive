@@ -387,6 +387,32 @@ def _comparison(report):
                 for category in categories} for policy in POLICIES}}
 
 
+def _qualification_status(project: Path, errors: list):
+    root = project / "qualifications" / "meco"
+    path = root / "qualification-status.json"
+    status, error = _read_json(path)
+    if status is None:
+        if error and path.exists():
+            errors.append({"source": str(path.relative_to(project)), "error": error})
+        return None
+    if (status.get("schema_version") != 1
+            or status.get("split") not in ("validation", "test")
+            or not isinstance(status.get("protocol_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", status["protocol_id"])
+            or not isinstance(status.get("bundle_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", status["bundle_id"])
+            or not isinstance(status.get("confidence_intervals"), dict)
+            or not isinstance(status.get("promotion"), dict)):
+        errors.append({"source": str(path.relative_to(project)),
+                       "error": "qualification status has invalid provenance"})
+        return None
+    return {key: status.get(key) for key in (
+        "updated_utc", "evaluation_id", "scenario_id", "candidate_policy", "split",
+        "protocol_id", "bundle_id", "checkpoint_sha256", "gate_definition",
+        "gate_calibration_status", "confidence_intervals", "promotion", "streak", "qualified",
+        "final_test_isolated")}
+
+
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                     campaign_passes=None,
                     process_probe=_process_alive):
@@ -571,6 +597,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 ("not_applicable" if policy in CONTROLS or policy in ABLATIONS else "not_started"),
             "evaluation_state": evidence["matched_status"] if evidence else "not_evaluated",
             "run": latest_run, "latest_evidence": evidence})
+    qualification = _qualification_status(root.parents[1], errors)
     return {"schema_version": STATUS_SCHEMA_VERSION,
         "generated_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "checkpoint_root": str(root), "evaluation_root": str(eval_root),
@@ -579,6 +606,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
         "evaluation_heartbeat_stale_seconds": EVALUATION_HEARTBEAT_STALE_SECONDS,
         "queue": queue, "policies": policies, "evaluation_runs": evaluation_runs,
         "implementation_passes": campaign_passes or [],
+        "qualification": qualification,
         "comparison_groups": groups,
         "errors": errors[:20]}
 
