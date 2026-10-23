@@ -143,7 +143,8 @@
         "Scoped Phase 4 review approved fef1eebf73eab9c06d6300b14bc8e9954f25176a after device/backend identity was bound into matrix, condition, and evaluator protocol IDs and report validation. Static review only; no tests or simulator evaluations.",
         "Integrated reviewed Phase 4 changes through fef1eebf73eab9c06d6300b14bc8e9954f25176a into the full-plan checkout; this integration awaits its own scoped review. Static checks only. Simulator factor experiments, held-out generalization, and qualification remain outstanding.",
         "Scoped review found Phase 5 `_pipeline` assumed tuple output and would KeyError for dict outputs; named-key extraction correction is committed in codex/meco-deployment-timing and awaits re-review. One-forward timing and explicit age-proxy limitations remain in scope; no runtime or hardware validation requested.",
-        "Scoped review approved the named-dictionary scorer extraction correction in e300fff36; follow-up warmup coverage now requires re-review: verify each warmup runs model plus argmax, synchronization boundary, and one forward pass per timed iteration."
+        "Scoped review approved the named-dictionary scorer extraction correction in e300fff36; follow-up warmup coverage now requires re-review: verify each warmup runs model plus argmax, synchronization boundary, and one forward pass per timed iteration.",
+        "Scoped review approved Phase 5 synthetic timing fix at 0e3eef933: dictionary/tuple scorer outputs are supported, model plus argmax are warmed together, and every timed interval contains one forward pass. Overall campaign reviewer pass remains in progress; empirical CPU/accelerator profiling, ONNX numerical parity, Hailo checks, and end-to-end latency evidence remain pending."
       ]
     }
   ],
