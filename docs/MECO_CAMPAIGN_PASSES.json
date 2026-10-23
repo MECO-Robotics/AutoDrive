@@ -70,7 +70,8 @@
         "Default two-robot fused HIP per-robot contact fix committed as c530fb92d in contact-rate worktree; both robots now set flags before per-tick counters; re-review pending",
         "Cross-branch audit found D0 calibration report indexing does not yet require the safety schema/three per-row rates/source bindings; its status correctly remains awaiting_runtime_contact_metric_support until that consumer validation is implemented and reviewed",
         "D0 retention/v1 compatibility/safety calibration consumer fixes committed as 8b1f496cc: binds retained policy manifest to bundle, preserves exact generated v1 schema, and requires exact contact-rate schema/source/row coverage before bundle creation; reviewer pass pending",
-        "Section 7 A/B matrix committed as 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886: immutable six-condition runner includes requested architecture contrasts, P0, K8/16/32, current/CV and inference-disabled D1 fallback; unsupported factors remain explicit; scoped review pending"
+        "Section 7 A/B matrix committed as 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886: immutable six-condition runner includes requested architecture contrasts, P0, K8/16/32, current/CV and inference-disabled D1 fallback; unsupported factors remain explicit; scoped review pending",
+        "A/B matrix reviewer found two blockers: C1/D1 uses mismatched prediction modes, and per-condition reports are not checked against frozen checkpoint/source/config/protocol hashes; implementer follow-up is fixing both"
       ]
     },
     {
@@ -116,7 +117,8 @@
         "Contact-rate commit 948d4f101 is not approved yet: two-robot fused HIP path must update per-robot flags (or be rejected for safety evaluation), and D0 consumer schema remains to be integrated",
         "Contact-rate follow-up c530fb92d submitted for static review; D0 calibration consumer still needs strict acceptance of the emitted schema, source identity and per-row rate fields before safety can be verified",
         "D0 follow-up 8b1f496cc submitted for re-review covering retention bundle identity, exact v1 schema preservation and safety calibration intake requirements",
-        "A/B matrix 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886 submitted for scoped static review; fault handoff and matched control-mode contrasts are priority checks"
+        "A/B matrix 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886 submitted for scoped static review; fault handoff and matched control-mode contrasts are priority checks",
+        "A/B matrix 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886 is not approved: align C1/D1 forecast mode and reject per-condition provenance drift before recording contrasts"
       ]
     }
   ]
