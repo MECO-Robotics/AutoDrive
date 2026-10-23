@@ -157,6 +157,27 @@ fit here, and no representative end-to-end simulator evaluation has been
 reviewed. See [MECO_SUPERVISED_WARMSTART.md](MECO_SUPERVISED_WARMSTART.md) for
 the v1/v2 commands and contracts.
 
+## A1 empty-support failure follow-up
+
+The observed A1 run `82d4f0f6fd3248e6b67e12c3a34ed132` failed at
+`2026-10-23T14:15:01.060912+00:00` with `IndexError: too many indices for tensor
+of dimension 1`. Its recorded source identity was
+`fe53f457ccf295681c3fbd2bfb02b3958ef1cbce2596e427b28ce069bb9a4731` and its
+protocol ID was
+`05c6843d5355fb5a4a9d7e998b0381640338dafd5451227cc41cb51325ae642c`. The
+failure occurred while assembling the empty-support diagnostic: the selected
+ferry target is already an `[x, y]` pair, but diagnostic serialization indexed
+it again as a batched tensor. The isolated fix serializes its two values
+directly and requires exactly two finite coordinates. It does not change the
+legal action mask, support tensor, sampling, or PPO behavior.
+
+The builder now reaches and raises the typed `PlanAEmptySupportError`; callers
+in counterfactual collection/replay do not convert it to an `IndexError` and
+retain their existing environment cleanup. This source change requires a fresh
+source identity and fresh output directory/checkpoints; the failed run cannot
+be resumed under this code. No test or simulator evaluation was run for this
+follow-up, so simulator validation remains pending.
+
 ## Adapter calls
 
 ```python

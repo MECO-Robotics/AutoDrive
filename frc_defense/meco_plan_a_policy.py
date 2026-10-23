@@ -281,7 +281,9 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         pose_values = tuple(float(value) for value in pose.detach().cpu().tolist())
         legal_ids = tuple(int(value) for value in torch.nonzero(
             action_mask, as_tuple=False).flatten().detach().cpu().tolist())
-        ferry_values = tuple(float(value) for value in ferry_target.detach().cpu()[0, 3].tolist())
+        ferry_values = tuple(float(value) for value in ferry_target.detach().cpu().tolist())
+        if len(ferry_values) != 2 or not all(math.isfinite(value) for value in ferry_values):
+            raise RuntimeError("Plan A empty-support ferry target is not a finite XY pair")
         curriculum = getattr(env, "curriculum", {})
         diagnostic = PlanAEmptySupportDiagnostic(
             snapshot_id=snapshot_id,
