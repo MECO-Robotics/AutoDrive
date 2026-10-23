@@ -36,7 +36,8 @@ CANDIDATE_BOUNDARY = {
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": False,
     "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
-    "capture_feasibility": "expanded collect endpoints checked at sensed-target bearing with a 10cm inset and 5 degree uncertainty",
+    "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
+    "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m", "route_time_s",
                   "risk_penalty_points", "target_heading_rad")
@@ -122,21 +123,20 @@ def _endpoint_clear(env, xy, heading: float, *, intake_extended: bool):
     if intake_extended:
         length = length + .6096
     width = env.sim.width[0, slot].clone()
+    # The selected heading is only a planner feature. Enclose the full robot
+    # (including intake) in a square so endpoint clearance holds at every yaw.
+    side = torch.sqrt(length.square() + width.square())
     point = xy.reshape(1, 1, 2).expand(1, 2, 2)
     static_ok = bool(env.planner._footprint_path_clear(point,
-        torch.tensor([heading], device=env.device, dtype=point.dtype),
-        length.reshape(1), width.reshape(1))[0].item())
+        torch.zeros(1, device=env.device, dtype=point.dtype),
+        side.reshape(1), side.reshape(1))[0].item())
     circles = env._perceived_robot_obstacles()[slot]
     circles = circles[circles[:, 2] > 0]
     if circles.numel() == 0:
         return static_ok
     delta = circles[:, :2] - xy
-    c, s = math.cos(heading), math.sin(heading)
-    forward = delta[:, 0] * c + delta[:, 1] * s
-    lateral = -delta[:, 0] * s + delta[:, 1] * c
-    dx = (forward.abs() - float(length) * .5).clamp_min(0.)
-    dy = (lateral.abs() - float(width) * .5).clamp_min(0.)
-    circles_clear = bool((dx.square() + dy.square() > circles[:, 2].square()).all().item())
+    clearance_radius = float(side) * .5
+    circles_clear = bool((delta.norm(dim=-1) > clearance_radius + circles[:, 2]).all().item())
     return static_ok and circles_clear
 
 
@@ -164,33 +164,35 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
     return node, center, hbin
 
 
-def _capture_pose_possible(env, base: SafeActionCandidates, action: int,
-                           goal_xy) -> bool:
-    """Conservatively check capture at the native target-bearing orientation."""
+def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
+                           goal_xy) -> dict:
+    """Report sensed-target geometry without implying commanded orientation."""
     if action >= 4:
-        return True
+        return {"status": "not_applicable", "basis": "non_collection_action"}
     row = base.table.features[action]
     if row[2] is None or row[3] is None:
-        return False
+        return {"status": "unavailable", "basis": "target_not_sensed"}
     slot = 3
     fuel = goal_xy.new_tensor((row[2], row[3]))
     delta = fuel - goal_xy
     distance = float(delta.norm().item())
     if not math.isfinite(distance):
-        return False
-    heading = math.atan2(float(delta[1]), float(delta[0])) if distance > 1e-8 else 0.
-    forward = delta[0] * math.cos(heading) + delta[1] * math.sin(heading)
+        return {"status": "unavailable", "basis": "nonfinite_target_geometry"}
     radius = (float(env.fuel_physics.config.radius) if env.fuel_physics is not None
               else float(env._fuel_radius))
     half_length = float(env.sim.length[0, slot]) * .5
     half_width = float(env.sim.width[0, slot]) * .5
-    # Bound small orientation/control error by shrinking the capture envelope
-    # 10 cm and checking the lateral displacement implied by a 5 degree error.
-    margin = .10
-    lateral_uncertainty = distance * math.sin(math.radians(5.))
-    return (-half_length - .075 - radius + margin <= float(forward) <=
-            half_length + .35 + .3048 + radius - margin and
-            lateral_uncertainty <= half_width + .075 + radius - margin)
+    forward_limit = (half_length + .35 + .3048 + radius)
+    lateral_limit = half_width + .075 + radius
+    # Bearing-aligned point geometry only; actual terminal orientation and
+    # capture are controlled by the native controller and simulator.
+    inside = (-half_length - .075 - radius <= distance <= forward_limit
+              and 0. <= lateral_limit)
+    return {"status": "inside_estimate" if inside else "outside_estimate",
+            "basis": "sensed_target_bearing_geometry_only",
+            "distance_m": distance,
+            "estimated_forward_limit_m": forward_limit,
+            "estimated_lateral_limit_m": lateral_limit}
 
 
 def _opponent_prediction(env, slot=3, horizon=0.):
@@ -276,7 +278,6 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                     allowed &= node is not None
                     if center is not None:
                         target = center
-                    allowed &= _capture_pose_possible(env, base, action, target)
         targets.append(target)
         headings.append(heading)
         goal_nodes.append(node)
@@ -331,12 +332,15 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         rows.append(tuple(row))
         route_costs.append(0. if eta is None else eta * ROUTE_COST_POINTS_PER_SECOND)
         risk_costs.append(0. if risk is None else risk)
+        capture_estimate = _capture_pose_estimate(env, base, action, goal_xy)
         routes.append({"candidate_id": candidate_id,
             "action_index": action,
             "candidate_row": row_index,
             "goal_variant": variant,
             "route_status": "not_queried" if result is None else result.status,
-            "feasible": valid, "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
+            "feasible": valid, "route_feasible": route_ok,
+            "capture_estimate": capture_estimate,
+            "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
             "goal_heading_rad": float(headings[row_index]),
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
