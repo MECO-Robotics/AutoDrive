@@ -193,13 +193,16 @@ def summarize(root, cache_dir=None):
                         'protocol_id': protocol,
                         'rows': [row for row in matching if row['evaluation_id'] == evaluation_id]})
             config = stats.get('config', {})
+            configured_eval_every = config.get('eval_every') if isinstance(config, dict) else None
+            eval_every = (configured_eval_every if type(configured_eval_every) is int
+                          and configured_eval_every > 0 else None)
             runs.append({'run': str(run.relative_to(root)), 'path': str(run),
                          'algorithm': stats.get('algorithm', config.get('algorithm', 'ppo')),
                          'architecture': stats.get('architecture', config.get('architecture', run.name)),
                          'updates': stats.get('updates', rows[-1]['update'] if rows else 0),
-                         # The run's own saved configuration is authoritative for
-                         # evaluation cadence. Do not infer it from observed files.
-                         'eval_every': stats.get('eval_every'),
+                         # TrainingConfig is saved under stats.config. Invalid or
+                         # missing cadence stays unavailable; never infer it.
+                         'eval_every': eval_every,
                          'current': stats.get('current', rows[-1].get('scenario_id') if rows else None),
                          'qualified': state.get('qualified', []),
                          'consecutive_passes': state.get('consecutive_passes', {}),
