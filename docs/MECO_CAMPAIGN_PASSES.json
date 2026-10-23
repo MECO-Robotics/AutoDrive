@@ -204,7 +204,8 @@
         "Sibling-failure abort implementation is in isolated worktree codex/meco-sibling-failure-abort from 94fe36939; scoped reviewer pass pending. Static compilation and diff checks only; no tests or simulator runs.",
         "Integrated A-P and C target-recall work at edd55a2aa: Plan A P route-v2 sampled route-ranking targets and Plan C selected sensed-target steering/remask fail-fast are statically reviewed; P route dataset collection/fitting and seeded simulator replay remain pending. Integrated commit chains: A-P 2854417e2, 6f99143dd, 4f40ac587; C 962ed04c5, 6b8e8ad38, 4e56de637, edd55a2aa. No tests or simulator evaluation were run; runtime checkpoints remain source-bound to the frozen training checkout.",
         "Scoped reviews approved Plan A loaded-dumper traversal e2dc4dc65 and Plan C perceived-fuel accessor/focal-slot chain cf365d2f/f61df040a. Reviews confirm native action/route authority, no truth-state leakage, loaded-dumper ferry exclusion, and slot-3 observation alignment. Integration review of combined HEAD b76a97b20 pending; no simulator validation or fitting has run.",
-        "Scoped reviewer approved counterfactual RNG isolation commit 000074940c497e81b1c89a3c415b84029c1a1886 from the dedicated ZFS worktree; checked exception-safe restoration of Python, NumPy, Torch CPU, and all CUDA RNGs, nested collection/replay behavior, full seeds except NumPy modulo 2**32, environment construction inside scope, and exact discount metadata reuse. No tests or simulation replay were run in review."
+        "Scoped reviewer approved counterfactual RNG isolation commit 000074940c497e81b1c89a3c415b84029c1a1886 from the dedicated ZFS worktree; checked exception-safe restoration of Python, NumPy, Torch CPU, and all CUDA RNGs, nested collection/replay behavior, full seeds except NumPy modulo 2**32, environment construction inside scope, and exact discount metadata reuse. No tests or simulation replay were run in review.",
+        "Scoped Phase 4 confidence-cap review approved be4aedc87: cap applies only to sensed learner slot-3 confidence after reset/refresh; delayed history retains capped values; no-factor path is unchanged; runtime evaluation remains pending."
       ]
     }
   ],
@@ -235,9 +236,9 @@
         "status": "in_progress",
         "planner_status": "complete",
         "implementation_status": "complete",
-        "review_status": "pending",
+        "review_status": "complete",
         "evaluation_status": "pending",
-        "summary": "Caps only sensed learner slot-3 FUEL track_confidence at 0.2 after initial reset perception and each sensor refresh; delayed history captures capped state. Runtime reports requested/applied cap, refreshes, reduced sensed values, sensed count, and final mean. Geometry, velocity, age, mask, dropout, and noise are unchanged; stale and other-robot confidence is untouched. Evaluation and review remain pending."
+        "summary": "Caps only sensed learner slot-3 FUEL track_confidence at 0.2 after initial reset perception and each sensor refresh; delayed history captures capped state. Runtime reports requested/applied cap, refreshes, reduced sensed values, sensed count, and final mean. Geometry, velocity, age, mask, dropout, and noise are unchanged; stale and other-robot confidence is untouched. Scoped static review approved; simulator evaluation remains pending."
       },
       {
         "factor_id": "abrupt_opponent_policy_change",
