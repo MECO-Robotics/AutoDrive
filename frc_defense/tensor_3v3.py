@@ -638,7 +638,8 @@ class TensorThreeVsThreeEnv(
              planner_goal_heading_override=None,
              planner_traversal_cost_override=None,
              planner_traversal_cost_override_action=None,
-             planner_traversal_cost_override_scale=1.0):
+             planner_traversal_cost_override_scale=1.0,
+             planner_force_goal_replan=False):
         full_batch=active_mask is None
         if full_batch and self._full_batch_step_scalar is not None:
             self._full_batch_step_scalar+=1
@@ -693,6 +694,11 @@ class TensorThreeVsThreeEnv(
                 planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
         elif planner_goal_heading_override is not None:
             raise ValueError("planner goal heading requires its paired XY goal")
+        if (type(planner_force_goal_replan) is not bool or
+                (planner_force_goal_replan and
+                 (self.n != 1 or planner_goal_override is None or
+                  not bool(planner_goal_override_mask[0, 3])))):
+            raise ValueError("forced focal planner refresh requires a selected focal goal")
         if planner_traversal_cost_override is None:
             if planner_traversal_cost_override_action is not None:
                 raise ValueError("planner traversal cost action requires a cost map")
@@ -828,6 +834,11 @@ class TensorThreeVsThreeEnv(
             traversal_differs_from_applied and self.n == 1 and bool(active[0]) and
             bool(planner_goal_override_mask[0, 3]))
         if traversal_override_eligible and not replan_due:
+            replan_due=True
+            flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
+                                    dtype=torch.bool)
+            flat_active[3]=True
+        if planner_force_goal_replan and not replan_due:
             replan_due=True
             flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
                                     dtype=torch.bool)

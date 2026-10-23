@@ -232,10 +232,12 @@ static checks; simulator-record validation remains outstanding.
 ## Separate Plan A P route warm start (code path only)
 
 The v2 counterfactual dataset and v3 Plan A U+B weights keep their explicit
-P-null/P0 contracts. A separate `meco-counterfactual-plan-a-p-route-v1`
+P-null/P0 contracts. A separate `meco-counterfactual-plan-a-p-route-v2`
 collector consumes a replay-bound v2 training dataset and executes a P0 branch
 plus reproducibly generated, model-independent positive XY cost-map probes
-through the native slot-3 AD* path. Its target is pairwise preference between
+through the native slot-3 AD* path. P0 and probes force the same focal selected-
+goal refresh at the macro boundary; P0 applies no added traversal cost. Each
+outcome binds to the exact selected descriptor hash. Its target is pairwise preference between
 the actual routes, ranked by simulator gross horizon return under the same
 prefix and deterministic continuation policy. It is not a per-cell oracle
 label. Each branch records every distinct focal route snapshot within the

@@ -784,6 +784,12 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
                     raise ValueError("invalid Plan A P executed-route outcome")
                 if route["map_applied"] != (outcome.get("intervention_id") != "P0"):
                     raise ValueError("Plan A P intervention was not applied as declared")
+                if (route.get("selected_action") != descriptor.get("action") or
+                        route.get("selected_goal_xy_m") != descriptor.get("goal_xy_m") or
+                        route.get("selected_goal_descriptor_sha256") !=
+                            descriptor.get("descriptor_sha256") or
+                        route.get("selected_goal_refresh_forced") is not True):
+                    raise ValueError("Plan A P branch selected-goal provenance mismatch")
                 if route.get("map_scale") != (None if expected_seed is None else
                                                 manifest["p_intervention_scale"]):
                     raise ValueError("Plan A P route scale differs from its manifest")

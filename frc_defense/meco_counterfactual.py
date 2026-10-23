@@ -35,7 +35,7 @@ from .training_curriculum import get_scenario
 
 DATASET_SCHEMA = "meco-counterfactual-trajectory-v2"
 TARGET_SCHEMA = "meco-matched-prefix-gross-return-v2"
-PLAN_A_P_ROUTE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-v1"
+PLAN_A_P_ROUTE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-v2"
 PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
 STATE_DIGEST_SCHEMA = "meco-full-environment-state-v1"
 DEFAULT_GAMMA = 0.993
@@ -299,6 +299,7 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
                  allow_action7_traversal=False,
                  planner_traversal_cost_override=None,
                  planner_traversal_cost_scale=1.0,
+                 planner_force_goal_replan=False,
                  planner_route_trace=None):
     from .meco_track_training import _run_macro_step
     values = _run_macro_step(env, action, action_ticks, goal_xy,
@@ -306,6 +307,7 @@ def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
         allow_action7_traversal=allow_action7_traversal,
         planner_traversal_cost_override=planner_traversal_cost_override,
         planner_traversal_cost_scale=planner_traversal_cost_scale,
+        planner_force_goal_replan=planner_force_goal_replan,
         planner_route_trace=planner_route_trace)
     reward, ended, timeout = values[:3]
     return (float(reward.detach().cpu().item()), bool(ended), bool(timeout),
@@ -342,7 +344,9 @@ def _plan_a_p_intervention_map(env, intervention_seed):
 
 
 def _plan_a_p_route_record(env, *, intervention_map, intervention_seed,
-                           selected_action, selected_goal, scale, route_trace):
+                           selected_action, selected_goal,
+                           selected_goal_descriptor_sha256,
+                           scale, route_trace):
     planner = env.planner
     path_length = int(planner.last_lengths[3].detach().item())
     if path_length < 1:
@@ -376,7 +380,9 @@ def _plan_a_p_route_record(env, *, intervention_map, intervention_seed,
         "route_trace_sha256": _hash([item["route_sha256"] for item in route_trace]),
         "route_trace": route_trace,
         "selected_action": selected_action,
-        "selected_goal_xy_m": [float(v) for v in selected_goal]}
+        "selected_goal_xy_m": [float(v) for v in selected_goal],
+        "selected_goal_descriptor_sha256": selected_goal_descriptor_sha256,
+        "selected_goal_refresh_forced": True}
 
 
 def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
@@ -876,12 +882,15 @@ def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_se
             allow_action7_traversal=(action == 7),
             planner_traversal_cost_override=intervention_map,
             planner_traversal_cost_scale=p_cost_scale,
+            planner_force_goal_replan=True,
             planner_route_trace=route_trace)
         if any(executed != action for executed in trace):
             raise RuntimeError("P route branch action was remasked or preempted")
         route = _plan_a_p_route_record(env, intervention_map=intervention_map,
             intervention_seed=intervention_seed, selected_action=action,
-            selected_goal=goal, scale=p_cost_scale, route_trace=route_trace)
+            selected_goal=goal,
+            selected_goal_descriptor_sha256=descriptor["descriptor_sha256"],
+            scale=p_cost_scale, route_trace=route_trace)
         total_return, discounted = reward, reward
         elapsed = record["macro_start_tick"] + len(trace)
         continuation_decisions = 0

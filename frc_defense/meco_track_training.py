@@ -532,6 +532,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     allow_action7_traversal=False,
                     planner_traversal_cost_override=None,
                     planner_traversal_cost_scale=1.0,
+                    planner_force_goal_replan=False,
                     planner_route_trace: list | None = None,
                     safety_counts: dict | None = None,
                     metric_ledger: MecoEpisodeMetricLedger | None = None):
@@ -560,6 +561,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading,
+            planner_force_goal_replan=(planner_force_goal_replan and tick_index == 0),
             **planner_kwargs)
         if planner_route_trace is not None:
             planner = env.planner
