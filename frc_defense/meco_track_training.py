@@ -408,19 +408,12 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             goal_distance = float((current_xy - torch.as_tensor(
                 goal_xy, device=env.device, dtype=current_xy.dtype)).norm())
             heading_alignment_opportunity |= goal_distance <= .04
-            if action_index == 4 and int((env.piece_owner[0] == 3).sum().item()) > 0:
-                team = int(env.team_ids[3])
-                x = float(current_xy[0])
-                in_score_zone = (x <= float(env.alliance_zone_depth) if team == 0 else
-                                 x >= float(env.field_length - env.alliance_zone_depth))
-                bump_clear = bool(env._robots_clear_of_bumps(
-                    env.sim.pose[:, :, :2])[0, 3])
-                native_goal_preempted |= in_score_zone and bump_clear and goal_distance > .04
-                native_goal_preempted |= (int(env.fuel_scored_event[0].sum().item()) > 0 and
-                                          goal_distance > .04)
+            if action_index == 4:
+                native_goal_preempted |= (
+                    int(env.fuel_scored_event[0, 3].item()) > 0 and goal_distance > .04)
             if action_index == 6:
                 native_goal_preempted |= (
-                    int(env.fuel_passed_event[0].sum().item()) > 0 and goal_distance > .04)
+                    int(env.fuel_passed_event[0, 3].item()) > 0 and goal_distance > .04)
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
@@ -1133,6 +1126,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 choice = int(logits.argmax(-1).item())
                                 action_source = policy.lower()
                             routes_before_choice = len(routes_seen)
+                            plan_a_support = (prepared is not None and
+                                              "support" in prepared)
                             if prepared is not None and "support" in prepared:
                                 support = prepared["support"]
                                 action = int(support.action_ids[choice].item())
@@ -1223,7 +1218,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "route_id": route_id})
                                 if pending_eval_goal is not None:
                                     pending_eval_goal = None
-                            elif not goal_complete and not forced_eval_goal:
+                            elif plan_a_support and not goal_complete and not forced_eval_goal:
                                 pending_eval_goal = {"action": action, "goal_xy": goal_xy,
                                     "goal_heading": goal_heading, "route_id": route_id}
                             elif goal_complete and forced_eval_goal:
@@ -1284,7 +1279,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints",
-            "plan_a_heading_contract": "selected legal graph heading is an explicit terminal target; selected goals persist across macro steps until XY and heading completion; simulator pauses at XY goal, samples the rectangular chassis sweep every 5 degrees, requires chassis translation to settle, and checks circumscribed footprint clearance against observed teammates/opponent predicted over turn time plus stopping drift; native scoring/ferry preemption is recorded as execution failure and excluded from actor credit; intake uses target capture geometry, score uses hub-facing tolerance, ferry uses native release-facing tolerance",
+            "plan_a_heading_contract": "selected Plan A goals persist across macro steps until XY and heading completion; C1/C2/D1/D2 retain their original per-macro action semantics. The simulator pauses at the selected XY goal, samples the rectangular chassis sweep every 5 degrees, requires chassis translation to settle, and applies a point-forecast clearance check against known teammate poses and the observed opponent using constant velocity over estimated turn time plus stopping drift. This estimate has no uncertainty inflation, and the 5-degree static samples do not prove continuous swept clearance; native route and collision checks remain authoritative. Slot-3 score/pass events before the selected goal are recorded as execution failures and excluded from Plan A actor credit. Intake uses target capture geometry, score uses hub-facing tolerance, and ferry uses the native release-facing tolerance",
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "ablations": ["A1_P0", "A2_P0", "A3_P0"],
             "controls": ["D0", "D1", "D2"] if include_controls else [],

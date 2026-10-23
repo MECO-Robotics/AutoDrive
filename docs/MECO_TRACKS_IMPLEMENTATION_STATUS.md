@@ -78,12 +78,18 @@ ferry support requires carried fuel, the current ferry endpoint, and a heading
 inside the simulator's 45-degree release cone; defense support is restricted to
 the current intercept/post endpoint. Each selected graph heading is passed as
 an explicit terminal target. At the XY endpoint, the controller pauses
-translation, checks sampled static rotation clearance and conservative
-clearance from observed robots, then aligns under the native physics step.
-Blocked turns wait safely and are marked as execution failures if the macro
-ends before alignment. Intake headings must satisfy their target capture
-geometry. P integrates the root-pose-to-root-node connector as well as graph
-edges.
+translation, samples static rectangular rotation clearance every 5 degrees,
+and checks observed robots with circumscribed footprints, stopping drift, and a
+constant-velocity point forecast over estimated turn time. The forecast has no
+uncertainty inflation, and the 5-degree samples do not prove continuous swept
+clearance; native route and collision checks remain authoritative. Blocked
+turns wait while Plan A retains the selected goal across macros. A goal that is
+still incomplete at the PPO rollout boundary is censored from actor loss;
+observed slot-3 score or pass events before the selected endpoint are also
+recorded as execution failures and censored. C1/C2/D1/D2 keep their existing
+per-macro evaluation semantics. Intake headings must satisfy their target
+capture geometry. P integrates the root-pose-to-root-node connector as well as
+graph edges.
 Action 7 remains a native no-op hold. The Plan A adapter permits it to traverse
 only when paired with the selected frozen planner goal; the existing route,
 obstacle, and action-safety checks remain in force. Dumper drive pairs are
