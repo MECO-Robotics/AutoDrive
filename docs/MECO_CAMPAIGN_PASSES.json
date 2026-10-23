@@ -19,7 +19,8 @@
         "D0 planner completed target-scoped calibration bundle design: immutable protocol covers target scenario plus prerequisite closure, per-scenario calibration IDs/gates/splits, and same-protocol ancestor retention; only the target can promote",
         "Safety-metric planner identified authoritative contact instrumentation boundary: count focal contact ticks once per class after low-level collision passes and divide by active focal physics ticks; contacts are proxies, not automatic rule violations",
         "Section 7 A/B planner completed an audit: matched five-track/D0-D1-D2 evaluation, P0 and bounded candidate-recall summaries exist, but no frozen experiment matrix, same-checkpoint K sweep, prediction-mode matrix, or explicit inference-disable scenario; feint/delay/low-confidence factors remain unrepresented",
-        "Phase 4 factor planner completed frozen definitions for deterministic telegraph/reversal feint, physics-tick observation buffering, confidence-only degradation, abrupt opponent A-to-B switching, matched baseline contracts, and factor-level status projection through the campaign dashboard."
+        "Phase 4 factor planner completed frozen definitions for deterministic telegraph/reversal feint, physics-tick observation buffering, confidence-only degradation, abrupt opponent A-to-B switching, matched baseline contracts, and factor-level status projection through the campaign dashboard.",
+        "Phase 5 synthetic scorer timing correction planned: compute raw scorer argmax from the already-timed model outputs so the interval contains one forward pass; retain age as an explicitly non-independent timing proxy."
       ]
     },
     {
@@ -80,7 +81,8 @@
         "Integrated evaluation-plan implementation merged into the full-plan checkout on codex/meco-reviewed-five-training after scoped review approval through 260fdfbe3; no simulator evaluation, runtime calibration, hardware qualification, or matrix experiments were claimed by this static integration.",
         "Merged the full-plan ledger with reviewed integration codex/meco-evaluation-plan-integration at 4ae006080, then corrected dashboard queue rendering (unknown counts remain unknown; stale queues are not reclassified) at fd5ba1317. Fresh scoped reviewer approved fd5ba1317 for training. Continuous all-five supervisor started from this checkout with --cycles 0; as of 2026-10-23 11:44 UTC, A1/A2 have each completed 1 update in cycle 1 and A3/C1/C2 are queued for the same 100-update frontier. The earlier mismatched partial checkpoints remain in a separate checkout and are not used by this campaign.",
         "Phase 4 four-factor implementation committed at fef1eebf73eab9c06d6300b14bc8e9954f25176a on isolated branch codex/meco-phase4-four-factor; dashboard/API factor-state rendering is implemented there. Runtime factor evaluations remain outstanding.",
-        "Integrated reviewed Phase 4 four-factor implementation fef1eebf73eab9c06d6300b14bc8e9954f25176a (with planner parent 160bd8f33) into full-plan base 24edcefd9 on isolated branch codex/meco-phase4-integrated; dashboard/API factor projection and cards are included. Execution device is included in common bundle provenance. Static checks only; runtime factor evaluation remains pending."
+        "Integrated reviewed Phase 4 four-factor implementation fef1eebf73eab9c06d6300b14bc8e9954f25176a (with planner parent 160bd8f33) into full-plan base 24edcefd9 on isolated branch codex/meco-phase4-integrated; dashboard/API factor projection and cards are included. Execution device is included in common bundle provenance. Static checks only; runtime factor evaluation remains pending.",
+        "Phase 5 synthetic timing correction implemented in isolated worktree codex/meco-deployment-timing: scorer-plus-argmax reuses the timed forward output; docs retain explicit non-independent/non-physical age limitations. Static review pending; no tests, exports, simulator, or hardware runs."
       ]
     },
     {
@@ -137,7 +139,8 @@
         "Scoped static integrated review approved branch codex/meco-evaluation-plan-integration through 260fdfbe3. The integration has been merged into the full-plan checkout; simulator/replay validation, runtime D0 calibration and safety evidence, ONNX/Hailo hardware qualification, and actual matrix experiments remain outstanding.",
         "Fresh scoped reviewer approved integrated full-plan training checkout fd5ba1317 after verifying the two-parent merge retains full-plan and reviewed integration code/docs, all five-track batching, continuous --cycles 0 support, current dashboard three-pass rendering, and fresh/stale queued-lane handling. Static review only: no tests or simulator evaluation were run. Runtime calibration, matched five-track results, qualification, matrix outcomes, and deployment evidence remain outstanding.",
         "Scoped Phase 4 review approved fef1eebf73eab9c06d6300b14bc8e9954f25176a after device/backend identity was bound into matrix, condition, and evaluator protocol IDs and report validation. Static review only; no tests or simulator evaluations.",
-        "Integrated reviewed Phase 4 changes through fef1eebf73eab9c06d6300b14bc8e9954f25176a into the full-plan checkout; this integration awaits its own scoped review. Static checks only. Simulator factor experiments, held-out generalization, and qualification remain outstanding."
+        "Integrated reviewed Phase 4 changes through fef1eebf73eab9c06d6300b14bc8e9954f25176a into the full-plan checkout; this integration awaits its own scoped review. Static checks only. Simulator factor experiments, held-out generalization, and qualification remain outstanding.",
+        "Scoped review pending for Phase 5 synthetic scorer timing correction in codex/meco-deployment-timing; inspect one-forward timing boundary, output reuse, and explicit age-proxy limitations. No runtime or hardware validation requested."
       ]
     }
   ],

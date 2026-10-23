@@ -14,11 +14,14 @@ python scripts/profile_meco_deployment.py --checkpoint-root checkpoints/meco-fiv
 Export requires PyTorch's ONNX exporter and the `onnx` package for graph
 inspection. Profiling benchmarks CPU and each visible ROCm/CUDA device. It
 reports model-only and synthetic raw-scorer-plus-argmax p50/p95/p99 latency,
-process peak RSS, and accelerator peak allocated memory. The argmax diagnostic
+process peak RSS, and accelerator peak allocated memory. The scorer-plus-argmax
+interval uses one model forward pass and applies argmax to that pass's output.
+The argmax diagnostic
 does not apply candidate feasibility, route/risk cost, or production action
-arbitration. Its reported age proxy repeats scorer-plus-argmax timing; it is
-not independent and is not sensor-to-actuator age. Inputs are preloaded on
-device, so transfer time is excluded.
+arbitration. Its reported age proxy repeats the same scorer-plus-argmax timing;
+it is not an independent measurement and is not real inference age or
+sensor-to-actuator age. Inputs are preloaded on device, so transfer time is
+excluded.
 
 Inputs use fixed shapes: 64×64 six-channel raster, seven globals, 256 graph
 nodes at degree eight, 64 regions, and 16 candidate rows. This is a bounded
