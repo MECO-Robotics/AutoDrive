@@ -241,6 +241,8 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
             rows = torch.arange(start.shape[0], device=device)
             goal_blocked = blocked[rows, gx, gy]
             at_goal_clear = at_goal_mask & _pose_clear(
+                scratch, start, heading, length, width, obstacle)
+            at_goal_clear &= _pose_clear(
                 scratch, goal, heading, length, width, obstacle)
             for local_index in torch.nonzero(at_goal_clear, as_tuple=False).flatten().tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]

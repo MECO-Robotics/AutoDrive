@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from frc_defense.experimental_route_evaluation import (
-    RouteQuery, _scratch_planner, evaluate_routes,
+    RouteQuery, _pose_clear, _scratch_planner, evaluate_routes,
 )
 from frc_defense.tensor_adstar import TensorADStar
 from frc_defense.tensor_3v3 import TensorThreeVsThreeEnv
@@ -187,6 +187,45 @@ def test_at_goal_rejects_exact_observed_robot_circle_overlap(env):
     assert not blocked[0, gx[0], gy[0]]
 
     result = evaluate_routes(env, [query])[0]
+
+    assert result.status == "no_path" and not result.feasible
+    assert result.distance_m is None
+
+
+def test_at_goal_checks_measured_start_when_nearby_static_goal_is_clear(env):
+    env.sim.pose[0, 3, 0] = 13.19
+    env.sim.field_colliders[0] = torch.tensor([13.65, 1.35, .02, .02])
+    query = RouteQuery("near-static", "episode-1:0", 0, 3, (13.14, 1.35))
+    scratch = _scratch_planner(env, [(query, torch.tensor(query.goal_xy))])
+    heading = env.sim.pose[0, 3, 2:3]
+    length, width = env.sim.length[0, 3:4], env.sim.width[0, 3:4]
+    obstacles = env._perceived_robot_obstacles()[3:4]
+    assert _pose_clear(scratch, torch.tensor([query.goal_xy]), heading,
+                       length, width, obstacles)[0]
+    assert not _pose_clear(scratch, env.sim.pose[0, 3:4, :2], heading,
+                           length, width, obstacles)[0]
+
+    result = evaluate_routes(env, [query], goal_tolerance_m=.06)[0]
+
+    assert result.status == "no_path" and not result.feasible
+
+
+def test_at_goal_checks_measured_start_when_nearby_dynamic_goal_is_clear(env):
+    env.sim.pose[0, 3, 0] = 13.19
+    env.opponent_pose[0, 3, :2] = torch.tensor([13.83, 1.35])
+    env.opponent_size[0, 3, :2] = torch.tensor([.4, .4])
+    env.opponent_valid[0, 3] = True
+    query = RouteQuery("near-dynamic", "episode-1:0", 0, 3, (13.14, 1.35))
+    scratch = _scratch_planner(env, [(query, torch.tensor(query.goal_xy))])
+    heading = env.sim.pose[0, 3, 2:3]
+    length, width = env.sim.length[0, 3:4], env.sim.width[0, 3:4]
+    obstacles = env._perceived_robot_obstacles()[3:4]
+    assert _pose_clear(scratch, torch.tensor([query.goal_xy]), heading,
+                       length, width, obstacles)[0]
+    assert not _pose_clear(scratch, env.sim.pose[0, 3:4, :2], heading,
+                           length, width, obstacles)[0]
+
+    result = evaluate_routes(env, [query], goal_tolerance_m=.06)[0]
 
     assert result.status == "no_path" and not result.feasible
     assert result.distance_m is None
