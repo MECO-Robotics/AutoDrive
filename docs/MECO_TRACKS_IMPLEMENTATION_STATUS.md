@@ -380,6 +380,7 @@ reported state differences were `env.fuel_physics._hip.contacts.tensor`,
 retaining their shapes, devices, and dtypes. `rebuild` still starts at one, so
 the first HIP substep rebuilds/initializes the broadphase buffers before valid
 reads; the buffers remain included in the strict state digest and its schema is
-unchanged. This isolated implementation is submitted for scoped review.
-Static compilation, diff, and JSON validation only; no simulator run succeeded,
-no dataset was validated, and simulator/replay validation remains pending.
+unchanged. The implementer change `dea6ec05763` passed independent scoped
+review and was integrated as `92ea05e9a`. Static compilation, diff, and JSON
+validation only; no simulator run succeeded, no dataset was validated, and
+simulator/replay validation remains pending.
