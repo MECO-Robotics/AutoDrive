@@ -328,6 +328,12 @@ class MecoSupervisor:
         _atomic_json(self.scheduler_path, self.task_scheduler.state)
         return assignment
 
+    def _observe_stop(self):
+        """Convert an externally created STOP file into graceful stop intent."""
+        if self.stop_file.exists():
+            self.request_stop = True
+        return self.request_stop
+
     def _complete_task_cycle(self, assignment):
         results = {}
         for track in MECO_TRACKS:
