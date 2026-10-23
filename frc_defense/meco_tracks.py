@@ -427,6 +427,9 @@ class _AsyncInferenceBroker:
                         # Publish only after the complete output mapping is validated.
                         item["response"] = response
                         self.latest_published_sequence = request.request_sequence
+                    # Make completion visible in the same critical section as
+                    # any complete response publication.
+                    item["done"] = True
                 if late_response:
                     self._mark_late(item)
             finally:
