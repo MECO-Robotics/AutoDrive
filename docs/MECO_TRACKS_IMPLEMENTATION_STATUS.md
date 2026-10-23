@@ -333,6 +333,7 @@ which advanced the episode identity separately from the route-feasible
 candidate snapshot. It now takes the safe observation from
 `build_route_feasible_candidates` and uses that single snapshot for the Plan A
 support ID, replay `snapshot_id`, and `safe_observation_sha256`. Existing strict
-replay checks and digest fields are unchanged; no schema bump is needed. Only
-static compile/diff/JSON checks are intended for this correction; collection,
+replay checks and digest fields are unchanged; no schema bump is needed. This
+correction passed independent scoped review in isolated commit b627f3a3b and
+was integrated as 0379776b7. Static compile/diff/JSON checks only; collection,
 simulator evaluation, and dashboard replay remain outstanding.
