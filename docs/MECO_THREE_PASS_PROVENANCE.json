@@ -1,0 +1,143 @@
+{
+  "schema": "meco-three-pass-provenance-v1",
+  "status": "scoped-transcript-summaries",
+  "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
+  "plan_path": "MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
+  "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches.",
+  "tranches": [
+    {
+      "requirement_id": "phase4-pressure-domain",
+      "title": "Phase 4 pressure domain",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/pressure-domain.md",
+        "artifact_sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c"
+      },
+      "implementer": {
+        "commit": "562560ca3",
+        "feature_commit": "5b470da9a",
+        "paths": [
+          "docs/MECO_ABLATION_MATRIX.md",
+          "docs/MECO_PHASE4_FACTORS.md",
+          "frc_defense/curriculum_scenarios.py",
+          "frc_defense/meco_ablation_matrix.py"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/pressure-domain.md",
+        "approved_commit": "eb77f2a62",
+        "verdict": "approved",
+        "artifact_sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c"
+      },
+      "limits": "Static checks only; simulator evaluation pending."
+    },
+    {
+      "requirement_id": "section6-sampled-bounded-set-regret",
+      "title": "Sampled bounded-set regret analyzer",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/sampled-regret.md",
+        "artifact_sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c"
+      },
+      "implementer": {
+        "commit": "c5dc562c9",
+        "feature_commit": "53ff9f995",
+        "correction_commit": "ba7b65b0f",
+        "paths": [
+          "docs/MECO_SAMPLED_COUNTERFACTUAL_REGRET.md",
+          "scripts/meco_counterfactual_regret.py",
+          "docs/MECO_CAMPAIGN_PASSES.json",
+          "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/sampled-regret.md",
+        "approved_commit": "c5dc562c9",
+        "verdict": "approved",
+        "artifact_sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c"
+      },
+      "limits": "Runtime replay and scoring pending; D1/D2 coverage unavailable."
+    },
+    {
+      "requirement_id": "unsuccessful-collection-bouts",
+      "title": "Unsuccessful collection action bouts",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
+        "artifact_sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2"
+      },
+      "implementer": {
+        "commit": "a0f0aa515",
+        "feature_commit": "2d1e66386",
+        "compatibility_commit": "ee7174d31",
+        "integrated_feature_commit": "5f73211d4",
+        "ledger_commit": "cc08989b8",
+        "paths": [
+          "frc_defense/meco_track_training.py",
+          "frc_defense/meco_metric_ledger.py",
+          "frc_defense/meco_dashboard.py",
+          "frc_defense/dashboard_static/meco.js",
+          "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
+        "approved_commit": "cc08989b8",
+        "verdict": "approved",
+        "artifact_sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2"
+      },
+      "limits": "Simulator-record validation pending."
+    },
+    {
+      "requirement_id": "plan-a-expert-goal-annotation-intake",
+      "title": "Plan A expert goal annotation intake",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/plan-a-goal-annotations.md",
+        "artifact_sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431"
+      },
+      "implementer": {
+        "commit": "71fe03fe5",
+        "feature_commit": "7ae3b3098",
+        "strictness_commit": "267956890",
+        "integration_commit": "c030ea924",
+        "paths": [
+          "frc_defense/meco_supervised.py",
+          "docs/MECO_SUPERVISED_WARMSTART.md",
+          "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/plan-a-goal-annotations.md",
+        "approved_commit": "71fe03fe5",
+        "verdict": "approved after constants restoration; c030ea924 was blocked",
+        "artifact_sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431"
+      },
+      "limits": "Loader only; no producer, annotated source dataset, fitting, or runtime validation."
+    },
+    {
+      "requirement_id": "c1-logprob-diagnostics",
+      "title": "C1 rollout log-probability diagnostics",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/c1-logprob-diagnostics.md",
+        "artifact_sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74"
+      },
+      "implementer": {
+        "commit": "d7dc22266",
+        "diagnostic_commit": "ac6681e3b",
+        "paths": [
+          "frc_defense/meco_track_training.py"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/c1-logprob-diagnostics.md",
+        "approved_commit": "d7dc22266",
+        "verdict": "approved after initial scalar-hash/write-mask block",
+        "artifact_sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74"
+      },
+      "limits": "Training reproduction pending; no claim of a repaired five-track run."
+    }
+  ]
+}

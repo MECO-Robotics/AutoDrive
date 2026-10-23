@@ -18,6 +18,14 @@ def _read(path):
     return json.loads(path.read_text())
 
 
+def _stats_files(root):
+    """Yield stats files without following symlinked campaign directories."""
+    for current, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
+        if 'stats.json' in files:
+            yield Path(current) / 'stats.json'
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -44,7 +52,8 @@ def category_summary(report, result, category, record):
         raise ValueError('invalid or nonfinite throughput evidence')
     ratio = learner / baseline if paired and valid and baseline > 0 else None
     baseline_successes = record.get('reference_successes')
-    key = {'protocol': report.get('protocol_id'), 'sources': _digest(report.get('sources', {})),
+    source_fingerprint = _digest(report.get('sources', {}))
+    key = {'protocol': report.get('protocol_id'), 'sources': source_fingerprint,
            'curriculum_version': report.get('curriculum_version'),
            'scenario_version': result.get('scenario_version'),
            'scenario': result['scenario_id'], 'category': category['category'],
@@ -61,6 +70,9 @@ def category_summary(report, result, category, record):
             'throughput_ratio': ratio, 'paired': paired,
             'reference_qualified': category.get('reference_qualified') is True,
             'diagnostic': report.get('diagnostic', True),
+            'curriculum_version': report.get('curriculum_version'),
+            'scenario_version': result.get('scenario_version'),
+            'source_fingerprint': source_fingerprint,
             'comparison_group': _digest(key), 'protocol_id': report.get('protocol_id'),
             'split': report.get('split'), 'seeds': seeds,
             'warnings': ([] if paired else ['unverified scenario/seed/protocol pairing'])
@@ -72,7 +84,7 @@ def _evidence_rows(evidence, sources, cache_dir=None):
     """Cache derived rows, never raw episode records or rejected evidence."""
     evidence = evidence.resolve()
     before = evidence.stat()
-    key = {'version': 1, 'path': str(evidence), 'mtime_ns': before.st_mtime_ns,
+    key = {'version': 2, 'path': str(evidence), 'mtime_ns': before.st_mtime_ns,
            'size': before.st_size, 'stats_sources': _digest(sources)}
     cache = Path(cache_dir)/(_digest(key)+'.json') if cache_dir is not None else None
     if cache is not None:
@@ -89,10 +101,23 @@ def _evidence_rows(evidence, sources, cache_dir=None):
     if report.get('sources') != sources:
         raise ValueError('evaluation source differs from run stats')
     number = int(evidence.stem.rsplit('-', 1)[-1])
+    evaluation_results = report.get('evaluation_results', [])
+    if not isinstance(evaluation_results, list):
+        raise ValueError('evaluation results must be a list')
+    scenario_ids = [result.get('scenario_id') for result in evaluation_results
+                    if isinstance(result, dict)]
+    if len(scenario_ids) != len(evaluation_results) or len(set(scenario_ids)) != len(scenario_ids):
+        raise ValueError('evaluation results are malformed or duplicated')
     records = {(r['scenario_id'], r['category']): r for r in report.get('records', [])}
     rows = []
-    for result in report.get('evaluation_results', []):
-        for category in result['categories']:
+    for result in evaluation_results:
+        categories = result['categories']
+        if not isinstance(categories, list):
+            raise ValueError('evaluation categories must be a list')
+        names = [category.get('category') for category in categories if isinstance(category, dict)]
+        if len(names) != len(categories) or len(set(names)) != len(names):
+            raise ValueError('evaluation categories are malformed or duplicated')
+        for category in categories:
             row = category_summary(report, result, category,
                 records.get((result['scenario_id'], category['category']), {}))
             rows.append(row | {'update': number, 'evidence': str(evidence)})
@@ -113,7 +138,7 @@ def summarize(root, cache_dir=None):
     runs, errors = [], []
     # Each stats file identifies a distinct training run. Evaluation files alone
     # never imply a queued or active learner.
-    for path in sorted(root.rglob('stats.json')):
+    for path in sorted(_stats_files(root)):
         try:
             stats = _read(path)
             if 'curriculum_state' not in stats:
@@ -130,6 +155,20 @@ def summarize(root, cache_dir=None):
             latest = {}
             for row in sorted(evaluations, key=lambda r: r['update']):
                 latest[row['scenario'], row['category']] = row
+            qualification_evidence = []
+            state = stats['curriculum_state']
+            for scenario in state.get('qualified', []):
+                checkpoint = state.get('last_qualified_checkpoint', {}).get(scenario)
+                protocol = state.get('qualified_protocol', {}).get(scenario)
+                matching = [row for row in evaluations
+                            if row['scenario'] == scenario and row['policy_id'] == checkpoint
+                            and row['protocol_id'] == protocol and row['split'] == 'validation']
+                if matching:
+                    evaluation_id = max(matching, key=lambda row: row['update'])['evaluation_id']
+                    qualification_evidence.append({'scenario': scenario,
+                        'evaluation_id': evaluation_id, 'policy_id': checkpoint,
+                        'protocol_id': protocol,
+                        'rows': [row for row in matching if row['evaluation_id'] == evaluation_id]})
             config = stats.get('config', {})
             runs.append({'run': str(run.relative_to(root)), 'path': str(run),
                          'algorithm': stats.get('algorithm', config.get('algorithm', 'ppo')),
@@ -138,9 +177,13 @@ def summarize(root, cache_dir=None):
                          'current': stats.get('current', rows[-1].get('scenario_id') if rows else None),
                          'qualified': state.get('qualified', []),
                          'consecutive_passes': state.get('consecutive_passes', {}),
+                         'last_qualified_checkpoint': state.get('last_qualified_checkpoint', {}),
+                         'qualified_protocol': state.get('qualified_protocol', {}),
                          'last_promotion': next((r['promotion'] for r in reversed(rows) if 'promotion' in r), None),
                          'diagnostic': stats.get('diagnostic', True),
-                         'latest_evaluations': list(latest.values())})
+                         'latest_evaluations': list(latest.values()),
+                         'evaluation_history': evaluations,
+                         'qualification_evidence': qualification_evidence})
         except (OSError, ValueError, KeyError, TypeError) as exc:
             errors.append({'path': str(path), 'error': str(exc)})
     groups = {}
@@ -150,6 +193,7 @@ def summarize(root, cache_dir=None):
                 {'run': run['run'], 'algorithm': run.get('algorithm', 'ppo'),
                  'architecture': run['architecture'], **row})
     queue = None
+    queue_lanes = []
     for name in ('orchestration.json', 'queue-status.json', 'queue.json', 'manifest.json'):
         candidate = root / name
         if candidate.exists():
@@ -161,26 +205,40 @@ def summarize(root, cache_dir=None):
             break
     if queue and isinstance(queue['data'], dict):
         by_path = {Path(r['path']).resolve(): r for r in runs}
-        for lane in queue['data'].get('lanes', []):
-            directory = Path(lane['directory'])
-            directory = directory.resolve() if directory.is_absolute() else (root / directory).resolve()
-            run = by_path.get(directory)
-            if run is None:
-                run = {'run': str(directory.relative_to(root)), 'path': str(directory),
-                       'algorithm': lane.get('algorithm', 'ppo'),
-                       'architecture': lane['architecture'], 'updates': lane.get('completed_updates', 0),
-                       'current': lane.get('current'), 'qualified': lane.get('qualified', []),
-                       'consecutive_passes': {}, 'last_promotion': None, 'diagnostic': False,
-                       'latest_evaluations': []}
-                runs.append(run)
-            run['queue_status'] = lane.get('status')
-            run['device'] = lane.get('device')
-            run['training_seed'] = lane.get('seed')
-            if lane.get('current'):
-                run['current'] = lane['current']
+        lanes = queue['data'].get('lanes', [])
+        if not isinstance(lanes, list):
+            errors.append({'path': str(queue['path']), 'error': 'queue lanes must be a list'})
+            lanes = []
+        for index, lane in enumerate(lanes):
+            try:
+                if not isinstance(lane, dict) or not isinstance(lane.get('directory'), str):
+                    raise ValueError('queue lane has no valid directory')
+                lane_path = Path(lane['directory'])
+                directory = lane_path.resolve() if lane_path.is_absolute() else (root / lane_path).resolve()
+                if directory != root and root not in directory.parents:
+                    raise ValueError('queue lane directory is outside the report root')
+                run = by_path.get(directory)
+                if run is None:
+                    run = {'run': str(directory.relative_to(root)), 'path': str(directory),
+                           'algorithm': lane.get('algorithm', 'ppo'),
+                           'architecture': lane.get('architecture', 'unknown'),
+                           'updates': lane.get('completed_updates', 0),
+                           'current': lane.get('current'), 'qualified': lane.get('qualified', []),
+                           'consecutive_passes': {}, 'last_promotion': None, 'diagnostic': False,
+                           'latest_evaluations': []}
+                    runs.append(run)
+                run['queue_status'] = lane.get('status', 'unknown')
+                run['device'] = lane.get('device')
+                run['training_seed'] = lane.get('seed')
+                queue_lanes.append({key: lane.get(key) for key in
+                                    ('track', 'status', 'completed_updates', 'device', 'current', 'evaluation')})
+                if lane.get('current'):
+                    run['current'] = lane['current']
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                errors.append({'path': str(queue['path']), 'error': f'queue lane {index}: {exc}'})
     return {'generated_at': datetime.now(timezone.utc).isoformat(), 'root': str(root),
             'baseline': 'paired deterministic observed teacher, generic NN execution; different from deployed native deterministic controller',
-            'runs': runs, 'comparison_groups': groups, 'queue': queue, 'errors': errors,
+            'runs': runs, 'comparison_groups': groups, 'queue': queue, 'queue_lanes': queue_lanes, 'errors': errors,
             'notes': ['Training reward is not a success metric.',
                       'Only rows sharing comparison_group have matching scenario, category, split, seeds, source and protocol.',
                       'Matching evaluation groups can have different training budgets; inspect update counts.',
