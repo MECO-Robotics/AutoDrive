@@ -7,6 +7,13 @@ source identity, exact category/seed list, condition ID, and evaluation report
 identity. Every contrast repeats the common bundle provenance so it can be
 audited independently of the full matrix JSON.
 
+Every condition also freezes `qualification_case` with `layout_id`,
+`defender_family`, `start_condition`, and `sensor_profile`. These values are
+passed to the evaluator and retained in each evaluation report and episode
+record. The matrix rejects reports and Phase 4 pairs whose stratum differs from
+the frozen condition, so the treatment and no-factor baseline are auditable as
+same-category, same-seed, same-stratum comparisons.
+
 ## Supported conditions
 
 | Condition | Paired comparison or measurement |

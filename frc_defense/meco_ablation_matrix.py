@@ -30,6 +30,12 @@ POLICY_CONTRASTS = {
     "C1_vs_D1": (("C1", "D1"),),
     "D1_vs_D2": (("D1", "D2"),),
 }
+DEFAULT_EVALUATION_STRATUM = {
+    "layout_id": "2026_rebuilt",
+    "defender_family": "category_scripted",
+    "start_condition": "scenario_defined",
+    "sensor_profile": "standard",
+}
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,7 @@ class MatrixCondition:
     inference_disable_tick: int | None = None
     phase4_factor: dict | None = None
     categories: tuple[str, ...] | None = None
+    qualification_case: dict | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -59,6 +66,12 @@ class MatrixCondition:
                     self.phase4_factor.get("kind") not in PHASE4_FACTORS or
                     self.phase4_factor != PHASE4_FACTORS[self.phase4_factor["kind"]]):
                 raise ValueError("Phase 4 factor differs from its frozen contract")
+        if self.qualification_case is not None:
+            if (not isinstance(self.qualification_case, dict) or
+                    set(self.qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
+                    any(not isinstance(value, str) or not value
+                        for value in self.qualification_case.values())):
+                raise ValueError("qualification case must freeze the four stratum identifiers")
 
 
 def _canonical_hash(value: Any) -> str:
@@ -134,7 +147,8 @@ def _validate_condition_manifest(report: dict, *,
                                  expected_configs: dict[str, str] | None,
                                  expected_protocols: dict[str, str] | None,
                                  expected_shared_config: dict | None,
-                                 expected_device: dict[str, str]):
+                                 expected_device: dict[str, str],
+                                 expected_qualification_case: dict):
     """Reject an evaluation whose loaded bundle differs from matrix inputs."""
     manifest = report.get("policy_manifest")
     if not isinstance(manifest, dict) or set(MECO_TRACKS) - set(manifest):
@@ -145,6 +159,8 @@ def _validate_condition_manifest(report: dict, *,
         raise ValueError("evaluation qualification protocol ID differs from frozen matrix provenance")
     if report.get("execution_device") != expected_device:
         raise ValueError("evaluation report device/backend differs from frozen matrix provenance")
+    if report.get("qualification_case") != expected_qualification_case:
+        raise ValueError("evaluation report stratum differs from frozen matrix qualification case")
     component_timing = report.get("component_timing")
     timing_provenance = (component_timing.get("provenance")
                          if isinstance(component_timing, dict) else None)
@@ -199,7 +215,8 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None = None,
-                       inference_disable_tick: int | None = None
+                       inference_disable_tick: int | None = None,
+                       qualification_case: dict | None = None
                        ) -> tuple[MatrixCondition, ...]:
     """Return the plan's architecture/prediction/K/fault cases and eligible Phase 4 factors."""
     horizon = math.ceil(get_scenario(scenario_id).time_budget_s / .02)
@@ -218,6 +235,8 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
         MatrixCondition("inference_disabled_fallback_current_k16", "current",
                         "current", 16, fault_tick),
     )
+    conditions = tuple(MatrixCondition(**{**asdict(condition),
+        "qualification_case": qualification_case}) for condition in conditions)
     pressure_domain = scenario_id in ("offense_vs_scripted_pressure", "full_match_offense")
     supported_categories = tuple(category for category in (categories or ())
         if _registered_pressure_level(category) in (1, 2, 3, 4, 5))
@@ -225,7 +244,8 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
         conditions += tuple(MatrixCondition(
             f"phase4_{name}", "cv", "cv", 16,
             phase4_factor=phase4_factor_config(name),
-            categories=supported_categories)
+            categories=supported_categories,
+            qualification_case=qualification_case)
             for name in PHASE4_FACTORS)
     for condition in conditions:
         condition.validate()
@@ -292,7 +312,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                categories: tuple[str, ...], seeds: tuple[int, ...],
                device: str, output_dir: str | Path,
                inference_disable_tick: int | None = None,
-               qualification_protocol: str | Path | None = None) -> dict:
+               qualification_protocol: str | Path | None = None,
+               qualification_case: dict | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco
@@ -337,8 +358,15 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     source_hash = _source_identity_hash(source_identity())
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
+    qualification_case = dict(DEFAULT_EVALUATION_STRATUM if qualification_case is None
+                              else qualification_case)
+    if (set(qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
+            any(not isinstance(value, str) or not value
+                for value in qualification_case.values())):
+        raise ValueError("qualification_case must contain nonempty layout, defender, start, and sensor identifiers")
     conditions = default_conditions(scenario_id, categories=categories,
-        inference_disable_tick=inference_disable_tick)
+        inference_disable_tick=inference_disable_tick,
+        qualification_case=qualification_case)
     phase4_enabled = any(condition.phase4_factor is not None for condition in conditions)
     pressure_domain = scenario_id in ("offense_vs_scripted_pressure", "full_match_offense")
     unsupported_phase4 = ([{"category": category,
@@ -359,6 +387,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "seed_split_assignments": seed_split_assignments,
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
+        "qualification_case": qualification_case,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
@@ -390,6 +419,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=condition_categories, episodes=len(seeds), master_seed=seeds[0],
             episode_seeds=seeds, device=device, split=evaluation_split,
+            qualification_case=condition.qualification_case,
             qualification_protocol_id=(None if qualification_provenance is None else
                 qualification_provenance["protocol_id"]),
             candidate_k_override=condition.candidate_k,
@@ -408,7 +438,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             expected_configs=expected_configs,
             expected_protocols=expected_protocols,
             expected_shared_config=expected_shared_config,
-            expected_device=execution_device)
+            expected_device=execution_device,
+            expected_qualification_case=qualification_case)
         if _checkpoint_hashes(checkpoints) != bundle_hashes:
             raise ValueError("checkpoint files drifted while an evaluation condition was running")
         if _source_identity_hash(source_identity()) != source_hash:
@@ -435,6 +466,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "checkpoint_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
             "execution_device": execution_device,
+            "qualification_case": report["qualification_case"],
             "policy_manifest": report["policy_manifest"],
             "effective_candidate_k": report["candidate_k"],
             "prediction": report["prediction"],
@@ -540,6 +572,16 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                         if treated is None or control is None:
                             raise ValueError(
                                 f"Phase 4 paired contrast lacks {policy}/{category}/{seed}")
+                        expected_stratum = qualification_case
+                        treated_stratum = {key: treated.get(key)
+                            for key in DEFAULT_EVALUATION_STRATUM}
+                        control_stratum = {key: control.get(key)
+                            for key in DEFAULT_EVALUATION_STRATUM}
+                        if (treated_stratum != expected_stratum or
+                                control_stratum != expected_stratum or
+                                treated_stratum != control_stratum):
+                            raise ValueError(
+                                f"Phase 4 pair has mismatched evaluation strata for {policy}/{category}/{seed}")
                         contrasts.append({"contrast": "phase4_factor_vs_no_factor",
                             "factor": name,
                             "factor_sha256": phase4_factor_digest(
@@ -548,6 +590,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                             "paired": True,
                             "condition_ids": {"factor": treatment["condition_id"],
                                 "baseline": baseline["condition_id"]},
+                            "qualification_case": expected_stratum,
                             "category": category, "seed": seed,
                             "factor_metrics": _record_metrics(treated),
                             "baseline_metrics": _record_metrics(control),
@@ -557,6 +600,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     # remains auditable when copied out of the matrix-level report.
     common_provenance = {
         "execution_device": execution_device,
+        "qualification_case": qualification_case,
         "evaluation_design": evaluation_design,
         "evaluation_split": evaluation_split,
         "qualification_protocol_id": (None if qualification_provenance is None else
