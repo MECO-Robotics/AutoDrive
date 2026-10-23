@@ -22,7 +22,7 @@ from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
     opponent_forecast, prediction_contract, PREDICTION_MODES,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
-    SAFE_ACTION_FEATURES)
+    SAFE_ACTION_FEATURES, EXTRA_FEATURES)
 
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
@@ -58,9 +58,6 @@ CANDIDATE_BOUNDARY = {
     "plan_a_route_metadata": "frozen shortest-path parent tree including the root-pose connector and terminal headings; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks and guarded terminal alignment",
     "plan_a_candidate_k": "not used; candidate_k applies only to Plan C candidate scorers",
 }
-EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
-                  "risk_penalty_points", "target_heading_rad",
-                  "is_continue", "commitment_switch_cost")
 # The learned candidate scorers receive both these named table columns and
 # one missingness bit per column. Keep the contract shared with training and
 # checkpoint export rather than inferring it from a stale export fixture.

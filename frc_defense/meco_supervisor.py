@@ -91,6 +91,8 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
     if warm_start is not None:
         command.extend(("--warm-start", str(warm_start),
                         "--qualification-protocol", str(qualification_protocol)))
+    elif qualification_protocol is not None:
+        command.extend(("--qualification-protocol", str(qualification_protocol)))
     return command
 
 
@@ -347,7 +349,7 @@ class MecoSupervisor:
             if payload:
                 if payload.get("sources") != self.sources:
                     raise ValueError(f"{track} checkpoint source differs from current source")
-                if payload.get("protocol_id") not in (None, self.protocol_id):
+                if payload.get("protocol_id") != self.protocol_id:
                     raise ValueError(f"{track} checkpoint protocol differs from supervisor configuration")
                 saved = dict(payload.get("config", {}))
                 for key in ("updates",):
@@ -397,6 +399,9 @@ class MecoSupervisor:
 
     def _task_for_cycle(self, cycle, target_update):
         assignment = self.task_scheduler.schedule(cycle, target_update)
+        if self.qualification_protocol is not None:
+            from .meco_supervised import validate_training_assignment
+            validate_training_assignment(self.qualification_protocol, assignment)
         self.current_assignment = assignment
         _atomic_json(self.scheduler_path, self.task_scheduler.state)
         return assignment
@@ -871,6 +876,10 @@ def _parser():
     parser.add_argument("--evaluation-seed", type=int, default=20261024)
     parser.add_argument("--evaluation-device", default="cpu",
         help="device for the paired evaluator; defaults to CPU so learners keep their devices")
+    parser.add_argument("--qualification-protocol",
+        help="frozen qualification protocol used to constrain scheduled scenario/category/seeds")
+    parser.add_argument("--warm-start-artifacts", type=json.loads, default=None,
+        help="JSON object mapping every MECO track to a validated weights-only artifact")
     parser.add_argument("--cycles", type=int, default=0,
         help="number of complete five-track chunks; zero continues until stopped")
     parser.add_argument("--stop-file")
@@ -898,7 +907,9 @@ def main(argv=None):
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,
         cycles=args.cycles, stop_file=args.stop_file,
-        stage_exposure_chunks=args.stage_exposure_chunks)
+        stage_exposure_chunks=args.stage_exposure_chunks,
+        qualification_protocol=args.qualification_protocol,
+        warm_start_artifacts=args.warm_start_artifacts)
     print(json.dumps(supervisor.run(), indent=2))
 
 

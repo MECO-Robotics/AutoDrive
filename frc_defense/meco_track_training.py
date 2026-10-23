@@ -683,6 +683,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         raise ValueError("scheduled task category is not registered for scenario")
     if type(task_seed) is not int or task_seed < 0:
         raise ValueError("scheduled task seed must be nonnegative")
+    qualification_protocol_data = None
+    qualification_protocol_id = None
+    qualification_protocol_sha256 = None
+    if qualification_protocol is not None:
+        from .meco_supervised import _load_protocol, validate_training_assignment
+        (qualification_protocol_data, qualification_protocol_id,
+         qualification_protocol_sha256, _) = _load_protocol(Path(qualification_protocol))
+        validate_training_assignment(qualification_protocol_data,
+            {"scenario_id": task_scenario, "category": task_category, "seed": task_seed})
     torch.set_num_threads(1)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -723,7 +732,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema_version") != 1 or payload.get("sources") != sources:
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
-        if payload.get("protocol_id") not in (None, protocol_id):
+        if payload.get("protocol_id") != protocol_id:
             raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
         saved_config = payload.get("config")
         requested_config = asdict(config)
@@ -779,6 +788,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
         "prediction_contract": prediction_contract(config.prediction_mode),
+        "qualification_protocol_id": qualification_protocol_id,
+        "qualification_protocol_sha256": qualification_protocol_sha256,
         "candidate_k": config.candidate_k,
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "chunk_start_update": update,
@@ -992,6 +1003,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
                 "prediction_contract": prediction_contract(config.prediction_mode),
+                "qualification_protocol_id": qualification_protocol_id,
+                "qualification_protocol_sha256": qualification_protocol_sha256,
                 "protocol_id": protocol_id,
                 "initialization": run_manifest["initialization"],
                 "task_assignment": task_assignment,

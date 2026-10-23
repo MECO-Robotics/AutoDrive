@@ -30,6 +30,11 @@ SAFE_ACTION_FEATURES = (
     "target_distance_m", "nearby_sensed_track_count", "track_confidence",
     "track_age_s", "opponent_distance_m", "route_time_s",
 )
+EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
+                  "risk_penalty_points", "target_heading_rad",
+                  "is_continue", "commitment_switch_cost")
+MECO_CANDIDATE_RAW_FEATURE_COUNT = len(SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)
+MECO_CANDIDATE_MODEL_INPUT_WIDTH = 2 * MECO_CANDIDATE_RAW_FEATURE_COUNT
 
 # Shared opponent forecast contract used by learned policies and controls.
 PREDICTION_MODES = ("current", "cv")
