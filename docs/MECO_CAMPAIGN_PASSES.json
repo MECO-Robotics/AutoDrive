@@ -37,7 +37,8 @@
         "Section 6 typed episode metric ledger committed in isolated worktree codex/meco-section6-ledger at b246e31efb9b7809c8751f762136c5a445f296ae; implements goal/heading attempts, route-switch and A-B-A proxies, focal slot-3 events, explicit unavailable values, and outer-step-scoped travel/contact metrics; scoped reviewer pass pending",
         "Counterfactual v2 digest re-review identified a remaining custom torch.Tensor / torch.Generator subclass state caveat; digest hardening follow-up is in progress in the isolated worktree",
         "Counterfactual v2 digest subclass remediation committed at 5e4dba876d7950ff653cf9520990f286c7657561; torch tensor/generator fast paths are exact-type only, subclasses are generically inspected and fail closed on opaque bases",
-        "Section 6 metric ledger implementation b246e31efb9b7809c8751f762136c5a445f296ae received scoped static approval; heading opportunity-versus-terminal endpoint semantics are being clarified in a narrow follow-up before integration"
+        "Section 6 metric ledger implementation b246e31efb9b7809c8751f762136c5a445f296ae received scoped static approval; heading opportunity-versus-terminal endpoint semantics are being clarified in a narrow follow-up before integration",
+        "Section 6 heading metric clarification committed as 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432: heading attempts are separate from joint endpoint success, which now requires terminal XY <=0.04m and heading error <=0.1rad; static re-review pending"
       ]
     },
     {
@@ -53,7 +54,8 @@
         "Runtime source/indexing/candidate fixes approved; Phase 5 shape/provenance remediation approved at 445c80e9b in isolated worktree; scoped review approved commit 6af0e7a7b6cdd14fc33b7abc76fb6cc8c33b016f for C1/C2 dimensions, warm-start integrity, split validation, and shared prediction mode; minor Plan A selected-node forecast detail remains; timing/fallback implementation and tick validation follow-up b0ed54594134af59ce6ca002aed273c68e2ad299 are statically approved; counterfactual digest fixes in d6c49cfb6 are under re-review; labels still need warm-start integration and empirical parity evaluation; full-plan review remains open",
         "Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae submitted for scoped static review; counterfactual v2 digest reviewer confirmed prior fixes and requested fail-closed/custom torch subclass handling follow-up; reviewer re-review pending",
         "Scoped static re-review approved counterfactual v2 digest commit 5e4dba876d7950ff653cf9520990f286c7657561; Section 6 metric-ledger review remains in progress",
-        "Scoped static review approved Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae with one heading endpoint interpretation clarification requested; follow-up review pending"
+        "Scoped static review approved Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae with one heading endpoint interpretation clarification requested; follow-up review pending",
+        "Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432 submitted for scoped re-review"
       ]
     }
   ]
