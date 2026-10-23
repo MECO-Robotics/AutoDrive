@@ -307,3 +307,20 @@ attempt produced no validated dataset. This correction passed independent scoped
 7ba2d89de/f5bd75922 and was integrated as 2dbd0e1a9/b91fe581f. Only static
 compile/diff checks were run; simulator collection and replay remain
 outstanding.
+
+## Route-query batch failure and chunking follow-up (2026-10-24)
+
+A fresh Plan A counterfactual collection at `pickup_scattered/dense`, seed
+`3540116847380660224`, source commit `5eb1cb4e0`, attempted output
+`...artifacts-20261023-r4/pickup-scattered-dense-3540116847380660224-cf-v2.jsonl`.
+Candidate construction aborted at step 0 with
+`ValueError: route batch exceeds 64 queries`; no validated output was written.
+The candidate builder now validates snapshot identity and duplicate
+`(world, slot, candidate_id)` keys across the full route-query list before
+submitting consecutive slices of at most `MAX_ROUTE_QUERY_BATCH` (64) to the
+existing evaluator. It concatenates results in query order and passes the same
+tolerances and learned-map, scale, and provenance arguments to every slice.
+The evaluator retains its explicit 64-query cap. Scoped independent review is
+pending. Only static compilation and diff checks have run for this follow-up;
+no route collection, simulator evaluation, or dashboard replay has validated
+it yet.

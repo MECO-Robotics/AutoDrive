@@ -16,7 +16,8 @@ import math
 
 import torch
 
-from .experimental_route_evaluation import RouteQuery, evaluate_routes
+from .experimental_route_evaluation import (MAX_ROUTE_QUERY_BATCH, RouteQuery,
+    evaluate_routes)
 from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
@@ -549,12 +550,29 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                 snapshot_id=base.observation.snapshot_id, world=0, slot=3,
                 goal_xy=(float(center[0]), float(center[1])), intake_extended=intake))
 
-    route_results = evaluate_routes(env, route_queries,
-        goal_tolerance_m=graph.resolution_m * .72,
-        endpoint_tolerance_m=graph.resolution_m * .72,
-        learned_traversal_cost=learned_traversal_cost,
-        learned_cost_scale=learned_cost_scale,
-        learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
+    # Validate the complete candidate set before probing any routes. The
+    # evaluator intentionally caps each native AD* workspace at 64 rows; split
+    # only after global snapshot and duplicate checks so chunk boundaries cannot
+    # hide a cross-chunk contract violation.
+    if route_queries:
+        snapshot_ids = {query.snapshot_id for query in route_queries}
+        if len(snapshot_ids) != 1:
+            raise ValueError("one route batch must use a single snapshot_id")
+        query_keys = [(query.world, query.slot, query.candidate_id)
+                      for query in route_queries]
+        if len(set(query_keys)) != len(query_keys):
+            raise ValueError("route batch contains duplicate candidate keys")
+
+    route_results_list = []
+    for offset in range(0, len(route_queries), MAX_ROUTE_QUERY_BATCH):
+        route_results_list.extend(evaluate_routes(
+            env, route_queries[offset:offset + MAX_ROUTE_QUERY_BATCH],
+            goal_tolerance_m=graph.resolution_m * .72,
+            endpoint_tolerance_m=graph.resolution_m * .72,
+            learned_traversal_cost=learned_traversal_cost,
+            learned_cost_scale=learned_cost_scale,
+            learned_cost_provenance="meco_legal_heading_penalty_projection_v1"))
+    route_results = tuple(route_results_list)
     result_by_id = {result.candidate_id: result for result in route_results}
     speed = max(float(env.sim.speed[0, 3]), .1)
     omega = max(float(env.sim.omega_limit[0, 3]), .1)
