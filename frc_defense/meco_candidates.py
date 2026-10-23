@@ -39,7 +39,7 @@ CANDIDATE_BOUNDARY = {
     "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
     "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
 }
-EXTRA_FEATURES = ("legal_node_index", "route_distance_m", "route_time_s",
+EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
                   "risk_penalty_points", "target_heading_rad")
 
 
@@ -345,8 +345,12 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         row[2] = float(goal_xy[0])
         row[3] = float(goal_xy[1])
         row[4] = float(hbins[row_index])
+        # route_time_s is already part of SAFE_ACTION_FEATURES; replace the
+        # coarse base estimate with the route-derived ETA instead of appending
+        # a duplicate column name.
+        row[13] = eta
         row.extend((None if goal_nodes[row_index] is None else float(goal_nodes[row_index]),
-                    distance, eta, risk, float(headings[row_index])))
+                    distance, risk, float(headings[row_index])))
         rows.append(tuple(row))
         route_costs.append(0. if eta is None else eta * ROUTE_COST_POINTS_PER_SECOND)
         risk_costs.append(0. if risk is None else risk)
