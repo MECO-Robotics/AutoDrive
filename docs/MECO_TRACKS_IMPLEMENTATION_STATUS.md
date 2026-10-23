@@ -46,14 +46,20 @@ candidate table.
 ## Deliberate limits
 
 The Plan C/D1/D2 candidate service keeps the original stable K=8/16/32 prefix
-over eight action primitives and six collection offsets. C1/C2 may append one
-`continue` row after that prefix when a task commitment is active; the row
+over eight action primitives and six collection offsets. C1/C2/D1/D2 share one
+candidate table and may append one `continue` row after that prefix when a task
+commitment is active; the row
 recomputes target matching, phase legality, endpoint safety, and AD* route cost
 from the current snapshot. Commitments expire after ten macro actions and are
 cleared on target loss, invalid route/action, goal completion, episode reset,
 or expiry. Intake commitments match the same sensed fuel by position rather
-than relying on the changing top-four buffer index. D1/D2 retain their prior
-per-macro behavior without commitment carryover.
+than relying on the changing top-four buffer index. D1/D2 now carry the same
+commitment lifecycle as C1/C2. All four subtract the same fixed 0.10-point
+switch cost from feasible non-continue rows while a commitment is active; D1
+and D2 differ only in hand utility and their selected prediction mode. Route
+cost, prediction risk, candidate eligibility, expiry and hysteresis are frozen
+in evaluation provenance. This parity is implementation evidence only; it has
+not yet been simulator-validated.
 
 The selectable table is bound to its candidate IDs, features, masks, route
 costs, and commitment descriptor by a SHA-256 digest retained in PPO rollout
@@ -124,8 +130,8 @@ This keeps the executed action paired with its policy density and reward. An
 incomplete goal at a macro or rollout boundary is not itself an execution
 failure. A sampled deterministic fallback, native action remask, or native goal
 preemption remains critic-only and is counted by reason in update stats; none
-is credited as a successful execution. C1/C2/D1/D2 retain their existing
-per-macro action semantics. Evaluation may retain a selected Plan A goal over
+is credited as a successful execution. C1/C2/D1/D2 use per-macro decisions and
+shared candidate commitment carryover. Evaluation may retain a selected Plan A goal over
 macros, as recorded in the evaluation contract. Intake headings must satisfy
 their target capture geometry. P integrates the root-pose-to-root-node
 connector as well as graph edges.

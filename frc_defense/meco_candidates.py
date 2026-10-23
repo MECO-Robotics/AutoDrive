@@ -44,6 +44,8 @@ CANDIDATE_BOUNDARY = {
     "selectable_pool": "stable ordinary 32-row prefix at K=8/16/32 plus at most one appended continue row; K8 ordinary IDs and order are preserved",
     "commitment_expiry_macro_actions": 10,
     "commitment_target_matching_tolerance_m": 1.0,
+    "commitment_switch_cost_points": 0.10,
+    "hysteresis": "when a commitment is active, apply the same fixed switch-cost utility penalty to every feasible non-continue row for C1/C2/D1/D2; continuation remains dynamically revalidated",
     "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
     "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
     "plan_a_policy_support": "all reachable legal SE(2) graph nodes crossed with currently executable drive/intake/score/ferry/defense behaviors; carrying dumper ferry pairs are excluded because native release may preempt the selected endpoint",

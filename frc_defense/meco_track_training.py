@@ -405,7 +405,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
-        commitment=(commitment if track in ("C1", "C2") else None))
+        commitment=commitment)
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     graph_data = _graph_inputs(track, graph, env, raster)
     path_geometry = _path_geometry(env)
@@ -432,6 +432,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost)
+        decision["logits"] = _apply_candidate_hysteresis(
+            decision["logits"], candidate_set.table)
         decision, path_cost = _apply_plan_a_path_cost(track, decision,
             candidate_set, route_cost, risk_cost, graph.lookup, path_geometry,
             p_config, record=record_path_penalty)
@@ -461,6 +463,16 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
 
 def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
+
+
+def _apply_candidate_hysteresis(logits, table):
+    """Apply the shared committed-task switch cost without changing feasibility."""
+    if "commitment_switch_cost" not in table.feature_names:
+        return logits
+    column = table.feature_names.index("commitment_switch_cost")
+    switch = torch.tensor([float(row[column] or 0.) for row in table.features],
+                          device=logits.device, dtype=logits.dtype)[None]
+    return logits - switch * CANDIDATE_BOUNDARY["commitment_switch_cost_points"]
 
 
 def _physics_safety_snapshot(env):
@@ -593,6 +605,8 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
         globals_=row["globals"], table=row["candidate_set"].table,
         hidden=hidden, graph=row["graph"],
         route_cost=row["route_cost"], risk_cost=row["risk_cost"])
+    decision["logits"] = _apply_candidate_hysteresis(
+        decision["logits"], row["candidate_set"].table)
     if track in ("A1", "A2", "A3"):
         decision, _ = _apply_plan_a_path_cost(track, decision,
             row["candidate_set"], row["route_cost"], row["risk_cost"],
@@ -1156,10 +1170,6 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
     table = candidate_set.table
     cols = {name: i for i, name in enumerate(table.feature_names)}
     values = []
-    opponent_xy = env.opponent_pose[0, 3, :2].detach().cpu().tolist()
-    opponent_valid = bool(env.opponent_valid[0, 3])
-    opponent_age = float(env.opponent_age[0, 3])
-    velocity_xy = env.opponent_velocity[0, 3, :2].detach().cpu().tolist()
     for index, (name, row, feasible) in enumerate(zip(table.candidate_ids,
                                                       table.features,
                                                       table.valid_mask)):
@@ -1167,29 +1177,20 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
             values.append(float("-inf"))
             continue
         action = int(row[cols["action_index"]])
-        eta = row[cols["route_time_s"]]
-        dist = row[cols["target_distance_m"]]
         conf = row[cols["track_confidence"]]
         age = row[cols["track_age_s"]]
         nearby = row[cols["nearby_sensed_track_count"]]
         if action < 4:
-            score = ((1. + .2 * float(nearby or 0.) + .25 * float(conf or 0.)) /
-                     max(.25, float(eta or 0.)) - .04 * float(age or 0.))
+            score = (1. + .2 * float(nearby or 0.) + .25 * float(conf or 0.)
+                     - .04 * float(age or 0.))
         else:
             score = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}.get(name, 0.)
-        if opponent_valid:
-            mode = prediction_mode or ("current" if policy == "D1" else "cv")
-            forecast = opponent_forecast(mode=mode, valid=True,
-                position_xy=opponent_xy, velocity_xy=velocity_xy,
-                age_s=opponent_age, horizon_s=float(eta or 0.))
-            enemy = forecast["xy"]
-            if enemy is not None:
-                dx = float(row[cols["goal_x_m"]]) - enemy[0]
-                dy = float(row[cols["goal_y_m"]]) - enemy[1]
-                separation = math.hypot(dx, dy)
-                score -= PREDICTION_MAX_PENALTY_POINTS * max(0., min(1.,
-                    (PREDICTION_THREAT_RADIUS_M - separation) /
-                    PREDICTION_THREAT_RADIUS_M))
+        score -= (float(candidate_set.route_cost_points[index].item()) +
+                  float(candidate_set.risk_cost_points[index].item()))
+        switch_col = cols.get("commitment_switch_cost")
+        if switch_col is not None:
+            score -= (float(row[switch_col] or 0.) *
+                      CANDIDATE_BOUNDARY["commitment_switch_cost_points"])
         values.append(score)
     return torch.tensor(values, device=env.device, dtype=torch.float32)[None]
 
@@ -1420,6 +1421,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "qualification_case": qualification_case,
         "candidate_k": {"checkpoint": checkpoint_candidate_k,
             "evaluation_override": candidate_k_override, "effective": candidate_k},
+        "candidate_service": {"contract": CANDIDATE_BOUNDARY,
+            "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
+            "candidate_builder": "shared_C1_C2_D1_D2_route_feasible_candidates"},
         "prediction": {"learned_mode": effective_prediction_mode,
             "control_override": control_prediction_mode,
             "control_modes": effective_control_modes,
@@ -1443,7 +1447,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
-            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2: stable configurable K=8/16/32 ordinary prefix, one appended snapshot-revalidated continue row when committed, and independently route-qualified expanded-goal coverage oracle; D1/D2: unchanged per-macro K=8/16/32 table without commitment carryover"}},
+            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2 and controls D1/D2: one shared stable configurable K=8/16/32 route-qualified candidate table, common action/route eligibility and prediction risk, one appended snapshot-revalidated continue row when committed, ten-macro expiry, target-loss/invalid-route/completion/failure/episode clearing, and a shared fixed 0.10-point switch-cost hysteresis; only candidate utility scoring differs"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     if qualification_protocol_id is not None:
         protocol = qualification_protocol_id
@@ -1601,7 +1605,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     p_points_per_grid_edge=p_points_per_grid_edge,
                                     prediction_mode=decision_prediction_mode,
                                     record_path_penalty=True,
-                                    commitment=(commitment if model_track in ("C1", "C2") else None))
+                                    commitment=commitment)
                                 _timing_sync(env)
                                 component_timing_ms["policy_decision_pipeline"].append(
                                     (time.perf_counter() - decision_started) * 1000.)
@@ -1618,7 +1622,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     episode_id=episode_id, action_ticks=action_ticks,
                                     candidate_k=candidate_k,
                                     prediction_mode=(effective_prediction_mode if use_d1_fallback
-                                        else effective_control_modes.get(policy, "current")))
+                                        else effective_control_modes.get(policy, "current")),
+                                    commitment=commitment)
                                 last_candidate_recall = candidate_set.candidate_recall
                                 logits = _d1_d2_scores(candidate_set, env,
                                     "D1" if use_d1_fallback else policy,
@@ -1782,7 +1787,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
                             hard_failure = remasked or native_preempted
-                            if policy in ("C1", "C2") and prepared is not None:
+                            if policy in ("C1", "C2", "D1", "D2"):
                                 selected_id = candidate_set.table.candidate_ids[choice]
                                 if selected_id.startswith("continue:"):
                                     commitment = candidate_set.commitment
@@ -1892,7 +1897,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "fallback": "deterministic D1 hand-weighted candidate scorer using the checkpoint prediction_mode",
                                 "prediction_mode": decision_prediction_mode,
                                 "model_inference_disabled_after_trigger": inference_fault_reached,
-                                "cleared_state": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                                "cleared_state": ["Plan A pending goal", "C1/C2/D1/D2 commitment", "recurrent hidden state"],
                                 "fallback_count": fault_fallback_count,
                                 "post_fault_macro_count": post_fault_macro_count,
                                 "post_fault_executed_action_counts": post_fault_executed_actions,
@@ -2066,7 +2071,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "trigger": "first macro decision boundary at or after requested physics tick",
                 "unreached_trigger_is_not_success": True,
                 "fallback": "D1 deterministic scorer using the checkpoint prediction mode",
-                "state_cleared": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                "state_cleared": ["Plan A pending goal", "C1/C2/D1/D2 commitment", "recurrent hidden state"],
                 "post_fault_safety": "controlled-slot-3 robot, field, and wall contact physics-tick counts from cumulative counters",
                 "post_fault_recovery": "not inferred; fallback action counts, outcome/progress deltas, and safety ticks are reported",
             } if inference_disable_tick is not None else None),
