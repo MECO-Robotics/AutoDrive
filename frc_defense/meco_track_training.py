@@ -34,6 +34,8 @@ from .meco_tracks import (MECO_TRACKS, make_meco_track,
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVATION_DT = .02
 DEFAULT_CATEGORIES = {"pickup_simple": ("single", "cluster")}
+CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
+    "scenario seed = master seed + cumulative completed updates + 1")
 
 
 @dataclass(frozen=True)
@@ -272,14 +274,15 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
 
 
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
-               stop_file: str | None = None):
+               stop_file: str | None = None, run_id_override: str | None = None,
+               protocol_id: str | None = None):
     config.validate()
     torch.set_num_threads(1)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
     if config.device.startswith("cuda"):
         torch.cuda.set_device(torch.device(config.device))
-    run_id = uuid.uuid4().hex
+    run_id = run_id_override or uuid.uuid4().hex
     output = Path(config.output or ROOT / "checkpoints" / "meco-five" / config.track)
     output.mkdir(parents=True, exist_ok=True)
     sources = source_identity()
@@ -291,23 +294,42 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     update = 0
     episode = 0
     history = []
+    resume_rng_torch = None
+    resume_rng_python = None
+    resume_rng_device = None
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema_version") != 1 or payload.get("sources") != sources:
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
-        if payload.get("config") != asdict(config):
+        if payload.get("protocol_id") not in (None, protocol_id):
+            raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
+        saved_config = payload.get("config")
+        requested_config = asdict(config)
+        if isinstance(saved_config, dict):
+            saved_config = dict(saved_config)
+            saved_config.pop("updates", None)
+        requested_config.pop("updates", None)
+        if saved_config != requested_config:
             raise ValueError("MECO immutable run configuration mismatch")
         model.load_state_dict(payload["model"])
         value_head.load_state_dict(payload["value_head"])
         optimizer.load_state_dict(payload["optimizer"])
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         run_id = payload["run_id"]
-        torch.set_rng_state(payload["rng_torch"])
-        random.setstate(payload["rng_python"])
-        if payload["rng_device"] and torch.cuda.is_available():
-            torch.cuda.set_rng_state(payload["rng_device"], torch.device(config.device))
+        if run_id_override and run_id_override != run_id:
+            raise ValueError("resume run ID mismatch")
+        resume_rng_torch = payload["rng_torch"]
+        resume_rng_python = payload["rng_python"]
+        resume_rng_device = payload["rng_device"]
     env = make_curriculum_env(config.scenario_id, config.category, 1,
         config.device, config.seed)
+    chunk_seed = config.seed + update + 1
+    _reset_episode(env, chunk_seed)
+    if resume_rng_torch is not None:
+        torch.set_rng_state(resume_rng_torch)
+        random.setstate(resume_rng_python)
+        if resume_rng_device is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state(resume_rng_device, torch.device(config.device))
     try:
         graph = build_legal_pose_graph(env, slot=3)
     except BaseException:
@@ -316,11 +338,20 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             close()
         raise
     run_manifest = {"schema_version": 1, "run_id": run_id,
-        "config": asdict(config), "sources": sources,
-        "source_identity_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
+        "config": asdict(config), "updates_semantics": "updates per invocation chunk",
+        "protocol_id": protocol_id,
+        "configuration_sha256": hashlib.sha256(json.dumps(
+            {key: value for key, value in asdict(config).items() if key != "updates"},
+            sort_keys=True, allow_nan=False).encode()).hexdigest(),
+        "sources": sources,
+        "source_identity_sha256": hashlib.sha256(json.dumps(
+            sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
         "graph": {"nodes": graph.node_count, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
+        "chunk_reset_policy": CHUNK_RESET_POLICY,
+        "chunk_start_update": update,
+        "chunk_start_seed": chunk_seed,
         "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running"}
     _atomic_json(output / "run.json", run_manifest)
     heartbeat_path = output / "heartbeat.json"
@@ -334,7 +365,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
     try:
-        while update < config.updates and not (stop_path and stop_path.exists()):
+        chunk_target = update + config.updates
+        while update < chunk_target and not (stop_path and stop_path.exists()):
             rows = []
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
@@ -389,6 +421,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                          update_utc=datetime.now(timezone.utc).isoformat())
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
+                "protocol_id": protocol_id,
+                "chunk_reset_policy": CHUNK_RESET_POLICY,
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),
                 "value_head": value_head.state_dict(), "optimizer": optimizer.state_dict(),
@@ -475,6 +509,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     loaded = {}
     policy_manifest = {}
     route_weight = None
+    common_training_config = None
+    common_training_protocol = None
+    protocol_initialized = False
     for track, path in checkpoints.items():
         payload = torch.load(path, map_location=device, weights_only=False)
         if payload["config"]["track"] != track or payload["sources"] != sources:
@@ -493,19 +530,40 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         model.eval()
         loaded[track] = model
         checkpoint_digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        track_config = payload.get("config", {})
+        immutable_track_config = {key: value for key, value in track_config.items()
+                                 if key != "updates"}
+        shared_track_config = {key: value for key, value in immutable_track_config.items()
+                               if key not in ("track", "device", "output")}
+        if common_training_config is None:
+            common_training_config = shared_track_config
+        elif shared_track_config != common_training_config:
+            raise ValueError("paired checkpoints have different immutable training settings")
+        checkpoint_protocol = payload.get("protocol_id")
+        if not protocol_initialized:
+            common_training_protocol = checkpoint_protocol
+            protocol_initialized = True
+        elif checkpoint_protocol != common_training_protocol:
+            raise ValueError("paired checkpoints have different supervisor protocols")
         policy_manifest[track] = {"policy_id": _model_id(model),
             "checkpoint_sha256": checkpoint_digest,
+            "training_protocol_id": payload.get("protocol_id"),
+            "training_configuration_sha256": hashlib.sha256(json.dumps(
+                immutable_track_config, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             "source_identity_sha256": hashlib.sha256(
-                json.dumps(sources, sort_keys=True).encode()).hexdigest()}
+                json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     for control in ("D0", "D1", "D2"):
-        policy_manifest[control] = {"policy_id": control, "checkpoint_sha256": None,
+        control_policy_id = {"D0": "D0_teacher_proxy",
+                             "D1": "D1_hand_weighted",
+                             "D2": "D2_kinematic_prediction"}[control]
+        policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
             "source_identity_sha256": hashlib.sha256(
-                json.dumps(sources, sort_keys=True).encode()).hexdigest()}
+                json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
         "dt": OBSERVATION_DT, "action_ticks": 12, "route_weight": route_weight,
         "candidate_contract": "eight masked actions; verified static terminal SE(2) pose and current-snapshot AD* route"},
-        sort_keys=True).encode()).hexdigest()
+        sort_keys=True, allow_nan=False).encode()).hexdigest()
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
     status_path = (output_path.with_name(output_path.name + ".status.json")
@@ -601,14 +659,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "sources": sources,
+            "training_protocol_ids": ([common_training_protocol]
+                if common_training_protocol else []),
+            "shared_training_configuration": common_training_config,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "controls": ["D0", "D1", "D2"] if include_controls else [],
+            "control_definitions": {"D0": "curriculum teacher proxy; not production AutoDrive controller",
+                "D1": "hand-weighted scorer over the shared feasible candidate table",
+                "D2": "D1 scorer with kinematic opponent endpoint prediction"},
             "policy_manifest": policy_manifest,
         "paired": True, "split": "validation", "diagnostic": episodes < 100,
         "candidate_boundary": CANDIDATE_BOUNDARY,
-            "source_identity_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
+            "source_identity_sha256": hashlib.sha256(json.dumps(
+                sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             "dashboard_verified": False, "records": records,
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
@@ -637,9 +702,19 @@ def _parser():
     train.add_argument("--seed", type=int, default=7)
     train.add_argument("--device", default="cpu")
     train.add_argument("--learning-rate", type=float, default=3e-4)
+    train.add_argument("--gamma", type=float, default=.993)
+    train.add_argument("--gae-lambda", type=float, default=.95)
+    train.add_argument("--clip-coef", type=float, default=.2)
+    train.add_argument("--entropy-coef", type=float, default=.01)
+    train.add_argument("--value-coef", type=float, default=.5)
+    train.add_argument("--max-grad-norm", type=float, default=.5)
+    train.add_argument("--route-cost-points-per-second", type=float,
+                        default=ROUTE_COST_POINTS_PER_SECOND)
     train.add_argument("--output", required=True)
     train.add_argument("--resume")
     train.add_argument("--stop-file")
+    train.add_argument("--run-id")
+    train.add_argument("--protocol-id")
     ev = commands.add_parser("evaluate")
     ev.add_argument("--scenario", default="pickup_simple")
     ev.add_argument("--categories", default="single,cluster")
@@ -658,8 +733,14 @@ def main(argv=None):
         config = MecoTrainConfig(track=args.track, scenario_id=args.scenario,
             category=args.category, updates=args.updates, rollout_steps=args.rollout_steps,
             epochs=args.epochs, action_ticks=args.action_ticks, seed=args.seed,
-            device=args.device, learning_rate=args.learning_rate, output=args.output)
-        result = train_meco(config, resume=args.resume, stop_file=args.stop_file)
+            device=args.device, learning_rate=args.learning_rate, gamma=args.gamma,
+            gae_lambda=args.gae_lambda, clip_coef=args.clip_coef,
+            entropy_coef=args.entropy_coef, value_coef=args.value_coef,
+            max_grad_norm=args.max_grad_norm,
+            route_cost_points_per_second=args.route_cost_points_per_second,
+            output=args.output)
+        result = train_meco(config, resume=args.resume, stop_file=args.stop_file,
+                            run_id_override=args.run_id, protocol_id=args.protocol_id)
         print(json.dumps(result, indent=2))
         return
     checkpoints = {track: getattr(args, f"{track.lower()}_checkpoint") for track in MECO_TRACKS}
