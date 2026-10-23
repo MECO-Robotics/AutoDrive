@@ -55,7 +55,8 @@
         "Phase 5 provenance correction committed as ea4c31d2d in isolated integration branch: explicit protocol_id equality, terminal update equality, running heartbeat freshness status, and failed-run manifest detail checks; scoped re-review pending",
         "D0 fail-closed correction committed as 5f8f667bd: validates exact v2 protocol/category/safety metric schemas, calibration/source bindings, row safety fields/ranges and evidence SHA-256; unknown safety fields rejected; unkeyed hash is integrity only, safety remains pending and promotion blocked; scoped review pending",
         "Phase 5 re-review found running heartbeat status only checks for a timestamp string without parsing age; implementer follow-up will compute age or rename the field to matching heartbeat presence with age unknown",
-        "D0 fail-closed review follow-up remains pending; protocol currently covers one scenario while ancestor-retention qualification requires a calibrated scenario bundle or protocol redesign"
+        "D0 fail-closed review follow-up remains pending; protocol currently covers one scenario while ancestor-retention qualification requires a calibrated scenario bundle or protocol redesign",
+        "Phase 5 heartbeat reporting correction committed as 4cd81d964: reports matching heartbeat presence but explicitly marks age unknown; documentation makes no freshness/liveness claim; scoped re-review pending"
       ]
     },
     {
@@ -88,7 +89,9 @@
         "Phase 5 provenance correction ea4c31d2d submitted for scoped re-review; deployment branch still has no runtime/hardware qualification evidence",
         "D0 fail-closed correction 5f8f667bd submitted for scoped static re-review; follow-up audit also found calibration currently covers only one scenario, so ancestor-retention qualification needs a calibration bundle or protocol redesign",
         "Phase 5 provenance re-review approved protocol equality, terminal update equality and failed-run rejection; heartbeat age/freshness label needs correction before approval",
-        "Scoped static re-review approved D0 fail-closed correction 5f8f667bd: strict protocol/safety schema, calibration/source/report binding, evidence digest, and pending-safety fail-closed behavior pass; multi-scenario ancestor-retention protocol coverage remains open"
+        "Scoped static re-review approved D0 fail-closed correction 5f8f667bd: strict protocol/safety schema, calibration/source/report binding, evidence digest, and pending-safety fail-closed behavior pass; multi-scenario ancestor-retention protocol coverage remains open",
+        "Phase 5 heartbeat reporting correction 4cd81d964 submitted for scoped re-review; previous protocol/update equality and failed-run checks remain intact",
+        "D0 fail-closed correction 5f8f667bd approved by scoped static reviewer; multi-scenario calibration/protocol coverage for ancestor retention remains an implementation gap"
       ]
     }
   ]
