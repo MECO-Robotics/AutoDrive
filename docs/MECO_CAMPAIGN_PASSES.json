@@ -48,7 +48,8 @@
         "Phase 5 synthetic ONNX/export/profile harness integration started in a separate worktree from reviewed commits 12ad40fd5 and 445c80e9b; actual hardware/profile evidence remains gated on a matched five-checkpoint bundle",
         "Phase 5 exporter/profile harness integrated in isolated branch codex/meco-deployment-integration: e5f77bd99 and f2a1c0f9c; no change to running checkout; production-schema parity, Hailo compile/device profile and checkpoint-bound end-to-end replay remain unvalidated",
         "D0 reviewer identified a fail-open edge case in v2 protocol consumption and report safety-metric provenance; implementer follow-up is tightening nonempty exact schemas and provenance validation before approval",
-        "Phase 2 v2 counterfactual warm-start consumer committed as 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 in isolated worktree; adds strict v2-only replay-backed A/C gross-horizon pairwise fitting and weights-only artifact validation, while preserving v1; scoped reviewer pass pending"
+        "Phase 2 v2 counterfactual warm-start consumer committed as 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 in isolated worktree; adds strict v2-only replay-backed A/C gross-horizon pairwise fitting and weights-only artifact validation, while preserving v1; scoped reviewer pass pending",
+        "Phase 5 scoped reviewer identified a checkpoint/run-manifest protocol_id equality gap and terminal update-count freshness gap in load_track_model; corrective implementation and re-review are pending"
       ]
     },
     {
@@ -73,7 +74,8 @@
         "Phase 5 harness integration reviewer pass pending; review scope will preserve synthetic-only limitations and verify exact checkpoint/config/source provenance contracts",
         "Phase 5 integration commits e5f77bd99/f2a1c0f9c submitted for scoped static review; no tests, simulator, Hailo, or hardware checks performed",
         "Scoped D0 review found blocking fail-open risk: consumer must reject empty safety margins even when protocol self-hash is recomputed, and must prevent untrusted safety metric injection into reports; follow-up review pending",
-        "Phase 2 v2 warm-start consumer 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 submitted for static review; exact transcript parity and A/C support/candidate remapping are key checks"
+        "Phase 2 v2 warm-start consumer 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 submitted for static review; exact transcript parity and A/C support/candidate remapping are key checks",
+        "Phase 5 integration is not approved yet: reviewer requires checkpoint/manifest protocol_id equality and terminal checkpoint/update consistency; source-only export shape and synthetic-only limitation checks passed"
       ]
     }
   ]
