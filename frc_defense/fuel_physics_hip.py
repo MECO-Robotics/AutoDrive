@@ -250,21 +250,16 @@ def native_extension_identity():
             _verify_loaded_identity()
             return dict(_EXT_IDENTITY)
         path = _extension_path()
-        build_inputs = _build_inputs()
-        fingerprint = _fingerprint(build_inputs)
-        try:
-            manifest_identity = _manifest_identity(path, fingerprint, build_inputs)
-            if manifest_identity is not None:
-                return manifest_identity
-            candidate = _binary_identity(path)
-        except FileNotFoundError:
-            candidate = None
+        # CPU-only provenance must not walk ROCm's device libraries or hash
+        # an unused binary. GPU entry points call prepare_native_fuel_extension
+        # before capturing provenance, which performs the full attestation.
+        candidate = _path_stat_identity(path)
         result = {"module": _EXTENSION_NAME, "path": str(path),
-            "status": "unprepared", "build_fingerprint": fingerprint}
+            "status": "unprepared"}
         if candidate is not None:
-            result.update(candidate_sha256=candidate["sha256"],
-                candidate_device=candidate["device"], candidate_inode=candidate["inode"],
-                candidate_size=candidate["size"], candidate_mtime_ns=candidate["mtime_ns"])
+            result.update(candidate_device=candidate["device"],
+                candidate_inode=candidate["inode"], candidate_size=candidate["size"],
+                candidate_mtime_ns=candidate["mtime_ns"])
         return result
 
 def prepare_native_fuel_extension(device):
