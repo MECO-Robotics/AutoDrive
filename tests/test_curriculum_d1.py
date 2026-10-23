@@ -114,6 +114,29 @@ def test_d2_missing_or_stale_opponent_falls_back_exactly_to_d1():
     assert torch.equal(stale['action_scores'], d1['action_scores'])
 
 
+def test_d2_prediction_eligibility_trace_matches_runtime_fallback_predicate():
+    cases = (
+        ('missing', False, 0., 'pose', 0.),
+        ('negative_age', True, -.1, 'pose', 0.),
+        ('infinite_age', True, float('inf'), 'pose', 0.),
+        ('nonfinite_pose', True, .1, 'pose', float('inf')),
+        ('nonfinite_velocity', True, .1, 'velocity', float('nan')),
+    )
+    for _, raw_valid, age, field, bad_value in cases:
+        env, observation = _sensor_fixture([1] * 8)
+        env.opponent_valid[0, 3] = raw_valid
+        env.opponent_age[0, 3] = age
+        if field == 'pose':
+            env.opponent_pose[0, 3, 0] = bad_value
+        else:
+            env.opponent_velocity[0, 3, 0] = bad_value
+        _, d1 = D1HandWeightedPolicy().choose(env, observation)
+        _, d2 = D2PredictivePolicy().choose(env, observation)
+        assert not bool(d2['opponent_prediction_valid'][0]), cases
+        assert torch.equal(d2['action_scores'], d1['action_scores']), cases
+        assert torch.equal(d2['threat_penalty'], torch.zeros_like(d2['threat_penalty'])), cases
+
+
 def test_scorer_snapshot_ids_are_scoped_to_evaluation_run(monkeypatch):
     import frc_defense.curriculum_training as training
 

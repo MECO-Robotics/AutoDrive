@@ -179,6 +179,7 @@ class D2PredictivePolicy(D1HandWeightedPolicy):
                       'observed_opponent_velocity': observed_velocity.detach().clone(),
                       'observed_opponent_age': age.detach().clone(),
                       'observed_opponent_valid': env.opponent_valid[:, slot].detach().clone(),
+                      'opponent_prediction_valid': valid.detach().clone(),
                       'predicted_opponent_endpoint': predicted.detach().clone(),
                       'candidate_endpoint_distance': endpoint_distance,
                       'threat_penalty': penalty,
@@ -572,17 +573,20 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
                     'candidate_confidence':trace['candidate_confidence'][0].tolist(),
                     'candidate_age':trace['candidate_age'][0].tolist()}
                 if isinstance(policy,D2PredictivePolicy):
+                    def finite_vector(values):
+                        return [float(x) if math.isfinite(float(x)) else None
+                                for x in values]
                     frame['prediction']={
                         'schema_version':1,
                         'observed_state':{'valid':bool(trace['observed_opponent_valid'][0]),
+                            'prediction_eligible':bool(trace['opponent_prediction_valid'][0]),
                             'age_s':(float(trace['observed_opponent_age'][0])
                                      if math.isfinite(float(trace['observed_opponent_age'][0])) else None),
-                            'pose_xy_m':trace['observed_opponent_pose'][0].tolist(),
-                            'velocity_xy_mps':trace['observed_opponent_velocity'][0].tolist()},
+                            'pose_xy_m':finite_vector(trace['observed_opponent_pose'][0].tolist()),
+                            'velocity_xy_mps':finite_vector(trace['observed_opponent_velocity'][0].tolist())},
                         'predicted_endpoint_xy_m':trace['predicted_opponent_endpoint'][0].tolist()
                             if bool(torch.isfinite(trace['predicted_opponent_endpoint'][0]).all()) else None,
-                        'used':bool(trace['observed_opponent_valid'][0] and
-                                    trace['observed_opponent_age'][0] <= policy.max_track_age_s),
+                        'used':bool(trace['opponent_prediction_valid'][0]),
                         'horizon_s':policy.prediction_horizon_s,
                         'candidate_endpoint_distance_m':[
                             float(x) if math.isfinite(float(x)) else None
