@@ -492,6 +492,12 @@ function renderTraining(status) {
       selectedLiveStatus.entropy == null && latestMetrics.entropy == null
         ? null
         : `entropy ${Number(selectedLiveStatus.entropy ?? latestMetrics.entropy).toFixed(3)}`,
+      selectedLiveStatus.approx_kl == null && latestMetrics.approx_kl == null
+        ? null
+        : `KL ${metricValue(selectedLiveStatus.approx_kl ?? latestMetrics.approx_kl, 4)}`,
+      selectedLiveStatus.clip_fraction == null && latestMetrics.clip_fraction == null
+        ? null
+        : `clip ${metricValue(selectedLiveStatus.clip_fraction ?? latestMetrics.clip_fraction, 3)}`,
     ]
       .filter(Boolean)
       .join(" · ") || "—";

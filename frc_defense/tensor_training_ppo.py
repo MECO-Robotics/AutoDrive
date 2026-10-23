@@ -387,6 +387,11 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
         flat_returns = returns.reshape(-1)
         batch_size = flat_obs.shape[0]
         ppo_update_started = time.perf_counter() if timing_enabled else 0.
+        # Sample-weighted across this update's minibatches and epochs, then
+        # reduced once at the update boundary to avoid per-minibatch syncs.
+        approx_kl_total = torch.zeros((), device=device)
+        clip_fraction_total = torch.zeros((), device=device)
+        optimization_sample_count = 0
         ppo_gpu_start = torch.cuda.Event(enable_timing=True) if timing_enabled and device.type == "cuda" else None
         ppo_gpu_end = torch.cuda.Event(enable_timing=True) if timing_enabled and device.type == "cuda" else None
         if ppo_gpu_start is not None:
@@ -399,6 +404,9 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                     flat_obs[idx], flat_actions[idx], action_mask)
                 logratio = new_logprob - flat_logprobs[idx]
                 ratio = logratio.exp()
+                approx_kl_total += ((ratio - 1.) - logratio).detach().sum()
+                clip_fraction_total += (torch.abs(ratio - 1.) > clip_coef).detach().sum()
+                optimization_sample_count += int(idx.numel())
                 mb_adv = flat_advantages[idx]
                 if distributed:
                     # Match one-GPU minibatch normalization over the union of
@@ -487,7 +495,10 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 completed_episode_count.to(torch.float64).reshape(1),
                 action_counts.to(torch.float64),
                 entropy_accumulator.to(torch.float64).reshape(1),
-                torch.tensor([entropy_batch_count], device=device, dtype=torch.float64)))
+                torch.tensor([entropy_batch_count], device=device, dtype=torch.float64),
+                approx_kl_total.to(torch.float64).reshape(1),
+                clip_fraction_total.to(torch.float64).reshape(1),
+                torch.tensor([optimization_sample_count], device=device, dtype=torch.float64)))
             dist.all_reduce(counters, op=dist.ReduceOp.SUM)
             elapsed_values = torch.tensor([local_elapsed], device=device, dtype=torch.float64)
             dist.all_reduce(elapsed_values, op=dist.ReduceOp.MAX)
@@ -501,6 +512,10 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             entropy_total = counters[entropy_offset]
             entropy_batches = counters[entropy_offset + 1]
             entropy_mean = float((entropy_total / entropy_batches.clamp_min(1.)).item())
+            approx_kl = float((counters[entropy_offset + 2] /
+                               counters[entropy_offset + 4].clamp_min(1.)).item())
+            clip_fraction = float((counters[entropy_offset + 3] /
+                                   counters[entropy_offset + 4].clamp_min(1.)).item())
             elapsed = float(elapsed_values.item())
         else:
             global_complete_matches = int(complete_matches.item())
@@ -509,6 +524,8 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
             global_episode_count = completed_episode_count
             global_action_counts = action_counts
             entropy_mean = float((entropy_accumulator / max(1, entropy_batch_count)).item())
+            approx_kl = float((approx_kl_total / max(1, optimization_sample_count)).item())
+            clip_fraction = float((clip_fraction_total / max(1, optimization_sample_count)).item())
             elapsed = local_elapsed
         global_completed = completed * world_size
         global_exposure = {key: value * world_size for key, value in opponent_exposure.items()}
@@ -546,6 +563,8 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                 "completed_episodes_observed": int(global_episode_count.item()),
                 "opponent_exposure_counts": global_exposure,
                 "entropy": entropy_mean,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
                 "action_distribution": (global_action_counts / global_action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "per_action_selection_rate": (global_action_counts / global_action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "timing_profile_seconds": timing_seconds if timing_enabled else None,
@@ -594,6 +613,8 @@ def train_once(task: str, timesteps: int, output: str | Path, *, seed: int,
                     if int(global_episode_count.item()) else None),
                 "opponent_exposure_counts": global_exposure,
                 "entropy": entropy_mean,
+                "approx_kl": approx_kl,
+                "clip_fraction": clip_fraction,
                 "action_distribution": (global_action_counts / global_action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "per_action_selection_rate": (global_action_counts / global_action_counts.sum().clamp_min(1)).detach().cpu().tolist(),
                 "timing_profile_seconds": timing_seconds if timing_enabled else None,
