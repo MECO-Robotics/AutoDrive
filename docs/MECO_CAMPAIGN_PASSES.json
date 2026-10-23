@@ -51,7 +51,8 @@
         "Phase 2 v2 counterfactual warm-start consumer committed as 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 in isolated worktree; adds strict v2-only replay-backed A/C gross-horizon pairwise fitting and weights-only artifact validation, while preserving v1; scoped reviewer pass pending",
         "Phase 5 scoped reviewer identified a checkpoint/run-manifest protocol_id equality gap and terminal update-count freshness gap in load_track_model; corrective implementation and re-review are pending",
         "Phase 2 v2 warm-start reviewer found a C1/C2 target mismatch: gross-return labels currently train against cost/risk-adjusted logits; implementer follow-up will use raw utility or equivalent net targets with explicit semantics before approval",
-        "Counterfactual v2 C-target correction committed as 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc: C1/C2 pairwise gross-return fits use raw candidate utility, excluding route/risk costs; artifact binds and validates scoring_semantics; scoped re-review pending"
+        "Counterfactual v2 C-target correction committed as 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc: C1/C2 pairwise gross-return fits use raw candidate utility, excluding route/risk costs; artifact binds and validates scoring_semantics; scoped re-review pending",
+        "Phase 5 provenance correction committed as ea4c31d2d in isolated integration branch: explicit protocol_id equality, terminal update equality, running heartbeat freshness status, and failed-run manifest detail checks; scoped re-review pending"
       ]
     },
     {
@@ -80,7 +81,8 @@
         "Phase 5 integration is not approved yet: reviewer requires checkpoint/manifest protocol_id equality and terminal checkpoint/update consistency; source-only export shape and synthetic-only limitation checks passed",
         "Phase 2 v2 warm-start review found blocking C score/target mismatch: raw gross-horizon returns must not supervise cost/risk-adjusted logits; A mapping and replay/parity gates otherwise passed static inspection",
         "Counterfactual v2 C-target correction 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc submitted for scoped re-review; static fix aligns raw gross-horizon labels with raw utility scores",
-        "Scoped static re-review approved Phase 2 v2 warm-start implementation commit 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc; C scoring semantics now align gross-return labels with raw candidate utility"
+        "Scoped static re-review approved Phase 2 v2 warm-start implementation commit 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc; C scoring semantics now align gross-return labels with raw candidate utility",
+        "Phase 5 provenance correction ea4c31d2d submitted for scoped re-review; deployment branch still has no runtime/hardware qualification evidence"
       ]
     }
   ]
