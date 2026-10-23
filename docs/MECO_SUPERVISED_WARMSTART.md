@@ -192,9 +192,13 @@ replan, the same frozen map is applied to the focal neural robot's route; other
 robots retain their unweighted AD* calls. A failed depot route is retried with
 the same P map when the focal route is eligible. P0 passes no map and retains
 the existing route-planning calls. The route override validates its map shape,
-finite nonnegative values and scale, neural slot-3 ownership, and paired goal
-action. P-map execution is eager-only; the map-free static/captured dashboard
-route path is unchanged.
+finite nonnegative values and scale once per unchanged frozen map, neural
+slot-3 ownership, and paired goal action. Standard Plan A train/eval invokes
+the P-map path eagerly. If a caller supplies a P map while a CUDA stream is
+being captured, `step` raises `ValueError` and aborts that call; it does not
+fall back silently. The dashboard's existing captured route path supplies no
+P map and remains unchanged. No fallback or graph-compatible P path has been
+validated.
 
 This is code-path integration only. No simulator replay has exercised or
 inspected a P-shaped route from this seam yet, and the independent

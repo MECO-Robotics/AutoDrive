@@ -94,6 +94,13 @@ route probe still returns geometry without executing it in physics. No
 P-route oracle or exhaustive route-coverage labels are defined; v2/v3
 supervised artifacts continue to fail closed with P null, zero prior, and
 `p_mode=p0`, and their sampled support is not exhaustive node/path coverage.
+The standard Plan A train/eval call path uses eager steps. A P map supplied
+during CUDA stream capture causes `TensorThreeVsThreeEnv.step` to raise
+`ValueError` and abort that call; it does not silently fall back. Dashboard
+capture currently supplies no P map. Finite/nonnegative map checks are cached
+per unchanged map tensor version, avoiding repeated scalar synchronization
+across the macro's physics ticks. This capture behavior has not been runtime
+validated.
 Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
 grid endpoints and heading bins within 5 degrees of the HUB-facing direction;

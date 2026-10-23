@@ -721,13 +721,19 @@ class TensorThreeVsThreeEnv(
             if planner_traversal_cost.shape != expected_cost_shape:
                 raise ValueError(
                     f"planner traversal cost map must have shape {expected_cost_shape}")
-            if (not bool(torch.isfinite(planner_traversal_cost).all().item()) or
-                    bool((planner_traversal_cost < 0.).any().item())):
-                raise ValueError(
-                    "planner traversal cost map must be finite and nonnegative")
-            if not bool(torch.isfinite(
-                    planner_traversal_cost * planner_traversal_cost_scale).all().item()):
-                raise ValueError("scaled planner traversal cost map must remain finite")
+            cached = getattr(self, "_validated_planner_traversal_cost", None)
+            version = getattr(planner_traversal_cost, "_version", None)
+            if not (cached is not None and cached[0] is planner_traversal_cost and
+                    cached[1] == version and cached[2] == planner_traversal_cost_scale):
+                if (not bool(torch.isfinite(planner_traversal_cost).all().item()) or
+                        bool((planner_traversal_cost < 0.).any().item())):
+                    raise ValueError(
+                        "planner traversal cost map must be finite and nonnegative")
+                if not bool(torch.isfinite(
+                        planner_traversal_cost * planner_traversal_cost_scale).all().item()):
+                    raise ValueError("scaled planner traversal cost map must remain finite")
+                self._validated_planner_traversal_cost = (
+                    planner_traversal_cost, version, planner_traversal_cost_scale)
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((self.sweeping_enabled &
