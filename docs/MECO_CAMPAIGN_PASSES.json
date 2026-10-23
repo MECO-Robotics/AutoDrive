@@ -45,7 +45,8 @@
         "Phase 2 v2 warm-start consumer implementation started in isolated worktree from approved planner checklist; v2 data labels are not yet consumed by training",
         "Phase 0 D0 calibration/qualification implementation started in an isolated worktree; current provisional protocol remains ineligible for promotion until calibrated gate evidence is frozen",
         "D0 calibration/protocol-gate first implementation slice committed as 9fff8d555 in isolated worktree; adds disjoint calibration split, repeated-seed baseline report, versioned calibrated protocol, paired useful-gain CI promotion gate, and fail-closed safety readiness; reviewer pass pending and safety metrics still unavailable",
-        "Phase 5 synthetic ONNX/export/profile harness integration started in a separate worktree from reviewed commits 12ad40fd5 and 445c80e9b; actual hardware/profile evidence remains gated on a matched five-checkpoint bundle"
+        "Phase 5 synthetic ONNX/export/profile harness integration started in a separate worktree from reviewed commits 12ad40fd5 and 445c80e9b; actual hardware/profile evidence remains gated on a matched five-checkpoint bundle",
+        "Phase 5 exporter/profile harness integrated in isolated branch codex/meco-deployment-integration: e5f77bd99 and f2a1c0f9c; no change to running checkout; production-schema parity, Hailo compile/device profile and checkpoint-bound end-to-end replay remain unvalidated"
       ]
     },
     {
@@ -67,7 +68,8 @@
         "Phase 2 v2 warm-start consumer reviewer pass is pending implementation; required checks cover transcript replay/digest gates, exact support/candidate mapping, target semantics, and weights-only artifact provenance",
         "Phase 0 scoped reviewer pass will check disjoint seeds, immutable report/protocol provenance, repeat versus cross-seed variance, CI-based promotion gating, and safety non-inferiority",
         "D0 calibration/protocol-gate commit 9fff8d555 submitted for scoped static review; expected blocker checks include case coverage, repeat-versus-cross-seed variance, immutable protocol and CI/safety gating",
-        "Phase 5 harness integration reviewer pass pending; review scope will preserve synthetic-only limitations and verify exact checkpoint/config/source provenance contracts"
+        "Phase 5 harness integration reviewer pass pending; review scope will preserve synthetic-only limitations and verify exact checkpoint/config/source provenance contracts",
+        "Phase 5 integration commits e5f77bd99/f2a1c0f9c submitted for scoped static review; no tests, simulator, Hailo, or hardware checks performed"
       ]
     }
   ]
