@@ -1,0 +1,29 @@
+# MECO learning tracks: research protocol
+
+Status: proposed research protocol. This document does not claim that any MECO track is implemented, qualified, or deployable.
+
+## Current baseline and boundary
+
+The offense curriculum is an opt-in research path using `TensorThreeVsThreeEnv`, ordinary simulated perception, and outcome-based promotion with draft targets and budgets. Its policy contract remains 137 scalar inputs and eight categorical actions. Keep that contract and the production controller unchanged while establishing the research comparison. The current curriculum exposes its existing actions and up to four sensed pickup targets; it does not provide arbitrary goal poses, generic candidate tables, or route-costed choices.
+
+Do not treat names such as `frc_defense/adstar.py` from the MECO proposal as an audited planner API. Before pose-level or route-costed experiments, identify and qualify a planner feasibility interface that can enumerate legal choices, compute comparable route costs, and preserve deterministic safety constraints. The first candidate-ranking slice must use only currently expressible choices, or introduce a candidate-table interface without claiming route-cost semantics.
+
+## Comparison sequence
+
+1. **Freeze protocol and D0.** Pin source revision, simulator and perception settings, action cadence, scenario/opponent versions, training and evaluation seeds, and metric definitions. Keep held-out opponent families and final test seeds out of tuning. Measure D0 (current deterministic controller) variance first; set any minimum useful gain from those measurements.
+2. **D1 then D2.** Implement D1 as hand-weighted ranking over the same choices available to the current policy, once a fair adapter exists. Add only features available through the shared observation path and mark unavailable estimates. D2 adds a predictive opponent model to D1. Keep prediction, strategic ranking, planning, and local collision handling separately timed and logged.
+3. **Qualify interfaces before models.** Define bounded/stable candidate ordering, validity masks, output identity and timestamps, and deterministic tie-breaking. Add freshness checks: reject stale, malformed, or mismatched model outputs and resume deterministic control. Safety, action legality, commitment hysteresis, and fallback remain deterministic. Route-cost accounting is blocked on the qualified planner feasibility API.
+4. **Add neural tracks in stages.** Start A1 (multiscale CNN dense pose scores) and C1 (candidate-feature MLP) only after their observation/output adapters and the relevant feasibility interface are qualified. Then compare C2 (map encoder with candidate attention) and A2 (topology-aware structured spatial model). Defer A3 (hierarchical pose graph model) until measured evidence justifies graph and deployment complexity. Keep the existing neural architecture study separate; these tracks do not replace it.
+5. **Compare and report.** Use paired scenarios and seeds, matched observations, physics, opponents, action constraints, and evaluation budgets. Report outcome uncertainty, safety events, candidate recall where applicable, calibration, and total feature extraction, planning, inference, and decision latency. Compare gross predicted reward with route/risk costs subtracted exactly once. Profile robot hardware only after simulator qualification.
+
+## Evidence and acceptance
+
+Every run that tests simulated behavior must include an end-to-end simulator evaluation of that behavior. Retain and inspect its simulation record; report the scenario, seed, source revision, and result. Unit tests alone do not qualify a track. Evaluate held-out opponent families, perception dropouts, stale inference, and forced model disablement; verify deterministic recovery. Promotion thresholds must be prespecified from qualified references and baseline variance, not inferred from training reward.
+
+If a dashboard replay is used, restart the relevant dashboard services after code changes, verify their health endpoints and that both backend and frontend assets come from the current checkout, then generate a fresh replay. Record replay provenance and mark older-source replays outdated. Reports must state which tests and simulator evaluations ran, their scenario/seed and record or replay identifiers, and whether dashboard currency was verified; disclose any missing check.
+
+## Assumptions
+
+- The current offense curriculum is the first research host; production behavior and the 137-scalar/eight-action policy stay unchanged.
+- “Candidate ranking” starts within currently supported actions/targets. Arbitrary-pose A1–A3 outputs and route-costed candidate semantics wait for a qualified planner feasibility API.
+- Candidate cap K=16, gross-reward outputs, D0→D1→D2 controls, and A1/C1→C2/A2→A3 ordering are initial hypotheses to measure, not fixed conclusions.
