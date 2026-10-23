@@ -6,15 +6,16 @@ from frc_defense.meco_tracks import make_meco_track, sample_candidate_action
 
 
 def _pair_support():
-    # Two graph nodes, each paired with behaviors 0 and 1. Only the first
-    # behavior at each node belongs to deterministic support.
+    # Two graph nodes, each paired with the four core behaviors. The action
+    # IDs follow the planner's canonical behavior-to-simulator mapping.
     return PlanAActionSupport(
         node_ids=torch.tensor([0, 1]),
-        behavior_ids=torch.tensor([0, 1, 0, 1]),
-        action_ids=torch.tensor([0, 1, 2, 3]),
-        pair_node_ids=torch.tensor([0, 0, 1, 1]),
-        descriptor_ids=torch.tensor([-1, -1, -1, -1]),
-        valid_mask=torch.tensor([True, False, True, False]),
+        behavior_ids=torch.tensor([0, 1, 2, 3, 4, 0, 1, 2]),
+        action_ids=torch.tensor([7, 0, 1, 2, 3, 4, 6, 5]),
+        pair_node_ids=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]),
+        descriptor_ids=torch.tensor([-1] * 8),
+        valid_mask=torch.tensor([True, False, False, False,
+                                 True, False, False, False]),
         distances_m=torch.tensor([0.0, 1.0]),
         route_cost=torch.tensor([0.0, 1.0]),
         parent_ids=torch.tensor([0, 0]),
@@ -46,15 +47,21 @@ def test_plan_a_gathers_expected_pose_plus_behavior_and_masks_invalid_pairs(trac
     else:
         utility = torch.tensor([[10.0, 20.0]])
         raster = torch.zeros(1, 6, 2, 4)
-    behavior = torch.tensor([[1.5, 50.0, 0.0, 0.0, 0.0]])
+    behavior = torch.tensor([[1.5, 50.0, 0.0, 0.0, 1.5]])
 
     logits = gather_pose_behavior_logits(
         track, {"utility": utility, "behavior_logits": behavior}, graph,
         raster, support, field_length=4.0, field_width=2.0)
 
-    assert torch.equal(logits, torch.tensor([11.5, -torch.inf, 21.5, -torch.inf]))
-    action, _, _ = sample_candidate_action(logits.unsqueeze(0), deterministic=True)
-    assert action.tolist() == [2]
+    assert torch.equal(logits, torch.tensor([
+        11.5, -torch.inf, -torch.inf, -torch.inf,
+        21.5, -torch.inf, -torch.inf, -torch.inf,
+    ]))
+    selected_pair, _, _ = sample_candidate_action(logits.unsqueeze(0), deterministic=True)
+    assert selected_pair.tolist() == [4]
+    pair_index = int(selected_pair.item())
+    assert int(support.action_ids[pair_index].item()) == 3
+    assert int(support.pair_node_ids[pair_index].item()) == 1
 
 
 @pytest.mark.parametrize("track", ("A1", "A2", "A3"))
