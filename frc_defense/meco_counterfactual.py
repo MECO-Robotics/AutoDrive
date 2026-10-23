@@ -604,9 +604,19 @@ def _replay_episode_eligibility(record, manifest):
     if not isinstance(summary, dict) or manifest.get("seed_branch_summaries", {}).get(
             str(record["seed"])) != summary:
         raise ValueError("episode eligibility summary differs from the manifest")
+    replay_config_fields = (
+        "horizon_physics_ticks", "max_macro_ticks", "candidate_k",
+        "prediction_mode", "prediction_contract",
+        "max_plan_c_descriptors_per_prefix", "max_plan_a_pairs_per_prefix",
+        "state_digest_schema", "protocol_id", "qualification_protocol_sha256",
+        "candidate_boundary", "plan_a_support_order", "route_cost_points_per_second",
+        "continuation_policy", "discount_semantics", "gamma_per_macro")
     cache_key = _hash({
+        "scenario_id": record.get("scenario_id"),
+        "category": record.get("category"),
         "seed": record["seed"],
         "device": manifest.get("device"),
+        "replay_config": {key: manifest.get(key) for key in replay_config_fields},
         "episode_transcript_sha256": record["episode_transcript_sha256"],
         "summary_sha256": summary.get("summary_sha256"),
         "source_identity_sha256": manifest.get("source_identity_sha256"),
