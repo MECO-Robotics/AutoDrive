@@ -11,14 +11,26 @@ def _report():
     categories, seeds = ["open", "defended"], [11, 12]
     sources = {"simulator": "abc", "policy": "def"}
     source_hash = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    policy_manifest = {
+        policy: {"policy_id": f"model-{policy}",
+                 "checkpoint_sha256": hashlib.sha256(policy.encode()).hexdigest(),
+                 "source_identity_sha256": source_hash}
+        for policy in TRACKS
+    }
+    policy_manifest.update({policy: {"policy_id": policy, "checkpoint_sha256": None,
+                                    "source_identity_sha256": source_hash}
+                           for policy in CONTROLS})
     return {
         "schema_version": 1, "evaluation_id": "eval-001", "protocol_id": "proto-a",
         "sources": sources, "source_identity_sha256": source_hash,
         "scenario_id": "fuel-test", "categories": categories, "seeds": seeds,
         "tracks": list(TRACKS), "controls": list(CONTROLS), "paired": True,
         "split": "validation", "diagnostic": True,
+        "policy_manifest": policy_manifest,
         "records": [{"scenario_id": "fuel-test", "category": category,
-                     "seed": seed, "policy": policy, "policy_id": policy,
+                     "seed": seed, "policy": policy,
+                     "policy_id": policy_manifest[policy]["policy_id"],
+                     "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
                      "protocol_id": "proto-a", "split": "validation",
                      "source_identity_sha256": source_hash,
                      "metrics": {"success": True, "useful_throughput": 2.5,
@@ -101,8 +113,20 @@ def test_record_metrics_and_provenance_are_required(tmp_path):
     del bad_metrics["records"][0]["metrics"]["success"]
     bad_provenance = _report()
     bad_provenance["records"][0]["split"] = "test"
+    bad_identity = _report()
+    bad_identity["sources"]["simulator"] = "changed"
+    bad_policy = _report()
+    bad_policy["records"][0]["policy_id"] = "different-weights"
+    bad_split = _report()
+    bad_split["split"] = "test"
+    bad_diagnostic = _report()
+    bad_diagnostic["diagnostic"] = "false"
     (evaluation_root / "metrics.json").write_text(json.dumps(bad_metrics))
     (evaluation_root / "provenance.json").write_text(json.dumps(bad_provenance))
+    (evaluation_root / "identity.json").write_text(json.dumps(bad_identity))
+    (evaluation_root / "policy.json").write_text(json.dumps(bad_policy))
+    (evaluation_root / "split.json").write_text(json.dumps(bad_split))
+    (evaluation_root / "diagnostic.json").write_text(json.dumps(bad_diagnostic))
     result = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.)
     assert result["comparison_groups"] == []
 
@@ -128,6 +152,25 @@ def test_evaluator_manifest_reports_live_progress_and_stale_state(tmp_path):
     stale = _collect_status(checkpoint_root, evaluation_root, now=1_800_001_000.,
                             process_probe=lambda _pid: False)
     assert stale["evaluation_runs"][0]["status"] == "stale/unconfirmed"
+
+
+def test_evaluator_complete_requires_valid_report(tmp_path):
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    report = _report()
+    report.update(evaluation_id="eval-complete", diagnostic=False)
+    report["records"].pop()
+    (evaluation_root / "report.json").write_text(json.dumps(report))
+    status = {"schema_version": 1, "evaluation_id": "eval-complete",
+        "protocol_id": "proto-a", "split": "validation", "status": "complete",
+        "pid": 42, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": "report.json", "progress": {"completed_records": 23, "total_records": 24}}
+    (evaluation_root / "report.json.status.json").write_text(json.dumps(status))
+    result = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.,
+                             process_probe=lambda _pid: False)
+    assert result["evaluation_runs"][0]["status"] == "invalid"
+    assert result["evaluation_runs"][0]["error"]
 
 
 def test_running_evaluator_can_report_progress_before_evidence_file_exists(tmp_path):

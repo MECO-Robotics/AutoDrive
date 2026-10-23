@@ -180,7 +180,15 @@ def _comparison(report):
             or not isinstance(report.get("evaluation_id"), str)
             or not report["evaluation_id"]
             or not isinstance(report.get("sources"), dict)
-            or not report["sources"]):
+            or not report["sources"]
+            or type(report.get("diagnostic")) is not bool
+            or report.get("split") != "validation"
+            or not isinstance(report.get("policy_manifest"), dict)
+            or set(report["policy_manifest"]) != set(POLICIES)
+            or any(not isinstance(value, dict)
+                   or not isinstance(value.get("policy_id"), str)
+                   or not value.get("policy_id")
+                   for value in report["policy_manifest"].values())):
         return None
     scenario = report.get("scenario_id")
     categories, seeds, records = report.get("categories"), report.get("seeds"), report.get("records")
@@ -192,9 +200,13 @@ def _comparison(report):
             or any(type(seed) is not int for seed in seeds)
             or len(set(seeds)) != len(seeds) or not isinstance(records, list)):
         return None
-    if (not isinstance(report.get("split"), str) or not report["split"]
-            or not isinstance(report.get("source_identity_sha256"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", report["source_identity_sha256"])):
+    try:
+        canonical_source_hash = hashlib.sha256(json.dumps(
+            report["sources"], sort_keys=True).encode()).hexdigest()
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(report.get("source_identity_sha256"), str)
+            or report["source_identity_sha256"] != canonical_source_hash):
         return None
     expected = {(category, seed, policy) for category in categories
                 for seed in seeds for policy in POLICIES}
@@ -208,7 +220,19 @@ def _comparison(report):
                 or row.get("split") != report["split"]
                 or row.get("source_identity_sha256") != report["source_identity_sha256"]
                 or not isinstance(row.get("policy_id"), str)
+                or row.get("policy_id") != report["policy_manifest"].get(row.get("policy"), {}).get("policy_id")
+                or row.get("checkpoint_sha256") != report["policy_manifest"].get(row.get("policy"), {}).get("checkpoint_sha256")
                 or not isinstance(row.get("metrics"), dict)):
+            return None
+        provenance = report["policy_manifest"][row["policy"]]
+        expected_checkpoint = provenance.get("checkpoint_sha256")
+        if row["policy"] in TRACKS:
+            if (not isinstance(expected_checkpoint, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint)):
+                return None
+        elif expected_checkpoint is not None:
+            return None
+        if provenance.get("source_identity_sha256") != canonical_source_hash:
             return None
         metrics = row["metrics"]
         if (type(metrics.get("success")) not in (bool, int, float)
@@ -226,8 +250,7 @@ def _comparison(report):
     if set(found) != expected:
         return None
     try:
-        source_hash = hashlib.sha256(json.dumps(report["sources"], sort_keys=True,
-            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        source_hash = canonical_source_hash
         signature = {"scenario_id": scenario, "categories": categories,
                      "seeds": seeds, "protocol_id": report["protocol_id"],
                      "source_hash": source_hash}
@@ -242,6 +265,7 @@ def _comparison(report):
             "scenario_id": scenario, "categories": categories, "seeds": seeds,
             "diagnostic": report.get("diagnostic") is True,
             "matched_status": "diagnostic matched" if report.get("diagnostic") is True else "non-diagnostic matched",
+            "policy_manifest": report["policy_manifest"],
             "policy_metrics": {policy: {category: _summarize([
                 _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
                 for category in categories} for policy in POLICIES}}
@@ -330,17 +354,22 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
             safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
             report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
             report, _ = _read_json(report_path) if safe_name and _inside(report_path, eval_root) else (None, None)
+            valid_report = _comparison(report) if report is not None else None
             consistent = (status.get("schema_version") == 1
                 and isinstance(status.get("evaluation_id"), str)
                 and isinstance(status.get("protocol_id"), str)
+                and status.get("split") == "validation"
                 and ((status.get("status") == "running" and report is None)
-                    or (report is not None
+                    or (valid_report is not None
                         and report.get("evaluation_id") == status.get("evaluation_id")
-                        and report.get("protocol_id") == status.get("protocol_id"))))
+                        and report.get("protocol_id") == status.get("protocol_id")
+                        and report.get("split") == status.get("split"))))
             alive = bool(process_probe(status.get("pid")))
             state = status.get("status", "unknown")
             if state == "running":
                 state = "running" if fresh and alive and consistent else "stale/unconfirmed"
+            elif state == "complete" and not consistent:
+                state = "invalid"
             elif state not in ("complete", "failed", "stopped"):
                 state = "unknown"
             evaluation_runs.append({"evaluation_id": status.get("evaluation_id"),
@@ -391,6 +420,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 "scenario_id": comparison["scenario_id"],
                 "diagnostic": comparison["diagnostic"],
                 "matched_status": comparison["matched_status"],
+                "policy_manifest": comparison["policy_manifest"][policy],
                 "records": metrics}
     policies = []
     for policy in POLICIES:
