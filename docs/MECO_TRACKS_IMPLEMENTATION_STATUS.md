@@ -308,7 +308,7 @@ attempt produced no validated dataset. This correction passed independent scoped
 compile/diff checks were run; simulator collection and replay remain
 outstanding.
 
-## Route-query batch failure and chunking follow-up (2026-10-24)
+## Route-query batch failure and chunking follow-up (2026-10-23)
 
 A fresh Plan A counterfactual collection at `pickup_scattered/dense`, seed
 `3540116847380660224`, source commit `5eb1cb4e0`, attempted output
@@ -320,7 +320,7 @@ The candidate builder now validates snapshot identity and duplicate
 submitting consecutive slices of at most `MAX_ROUTE_QUERY_BATCH` (64) to the
 existing evaluator. It concatenates results in query order and passes the same
 tolerances and learned-map, scale, and provenance arguments to every slice.
-The evaluator retains its explicit 64-query cap. Scoped independent review is
-pending. Only static compilation and diff checks have run for this follow-up;
+The evaluator retains its explicit 64-query cap. Independent scoped review approved isolated commit 1f9f7d079 and integration
+commit f23171d63. Only static compilation and diff checks have run for this follow-up;
 no route collection, simulator evaluation, or dashboard replay has validated
 it yet.
