@@ -636,19 +636,29 @@ def main(argv=None):
             "checkpoint_path": args.checkpoint, "passed": False,
             "failures": [f"round aborted: {type(error).__name__}: {error}"],
             "streak_reset": True}
-        _atomic_json(state_path, {"schema_version": 1,
-            "candidate_policy": args.candidate_policy, "state": state.to_dict(),
-            "last_round": failure})
-        _write_dashboard_status(state_path, args.scenario, args.candidate_policy,
-            {"evaluation_id": None, "protocol_id": protocol.get("protocol_id"),
-             "split": "validation", "bundle_id": None, "policy_manifest": {},
-             "gate_definition": asdict(SCENARIOS[args.scenario].gate),
-             "gate_calibration_status": protocol.get("gate_calibration_status"),
-             "promotion": {"passed": False, "promoted": False,
-                           "failures": failure["failures"]},
-             "failure": failure,
-             "generated_utc": __import__("datetime").datetime.now(
-                 __import__("datetime").timezone.utc).isoformat()}, state)
+        try:
+            _atomic_json(state_path, {"schema_version": 1,
+                "candidate_policy": args.candidate_policy, "state": state.to_dict(),
+                "last_round": failure})
+        except BaseException as persistence_error:
+            failure["failures"].append(
+                f"state persistence failed: {type(persistence_error).__name__}: {persistence_error}")
+        finally:
+            try:
+                _write_dashboard_status(state_path, args.scenario, args.candidate_policy,
+                    {"evaluation_id": None, "protocol_id": protocol.get("protocol_id"),
+                     "split": "validation", "bundle_id": None, "policy_manifest": {},
+                     "gate_definition": asdict(SCENARIOS[args.scenario].gate),
+                     "gate_calibration_status": protocol.get("gate_calibration_status"),
+                     "promotion": {"passed": False, "promoted": False,
+                                   "failures": failure["failures"]},
+                     "failure": failure,
+                     "generated_utc": __import__("datetime").datetime.now(
+                         __import__("datetime").timezone.utc).isoformat()}, state)
+            except BaseException:
+                # The original round failure remains authoritative; dashboard
+                # refresh is best-effort even when state storage is unavailable.
+                pass
         raise
     _write_dashboard_status(state_path, args.scenario, args.candidate_policy,
                              report, state)

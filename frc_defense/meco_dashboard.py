@@ -395,12 +395,21 @@ def _qualification_status(project: Path, errors: list):
         if error and path.exists():
             errors.append({"source": str(path.relative_to(project)), "error": error})
         return None
+    failure = status.get("failure")
+    promotion = status.get("promotion")
+    failed_round = (isinstance(promotion, dict)
+                    and promotion.get("passed") is False
+                    and isinstance(failure, dict)
+                    and isinstance(failure.get("failures"), list)
+                    and bool(failure["failures"]))
+    bundle_id = status.get("bundle_id")
+    valid_bundle = (isinstance(bundle_id, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", bundle_id))
     if (status.get("schema_version") != 1
             or status.get("split") not in ("validation", "test")
             or not isinstance(status.get("protocol_id"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", status["protocol_id"])
-            or not isinstance(status.get("bundle_id"), str)
-            or not re.fullmatch(r"[0-9a-f]{64}", status["bundle_id"])
+            or (not valid_bundle and not failed_round)
             or not isinstance(status.get("confidence_intervals"), dict)
             or not isinstance(status.get("promotion"), dict)):
         errors.append({"source": str(path.relative_to(project)),
@@ -410,7 +419,7 @@ def _qualification_status(project: Path, errors: list):
         "updated_utc", "evaluation_id", "scenario_id", "candidate_policy", "split",
         "protocol_id", "bundle_id", "checkpoint_sha256", "gate_definition",
         "gate_calibration_status", "confidence_intervals", "promotion", "streak", "qualified",
-        "final_test_isolated")}
+        "final_test_isolated", "failure")}
 
 
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,

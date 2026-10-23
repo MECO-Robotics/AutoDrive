@@ -47,13 +47,13 @@
       "<p class='muted'>No three-pass workflow evidence is available.</p>";
     const qualification = data.qualification;
     document.querySelector("#qualification").innerHTML = qualification ?
-      `<article class="group"><h3>${esc(qualification.scenario_id)} · ${esc(qualification.split)} · ${esc(qualification.qualified ? "qualified under provisional gates" : qualification.promotion?.passed ? "streaking" : "not qualified")}</h3>`+
+      `<article class="group"><h3>${esc(qualification.scenario_id)} · ${esc(qualification.split)} · ${esc(qualification.failure ? "round failed / streak reset" : qualification.qualified ? "qualified under provisional gates" : qualification.promotion?.passed ? "streaking" : "not qualified")}</h3>`+
       `<p>Policy ${esc(qualification.candidate_policy)} · streak ${esc(qualification.streak?.count ?? "—")} / 3 · ${esc(qualification.evaluation_id)}</p>`+
       `<small>Protocol ${esc(qualification.protocol_id)} · bundle ${esc(qualification.bundle_id)}</small>`+
       `<small>Checkpoint ${esc(qualification.checkpoint_sha256 || "—")} · final-test isolated ${qualification.final_test_isolated ? "yes" : "no"}</small>`+
       `<small>Gate calibration ${esc(qualification.gate_calibration_status || "unknown")}</small>`+
       `<small>Gate ${pretty(qualification.gate_definition || {})}</small>`+
-      `<pre>${pretty({promotion: qualification.promotion, paired_clustered_confidence_intervals: qualification.confidence_intervals})}</pre></article>` :
+      `<pre>${pretty({failure: qualification.failure, promotion: qualification.promotion, paired_clustered_confidence_intervals: qualification.confidence_intervals})}</pre></article>` :
       "<p class='muted'>No formal qualification round is recorded.</p>";
     document.querySelector("#groups").innerHTML = groups.length ? groups.map(g =>
       `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
