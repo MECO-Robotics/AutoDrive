@@ -55,7 +55,15 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         return torch.where(active[:, None, None], commands, 0.)
 
 
-def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True):
+def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True,
+                        production_d0=False):
+    """Build a curriculum environment, optionally running production D0 in slot 3.
+
+    ``production_d0`` changes only the learner slot's controller from the
+    default NN controller to the native deterministic offense controller.
+    Scenario-specific teammate and scripted pressure/blocker assignments are
+    still applied below, and the same reset path is used in either mode.
+    """
     definition = get_scenario(scenario_id)
     if category.endswith('/after_release') and not fuel_physics:
         raise ValueError('after_release requires fuel_physics=True for an actual airborne initial release')
@@ -66,7 +74,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         # Native simulator kernels use the current device/stream at setup.
         torch.cuda.set_device(requested_device)
     modes = ['none'] * 6
-    modes[3] = 'nn'
+    modes[3] = 'deterministic' if production_d0 else 'nn'
     pressure = _pressure(category, seed) if scenario_id in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed)
     if scenario_id == 'team_delivery_cycles':
         modes[4] = 'deterministic'
@@ -90,7 +98,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'time_budget_s': definition.time_budget_s, 'pressure': pressure,
         'targets': {}, 'allowed_actions': (), 'schedule': None,
         'route': next((r for r in ('trench', 'bump', 'open') if r in category.split('/')), 'open'),
-        'reference_qualified': False, 'execution': 'generic_nn',
+        'reference_qualified': False,
+        'execution': 'production_deterministic_d0' if production_d0 else 'generic_nn',
         'limitations': ['Draft budgets and targets require scripted-reference qualification.',
                         'Uncontrolled robot bodies remain off-field and are restored after each step.']}
     reset_curriculum_scenario(env, seed)
