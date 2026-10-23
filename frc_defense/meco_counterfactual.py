@@ -401,7 +401,7 @@ def _observation_digest(observation):
 
 def _device_identity(device):
     resolved = torch.device(device)
-    identity = {"torch": torch.__version__, "python": sys.version,
+    identity = {"torch": str(torch.__version__), "python": sys.version,
                 "device": str(resolved), "platform": platform.platform()}
     if resolved.type == "cuda":
         index = resolved.index if resolved.index is not None else torch.cuda.current_device()

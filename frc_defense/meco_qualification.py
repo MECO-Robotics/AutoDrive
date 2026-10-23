@@ -529,7 +529,8 @@ def _require_calibration_gpu(device: str) -> dict:
         raise RuntimeError(f"could not identify requested calibration GPU {selected}")
     return {"device": str(selected), "device_name": name,
         "backend": "hip" if torch.version.hip else "cuda",
-        "torch_version": torch.__version__, "hip_version": torch.version.hip}
+        "torch_version": str(torch.__version__),
+        "hip_version": str(torch.version.hip) if torch.version.hip is not None else None}
 
 
 def derive_useful_gain_margins(reports: dict, target: str, declaration: dict) -> tuple[dict, dict]:
