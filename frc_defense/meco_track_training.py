@@ -1090,8 +1090,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
-            or inference_disable_tick < 0):
-        raise ValueError("inference_disable_tick must be a nonnegative physics tick")
+            or inference_disable_tick <= 0):
+        raise ValueError("inference_disable_tick must be a positive physics tick")
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1106,6 +1106,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category is not registered for scenario")
+    if inference_disable_tick is not None:
+        scenario_horizon = math.ceil(definition.time_budget_s / OBSERVATION_DT)
+        if inference_disable_tick >= scenario_horizon:
+            raise ValueError("inference_disable_tick must be below the scenario horizon "
+                f"({scenario_horizon} physics ticks) for every category")
     selected = tuple(MECO_TRACKS if evaluation_policies is None else evaluation_policies)
     if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
         raise ValueError("evaluation_policies must be a nonempty unique subset of MECO tracks")
@@ -1316,6 +1321,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         production_d0=is_production_d0,
                         **(qualification_case or {}))
                     try:
+                        if (inference_disable_tick is not None and
+                                inference_disable_tick >= env.horizon):
+                            raise ValueError("inference_disable_tick must be below the "
+                                f"evaluated environment horizon ({env.horizon} physics ticks)")
                         if is_production_d0 and env.control_modes[3] != "deterministic":
                             raise RuntimeError("production D0 evaluation did not receive the deterministic slot-3 controller")
                         graph = (None if is_production_d0 else
