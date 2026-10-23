@@ -1375,8 +1375,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
-    if split not in ("validation", "test", "train", "calibration"):
-        raise ValueError("split must be train, validation, test, or calibration")
+    if split not in ("validation", "test", "train", "calibration", "diagnostic"):
+        raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
@@ -1398,8 +1398,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         required_case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
         if not isinstance(qualification_case, dict) or set(qualification_case) != required_case_fields:
             raise ValueError("qualification_case must contain the four frozen stratum identifiers")
-    if qualification_protocol_id is not None and (split == "train" or not isinstance(qualification_protocol_id, str)
-                                                   or not qualification_protocol_id):
+    if qualification_protocol_id is not None and (
+            split not in ("validation", "test") or
+            not isinstance(qualification_protocol_id, str) or
+            not qualification_protocol_id):
         raise ValueError("qualification protocol identity is only valid for held-out splits")
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
@@ -1409,8 +1411,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if inference_disable_tick >= scenario_horizon:
             raise ValueError("inference_disable_tick must be below the scenario horizon "
                 f"({scenario_horizon} physics ticks) for every category")
-    if split not in ("validation", "test", "train", "calibration"):
-        raise ValueError("split must be train, validation, test, or calibration")
+    if split not in ("validation", "test", "train", "calibration", "diagnostic"):
+        raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     selected = tuple(MECO_TRACKS if evaluation_policies is None else evaluation_policies)
     if len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
         raise ValueError("evaluation_policies must be a unique subset of MECO tracks")

@@ -44,8 +44,10 @@ The runner uses the explicit contiguous seed list beginning at `--seed` and
 writes one evaluation JSON per condition plus a matrix JSON. When
 `--qualification-protocol` is supplied, every category/seed must be assigned
 by that frozen protocol to exactly one validation or test split; training or
-unassigned seeds are rejected. The matrix records the protocol ID and hash
-plus each category/seed split assignment. Without that option, the matrix is
+unassigned seeds are rejected. Each invocation must resolve entirely to one
+split; run validation and test seeds in separate matrices. The matrix passes
+the resolved split and protocol ID to every evaluator and records the protocol
+ID/hash plus each category/seed assignment. Without that option, the matrix is
 explicitly marked `diagnostic_only_unbound_seeds`; it makes no held-out claim.
 In either mode these are diagnostic paired records; they do not replace the
 calibrated qualification gate and the matrix does not calculate promotion

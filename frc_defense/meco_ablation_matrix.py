@@ -115,13 +115,13 @@ def _held_out_seed_assignments(protocol: dict, scenario_id: str,
                  and case.get("category") == category]
         category_assignments = {}
         for seed in seeds:
-            splits = {case["split"] for case in cases
-                      if seed in case.get("seeds", [])}
-            if len(splits) != 1 or not splits <= {"validation", "test"}:
+            matches = [case for case in cases if seed in case.get("seeds", [])]
+            if (len(matches) != 1 or
+                    matches[0]["split"] not in ("validation", "test")):
                 raise ValueError(
                     f"matrix seed {seed} for {scenario_id}/{category} is not assigned "
                     "to exactly one frozen validation/test split")
-            category_assignments[str(seed)] = next(iter(splits))
+            category_assignments[str(seed)] = matches[0]["split"]
         assignments[category] = category_assignments
     return assignments
 
@@ -297,12 +297,20 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if qualification_protocol is None:
         seed_split_assignments = None
         evaluation_design = "diagnostic_only_unbound_seeds"
+        evaluation_split = "diagnostic"
     else:
         from .meco_supervised import _load_protocol
         protocol, protocol_id, protocol_sha256, protocol_path = _load_protocol(
             Path(qualification_protocol))
         seed_split_assignments = _held_out_seed_assignments(
             protocol, scenario_id, categories, seeds)
+        splits = {split for assignments in seed_split_assignments.values()
+                  for split in assignments.values()}
+        if len(splits) != 1:
+            raise ValueError(
+                "one matrix invocation must use a single frozen split; run validation "
+                "and test seeds in separate matrices")
+        evaluation_split = next(iter(splits))
         evaluation_design = "frozen_protocol_held_out"
         qualification_provenance = {"protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
@@ -321,6 +329,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
         "evaluation_design": evaluation_design,
+        "evaluation_split": evaluation_split,
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "source_identity_sha256": source_hash,
@@ -353,7 +362,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         report_path = output_root / f"{condition_id}.evaluation.json"
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=categories, episodes=len(seeds), master_seed=seeds[0],
-            episode_seeds=seeds, device=device,
+            episode_seeds=seeds, device=device, split=evaluation_split,
+            qualification_protocol_id=(None if qualification_provenance is None else
+                qualification_provenance["protocol_id"]),
             candidate_k_override=condition.candidate_k,
             prediction_mode=condition.prediction_mode,
             control_prediction_mode=condition.control_prediction_mode,
@@ -376,6 +387,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         report["experiment_matrix"] = {"matrix_id": matrix_id,
             "condition_id": condition_id, "condition": spec,
             "evaluation_design": evaluation_design,
+            "evaluation_split": evaluation_split,
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments}
         _atomic_json(report_path, report)
@@ -384,6 +396,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "evaluation_id": report["evaluation_id"],
             "protocol_id": report["protocol_id"],
             "evaluation_design": evaluation_design,
+            "evaluation_split": evaluation_split,
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments,
             "report_path": str(report_path),
@@ -510,6 +523,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     common_provenance = {
         "execution_device": execution_device,
         "evaluation_design": evaluation_design,
+        "evaluation_split": evaluation_split,
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
@@ -529,6 +543,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "matrix_id": matrix_id,
         "protocol": matrix_protocol,
         "evaluation_design": evaluation_design,
+        "evaluation_split": evaluation_split,
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
