@@ -13,6 +13,7 @@ import threading
 import math
 from contextlib import contextmanager
 from .dashboard_api import field_layout_payload
+from .meco_dashboard import meco_status_payload
 
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -79,6 +80,18 @@ def create_handler(run_dir: Path):
                 body = (STATIC_DIR / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path in ("/meco", "/meco.html"):
+                body = (STATIC_DIR / "meco.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path == "/assets/meco.css":
+                body = (STATIC_DIR / "meco.css").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/css; charset=utf-8")
+            elif parsed.path == "/assets/meco.js":
+                body = (STATIC_DIR / "meco.js").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
             elif parsed.path == "/info":
                 body = (STATIC_DIR / "field-guide.html").read_bytes()
                 self.send_response(200)
@@ -156,6 +169,15 @@ def create_handler(run_dir: Path):
                     body=json.dumps({"status":"waiting","algorithm":"generational",
                                      "campaign":campaign}).encode()
                 self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif parsed.path == "/api/meco-status":
+                try:
+                    body = meco_status_payload(Path(__file__).resolve().parents[1])
+                    self.send_response(200)
+                except (OSError, ValueError):
+                    body = json.dumps({"schema_version": 1, "policies": [],
+                        "comparison_groups": [], "errors": [{"error": "MECO status unavailable"}]}).encode()
+                    self.send_response(503)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/field-layout":
                 body = field_layout_payload()
