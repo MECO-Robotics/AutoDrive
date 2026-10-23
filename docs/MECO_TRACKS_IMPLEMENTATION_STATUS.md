@@ -265,3 +265,26 @@ paths to cover at least the configured fraction of legal XY cells (default
 1%); the exact observed and minimum fractions are stored in the artifact.
 P warm-start outcomes therefore
 remain unqualified until the dataset, fit, and representative replay gates run.
+
+## Runtime failure follow-up (2026-10-23)
+
+The first live five-track batch stopped before a cycle completed. A2 failed at
+42 updates after `pickup_simple/cluster` reached a state with a loaded dumper,
+no currently sensed eligible FUEL target, and only native action 7 legal. Plan
+A correctly failed closed because its drive support also excluded loaded
+dumper traversal. The corrected support now retains action 7 at reachable
+legal graph nodes when the native mask permits it; traversal still requires
+the selected explicit planner goal and native route/safety checks, while
+loaded-dumper ferry action 6 stays excluded. A1 stopped at 47 updates from
+the supervisor's sibling-failure handling. Those checkpoints are source-bound
+to the prior checkout and are not resumable under this code revision.
+
+The first current-source counterfactual collector attempt also exposed that
+`CurriculumEnv` did not expose the native perceived-track accessor used by
+Plan C's expanded-target candidate builder. A shared native accessor now
+returns only perceived track positions, velocities, and masks; both Plan C
+target enumeration and commitment matching query slot 3, matching execution.
+The failed collector run produced no validated dataset. The fixes have scoped
+static review and compilation only; seeded simulator collection, route-v2
+fitting, current-dashboard replay inspection, and a new all-five training run
+remain pending.
