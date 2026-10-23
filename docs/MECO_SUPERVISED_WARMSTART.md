@@ -333,3 +333,46 @@ preference. It does not claim global optimality and provides no U target;
 uncensored feasible coverage exist. It does not convert or modify v3.
 Collection and replay require runtime simulator validation before the data can
 be treated as empirically established.
+
+`warm-start-plan-a-expert-goals-v1` is the explicit annotation intake and
+weights-only fitter for A1/A2/A3. Its `--dataset` is a JSONL annotation file
+with the `meco-plan-a-expert-goal-annotations-v1` manifest. Each row identifies
+the exact scenario/category/seed/decision, snapshot and state hashes, legal
+support digest, replayed goal descriptor, executed action and selected
+behavior, selected canonical legal goal, censoring inventory, and an explicit
+`u_status`. An available U must be finite and uncensored across all feasible
+behavior support; unavailable or censored U remains masked. B is learned only
+as a behavior preference among available behaviors at the annotated goal.
+Every row must bind the exact trajectory-v3 replay, explicit-goal source,
+legal-node dataset, train split, frozen protocol and annotation-authority file
+hash. The loader rejects action-only or mismatched labels.
+
+Example after collecting the explicit-goal source and preparing the strict
+legal-node dataset and annotation manifest:
+
+```sh
+python -m frc_defense.meco_supervised collect-plan-a-expert-goal-source-v1 \
+  --dataset evaluations/meco-supervised/counterfactual-v3.jsonl \
+  --output evaluations/meco-supervised/expert-goal-source.jsonl \
+  --qualification-protocol qualifications/meco/protocol.json --device cuda:0
+python -m frc_defense.meco_supervised collect-plan-a-legal-nodes-v1 \
+  --dataset evaluations/meco-supervised/counterfactual-v3.jsonl \
+  --expert-goal-source evaluations/meco-supervised/expert-goal-source.jsonl \
+  --output evaluations/meco-supervised/legal-nodes.jsonl \
+  --qualification-protocol qualifications/meco/protocol.json --device cuda:0
+python -m frc_defense.meco_supervised warm-start-plan-a-expert-goals-v1 \
+  --track A1 --dataset evaluations/meco-supervised/expert-goal-annotations.jsonl \
+  --legal-node-dataset evaluations/meco-supervised/legal-nodes.jsonl \
+  --source-dataset evaluations/meco-supervised/expert-goal-source.jsonl \
+  --annotation-source evaluations/meco-supervised/annotation-authority.json \
+  --output checkpoints/meco-warmstart/A1-expert-goals.pt \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --device cuda:0
+```
+
+The fitter replays the exact legal support before training, emits model weights
+only, binds the annotation/source/legal data and manifest hashes, and validates
+the artifact before returning. It initializes and verifies the P head at p0;
+it does not turn the route-cost selection rule into U, P, or a global
+optimality claim. No expert-goal data or weights have been collected or fitted
+by this implementation change.

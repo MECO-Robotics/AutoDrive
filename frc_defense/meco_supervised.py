@@ -38,6 +38,7 @@ PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA = "meco-plan-a-legal-node-u-b-weights-v1"
 PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA = "meco-plan-a-joint-u-b-p-weights-v1"
 PLAN_A_EXPERT_GOAL_DATASET_SCHEMA = "meco-plan-a-expert-goal-annotations-v1"
 PLAN_A_EXPERT_GOAL_TARGET_SCHEMA = "meco-plan-a-explicit-goal-u-b-targets-v1"
+PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA = "meco-plan-a-expert-goals-weights-v1"
 PLAN_A_EXPERT_GOAL_SEMANTICS = (
     "explicit_annotated_goal_value_and_behavior_preference; teacher selection is not globally optimal")
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
@@ -614,6 +615,11 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
             legal_manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
             legal_manifest.get("dataset_sha256") != legal_sha):
         raise ValueError("expert-goal annotations do not bind the frozen legal-node source")
+    if (expert_source_manifest.get("schema") == PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA and
+            (legal_manifest.get("expert_goal_source_sha256") != expert_source_sha or
+             legal_manifest.get("expert_goal_source_manifest_sha256") !=
+                hashlib.sha256(expert_source_manifest_path.read_bytes()).hexdigest())):
+        raise ValueError("legal-node coverage was not collected with this exact expert-goal source")
     replayed_legal, _, replayed_legal_sha, _ = _read_and_replay_plan_a_legal_node_dataset(
         legal_node_dataset, legal_source_dataset, qualification_protocol, device, track=None)
     if replayed_legal_sha != legal_sha:
@@ -717,6 +723,312 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
         row["b_target"] = behavior
         row["target_semantics"] = PLAN_A_EXPERT_GOAL_SEMANTICS
     return rows, manifest, data_sha, hashlib.sha256(manifest_bytes).hexdigest()
+
+
+def warm_start_plan_a_expert_goals_v1(track: str, dataset: Path,
+        legal_node_dataset: Path, source_dataset: Path, annotation_source_path: Path,
+        output: Path, *, qualification_protocol: Path, updates=10,
+        learning_rate=1e-4, device=None):
+    """Fit Plan A U/B from explicitly annotated replay-bound feasible goals.
+
+    U is trained only when the annotation loader proves an available uncensored
+    value. B is a preference among legal behaviors at that annotated goal.
+    The selected goal is not treated as a globally optimal goal, and P stays at
+    p0 because this artifact contains no route-cost oracle target.
+    """
+    if (track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1 or
+            not _finite_number(learning_rate) or learning_rate <= 0):
+        raise ValueError("expert-goal warm start requires A1/A2/A3 and positive finite fit settings")
+    _prepare_native_gpu_runtime(device)
+    from .meco_device import require_indexed_cuda_device
+    from .curriculum_training import source_identity
+    from .meco_plan_a_policy import gather_pose_behavior_logits
+    device = str(require_indexed_cuda_device(device,
+        purpose="Plan A expert-goal fitting"))
+    sources = source_identity()
+    annotations, manifest, data_sha, annotation_manifest_sha = (
+        load_plan_a_expert_goal_annotations(dataset, legal_node_dataset, source_dataset,
+            qualification_protocol=qualification_protocol, expected_sources=sources,
+            annotation_source_path=annotation_source_path, device=device))
+    # The legal-node records are replayed again here to obtain model inputs. The
+    # strict annotation loader above independently replays the same bytes.
+    base_manifest_path = Path(source_dataset).resolve().with_suffix(
+        Path(source_dataset).resolve().suffix + ".manifest.json")
+    source_manifest = json.loads(base_manifest_path.read_text())
+    base_name = source_manifest.get("base_dataset")
+    if not isinstance(base_name, str) or not base_name or Path(base_name).is_absolute():
+        raise ValueError("expert-goal source has invalid base trajectory reference")
+    base_dataset = (Path(source_dataset).resolve().parent / base_name).resolve()
+    samples, legal_manifest, legal_sha, legal_manifest_sha = (
+        _read_and_replay_plan_a_legal_node_dataset(legal_node_dataset, base_dataset,
+            qualification_protocol, device, track))
+    if legal_manifest.get("device", {}).get("device") != device:
+        raise ValueError("expert-goal legal support and fitter devices differ")
+    expert_source_device = source_manifest.get("device", {}).get("device")
+    if expert_source_device != device:
+        raise ValueError("expert-goal source and fitter devices differ")
+    sample_by_key = {(s["row"]["scenario_id"], s["row"]["category"],
+        s["row"]["seed"], s["row"]["decision_index"]): s for s in samples}
+    annotated = []
+    for row in annotations:
+        key = (row["scenario_id"], row["category"], row["seed"], row["decision_index"])
+        sample = sample_by_key.get(key)
+        if sample is None or sample["row"].get("support_digest") != row.get("support_digest"):
+            raise ValueError("expert annotation has no exact replayed legal support sample")
+        goal_node = row["selected_goal"]["node_id"]
+        node_position = goal_node if 0 <= goal_node < sample["graph"].node_count else None
+        if node_position is None:
+            raise ValueError("annotated goal node is absent from replayed graph")
+        b_pairs = [(pair["behavior_id"], pair["pair_index"])
+            for pair in sample["row"]["pairs"] if pair.get("node_id") == goal_node and
+            pair.get("status") == "available"]
+        if row["b_target"] not in {behavior for behavior, _ in b_pairs}:
+            raise ValueError("annotated behavior is absent from exact legal goal support")
+        annotated.append((row, sample, node_position, b_pairs))
+    if not annotated:
+        raise ValueError("expert-goal annotation dataset has no replayed rows")
+    u_count = sum(row["u_mask"] for row, _, _, _ in annotated)
+    b_count = sum(len(pairs) > 1 for _, _, _, pairs in annotated)
+    if u_count < 1 and b_count < 1:
+        raise ValueError("expert-goal annotations provide no trainable uncensored U or B comparisons")
+
+    model = make_meco_track(track,
+        candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    value_losses, preference_losses = [], []
+    model.train()
+    for _ in range(updates):
+        epoch_u, epoch_b = [], []
+        for row, sample, node_position, behavior_pairs in annotated:
+            raw = model(raster=sample["raster"], globals_=sample["globals"],
+                **sample["graph_inputs"])
+            logits = gather_pose_behavior_logits(track, raw, sample["graph"],
+                sample["raster"], sample["support"],
+                field_length=sample["field_length"], field_width=sample["field_width"])
+            terms = []
+            if row["u_mask"]:
+                target_u = torch.tensor(float(row["u_target"]), device=device,
+                    dtype=raw["utility"].dtype)
+                if track == "A1":
+                    h, w = sample["raster"].shape[-2:]
+                    pose_node = sample["graph"].xy[node_position]
+                    col = (pose_node[0] / sample["field_length"] * w).floor().long().clamp(0, w-1)
+                    rr = (pose_node[1] / sample["field_width"] * h).floor().long().clamp(0, h-1)
+                    prediction_u = raw["utility"][0, sample["graph"].heading_bin[node_position], rr, col]
+                else:
+                    prediction_u = raw["utility"][0, node_position]
+                loss_u = F.smooth_l1_loss(prediction_u, target_u, beta=1.)
+                terms.append(loss_u)
+                epoch_u.append(float(loss_u.detach().cpu()))
+            if len(behavior_pairs) > 1:
+                pair_indices = [index for _, index in behavior_pairs]
+                behavior_ids = [behavior for behavior, _ in behavior_pairs]
+                local_logits = logits[pair_indices]
+                target_index = behavior_ids.index(row["b_target"])
+                target = torch.tensor([target_index], dtype=torch.long, device=device)
+                loss_b = F.cross_entropy(local_logits.reshape(1, -1), target)
+                terms.append(loss_b)
+                epoch_b.append(float(loss_b.detach().cpu()))
+            if terms:
+                loss = torch.stack(terms).sum()
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+                optimizer.step()
+        if not epoch_u and not epoch_b:
+            raise ValueError("expert-goal epoch contains no trainable target")
+        value_losses.append(sum(epoch_u) / len(epoch_u) if epoch_u else 0.)
+        preference_losses.append(sum(epoch_b) / len(epoch_b) if epoch_b else 0.)
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during Plan A expert-goal fitting")
+    _initialize_unlabelled_plan_a_penalty_head(model, track)
+    from .meco_counterfactual import _device_identity
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    payload = {"schema": PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA, "schema_version": 1,
+        "artifact_kind": "weights_only_plan_a_explicit_expert_goal_u_b_v1",
+        "track": track, "model_schema_version": 1, "model": model.state_dict(),
+        "dataset_path": str(Path(dataset).resolve()), "dataset_sha256": data_sha,
+        "dataset_manifest_sha256": annotation_manifest_sha,
+        "annotation_source_manifest_sha256": hashlib.sha256(
+            Path(dataset).resolve().with_suffix(Path(dataset).resolve().suffix + ".manifest.json").read_bytes()).hexdigest(),
+        "legal_node_dataset_path": str(Path(legal_node_dataset).resolve()),
+        "legal_node_dataset_sha256": legal_sha,
+        "legal_node_manifest_sha256": legal_manifest_sha,
+        "source_dataset_path": str(Path(source_dataset).resolve()),
+        "source_dataset_sha256": hashlib.sha256(Path(source_dataset).read_bytes()).hexdigest(),
+        "source_manifest_sha256": hashlib.sha256(Path(source_dataset).resolve().with_suffix(
+            Path(source_dataset).resolve().suffix + ".manifest.json").read_bytes()).hexdigest(),
+        "base_dataset_sha256": legal_manifest["source_dataset_sha256"],
+        "base_manifest_sha256": legal_manifest["source_manifest_sha256"],
+        "annotation_source_path": str(Path(annotation_source_path).resolve()),
+        "annotation_source_sha256": hashlib.sha256(Path(annotation_source_path).read_bytes()).hexdigest(),
+        "dataset_schema": PLAN_A_EXPERT_GOAL_DATASET_SCHEMA,
+        "target_schema": PLAN_A_EXPERT_GOAL_TARGET_SCHEMA,
+        "label_provenance": "explicit replay-bound selected feasible goal and behavior annotation",
+        "target_semantics": PLAN_A_EXPERT_GOAL_SEMANTICS,
+        "u_target_semantics": "uncensored_explicit_expert_goal_value_only; absent_values_masked",
+        "b_target_semantics": "selected_behavior_preference_within_annotated_legal_goal_support",
+        "p_target": None, "p_mode": "p0", "p_prior": 0.0,
+        "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+        "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+        "candidate_feature_names": list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)),
+        "prediction_mode": legal_manifest["prediction_mode"],
+        "prediction_contract": legal_manifest["prediction_contract"],
+        "protocol_id": protocol_id, "protocol_sha256": protocol_sha,
+        "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": protocol_path.name,
+        "split": "train", "sources": sources,
+        "source_identity_sha256": _canonical_hash(sources),
+        "collection_device": legal_manifest["device"],
+        "training_device": _device_identity(device),
+        "optimizer_state_included": False, "resume_compatible": False,
+        "updates": updates, "learning_rate": learning_rate,
+        "annotated_record_count": len(annotated), "available_u_target_count": u_count,
+        "comparable_b_record_count": b_count,
+        "mean_u_loss_by_epoch": value_losses,
+        "mean_b_loss_by_epoch": preference_losses}
+    output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    validate_plan_a_expert_goal_artifact(track, output,
+        qualification_protocol=qualification_protocol, expected_sources=sources)
+    return {"track": track, "checkpoint": str(output),
+        "schema": PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA,
+        "annotated_records": len(annotated), "available_u_targets": u_count,
+        "comparable_b_records": b_count}
+
+
+def validate_plan_a_expert_goal_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate replay-bound expert-goal lineage and weights-only model state."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    from .curriculum_training import source_identity
+    import hashlib
+    _, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    paths = {key: Path(payload.get(key, "")).resolve() for key in (
+        "dataset_path", "legal_node_dataset_path", "source_dataset_path",
+        "annotation_source_path")}
+    try:
+        data_bytes = paths["dataset_path"].read_bytes()
+        data_manifest_bytes = paths["dataset_path"].with_suffix(
+            paths["dataset_path"].suffix + ".manifest.json").read_bytes()
+        legal_bytes = paths["legal_node_dataset_path"].read_bytes()
+        legal_manifest_bytes = paths["legal_node_dataset_path"].with_suffix(
+            paths["legal_node_dataset_path"].suffix + ".manifest.json").read_bytes()
+        source_bytes = paths["source_dataset_path"].read_bytes()
+        source_manifest_bytes = paths["source_dataset_path"].with_suffix(
+            paths["source_dataset_path"].suffix + ".manifest.json").read_bytes()
+        annotation_source_bytes = paths["annotation_source_path"].read_bytes()
+        data_manifest = json.loads(data_manifest_bytes)
+        legal_manifest = json.loads(legal_manifest_bytes)
+        source_manifest = json.loads(source_manifest_bytes)
+        if not isinstance(source_manifest, dict):
+            raise ValueError("expert-goal source manifest is not an object")
+        base_name = source_manifest.get("base_dataset")
+        if not isinstance(base_name, str) or not base_name or Path(base_name).is_absolute():
+            raise ValueError("expert-goal source manifest has invalid base dataset reference")
+        base_path = (paths["source_dataset_path"].parent / base_name).resolve()
+        base_bytes = base_path.read_bytes()
+        base_manifest_bytes = base_path.with_suffix(base_path.suffix + ".manifest.json").read_bytes()
+    except (OSError, ValueError) as exc:
+        raise ValueError("expert-goal artifact's bound source files are unavailable or malformed") from exc
+    sources = source_identity()
+    mode = payload.get("prediction_mode")
+    annotation_authority = data_manifest.get("annotation_source")
+    collection_device = payload.get("collection_device")
+    training_device = payload.get("training_device")
+    losses_u, losses_b = payload.get("mean_u_loss_by_epoch"), payload.get("mean_b_loss_by_epoch")
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or
+            payload.get("artifact_kind") != "weights_only_plan_a_explicit_expert_goal_u_b_v1" or
+            payload.get("track") != track or payload.get("model_schema_version") != 1 or
+            payload.get("dataset_schema") != PLAN_A_EXPERT_GOAL_DATASET_SCHEMA or
+            payload.get("target_schema") != PLAN_A_EXPERT_GOAL_TARGET_SCHEMA or
+            payload.get("target_semantics") != PLAN_A_EXPERT_GOAL_SEMANTICS or
+            payload.get("sources") != expected_sources or expected_sources != sources or
+            payload.get("source_identity_sha256") != _canonical_hash(sources) or
+            payload.get("protocol_id") != protocol_id or
+            payload.get("protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_file") != protocol_path.name or
+            payload.get("split") != "train" or mode not in PREDICTION_MODES or
+            payload.get("prediction_contract") != prediction_contract(mode) or
+            (expected_prediction_mode is not None and mode != expected_prediction_mode) or
+            data_manifest.get("schema") != PLAN_A_EXPERT_GOAL_DATASET_SCHEMA or
+            data_manifest.get("target_schema") != PLAN_A_EXPERT_GOAL_TARGET_SCHEMA or
+            data_manifest.get("split") != "train" or
+            data_manifest.get("sources") != sources or
+            not isinstance(annotation_authority, dict) or
+            data_manifest.get("protocol_id") != protocol_id or
+            data_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            hashlib.sha256(data_bytes).hexdigest() != payload.get("dataset_sha256") or
+            data_manifest.get("dataset_sha256") != payload.get("dataset_sha256") or
+            hashlib.sha256(data_manifest_bytes).hexdigest() != payload.get("dataset_manifest_sha256") or
+            hashlib.sha256(data_manifest_bytes).hexdigest() != payload.get("annotation_source_manifest_sha256") or
+            hashlib.sha256(legal_bytes).hexdigest() != payload.get("legal_node_dataset_sha256") or
+            hashlib.sha256(legal_manifest_bytes).hexdigest() != payload.get("legal_node_manifest_sha256") or
+            hashlib.sha256(source_bytes).hexdigest() != payload.get("source_dataset_sha256") or
+            hashlib.sha256(source_manifest_bytes).hexdigest() != payload.get("source_manifest_sha256") or
+            hashlib.sha256(annotation_source_bytes).hexdigest() != payload.get("annotation_source_sha256") or
+            annotation_authority.get("sha256") != hashlib.sha256(annotation_source_bytes).hexdigest() or
+            data_manifest.get("expert_goal_source_sha256") != hashlib.sha256(source_bytes).hexdigest() or
+            source_manifest.get("schema") != "meco-plan-a-expert-goal-source-v1" or
+            source_manifest.get("target_schema") != "meco-plan-a-explicit-selected-goal-trace-v1" or
+            source_manifest.get("dataset_sha256") != hashlib.sha256(source_bytes).hexdigest() or
+            source_manifest.get("protocol_id") != protocol_id or
+            source_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            source_manifest.get("sources") != sources or
+            source_manifest.get("split") != "train" or
+            source_manifest.get("device") != payload.get("collection_device") or
+            source_manifest.get("base_dataset_sha256") != hashlib.sha256(base_bytes).hexdigest() or
+            source_manifest.get("base_manifest_sha256") != hashlib.sha256(base_manifest_bytes).hexdigest() or
+            data_manifest.get("source_dataset_sha256") != payload.get("base_dataset_sha256") or
+            data_manifest.get("source_manifest_sha256") != payload.get("base_manifest_sha256") or
+            payload.get("base_dataset_sha256") != legal_manifest.get("source_dataset_sha256") or
+            payload.get("base_manifest_sha256") != legal_manifest.get("source_manifest_sha256") or
+            legal_manifest.get("schema") != "meco-counterfactual-plan-a-legal-node-v1" or
+            legal_manifest.get("protocol_id") != protocol_id or
+            legal_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            legal_manifest.get("sources") != sources or
+            payload.get("prediction_mode") != legal_manifest.get("prediction_mode") or
+            payload.get("collection_device") != legal_manifest.get("device") or
+            not isinstance(collection_device, dict) or not isinstance(training_device, dict) or
+            collection_device.get("device") != training_device.get("device") or
+            payload.get("p_target", "missing") is not None or
+            payload.get("p_mode") != "p0" or payload.get("p_prior") != 0.0 or
+            payload.get("optimizer_state_included") is not False or
+            payload.get("resume_compatible") is not False or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            not isinstance(losses_u, list) or len(losses_u) != payload["updates"] or
+            not isinstance(losses_b, list) or len(losses_b) != payload["updates"] or
+            any(not _finite_number(x) or x < 0 for x in losses_u + losses_b) or
+            type(payload.get("annotated_record_count")) is not int or payload["annotated_record_count"] < 1 or
+            type(payload.get("available_u_target_count")) is not int or payload["available_u_target_count"] < 0 or
+            type(payload.get("comparable_b_record_count")) is not int or payload["comparable_b_record_count"] < 0 or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") != list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("Plan A expert-goal weights/source/protocol/model contract mismatch")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("expert-goal model weights do not match the Plan A model schema") from exc
+    expected_p = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    _initialize_unlabelled_plan_a_penalty_head(expected_p, track)
+    actual_layer, mask = _plan_a_p_output_parameters(model, track)
+    expected_layer, expected_mask = _plan_a_p_output_parameters(expected_p, track)
+    if not torch.equal(mask, expected_mask):
+        raise ValueError("Plan A P head mask changed unexpectedly")
+    output_indices = torch.nonzero(mask.reshape(-1), as_tuple=False).reshape(-1)
+    actual, expected = actual_layer.weight[output_indices], expected_layer.weight[output_indices]
+    actual_bias, expected_bias = actual_layer.bias[output_indices], expected_layer.bias[output_indices]
+    if not torch.equal(actual, expected) or not torch.equal(actual_bias, expected_bias):
+        raise ValueError("expert-goal artifact modified unlabelled Plan A P head from p0")
+    return payload
 
 
 def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
@@ -1930,6 +2242,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
                                  expected_prediction_mode: str | None = None):
     """Validate immutable metadata without restoring any training state."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA:
+        return validate_plan_a_expert_goal_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
         return validate_plan_a_joint_ubp_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
@@ -2234,6 +2551,16 @@ def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protoc
             raise ValueError("legal-node consumer model has no parameters") from exc
         require_indexed_cuda_device(str(model_device),
             purpose="Plan A legal-node warm-start consumption")
+    if payload.get("schema") == PLAN_A_EXPERT_GOAL_WEIGHTS_SCHEMA:
+        from .meco_device import require_indexed_cuda_device
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration as exc:
+            raise ValueError("expert-goal consumer model has no parameters") from exc
+        selected = str(require_indexed_cuda_device(str(model_device),
+            purpose="Plan A expert-goal warm-start consumption"))
+        if payload.get("training_device", {}).get("device") != selected:
+            raise ValueError("expert-goal weights were fitted on a different indexed CUDA device")
     if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
         from .meco_device import require_indexed_cuda_device
         try:
@@ -2611,10 +2938,27 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
             manifest.get("qualification_protocol_sha256") != protocol_sha or
             manifest.get("device") != source_manifest.get("device")):
         raise ValueError("legal-node source dataset/protocol/device binding mismatch")
+    expert_goal_source = manifest.get("expert_goal_source")
+    expert_goal_path = None
+    if expert_goal_source is not None:
+        if not isinstance(expert_goal_source, str) or Path(expert_goal_source).is_absolute():
+            raise ValueError("legal-node expert-goal source path is invalid")
+        expert_goal_path = (dataset.parent / expert_goal_source).resolve()
+        expert_goal_bytes = expert_goal_path.read_bytes()
+        expert_goal_manifest_bytes = expert_goal_path.with_suffix(
+            expert_goal_path.suffix + ".manifest.json").read_bytes()
+        if (hashlib.sha256(expert_goal_bytes).hexdigest() != manifest.get("expert_goal_source_sha256") or
+                hashlib.sha256(expert_goal_manifest_bytes).hexdigest() !=
+                    manifest.get("expert_goal_source_manifest_sha256")):
+            raise ValueError("legal-node expert-goal source bytes changed")
+    elif (manifest.get("expert_goal_source_sha256") is not None or
+            manifest.get("expert_goal_source_manifest_sha256") is not None):
+        raise ValueError("legal-node expert-goal source provenance is incomplete")
     with tempfile.TemporaryDirectory(prefix="meco-legal-node-replay-") as tmp:
         replayed_path = Path(tmp) / "replayed.jsonl"
         collect_plan_a_legal_nodes_v1(replayed_path, dataset=source_dataset,
-            qualification_protocol=Path(qualification_protocol), device=device)
+            qualification_protocol=Path(qualification_protocol), device=device,
+            expert_goal_source=expert_goal_path)
         if replayed_path.read_bytes() != data_bytes:
             raise ValueError("legal-node labels differ from fresh deterministic replay")
     legal_rows = [json.loads(line) for line in data_bytes.decode().splitlines() if line]
@@ -3139,6 +3483,8 @@ def main(argv=None):
         help="strictly replayable counterfactual v2 training dataset")
     legal_collect.add_argument("--output", type=Path, required=True)
     legal_collect.add_argument("--qualification-protocol", type=Path, required=True)
+    legal_collect.add_argument("--expert-goal-source", type=Path,
+        help="include each replay-bound explicit selected goal as a certainty unit")
     legal_collect.add_argument("--device", required=True,
         help="explicit CUDA/ROCm device matching the frozen source dataset")
     expert_goal_collect = commands.add_parser("collect-plan-a-expert-goal-source-v1")
@@ -3148,6 +3494,21 @@ def main(argv=None):
     expert_goal_collect.add_argument("--qualification-protocol", type=Path, required=True)
     expert_goal_collect.add_argument("--device", required=True,
         help="explicit indexed CUDA/ROCm device matching the frozen source dataset")
+    expert_goal_warm = commands.add_parser("warm-start-plan-a-expert-goals-v1")
+    expert_goal_warm.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    expert_goal_warm.add_argument("--dataset", type=Path, required=True,
+        help="strict annotation JSONL with replay-bound manifest")
+    expert_goal_warm.add_argument("--legal-node-dataset", type=Path, required=True)
+    expert_goal_warm.add_argument("--source-dataset", type=Path, required=True,
+        help="replay-bound explicit expert-goal source v1")
+    expert_goal_warm.add_argument("--annotation-source", type=Path, required=True,
+        help="immutable authority file whose SHA-256 is recorded in the manifest")
+    expert_goal_warm.add_argument("--output", type=Path, required=True)
+    expert_goal_warm.add_argument("--qualification-protocol", type=Path, required=True)
+    expert_goal_warm.add_argument("--updates", type=int, default=10)
+    expert_goal_warm.add_argument("--learning-rate", type=float, default=1e-4)
+    expert_goal_warm.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device matching frozen data; CPU is not supported")
     legal_warm = commands.add_parser("warm-start-plan-a-legal-nodes-v1")
     legal_warm.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
     legal_warm.add_argument("--dataset", type=Path, required=True)
@@ -3244,11 +3605,17 @@ def main(argv=None):
     elif args.command == "collect-plan-a-legal-nodes-v1":
         from .meco_counterfactual import collect_plan_a_legal_nodes_v1
         result = collect_plan_a_legal_nodes_v1(args.output, dataset=args.dataset,
-            qualification_protocol=args.qualification_protocol, device=args.device)
+            qualification_protocol=args.qualification_protocol, device=args.device,
+            expert_goal_source=args.expert_goal_source)
     elif args.command == "collect-plan-a-expert-goal-source-v1":
         from .meco_counterfactual import collect_plan_a_expert_goal_source_v1
         result = collect_plan_a_expert_goal_source_v1(args.output, dataset=args.dataset,
             qualification_protocol=args.qualification_protocol, device=args.device)
+    elif args.command == "warm-start-plan-a-expert-goals-v1":
+        result = warm_start_plan_a_expert_goals_v1(args.track, args.dataset,
+            args.legal_node_dataset, args.source_dataset, args.annotation_source,
+            args.output, qualification_protocol=args.qualification_protocol,
+            updates=args.updates, learning_rate=args.learning_rate, device=args.device)
     elif args.command == "warm-start-plan-a-legal-nodes-v1":
         result = warm_start_plan_a_legal_nodes_v1(args.track, args.dataset,
             args.source_dataset, args.output,

@@ -1290,7 +1290,7 @@ def _legal_node_pair_return(record, manifest, pair_index, repeat_index):
 
 
 def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
-        qualification_protocol: Path, device: str):
+        qualification_protocol: Path, device: str, expert_goal_source: Path | None = None):
     """Collect simulator-only labels over a deterministic bounded legal-node subset."""
     from .curriculum_training import source_identity
     from .meco_supervised import _load_protocol, _read_counterfactual_dataset
@@ -1307,6 +1307,43 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
     _, loaded_id, loaded_sha, protocol_path = _load_protocol(Path(qualification_protocol))
     if (loaded_id != protocol_id or loaded_sha != protocol_sha or source_manifest["split"] != "train"):
         raise ValueError("legal-node source protocol/train split mismatch")
+    expert_rows_by_key = None
+    expert_source_sha = expert_manifest_sha = None
+    expert_source_path = None
+    if expert_goal_source is not None:
+        expert_source_path = Path(expert_goal_source).resolve()
+        expert_source_bytes = expert_source_path.read_bytes()
+        expert_manifest_path = expert_source_path.with_suffix(expert_source_path.suffix + ".manifest.json")
+        expert_manifest_bytes = expert_manifest_path.read_bytes()
+        expert_manifest = json.loads(expert_manifest_bytes)
+        expert_source_sha = hashlib.sha256(expert_source_bytes).hexdigest()
+        expert_manifest_sha = hashlib.sha256(expert_manifest_bytes).hexdigest()
+        if (expert_manifest.get("schema") != PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA or
+                expert_manifest.get("target_schema") != PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA or
+                expert_manifest.get("base_dataset_sha256") != source_sha or
+                expert_manifest.get("base_manifest_sha256") != source_manifest_sha or
+                expert_manifest.get("protocol_id") != protocol_id or
+                expert_manifest.get("qualification_protocol_sha256") != protocol_sha or
+                expert_manifest.get("sources") != sources or
+                expert_manifest.get("source_identity_sha256") != _hash(sources) or
+                expert_manifest.get("device") != source_manifest.get("device") or
+                expert_manifest.get("split") != "train" or
+                expert_manifest.get("dataset_sha256") != expert_source_sha):
+            raise ValueError("expert-goal source does not bind the exact legal-node source/protocol/device")
+        expert_rows = [json.loads(line) for line in expert_source_bytes.decode().splitlines() if line]
+        if len(expert_rows) != expert_manifest.get("record_count"):
+            raise ValueError("expert-goal source record count mismatch")
+        expert_rows_by_key = {}
+        for goal_row in expert_rows:
+            key = (goal_row.get("scenario_id"), goal_row.get("category"),
+                goal_row.get("seed"), goal_row.get("decision_index"))
+            if key in expert_rows_by_key:
+                raise ValueError("expert-goal source contains duplicate branch identities")
+            expert_rows_by_key[key] = goal_row
+        source_keys = {(r["scenario_id"], r["category"], r["seed"], r["decision_index"])
+            for r in rows}
+        if set(expert_rows_by_key) != source_keys:
+            raise ValueError("expert-goal source does not cover exact legal-node source rows")
     out_rows = []
     preflight_rollout_bound = len(rows) * PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX
     if preflight_rollout_bound > PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES:
@@ -1330,6 +1367,25 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
             feasible_nodes = sorted({pair_nodes[i] for i, ok in enumerate(valid) if ok and reachable[pair_nodes[i]]})
             if not feasible_nodes:
                 raise RuntimeError("legal-node branch has N=0 feasible reachable nodes")
+            goal_row = None
+            expert_node = None
+            if expert_rows_by_key is not None:
+                record_key = (record["scenario_id"], record["category"],
+                    record["seed"], record["decision_index"])
+                goal_row = expert_rows_by_key[record_key]
+                if (goal_row.get("schema") != PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA or
+                        goal_row.get("base_record") != record or
+                        goal_row.get("snapshot_id") != replay["snapshot"]["snapshot_id"] or
+                        goal_row.get("state_sha256") != replay["snapshot"]["simulator_state_sha256"] or
+                        goal_row.get("support_digest") != support.support_digest or
+                        goal_row.get("execution_failure") is not False):
+                    raise ValueError("expert-goal row is not bound to the exact replayed legal-node branch")
+                selected_goal = goal_row.get("selected_goal")
+                if not isinstance(selected_goal, dict) or type(selected_goal.get("node_id")) is not int:
+                    raise ValueError("expert-goal row has no selected legal node")
+                expert_node = selected_goal["node_id"]
+                if expert_node not in feasible_nodes:
+                    raise ValueError("expert selected goal is not feasible in exact legal support")
             behavior_count = max(1, len({pair_behaviors[i] for i, ok in enumerate(valid)
                 if ok and pair_nodes[i] in feasible_nodes}))
             requested = max(1, len(feasible_nodes) // 16)
@@ -1348,8 +1404,13 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
             ordered_strata = sorted(strata, key=lambda cell: hashlib.sha256(
                 f"{key}:stratum:{cell[0]}:{cell[1]}".encode()).digest())
             selected = []
+            mandatory_nodes = set()
             if support.root_node in feasible_nodes:
-                selected.append(support.root_node)
+                mandatory_nodes.add(support.root_node)
+            if expert_node is not None:
+                mandatory_nodes.add(expert_node)
+            selected.extend(sorted(mandatory_nodes))
+            limit = max(limit, len(selected))
             depth = 0
             while len(selected) < limit:
                 added = False
@@ -1370,12 +1431,12 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
             node_pi = {}
             for selected_node in selected:
                 cell = (headings[selected_node], regions[selected_node])
-                in_root_stratum = support.root_node in strata[cell]
-                if selected_node == support.root_node:
+                forced_in_stratum = sum(node in mandatory_nodes for node in strata[cell])
+                if selected_node in mandatory_nodes:
                     pi = 1.0
                 else:
-                    population = len(strata[cell]) - int(in_root_stratum)
-                    sample = stratum_selected_counts[cell] - int(in_root_stratum)
+                    population = len(strata[cell]) - forced_in_stratum
+                    sample = stratum_selected_counts[cell] - forced_in_stratum
                     pi = sample / population if population else 1.0
                 node_pi[selected_node] = pi
             if any(not (0. < pi <= 1.) for pi in node_pi.values()):
@@ -1536,12 +1597,16 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
         "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
         "continuation_policy": CONTINUATION_POLICY, "support_order": SUPPORT_ORDER,
         "preference_stability_rule": "both paired repeats have same nonzero sign; exact all-repeat zero is tie; all other pairs uncertain; zero noise threshold because no calibrated margin exists",
-        "coverage_rule": "min(max(1,floor(N/16)),floor(512/(2*feasible_behavior_count))) nodes; one uniform hash-ranked descriptor per feasible behavior and two paired repeat outcomes; descriptor inclusion probabilities/weights are provenance for uniform-draw U/B estimands, with no descriptor reweighting; heading-bin x graph-region stratification; feasible reachable root included when available",
+        "coverage_rule": ("min(max(1,floor(N/16)),floor(512/(2*feasible_behavior_count))) nodes; one uniform hash-ranked descriptor per feasible behavior and two paired repeat outcomes; descriptor inclusion probabilities/weights are provenance for uniform-draw U/B estimands, with no descriptor reweighting; heading-bin x graph-region stratification; feasible reachable root included when available" + ("; replay-bound expert selected goal included as a certainty unit" if expert_source_path else "")),
         "branch_rollout_cap": PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX,
         "paired_repeats": PLAN_A_LEGAL_NODE_REPEATS,
         "dataset_rollout_cap": PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES,
         "preflight_rollout_upper_bound": preflight_rollout_bound,
         "actual_branch_rollouts": actual_rollouts,
+        "expert_goal_source": (os.path.relpath(expert_source_path, Path(output).resolve().parent)
+            if expert_source_path else None),
+        "expert_goal_source_sha256": expert_source_sha,
+        "expert_goal_source_manifest_sha256": expert_manifest_sha,
         "p_target": None, "p_prior": 0.0,
         "p_unlabelled_reason": "independent P-v3 oracle labels are not supplied by this dataset",
         "record_count": len(out_rows), "dataset_sha256": hashlib.sha256(raw).hexdigest()}
