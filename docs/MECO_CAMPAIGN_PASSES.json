@@ -27,7 +27,8 @@
         "Runtime generated HIP source identity fix: 0e125c1ff; static py_compile and git diff --check passed",
         "Simulator same-team robot 3 indexing correction: 1719156d0; static py_compile and git diff --check passed",
         "Plan A optional candidate commitment metadata correction: 1eec0c487; static py_compile and git diff --check passed",
-        "Phase 2 supervised warm-start prototype 6e4e328e2 is under revision in isolated ZFS worktree; protocol split enforcement, artifact validation, track-specific supervisor application, and C-track feature-width fixes are in progress; counterfactual outcome labels and full Plan A U/P targets remain open",
+        "Phase 2 supervised warm-start follow-up committed as cd973a1c6 in isolated worktree: frozen train-split protocol enforcement, strict artifact/source/dataset checks, per-track one-time initialization, shared 40-column candidate input contract, checkpoint provenance checks, and zero-update queue-status correction; counterfactual C targets and full Plan A U/P targets remain open pending review",
+        "Shared prediction-mode fairness contract across A/C and D1/D2 is being implemented in an isolated worktree; timing instrumentation and paired forced-fallback evaluation remain required if not included in that batch",
         "Five-track scheduler review confirms matched-update barrier and A1/A2 then A3/C1 then C2 device batches; reviewer found pending-cycle queue marks untrained lanes complete at zero updates, correction in isolated supervisor changes; no matched five-track frontier yet",
         "Phase 5 ONNX/profile harness and Phase 2 supervised warm-start implementation are progressing in isolated ZFS worktrees; not yet integrated into this live training checkout"
       ]
@@ -42,7 +43,7 @@
         "Formal qualification integrated review approved through 9e02874c155f32f6409678f00ee95de31e2d1cdd; generated HIP source-identity fix approved by scoped reviewer; runtime simulator validation and baseline variance review remain outstanding",
         "Scoped static review approved 0e125c1ff and 1719156d0; runtime evaluation remains outstanding",
         "Scoped review approved Plan A optional candidate metadata correction 1eec0c487; runtime evaluation remains outstanding",
-        "Runtime source/indexing/candidate fixes approved; Phase 5 shape/provenance remediation approved at 445c80e9b in isolated worktree; Phase 2 warm-start review found blocking protocol leakage, artifact validation, C-track width, and supervisor integration gaps; five-track scheduler review found a zero-update queue-status defect; full plan implementation review remains open"
+        "Runtime source/indexing/candidate fixes approved; Phase 5 shape/provenance remediation approved at 445c80e9b in isolated worktree; Phase 2 review identified protocol leakage, artifact validation, C-track width, supervisor integration, and zero-update status defects; implementer committed cd973a1c6 with remediations and scoped reviewer pass is in progress; full plan implementation review remains open"
       ]
     }
   ]
