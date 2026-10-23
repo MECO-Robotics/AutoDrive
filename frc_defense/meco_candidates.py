@@ -307,6 +307,23 @@ def _opponent_prediction(env, slot=3, horizon=0., mode="cv"):
         velocity_xy=velocity, age_s=age, horizon_s=max(0., float(horizon)))
 
 
+def _world_zero_perceived_fuel(env):
+    """Read slot-3 tracks through the batched native accessor for one world."""
+    if env.n != 1:
+        raise ValueError("Plan C perceived-target candidates require one world")
+    points, velocities, sensed = env._perceived_fuel(3)
+    if (not isinstance(points, torch.Tensor)
+            or not isinstance(velocities, torch.Tensor)
+            or not isinstance(sensed, torch.Tensor)
+            or points.ndim != 3 or points.shape[0] != env.n
+            or points.shape[-1] != 2 or velocities.shape != points.shape
+            or sensed.shape != points.shape[:2]):
+        raise ValueError("slot-3 perceived FUEL buffers have misaligned batched shapes")
+    # Keep the native accessor's [world, track, ...] contract intact, then
+    # select the sole supported world explicitly for candidate construction.
+    return points[0], velocities[0], sensed[0]
+
+
 def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     """Return candidate rows for sensed tracks omitted by the native top four.
 
@@ -322,8 +339,8 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     if not valid_collect_actions:
         return []
     fallback_action = valid_collect_actions[0]
-    points, _, sensed = env._perceived_fuel(3)
-    sensed_ids = torch.nonzero(sensed[0], as_tuple=False).flatten().tolist()
+    points, _, sensed = _world_zero_perceived_fuel(env)
+    sensed_ids = torch.nonzero(sensed, as_tuple=False).flatten().tolist()
     pose_xy = env.sim.pose[0, 3, :2]
     confidence = env.track_confidence[0, 3]
     ages = env.track_age[0, 3]
@@ -334,7 +351,7 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     ordered = sorted((int(i) for i in sensed_ids if int(i) not in base_track_ids),
                      key=lambda i: (float(distances[i]), i))
     nearby = (((points[:, None, :] - points[None, :, :]).norm(dim=-1) < 1.25)
-              & sensed[0][None, :]).sum(-1)
+              & sensed[None, :]).sum(-1)
     field_length, field_width = float(env.sim.field_length), float(env.sim.field_width)
     template = base.table.features[fallback_action]
     result = []
@@ -432,8 +449,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             source = active_commitment.source_xy_m
             matches = []
             if source is not None:
-                points, _, sensed = env._perceived_fuel(3)
-                for track in torch.nonzero(sensed[0], as_tuple=False).flatten().tolist():
+                points, _, sensed = _world_zero_perceived_fuel(env)
+                for track in torch.nonzero(sensed, as_tuple=False).flatten().tolist():
                     point = points[track]
                     gap = math.hypot(float(point[0]) - source[0], float(point[1]) - source[1])
                     matches.append((gap, int(track)))
