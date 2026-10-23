@@ -552,7 +552,10 @@ def _canonical_sha256(value) -> str:
 
 def _calibration_source_identity_sha256() -> str:
     from .curriculum_training import source_identity
-    return _canonical_sha256(source_identity())
+    # Match evaluate_meco's established source identity hash byte for byte.
+    # Its default JSON separators are part of the existing v2 report contract.
+    return hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
 
 
 def _calibration_case_table(scenario_id, episodes, repetitions, master_seed):
