@@ -11,7 +11,9 @@ import hashlib
 import json
 import math
 import queue
+import sys
 import threading
+from contextlib import contextmanager
 from types import MappingProxyType
 import time
 from typing import Mapping
@@ -23,6 +25,33 @@ from torch.nn import functional as F
 
 from .learning_contract import CandidateTable, ObservationSnapshot, ScorerSnapshot, masked_argmax
 from .learning_inputs import build_observation_snapshot
+
+
+_MecoAdapterScope = threading.local()
+
+
+@contextmanager
+def managed_meco_adapters():
+    """Close every production adapter created in this thread's scope."""
+    previous = getattr(_MecoAdapterScope, "adapters", None)
+    adapters = []
+    _MecoAdapterScope.adapters = adapters
+    try:
+        yield
+    finally:
+        if previous is None:
+            del _MecoAdapterScope.adapters
+        else:
+            _MecoAdapterScope.adapters = previous
+        active_exception = sys.exc_info()[0] is not None
+        close_error = None
+        for adapter in reversed(adapters):
+            try:
+                adapter.close()
+            except Exception as exc:
+                close_error = close_error or exc
+        if close_error is not None and not active_exception:
+            raise close_error
 
 
 MECO_INFERENCE_SCHEMA = "meco-inference-v2"
@@ -181,6 +210,9 @@ class ProductionMecoAdapter:
         self._request_sequence = 0
         self._generation_id = uuid.uuid4().hex
         self._broker = _AsyncInferenceBroker(self)
+        scope = getattr(_MecoAdapterScope, "adapters", None)
+        if scope is not None:
+            scope.append(self)
 
     def next_request_identity(self):
         with self._request_lock:
@@ -197,6 +229,10 @@ class ProductionMecoAdapter:
 
     def poll_inference(self, request: MecoInferenceRequest, handle):
         return self._broker.poll(request, handle)
+
+    def close(self):
+        """Stop the adapter worker and release its model references once idle."""
+        self._broker.close()
 
     def _infer_sync(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
         try:
@@ -297,12 +333,15 @@ class ProductionMecoAdapter:
 
 class _AsyncInferenceBroker:
     """One-worker, single-pending-request broker with replace-oldest semantics."""
+    _STOP = object()
+
     def __init__(self, adapter):
         self.adapter = adapter
         self.pending = queue.Queue(maxsize=1)
         self.lock = threading.Lock()
         self.latest_published_sequence = 0
         self.latest_submitted_sequence = 0
+        self.closed = False
         self.dropped = 0
         self.late = 0
         self.faults = 0
@@ -316,7 +355,8 @@ class _AsyncInferenceBroker:
                     "late_responses": self.late,
                     "inference_faults": self.faults,
                     "generation_id": self.adapter._generation_id,
-                    "last_published_sequence": self.latest_published_sequence}
+                    "last_published_sequence": self.latest_published_sequence,
+                    "closed": self.closed}
 
     def submit(self, request, inputs):
         if (request.generation_id != self.adapter._generation_id
@@ -339,6 +379,9 @@ class _AsyncInferenceBroker:
                 "response": None, "done": False, "consumed": False,
                 "discarded": False, "late_counted": False}
         with self.lock:
+            if self.closed:
+                self.faults += 1
+                return None
             if request.request_sequence <= self.latest_submitted_sequence:
                 self.faults += 1
                 return None
@@ -363,6 +406,24 @@ class _AsyncInferenceBroker:
                     return None
             self.latest_submitted_sequence = request.request_sequence
         return item
+
+    def close(self):
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                while True:
+                    try:
+                        item = self.pending.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not self._STOP:
+                        item["discarded"] = True
+                        item["done"] = True
+                        self.dropped += 1
+                    self.pending.task_done()
+                self.pending.put_nowait(self._STOP)
+        if threading.current_thread() is not self.thread:
+            self.thread.join()
 
     def poll(self, request, item):
         if item is None or item.get("request") != request:
@@ -404,6 +465,9 @@ class _AsyncInferenceBroker:
     def _run(self):
         while True:
             item = self.pending.get()
+            if item is self._STOP:
+                self.pending.task_done()
+                return
             request = item["request"]
             try:
                 if (request.generation_id != self.adapter._generation_id
@@ -1001,6 +1065,8 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 "generation_id": (inference_request.generation_id
                     if inference_request is not None else None),
                 "snapshot_id": table.snapshot_id,
+                "observation_timestamp": (inference_request.observation_timestamp
+                    if inference_request is not None else observation_timestamp),
                 "candidate_mask_digest": (inference_request.candidate_mask_digest
                     if inference_request is not None else None),
                 "captured_monotonic": (inference_request.capture_monotonic
@@ -1033,6 +1099,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         "request_sequence": inference_request.request_sequence,
         "generation_id": inference_request.generation_id,
         "snapshot_id": inference_request.snapshot_id,
+        "observation_timestamp": inference_request.observation_timestamp,
         "candidate_mask_digest": inference_request.candidate_mask_digest,
         "captured_monotonic": inference_request.capture_monotonic,
         "dispatch_monotonic": inference_request.dispatch_monotonic,

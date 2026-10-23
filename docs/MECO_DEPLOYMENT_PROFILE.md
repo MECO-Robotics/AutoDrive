@@ -141,6 +141,12 @@ and fault counters. The worker runs the model forward under
 `torch.inference_mode()`. Plan A's P path-cost semantics
 remain active, with zero P on inference failure.
 
+`evaluate_meco` owns every adapter it constructs through a scoped lifecycle.
+Its `finally` cleanup closes adapters on success, evaluation errors, and
+partial checkpoint loading. Closing is idempotent, rejects later submissions,
+discards queued work, sends a worker stop sentinel, and joins the worker before
+the evaluator releases checkpoint/model references.
+
 `load_production_adapter` requires an explicit available `cuda:N` device and
 moves the checkpoint model to that device. PyTorch uses the same spelling for
 CUDA and ROCm/HIP devices. Missing accelerators and CPU fallback are rejected.
@@ -150,7 +156,9 @@ Existing training calls still use their direct model path and do not establish
 production qualification.
 
 This async broker is an implementation pass with review and runtime evidence
-pending. It has only static compilation and diff checks so far; no simulator,
+pending. Its worker lifecycle and evaluator cleanup have static review only and
+have not been runtime exercised. Static compilation and diff checks are the
+only checks so far; no simulator,
 fault-injection, or replay evaluation has exercised queue replacement,
 freshness rejection, or fallback behavior. This is not evidence
 of ONNX parity, Hailo operator support, accelerator execution, full planner

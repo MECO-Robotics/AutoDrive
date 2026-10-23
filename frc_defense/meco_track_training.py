@@ -9,6 +9,7 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+from functools import wraps
 import json
 import math
 import os
@@ -36,6 +37,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
     MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA, MECO_MAX_INFERENCE_AGE_S,
     candidate_policy_logits, ordered_candidate_mask_digest,
+    managed_meco_adapters,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
     PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
@@ -1505,6 +1507,15 @@ def _metric_snapshot(metrics):
             for name, value in metrics.outcomes().items()}
 
 
+def _manage_evaluation_adapters(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with managed_meco_adapters():
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@_manage_evaluation_adapters
 @torch.no_grad()
 def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   categories: tuple[str, ...], episodes: int, master_seed: int,

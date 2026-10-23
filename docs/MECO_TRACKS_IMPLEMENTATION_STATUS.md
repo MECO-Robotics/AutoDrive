@@ -472,10 +472,16 @@ commit; an unavailable result is discarded for that snapshot. The worker uses
 serialized under one broker lock. Decisions expose request provenance and
 dropped, late, and inference-fault counters. Existing feasibility, route/risk,
 deterministic fallback, and Plan A P path-cost behavior are preserved; there is
-no CPU model fallback.
+no CPU model fallback. `evaluate_meco` scopes every constructed adapter and
+closes workers in `finally`, including failures during partial checkpoint
+loading. Worker close is idempotent, rejects new requests, discards queued
+work, sends a stop sentinel, and joins before evaluator-owned models are
+released. Accepted Plan C provenance includes the simulation observation time.
 
 Three-pass ledger: Planner complete; implementer implemented in the isolated
-worktree; independent reviewer pending. Runtime evidence pending. This pass ran
-`py_compile` and `git diff --check` only. No tests or simulator evaluation
-were run, so queue replacement, stale/out-of-order rejection, and fallback
-behavior have not yet been validated in simulation or replay.
+worktree; scoped static review approved the nonblocking/inference-mode/sequence
+fixes. The lifecycle and provenance follow-up is pending scoped review. Runtime
+evidence pending. This pass ran `py_compile` and `git diff --check` only. No
+tests or simulator evaluation were run, so shutdown, queue replacement,
+stale/out-of-order rejection, and fallback behavior have not been validated in
+simulation or replay.
