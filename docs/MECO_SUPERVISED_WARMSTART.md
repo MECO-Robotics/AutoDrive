@@ -132,7 +132,9 @@ simulator, observation, candidate, support, descriptor, or action-trace parity
 mismatch. It trains only on non-tied within-prefix pairwise comparisons of
 `gross_horizon_return`. Plan A scores exact sampled support rows with U(node) +
 B(behavior); P remains null and has zero prior. Plan C scores the exact replayed
-candidate rows with the existing candidate scorer. The resulting
+candidate rows with the existing candidate scorer, but applies pairwise loss
+to raw candidate utility because the labels are gross returns; route and risk
+costs are excluded from this target loss. The resulting
 `meco-counterfactual-warm-start-weights-v2` artifact is weights-only and has a
 separate `validate_counterfactual_warm_start_artifact` /
 `load_counterfactual_warm_start` API. The v1 `warm-start` and its artifact

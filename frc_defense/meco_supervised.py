@@ -796,7 +796,7 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
                 result = score_candidates(track, model, raster=sample["raster"],
                     globals_=sample["globals"], table=sample["table"],
                     route_cost=sample["route"], risk_cost=sample["risk"])
-                scores = [(result["logits"][0, index], ret)
+                scores = [(result["utility"][index], ret)
                           for index, ret, _ in sample["pairs"]]
             pair_losses = []
             for index, (left_logit, left_return) in enumerate(scores):
@@ -824,6 +824,9 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         "target_schema": manifest["target_schema"],
         "label_provenance": COUNTERFACTUAL_LABEL_PROVENANCE,
         "target_semantics": "within_prefix_pairwise_preference_from_gross_horizon_return",
+        "scoring_semantics": ("raw_U_node_plus_B_behavior; no P gradient; p_mode=p0"
+            if track.startswith("A") else
+            "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target"),
         "plan_a_p_target": None, "plan_a_p_prior": 0.0,
         "plan_a_p_mode": ("p0" if track.startswith("A") else None),
         "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
@@ -934,6 +937,9 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
     valid_track = track in MECO_TRACKS and (
         track in ("A1", "A2", "A3") or track in ("C1", "C2"))
     expected_target = "within_prefix_pairwise_preference_from_gross_horizon_return"
+    expected_scoring = ("raw_U_node_plus_B_behavior; no P gradient; p_mode=p0"
+        if track.startswith("A") else
+        "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target")
     losses = payload.get("mean_loss_by_epoch")
     pairs = payload.get("non_tied_pair_count")
     ties = payload.get("tied_pair_count")
@@ -945,6 +951,7 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
             payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
             payload.get("label_provenance") != COUNTERFACTUAL_LABEL_PROVENANCE or
             payload.get("target_semantics") != expected_target or
+            payload.get("scoring_semantics") != expected_scoring or
             payload.get("plan_a_p_target", "missing") is not None or
             payload.get("plan_a_p_prior") != 0.0 or
             payload.get("plan_a_p_mode") != ("p0" if track.startswith("A") else None) or
