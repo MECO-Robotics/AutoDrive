@@ -87,7 +87,8 @@
         "Scoped static re-review approved Phase 2 v2 warm-start implementation commit 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc; C scoring semantics now align gross-return labels with raw candidate utility",
         "Phase 5 provenance correction ea4c31d2d submitted for scoped re-review; deployment branch still has no runtime/hardware qualification evidence",
         "D0 fail-closed correction 5f8f667bd submitted for scoped static re-review; follow-up audit also found calibration currently covers only one scenario, so ancestor-retention qualification needs a calibration bundle or protocol redesign",
-        "Phase 5 provenance re-review approved protocol equality, terminal update equality and failed-run rejection; heartbeat age/freshness label needs correction before approval"
+        "Phase 5 provenance re-review approved protocol equality, terminal update equality and failed-run rejection; heartbeat age/freshness label needs correction before approval",
+        "Scoped static re-review approved D0 fail-closed correction 5f8f667bd: strict protocol/safety schema, calibration/source/report binding, evidence digest, and pending-safety fail-closed behavior pass; multi-scenario ancestor-retention protocol coverage remains open"
       ]
     }
   ]
