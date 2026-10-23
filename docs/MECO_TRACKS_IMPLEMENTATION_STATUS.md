@@ -514,3 +514,17 @@ Three-pass ledger: planner complete; implementation committed as `f91d76237`;
 scoped static review approved the exact diff. Runtime evidence pending. Static `py_compile`, diff whitespace,
 and JSON parsing are the only checks performed here. No tests or simulator
 runs were run.
+
+## Joint Plan A U+B+P warm start v1
+
+A new standalone fitter combines replay-bound legal-node U/B supervision and
+independent oracle-v3 executed-route P supervision in one model and optimizer,
+so encoder gradients are shared rather than spliced from separate checkpoints.
+It cross-validates exact trajectory-v3 source data and manifest hashes across
+both dataset manifests, plus protocol, identity, train split, prediction mode,
+and indexed device. Its weights-only schema binds both datasets/manifests,
+records explicit equal task weights and loss masks, and requires `p_mode=learned`
+with the exact P scale in training. Existing U+B and P-only artifact schemas
+remain unchanged. Implementation complete; scoped review and runtime evidence
+pending. Static checks only; no tests, collection, fitting, GPU training or
+simulator runs were performed.

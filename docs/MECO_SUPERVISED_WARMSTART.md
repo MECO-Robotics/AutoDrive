@@ -224,16 +224,10 @@ inspected a P-shaped route from this seam yet, and the independent
 geometry without executing it through physics. The integration therefore does
 not establish replay-backed P-route behavior or provide an oracle label.
 
-For that reason this checkout still does not define or accept a P-route-oracle
-or exhaustive-route-coverage schema. The v2/v3 artifact validators continue to
-require a null P target, zero P prior, and `p_mode=p0`; a sampled subset of
-legal Plan A support descriptors remains sampled coverage, not exhaustive
-node/path coverage. A versioned oracle contract requires a representative
-simulator replay that proves the selected map affects only the focal native
-route, records the executed route and map provenance, and matches the replayed
-route costs to an independent reference. Until then, P labels and exhaustive
-P-route coverage remain unavailable and must not be inferred from planner API
-capability or U+B return labels.
+The earlier U+B-only artifacts and validators continue to require a null P
+target, zero P prior, and `p_mode=p0`. The later independent P-route oracle v3
+schema is documented below; it binds sampled executed paths and is not
+exhaustive legal-grid coverage.
 
 #### Plan A legal-node tranche v1
 
@@ -289,3 +283,31 @@ weights-only consumer rejects CPU and nonmatching track/device/P contracts.
 Planner is complete. This implementation pass has static compilation and diff
 checks only; scoped review and runtime evidence remain pending. No tests or
 simulator runs were performed.
+
+#### Joint Plan A U+B+P warm start v1
+
+`warm-start-plan-a-joint-ubp-v1` trains one new A1/A2/A3 model and shared
+encoder against legal-node U regression, centered feasible-behavior B
+preferences, and independent oracle-v3 executed-route P preferences in the
+same optimizer step. The U loss is inverse node inclusion weighted Smooth L1;
+B is a per-node mean of stable comparable pairwise softplus terms with the
+same node inclusion weights; P is pairwise softplus over replayed base bump
+cost plus learned scaled P path integral, with mean-P regularization. The
+three task weights are each 1.0 and are recorded in the artifact. Existing
+U+B-only artifacts retain `p_mode=p0` and null P semantics; P-only artifacts
+retain their own schema and loading contract.
+
+Each configured update is a full epoch: every legal-node and P dataset row is
+visited at least once, and the shorter dataset cycles in fixed order. Per-task
+loss summaries omit batches without that task's target mask.
+
+The joint fitter requires the legal-node and P-route manifests to bind the
+same exact trajectory-v3 source data bytes and manifest bytes. It also checks
+protocol, source identity, train split, prediction mode/contract and indexed
+device, and strictly replays both datasets before fitting. The new
+weights-only artifact binds both dataset and manifest digests and loads only
+on its indexed CUDA device. Training accepts it only when `p_mode=learned` and
+`p_cost_scale` exactly matches the frozen P-route scale. Implementation is
+complete pending scoped review; runtime evidence is pending. This pass ran
+static compilation, diff and JSON checks only; no tests, collection, fitting,
+GPU training or simulator evaluation were run.

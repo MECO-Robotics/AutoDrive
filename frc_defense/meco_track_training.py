@@ -975,6 +975,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                  config.p_cost_scale != warm_start_provenance.get("p_cost_scale"))):
             raise ValueError(
                 "Plan A P route warm start requires matching learned p_mode and p_cost_scale")
+        if (warm_start_provenance.get("artifact_kind") ==
+                "weights_only_plan_a_joint_u_b_p_v1" and
+                (config.p_mode != "learned" or
+                 config.p_cost_scale != warm_start_provenance.get("p_cost_scale"))):
+            raise ValueError(
+                "joint Plan A U+B+P warm start requires matching learned p_mode and p_cost_scale")
         initialization_record = {"mode": "weights_only_supervised_warm_start",
             "warm_start_artifact_sha256": hashlib.sha256(
                 Path(warm_start).read_bytes()).hexdigest(),

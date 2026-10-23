@@ -35,6 +35,7 @@ COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-warm-start-weights-v2"
 COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-warm-start-weights-v3"
 COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-p-route-warm-start-weights-v1"
 PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA = "meco-plan-a-legal-node-u-b-weights-v1"
+PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA = "meco-plan-a-joint-u-b-p-weights-v1"
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
 PLAN_A_VALUE_LABEL_PROVENANCE = (
     "within-prefix matched simulator gross_horizon_return regression and pairwise comparisons"
@@ -1701,6 +1702,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
                                  expected_prediction_mode: str | None = None):
     """Validate immutable metadata without restoring any training state."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
+        return validate_plan_a_joint_ubp_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") == PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA:
         return validate_plan_a_legal_node_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
@@ -1757,6 +1763,8 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             not isinstance(losses, list) or not losses or
             any(not isinstance(loss, (int, float)) or not math.isfinite(loss) for loss in losses) or
             type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            type(payload.get("steps_per_epoch")) is not int or payload["steps_per_epoch"] < 1 or
+            payload.get("batch_schedule") != "each epoch visits every legal-node and P dataset row at least once; shorter dataset cycles deterministically" or
             not isinstance(payload.get("learning_rate"), (int, float)) or
             not math.isfinite(payload["learning_rate"]) or payload["learning_rate"] <= 0 or
             payload.get("optimizer_state_included") is not False or
@@ -1768,6 +1776,138 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
         model.load_state_dict(payload["model"], strict=True)
     except (RuntimeError, TypeError) as exc:
         raise ValueError("warm-start model weights do not match the model schema") from exc
+    return payload
+
+
+def validate_plan_a_joint_ubp_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate joint U+B+P provenance, exact source bytes and full model state."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    from .meco_counterfactual import (PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        PLAN_A_LEGAL_NODE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
+        DATASET_SCHEMA as TRAJECTORY_SCHEMA, TARGET_SCHEMA as TRAJECTORY_TARGET_SCHEMA)
+    from .curriculum_training import source_identity
+    import hashlib
+    _, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    paths = {key: Path(payload.get(key, "")).resolve() for key in
+        ("legal_dataset_path", "source_dataset_path", "p_dataset_path")}
+    try:
+        legal_bytes = paths["legal_dataset_path"].read_bytes()
+        legal_manifest_bytes = paths["legal_dataset_path"].with_suffix(
+            paths["legal_dataset_path"].suffix + ".manifest.json").read_bytes()
+        source_bytes = paths["source_dataset_path"].read_bytes()
+        source_manifest_bytes = paths["source_dataset_path"].with_suffix(
+            paths["source_dataset_path"].suffix + ".manifest.json").read_bytes()
+        p_bytes = paths["p_dataset_path"].read_bytes()
+        p_manifest_bytes = paths["p_dataset_path"].with_suffix(
+            paths["p_dataset_path"].suffix + ".manifest.json").read_bytes()
+        legal_manifest = json.loads(legal_manifest_bytes)
+        source_manifest = json.loads(source_manifest_bytes)
+        p_manifest = json.loads(p_manifest_bytes)
+    except (OSError, ValueError) as exc:
+        raise ValueError("joint Plan A artifact bound datasets are missing or malformed") from exc
+    sources = source_identity()
+    mode = payload.get("prediction_mode")
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or
+            payload.get("artifact_kind") != "weights_only_plan_a_joint_u_b_p_v1" or
+            payload.get("track") != track or payload.get("model_schema_version") != 1 or
+            payload.get("sources") != expected_sources or expected_sources != sources or
+            payload.get("source_identity_sha256") != _canonical_hash(sources) or
+            payload.get("protocol_id") != protocol_id or
+            payload.get("qualification_protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_file") != protocol_path.name or
+            payload.get("split") != "train" or mode not in PREDICTION_MODES or
+            payload.get("prediction_contract") != prediction_contract(mode) or
+            (expected_prediction_mode is not None and mode != expected_prediction_mode) or
+            payload.get("legal_dataset_schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            payload.get("legal_target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            payload.get("p_dataset_schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA or
+            payload.get("p_target_schema") != PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA or
+            payload.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION or
+            payload.get("p_mode") != "learned" or
+            not _finite_number(payload.get("p_cost_scale")) or payload["p_cost_scale"] <= 0 or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") != list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            payload.get("optimizer_state_included") is not False or
+            payload.get("resume_compatible") is not False or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            not _finite_number(payload.get("route_margin")) or payload["route_margin"] <= 0 or
+            not _finite_number(payload.get("map_regularization")) or payload["map_regularization"] < 0 or
+            not _finite_number(payload.get("p_route_minimum_coverage_fraction")) or
+            not 0 < payload["p_route_minimum_coverage_fraction"] <= 1 or
+            not _finite_number(payload.get("p_route_legal_xy_coverage_fraction")) or
+            payload["p_route_legal_xy_coverage_fraction"] < payload["p_route_minimum_coverage_fraction"] or
+            type(payload.get("p_route_pair_count")) is not int or payload["p_route_pair_count"] < 1 or
+            payload.get("task_loss_weights") != {"u": 1.0, "b": 1.0, "p": 1.0} or
+            payload.get("target_masks") != {"u": "status=available and finite u_target",
+                "b": "status=comparable; both behavior logits available and centered within feasible node support",
+                "p": "distinct route trace pairs with non-tied independent oracle-v3 costs"} or
+            not isinstance(payload.get("joint_loss_history"), list) or
+            len(payload["joint_loss_history"]) != payload.get("updates") or
+            any(not isinstance(entry, dict) or set(entry) != {"u", "b", "p", "joint"} or
+                any(value is not None and not _finite_number(value)
+                    for key, value in entry.items() if key != "joint") or
+                not _finite_number(entry.get("joint"))
+                for entry in payload["joint_loss_history"]) or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("joint Plan A U+B+P artifact metadata contract mismatch")
+    if (hashlib.sha256(legal_bytes).hexdigest() != payload.get("legal_dataset_sha256") or
+            hashlib.sha256(legal_manifest_bytes).hexdigest() != payload.get("legal_manifest_sha256") or
+            hashlib.sha256(source_bytes).hexdigest() != payload.get("source_dataset_sha256") or
+            hashlib.sha256(source_manifest_bytes).hexdigest() != payload.get("source_manifest_sha256") or
+            hashlib.sha256(p_bytes).hexdigest() != payload.get("p_dataset_sha256") or
+            hashlib.sha256(p_manifest_bytes).hexdigest() != payload.get("p_manifest_sha256") or
+            legal_manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            legal_manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            legal_manifest.get("dataset_sha256") != payload.get("legal_dataset_sha256") or
+            source_manifest.get("schema") != TRAJECTORY_SCHEMA or
+            source_manifest.get("target_schema") != TRAJECTORY_TARGET_SCHEMA or
+            p_manifest.get("schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA or
+            p_manifest.get("target_schema") != PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA or
+            p_manifest.get("dataset_sha256") != payload.get("p_dataset_sha256") or
+            p_manifest.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION or
+            legal_manifest.get("split") != "train" or source_manifest.get("split") != "train" or
+            p_manifest.get("split") != "train" or
+            legal_manifest.get("sources") != sources or source_manifest.get("sources") != sources or
+            p_manifest.get("sources") != sources or
+            legal_manifest.get("protocol_id") != protocol_id or
+            source_manifest.get("protocol_id") != protocol_id or
+            p_manifest.get("protocol_id") != protocol_id or
+            legal_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            source_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            p_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            legal_manifest.get("prediction_mode") != mode or
+            source_manifest.get("prediction_mode") != mode or p_manifest.get("prediction_mode") != mode or
+            legal_manifest.get("prediction_contract") != prediction_contract(mode) or
+            source_manifest.get("prediction_contract") != prediction_contract(mode) or
+            p_manifest.get("prediction_contract") != prediction_contract(mode) or
+            legal_manifest.get("source_dataset_sha256") != payload.get("source_dataset_sha256") or
+            legal_manifest.get("source_manifest_sha256") != payload.get("source_manifest_sha256") or
+            p_manifest.get("source_counterfactual_dataset_sha256") != payload.get("source_dataset_sha256") or
+            p_manifest.get("source_counterfactual_manifest_sha256") != payload.get("source_manifest_sha256") or
+            p_manifest.get("p_intervention_scale") != payload.get("p_cost_scale") or
+            legal_manifest.get("device") != p_manifest.get("device") or
+            payload.get("collection_device") != legal_manifest.get("device") or
+            payload.get("training_device") != legal_manifest.get("device")):
+        raise ValueError("joint Plan A datasets/source bytes/protocol/device are not identically bound")
+    template = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        template.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("joint Plan A model weights do not match the requested model schema") from exc
+    layer, mask = _plan_a_p_output_parameters(template, track)
+    selected = (layer.weight.detach() * mask.reshape(-1,
+        *([1] * (layer.weight.ndim - 1)))).abs().sum()
+    biases = layer.bias.detach()[1::2] if track == "A1" else layer.bias.detach()[1:2]
+    if (not bool(torch.isfinite(selected)) or not bool(torch.isfinite(biases).all()) or
+            not bool((selected > 0) or (biases > -20).any())):
+        raise ValueError("joint Plan A artifact contains no trained P output channel")
     return payload
 
 
@@ -1866,6 +2006,16 @@ def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protoc
             raise ValueError("legal-node consumer model has no parameters") from exc
         require_indexed_cuda_device(str(model_device),
             purpose="Plan A legal-node warm-start consumption")
+    if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
+        from .meco_device import require_indexed_cuda_device
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration as exc:
+            raise ValueError("joint Plan A consumer model has no parameters") from exc
+        selected = str(require_indexed_cuda_device(str(model_device),
+            purpose="joint Plan A U+B+P warm-start consumption"))
+        if payload.get("training_device", {}).get("device") != selected:
+            raise ValueError("joint Plan A weights were fitted on a different indexed CUDA device")
     model.load_state_dict(payload["model"], strict=True)
     return payload
 
@@ -2404,6 +2554,277 @@ def warm_start_plan_a_legal_nodes_v1(track: str, dataset: Path, source_dataset: 
         "node_targets": node_count, "comparable_pairs": preference_count}
 
 
+def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
+        source_dataset: Path, p_dataset: Path, output: Path, *,
+        qualification_protocol: Path, updates=10, learning_rate=1e-4,
+        device=None, route_margin=0.02, map_regularization=0.001,
+        minimum_coverage_fraction=0.01):
+    """Fit one shared A model against replay-bound legal-node U/B and oracle P."""
+    if (track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1 or
+            not _finite_number(learning_rate) or learning_rate <= 0 or
+            not _finite_number(route_margin) or route_margin <= 0 or
+            not _finite_number(map_regularization) or map_regularization < 0 or
+            not _finite_number(minimum_coverage_fraction) or
+            not 0 < minimum_coverage_fraction <= 1):
+        raise ValueError("invalid joint Plan A U+B+P warm-start configuration")
+    _prepare_native_gpu_runtime(device)
+    from .meco_device import require_indexed_cuda_device
+    device = str(require_indexed_cuda_device(device, purpose="joint Plan A U+B+P fitting"))
+    from .curriculum_training import source_identity
+    from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
+    from .meco_plan_a_policy import gather_pose_behavior_logits
+    from .meco_counterfactual import (PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
+        _device_identity)
+    sources = source_identity()
+    ub_samples, ub_manifest, ub_data_sha, ub_manifest_sha = (
+        _read_and_replay_plan_a_legal_node_dataset(legal_dataset, source_dataset,
+            qualification_protocol, device, track))
+    p_rows, p_data_sha, p_manifest_sha, _, protocol_id, protocol_sha, p_manifest = (
+        _read_plan_a_p_route_dataset(p_dataset,
+            qualification_protocol=qualification_protocol, expected_sources=sources))
+    if p_manifest.get("schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA:
+        raise ValueError("joint U+B+P fitter requires independent oracle-v3 P-route labels")
+    if (ub_manifest.get("source_dataset_sha256") !=
+            p_manifest.get("source_counterfactual_dataset_sha256") or
+            ub_manifest.get("source_manifest_sha256") !=
+            p_manifest.get("source_counterfactual_manifest_sha256")):
+        raise ValueError("joint U+B and P datasets must bind identical trajectory-v3 source bytes and manifest")
+    if (ub_manifest.get("protocol_id") != protocol_id or
+            ub_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            ub_manifest.get("sources") != p_manifest.get("sources") or
+            ub_manifest.get("source_identity_sha256") != p_manifest.get("source_identity_sha256") or
+            ub_manifest.get("prediction_mode") != p_manifest.get("prediction_mode") or
+            ub_manifest.get("prediction_contract") != p_manifest.get("prediction_contract") or
+            ub_manifest.get("split") != "train" or p_manifest.get("split") != "train" or
+            ub_manifest.get("device") != p_manifest.get("device") or
+            ub_manifest.get("device", {}).get("device") != device or
+            p_manifest.get("device") != _device_identity(device)):
+        raise ValueError("joint U+B/P protocol, source, mode, split, or device identities differ")
+    p_samples = _materialize_plan_a_p_route_rows(p_rows, p_manifest,
+        track=track, train_device=device)
+    if not ub_samples or not p_samples:
+        raise ValueError("joint Plan A datasets must both contain replayed training rows")
+    model = make_meco_track(track,
+        candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    layer, channel_mask = _plan_a_p_output_parameters(model, track)
+    weight_mask = channel_mask.reshape(-1, *([1] * (layer.weight.ndim - 1)))
+    with torch.no_grad():
+        layer.weight.mul_(weight_mask)
+        initial_logit = torch.log(torch.expm1(torch.tensor(0.02,
+            device=device, dtype=layer.bias.dtype)))
+        if track == "A1":
+            layer.bias[1::2] = initial_logit
+        else:
+            layer.bias[1] = initial_logit
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    p_cost_scale = float(p_manifest["p_intervention_scale"])
+    if any(abs(sample["p_cost_scale"] - p_cost_scale) > 1e-12 for sample in p_samples):
+        raise ValueError("replayed P rows disagree on the frozen P scale")
+    legal_mask = p_samples[0]["legal_xy_mask"]
+    if any(not torch.equal(s["legal_xy_mask"], legal_mask) for s in p_samples):
+        raise ValueError("P dataset mixes legal XY grid geometries")
+    legal_cell_count = int(legal_mask.sum().item())
+    visited_cells = set()
+    counts = {"u": 0, "b": 0, "p": 0}
+    history = []
+    model.train()
+    steps_per_epoch = max(len(ub_samples), len(p_samples))
+    for epoch in range(updates):
+        epoch_history = []
+        for step in range(steps_per_epoch):
+            ub = ub_samples[step % len(ub_samples)]
+            ps = p_samples[step % len(p_samples)]
+            raw = model(raster=ub["raster"], globals_=ub["globals"], **ub["graph_inputs"])
+            graph, support, row = ub["graph"], ub["support"], ub["row"]
+            logits = gather_pose_behavior_logits(track, raw, graph, ub["raster"], support,
+                field_length=ub["field_length"], field_width=ub["field_width"])
+            if track == "A1":
+                h, w = ub["raster"].shape[-2:]
+                col = (graph.xy[:, 0] / ub["field_length"] * w).floor().long().clamp(0, w - 1)
+                rr = (graph.xy[:, 1] / ub["field_width"] * h).floor().long().clamp(0, h - 1)
+                node_u = raw["utility"][0, graph.heading_bin, rr, col]
+            else:
+                node_u = raw["utility"][0]
+            targets = [x for x in row["node_u_targets"]
+                if x.get("status") == "available" and x.get("u_target") is not None]
+            if targets:
+                ids = torch.tensor([x["node_id"] for x in targets], device=device, dtype=torch.long)
+                target_u = torch.tensor([x["u_target"] for x in targets], device=device, dtype=node_u.dtype)
+                iw = torch.tensor([x["node_inverse_probability_weight"] for x in targets],
+                    device=device, dtype=node_u.dtype)
+                loss_u = (F.smooth_l1_loss(node_u[ids], target_u, beta=1., reduction="none") * iw).sum() / iw.sum()
+                counts["u"] += len(targets)
+            else:
+                loss_u = node_u.new_zeros(())
+            pair_by_behavior = {}
+            for pair in row["pairs"]:
+                if pair.get("status") == "available":
+                    pair_by_behavior[(pair["node_id"], pair["behavior_id"])] = pair["pair_index"]
+            centered = {}
+            for node in row["selected_node_ids"]:
+                vals = [(behavior, idx) for (nid, behavior), idx in pair_by_behavior.items() if nid == node]
+                if vals:
+                    scores = torch.stack([logits[idx] for _, idx in vals])
+                    scores = scores - scores.mean()
+                    centered.update({(node, behavior): scores[i] for i, (behavior, _) in enumerate(vals)})
+            by_node = {}
+            target_by_node = {x["node_id"]: x for x in row["node_u_targets"]}
+            for pref in row["behavior_preferences"]:
+                if pref.get("status") != "comparable":
+                    continue
+                node = pref["node_id"]
+                left, right = (node, pref["left_behavior_id"]), (node, pref["right_behavior_id"])
+                if left not in centered or right not in centered or node not in target_by_node:
+                    continue
+                sign = 1. if pref["preferred_behavior_id"] == pref["left_behavior_id"] else -1.
+                by_node.setdefault(node, []).append(F.softplus(-sign * (centered[left] - centered[right])))
+            if by_node:
+                node_terms, node_weights = [], []
+                for node, terms in by_node.items():
+                    node_terms.append(torch.stack(terms).mean())
+                    node_weights.append(float(target_by_node[node]["node_inverse_probability_weight"]))
+                bw = torch.tensor(node_weights, device=device, dtype=node_terms[0].dtype)
+                loss_b = (torch.stack(node_terms) * bw).sum() / bw.sum()
+                counts["b"] += sum(len(x) for x in by_node.values())
+            else:
+                loss_b = loss_u.new_zeros(())
+
+            raw_p = model(raster=ps["raster"], globals_=ps["globals"], **ps["graph"])
+            pmap = project_pose_penalty(track, raw_p["penalty"], ps["graph_object"].lookup,
+                ps["planner"], ps["field_length"], ps["field_width"])
+            route_terms = []
+            for outcomes in ps["route_groups"]:
+                unique = {}
+                for outcome in outcomes:
+                    native = outcome["native_route"]
+                    unique.setdefault(native["route_trace_sha256"], outcome)
+                    for snap in native["route_trace"]:
+                        points = snap["route_points_m"]
+                        for point in points:
+                            ix = min(legal_mask.shape[0]-1,
+                                max(0, int(float(point[0]) / ps["resolution_m"])))
+                            iy = min(legal_mask.shape[1]-1,
+                                max(0, int(float(point[1]) / ps["resolution_m"])))
+                            if bool(legal_mask[ix, iy]):
+                                visited_cells.add((ix, iy))
+                        for first, second in zip(points, points[1:]):
+                            dx, dy = float(second[0])-float(first[0]), float(second[1])-float(first[1])
+                            n = max(1, math.ceil(math.hypot(dx, dy) / (ps["resolution_m"] * .5)))
+                            for i in range(n + 1):
+                                f = i / n
+                                ix = min(legal_mask.shape[0]-1, max(0, int((float(first[0])+f*dx)/ps["resolution_m"])))
+                                iy = min(legal_mask.shape[1]-1, max(0, int((float(first[1])+f*dy)/ps["resolution_m"])))
+                                if bool(legal_mask[ix, iy]):
+                                    visited_cells.add((ix, iy))
+                variants = list(unique.values())
+                for i, left in enumerate(variants):
+                    for right in variants[i+1:]:
+                        lc = left["native_route"]["independent_cost_oracle"]["route_cost_grid_edges"]
+                        rc = right["native_route"]["independent_cost_oracle"]["route_cost_grid_edges"]
+                        if lc == rc:
+                            continue
+                        better, worse = (left, right) if lc < rc else (right, left)
+                        costs = []
+                        for outcome in (better, worse):
+                            records = [{"path_points_m": s["route_points_m"]}
+                                for s in outcome["native_route"]["route_trace"]]
+                            learned = integrate_frozen_routes(pmap, records,
+                                ps["resolution_m"], map_scale=p_cost_scale,
+                                points_per_grid_edge=1.).mean()
+                            base = outcome.get("_replayed_base_route_cost_grid_edges")
+                            if not _finite_number(base) or base < 0:
+                                raise ValueError("oracle P route lacks replayed base cost")
+                            costs.append(learned + float(base))
+                        route_terms.append(F.softplus(costs[0] - costs[1] + route_margin))
+            if route_terms:
+                loss_p = torch.stack(route_terms).mean() + map_regularization * pmap.mean()
+                counts["p"] += len(route_terms)
+            else:
+                loss_p = raw_p["penalty"].new_zeros(())
+            if not targets and not by_node and not route_terms:
+                continue
+            loss = loss_u + loss_b + loss_p
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            optimizer.step()
+            epoch_history.append({"u": float(loss_u.detach().cpu()) if targets else None,
+                "b": float(loss_b.detach().cpu()) if by_node else None,
+                "p": float(loss_p.detach().cpu()) if route_terms else None,
+                "joint": float(loss.detach().cpu())})
+        if not epoch_history:
+            raise ValueError("joint epoch has no estimable U, B, or P supervision")
+        history.append({key: (sum(item[key] for item in epoch_history if item[key] is not None) /
+                sum(item[key] is not None for item in epoch_history)
+                if key != "joint" and any(item[key] is not None for item in epoch_history)
+                else (sum(item[key] for item in epoch_history) / len(epoch_history)
+                    if key == "joint" else None))
+            for key in ("u", "b", "p", "joint")})
+    coverage = len(visited_cells) / max(1, legal_cell_count)
+    if any(counts[key] < 1 for key in ("u", "b", "p")):
+        raise ValueError("joint datasets require estimable U, B, and non-tied oracle P targets")
+    if coverage < minimum_coverage_fraction:
+        raise ValueError("P executed paths do not meet the configured legal-grid coverage floor")
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during joint Plan A fitting")
+    from .meco_counterfactual import PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA
+    _, _, _, protocol_path = _load_protocol(qualification_protocol)
+    payload = {"schema": PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA, "schema_version": 1,
+        "artifact_kind": "weights_only_plan_a_joint_u_b_p_v1", "track": track,
+        "model_schema_version": 1, "model": model.state_dict(),
+        "legal_dataset_path": str(Path(legal_dataset).resolve()),
+        "source_dataset_path": str(Path(source_dataset).resolve()),
+        "p_dataset_path": str(Path(p_dataset).resolve()),
+        "legal_dataset_sha256": ub_data_sha, "legal_manifest_sha256": ub_manifest_sha,
+        "p_dataset_sha256": p_data_sha, "p_manifest_sha256": p_manifest_sha,
+        "source_dataset_sha256": ub_manifest["source_dataset_sha256"],
+        "source_manifest_sha256": ub_manifest["source_manifest_sha256"],
+        "legal_dataset_schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        "legal_target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        "p_dataset_schema": PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        "p_target_schema": PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA,
+        "p_oracle_version": PLAN_A_P_ROUTE_ORACLE_VERSION,
+        "sources": sources, "source_identity_sha256": _canonical_hash(sources),
+        "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": protocol_path.name, "split": "train",
+        "prediction_mode": ub_manifest["prediction_mode"],
+        "prediction_contract": ub_manifest["prediction_contract"],
+        "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+        "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+        "candidate_feature_names": list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)),
+        "collection_device": ub_manifest["device"], "training_device": _device_identity(device),
+        "loss_semantics": {"u": "inverse_node_inclusion_weighted_smooth_l1 on available replay-bound legal-node U targets",
+            "b": "node inclusion weighted pairwise softplus on behavior logits centered over available feasible behaviors; unavailable/tied/uncertain excluded",
+            "p": "independent oracle-v3 pairwise softplus on replayed base bump plus learned scaled P route integral, plus mean-P regularization",
+            "joint": "L_U + L_B + L_P, one shared encoder/model and one optimizer step per aligned batch"},
+        "task_loss_weights": {"u": 1.0, "b": 1.0, "p": 1.0},
+        "target_masks": {"u": "status=available and finite u_target",
+            "b": "status=comparable; both behavior logits available and centered within feasible node support",
+            "p": "distinct route trace pairs with non-tied independent oracle-v3 costs"},
+        "p_mode": "learned", "p_cost_scale": p_cost_scale,
+        "p_projection": "mean_over_legal_heading_bins_xy_grid_v1",
+        "p_map_units": "dimensionless_additive_penalty_per_cardinal_grid_step",
+        "p_path_units": "normalized_grid_edge_units",
+        "route_margin": route_margin, "map_regularization": map_regularization,
+        "p_route_pair_count": counts["p"], "p_route_legal_xy_coverage_fraction": coverage,
+        "p_route_minimum_coverage_fraction": minimum_coverage_fraction,
+        "steps_per_epoch": steps_per_epoch,
+        "batch_schedule": "each epoch visits every legal-node and P dataset row at least once; shorter dataset cycles deterministically",
+        "updates": updates, "learning_rate": learning_rate,
+        "joint_loss_history": history,
+        "optimizer_state_included": False, "resume_compatible": False}
+    output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    validate_plan_a_joint_ubp_artifact(track, output,
+        qualification_protocol=qualification_protocol, expected_sources=sources,
+        expected_prediction_mode=ub_manifest["prediction_mode"])
+    return {"path": str(output), "schema": PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA,
+        "u_target_count": counts["u"], "b_pair_count": counts["b"],
+        "p_route_pair_count": counts["p"], "p_route_coverage": coverage,
+        "joint_loss_history": history}
+
+
 def load_plan_a_legal_node_weights(model, checkpoint: Path, *, track: str, device,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
@@ -2499,6 +2920,21 @@ def main(argv=None):
     legal_warm.add_argument("--learning-rate", type=float, default=1e-4)
     legal_warm.add_argument("--device", required=True,
         help="explicit indexed CUDA device; CPU is not supported")
+    joint_warm = commands.add_parser("warm-start-plan-a-joint-ubp-v1")
+    joint_warm.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    joint_warm.add_argument("--legal-dataset", type=Path, required=True)
+    joint_warm.add_argument("--source-dataset", type=Path, required=True)
+    joint_warm.add_argument("--p-dataset", type=Path, required=True,
+        help="independent oracle-v3 executed-route dataset")
+    joint_warm.add_argument("--output", type=Path, required=True)
+    joint_warm.add_argument("--qualification-protocol", type=Path, required=True)
+    joint_warm.add_argument("--updates", type=int, default=10)
+    joint_warm.add_argument("--learning-rate", type=float, default=1e-4)
+    joint_warm.add_argument("--device", required=True,
+        help="explicit indexed CUDA device; CPU is not supported")
+    joint_warm.add_argument("--route-margin", type=float, default=0.02)
+    joint_warm.add_argument("--map-regularization", type=float, default=0.001)
+    joint_warm.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
     p_routes = commands.add_parser("collect-plan-a-p-routes-v1")
     p_routes.add_argument("--dataset", type=Path, required=True,
         help="strictly replayable counterfactual v2 training dataset")
@@ -2576,6 +3012,14 @@ def main(argv=None):
             args.source_dataset, args.output,
             qualification_protocol=args.qualification_protocol,
             updates=args.updates, learning_rate=args.learning_rate, device=args.device)
+    elif args.command == "warm-start-plan-a-joint-ubp-v1":
+        result = warm_start_plan_a_joint_ubp_v1(args.track, args.legal_dataset,
+            args.source_dataset, args.p_dataset, args.output,
+            qualification_protocol=args.qualification_protocol,
+            updates=args.updates, learning_rate=args.learning_rate, device=args.device,
+            route_margin=args.route_margin,
+            map_regularization=args.map_regularization,
+            minimum_coverage_fraction=args.minimum_coverage_fraction)
     elif args.command == "collect-plan-a-p-routes-v1":
         from .meco_counterfactual import collect_plan_a_p_routes_v1
         result = collect_plan_a_p_routes_v1(args.output, dataset=args.dataset,
