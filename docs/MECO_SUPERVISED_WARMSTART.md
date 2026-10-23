@@ -234,3 +234,58 @@ route, records the executed route and map provenance, and matches the replayed
 route costs to an independent reference. Until then, P labels and exhaustive
 P-route coverage remain unavailable and must not be inferred from planner API
 capability or U+B return labels.
+
+#### Plan A legal-node tranche v1
+
+The new `meco-counterfactual-plan-a-legal-node-v1` collector and
+`meco-plan-a-legal-node-u-b-weights-v1` fitter are separate from Plan A v3.
+They bind fresh source-v2 dataset and manifest hashes, protocol and train
+split, source identity, device, full support digest, canonical node order,
+reachable mask, and full ordered pair feasibility layout. Every label comes
+from strict prefix replay followed by a legal simulator action and the same
+deterministic teacher continuation, horizon, and per-macro discount as the
+source manifest. Planner-internal AD* costs are never targets.
+
+Coverage is a sampled tranche. For each branch, `N` is the count of feasible
+reachable legal nodes. The selector chooses at most `floor(N/16)` nodes,
+capped by `floor(512 / (2 * feasible_behavior_count))`, in deterministic
+heading-bin × graph-region strata; it includes the root when the root has a
+valid behavior pair. For about 7,528 nodes and five feasible behaviors this
+selects at most 51 nodes (about 0.68% of reachable nodes), not an exhaustive
+pass. One descriptor per selected node/behavior is selected by uniform hash
+rank from that behavior's `D` feasible descriptors. It records `1/D`
+inclusion probability and inverse-probability weight `D` as provenance; U and
+B are defined as expectations over uniform descriptor draws, so the fitting
+loss does not multiply sampled returns by `D`. Two paired repeat
+outcomes use the same repeat seed across alternatives, retain each return and
+report paired-difference variance. Each branch record includes the repeat seed,
+requested action, executed physics-tick action trace, branch tick count, and
+terminal/timeout state. Preempted, remasked, or partial requested actions are
+recorded as unavailable and excluded from U and B targets. Behavior pairs are
+comparable only when both paired repeats have the same nonzero sign; exact
+all-repeat zeros are ties and all other cases are uncertain. There is no
+calibrated noise margin, so this sign agreement rule is the declared minimum.
+The per-prefix hard limit is 512 simulator
+branches; the deterministic dataset preflight bound is
+`source_record_count × 512`, capped at 12,000. A larger bound is rejected
+before collection and requires partitioning the source dataset.
+
+At each selected node, one uniformly sampled descriptor return estimates each
+feasible behavior's descriptor-average return, then feasible behavior means
+receive equal weight for the U target.
+U is withheld when any feasible behavior outcome is censored or unavailable;
+unavailable and censored behaviors are reported separately. Independently
+valid behavior pairs can still contribute B preferences. Exact ties are
+retained with no preferred behavior. The fitter uses
+`smooth_l1(U(node), U_target)` plus a
+feasible within-node pairwise softplus loss on `U+B` logits; the shared U term
+cancels in each B contrast. It applies exact per-stratum node inclusion
+weights; descriptor inverse-probability weights remain provenance for this
+uniform-draw estimand. P targets remain null with zero prior
+until the independent P-v3 oracle supplies them. Fresh deterministic
+recollection must byte-match the dataset before fitting; the dedicated
+weights-only consumer rejects CPU and nonmatching track/device/P contracts.
+
+Planner is complete. This implementation pass has static compilation and diff
+checks only; scoped review and runtime evidence remain pending. No tests or
+simulator runs were performed.

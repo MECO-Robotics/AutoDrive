@@ -34,6 +34,7 @@ WEIGHTS_SCHEMA = "meco-warm-start-weights-v1"
 COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-warm-start-weights-v2"
 COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-warm-start-weights-v3"
 COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-p-route-warm-start-weights-v1"
+PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA = "meco-plan-a-legal-node-u-b-weights-v1"
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
 PLAN_A_VALUE_LABEL_PROVENANCE = (
     "within-prefix matched simulator gross_horizon_return regression and pairwise comparisons"
@@ -1700,6 +1701,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
                                  expected_prediction_mode: str | None = None):
     """Validate immutable metadata without restoring any training state."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA:
+        return validate_plan_a_legal_node_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") == COUNTERFACTUAL_WEIGHTS_SCHEMA:
         return validate_counterfactual_warm_start_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
@@ -1765,6 +1771,86 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
     return payload
 
 
+def validate_plan_a_legal_node_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate legal-node weights, source bytes, split, protocol and model shape."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    import hashlib
+    from .meco_counterfactual import (PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        PLAN_A_LEGAL_NODE_TARGET_SCHEMA, DATASET_SCHEMA as CF_SCHEMA,
+        TARGET_SCHEMA as CF_TARGET_SCHEMA)
+    from .curriculum_training import source_identity
+    _, protocol_id, protocol_sha, protocol_path = _load_protocol(Path(qualification_protocol))
+    dataset_path = Path(payload.get("dataset_path", "")).resolve()
+    source_path = Path(payload.get("source_dataset_path", "")).resolve()
+    try:
+        dataset_bytes = dataset_path.read_bytes()
+        dataset_manifest_bytes = dataset_path.with_suffix(dataset_path.suffix + ".manifest.json").read_bytes()
+        source_bytes = source_path.read_bytes()
+        source_manifest_bytes = source_path.with_suffix(source_path.suffix + ".manifest.json").read_bytes()
+        dataset_manifest = json.loads(dataset_manifest_bytes)
+        source_manifest = json.loads(source_manifest_bytes)
+    except (OSError, ValueError) as exc:
+        raise ValueError("legal-node artifact's bound dataset files are unavailable or malformed") from exc
+    source_digest = _canonical_hash(expected_sources)
+    model_template = make_meco_track(track,
+        candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT) if track in ("A1", "A2", "A3") else None
+    expected_state = model_template.state_dict() if model_template is not None else {}
+    model_state = payload.get("model")
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or
+            payload.get("artifact_kind") != "weights_only_plan_a_legal_node_u_b_v1" or
+            payload.get("model_schema_version") != 1 or payload.get("track") != track or
+            payload.get("dataset_schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            payload.get("source_dataset_schema") != CF_SCHEMA or
+            payload.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            payload.get("split") != "train" or
+            payload.get("sources") != expected_sources or
+            payload.get("source_identity_sha256") != source_digest or
+            payload.get("protocol_id") != protocol_id or
+            payload.get("protocol_sha256") != protocol_sha or
+            dataset_manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            dataset_manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            dataset_manifest.get("split") != "train" or
+            dataset_manifest.get("sources") != expected_sources or
+            dataset_manifest.get("protocol_id") != protocol_id or
+            dataset_manifest.get("qualification_protocol_sha256") != protocol_sha or
+            dataset_manifest.get("qualification_protocol_file") != protocol_path.name or
+            hashlib.sha256(dataset_bytes).hexdigest() != payload.get("dataset_sha256") or
+            hashlib.sha256(dataset_manifest_bytes).hexdigest() != payload.get("dataset_manifest_sha256") or
+            dataset_manifest.get("dataset_sha256") != payload.get("dataset_sha256") or
+            hashlib.sha256(source_bytes).hexdigest() != payload.get("source_dataset_sha256") or
+            hashlib.sha256(source_manifest_bytes).hexdigest() != payload.get("source_manifest_sha256") or
+            source_manifest.get("schema") != CF_SCHEMA or
+            source_manifest.get("target_schema") != CF_TARGET_SCHEMA or
+            source_manifest.get("split") != "train" or
+            source_manifest.get("sources") != expected_sources or
+            payload.get("source_dataset_sha256") != dataset_manifest.get("source_dataset_sha256") or
+            payload.get("source_manifest_sha256") != dataset_manifest.get("source_manifest_sha256") or
+            payload.get("prediction_mode") != source_manifest.get("prediction_mode") or
+            payload.get("prediction_mode") not in PREDICTION_MODES or
+            source_manifest.get("prediction_contract") != prediction_contract(payload.get("prediction_mode")) or
+            dataset_manifest.get("prediction_mode") != payload.get("prediction_mode") or
+            dataset_manifest.get("prediction_contract") != source_manifest.get("prediction_contract") or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") != list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            payload.get("device") != dataset_manifest.get("device") or
+            payload.get("p_mode") != "p0" or
+            payload.get("optimizer_state_included") is not False or
+            payload.get("resume_compatible") is not False or
+            payload.get("p_target", "missing") is not None or payload.get("p_prior") != 0.0 or
+            not isinstance(model_state, dict) or set(model_state) != set(expected_state) or
+            any(tuple(model_state[k].shape) != tuple(expected_state[k].shape) for k in expected_state)):
+        raise ValueError("Plan A legal-node weights/source/protocol/model contract mismatch")
+    if (expected_prediction_mode is not None and
+            payload.get("prediction_mode") != expected_prediction_mode):
+        raise ValueError("legal-node prediction mode differs from training configuration")
+    return payload
+
+
 def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protocol: Path,
                     expected_sources: dict,
                     expected_prediction_mode: str | None = None):
@@ -1772,6 +1858,14 @@ def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protoc
     payload = validate_warm_start_artifact(track, checkpoint,
         qualification_protocol=qualification_protocol, expected_sources=expected_sources,
         expected_prediction_mode=expected_prediction_mode)
+    if payload.get("schema") == PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA:
+        from .meco_device import require_indexed_cuda_device
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration as exc:
+            raise ValueError("legal-node consumer model has no parameters") from exc
+        require_indexed_cuda_device(str(model_device),
+            purpose="Plan A legal-node warm-start consumption")
     model.load_state_dict(payload["model"], strict=True)
     return payload
 
@@ -2108,6 +2202,228 @@ def load_counterfactual_warm_start(track: str, model, checkpoint: Path, *,
     return payload
 
 
+def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualification_protocol, device, track):
+    """Fail-closed validator: regenerate all labels from strict source replays."""
+    from .meco_counterfactual import (collect_plan_a_legal_nodes_v1,
+        PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        _hash, replay_counterfactual_branch)
+    from .curriculum_training import source_identity
+    import hashlib, tempfile
+
+    dataset, source_dataset = Path(dataset).resolve(), Path(source_dataset).resolve()
+    manifest_path = dataset.with_suffix(dataset.suffix + ".manifest.json")
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    data_bytes = dataset.read_bytes()
+    digest = hashlib.sha256(data_bytes).hexdigest()
+    sources = source_identity()
+    if (manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+            manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            manifest.get("split") != "train" or manifest.get("sources") != sources or
+            manifest.get("source_identity_sha256") != _canonical_hash(sources) or
+            manifest.get("dataset_sha256") != digest):
+        raise ValueError("legal-node dataset schema, source identity, or bytes mismatch")
+    from .meco_counterfactual import _read_counterfactual_dataset
+    source_rows, source_sha, source_manifest_sha, _, protocol_id, protocol_sha, source_manifest = \
+        _read_counterfactual_dataset(source_dataset,
+            qualification_protocol=Path(qualification_protocol), expected_sources=sources)
+    if (manifest.get("source_dataset_sha256") != source_sha or
+            manifest.get("source_manifest_sha256") != source_manifest_sha or
+            manifest.get("protocol_id") != protocol_id or
+            manifest.get("qualification_protocol_sha256") != protocol_sha or
+            manifest.get("device") != source_manifest.get("device")):
+        raise ValueError("legal-node source dataset/protocol/device binding mismatch")
+    with tempfile.TemporaryDirectory(prefix="meco-legal-node-replay-") as tmp:
+        replayed_path = Path(tmp) / "replayed.jsonl"
+        collect_plan_a_legal_nodes_v1(replayed_path, dataset=source_dataset,
+            qualification_protocol=Path(qualification_protocol), device=device)
+        if replayed_path.read_bytes() != data_bytes:
+            raise ValueError("legal-node labels differ from fresh deterministic replay")
+    legal_rows = [json.loads(line) for line in data_bytes.decode().splitlines() if line]
+    if len(legal_rows) != manifest.get("record_count") or not legal_rows:
+        raise ValueError("legal-node row count mismatch")
+    source_by_key = {(r["scenario_id"], r["category"], r["seed"], r["decision_index"]): r
+        for r in source_rows}
+    samples = []
+    from .meco_track_training import _graph_inputs
+    for row in legal_rows:
+        key = (row["scenario_id"], row["category"], row["seed"], row["decision_index"])
+        record = source_by_key.get(key)
+        if record is None:
+            raise ValueError("legal-node row does not map to a frozen source branch")
+        replay = replay_counterfactual_branch(record, source_manifest)
+        try:
+            env, graph, support = replay["env"], replay["graph"], replay["support"]
+            if row.get("support_digest") != support.support_digest:
+                raise ValueError("legal-node support digest differs on consumer replay")
+            observation = replay["observation"]
+            raster = torch.tensor(observation.raster, dtype=torch.float32, device=device).reshape(
+                1, *observation.raster_shape)
+            globals_ = torch.tensor(observation.globals, dtype=torch.float32, device=device).reshape(1, 7)
+            graph_inputs = _graph_inputs(track, graph, env, raster) or {}
+            graph_inputs = {k: v.to(device) for k, v in graph_inputs.items()}
+            samples.append({"row": row, "support": support, "graph": graph,
+                "graph_inputs": graph_inputs, "raster": raster, "globals": globals_,
+                "field_length": float(env.sim.field_length), "field_width": float(env.sim.field_width)})
+        finally:
+            close = getattr(replay["env"], "close", None)
+            if callable(close): close()
+    return samples, manifest, digest, hashlib.sha256(manifest_bytes).hexdigest()
+
+
+def warm_start_plan_a_legal_nodes_v1(track: str, dataset: Path, source_dataset: Path,
+        output: Path, *, qualification_protocol: Path, updates=10,
+        learning_rate=1e-4, device=None):
+    """Fit U regression plus centered feasible B contrasts from legal-node labels."""
+    if track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1:
+        raise ValueError("legal-node warm start requires A1/A2/A3 and positive updates")
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning rate must be positive and finite")
+    _prepare_native_gpu_runtime(device)
+    from .meco_device import require_indexed_cuda_device
+    device = str(require_indexed_cuda_device(device, purpose="Plan A legal-node fitting"))
+    samples, manifest, data_sha, manifest_sha = _read_and_replay_plan_a_legal_node_dataset(
+        dataset, source_dataset, qualification_protocol, device, track)
+    if manifest["device"]["device"] != device:
+        raise ValueError("legal-node fitter device must match frozen collection device")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    from .meco_plan_a_policy import gather_pose_behavior_logits
+    value_losses, preference_losses = [], []
+    node_count = sum(sum(item.get("status") == "available" for item in sample["row"]["node_u_targets"])
+        for sample in samples)
+    preference_count = sum(sum(p["status"] == "comparable" for p in sample["row"]["behavior_preferences"])
+        for sample in samples)
+    if node_count < 1:
+        raise ValueError("legal-node dataset has no U targets")
+    model.train()
+    for _ in range(updates):
+        losses_u, losses_b = [], []
+        for sample in samples:
+            graph, support, row = sample["graph"], sample["support"], sample["row"]
+            raw = model(raster=sample["raster"], globals_=sample["globals"], **sample["graph_inputs"])
+            logits = gather_pose_behavior_logits(track, raw, graph, sample["raster"], support,
+                field_length=sample["field_length"], field_width=sample["field_width"])
+            if track == "A1":
+                utility = raw["utility"]
+                h, w = sample["raster"].shape[-2:]
+                col = (graph.xy[:, 0] / sample["field_length"] * w).floor().long().clamp(0, w-1)
+                rr = (graph.xy[:, 1] / sample["field_width"] * h).floor().long().clamp(0, h-1)
+                node_u = utility[0, graph.heading_bin, rr, col]
+            else:
+                node_u = raw["utility"][0]
+            all_target_records = row["node_u_targets"]
+            target_records = [item for item in all_target_records if
+                item.get("status") == "available" and item.get("u_target") is not None]
+            if target_records:
+                node_ids = torch.tensor([x["node_id"] for x in target_records], device=device, dtype=torch.long)
+                target_u = torch.tensor([x["u_target"] for x in target_records], device=device, dtype=node_u.dtype)
+                node_weights = torch.tensor([x["node_inverse_probability_weight"] for x in target_records],
+                    device=device, dtype=target_u.dtype)
+                loss_u = (F.smooth_l1_loss(node_u[node_ids], target_u, beta=1., reduction="none") *
+                    node_weights).sum() / node_weights.sum()
+            else:
+                loss_u = node_u.new_zeros(())
+            terms_by_node = {}
+            pair_index_by_behavior = {}
+            for pair in row["pairs"]:
+                if pair.get("status") == "available":
+                    pair_index_by_behavior[(pair["node_id"], pair["behavior_id"])] = pair["pair_index"]
+            centered_behavior_logits = {}
+            for node in row["selected_node_ids"]:
+                behavior_pairs = [(behavior, pair_index) for (node_id, behavior), pair_index
+                    in pair_index_by_behavior.items() if node_id == node]
+                if behavior_pairs:
+                    values = torch.stack([logits[pair_index] for _, pair_index in behavior_pairs])
+                    centered = values - values.mean()
+                    centered_behavior_logits.update({(node, behavior): centered[i]
+                        for i, (behavior, _) in enumerate(behavior_pairs)})
+            for pref in row["behavior_preferences"]:
+                if pref["status"] != "comparable":
+                    continue
+                node = pref["node_id"]
+                # Pick one valid pair for each compared behavior; U cancels in
+                # the paired logits, leaving the centered behavior contrast.
+                left = centered_behavior_logits[(node, pref["left_behavior_id"])]
+                right = centered_behavior_logits[(node, pref["right_behavior_id"])]
+                sign = 1. if pref["preferred_behavior_id"] == pref["left_behavior_id"] else -1.
+                terms_by_node.setdefault(node, []).append((
+                    F.softplus(-sign * (left - right)), 1.0))
+            if terms_by_node:
+                node_terms, node_term_weights = [], []
+                target_by_node = {item["node_id"]: item for item in all_target_records}
+                for node, values in terms_by_node.items():
+                    weights = torch.tensor([weight for _, weight in values], device=device,
+                        dtype=values[0][0].dtype)
+                    node_terms.append((torch.stack([term for term, _ in values]) * weights).sum() / weights.sum())
+                    node_term_weights.append(float(target_by_node[node]["node_inverse_probability_weight"]))
+                weights_b = torch.tensor(node_term_weights, device=device, dtype=node_terms[0].dtype)
+                loss_b = (torch.stack(node_terms) * weights_b).sum() / weights_b.sum()
+            else:
+                loss_b = loss_u.new_zeros(())
+            if not target_records and not terms_by_node:
+                continue
+            loss = loss_u + loss_b
+            optimizer.zero_grad(set_to_none=True); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
+            if target_records: losses_u.append(float(loss_u.detach().cpu()))
+            if terms_by_node: losses_b.append(float(loss_b.detach().cpu()))
+        value_losses.append(sum(losses_u)/len(losses_u) if losses_u else 0.)
+        preference_losses.append(sum(losses_b)/len(losses_b) if losses_b else 0.)
+    _initialize_unlabelled_plan_a_penalty_head(model, track)
+    payload = {"schema": PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA, "schema_version": 1,
+        "artifact_kind": "weights_only_plan_a_legal_node_u_b_v1", "track": track,
+        "model_schema_version": 1, "model": model.state_dict(), "dataset_sha256": data_sha,
+        "dataset_manifest_sha256": manifest_sha,
+        "source_dataset_sha256": manifest["source_dataset_sha256"],
+        "source_manifest_sha256": manifest["source_manifest_sha256"],
+        "dataset_path": str(Path(dataset).resolve()),
+        "source_dataset_path": str(Path(source_dataset).resolve()),
+        "sources": manifest["sources"],
+        "source_identity_sha256": manifest["source_identity_sha256"],
+        "protocol_id": manifest["protocol_id"], "protocol_sha256": manifest["qualification_protocol_sha256"],
+        "target_schema": "meco-plan-a-legal-node-utility-and-feasible-preference-v1",
+        "dataset_schema": "meco-counterfactual-plan-a-legal-node-v1",
+        "source_dataset_schema": "meco-counterfactual-trajectory-v3",
+        "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+        "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+        "candidate_feature_names": list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)),
+        "split": "train", "prediction_mode": manifest["prediction_mode"],
+        "coverage_rule": manifest["coverage_rule"], "u_loss": "inverse-node-inclusion-weighted smooth_l1(U(node), equal-feasible-behavior mean of uniform descriptor-sample returns)",
+        "b_loss": "pairwise_softplus on behavior logits centered over sampled feasible behaviors per node; uniformly sampled descriptor alternatives estimate behavior marginals; equal node weighting with node inclusion weights",
+        "p_target": None, "p_prior": 0.0,
+        "p_mode": "p0", "optimizer_state_included": False, "resume_compatible": False,
+        "device": manifest["device"], "updates": updates, "learning_rate": learning_rate,
+        "node_target_count": node_count, "comparable_behavior_pair_count": preference_count,
+        "selector_digest": _canonical_hash([x["row"]["selection_digest"] for x in samples]),
+        "behavior_descriptor_sampling": "one deterministic uniform hash-ranked descriptor per feasible node-behavior; descriptor inclusion probabilities/weights are provenance, while U and B estimands are expectations over uniform descriptor draws",
+        "value_losses": value_losses, "preference_losses": preference_losses}
+    output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    return {"path": str(output), "schema": PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA,
+        "node_targets": node_count, "comparable_pairs": preference_count}
+
+
+def load_plan_a_legal_node_weights(model, checkpoint: Path, *, track: str, device,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Load only validated legal-node weights on an explicit CUDA device."""
+    from .meco_device import require_indexed_cuda_device
+    selected = str(require_indexed_cuda_device(device, purpose="Plan A legal-node weights consumer"))
+    validate_plan_a_legal_node_artifact(track, checkpoint,
+        qualification_protocol=qualification_protocol,
+        expected_sources=expected_sources,
+        expected_prediction_mode=expected_prediction_mode)
+    payload = torch.load(Path(checkpoint), map_location=selected, weights_only=True)
+    if (not isinstance(payload, dict) or payload.get("schema") != PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA or
+            payload.get("track") != track or payload.get("device", {}).get("device") != selected or
+            payload.get("p_target", "missing") is not None or payload.get("p_prior") != 0.0 or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("legal-node weights artifact identity or P-null contract mismatch")
+    model.load_state_dict(payload["model"], strict=True)
+    return payload
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2166,6 +2482,23 @@ def main(argv=None):
     plan_a_v3.add_argument("--learning-rate", type=float, default=1e-4)
     plan_a_v3.add_argument("--device", required=True,
         help="explicit indexed CUDA/ROCm device, for example cuda:0")
+    legal_collect = commands.add_parser("collect-plan-a-legal-nodes-v1")
+    legal_collect.add_argument("--dataset", type=Path, required=True,
+        help="strictly replayable counterfactual v2 training dataset")
+    legal_collect.add_argument("--output", type=Path, required=True)
+    legal_collect.add_argument("--qualification-protocol", type=Path, required=True)
+    legal_collect.add_argument("--device", required=True,
+        help="explicit CUDA/ROCm device matching the frozen source dataset")
+    legal_warm = commands.add_parser("warm-start-plan-a-legal-nodes-v1")
+    legal_warm.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    legal_warm.add_argument("--dataset", type=Path, required=True)
+    legal_warm.add_argument("--source-dataset", type=Path, required=True)
+    legal_warm.add_argument("--output", type=Path, required=True)
+    legal_warm.add_argument("--qualification-protocol", type=Path, required=True)
+    legal_warm.add_argument("--updates", type=int, default=10)
+    legal_warm.add_argument("--learning-rate", type=float, default=1e-4)
+    legal_warm.add_argument("--device", required=True,
+        help="explicit indexed CUDA device; CPU is not supported")
     p_routes = commands.add_parser("collect-plan-a-p-routes-v1")
     p_routes.add_argument("--dataset", type=Path, required=True,
         help="strictly replayable counterfactual v2 training dataset")
@@ -2234,6 +2567,15 @@ def main(argv=None):
         result = warm_start_counterfactual_plan_a_v3(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,
             learning_rate=args.learning_rate, device=args.device)
+    elif args.command == "collect-plan-a-legal-nodes-v1":
+        from .meco_counterfactual import collect_plan_a_legal_nodes_v1
+        result = collect_plan_a_legal_nodes_v1(args.output, dataset=args.dataset,
+            qualification_protocol=args.qualification_protocol, device=args.device)
+    elif args.command == "warm-start-plan-a-legal-nodes-v1":
+        result = warm_start_plan_a_legal_nodes_v1(args.track, args.dataset,
+            args.source_dataset, args.output,
+            qualification_protocol=args.qualification_protocol,
+            updates=args.updates, learning_rate=args.learning_rate, device=args.device)
     elif args.command == "collect-plan-a-p-routes-v1":
         from .meco_counterfactual import collect_plan_a_p_routes_v1
         result = collect_plan_a_p_routes_v1(args.output, dataset=args.dataset,

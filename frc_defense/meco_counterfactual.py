@@ -41,6 +41,11 @@ PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
 PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-oracle-v3"
 PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA = "meco-executed-route-independent-cost-v1"
 PLAN_A_P_ROUTE_ORACLE_VERSION = "base-bump-plus-effective-p-grid-edge-integral-v1"
+PLAN_A_LEGAL_NODE_DATASET_SCHEMA = "meco-counterfactual-plan-a-legal-node-v1"
+PLAN_A_LEGAL_NODE_TARGET_SCHEMA = "meco-plan-a-legal-node-utility-and-feasible-preference-v1"
+PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX = 512
+PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES = 12000
+PLAN_A_LEGAL_NODE_REPEATS = 2
 # v2 hashes all canonical environment state except the root environment's
 # CUDA-graph execution cache (`env._physics_graphs`). Captured graph objects are
 # device/runtime execution machinery, not simulator state; every other field
@@ -1191,6 +1196,349 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
     return {"path": str(output), "record_count": len(rows),
             "dataset_sha256": manifest["dataset_sha256"],
             "schema": DATASET_SCHEMA}
+
+
+def _legal_node_pair_return(record, manifest, pair_index, repeat_index):
+    """Replay a branch and execute one pair from the full legal Plan A support."""
+    replay = replay_counterfactual_branch(record, manifest)
+    env = replay["env"]
+    repeat_seed = int.from_bytes(hashlib.sha256(
+        f"legal-node-repeat:{record['seed']}:{repeat_index}".encode()).digest()[:4], "big")
+    branch_rng = _counterfactual_rng_scope(repeat_seed)
+    branch_rng.__enter__()
+    try:
+        support = replay["support"]
+        if (support.support_digest != record["support_digest"] or
+                pair_index < 0 or pair_index >= support.valid_mask.numel() or
+                not bool(support.valid_mask[pair_index])):
+            raise RuntimeError("legal-node pair is absent from full replayed support")
+        node = int(support.pair_node_ids[pair_index].item())
+        action = int(support.action_ids[pair_index].item())
+        requested_action = action
+        goal_xy = [float(x) for x in support.goal_xy[node].tolist()]
+        goal_heading = float(support.goal_heading[node].item())
+        goal_track_index = None
+        goal_track_source_xy = None
+        if int(support.behavior_ids[pair_index].item()) == 1:
+            descriptor_id = int(support.descriptor_ids[pair_index].item())
+            target_indices, target_available, _ = env._candidates()
+            if (descriptor_id < 0 or descriptor_id >= target_indices.shape[-1] or
+                    not bool(target_available[0, 3, descriptor_id].item())):
+                return {"status": "unavailable", "unavailable_reason":
+                    "selected intake descriptor is no longer sensed/available",
+                    "requested_action": requested_action, "repeat_seed": repeat_seed}
+            goal_track_index = int(target_indices[0, 3, descriptor_id].item())
+            goal_track_source_xy = [float(x) for x in
+                env.track_pos[0, 3, goal_track_index].tolist()]
+        ticks = record["macro_ticks"]
+        reward, ended, timeout, trace, _, _, preempted = _reward_step(env, action, ticks,
+            goal_xy=goal_xy, goal_heading=goal_heading,
+            goal_track_index=goal_track_index, goal_track_source_xy=goal_track_source_xy,
+            allow_action7_traversal=(action == 7))
+        target_lost = getattr(env, "_last_planner_collection_target_valid", None) is False
+        action_remasked = getattr(env, "_last_planner_collection_action_match", None) is False
+        if (len(trace) != ticks or any(executed != action for executed in trace) or
+                preempted or target_lost or action_remasked):
+            return {"status": "unavailable", "unavailable_reason":
+                "requested action or goal was preempted, remasked, or not executed for full macro",
+                "requested_action": requested_action, "executed_action_trace": list(trace),
+                "executed_branch_ticks": len(trace), "repeat_seed": repeat_seed,
+                "goal_preempted": bool(preempted), "target_lost": bool(target_lost),
+                "action_remasked": bool(action_remasked)}
+        branch_trace = list(trace)
+        branch_ended, branch_timeout = bool(ended), bool(timeout)
+        gross = discounted = reward
+        elapsed = record["macro_start_tick"] + ticks
+        continuation = 0
+        while not (ended or timeout) and elapsed < manifest["horizon_physics_ticks"]:
+            action = int(teacher_actions(env, env._last_obs)[0, 3].item())
+            macro_ticks = min(manifest["max_macro_ticks"],
+                manifest["horizon_physics_ticks"] - elapsed)
+            step_reward, ended, timeout, trace, _, _, _ = _reward_step(env, action, macro_ticks)
+            if len(trace) != macro_ticks and not (ended or timeout):
+                raise RuntimeError("continuation macro ended before allotted ticks")
+            gross += step_reward
+            continuation += 1
+            discounted += manifest["gamma_per_macro"] ** continuation * step_reward
+            elapsed += len(trace)
+        return {"gross_horizon_return": gross,
+            "discounted_horizon_return": discounted,
+            "status": "available", "requested_action": requested_action,
+            "executed_action_trace": branch_trace,
+            "executed_branch_ticks": len(branch_trace),
+            "branch_terminal": branch_ended, "branch_timeout": branch_timeout,
+            "repeat_seed": repeat_seed,
+            "continuation_macro_horizon": continuation,
+            "continuation_policy": CONTINUATION_POLICY,
+            "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
+            "terminal": bool(ended or timeout)}
+    finally:
+        close = getattr(env, "close", None)
+        try:
+            if callable(close): close()
+        finally:
+            branch_rng.__exit__(None, None, None)
+
+
+def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
+        qualification_protocol: Path, device: str):
+    """Collect simulator-only labels over a deterministic bounded legal-node subset."""
+    from .curriculum_training import source_identity
+    from .meco_supervised import _load_protocol, _read_counterfactual_dataset
+    from .meco_track_training import _atomic_json
+    from .meco_device import require_indexed_cuda_device
+
+    device = str(require_indexed_cuda_device(device, purpose="Plan A legal-node collection"))
+    sources = source_identity()
+    rows, source_sha, source_manifest_sha, _, protocol_id, protocol_sha, source_manifest = \
+        _read_counterfactual_dataset(Path(dataset), qualification_protocol=Path(qualification_protocol),
+            expected_sources=sources)
+    if source_manifest["device"]["device"] != device:
+        raise ValueError("legal-node collection device must match frozen source dataset")
+    _, loaded_id, loaded_sha, protocol_path = _load_protocol(Path(qualification_protocol))
+    if (loaded_id != protocol_id or loaded_sha != protocol_sha or source_manifest["split"] != "train"):
+        raise ValueError("legal-node source protocol/train split mismatch")
+    out_rows = []
+    preflight_rollout_bound = len(rows) * PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX
+    if preflight_rollout_bound > PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES:
+        raise ValueError(f"legal-node deterministic preflight bound {preflight_rollout_bound} exceeds "
+            f"dataset cap {PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES}; partition the source dataset")
+    actual_rollouts = 0
+    for record in rows:
+        if not record.get("plan_a_descriptors"): continue
+        replay = replay_counterfactual_branch(record, source_manifest)
+        env = replay["env"]
+        graph = replay["graph"]
+        try:
+            support = replay["support"]
+            nodes = [int(x) for x in support.node_ids.tolist()]
+            pair_nodes = [int(x) for x in support.pair_node_ids.tolist()]
+            pair_behaviors = [int(x) for x in support.behavior_ids.tolist()]
+            pair_descriptors = [int(x) for x in support.descriptor_ids.tolist()]
+            pair_actions = [int(x) for x in support.action_ids.tolist()]
+            valid = [bool(x) for x in support.valid_mask.tolist()]
+            reachable = [bool(math.isfinite(float(x))) for x in support.distances_m.tolist()]
+            feasible_nodes = sorted({pair_nodes[i] for i, ok in enumerate(valid) if ok and reachable[pair_nodes[i]]})
+            if not feasible_nodes:
+                raise RuntimeError("legal-node branch has N=0 feasible reachable nodes")
+            behavior_count = max(1, len({pair_behaviors[i] for i, ok in enumerate(valid)
+                if ok and pair_nodes[i] in feasible_nodes}))
+            requested = max(1, len(feasible_nodes) // 16)
+            # Preserve a complete feasible-behavior panel at each selected
+            # node while bounding simulator interventions per prefix.
+            budget_node_limit = max(1, PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX //
+                (behavior_count * PLAN_A_LEGAL_NODE_REPEATS))
+            limit = min(requested, budget_node_limit)
+            headings = [int(x) for x in graph.heading_bin.tolist()]
+            regions = [int(x) for x in graph.region_ids.reshape(-1).tolist()]
+            key = (f"legal-node-v1:{protocol_id}:{record['scenario_id']}:{record['category']}:"
+                f"{record['seed']}:{record['decision_index']}:{support.support_digest}")
+            strata = {}
+            for node in feasible_nodes:
+                strata.setdefault((headings[node], regions[node]), []).append(node)
+            ordered_strata = sorted(strata, key=lambda cell: hashlib.sha256(
+                f"{key}:stratum:{cell[0]}:{cell[1]}".encode()).digest())
+            selected = []
+            if support.root_node in feasible_nodes:
+                selected.append(support.root_node)
+            depth = 0
+            while len(selected) < limit:
+                added = False
+                for cell in ordered_strata:
+                    candidates = sorted(strata[cell], key=lambda node: hashlib.sha256(
+                        f"{key}:node:{node}".encode()).digest())
+                    if depth < len(candidates) and candidates[depth] not in selected:
+                        selected.append(candidates[depth]); added = True
+                        if len(selected) >= limit: break
+                if not added: break
+                depth += 1
+            selected = sorted(selected)
+            selected_set = set(selected)
+            stratum_selected_counts = {}
+            for selected_node in selected:
+                cell = (headings[selected_node], regions[selected_node])
+                stratum_selected_counts[cell] = stratum_selected_counts.get(cell, 0) + 1
+            node_pi = {}
+            for selected_node in selected:
+                cell = (headings[selected_node], regions[selected_node])
+                in_root_stratum = support.root_node in strata[cell]
+                if selected_node == support.root_node:
+                    pi = 1.0
+                else:
+                    population = len(strata[cell]) - int(in_root_stratum)
+                    sample = stratum_selected_counts[cell] - int(in_root_stratum)
+                    pi = sample / population if population else 1.0
+                node_pi[selected_node] = pi
+            if any(not (0. < pi <= 1.) for pi in node_pi.values()):
+                raise RuntimeError("legal-node stratum inclusion probability is invalid")
+            pairs = []
+            for node in selected:
+                behaviors_here = sorted({pair_behaviors[i] for i, ok in enumerate(valid)
+                    if ok and pair_nodes[i] == node})
+                for behavior in behaviors_here:
+                    candidates = [i for i, ok in enumerate(valid)
+                        if ok and pair_nodes[i] == node and pair_behaviors[i] == behavior]
+                    pair_index = min(candidates, key=lambda i: hashlib.sha256(
+                        f"{key}:descriptor:{node}:{behavior}:{pair_descriptors[i]}".encode()).digest())
+                    pair = {"pair_index": pair_index, "node_id": node,
+                        "behavior_id": behavior, "descriptor_id": pair_descriptors[pair_index],
+                        "action": pair_actions[pair_index],
+                        "goal_xy_m": [float(x) for x in support.goal_xy[node].tolist()],
+                        "goal_heading_rad": float(support.goal_heading[node].item()),
+                        "behavior_descriptor_support_count": len(candidates),
+                        "descriptor_inclusion_probability": 1.0 / len(candidates),
+                        "descriptor_inverse_probability_weight": len(candidates),
+                        "descriptor_sampling": "uniform protocol-hash rank; one draw from D; inclusion probability 1/D; uniform-draw estimand, no D multiplier in fitting"}
+                    pairs.append(pair)
+            rollout_count = len(pairs) * PLAN_A_LEGAL_NODE_REPEATS
+            if rollout_count > PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX:
+                raise RuntimeError("legal-node branch budget exceeded after deterministic selection")
+            actual_rollouts += rollout_count
+            if actual_rollouts > PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES:
+                raise RuntimeError("legal-node dataset rollout cap exceeded")
+            layout = [{"pair_index": i, "node_id": pair_nodes[i],
+                "behavior_id": pair_behaviors[i], "descriptor_id": pair_descriptors[i],
+                "action": pair_actions[i], "feasible": valid[i]} for i in range(len(valid))]
+            outcomes = []
+            for pair in pairs:
+                repeats = [_legal_node_pair_return(record, source_manifest,
+                    pair["pair_index"], repeat) for repeat in range(PLAN_A_LEGAL_NODE_REPEATS)]
+                if all(x.get("status") == "available" for x in repeats):
+                    outcomes.append({**pair, "status": "available",
+                        "repeat_count": PLAN_A_LEGAL_NODE_REPEATS,
+                        "repeat_returns": repeats,
+                        "gross_horizon_return": sum(x["gross_horizon_return"] for x in repeats) / len(repeats)})
+                else:
+                    outcomes.append({**pair, "status": "unavailable",
+                        "unavailable_reason": next(x["unavailable_reason"] for x in repeats
+                            if x.get("status") == "unavailable"), "repeat_outcomes": repeats})
+            by_behavior = {}
+            for outcome in outcomes:
+                if outcome["status"] != "available": continue
+                by_behavior.setdefault((outcome["node_id"], outcome["behavior_id"]), []).append(outcome)
+            behavior_domain = list(range(5))
+            node_targets, preferences = [], []
+            for node in selected:
+                feasible_behaviors = sorted({pair_behaviors[i] for i, ok in enumerate(valid)
+                    if ok and pair_nodes[i] == node})
+                repeat_means = {b: [sum(item["repeat_returns"][r]["gross_horizon_return"]
+                    for item in values) / len(values) for r in range(PLAN_A_LEGAL_NODE_REPEATS)]
+                    for (n, b), values in by_behavior.items() if n == node}
+                means = {b: sum(values) / len(values) for b, values in repeat_means.items()}
+                variances = {b: (sum((x-means[b])**2 for x in values) / len(values))
+                    for b, values in repeat_means.items()}
+                censored_behaviors = sorted(set(feasible_behaviors) - set(means))
+                u_estimable = bool(feasible_behaviors) and not censored_behaviors
+                # One uniform descriptor draw estimates each behavior's
+                # descriptor-average return; feasible behaviors get equal weight.
+                node_targets.append({"node_id": node,
+                    "u_target": sum(means[b] for b in feasible_behaviors) / len(feasible_behaviors)
+                        if u_estimable else None,
+                    "status": "available" if u_estimable else "unavailable",
+                    "node_inclusion_probability": node_pi[node],
+                    "node_inverse_probability_weight": 1. / node_pi[node],
+                    "feasible_behavior_ids": feasible_behaviors,
+                    "available_behavior_ids": sorted(means),
+                    "unavailable_behavior_ids": sorted(set(behavior_domain) - set(feasible_behaviors)),
+                    "censored_feasible_behavior_ids": censored_behaviors,
+                    "behavior_mean_returns": means, "behavior_repeat_return_variances": variances,
+                    "behavior_repeat_mean_returns": repeat_means,
+                    "behavior_weighting": "equal over feasible behaviors; one uniform hash-ranked descriptor estimates each behavior mean"})
+                available = sorted(means)
+                for i, left in enumerate(available):
+                    for right in available[i + 1:]:
+                        repeat_diffs = [repeat_means[left][r] - repeat_means[right][r]
+                            for r in range(PLAN_A_LEGAL_NODE_REPEATS)]
+                        diff = means[left] - means[right]
+                        signs = [0 if value == 0 else 1 if value > 0 else -1
+                            for value in repeat_diffs]
+                        stable = len(set(signs)) == 1 and signs[0] != 0
+                        status = ("comparable" if stable else
+                            "tie" if all(value == 0 for value in repeat_diffs) else "uncertain")
+                        preferences.append({"node_id": node, "left_behavior_id": left,
+                            "right_behavior_id": right, "left_mean_return": means[left],
+                            "right_mean_return": means[right],
+                            "paired_repeat_differences": repeat_diffs,
+                            "paired_repeat_difference_variance": sum((x-diff)**2 for x in repeat_diffs)/len(repeat_diffs),
+                            "preferred_behavior_id": (left if signs[0] > 0 else right) if stable else None,
+                            "status": status,
+                            "stability_rule": "both paired repeats have the same nonzero sign; no calibrated noise margin; otherwise uncertain"})
+            out_rows.append({"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+                "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+                "scenario_id": record["scenario_id"], "category": record["category"],
+                "seed": record["seed"], "decision_index": record["decision_index"],
+                "macro_start_tick": record["macro_start_tick"],
+                "snapshot_id": replay["snapshot"]["snapshot_id"],
+                "state_sha256": replay["snapshot"]["simulator_state_sha256"],
+                "support_digest": support.support_digest, "canonical_node_ids": nodes,
+                "canonical_poses": [{"node_id": i,
+                    "x_m": float(graph.xy[i, 0].item()), "y_m": float(graph.xy[i, 1].item()),
+                    "heading_bin": headings[i], "heading_rad": float(graph.heading[i].item()),
+                    "region_id": regions[i]} for i in nodes],
+                "reachable_mask": reachable, "full_pair_layout": layout,
+                "full_pair_layout_sha256": _hash(layout), "feasible_node_ids": feasible_nodes,
+                "pair_feasibility_digest": _hash(valid),
+                "selected_node_ids": selected, "selected_node_coverage_fraction": len(selected)/len(feasible_nodes),
+                "selected_heading_region_coverage": sorted({f"{headings[n]}:{regions[n]}" for n in selected}),
+                "stratum_population_counts": {f"{h}:{r}": len(strata[(h, r)]) for h, r in strata},
+                "stratum_selected_counts": {f"{h}:{r}": stratum_selected_counts.get((h, r), 0)
+                    for h, r in strata},
+                "root_node": support.root_node,
+                "root_node_behavior_supported": support.root_node in feasible_nodes,
+                "root_node_unavailable_reason": None if support.root_node in feasible_nodes else "root has no feasible legal behavior pair",
+                "selection_rule": "min(max(1,floor(N/16)),floor(512/(2*feasible_behavior_count))); deterministic heading-bin x graph-region stratification, feasible reachable root included",
+                "node_inclusion_probabilities": {str(n): node_pi[n] for n in selected},
+                "selection_digest": _hash({"protocol_id": protocol_id, "key": key,
+                    "support_digest": support.support_digest, "selected_node_ids": selected,
+                    "selected_pair_indices": [p["pair_index"] for p in pairs]}),
+                "maximum_branch_rollouts": PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX,
+                "pairs": outcomes, "node_u_targets": node_targets,
+                "behavior_preferences": preferences, "p_target": None, "p_prior": 0.0})
+        finally:
+            close = getattr(env, "close", None)
+            if callable(close): close()
+    if not out_rows: raise ValueError("source contains no replayable Plan A legal-node support")
+    import os, tempfile
+    output = Path(output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    raw = "".join(json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)+"\n"
+        for row in out_rows).encode()
+    fd, temp_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temp_name, output)
+    except BaseException:
+        try: os.unlink(temp_name)
+        except FileNotFoundError: pass
+        raise
+    manifest = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA, "split": "train",
+        "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": protocol_path.name, "sources": sources,
+        "source_identity_sha256": _hash(sources), "source_dataset_sha256": source_sha,
+        "source_manifest_sha256": source_manifest_sha, "source_schema": DATASET_SCHEMA,
+        "source_dataset": Path(dataset).name, "device": source_manifest["device"],
+        "prediction_mode": source_manifest["prediction_mode"],
+        "prediction_contract": source_manifest["prediction_contract"],
+        "horizon_physics_ticks": source_manifest["horizon_physics_ticks"],
+        "max_macro_ticks": source_manifest["max_macro_ticks"],
+        "gamma_per_macro": source_manifest["gamma_per_macro"],
+        "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
+        "continuation_policy": CONTINUATION_POLICY, "support_order": SUPPORT_ORDER,
+        "preference_stability_rule": "both paired repeats have same nonzero sign; exact all-repeat zero is tie; all other pairs uncertain; zero noise threshold because no calibrated margin exists",
+        "coverage_rule": "min(max(1,floor(N/16)),floor(512/(2*feasible_behavior_count))) nodes; one uniform hash-ranked descriptor per feasible behavior and two paired repeat outcomes; descriptor inclusion probabilities/weights are provenance for uniform-draw U/B estimands, with no descriptor reweighting; heading-bin x graph-region stratification; feasible reachable root included when available",
+        "branch_rollout_cap": PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX,
+        "paired_repeats": PLAN_A_LEGAL_NODE_REPEATS,
+        "dataset_rollout_cap": PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES,
+        "preflight_rollout_upper_bound": preflight_rollout_bound,
+        "actual_branch_rollouts": actual_rollouts,
+        "p_target": None, "p_prior": 0.0,
+        "p_unlabelled_reason": "independent P-v3 oracle labels are not supplied by this dataset",
+        "record_count": len(out_rows), "dataset_sha256": hashlib.sha256(raw).hexdigest()}
+    _atomic_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
+    return {"path": str(output), "record_count": len(out_rows),
+        "dataset_sha256": manifest["dataset_sha256"], "coverage_rule": manifest["coverage_rule"]}
 
 
 def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_seed,

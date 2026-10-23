@@ -484,13 +484,33 @@ checks only (`py_compile`, `git diff --check`); no tests or simulator evaluation
 were run. Worker lifecycle, queue replacement, stale/out-of-order rejection,
 and fallback behavior still require runtime and replay validation.
 
-## Next Phase 2 implementation gap
+## Plan A legal-node supervision tranche v1
 
-The plan calls for Plan A legal-node goal/routing value supervision and
-feasible behavior preferences. Existing v3 U+B fitting uses sampled
-counterfactual choices; P-v3 labels sampled executed-route costs. Neither
-provides legal-node U targets. A separate replay-bound legal-node dataset and
-weights-only CUDA fitter are now in a planner-complete, implementation-in-
-progress pass. It must preserve the existing v3/P-null contract and must not
-use AD* internal costs as simulator-outcome labels. Static implementation and
-review will not establish simulator coverage or training benefit.
+A separate strict replay-bound dataset and fitter now cover a deterministic
+sample of legal Plan A nodes, preserving the existing v3 dataset and weights
+schemas. Each branch binds full canonical node order, reachable mask, ordered
+pair feasibility layout and support digest. The collector applies the archived
+legal support action, follows the source's teacher continuation, horizon, and
+per-macro discount, and records two paired repeat outcomes. It never uses
+AD* internal costs as supervision. U is the equal-weight mean over feasible
+behavior means after descriptor sampling; B preferences use same-node paired
+logit contrasts, with unavailable and censored feasible behaviors and ties
+explicit. U is withheld if any feasible behavior outcome is censored;
+independently valid B pairs remain usable. P remains null until independent
+P-v3 labels exist.
+
+The tranche is sampled rather than exhaustive. It selects at most
+`min(floor(N/16), floor(512/(2*B)))` nodes per branch, where `N` is the count
+of feasible reachable nodes and `B` is the feasible behavior count, with a
+heading-bin × graph-region deterministic selector and feasible root inclusion.
+One uniformly hash-ranked descriptor is sampled per selected node/behavior,
+with inclusion probability and inverse-probability weight recorded. The hard
+budget is 512 simulator branches per prefix and 12,000 for the dataset; the
+preflight upper bound is source row count times 512 and rejects oversized
+source files before collection. At the approximate 7,528-node/five-behavior
+support, the node tranche is at most 51 nodes (about 0.68%).
+
+Three-pass ledger: planner complete; implementation committed as `f91d76237`;
+scoped static review approved the exact diff. Runtime evidence pending. Static `py_compile`, diff whitespace,
+and JSON parsing are the only checks performed here. No tests or simulator
+runs were run.
