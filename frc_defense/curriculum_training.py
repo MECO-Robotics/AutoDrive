@@ -34,6 +34,7 @@ from .training_curriculum import (SCENARIOS, CURRICULUM_VERSION, CategoryResult,
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_VERSION = 2
+NATIVE_FUEL_EXTENSION = 'autodrive_fuel_physics_hip'
 
 
 class D1HandWeightedPolicy:
@@ -321,10 +322,42 @@ def source_identity():
                    and p.relative_to(ROOT).as_posix() not in generated_sources)
     identity = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     identity['_runtime_environment'] = {k:v for k,v in sorted(os.environ.items())
-        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))}
+        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_')) or k == 'TORCH_EXTENSIONS_DIR'}
     config_path=os.environ.get('FRC_DRIVETRAIN_CONFIG')
     if config_path: identity['_drivetrain_config_sha256']=hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+    identity['_native_fuel_extension'] = _native_fuel_extension_source_identity()
     return identity
+
+
+def _native_fuel_extension_source_identity():
+    """Identify the active/default HIP binary without importing or building it."""
+    from . import fuel_physics_hip
+
+    extension = fuel_physics_hip._EXT
+    if extension is not None:
+        path = Path(extension.__file__).resolve()
+    else:
+        extension_root = os.environ.get('TORCH_EXTENSIONS_DIR')
+        if extension_root:
+            path = (Path(extension_root) / NATIVE_FUEL_EXTENSION /
+                    f'{NATIVE_FUEL_EXTENSION}.so').resolve()
+        else:
+            path = (ROOT / 'outputs/fuel_physics/extensions/native' /
+                    f'{NATIVE_FUEL_EXTENSION}.so').resolve()
+    result = {'module': NATIVE_FUEL_EXTENSION, 'path': str(path)}
+    try:
+        before = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        after = path.stat()
+    except FileNotFoundError:
+        result['status'] = 'missing'
+        return result
+    before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if before_identity != after_identity:
+        raise RuntimeError('native HIP extension changed while source identity was read')
+    result.update(status='present', sha256=digest, size=after.st_size)
+    return result
 
 
 def _hash(data):
