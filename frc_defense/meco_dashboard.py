@@ -559,11 +559,6 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
         return None
     failure = status.get("failure")
     promotion = status.get("promotion")
-    failed_round = (isinstance(promotion, dict)
-                    and promotion.get("passed") is False
-                    and isinstance(failure, dict)
-                    and isinstance(failure.get("failures"), list)
-                    and bool(failure["failures"]))
     bundle_id = status.get("bundle_id")
     valid_bundle = (isinstance(bundle_id, str)
                     and re.fullmatch(r"[0-9a-f]{64}", bundle_id))
@@ -607,14 +602,33 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
             and safety_gate_status == "metrics_schema_verified"
             and status.get("gate_calibration_status") == "calibrated_baseline_frozen")
     elif protocol_version == PROTOCOL_VERSION:
-        valid_calibration = (calibration_id is None and valid_calibration_ids
-            and not calibration_ids and valid_retention_ids
-            and not retention_scenario_ids
-            and safety_gate_status == "not_calibrated"
-            and status.get("gate_calibration_status")
-                == "provisional_pending_baseline_variance_review")
+        # Older v1 status files predate these projection fields. Permit only
+        # absent/null or canonical empty calibration containers for them.
+        valid_calibration = (
+            calibration_id is None
+            and (calibration_ids is None or
+                 type(calibration_ids) is dict and not calibration_ids)
+            and (retention_scenario_ids is None or
+                 type(retention_scenario_ids) is list and not retention_scenario_ids)
+            and safety_gate_status in (None, "not_calibrated")
+            and status.get("gate_calibration_status") in
+                (None, "provisional_pending_baseline_variance_review"))
     else:
         valid_calibration = False
+    failure_messages = failure.get("failures") if isinstance(failure, dict) else None
+    failed_round = (
+        protocol_version in (PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION)
+        and valid_scenario
+        and isinstance(promotion, dict) and promotion.get("passed") is False
+        and isinstance(failure, dict)
+        and failure.get("scenario_id") == scenario_id
+        and failure.get("protocol_id") == status.get("protocol_id")
+        and failure.get("passed") is False and failure.get("streak_reset") is True
+        and isinstance(failure_messages, list) and 0 < len(failure_messages) <= 32
+        and all(type(message) is str and len(message) <= 2048
+                for message in failure_messages)
+        and status.get("evaluation_id") is None and bundle_id is None
+        and status.get("split") == "validation")
     if (status.get("schema_version") != 1
             or status.get("split") not in ("validation", "test")
             or not valid_scenario
@@ -629,13 +643,26 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
         errors.append({"source": str(path.relative_to(project)),
                        "error": "qualification status has invalid provenance"})
         return None
-    return {key: status.get(key) for key in (
+    projected = {key: status.get(key) for key in (
         "updated_utc", "evaluation_id", "scenario_id", "candidate_policy", "split",
         "protocol_id", "bundle_id", "checkpoint_sha256", "gate_definition",
         "gate_calibration_status", "protocol_version", "calibration_id",
         "calibration_ids", "retention_scenario_ids", "safety_gate_status",
         "confidence_intervals", "promotion", "streak", "qualified",
-        "final_test_isolated", "failure")}
+        "final_test_isolated")}
+    if isinstance(failure, dict):
+        # Expose the reset outcome and protocol binding without projecting the
+        # checkpoint path or free-form exception text from the raw artifact.
+        projected["failure"] = {
+            "scenario_id": failure.get("scenario_id"),
+            "protocol_id": failure.get("protocol_id"),
+            "passed": failure.get("passed"),
+            "streak_reset": failure.get("streak_reset"),
+            "failure_count": len(failure_messages) if isinstance(failure_messages, list) else None}
+        if failed_round:
+            projected["promotion"] = {"passed": False, "promoted": False,
+                                       "failure_count": len(failure_messages)}
+    return projected
 
 
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_root=None, now=None,

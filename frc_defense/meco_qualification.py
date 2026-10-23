@@ -1202,7 +1202,7 @@ def main(argv=None):
         failure = {"scenario_id": args.scenario,
             "protocol_id": protocol.get("protocol_id"),
             "checkpoint_path": args.checkpoint, "passed": False,
-            "failures": [f"round aborted: {type(error).__name__}: {error}"],
+            "failures": [f"round aborted: {type(error).__name__}: {error}"[:2048]],
             "streak_reset": True}
         try:
             _atomic_json(state_path, {"schema_version": 1,
@@ -1218,6 +1218,11 @@ def main(argv=None):
                      "split": "validation", "bundle_id": None, "policy_manifest": {},
                      "gate_definition": asdict(SCENARIOS[args.scenario].gate),
                      "gate_calibration_status": protocol.get("gate_calibration_status"),
+                     "protocol_version": protocol.get("protocol_version"),
+                     "calibration_id": protocol.get("calibration_id"),
+                     "calibration_ids": protocol.get("calibration_ids"),
+                     "retention_scenario_ids": protocol.get("retention_scenario_ids"),
+                     "safety_gate_status": protocol.get("safety_gate_status"),
                      "promotion": {"passed": False, "promoted": False,
                                    "failures": failure["failures"]},
                      "failure": failure,
