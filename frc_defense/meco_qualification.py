@@ -164,8 +164,17 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
                 or any(c not in "0123456789abcdef" for c in current_source)
                 or report.get("policy_manifest", {}).get(REFERENCE_POLICY, {}).get("policy_id")
                     != "D0_production_deterministic"
+                or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                or report.get("safety_metrics_source_identity_sha256") != current_source
                 or any(row.get("source_identity_sha256") != current_source for row in rows)):
             raise ValueError(f"D0 calibration source/controller provenance is invalid for {scenario}")
+        for row in rows:
+            metrics = row.get("metrics")
+            if (not isinstance(metrics, dict)
+                    or any(type(metrics.get(name)) not in (int, float)
+                        or not math.isfinite(metrics[name]) or not 0 <= metrics[name] <= 1
+                        for name in SAFETY_METRIC_NAMES)):
+                raise ValueError(f"D0 calibration safety metric coverage is invalid for {scenario}")
         if source_hash is None:
             source_hash = current_source
         elif source_hash != current_source:
@@ -203,6 +212,38 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
              for case in protocol_cases(scenario, split,
                  episodes=TRAIN_SEED_POOL_SIZE if split == "train" else episodes,
                  master_seed=master_seed)]
+    if not calibrated:
+        # Keep the legacy v1 document byte-for-byte schema compatible.
+        body = {"protocol_version": PROTOCOL_VERSION,
+            "curriculum_version": CURRICULUM_VERSION,
+            "scenario_ids": list(scenarios),
+            "scenario_versions": {scenario: SCENARIOS[scenario].version for scenario in scenarios},
+            "episodes_per_category_stratum": episodes,
+            "master_seed": master_seed,
+            "training": {"layouts": list(TRAIN_LAYOUTS),
+                "defender_families": ["none", *TRAIN_DEFENDER_FAMILIES],
+                "seed_pool_size": TRAIN_SEED_POOL_SIZE,
+                "runtime_seed_binding": "MecoTaskScheduler selects these exact train-split seeds by scenario cycle modulo pool size; scheduler master_seed must match this protocol",
+                "runtime_seed_lists_enforced": True},
+            "validation": {"layouts": list(VALIDATION_LAYOUTS),
+                "defender_families": ["none", *VALIDATION_DEFENDER_FAMILIES]},
+            "final_test": {"layouts": list(FINAL_TEST_LAYOUTS),
+                "defender_families": ["none", *FINAL_TEST_DEFENDER_FAMILIES],
+                "isolated_until_selected_frozen_bundle": True},
+            "start_conditions": {"train": list(TRAIN_START_CONDITIONS),
+                "validation": list(VALIDATION_START_CONDITIONS),
+                "test": list(FINAL_TEST_START_CONDITIONS)},
+            "sensor_profiles": {"train": list(TRAIN_SENSOR_PROFILES),
+                "validation": list(VALIDATION_SENSOR_PROFILES),
+                "test": list(FINAL_TEST_SENSOR_PROFILES)},
+            "paired_reference_policy": REFERENCE_POLICY,
+            "gate_calibration_status": "provisional_pending_baseline_variance_review",
+            "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate)
+                for scenario in scenarios},
+            "cases": cases}
+        body["protocol_id"] = hashlib.sha256(json.dumps(body, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        return body
     if calibrated:
         reports = ({calibration_report["scenario_id"]: calibration_report}
                    if isinstance(calibration_report, dict) and "scenario_id" in calibration_report
@@ -411,6 +452,8 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             raise ValueError(f"calibration seeds overlap the {split} partition")
     records = []
     source_hash = None
+    safety_source_hash = None
+    safety_schema = None
     manifest = None
     # Repetitions intentionally reuse each calibration seed. This estimates
     # repeat-run variation separately from variation across seed means.
@@ -428,7 +471,12 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             if manifest is None:
                 manifest = result["policy_manifest"]
                 source_hash = result["source_identity_sha256"]
-            elif manifest != result["policy_manifest"] or source_hash != result["source_identity_sha256"]:
+                safety_schema = result.get("safety_metrics_schema")
+                safety_source_hash = result.get("safety_metrics_source_identity_sha256")
+            elif (manifest != result["policy_manifest"]
+                    or source_hash != result["source_identity_sha256"]
+                    or safety_schema != result.get("safety_metrics_schema")
+                    or safety_source_hash != result.get("safety_metrics_source_identity_sha256")):
                 raise ValueError("D0 source identity changed during calibration")
             for row in result["records"]:
                 records.append({"repetition": repetition, **row})
@@ -466,6 +514,8 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             "defender_family": c.defender_family, "start_condition": c.start_condition,
             "sensor_profile": c.sensor_profile} for c in cases],
         "policy_manifest": manifest, "source_identity_sha256": source_hash,
+        "safety_metrics_schema": safety_schema,
+        "safety_metrics_source_identity_sha256": safety_source_hash,
         "summary": summaries, "records": records,
         "generated_utc": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat()}
@@ -755,6 +805,8 @@ def _retention_result(report, protocol, primary):
         raise ValueError("retention must use the same round, frozen protocol, and checkpoint bundle")
     if report.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256"):
         raise ValueError("retention report source identity differs from calibrated protocol")
+    if report.get("bundle_id") != bundle_identity(report.get("policy_manifest")):
+        raise ValueError("retention checkpoint bundle identity mismatch")
     scenario = report["scenario_id"]
     if report.get("gate_definition") != protocol.get("promotion_gates", {}).get(scenario):
         raise ValueError("retention report gate definition differs from the frozen protocol")
