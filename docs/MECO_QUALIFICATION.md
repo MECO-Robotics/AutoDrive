@@ -30,6 +30,12 @@ protocol. Promotion state resets a streak on any failure, protocol change, or
 checkpoint-bundle change, and promotes after three consecutive passing rounds.
 Keep a separate state file for each candidate policy.
 
+Promotion state is staged until the immutable round report is written and the
+state file is atomically saved. An aborted round restores prior qualification
+and evaluation history, resets only that scenario's streak, records the failure,
+and refreshes dashboard status. Per-episode coverage validation also requires
+each record's scenario identity to match its report.
+
 The held-out layouts shift real bump and trench collision/observation geometry.
 Held-out defender families run distinct orbiting-interceptor and split-chaser
 commands; start lanes and sensor noise also vary in the simulator. These case

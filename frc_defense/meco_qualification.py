@@ -225,7 +225,10 @@ def _validate_case_rows(report, expected_cases, policy):
     rows = [row for row in report.get("records", ())
             if isinstance(row, dict) and row.get("policy") == policy]
     found = {}
+    expected_scenario = expected_cases[0].scenario_id if expected_cases else None
     for row in rows:
+        if row.get("scenario_id") != expected_scenario:
+            raise ValueError("qualification record scenario identity mismatch")
         key = (row.get("category"), row.get("layout_id"),
                row.get("defender_family"), row.get("start_condition"),
                row.get("sensor_profile"), row.get("seed"))
@@ -525,13 +528,28 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                 round_id=run_id, collect_only=True, split="validation")
             retention_reports.append(ancestor_report)
     round_report["retention_reports"] = retention_reports
+    staged_state = CurriculumState.from_dict(state.to_dict())
     decision, summary = consume_validation_round(round_report, protocol=protocol,
-        state=state, retention_reports=tuple(retention_reports))
+        state=staged_state, retention_reports=tuple(retention_reports))
     round_report["confidence_intervals"] = summary["confidence_intervals"]
     round_report["promotion"] = summary["promotion"]
     round_report["state"] = summary["state"]
     write_immutable_report(output, round_report)
+    _replace_curriculum_state(state, staged_state)
     return decision, round_report
+
+
+def _replace_curriculum_state(destination: CurriculumState, source: CurriculumState):
+    """Copy validated staged state only after its immutable report is durable."""
+    destination.qualified = set(source.qualified)
+    destination.consecutive_passes = dict(source.consecutive_passes)
+    destination.last_qualified_checkpoint = dict(source.last_qualified_checkpoint)
+    destination.qualified_throughput = {key: dict(value)
+                                        for key, value in source.qualified_throughput.items()}
+    destination.seen_evaluation_ids = set(source.seen_evaluation_ids)
+    destination.qualified_protocol = dict(source.qualified_protocol)
+    destination.consecutive_protocol = dict(source.consecutive_protocol)
+    destination.consecutive_checkpoint = dict(source.consecutive_checkpoint)
 
 
 def _load_json(path):
@@ -593,32 +611,45 @@ def main(argv=None):
             "final_test_results": report["final_test_results"],
             "output": args.output}, indent=2))
         return
+    state_before_round = state.to_dict()
     try:
         decision, report = run_validation_round(scenario_id=args.scenario,
             candidate_policy=args.candidate_policy,
             checkpoints={args.candidate_policy: args.checkpoint}, protocol=protocol,
             state=state, device=args.device, output=args.output,
             retention_reports=())
+        _atomic_json(state_path, {"schema_version": 1,
+            "candidate_policy": args.candidate_policy, "state": state.to_dict(),
+            "last_round": {"evaluation_id": report["evaluation_id"],
+                "scenario_id": args.scenario, "protocol_id": report["protocol_id"],
+                "checkpoint_bundle_id": report["bundle_id"],
+                "passed": decision.passed, "promoted": decision.promoted,
+                "failures": list(decision.failures),
+                "streak_reset": not decision.passed}})
     except BaseException as error:
+        _replace_curriculum_state(state, CurriculumState.from_dict(state_before_round))
         state.consecutive_passes[args.scenario] = 0
         state.consecutive_protocol.pop(args.scenario, None)
         state.consecutive_checkpoint.pop(args.scenario, None)
+        failure = {"scenario_id": args.scenario,
+            "protocol_id": protocol.get("protocol_id"),
+            "checkpoint_path": args.checkpoint, "passed": False,
+            "failures": [f"round aborted: {type(error).__name__}: {error}"],
+            "streak_reset": True}
         _atomic_json(state_path, {"schema_version": 1,
             "candidate_policy": args.candidate_policy, "state": state.to_dict(),
-            "last_round": {"scenario_id": args.scenario,
-                "protocol_id": protocol.get("protocol_id"),
-                "checkpoint_path": args.checkpoint,
-                "passed": False, "failures": [f"round aborted: {type(error).__name__}: {error}"],
-                "streak_reset": True}})
+            "last_round": failure})
+        _write_dashboard_status(state_path, args.scenario, args.candidate_policy,
+            {"evaluation_id": None, "protocol_id": protocol.get("protocol_id"),
+             "split": "validation", "bundle_id": None, "policy_manifest": {},
+             "gate_definition": asdict(SCENARIOS[args.scenario].gate),
+             "gate_calibration_status": protocol.get("gate_calibration_status"),
+             "promotion": {"passed": False, "promoted": False,
+                           "failures": failure["failures"]},
+             "failure": failure,
+             "generated_utc": __import__("datetime").datetime.now(
+                 __import__("datetime").timezone.utc).isoformat()}, state)
         raise
-    _atomic_json(state_path, {"schema_version": 1,
-        "candidate_policy": args.candidate_policy, "state": state.to_dict(),
-        "last_round": {"evaluation_id": report["evaluation_id"],
-            "scenario_id": args.scenario, "protocol_id": report["protocol_id"],
-            "checkpoint_bundle_id": report["bundle_id"],
-            "passed": decision.passed, "promoted": decision.promoted,
-            "failures": list(decision.failures),
-            "streak_reset": not decision.passed}})
     _write_dashboard_status(state_path, args.scenario, args.candidate_policy,
                              report, state)
     print(json.dumps({"evaluation_id": report["evaluation_id"],
@@ -628,7 +659,7 @@ def main(argv=None):
 
 
 def _write_dashboard_status(state_path, scenario, candidate_policy, report, state):
-    policy_info = report["policy_manifest"][candidate_policy]
+    policy_info = report.get("policy_manifest", {}).get(candidate_policy, {})
     streak = {"count": state.consecutive_passes.get(scenario, 0),
         "protocol_id": state.consecutive_protocol.get(scenario),
         "bundle_id": state.consecutive_checkpoint.get(scenario)}
@@ -637,13 +668,14 @@ def _write_dashboard_status(state_path, scenario, candidate_policy, report, stat
         "evaluation_id": report["evaluation_id"], "scenario_id": scenario,
         "candidate_policy": candidate_policy, "split": report["split"],
         "protocol_id": report["protocol_id"], "bundle_id": report["bundle_id"],
-        "checkpoint_sha256": policy_info["checkpoint_sha256"],
+        "checkpoint_sha256": policy_info.get("checkpoint_sha256"),
         "gate_definition": report["gate_definition"],
         "gate_calibration_status": report["gate_calibration_status"],
         "confidence_intervals": report.get("confidence_intervals",
                                             report.get("final_test_results", {})),
         "promotion": report.get("promotion", {"passed": False, "promoted": False,
             "failures": ["final test does not change qualification state"]}), "streak": streak,
+        "failure": report.get("failure"),
         "qualified": scenario in state.qualified,
         "final_test_isolated": report["split"] == "test"})
 
