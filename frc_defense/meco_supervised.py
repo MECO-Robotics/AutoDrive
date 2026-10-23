@@ -521,10 +521,62 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
     legal_sha = hashlib.sha256(legal_bytes).hexdigest()
     annotation_source_sha = hashlib.sha256(Path(annotation_source_path).resolve().read_bytes()).hexdigest()
     from .meco_counterfactual import (_read_counterfactual_dataset,
-        PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA)
-    source_rows, source_sha, source_manifest_sha, protocol, protocol_id, protocol_sha, source_manifest = \
-        _read_counterfactual_dataset(source_dataset,
-            qualification_protocol=qualification_protocol, expected_sources=expected_sources)
+        PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA, _replay_plan_a_expert_goal_source_row)
+    expert_source_manifest_path = source_dataset.with_suffix(source_dataset.suffix + ".manifest.json")
+    expert_source_manifest = json.loads(expert_source_manifest_path.read_text())
+    expert_source_sha = hashlib.sha256(source_dataset.read_bytes()).hexdigest()
+    if expert_source_manifest.get("schema") == PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA:
+        base_name = expert_source_manifest.get("base_dataset")
+        if (not isinstance(base_name, str) or not base_name or
+                Path(base_name).is_absolute()):
+            raise ValueError("expert-goal source has invalid base dataset reference")
+        base_dataset = (source_dataset.parent / base_name).resolve()
+        source_rows, source_sha, source_manifest_sha, protocol, protocol_id, protocol_sha, source_manifest = \
+            _read_counterfactual_dataset(base_dataset,
+                qualification_protocol=qualification_protocol, expected_sources=expected_sources)
+        if (expert_source_manifest.get("target_schema") !=
+                "meco-plan-a-explicit-selected-goal-trace-v1" or
+                expert_source_manifest.get("base_dataset_schema") !=
+                    "meco-counterfactual-trajectory-v3" or
+                expert_source_manifest.get("base_dataset_sha256") != source_sha or
+                expert_source_manifest.get("base_manifest_sha256") != source_manifest_sha or
+                expert_source_manifest.get("sources") != expected_sources or
+                expert_source_manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+                expert_source_manifest.get("protocol_id") != protocol_id or
+                expert_source_manifest.get("qualification_protocol_sha256") != protocol_sha or
+                expert_source_manifest.get("dataset_sha256") != expert_source_sha or
+                expert_source_manifest.get("support_order") != SUPPORT_ORDER or
+                expert_source_manifest.get("split") != "train" or
+                expert_source_manifest.get("records_have_replay_bound_selected_goal") is not True):
+            raise ValueError("expert-goal source does not bind exact base data/protocol/runtime")
+        goal_rows = [json.loads(line) for line in source_dataset.read_text().splitlines() if line]
+        if len(goal_rows) != expert_source_manifest.get("record_count"):
+            raise ValueError("expert-goal source record count mismatch")
+        source_by_key = {(r["scenario_id"], r["category"], r["seed"], r["decision_index"]): r
+            for r in source_rows}
+        seen_goal_keys = set()
+        for goal_row in goal_rows:
+            key = (goal_row.get("scenario_id"), goal_row.get("category"),
+                   goal_row.get("seed"), goal_row.get("decision_index"))
+            base = source_by_key.get(key)
+            if (base is None or key in seen_goal_keys or goal_row.get("base_record") != base or
+                    goal_row.get("schema") != PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA or
+                    goal_row.get("target_schema") != "meco-plan-a-explicit-selected-goal-trace-v1" or
+                    goal_row.get("snapshot_id") != base.get("branch_state", {}).get("snapshot_id") or
+                    goal_row.get("state_sha256") != base.get("predecision_simulator_state_sha256") or
+                    goal_row.get("support_digest") != base.get("support_digest")):
+                raise ValueError("expert-goal source row does not map to exact frozen v3 record")
+            seen_goal_keys.add(key)
+            verified = _replay_plan_a_expert_goal_source_row(goal_row, source_manifest)
+            source_by_key[key] = {**base, **verified}
+        if seen_goal_keys != set(source_by_key):
+            raise ValueError("expert-goal source does not cover the exact v3 source row set")
+        source_rows = list(source_by_key.values())
+    else:
+        source_rows, source_sha, source_manifest_sha, protocol, protocol_id, protocol_sha, source_manifest = \
+            _read_counterfactual_dataset(source_dataset,
+                qualification_protocol=qualification_protocol, expected_sources=expected_sources)
     annotation_source = manifest.get("annotation_source")
     if (manifest.get("schema") != PLAN_A_EXPERT_GOAL_DATASET_SCHEMA or
             manifest.get("target_schema") != PLAN_A_EXPERT_GOAL_TARGET_SCHEMA or
@@ -532,6 +584,8 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
             manifest.get("split") != "train" or
             manifest.get("source_dataset_sha256") != source_sha or
             manifest.get("source_manifest_sha256") != source_manifest_sha or
+            (expert_source_manifest.get("schema") == PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA and
+             manifest.get("expert_goal_source_sha256") != expert_source_sha) or
             manifest.get("legal_node_dataset_sha256") != legal_sha or
             manifest.get("legal_node_manifest_sha256") != hashlib.sha256(legal_manifest_bytes).hexdigest() or
             manifest.get("protocol_id") != protocol_id or
@@ -600,8 +654,11 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
                     source["teacher_selected_goal_descriptor_sha256"]):
             raise ValueError("source row has no replay-bound executed-goal identity; recollect with explicit goal provenance")
         executed_action = row.get("executed_action")
-        if (type(executed_action) is not int or executed_action != source.get("teacher_action") or
-                row.get("selected_behavior_id") != ACTION_TO_BEHAVIOR.get(executed_action)):
+        expected_action = source.get("teacher_selected_action", source.get("teacher_action"))
+        expected_behavior = source.get("teacher_selected_behavior",
+            ACTION_TO_BEHAVIOR.get(executed_action))
+        if (type(executed_action) is not int or executed_action != expected_action or
+                row.get("selected_behavior_id") != expected_behavior):
             raise ValueError("annotation behavior/action does not match the replayed teacher execution")
         goal = row.get("selected_goal")
         if not isinstance(goal, dict) or type(goal.get("node_id")) is not int:
@@ -3074,6 +3131,13 @@ def main(argv=None):
     legal_collect.add_argument("--qualification-protocol", type=Path, required=True)
     legal_collect.add_argument("--device", required=True,
         help="explicit CUDA/ROCm device matching the frozen source dataset")
+    expert_goal_collect = commands.add_parser("collect-plan-a-expert-goal-source-v1")
+    expert_goal_collect.add_argument("--dataset", type=Path, required=True,
+        help="strictly replayable counterfactual trajectory-v3 dataset")
+    expert_goal_collect.add_argument("--output", type=Path, required=True)
+    expert_goal_collect.add_argument("--qualification-protocol", type=Path, required=True)
+    expert_goal_collect.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device matching the frozen source dataset")
     legal_warm = commands.add_parser("warm-start-plan-a-legal-nodes-v1")
     legal_warm.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
     legal_warm.add_argument("--dataset", type=Path, required=True)
@@ -3170,6 +3234,10 @@ def main(argv=None):
     elif args.command == "collect-plan-a-legal-nodes-v1":
         from .meco_counterfactual import collect_plan_a_legal_nodes_v1
         result = collect_plan_a_legal_nodes_v1(args.output, dataset=args.dataset,
+            qualification_protocol=args.qualification_protocol, device=args.device)
+    elif args.command == "collect-plan-a-expert-goal-source-v1":
+        from .meco_counterfactual import collect_plan_a_expert_goal_source_v1
+        result = collect_plan_a_expert_goal_source_v1(args.output, dataset=args.dataset,
             qualification_protocol=args.qualification_protocol, device=args.device)
     elif args.command == "warm-start-plan-a-legal-nodes-v1":
         result = warm_start_plan_a_legal_nodes_v1(args.track, args.dataset,

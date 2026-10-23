@@ -312,3 +312,24 @@ on its indexed CUDA device. Training accepts it only when `p_mode=learned` and
 `05338ce72`; runtime evidence is pending. This pass ran static compilation,
 diff and JSON checks only; no tests, collection, fitting, GPU training or
 simulator evaluation were run.
+
+#### Explicit Plan A goal source v1
+
+`collect-plan-a-expert-goal-source-v1` writes a separate source artifact from
+the immutable trajectory-v3 rows. At each exact replayed Plan A support it
+selects the feasible pair with minimum finite `route_cost`, breaking ties by
+canonical support pair index, then executes that action with the selected
+legal node pose as an explicit planner goal. Replay rebuilds support and
+reruns the rule before accepting the descriptor hash; action remasking or
+native planner preemption fails collection or annotation loading. The source
+binds each record to its complete v3 base row, state, support digest, selected
+node/behavior/descriptor, and physics-tick action trace. The expert annotation
+loader accepts this source path and requires the annotation manifest to also
+bind `expert_goal_source_sha256` to its bytes.
+
+This deterministic nearest-route rule creates a demonstrated feasible B
+preference. It does not claim global optimality and provides no U target;
+`u_status` is unavailable until an independent expert value oracle and
+uncensored feasible coverage exist. It does not convert or modify v3.
+Collection and replay require runtime simulator validation before the data can
+be treated as empirically established.

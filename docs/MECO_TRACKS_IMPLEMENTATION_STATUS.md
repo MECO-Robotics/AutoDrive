@@ -579,3 +579,16 @@ training artifact identities. Scoped review approved implementation commit
 `ba7b65b0`; integrated review approved exact candidate HEAD `c5dc562c9`.
 Runtime replay and analysis remain pending. Static `py_compile` and diff checks
 only; no tests, simulator, or GPU execution were performed.
+
+### Explicit Plan A goal-source v1
+
+A separate `meco-plan-a-expert-goal-source-v1` producer now binds explicit
+rule-selected feasible goals and action traces to exact trajectory-v3 rows.
+The rule selects minimum finite Plan A route cost with support-index tie
+breaking; replay reconstructs support, reruns selection, and rejects remasking
+or planner preemption before exposing the selected descriptor hash to expert
+annotation intake. B is only a demonstrated feasible preference. U remains
+unavailable without an independent expert oracle and uncensored support. The
+annotation manifest binds the new source bytes separately while legal-node
+support remains bound to its original v3 source. Static checks only; no
+collection, replay, or simulator evaluation has been run.

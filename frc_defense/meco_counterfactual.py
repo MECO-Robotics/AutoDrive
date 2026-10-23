@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import enum
+import os
 from contextlib import contextmanager
 import inspect
 import platform
@@ -43,6 +44,8 @@ PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA = "meco-executed-route-independent-cost-v1"
 PLAN_A_P_ROUTE_ORACLE_VERSION = "base-bump-plus-effective-p-grid-edge-integral-v1"
 PLAN_A_LEGAL_NODE_DATASET_SCHEMA = "meco-counterfactual-plan-a-legal-node-v1"
 PLAN_A_LEGAL_NODE_TARGET_SCHEMA = "meco-plan-a-legal-node-utility-and-feasible-preference-v1"
+PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA = "meco-plan-a-expert-goal-source-v1"
+PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA = "meco-plan-a-explicit-selected-goal-trace-v1"
 PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX = 512
 PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES = 12000
 PLAN_A_LEGAL_NODE_REPEATS = 2
@@ -1539,6 +1542,136 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
     _atomic_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
     return {"path": str(output), "record_count": len(out_rows),
         "dataset_sha256": manifest["dataset_sha256"], "coverage_rule": manifest["coverage_rule"]}
+
+
+def _select_plan_a_expert_goal_v1(support):
+    """Choose the nearest reachable feasible pair; ties follow support order.
+
+    This deterministic rule records a feasible behavior preference only. It is
+    not an optimality claim and does not supply an expert U target.
+    """
+    pairs = torch.nonzero(support.valid_mask, as_tuple=False).reshape(-1).tolist()
+    ranked = [(float(support.route_cost[int(support.pair_node_ids[pair])].item()), pair)
+        for pair in pairs]
+    ranked = [(distance, pair) for distance, pair in ranked if math.isfinite(distance)]
+    if not ranked:
+        raise RuntimeError("Plan A expert-goal selector found no feasible supported pair")
+    _, pair = min(ranked, key=lambda item: (item[0], item[1]))
+    node = int(support.pair_node_ids[pair].item())
+    selected = {"node_id": node,
+        "behavior_id": int(support.behavior_ids[pair].item()),
+        "descriptor_id": int(support.descriptor_ids[pair].item()),
+        "action": int(support.action_ids[pair].item()),
+        "goal_xy_m": [float(x) for x in support.goal_xy[node].tolist()],
+        "goal_heading_rad": float(support.goal_heading[node].item()),
+        "support_digest": support.support_digest,
+        "selection_rule": "minimum finite route_cost; canonical pair-index tie break"}
+    selected["descriptor_sha256"] = _hash(selected)
+    return pair, selected
+
+
+def _replay_plan_a_expert_goal_source_row(record, base_manifest):
+    """Rebuild source support, rerun selection, and verify explicit execution."""
+    replay = replay_counterfactual_branch(record["base_record"], base_manifest)
+    env = replay["env"]
+    try:
+        support = replay["support"]
+        if support.support_digest != record.get("support_digest"):
+            raise RuntimeError("expert-goal source support digest changed on replay")
+        pair, selected = _select_plan_a_expert_goal_v1(support)
+        if (selected != record.get("selected_goal") or
+                selected["descriptor_sha256"] !=
+                    record.get("teacher_selected_goal_descriptor_sha256")):
+            raise RuntimeError("expert-goal selector result changed on replay")
+        reward, ended, timeout, trace, _, _, preempted = _reward_step(env,
+            selected["action"], record["macro_ticks"], goal_xy=selected["goal_xy_m"],
+            goal_heading=selected["goal_heading_rad"],
+            allow_action7_traversal=(selected["action"] == 7),
+            planner_force_goal_replan=True)
+        if preempted or any(action != selected["action"] for action in trace):
+            raise RuntimeError("explicit expert-goal execution was preempted or remasked")
+        if (trace != record.get("executed_action_trace") or
+                reward != record.get("gross_macro_return") or
+                bool(ended or timeout) != record.get("terminal")):
+            raise RuntimeError("expert-goal execution trace/outcome changed on replay")
+        return {"teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
+            "selected_goal": selected, "selected_pair_index": pair,
+            "teacher_selected_action": selected["action"],
+            "teacher_selected_behavior": selected["behavior_id"],
+            "support_digest": support.support_digest}
+    finally:
+        close = getattr(env, "close", None)
+        if callable(close): close()
+
+
+def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
+        qualification_protocol: Path, device: str):
+    """Collect separately versioned, explicit rule-selected Plan A goal traces."""
+    from .curriculum_training import source_identity
+    from .meco_supervised import _read_counterfactual_dataset
+    from .meco_device import require_indexed_cuda_device
+    sources = source_identity()
+    rows, source_sha, source_manifest_sha, _, protocol_id, protocol_sha, base_manifest = \
+        _read_counterfactual_dataset(Path(dataset),
+            qualification_protocol=Path(qualification_protocol), expected_sources=sources)
+    device = str(require_indexed_cuda_device(device,
+        purpose="Plan A explicit-goal source collection"))
+    if base_manifest["device"]["device"] != device or base_manifest.get("split") != "train":
+        raise ValueError("expert-goal source device/train split must match frozen v3 source")
+    output_rows = []
+    for base in rows:
+        replay = replay_counterfactual_branch(base, base_manifest)
+        env = replay["env"]
+        try:
+            pair, selected = _select_plan_a_expert_goal_v1(replay["support"])
+            reward, ended, timeout, trace, _, _, preempted = _reward_step(env,
+                selected["action"], base["macro_ticks"], goal_xy=selected["goal_xy_m"],
+                goal_heading=selected["goal_heading_rad"],
+                allow_action7_traversal=(selected["action"] == 7),
+                planner_force_goal_replan=True)
+            if preempted or any(action != selected["action"] for action in trace):
+                raise RuntimeError("selected explicit expert goal was preempted or remasked")
+            output_rows.append({"schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
+                "target_schema": PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
+                "scenario_id": base["scenario_id"], "category": base["category"],
+                "seed": base["seed"], "decision_index": base["decision_index"],
+                "snapshot_id": base["branch_state"]["snapshot_id"],
+                "state_sha256": base["predecision_simulator_state_sha256"],
+                "support_digest": replay["support"].support_digest,
+                "macro_ticks": base["macro_ticks"], "selected_goal": selected,
+                "teacher_selected_goal_descriptor_sha256": selected["descriptor_sha256"],
+                "selected_pair_index": pair, "executed_action": selected["action"],
+                "executed_action_trace": trace, "gross_macro_return": reward,
+                "terminal": bool(ended or timeout), "u_status": "unavailable",
+                "u_target": None,
+                "u_unavailable_reason": "no independent expert goal-value oracle",
+                "base_record": base})
+        finally:
+            close = getattr(env, "close", None)
+            if callable(close): close()
+    payload = "".join(json.dumps(row, sort_keys=True, separators=(",", ":"),
+        allow_nan=False) + "\n" for row in output_rows).encode()
+    output = Path(output).resolve(); output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(payload)
+    manifest = {"schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
+        "target_schema": PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
+        "base_dataset_schema": DATASET_SCHEMA, "base_dataset_sha256": source_sha,
+        "base_manifest_sha256": source_manifest_sha, "protocol_id": protocol_id,
+        "base_dataset": os.path.relpath(
+            Path(dataset).resolve(), Path(output).resolve().parent),
+        "qualification_protocol_sha256": protocol_sha, "sources": sources,
+        "source_identity_sha256": _hash(sources), "device": base_manifest["device"],
+        "split": "train", "support_order": SUPPORT_ORDER,
+        "selection_rule": "minimum finite route_cost; canonical pair-index tie break",
+        "selection_semantics": "demonstrated feasible B preference; no U optimality claim; U unavailable",
+        "execution_semantics": "explicit selected-goal override; preemption and action remask rejected",
+        "records_have_replay_bound_selected_goal": True,
+        "record_count": len(output_rows), "dataset_sha256": hashlib.sha256(payload).hexdigest()}
+    output.with_suffix(output.suffix + ".manifest.json").write_text(
+        json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+    return {"path": str(output), "record_count": len(output_rows),
+        "dataset_sha256": manifest["dataset_sha256"],
+        "schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA}
 
 
 def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_seed,
