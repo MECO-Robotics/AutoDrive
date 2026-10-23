@@ -11,11 +11,13 @@ import hashlib
 import json
 import math
 import enum
+import inspect
 import platform
 from pathlib import Path
 import random
 import sys
 import types
+from functools import lru_cache
 
 import numpy as np
 import torch
@@ -51,16 +53,62 @@ def _tensor_digest(tensor):
     return digest.hexdigest()
 
 
+def _stable_key(value):
+    """Encode immutable mapping/set keys without touching traversal references."""
+    if value is None:
+        item = ["none"]
+    elif type(value) is bool:
+        item = ["bool", value]
+    elif type(value) is int:
+        item = ["int", str(value)]
+    elif type(value) is str:
+        item = ["str", value]
+    elif type(value) is float and math.isfinite(value):
+        item = ["float", value.hex()]
+    elif isinstance(value, enum.Enum):
+        item = ["enum", f"{type(value).__module__}.{type(value).__qualname__}",
+                _stable_key(value.value)]
+    elif isinstance(value, tuple):
+        item = ["tuple", [_stable_key(part) for part in value]]
+    elif isinstance(value, (torch.device, torch.dtype, Path)):
+        item = [type(value).__name__, str(value)]
+    else:
+        raise TypeError(f"unsupported unordered key type: {type(value)!r}")
+    return json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+@lru_cache(maxsize=8)
+def _module_file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _state_value(value, seen, path):
     """Canonicalize mutable simulator/environment state; unknown state fails closed."""
     if isinstance(value, torch.Tensor):
-        return {"tensor": _tensor_digest(value), "device": str(value.device)}
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
+        return {"object_id": stable_id, "tensor": _tensor_digest(value),
+                "device": str(value.device), "requires_grad": value.requires_grad}
     if isinstance(value, torch.Generator):
-        return {"torch_generator": str(value.device),
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
+        return {"object_id": stable_id, "torch_generator": str(value.device),
                 "state": _state_value(value.get_state(), seen, path + ".state")}
-    if isinstance(value, np.ndarray):
+    if type(value) is np.ndarray:
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
         array = np.ascontiguousarray(value)
-        return {"numpy_array": hashlib.sha256(array.tobytes()).hexdigest(),
+        return {"object_id": stable_id,
+                "numpy_array": hashlib.sha256(array.tobytes()).hexdigest(),
                 "dtype": str(array.dtype), "shape": list(array.shape)}
     if isinstance(value, np.generic):
         return value.item()
@@ -73,14 +121,32 @@ def _state_value(value, seen, path):
     if isinstance(value, enum.Enum):
         return {"enum": f"{type(value).__module__}.{type(value).__qualname__}",
                 "value": _state_value(value.value, seen, path + ".value")}
-    if isinstance(value, random.Random):
-        return {"python_random_state": _state_value(value.getstate(), seen,
+    if type(value) is random.Random:
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
+        return {"object_id": stable_id,
+                "python_random_state": _state_value(value.getstate(), seen,
                                                      path + ".random_state")}
-    if isinstance(value, np.random.RandomState):
-        return {"numpy_random_state": _state_value(value.get_state(), seen,
+    if type(value) is np.random.RandomState:
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
+        return {"object_id": stable_id,
+                "numpy_random_state": _state_value(value.get_state(), seen,
                                                     path + ".random_state")}
-    if isinstance(value, np.random.Generator):
-        return {"numpy_generator": _state_value(value.bit_generator.state, seen,
+    if type(value) is np.random.Generator:
+        object_id = id(value)
+        if object_id in seen:
+            return {"ref": seen[object_id]}
+        stable_id = len(seen)
+        seen[object_id] = stable_id
+        return {"object_id": stable_id,
+                "numpy_generator": _state_value(value.bit_generator.state, seen,
                                                  path + ".bit_generator_state")}
 
     object_id = id(value)
@@ -89,47 +155,109 @@ def _state_value(value, seen, path):
     stable_id = len(seen)
     seen[object_id] = stable_id
 
-    if isinstance(value, dict):
-        entries = [(_state_value(key, seen, f"{path}.key"),
-                    _state_value(item, seen, f"{path}[{key!r}]"))
-                   for key, item in value.items()]
-        entries.sort(key=lambda pair: json.dumps(pair[0], sort_keys=True,
-                                                  separators=(",", ":")))
+    if type(value) is dict:
+        keyed = [(_stable_key(key), key) for key in value]
+        keyed.sort(key=lambda pair: pair[0])
+        if any(keyed[index - 1][0] == keyed[index][0]
+               for index in range(1, len(keyed))):
+            raise TypeError(f"mapping key encoding collision at {path}")
+        entries = [(token, _state_value(value[key], seen, f"{path}[{token}]") )
+                   for token, key in keyed]
         return {"dict_id": stable_id, "entries": entries}
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return {"sequence_id": stable_id, "kind": type(value).__name__,
                 "items": [_state_value(item, seen, f"{path}[{index}]")
                           for index, item in enumerate(value)]}
-    if isinstance(value, (set, frozenset)):
-        items = [_state_value(item, seen, f"{path}.item") for item in value]
-        items.sort(key=lambda item: json.dumps(item, sort_keys=True,
-                                               separators=(",", ":")))
+    if type(value) in (set, frozenset):
+        keyed = [(_stable_key(item), item) for item in value]
+        keyed.sort(key=lambda pair: pair[0])
+        if any(keyed[index - 1][0] == keyed[index][0]
+               for index in range(1, len(keyed))):
+            raise TypeError(f"set item encoding collision at {path}")
+        items = [token for token, _ in keyed]
         return {"set_id": stable_id, "items": items}
     if isinstance(value, types.MethodType):
-        return {"bound_method": f"{value.__func__.__module__}.{value.__func__.__qualname__}",
+        return {"object_id": stable_id,
+                "bound_method": f"{value.__func__.__module__}.{value.__func__.__qualname__}",
+                "function_state": _state_value(value.__func__, seen, path + ".function"),
                 "self": _state_value(value.__self__, seen, path + ".self")}
-    if isinstance(value, type) or isinstance(value, (types.FunctionType,
-            types.BuiltinFunctionType, types.BuiltinMethodType)):
-        return {"callable_or_type": f"{getattr(value, '__module__', type(value).__module__)}."
+    if isinstance(value, types.BuiltinMethodType):
+        return {"object_id": stable_id,
+                "bound_builtin_method": f"{value.__module__}.{value.__qualname__}",
+                "self": _state_value(value.__self__, seen, path + ".self")}
+    if isinstance(value, types.FunctionType):
+        closure_items = []
+        for cell in value.__closure__ or ():
+            try:
+                closure_items.append(cell.cell_contents)
+            except ValueError:
+                closure_items.append({"empty_closure_cell": True})
+        return {"object_id": stable_id,
+                "function": f"{value.__module__}.{value.__qualname__}",
+                "defaults": _state_value(value.__defaults__, seen, path + ".defaults"),
+                "kwdefaults": _state_value(value.__kwdefaults__, seen, path + ".kwdefaults"),
+                "closure": _state_value(tuple(closure_items), seen, path + ".closure")}
+    if isinstance(value, types.BuiltinFunctionType):
+        owner = getattr(value, "__self__", None)
+        return {"object_id": stable_id,
+                "callable_or_type": f"{value.__module__}.{value.__qualname__}",
+                "owner": (None if owner is None else
+                          _state_value(owner, seen, path + ".self"))}
+    if isinstance(value, type):
+        return {"object_id": stable_id,
+                "callable_or_type": f"{getattr(value, '__module__', type(value).__module__)}."
                 f"{getattr(value, '__qualname__', type(value).__qualname__)}"}
 
+    if isinstance(value, types.ModuleType):
+        if value.__name__ != "autodrive_fuel_physics_hip":
+            raise TypeError(f"unreviewed module state at {path}: {value.__name__}")
+        module_path = getattr(value, "__file__", None)
+        if not module_path or not Path(module_path).is_file():
+            raise TypeError(f"native extension has no immutable file identity at {path}")
+        return {"object_id": stable_id,
+                "stateless_native_extension": value.__name__,
+                "file_sha256": _module_file_sha256(str(Path(module_path).resolve()))}
+
+    cls = type(value)
+    if cls is types.SimpleNamespace:
+        class_source = "builtin:types.SimpleNamespace"
+    else:
+        class_source = None
+        for base in cls.__mro__:
+            if base in (object, types.SimpleNamespace):
+                continue
+            try:
+                source_path = inspect.getsourcefile(base)
+            except (TypeError, OSError):
+                source_path = None
+            if source_path is None:
+                raise TypeError(f"opaque/native base state at {path}: {base!r}")
+            class_source = source_path
+
     attributes = getattr(value, "__dict__", None)
-    if attributes is not None:
-        return {"object_id": stable_id,
-                "type": f"{type(value).__module__}.{type(value).__qualname__}",
-                "attributes": {name: _state_value(item, seen, f"{path}.{name}")
-                               for name, item in sorted(attributes.items())}}
-    slots = getattr(type(value), "__slots__", ())
-    if isinstance(slots, str):
-        slots = (slots,)
-    slot_values = {name: getattr(value, name) for name in slots
-                   if hasattr(value, name)}
-    if slot_values:
-        return {"object_id": stable_id,
-                "type": f"{type(value).__module__}.{type(value).__qualname__}",
-                "slots": {name: _state_value(item, seen, f"{path}.{name}")
-                          for name, item in sorted(slot_values.items())}}
-    raise TypeError(f"cannot canonicalize mutable state at {path}: {type(value)!r}")
+    slot_values = {}
+    for base in cls.__mro__:
+        declared = base.__dict__.get("__slots__", ())
+        if isinstance(declared, str):
+            declared = (declared,)
+        for name in declared:
+            if name in ("__dict__", "__weakref__"):
+                continue
+            actual_name = name
+            if name.startswith("__") and not name.endswith("__"):
+                actual_name = f"_{base.__name__.lstrip('_')}{name}"
+            if hasattr(value, actual_name):
+                slot_values[f"{base.__module__}.{base.__qualname__}.{name}"] = getattr(value, actual_name)
+    if attributes is None and not slot_values:
+        raise TypeError(f"cannot canonicalize opaque state at {path}: {type(value)!r}")
+    attr_values = {} if attributes is None else attributes
+    return {"object_id": stable_id,
+            "type": f"{cls.__module__}.{cls.__qualname__}",
+            "class_source": class_source,
+            "attributes": {name: _state_value(item, seen, f"{path}.{name}")
+                           for name, item in sorted(attr_values.items())},
+            "slots": {name: _state_value(item, seen, f"{path}.{name}")
+                      for name, item in sorted(slot_values.items())}}
 
 
 def _simulator_state_digest(env):

@@ -97,6 +97,11 @@ branch; the current decision's state and descriptor are stored separately.
 Parity hashing covers the environment and simulator object state, reward
 metrics, planner, fuel-physics object, and Python/NumPy/PyTorch RNG states. An
 unknown state object fails collection instead of being silently omitted.
+Mappings and sets are traversed in stable immutable-key order before reference
+IDs are assigned. Object state includes instance dictionaries and inherited
+slots; objects with opaque native bases fail closed. The optional HIP fuel
+wrapper's Python buffers are included, and its native extension is bound by a
+binary hash after inspection confirmed it exposes stateless kernel functions.
 
 Example (start with a small train seed set; each decision branches multiple
 simulator rollouts):
