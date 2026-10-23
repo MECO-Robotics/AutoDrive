@@ -64,7 +64,8 @@
         "Authoritative low-level contact-rate instrumentation implementation started on the approved Section6 metrics branch; outer-step samples are retained only as scoped proxies, while qualification rates will use per-tick numerators/denominators",
         "D0 target-scoped calibration bundle committed as da1f7d236 in isolated worktree: protocol binds target+prerequisite closure, per-scenario calibration IDs/seed pools/gates/splits; only target can promote, ancestors collect retention under the same protocol; scoped review pending",
         "D0 bundle reviewer found retention policy_manifest bundle_id is not recomputed at consumption and v1 protocol_document output shape changed while PROTOCOL_VERSION remains v1; implementer follow-up will bind retention manifests and dispatch v1/v2 schemas explicitly",
-        "Section 7 A/B matrix implementation started in isolated branch codex/meco-ablation-matrix; scope covers exact paired checkpoint/seed/condition contracts and supported forecast, P0, K=8/16/32 and fallback factors"
+        "Section 7 A/B matrix implementation started in isolated branch codex/meco-ablation-matrix; scope covers exact paired checkpoint/seed/condition contracts and supported forecast, P0, K=8/16/32 and fallback factors",
+        "Low-level contact-rate instrumentation committed as 948d4f101 in isolated worktree: records focal robot/field/wall contact ticks per active physics tick after collisions, including fused six-robot HIP flags; reports unsupported illegal-transition/footprint metrics null; scoped review pending"
       ]
     },
     {
@@ -105,7 +106,8 @@
         "Contact-rate instrumentation will receive scoped static review for low-level clear/collision ordering, once-per-tick counts, episode reset, active-tick denominator, and explicit distinction from actual safety-rule violations",
         "D0 target-scoped bundle da1f7d236 submitted for scoped review; safety metrics remain pending, so calibrated promotion still fails closed",
         "D0 bundle review pending two fixes: recompute retention policy bundle identity and preserve generated v1 protocol schema unchanged under explicit v1/v2 dispatch",
-        "Section 7 experiment-matrix code will receive scoped review for common checkpoint/source/config/seed identity, immutable factor contracts, same-checkpoint K/prediction/fault overrides, and honest unsupported-factor status"
+        "Section 7 experiment-matrix code will receive scoped review for common checkpoint/source/config/seed identity, immutable factor contracts, same-checkpoint K/prediction/fault overrides, and honest unsupported-factor status",
+        "Contact-rate instrumentation 948d4f101 submitted for scoped static review; no simulator validation run and contacts remain distinct from policy-rule violations"
       ]
     }
   ]
