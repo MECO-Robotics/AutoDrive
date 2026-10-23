@@ -103,7 +103,8 @@
         "Plan A unreachable-ETA runtime correction implemented in isolated branch and integrated as 9080ab198: support-valid nodes require finite nonnegative ETA; unreachable/fully masked nodes are excluded from CV horizon/risk outputs, Plan C unreachable forecasts remain null/not-applicable, and evaluator progress counts match actual P0 runs. Static checks/review only; simulator re-run pending.",
         "Dashboard worker observability implemented in isolated worktree and integrated as d7d252604/71187450e: raw Linux process state is separate from training status; stalled classification requires a fresh matched queue/manifest/heartbeat/stats frontier, confirmed MECO PID/run ID, stale heartbeat and unchanged updates for 600 seconds. Missing /proc or mismatched provenance yields unknown. No process control is attempted.",
         "Fail-closed ONNX numerical parity CLI added on codex/meco-onnx-parity for all five tracks; static checks only, no model/ONNX artifacts or ONNX Runtime parity execution performed, so parity and deployment qualification remain pending.",
-        "ONNX parity follow-up adds fixed-contract graph/runtime dtype checks and overflow-safe finite-error summaries; re-review pending, static-only, parity remains unrun."
+        "ONNX parity follow-up adds fixed-contract graph/runtime dtype checks and overflow-safe finite-error summaries; re-review pending, static-only, parity remains unrun.",
+        "ONNX parity follow-up validates exact ONNX graph input/output metadata dimensions against seeded input tensors and checkpoint-backed output shapes; symbolic/unknown dimensions fail closed. Scoped re-review pending, static only."
       ]
     },
     {

@@ -188,10 +188,24 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             graph_output_values = session.get_outputs()
             graph_inputs = [entry.name for entry in graph_input_values]
             graph_outputs = [entry.name for entry in graph_output_values]
+            feeds = {name: tensor.numpy() for name, tensor in zip(names, inputs)}
+            with torch.inference_mode():
+                torch_outputs = model(*inputs)
             if graph_inputs != list(names):
                 raise ValueError(f"ONNX input names/order mismatch: {graph_inputs!r}")
             if graph_outputs != list(OUTPUT_NAMES[track]):
                 raise ValueError(f"ONNX output names/order mismatch: {graph_outputs!r}")
+            expected_input_shapes = [list(tensor.shape) for tensor in inputs]
+            expected_output_shapes = [list(tensor.shape) for tensor in torch_outputs]
+            actual_input_shapes = [entry.shape for entry in graph_input_values]
+            actual_output_shapes = [entry.shape for entry in graph_output_values]
+            item["input_shapes"] = {"expected": expected_input_shapes,
+                                    "onnx_metadata": actual_input_shapes}
+            item["output_shapes"] = {"expected": expected_output_shapes,
+                                     "onnx_metadata": actual_output_shapes}
+            if (actual_input_shapes != expected_input_shapes
+                    or actual_output_shapes != expected_output_shapes):
+                raise ValueError("ONNX input/output metadata shape mismatch")
             onnx_types = {torch.float32: "tensor(float)", torch.float64: "tensor(double)",
                           torch.int64: "tensor(int64)", torch.int32: "tensor(int32)",
                           torch.bool: "tensor(bool)"}
@@ -205,9 +219,6 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             if (None in expected_input_types or actual_input_types != expected_input_types
                     or actual_output_types != item["output_types"]["expected"]):
                 raise ValueError("ONNX input/output tensor type mismatch")
-            feeds = {name: tensor.numpy() for name, tensor in zip(names, inputs)}
-            with torch.inference_mode():
-                torch_outputs = model(*inputs)
             onnx_outputs = session.run(None, feeds)
             item["outputs"] = _compare_outputs(track, torch_outputs, onnx_outputs, atol, rtol)
             item["status"] = ("pass" if all(output["allclose"] for output in item["outputs"])

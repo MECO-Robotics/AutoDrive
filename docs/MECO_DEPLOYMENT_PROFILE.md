@@ -15,8 +15,9 @@ python scripts/profile_meco_deployment.py --checkpoint-root checkpoints/meco-fiv
 Numerical parity is a separate, fail-closed gate. It always requires A1, A2,
 A3, C1, and C2; a partial set cannot pass. For each fixed-shape adapter it
 runs identical deterministic seeded inputs through the checkpoint-backed
-PyTorch model and ONNX Runtime, checks input/output names, shapes, and tensor
-types against the adapter contract, rejects nonfinite values, and compares
+PyTorch model and ONNX Runtime, checks input/output names, exact graph metadata
+dimensions and tensor types against the adapter contract, rejects symbolic,
+unknown, or mismatched dimensions, rejects nonfinite values, and compares
 every output tensor with the recorded absolute and relative tolerances. The
 JSON evidence binds each comparison to the
 checkpoint SHA-256, checkpoint source snapshot and its digest, run/update,
