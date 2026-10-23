@@ -190,9 +190,27 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
     return ExportAdapter(track, model).eval(), provenance
 
 
-def load_production_adapter(track: str, checkpoint: Path) -> tuple[ProductionMecoAdapter, dict]:
-    """Load an identity-checked checkpoint for use at score_candidates seam."""
+def load_production_adapter(track: str, checkpoint: Path, *, device: str) -> tuple[ProductionMecoAdapter, dict]:
+    """Load a checkpoint on an explicitly available CUDA/HIP device.
+
+    Production loading never silently falls back to CPU. PyTorch exposes both
+    CUDA and ROCm devices through its ``cuda:N`` device spelling.
+    """
+    if (not isinstance(device, str) or not device.startswith("cuda:")
+            or not torch.cuda.is_available()):
+        raise RuntimeError("production MECO inference requires an explicit available CUDA/HIP device")
+    try:
+        selected = torch.device(device)
+        index = selected.index
+        count = torch.cuda.device_count()
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError(f"invalid production CUDA/HIP device {device!r}") from exc
+    if selected.type != "cuda" or index is None or index < 0 or index >= count:
+        raise RuntimeError(f"production CUDA/HIP device is unavailable: {device}")
     export_adapter, provenance = load_track_model(track, checkpoint)
+    model = export_adapter.model.to(selected).eval()
+    if any(parameter.device != selected for parameter in model.parameters()):
+        raise RuntimeError("production MECO checkpoint did not load on the selected accelerator")
     return ProductionMecoAdapter(track, export_adapter.model,
         checkpoint_sha256=provenance["sha256"],
         protocol_id=provenance["protocol_id"]), provenance

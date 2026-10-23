@@ -89,25 +89,34 @@ end-to-end simulator or robot measurements.
 ## Production inference request boundary (Phase 5A)
 
 `meco-inference-v1` in `frc_defense.meco_tracks` is the versioned request and
-response boundary for a checkpoint-backed scorer at the shared A/C candidate
-scoring seam. Callers construct the request from the current planner tensors
-with `make_meco_inference_request`; the request binds the track, checkpoint
-SHA-256, protocol ID, observation schema, snapshot ID and timestamp, expiry,
-canonical named input order and dimensions, and the stable candidate IDs and
-feasibility mask. A1 accepts six-channel raster input and returns dense `U/P`
+response boundary for checkpoint-backed scorers. `meco_track_training`
+dispatches A1–A3 through the adapter in `_prepare_plan_a_decision`, where the
+real full legal pose/behavior support is bound to the request. C1/C2 decisions
+flow through `_prepare_decision` into `score_candidates`, which builds the
+request from the real route-feasible candidate table. The request binds the
+track, checkpoint SHA-256, protocol ID, observation schema, snapshot ID and
+timestamp, expiry, canonical named input order and dimensions, and stable
+candidate IDs and feasibility mask. A1 accepts six-channel raster input and returns dense `U/P`
 plus five behavior logits; A2/A3 return node-wise `U/P` plus behavior logits;
 C1/C2 return one utility and uncertainty value per candidate. All floating
 inputs and required outputs must be finite, graph/candidate dimensions and
 masks must align, and C uncertainty/A penalty must be nonnegative.
 
 The adapter rejects mismatched identity, schema, input order/shape/dtype,
-expired observations, malformed/nonfinite outputs, and scorer faults. The
-planner then uses zero neural utility with the existing feasibility mask and
-deterministic route/risk costs, preserving its first valid deterministic
-fallback. No model result can modify feasibility. Timestamps use the same
-monotonic clock domain as `time.monotonic()`; callers must provide a bounded
-expiry in that domain. Existing trainer calls remain direct model calls and
-are marked `trainer_direct`; they do not establish production qualification.
+expired observations, malformed/nonfinite outputs, and ordinary scorer
+exceptions. On failure it uses zero neural utility while retaining the
+existing feasibility mask and route/risk costs; a designated valid candidate
+is used only when route/risk costs are absent. Plan A also retains its
+deterministic route and learned-P path-cost calculation, with a zero P output
+on inference failure. No model result can modify feasibility. Timestamps use
+the same monotonic clock domain as `time.monotonic()` and expire after 250 ms
+in the current planner wiring.
+
+`load_production_adapter` requires an explicit available `cuda:N` device and
+moves the checkpoint model to that device. PyTorch uses the same spelling for
+CUDA and ROCm/HIP devices. Missing accelerators and CPU fallback are rejected.
+Existing training calls still use their direct model path and do not establish
+production qualification.
 
 This is an implemented interface and static validation boundary, not evidence
 of ONNX parity, Hailo operator support, accelerator execution, full planner

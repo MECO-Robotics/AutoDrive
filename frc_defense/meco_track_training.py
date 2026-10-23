@@ -33,7 +33,8 @@ from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
 from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, integrate_frozen_routes, project_pose_penalty)
 from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
-    make_meco_track,
+    make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
+    MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA,
     candidate_policy_logits,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
@@ -60,6 +61,7 @@ TRACK_LOSS_RESET_POLICY = {
     "episode_start": "GRU hidden state is already zero; tracking availability starts unknown",
 }
 TRACK_LOSS_STALE_SECONDS = 2.0
+PRODUCTION_INFERENCE_MAX_AGE_S = 0.25
 
 
 def _opponent_tracking_available(raster):
@@ -355,8 +357,52 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
         hidden, tracking_was_available, raster)
     graph_data = _graph_inputs(track, graph, env, raster)
-    raw = model(raster=raster, globals_=globals_, hidden=hidden_before,
-                **(graph_data or {}))
+    production_inference_failed = False
+    if isinstance(model, ProductionMecoAdapter):
+        hidden_input = (hidden_before if hidden_before is not None else
+                        raster.new_zeros((raster.shape[0], 64)))
+        model_inputs = {"raster": raster, "globals_": globals_, "hidden": hidden_input}
+        model_inputs.update(graph_data or {})
+        ordered_inputs = {name: model_inputs[name] for name in MECO_INPUT_NAMES[track]}
+        pair_nodes = support.pair_node_ids.detach().cpu().tolist()
+        behaviors = support.behavior_ids.detach().cpu().tolist()
+        candidate_ids = tuple(f"node:{node}:behavior:{behavior}"
+                              for node, behavior in zip(pair_nodes, behaviors))
+        candidate_mask = tuple(bool(value) for value in
+                               support.valid_mask.detach().cpu().tolist())
+        request_started = time.monotonic()
+        request = MecoInferenceRequest(
+            track=track, snapshot_id=safe.observation.snapshot_id,
+            checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
+            observation_schema=safe.observation.schema_version,
+            observation_timestamp=request_started,
+            expires_at=request_started + PRODUCTION_INFERENCE_MAX_AGE_S,
+            input_names=MECO_INPUT_NAMES[track],
+            input_shapes=tuple(tuple(ordered_inputs[name].shape)
+                               for name in MECO_INPUT_NAMES[track]),
+            candidate_ids=candidate_ids,
+            valid_mask=candidate_mask,
+            fallback_index=support.fallback_pair)
+        response = model.infer(request, ordered_inputs, now=time.monotonic())
+        if (response is None or response.schema != MECO_INFERENCE_SCHEMA
+                or response.track != track
+                or response.checkpoint_sha256 != model.checkpoint_sha256
+                or response.protocol_id != model.protocol_id
+                or response.completed_at > request.expires_at):
+            production_inference_failed = True
+            if track == "A1":
+                utility_shape = (1, 8, *raster.shape[-2:])
+            else:
+                utility_shape = (1, graph.node_count)
+            raw = {"utility": raster.new_zeros(utility_shape),
+                   "penalty": raster.new_zeros(utility_shape),
+                   "behavior_logits": raster.new_zeros((1, 5)),
+                   "hidden": hidden_input}
+        else:
+            raw = response.outputs
+    else:
+        raw = model(raster=raster, globals_=globals_, hidden=hidden_before,
+                    **(graph_data or {}))
     seed_decision = {"raw": raw, "hidden": raw["hidden"]}
     penalty_map = None
     if p_mode == "learned":
@@ -374,14 +420,15 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
         env, support, eta, config.prediction_mode)
-    fallback_used = not bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
-    if fallback_used:
+    finite_decision = bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
+    fallback_used = production_inference_failed or not finite_decision
+    if not finite_decision:
         action = torch.tensor([support.fallback_pair], device=env.device, dtype=torch.long)
         logprob = torch.zeros((1,), device=env.device, dtype=logits.dtype)
         entropy = torch.zeros_like(logprob)
     else:
         action, logprob, entropy = sample_candidate_action(logits[None],
-                                                            deterministic=deterministic)
+            deterministic=(True if production_inference_failed else deterministic))
     value = (_value(value_head, globals_, seed_decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": safe.observation, "candidate_set": None,
@@ -478,7 +525,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             decision["logits"], candidate_set.table)
         path_cost = None
     action, logprob, entropy = sample_candidate_action(decision["logits"],
-                                                       deterministic=deterministic)
+        deterministic=(True if decision.get("inference_status") ==
+                       "deterministic_fallback" else deterministic))
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
@@ -1391,7 +1439,7 @@ def _metric_snapshot(metrics):
 @torch.no_grad()
 def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   categories: tuple[str, ...], episodes: int, master_seed: int,
-                  device: str = "cpu", include_controls=True, output: str | None = None,
+                  device: str, include_controls=True, output: str | None = None,
                   episode_seeds: tuple[int, ...] | None = None,
                   split: str = "validation", qualification_case: dict | None = None,
                   qualification_protocol_id: str | None = None,
@@ -1416,6 +1464,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
+    if (not isinstance(device, str) or not device.startswith("cuda:")
+            or not torch.cuda.is_available()):
+        raise RuntimeError("MECO checkpoint evaluation requires an explicit available CUDA/HIP device")
+    selected_device = torch.device(device)
+    if (selected_device.type != "cuda" or selected_device.index is None
+            or selected_device.index < 0 or selected_device.index >= torch.cuda.device_count()):
+        raise RuntimeError(f"MECO checkpoint evaluation device is unavailable: {device}")
     from .meco_phase4 import validate_phase4_factor
     from .meco_device import normalized_device_info
     from .fuel_physics_hip import prepare_native_fuel_extension
@@ -1497,8 +1552,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(device)
         model.load_state_dict(payload["model"])
         model.eval()
-        loaded[track] = model
         checkpoint_digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        checkpoint_protocol = payload.get("protocol_id")
+        if not isinstance(checkpoint_protocol, str) or not checkpoint_protocol:
+            raise ValueError(f"{track} checkpoint has no production protocol identity")
+        loaded[track] = ProductionMecoAdapter(track, model,
+            checkpoint_sha256=checkpoint_digest, protocol_id=checkpoint_protocol)
         track_config = payload.get("config", {})
         track_p_mode = track_config.get("p_mode", "learned")
         track_p_scale = float(track_config.get("p_cost_scale", 1.))
@@ -1532,7 +1591,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             common_training_config = shared_track_config
         elif shared_track_config != common_training_config:
             raise ValueError("paired checkpoints have different immutable training settings")
-        checkpoint_protocol = payload.get("protocol_id")
         if not protocol_initialized:
             common_training_protocol = checkpoint_protocol
             protocol_initialized = True
@@ -2356,7 +2414,7 @@ def _parser():
     ev.add_argument("--categories", default="single,cluster")
     ev.add_argument("--episodes", type=int, default=1)
     ev.add_argument("--seed", type=int, default=20261024)
-    ev.add_argument("--device", default="cpu")
+    ev.add_argument("--device", default="cuda:0")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
         help="override learned A/C prediction mode; default preserves checkpoint mode")
     ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,

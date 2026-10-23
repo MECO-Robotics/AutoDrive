@@ -62,7 +62,11 @@ class MecoInferenceRequest:
             raise ValueError("invalid observation timestamp or expiry")
         if self.input_names != MECO_INPUT_NAMES[self.track] or len(self.input_shapes) != len(self.input_names):
             raise ValueError("track input names/order do not match the versioned contract")
-        if (not self.candidate_ids or len(self.candidate_ids) != len(self.valid_mask)
+        if (not self.candidate_ids or any(not isinstance(item, str) or not item for item in self.candidate_ids)
+                or len(set(self.candidate_ids)) != len(self.candidate_ids)
+                or any(not shape or any(type(size) is not int or size <= 0 for size in shape)
+                       for shape in self.input_shapes)
+                or len(self.candidate_ids) != len(self.valid_mask)
                 or any(type(v) is not bool for v in self.valid_mask)
                 or not 0 <= self.fallback_index < len(self.candidate_ids)
                 or not self.valid_mask[self.fallback_index]):
@@ -191,7 +195,7 @@ class ProductionMecoAdapter:
             return MecoInferenceResponse(MECO_INFERENCE_SCHEMA, self.track,
                 self.checkpoint_sha256, self.protocol_id, request.observation_timestamp,
                 done, values)
-        except (ArithmeticError, RuntimeError, TypeError, ValueError, KeyError):
+        except Exception:
             return None
 
 
@@ -684,8 +688,29 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             raise ValueError("graph data cannot override observation state or recurrent context")
         inputs.update(graph)
     if isinstance(model, ProductionMecoAdapter):
+        if model.track != track:
+            response = None
+        else:
+            ordered_inputs = {name: inputs[name] for name in MECO_INPUT_NAMES[track] if name in inputs}
+            if inference_request is None:
+                started = time.monotonic() if inference_now is None else inference_now
+                fallback_index = next((i for i, valid_value in enumerate(table.valid_mask)
+                                       if valid_value), -1)
+                if fallback_index < 0:
+                    raise ValueError("production scorer requires a valid deterministic fallback")
+                inference_request = MecoInferenceRequest(
+                    track=track, snapshot_id=table.snapshot_id,
+                    checkpoint_sha256=model.checkpoint_sha256,
+                    protocol_id=model.protocol_id, observation_schema=1,
+                    observation_timestamp=started, expires_at=started + .25,
+                    input_names=MECO_INPUT_NAMES[track],
+                    input_shapes=tuple(tuple(ordered_inputs[name].shape)
+                                       for name in MECO_INPUT_NAMES[track]),
+                    candidate_ids=table.candidate_ids,
+                    valid_mask=table.valid_mask, fallback_index=fallback_index)
+                inference_now = time.monotonic()
         if (inference_request is None or inference_now is None
-                or model.track != track or inference_request.track != track
+                or inference_request.track != track
                 or inference_request.snapshot_id != table.snapshot_id
                 or inference_request.candidate_ids != table.candidate_ids
                 or inference_request.valid_mask != table.valid_mask):
@@ -707,13 +732,16 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         if response is None:
             utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)
             valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
-            fallback = inference_request.fallback_index if inference_request is not None else next(
-                (i for i, ok in enumerate(table.valid_mask) if ok), -1)
-            logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
-                                device=utility.device, dtype=utility.dtype)
-            if fallback < 0 or fallback >= len(table.candidate_ids) or not table.valid_mask[fallback]:
-                raise ValueError("invalid deterministic fallback for failed inference")
-            logits[0, fallback] = 0.
+            if route_cost is not None or risk_cost is not None:
+                logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+            else:
+                fallback = inference_request.fallback_index if inference_request is not None else next(
+                    (i for i, ok in enumerate(table.valid_mask) if ok), -1)
+                logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
+                                    device=utility.device, dtype=utility.dtype)
+                if fallback < 0 or fallback >= len(table.candidate_ids) or not table.valid_mask[fallback]:
+                    raise ValueError("invalid deterministic fallback for failed inference")
+                logits[0, fallback] = 0.
             return {"logits": logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
                     "inference_status": "deterministic_fallback"}
