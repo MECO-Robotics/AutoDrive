@@ -1352,8 +1352,10 @@ function renderCurriculum(data) {
   const provenance = $("threePassProvenance");
   provenance.replaceChildren();
   const passes = data.three_pass_provenance;
-  if (!passes || passes.status === "unknown") {
-    provenance.append(curriculumNode("p", "empty-note", "Three pass provenance unknown."));
+  if (!passes || passes.status === "unknown" || passes.status === "untrusted") {
+    provenance.append(curriculumNode("p", "empty-note", passes?.status === "untrusted"
+      ? "Three pass provenance is untrusted; declared review claims are hidden."
+      : "Three pass provenance unknown."));
   } else {
     provenance.append(curriculumNode("p", "curriculum-summary",
       `Plan SHA-256: ${passes.plan_sha256 || "unknown"} · scope: ${passes.scope || "unknown"}`));

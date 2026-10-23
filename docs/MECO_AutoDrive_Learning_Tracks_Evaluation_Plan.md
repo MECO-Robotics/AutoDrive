@@ -1,8 +1,8 @@
 # MECO AutoDrive: Parallel Learning Architecture Evaluation
 
-**Status:** Proposed experimental specification, not an implementation or validation claim
-**Target:** FRC 2026 REBUILT, SystemCore with optional Hailo acceleration
-**Repository:** https://github.com/MECO-Robotics/AutoDrive
+**Status:** Proposed experimental specification, not an implementation or validation claim  
+**Target:** FRC 2026 REBUILT, SystemCore with optional Hailo acceleration  
+**Repository:** https://github.com/MECO-Robotics/AutoDrive  
 **Companion:** `MECO_AutoDrive_Neural_Architecture_Plan.md` (original spatial neural architecture plan)
 
 ## 1. Decision and hypothesis
@@ -13,7 +13,7 @@ Continue **three Plan A spatial neural tactical-scoring architectures** and add 
 - **Plan C:** deterministically enumerate feasible action/goal candidates, then learn their *strategic value*. AD* computes feasible routes and their costs. Plan C does not output per-node traversal penalties. Behavior is part of each candidate, rather than an unconstrained behavior decision detached from a feasible destination.
 - **Common safety:** deterministic legal-space checking, footprint and swept-transition constraints, controller capture feasibility, dynamic collision handling, fallback pathing and interruptible execution. A neural model never authorizes an illegal motion or mechanism action.
 
-**Principal research question:** Does full-field neural utility/cost shaping improve outcomes over learning only how to rank a small set of feasible, route-costed decisions?
+**Principal research question:** Does full-field neural utility/cost shaping improve outcomes over learning only how to rank a small set of feasible, route-costed decisions?  
 **Secondary question:** Does either learned approach beat a deterministic strategy when perception, predictions, and available actions are matched?
 
 ## 2. Five models to evaluate

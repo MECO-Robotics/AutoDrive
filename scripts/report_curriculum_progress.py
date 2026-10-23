@@ -26,6 +26,14 @@ def _stats_files(root):
             yield Path(current) / 'stats.json'
 
 
+def _tree_has_symlink(root):
+    for current, dirs, files in os.walk(root, followlinks=False):
+        if any((Path(current) / name).is_symlink() for name in dirs + files):
+            return True
+        dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
+    return False
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -134,12 +142,21 @@ def _evidence_rows(evidence, sources, cache_dir=None):
 
 
 def summarize(root, cache_dir=None):
-    root = Path(root).resolve()
+    root = Path(root)
+    if any(part.is_symlink() for part in (root.absolute(), *root.absolute().parents)):
+        raise ValueError('curriculum root traverses a symlink')
+    root = root.resolve()
     runs, errors = [], []
+    tree_has_symlink = _tree_has_symlink(root)
+    if tree_has_symlink:
+        errors.append({'path': '.', 'error': 'symlinked campaign evidence was excluded'})
     # Each stats file identifies a distinct training run. Evaluation files alone
     # never imply a queued or active learner.
     for path in sorted(_stats_files(root)):
         try:
+            if path.is_symlink() or not path.is_file():
+                errors.append({'path': str(path.relative_to(root)), 'error': 'stats file is not a regular in-root file'})
+                continue
             stats = _read(path)
             if 'curriculum_state' not in stats:
                 continue
@@ -147,10 +164,16 @@ def summarize(root, cache_dir=None):
             state = stats['curriculum_state']
             rows = stats.get('stats', [])
             evaluations = []
+            evaluation_history_incomplete = tree_has_symlink
             for evidence in run.glob('evaluation-*.json'):
+                if evidence.is_symlink() or not evidence.is_file():
+                    evaluation_history_incomplete = True
+                    errors.append({'path': str(evidence.relative_to(root)), 'error': 'evaluation is not a regular in-root file'})
+                    continue
                 try:
                     evaluations.extend(_evidence_rows(evidence, stats.get('sources'), cache_dir))
                 except (OSError, ValueError, KeyError, TypeError) as exc:
+                    evaluation_history_incomplete = True
                     errors.append({'path': str(evidence), 'error': str(exc)})
             latest = {}
             for row in sorted(evaluations, key=lambda r: r['update']):
@@ -179,6 +202,8 @@ def summarize(root, cache_dir=None):
                          'consecutive_passes': state.get('consecutive_passes', {}),
                          'last_qualified_checkpoint': state.get('last_qualified_checkpoint', {}),
                          'qualified_protocol': state.get('qualified_protocol', {}),
+                         'consecutive_protocol': state.get('consecutive_protocol', {}),
+                         'evaluation_history_incomplete': evaluation_history_incomplete,
                          'last_promotion': next((r['promotion'] for r in reversed(rows) if 'promotion' in r), None),
                          'diagnostic': stats.get('diagnostic', True),
                          'latest_evaluations': list(latest.values()),
@@ -196,8 +221,10 @@ def summarize(root, cache_dir=None):
     queue_lanes = []
     for name in ('orchestration.json', 'queue-status.json', 'queue.json', 'manifest.json'):
         candidate = root / name
-        if candidate.exists():
+        if candidate.exists() or candidate.is_symlink():
             try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    raise ValueError('queue record is not a regular in-root file')
                 queue = {'path': str(candidate), 'data': _read(candidate),
                          'age_seconds': max(0., datetime.now(timezone.utc).timestamp() - candidate.stat().st_mtime)}
             except (OSError, ValueError) as exc:
@@ -215,6 +242,9 @@ def summarize(root, cache_dir=None):
                     raise ValueError('queue lane has no valid directory')
                 lane_path = Path(lane['directory'])
                 directory = lane_path.resolve() if lane_path.is_absolute() else (root / lane_path).resolve()
+                lexical_directory = lane_path if lane_path.is_absolute() else root / lane_path
+                if any(part.is_symlink() for part in (lexical_directory.absolute(), *lexical_directory.absolute().parents)):
+                    raise ValueError('queue lane directory traverses a symlink')
                 if directory != root and root not in directory.parents:
                     raise ValueError('queue lane directory is outside the report root')
                 run = by_path.get(directory)

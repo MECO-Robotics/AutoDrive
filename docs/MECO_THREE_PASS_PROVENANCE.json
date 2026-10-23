@@ -2,7 +2,7 @@
   "schema": "meco-three-pass-provenance-v1",
   "status": "scoped-transcript-summaries",
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
-  "plan_path": "MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
+  "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
   "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches.",
   "tranches": [
