@@ -61,7 +61,8 @@
         "Phase 5 heartbeat reporting correction committed as 4cd81d964: reports matching heartbeat presence but explicitly marks age unknown; documentation makes no freshness/liveness claim; scoped re-review pending",
         "D0 implementer is extending the calibrated protocol to target-scoped scenario bundles so ancestor retention reports can be generated under one protocol ID without relaxing safety or split isolation",
         "Authoritative low-level contact-rate instrumentation implementation started on the approved Section6 metrics branch; outer-step samples are retained only as scoped proxies, while qualification rates will use per-tick numerators/denominators",
-        "D0 target-scoped calibration bundle committed as da1f7d236 in isolated worktree: protocol binds target+prerequisite closure, per-scenario calibration IDs/seed pools/gates/splits; only target can promote, ancestors collect retention under the same protocol; scoped review pending"
+        "D0 target-scoped calibration bundle committed as da1f7d236 in isolated worktree: protocol binds target+prerequisite closure, per-scenario calibration IDs/seed pools/gates/splits; only target can promote, ancestors collect retention under the same protocol; scoped review pending",
+        "D0 bundle reviewer found retention policy_manifest bundle_id is not recomputed at consumption and v1 protocol_document output shape changed while PROTOCOL_VERSION remains v1; implementer follow-up will bind retention manifests and dispatch v1/v2 schemas explicitly"
       ]
     },
     {
@@ -100,7 +101,8 @@
         "Scoped static re-review approved Phase 5 heartbeat correction 4cd81d964; heartbeat presence is separated from unknown age, with no freshness/liveness claim",
         "Target-scoped multi-scenario calibration bundle implementation will receive a separate static review for prerequisite closure, per-scenario seed disjointness, same-protocol ancestor retention, and target-only promotion",
         "Contact-rate instrumentation will receive scoped static review for low-level clear/collision ordering, once-per-tick counts, episode reset, active-tick denominator, and explicit distinction from actual safety-rule violations",
-        "D0 target-scoped bundle da1f7d236 submitted for scoped review; safety metrics remain pending, so calibrated promotion still fails closed"
+        "D0 target-scoped bundle da1f7d236 submitted for scoped review; safety metrics remain pending, so calibrated promotion still fails closed",
+        "D0 bundle review pending two fixes: recompute retention policy bundle identity and preserve generated v1 protocol schema unchanged under explicit v1/v2 dispatch"
       ]
     }
   ]
