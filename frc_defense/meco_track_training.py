@@ -42,7 +42,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     PREDICTION_MODEL_ID)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
-    SUPPORT_ORDER)
+    PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 
 
@@ -838,6 +838,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "sampled at the next macro boundary. Incomplete goals are not censored. "
             "Sampled fallback, native remask, and native goal preemption are "
             "critic-only and counted separately by reason. C1/C2 semantics unchanged."),
+        "plan_a_empty_support_contract": (
+            "An observation with no legal node/behavior pair emits a typed state "
+            "diagnostic; no action is sampled or executed. The episode is counted "
+            "as aborted and reset at the next deterministic task seed. Unconsumed "
+            "rollout rows from that episode are discarded before PPO, so no action "
+            "or credit is fabricated for the unsupported state. A rollout with no "
+            "eligible rows fails the run instead of training on an empty batch."),
         "plan_a_route_execution_contract": (
             "A1/A2/A3 learned mode: freeze the projected P map at the policy decision "
             "and pass it through the full macro to native AD* for focal slot 3 on "
@@ -867,29 +874,71 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     task_successes = 0
     task_failures = 0
     task_episodes = 0
+    task_aborts = 0
+    empty_support_diagnostics = []
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
+
+    def abort_empty_support(exc, rows, update_number, update_events):
+        nonlocal episode, task_aborts, hidden, commitment, episode_generation
+        aborted_episode_id = episode_generation
+        retained = [row for row in rows if row.get("episode_id") != aborted_episode_id]
+        discarded_count = len(rows) - len(retained)
+        rows[:] = retained
+        if rows and not rows[-1]["done"]:
+            discarded_count += len(rows)
+            rows.clear()
+        diagnostic = asdict(exc.diagnostic)
+        next_episode = episode + 1
+        event = {"track": config.track, "update": update_number,
+                 "episode": episode, "episode_id": aborted_episode_id,
+                 "reason": "no_legal_plan_a_pair", "credited_to_ppo": False,
+                 "reset_seed": task_seed + next_episode,
+                 "discarded_current_rollout_rows": discarded_count,
+                 "diagnostic": diagnostic}
+        empty_support_diagnostics.append(event)
+        update_events.append(event)
+        task_aborts += 1
+        run_manifest["plan_a_empty_support_abort_count"] = len(empty_support_diagnostics)
+        run_manifest["latest_plan_a_empty_support_abort"] = event
+        diagnostic_path = output / f"plan-a-empty-support-aborts-{run_id}.json"
+        run_manifest["plan_a_empty_support_diagnostics"] = str(diagnostic_path)
+        _atomic_json(diagnostic_path, {
+            "schema_version": 1, "run_id": run_id,
+            "events": empty_support_diagnostics})
+        episode = next_episode
+        _reset_episode(env, task_seed + episode)
+        hidden = None
+        commitment = None
+        episode_generation = _episode_id(run_id, episode)
+        update_heartbeat()
+
     try:
         chunk_target = update + config.updates
         while update < chunk_target and not (stop_path and stop_path.exists()):
             rows = []
+            update_empty_support_events = []
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
                     raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
                 hidden_before = None if hidden is None else hidden.detach().clone()
-                with torch.no_grad():
-                    prepared = _prepare_decision(config.track, model, env, graph,
-                        episode_generation, hidden,
-                        route_cost_points_per_second=config.route_cost_points_per_second,
-                        action_ticks=config.action_ticks, candidate_k=config.candidate_k,
-                        p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
-                        p_points_per_grid_edge=config.p_points_per_grid_edge,
-                        prediction_mode=config.prediction_mode,
-                        commitment=commitment,
-                        value_head=value_head)
-                    action_index = int(prepared["action"][0].item())
-                    hidden = prepared["hidden_next"].detach()
-                    value = prepared["value"].detach().reshape(())
+                try:
+                    with torch.no_grad():
+                        prepared = _prepare_decision(config.track, model, env, graph,
+                            episode_generation, hidden,
+                            route_cost_points_per_second=config.route_cost_points_per_second,
+                            action_ticks=config.action_ticks, candidate_k=config.candidate_k,
+                            p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
+                            p_points_per_grid_edge=config.p_points_per_grid_edge,
+                            prediction_mode=config.prediction_mode,
+                            commitment=commitment,
+                            value_head=value_head)
+                except PlanAEmptySupportError as exc:
+                    abort_empty_support(exc, rows, update, update_empty_support_events)
+                    continue
+                action_index = int(prepared["action"][0].item())
+                hidden = prepared["hidden_next"].detach()
+                value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
                 if "support" in prepared:
                     support = prepared["support"]
@@ -927,7 +976,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     failure_reasons.append("action_remasked")
                 if native_preempted:
                     failure_reasons.append("native_goal_preempted")
-                row = {"raster": prepared["raster"].detach(),
+                row = {"episode_id": episode_generation,
+                    "raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
                     "graph": prepared["graph"],
                     "candidate_set": prepared["candidate_set"],
@@ -1000,21 +1050,35 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     _reset_episode(env, episode_seed)
                     hidden = None
                     episode_generation = _episode_id(run_id, episode)
+            if not rows:
+                raise RuntimeError(
+                    "Plan A rollout produced no eligible transitions after empty-support episode aborts")
             if rows[-1]["done"]:
                 bootstrap_value = torch.zeros_like(rows[-1]["value"])
             else:
-                with torch.no_grad():
-                    bootstrap = _prepare_decision(config.track, model, env, graph,
-                        episode_generation, hidden,
-                        route_cost_points_per_second=config.route_cost_points_per_second,
-                        action_ticks=config.action_ticks, candidate_k=config.candidate_k,
-                        p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
-                        p_points_per_grid_edge=config.p_points_per_grid_edge,
-                        prediction_mode=config.prediction_mode,
-                        commitment=commitment,
-                        deterministic=True,
-                        value_head=value_head)
+                try:
+                    with torch.no_grad():
+                        bootstrap = _prepare_decision(config.track, model, env, graph,
+                            episode_generation, hidden,
+                            route_cost_points_per_second=config.route_cost_points_per_second,
+                            action_ticks=config.action_ticks, candidate_k=config.candidate_k,
+                            p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
+                            p_points_per_grid_edge=config.p_points_per_grid_edge,
+                            prediction_mode=config.prediction_mode,
+                            commitment=commitment,
+                            deterministic=True,
+                            value_head=value_head)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
+                except PlanAEmptySupportError as exc:
+                    abort_empty_support(exc, rows, update, update_empty_support_events)
+                    if not rows:
+                        raise RuntimeError(
+                            "Plan A bootstrap found empty support and no eligible transitions remain") from exc
+                    if not rows[-1]["done"]:
+                        rows.clear()
+                        raise RuntimeError(
+                            "empty-support bootstrap discarded the rollout to preserve episode boundaries") from exc
+                    bootstrap_value = torch.zeros_like(rows[-1]["value"])
             stats = _ppo_update(config.track, model, value_head, optimizer, rows,
                                 config, bootstrap_value)
             update += 1
@@ -1027,6 +1091,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                       else config.candidate_k),
                          graph_nodes=graph.node_count,
                          update_utc=datetime.now(timezone.utc).isoformat())
+            if update_empty_support_events:
+                stats["plan_a_empty_support_abort_count"] = len(update_empty_support_events)
+                stats["plan_a_empty_support_aborts"] = update_empty_support_events
             if config.track in ("A1", "A2", "A3"):
                 stats.update(policy_support_order=SUPPORT_ORDER,
                     policy_support_pair_count=rows[0]["support"].pair_count,
@@ -1065,7 +1132,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         run_manifest["task_outcomes"] = {"assignment_id": task_assignment.get("assignment_id"),
             "scenario_id": task_scenario, "category": task_category,
             "episodes": task_episodes, "successes": task_successes,
-            "failures": task_failures}
+            "failures": task_failures,
+            "aborted_no_legal_support": task_aborts}
         _atomic_json(output / "task-outcomes.json", run_manifest["task_outcomes"])
         _atomic_json(output / "run.json", run_manifest)
         update_heartbeat()

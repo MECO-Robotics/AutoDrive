@@ -47,6 +47,37 @@ class PlanAActionSupport:
         return int(self.valid_mask.numel())
 
 
+@dataclass(frozen=True)
+class PlanAEmptySupportDiagnostic:
+    """Source-state evidence for an observation with no legal Plan A pair."""
+    snapshot_id: str
+    scenario_id: str | None
+    category: str | None
+    graph_node_count: int
+    reachable_node_count: int
+    root_node: int
+    root_connector_m: float
+    learner_pose_m_rad: tuple[float, float, float]
+    legal_action_ids: tuple[int, ...]
+    action_mask: tuple[bool, ...]
+    support_pair_count: int
+    valid_pair_counts_by_behavior: tuple[tuple[str, int], ...]
+    reachable_node_counts_by_descriptor: tuple[tuple[str, int], ...]
+    available_fuel_targets: int
+    safe_score_points: int
+    possession_count: int
+    dumper_with_fuel: bool
+    ferry_target_m: tuple[float, float]
+    opponent_valid: bool
+
+
+class PlanAEmptySupportError(RuntimeError):
+    """No action is legal for this frozen Plan A observation."""
+    def __init__(self, diagnostic: PlanAEmptySupportDiagnostic):
+        self.diagnostic = diagnostic
+        super().__init__("Plan A support contains no legal node/behavior pair")
+
+
 def _plan_a_support_tensors(support: PlanAActionSupport, graph):
     """Return the canonical, ordered tensor set bound to the support digest."""
     return {
@@ -247,7 +278,40 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         score_mask, ferry_mask, defense_mask), -1)
     valid = valid_matrix.reshape(-1) & reachable_rows.reshape(-1)
     if not bool(valid.any()):
-        raise RuntimeError("Plan A support has no feasible node/behavior pair")
+        counts = valid_matrix.sum(dim=0).detach().cpu().tolist()
+        reachable_counts = (reachable_rows & torch.ones_like(valid_matrix)).sum(
+            dim=0).detach().cpu().tolist()
+        pose_values = tuple(float(value) for value in pose.detach().cpu().tolist())
+        legal_ids = tuple(int(value) for value in torch.nonzero(
+            action_mask, as_tuple=False).flatten().detach().cpu().tolist())
+        ferry_values = tuple(float(value) for value in ferry_target.detach().cpu()[0, 3].tolist())
+        curriculum = getattr(env, "curriculum", {})
+        diagnostic = PlanAEmptySupportDiagnostic(
+            snapshot_id=snapshot_id,
+            scenario_id=curriculum.get("scenario_id"),
+            category=curriculum.get("category"),
+            graph_node_count=n,
+            reachable_node_count=int(reachable.sum().item()),
+            root_node=root,
+            root_connector_m=root_connector_m,
+            learner_pose_m_rad=pose_values,
+            legal_action_ids=legal_ids,
+            action_mask=tuple(bool(value) for value in action_mask.detach().cpu().tolist()),
+            support_pair_count=int(valid.sum().item()),
+            valid_pair_counts_by_behavior=tuple(zip(
+                ("drive", "intake_0", "intake_1", "intake_2", "intake_3",
+                 "score", "ferry", "defense"), (int(value) for value in counts))),
+            reachable_node_counts_by_descriptor=tuple(zip(
+                ("drive", "intake_0", "intake_1", "intake_2", "intake_3",
+                 "score", "ferry", "defense"),
+                (int(value) for value in reachable_counts))),
+            available_fuel_targets=int(fuel_valid.sum().item()),
+            safe_score_points=int(score_clear.sum().item()),
+            possession_count=possession,
+            dumper_with_fuel=dumper_with_fuel,
+            ferry_target_m=ferry_values,
+            opponent_valid=opponent_valid)
+        raise PlanAEmptySupportError(diagnostic)
     # Use the closest graph pose with any deterministic executable behavior,
     # then its first valid descriptor in canonical order.
     node_has_action = valid.reshape(n, 8).any(-1)
