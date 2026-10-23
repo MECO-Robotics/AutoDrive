@@ -170,7 +170,11 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
             raise ValueError(f"D0 calibration source/controller provenance is invalid for {scenario}")
         for row in rows:
             metrics = row.get("metrics")
+            safety_keys = ({key for key in metrics
+                            if isinstance(key, str) and key.startswith("safety_")}
+                           if isinstance(metrics, dict) else set())
             if (not isinstance(metrics, dict)
+                    or safety_keys != SAFETY_METRIC_NAMES
                     or any(type(metrics.get(name)) not in (int, float)
                         or not math.isfinite(metrics[name]) or not 0 <= metrics[name] <= 1
                         for name in SAFETY_METRIC_NAMES)):
@@ -298,9 +302,12 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         "calibration_source_identity_sha256": source_hash,
         "minimum_useful_gain": minimum_useful_gain if calibrated else None,
         "safety_noninferiority_margins": safety_noninferiority_margins if calibrated else None,
-        "safety_gate_status": "awaiting_runtime_contact_metric_support" if calibrated else "not_calibrated",
+        "safety_gate_status": "metrics_schema_verified" if calibrated else "not_calibrated",
         "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate) for scenario in scenarios},
         "cases": cases}
+    if calibrated:
+        body["safety_metrics_schema"] = SAFETY_METRICS_SCHEMA
+        body["safety_metrics_source_identity_sha256"] = source_hash
     body["protocol_id"] = hashlib.sha256(json.dumps(body, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return body
@@ -327,13 +334,17 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or protocol.get("promotion_gates") != {name: asdict(SCENARIOS[name].gate) for name in scenarios}):
         raise ValueError("calibrated protocol scenario versions/gates are invalid")
     if (protocol.get("gate_calibration_status") != "calibrated_baseline_frozen"
-            or protocol.get("safety_gate_status") != "awaiting_runtime_contact_metric_support"):
+            or protocol.get("safety_gate_status") != "metrics_schema_verified"):
         raise ValueError("calibrated protocol status fields are invalid or unsupported")
     for field in ("calibration_id", "calibration_source_identity_sha256"):
         value = protocol.get(field)
         if (not isinstance(value, str) or len(value) != 64
                 or any(char not in "0123456789abcdef" for char in value)):
             raise ValueError(f"calibrated protocol has invalid {field}")
+    if (protocol.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or protocol.get("safety_metrics_source_identity_sha256")
+                != protocol.get("calibration_source_identity_sha256")):
+        raise ValueError("calibrated protocol safety schema/source binding is invalid")
     ids = protocol.get("calibration_ids")
     pools = protocol.get("calibration_seed_pools")
     if not isinstance(ids, dict) or set(ids) != set(scenarios) or not isinstance(pools, dict) or set(pools) != set(scenarios):
@@ -420,6 +431,7 @@ def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
         "retention_scenario_ids",
         "gate_calibration_status", "minimum_useful_gain",
         "safety_noninferiority_margins", "safety_gate_status",
+        "safety_metrics_schema", "safety_metrics_source_identity_sha256",
         "episodes_per_category_stratum", "master_seed")
     if any(report.get(field) != protocol.get(field) for field in bindings):
         raise ValueError("qualification report calibration/protocol provenance mismatch")
@@ -634,11 +646,23 @@ def _validate_case_rows(report, expected_cases, policy):
                        if isinstance(metrics, dict) else set())
         if safety_keys - SAFETY_METRIC_NAMES:
             raise ValueError("qualification row contains an unknown safety metric")
-        if safety_keys and safety_keys != SAFETY_METRIC_NAMES:
-            raise ValueError("qualification row has incomplete safety metric coverage")
-        if safety_keys and (report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
-                or report.get("safety_metrics_source_identity_sha256") != report.get("source_identity_sha256")):
-            raise ValueError("qualification safety metrics lack evaluator schema/source provenance")
+        if report.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+            source_hash = report.get("source_identity_sha256")
+            if (not isinstance(source_hash, str) or len(source_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in source_hash)
+                    or safety_keys != SAFETY_METRIC_NAMES
+                    or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                    or report.get("safety_metrics_source_identity_sha256") != source_hash):
+                raise ValueError("calibrated qualification row lacks exact source-bound safety metrics")
+        elif report.get("protocol_version") == PROTOCOL_VERSION:
+            # Historical v1 rows may predate safety-rate instrumentation.
+            if safety_keys and safety_keys != SAFETY_METRIC_NAMES:
+                raise ValueError("qualification row has incomplete safety metric coverage")
+            if safety_keys and (report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                    or report.get("safety_metrics_source_identity_sha256") != report.get("source_identity_sha256")):
+                raise ValueError("qualification safety metrics lack evaluator schema/source provenance")
+        else:
+            raise ValueError("qualification report protocol version is unsupported")
         if any(type(metrics.get(key)) not in (int, float)
                or not math.isfinite(metrics[key]) or not 0 <= metrics[key] <= 1
                for key in safety_keys):
@@ -923,6 +947,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         raise ValueError("frozen protocol has incomplete validation case table")
     run_id = round_id or uuid.uuid4().hex
     records, manifest, source_hash = [], None, None
+    safety_schema, safety_source_hash = None, None
+    have_safety_binding = False
     for row in raw_cases:
         key = (row["category"], row["layout_id"], row["defender_family"],
                row["start_condition"], row["sensor_profile"])
@@ -944,6 +970,21 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
             source_hash = report["source_identity_sha256"]
         elif manifest != report["policy_manifest"] or source_hash != report["source_identity_sha256"]:
             raise ValueError("checkpoint/source identity changed during qualification round")
+        report_safety_schema = report.get("safety_metrics_schema")
+        report_safety_source_hash = report.get("safety_metrics_source_identity_sha256")
+        if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+            if (report_safety_schema != protocol.get("safety_metrics_schema")
+                    or report_safety_source_hash != protocol.get("safety_metrics_source_identity_sha256")
+                    or report_safety_source_hash != protocol.get("calibration_source_identity_sha256")
+                    or report.get("source_identity_sha256")
+                        != protocol.get("calibration_source_identity_sha256")):
+                raise ValueError("evaluator safety schema/source differs from calibrated protocol")
+        if not have_safety_binding:
+            safety_schema, safety_source_hash = report_safety_schema, report_safety_source_hash
+            have_safety_binding = True
+        elif (safety_schema != report_safety_schema
+                or safety_source_hash != report_safety_source_hash):
+            raise ValueError("safety schema/source identity changed during qualification round")
         records.extend(report["records"])
     bundle_id = bundle_identity(manifest)
     round_report = {"schema_version": 1, "qualification": True,
@@ -961,8 +1002,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "minimum_useful_gain": protocol.get("minimum_useful_gain"),
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
-        "safety_metrics_schema": None,
-        "safety_metrics_source_identity_sha256": None,
+        "safety_metrics_schema": safety_schema,
+        "safety_metrics_source_identity_sha256": safety_source_hash,
         "paired_reference_policy": REFERENCE_POLICY, "paired": True,
         "episodes_per_category_stratum": episodes,
         "master_seed": master_seed, "records": records,

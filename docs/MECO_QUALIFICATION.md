@@ -76,25 +76,31 @@ It contains exact train/validation/test lists for the target and prerequisite
 closure, and verifies calibration pools are disjoint from all three splits and
 from each other. Only the target can advance promotion; prerequisite runs are
 collected as retention evidence under the same protocol and checkpoint bundle.
-Promotion requires each paired
-useful-throughput confidence interval to clear its frozen gain margin. It also
-requires candidate-versus-D0 safety metrics named by the frozen safety-margin
-file. Until the evaluator emits those safety metrics, v2 promotion fails closed
-with an explicit missing-metric failure; calibration alone does not qualify a
-policy. Dashboard status reports protocol version, calibration ID, and safety
-gate readiness.
+Promotion requires each paired useful-throughput confidence interval to clear
+its frozen gain margin. It also requires candidate-versus-D0 safety metrics
+named by the frozen safety-margin file. Calibration intake verifies the exact
+`meco-safety-rates-v1` schema, common source identity, record-level source
+bindings, and all three finite per-active-tick rates. A calibrated v2 protocol
+copies the verified schema and source identity into its hashed body and marks
+`safety_gate_status` as `metrics_schema_verified`. Each validation category
+subreport must match that frozen binding, and every candidate and D0 row must
+contain exactly the three finite rates in [0, 1] with the report's source
+identity. Missing or mismatched evidence fails closed; calibration alone does
+not qualify a policy. Historical v1 rows remain readable under their separate
+compatibility rules, but cannot advance promotion. Dashboard status reports
+protocol version, calibration ID, and safety gate readiness.
 
 Promotion consumption revalidates the complete v2 protocol schema, category
-and safety metric name sets, exact seed case table, calibration/source IDs,
-and an `evidence_sha256` over the immutable report's policy manifest, source
-identity, cases, and raw rows. Unknown `safety_*` row fields are rejected.
-These are unkeyed SHA-256 integrity checks: they detect edits when the recorded
-digest is retained, but they do not authenticate the report producer or stop a
-forger from replacing both data and digest. No signing key or trusted attestor
-is configured. For that reason the current protocol marks the safety schema as
-unsupported and promotion remains blocked even if a report claims safety
-metrics; a future metric implementation must bind supported metrics to its
-evaluator provenance before changing that gate status.
+and safety metric name sets, schema/source binding, exact seed case table,
+calibration/source IDs, and an `evidence_sha256` over the immutable report's
+policy manifest, source identity, cases, safety provenance, and raw rows.
+Unknown `safety_*` row fields are rejected. These are unkeyed SHA-256 integrity
+checks: they detect edits when the recorded digest is retained, but they do not
+authenticate the report producer or stop a forger from replacing both data and
+digest. No signing key or trusted attestor is configured. Runtime calibration
+and representative simulator replay remain necessary before treating observed
+safety rates as empirical validation; schema readiness alone does not establish
+runtime parity or promotion eligibility.
 
 Final-test execution is separate and requires the already promoted scenario,
 the same protocol, and the exact checkpoint bundle recorded at promotion. It
