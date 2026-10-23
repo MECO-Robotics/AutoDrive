@@ -79,7 +79,8 @@
         "Phase 2 v2 warm-start consumer 5b8b417bc6b9a485a7153e8bcc06c2b1a909f6b5 submitted for static review; exact transcript parity and A/C support/candidate remapping are key checks",
         "Phase 5 integration is not approved yet: reviewer requires checkpoint/manifest protocol_id equality and terminal checkpoint/update consistency; source-only export shape and synthetic-only limitation checks passed",
         "Phase 2 v2 warm-start review found blocking C score/target mismatch: raw gross-horizon returns must not supervise cost/risk-adjusted logits; A mapping and replay/parity gates otherwise passed static inspection",
-        "Counterfactual v2 C-target correction 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc submitted for scoped re-review; static fix aligns raw gross-horizon labels with raw utility scores"
+        "Counterfactual v2 C-target correction 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc submitted for scoped re-review; static fix aligns raw gross-horizon labels with raw utility scores",
+        "Scoped static re-review approved Phase 2 v2 warm-start implementation commit 2758ee4ac9bf04e5783764b9cf2ce70a2e56a3bc; C scoring semantics now align gross-return labels with raw candidate utility"
       ]
     }
   ]
