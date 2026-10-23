@@ -197,6 +197,9 @@ def summarize(root, cache_dir=None):
                          'algorithm': stats.get('algorithm', config.get('algorithm', 'ppo')),
                          'architecture': stats.get('architecture', config.get('architecture', run.name)),
                          'updates': stats.get('updates', rows[-1]['update'] if rows else 0),
+                         # The run's own saved configuration is authoritative for
+                         # evaluation cadence. Do not infer it from observed files.
+                         'eval_every': stats.get('eval_every'),
                          'current': stats.get('current', rows[-1].get('scenario_id') if rows else None),
                          'qualified': state.get('qualified', []),
                          'consecutive_passes': state.get('consecutive_passes', {}),
