@@ -794,6 +794,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                warm_start: str | None = None,
                qualification_protocol: str | None = None,
                stop_file: str | None = None, abort_file: str | None = None,
+               invocation_id: str | None = None,
                run_id_override: str | None = None,
                protocol_id: str | None = None,
                task_assignment: dict | None = None):
@@ -959,7 +960,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "chunk_start_update": update,
         "chunk_start_seed": chunk_seed,
-        "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running"}
+        "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running",
+        "supervisor_invocation_id": invocation_id}
     run_manifest["initialization"] = initialization_record or {"mode": "random_initialization"}
     _atomic_json(output / "run.json", run_manifest)
     heartbeat_path = output / "heartbeat.json"
@@ -993,6 +995,21 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
     abort_path = Path(abort_file) if abort_file else None
+
+    def sibling_abort_marker():
+        if abort_path is None or not abort_path.exists():
+            return None
+        try:
+            marker = json.loads(abort_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("sibling abort marker is unreadable") from exc
+        if (not isinstance(marker, dict) or marker.get("schema_version") != 1
+                or not isinstance(marker.get("invocation_id"), str)
+                or not marker["invocation_id"]):
+            raise RuntimeError("sibling abort marker has invalid invocation provenance")
+        if invocation_id is not None and marker["invocation_id"] != invocation_id:
+            raise RuntimeError("sibling abort marker belongs to a different supervisor invocation")
+        return marker
 
     def task_progress_payload():
         return {"assignment_id": task_assignment.get("assignment_id"),
@@ -1047,7 +1064,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     try:
         chunk_target = update + config.updates
         while update < chunk_target and not (stop_path and stop_path.exists()) \
-                and not (abort_path and abort_path.exists()):
+                and sibling_abort_marker() is None:
             rows = []
             update_empty_support_events = []
             for _ in range(config.rollout_steps):
@@ -1279,13 +1296,19 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             _atomic_json(output / "stats.json", {"run_id": run_id, "track": config.track,
                 "update": update, "episode": episode, "history": history})
             persist_task_outcomes()
+        abort_marker = sibling_abort_marker()
         worker_status = ("stopped" if stop_path and stop_path.exists() else
                          "aborted_due_to_sibling_failure"
-                         if abort_path and abort_path.exists() and update < chunk_target
+                         if abort_marker is not None and update < chunk_target
                          else "complete")
         run_manifest.update(status=worker_status,
                             completed_updates=update,
                             stopped_utc=datetime.now(timezone.utc).isoformat())
+        if worker_status == "aborted_due_to_sibling_failure":
+            run_manifest.update(sibling_abort_file=str(abort_path),
+                sibling_abort_invocation_id=abort_marker["invocation_id"],
+                sibling_abort_marker=abort_marker,
+                sibling_abort_observed_utc=datetime.now(timezone.utc).isoformat())
         run_manifest["task_outcomes"] = task_outcomes_payload()
         _atomic_json(output / "task-outcomes.json", run_manifest["task_outcomes"])
         _atomic_json(output / "run.json", run_manifest)
@@ -2318,6 +2341,8 @@ def _parser():
     train.add_argument("--stop-file")
     train.add_argument("--abort-file",
         help="invocation-scoped sibling-failure signal; honored after an atomic update checkpoint")
+    train.add_argument("--invocation-id",
+        help="supervisor invocation identity bound to a sibling abort marker")
     train.add_argument("--run-id")
     train.add_argument("--protocol-id")
     train.add_argument("--task-assignment-json")
@@ -2364,6 +2389,7 @@ def main(argv=None):
                             qualification_protocol=args.qualification_protocol,
                             stop_file=args.stop_file,
                             abort_file=args.abort_file,
+                            invocation_id=args.invocation_id,
                             run_id_override=args.run_id, protocol_id=args.protocol_id,
                             task_assignment=assignment)
         print(json.dumps(result, indent=2))

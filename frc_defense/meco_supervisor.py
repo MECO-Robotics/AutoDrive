@@ -65,10 +65,23 @@ def _checkpoint_info(path: Path):
 
 def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
                         kill_seconds=10.):
-    """Give workers time to observe a stop marker, then bound group teardown."""
+    """Give workers time to stop, then bound and verify process-group teardown."""
+    def group_exists(process):
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def alive_groups():
+        return [process for process in processes.values()
+                if process.poll() is None or group_exists(process)]
+
     deadline = time.monotonic() + graceful_seconds
     while time.monotonic() < deadline:
-        alive = [process for process in processes.values() if process.poll() is None]
+        alive = alive_groups()
         if not alive:
             break
         time.sleep(min(.5, max(0., deadline - time.monotonic())))
@@ -79,7 +92,7 @@ def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
             pass
     deadline = time.monotonic() + term_seconds
     while time.monotonic() < deadline:
-        alive = [process for process in processes.values() if process.poll() is None]
+        alive = alive_groups()
         if not alive:
             break
         time.sleep(min(.25, max(0., deadline - time.monotonic())))
@@ -90,15 +103,16 @@ def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
             pass
     deadline = time.monotonic() + kill_seconds
     while time.monotonic() < deadline:
-        alive = [process for process in processes.values() if process.poll() is None]
+        alive = alive_groups()
         if not alive:
             break
         time.sleep(min(.1, max(0., deadline - time.monotonic())))
-    return [process.pid for process in processes.values() if process.poll() is None]
+    return [process.pid for process in alive_groups()]
 
 
 def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
-                   stop_file: Path, abort_file: Path, resume: Path | None, protocol_id: str,
+                   stop_file: Path, abort_file: Path, invocation_id: str,
+                   resume: Path | None, protocol_id: str,
                    task_assignment: dict, warm_start: Path | None = None,
                    qualification_protocol: Path | None = None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "train",
@@ -117,7 +131,8 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--p-points-per-grid-edge", str(config.p_points_per_grid_edge),
         "--prediction-mode", config.prediction_mode,
         "--output", str(output), "--stop-file", str(stop_file),
-        "--abort-file", str(abort_file), "--run-id", run_id,
+        "--abort-file", str(abort_file), "--invocation-id", invocation_id,
+        "--run-id", run_id,
         "--protocol-id", protocol_id]
     command.extend(("--task-assignment-json", json.dumps(
         task_assignment, sort_keys=True, allow_nan=False)))
@@ -558,7 +573,7 @@ class MecoSupervisor:
                     raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
                 command = _train_command(config=config, output=self.output / track,
                     run_id=self.run_ids[track], stop_file=self.stop_file,
-                    abort_file=abort_file,
+                    abort_file=abort_file, invocation_id=self.supervisor_id,
                     resume=latest if latest.is_file() else None,
                     protocol_id=self.protocol_id, task_assignment=task_assignment,
                     warm_start=warm_artifact,
@@ -593,10 +608,14 @@ class MecoSupervisor:
                         except (OSError, json.JSONDecodeError):
                             worker_manifest = {}
                         if (abort_started is not None and
-                                worker_manifest.get("status") != "failed"):
+                                worker_manifest.get("status") ==
+                                    "aborted_due_to_sibling_failure" and
+                                worker_manifest.get("supervisor_invocation_id") ==
+                                    self.supervisor_id):
                             statuses[track] = "aborted_due_to_sibling_failure"
                             worker_manifest.update(status=statuses[track],
                                 sibling_abort_file=str(abort_file),
+                                sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_observed_utc=_utc(),
                                 worker_exit_code=result)
                             _atomic_json(self.output / track / "run.json", worker_manifest)
@@ -615,6 +634,7 @@ class MecoSupervisor:
                                 _atomic_json(abort_file, {
                                     "schema_version": 1,
                                     "supervisor_id": self.supervisor_id,
+                                    "invocation_id": self.supervisor_id,
                                     "cycle": cycle,
                                     "protocol_id": self.protocol_id,
                                     "source_identity_sha256": self.source_hash,
@@ -634,14 +654,30 @@ class MecoSupervisor:
                             statuses[track] = "aborted_due_to_sibling_failure"
                             worker_manifest.update(status=statuses[track],
                                 sibling_abort_file=str(abort_file),
+                                sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_reap="process_group_killed",
                                 completed_updates=self._completed_updates(track))
                             _atomic_json(self.output / track / "run.json", worker_manifest)
                         elif abort_started is not None and worker_status == "aborted_due_to_sibling_failure":
                             statuses[track] = worker_status
+                            worker_manifest.update(sibling_abort_file=str(abort_file),
+                                sibling_abort_invocation_id=self.supervisor_id,
+                                sibling_abort_marker=json.loads(abort_file.read_text()))
+                            _atomic_json(self.output / track / "run.json", worker_manifest)
                         else:
-                            statuses[track] = "complete"
-                            self.completed_chunks += 1
+                            completed = self._completed_updates(track)
+                            if completed < target_update:
+                                statuses[track] = "failed"
+                                failed[track] = result
+                                worker_manifest.update(status="failed",
+                                    error=(worker_manifest.get("error") or
+                                        f"worker exited successfully at update {completed}, below matched target {target_update}"),
+                                    worker_exit_code=result, completed_updates=completed,
+                                    failed_utc=worker_manifest.get("failed_utc") or _utc())
+                                _atomic_json(self.output / track / "run.json", worker_manifest)
+                            else:
+                                statuses[track] = "complete"
+                                self.completed_chunks += 1
                 if abort_started is not None and processes and \
                         time.monotonic() - abort_started >= 1800.:
                     force_terminated.update(processes)
@@ -661,6 +697,7 @@ class MecoSupervisor:
                                 worker_manifest = {}
                             worker_manifest.update(status=statuses[track],
                                 sibling_abort_file=str(abort_file),
+                                sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_reap="process_group_killed",
                                 worker_exit_code=process.returncode,
                                 completed_updates=self._completed_updates(track))

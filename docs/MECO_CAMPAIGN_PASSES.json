@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -122,7 +122,8 @@
         "R5 counterfactual retry at pickup_scattered/dense seed 3540116847380660224 failed strict prefix replay parity at snapshot_id in _branch_return before validated output; _prefix_snapshot now uses the route-feasible candidates observation as the single safe snapshot for Plan A support and replay digests; existing strict parity/digest fields are unchanged; no schema bump; independent review approved isolated b627f3a3b and integration 0379776b7; static compile/diff/JSON only, no simulator validation.",
         "GPU counterfactual collection failure/fix: r6 at `pickup_scattered/dense`, seed `3540116847380660224`, source `72fe1059c`, stopped before writing a validated dataset on strict `simulator_state_sha256` parity. The earlier same-seed audit found `_physics_graph_command.tensor` differed; zero-initialization was integrated as `0c65857f3`. The subsequent GPU attempt exposed root `env._physics_graphs` device execution cache objects in canonical traversal. Scoped implementation passes the exact root cache exclusion into `_state_value`, uses digest schema `meco-full-environment-state-v2`, and updates dataset-manifest and warm-start artifact validators to require v2. Only this execution cache is excluded; all other environment and RNG state remains strict/fail-closed. Implementer commit `a4ff27922` was independently approved and integrated as `07098e82a`; static checks only, GPU simulator collection/replay pending.",
         "GPU counterfactual retry r10 at `pickup_scattered/dense` failed before producing datasets: source `881bf4b3d`, seeds `3540116847380660228` on `cuda:0` and `3540116847380660232` on `cuda:1`, both stopped in `_rebuild_and_check` with strict `simulator_state_sha256` parity mismatch. Same-device reset comparison for seed `3540116847380660228` matched observation, candidate, support, and global RNG digests; only `env.fuel_physics._hip.contacts.tensor`, `_hip.list.tensor`, `_hip.next.tensor`, and `_hip.robot_candidates.tensor` differed. Isolated implementer follow-up on `codex/meco-hip-scratch-init` initializes exactly those four `FuelHIP.__init__` execution buffers with `torch.zeros`, preserving shape/device/dtype and keeping strict digest/schema unchanged; `rebuild` begins at one, so the first HIP substep initializes broadphase storage before valid reads. Static checks only; no GPU simulator success or validated dataset. Reviewer independently approved `dea6ec05763`, integrated as `92ea05e9a`.",
-        "Counterfactual replay blocker fixed and integrated as 54c8d3f16 after the seeded diagnostic isolated ambient global RNG state; collection, replay, and branch scoring seed/restore Python, NumPy, Torch CPU, and all CUDA RNG streams, and manifest/outcome discount metadata now share one canonical string. Scoped static review approved. Fresh source-bound collectors launched on WX9100 cuda:0 seed 3540116847380660228 and cuda:1 seed 3540116847380660232 under artifacts r12; outputs pending. The r11 datasets remain archived and invalid for fitting."
+        "Counterfactual replay blocker fixed and integrated as 54c8d3f16 after the seeded diagnostic isolated ambient global RNG state; collection, replay, and branch scoring seed/restore Python, NumPy, Torch CPU, and all CUDA RNG streams, and manifest/outcome discount metadata now share one canonical string. Scoped static review approved. Fresh source-bound collectors launched on WX9100 cuda:0 seed 3540116847380660228 and cuda:1 seed 3540116847380660232 under artifacts r12; outputs pending. The r11 datasets remain archived and invalid for fitting.",
+        "Sibling-failure containment hardening committed in isolated worktree codex/meco-sibling-failure-abort-v2 from b23b9197a: trainer validates the invocation-bound abort marker after atomic update checkpoints; manifests record invocation/marker provenance; supervisor distinguishes actual failures from sibling aborts, rejects zero-update successful lanes, and verifies bounded TERM/KILL process-group cleanup. Static compile/diff checks only; no tests or simulator runs; scoped review pending."
       ]
     },
     {
