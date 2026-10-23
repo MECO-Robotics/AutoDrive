@@ -12,16 +12,19 @@
       .filter(([, lane]) => lane.pid).map(([track, lane]) => `${track} pid ${lane.pid}`);
     const queuePhase = data.queue?.phase;
     const cycle = Number(data.queue?.cycle);
-    const isAdvancingCycle = ["training", "catching_up"].includes(queuePhase) &&
+    const isAdvancingCycle = data.queue?.state === "fresh" &&
+      ["training", "catching_up"].includes(queuePhase) &&
       Number.isInteger(cycle) && cycle > 0;
     const laneSummary = Object.entries(data.queue?.lanes || {}).map(([track, lane]) => {
-      const updates = Number(lane.completed_updates || 0);
+      const updates = lane.completed_updates;
+      const hasKnownUpdates = typeof updates === "number" &&
+        Number.isFinite(updates) && Number.isInteger(updates) && updates >= 0;
       const chunk = Number(lane.chunk_updates);
       const target = isAdvancingCycle && Number.isFinite(chunk) && chunk > 0
         ? cycle * chunk : null;
-      const status = lane.status === "complete" && target !== null && updates < target
+      const status = lane.status === "complete" && hasKnownUpdates && target !== null && updates < target
         ? "queued" : lane.status || "unknown";
-      return `${track} ${status} ${updates}${target === null ? "" : `/${target}`}`;
+      return `${track} ${status} ${hasKnownUpdates ? updates : "—"}${target === null || !hasKnownUpdates ? "" : `/${target}`}`;
     });
     const queueEval = data.queue?.evaluation || {};
     document.querySelector("#queue").textContent =
