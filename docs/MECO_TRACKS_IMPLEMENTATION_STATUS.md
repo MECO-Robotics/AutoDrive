@@ -324,3 +324,15 @@ The evaluator retains its explicit 64-query cap. Independent scoped review appro
 commit f23171d63. Only static compilation and diff checks have run for this follow-up;
 no route collection, simulator evaluation, or dashboard replay has validated
 it yet.
+
+A fresh retry at `pickup_scattered/dense`, seed `3540116847380660224`, after
+the route-query chunking fix failed strict prefix replay parity at
+`snapshot_id` inside `_branch_return` (r5 attempt); no validated output was
+written. `_prefix_snapshot` had independently rebuilt safe action candidates,
+which advanced the episode identity separately from the route-feasible
+candidate snapshot. It now takes the safe observation from
+`build_route_feasible_candidates` and uses that single snapshot for the Plan A
+support ID, replay `snapshot_id`, and `safe_observation_sha256`. Existing strict
+replay checks and digest fields are unchanged; no schema bump is needed. Only
+static compile/diff/JSON checks are intended for this correction; collection,
+simulator evaluation, and dashboard replay remain outstanding.

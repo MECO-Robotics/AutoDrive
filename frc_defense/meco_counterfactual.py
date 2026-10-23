@@ -29,8 +29,8 @@ from .meco_candidates import (CANDIDATE_BOUNDARY,
 from .meco_plan_a_policy import (SUPPORT_ORDER, build_plan_a_support,
     plan_a_support_digest)
 from .meco_pose_graph import build_legal_pose_graph
-from .meco_tracks import (PREDICTION_MODES, build_safe_action_candidates,
-    candidate_digest, prediction_contract)
+from .meco_tracks import (PREDICTION_MODES, candidate_digest,
+    prediction_contract)
 from .training_curriculum import get_scenario
 
 DATASET_SCHEMA = "meco-counterfactual-trajectory-v2"
@@ -394,12 +394,10 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
                      prediction_mode, max_c_candidates, max_a_pairs,
                      materialize=False):
     from .meco_track_training import (_candidate_replay_digest, _route_cost_tensor)
-    safe = build_safe_action_candidates(env, env._last_obs, world=0, slot=3,
-                                        episode_id=episode_id)
-    observation = safe.observation
     candidates = build_route_feasible_candidates(env, env._last_obs, graph,
         episode_id=episode_id, action_ticks=action_ticks,
         candidate_k=candidate_k, prediction_mode=prediction_mode)
+    observation = candidates.observation
     route = _route_cost_tensor(candidates, ROUTE_COST_POINTS_PER_SECOND,
                                device=env.device)
     risk = candidates.risk_cost_points.unsqueeze(0)
