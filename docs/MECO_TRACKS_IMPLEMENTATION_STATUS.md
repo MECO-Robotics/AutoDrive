@@ -68,7 +68,9 @@ updates. K8 ordinary row IDs/order remain unchanged. Candidate coverage is
 measured against an independently enumerated, route-qualified expanded goal
 set (32 stable rows plus 18 additional offsets per sensed target). It reports
 feasible-row coverage and selected/oracle minimum and mean route costs, not
-regret or simulator optimality.
+regret or simulator optimality. A separate offline analyzer now reports
+replay-verified sampled bounded-set regret for C1/C2 checkpoints; it does not
+claim regret over unsampled choices or simulator optimality.
 Static endpoint clearance encloses the robot and extended intake at every yaw.
 For collection candidates, a bearing-aligned capture envelope built from the
 sensed target and candidate goal is also an eligibility filter. It uses the
@@ -544,3 +546,25 @@ remain unchanged. Implementation committed as `15d5ef218`; scoped static review 
 integrated candidate at `05338ce72`. Runtime evidence remains pending. Static
 checks only; no tests, collection, fitting, GPU training or simulator runs
 were performed.
+
+## Sampled counterfactual regret analysis
+
+The offline `scripts/meco_counterfactual_regret.py` analyzer scores the exact
+replayed Plan C candidate table with a source-bound C1/C2 checkpoint. It
+reconstructs the model's recurrent state through the verified teacher prefix,
+then replays every sampled candidate continuation and checks its macro,
+horizon, discounted, continuation-policy, and terminal outcomes before using
+the returns. Regret is `max sampled available gross_horizon_return` minus the
+checkpoint-selected candidate's return, and is emitted only when that exact
+candidate ID has a sampled outcome. Missing chosen outcomes are excluded and
+counted. Stable table order resolves score ties.
+
+This is sampled bounded-set regret, not regret over unsampled choices or global
+simulator optimality. D1/D2 regret is unavailable because each v2 archived
+table carries one prediction-mode risk tensor; the analyzer does not present
+the same tensor as two independent controls. The script is outside the
+`frc_defense` source-identity tree and therefore does not change existing
+training artifact identities. Scoped review approved implementation commit
+`ba7b65b0`; integrated review and runtime replay remain pending. Static
+`py_compile` and diff checks only; no tests, simulator, or GPU execution were
+performed.
