@@ -13,7 +13,7 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
     const float* length, const float* width, const float* mass,
     const float* yaw_mult, const float* friction, const bool* active,
     const int64_t* team_ids, bool* robot_contact, bool* opponent_contact,
-    int n) {
+    bool* robot_contact_by_robot, int n) {
   const int world = blockIdx.x * blockDim.x + threadIdx.x;
   if (world >= n || !active[world]) return;
 
@@ -39,6 +39,7 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
   }
 
   bool any_robot = false, any_opponent = false;
+  bool contact_by_robot[6] = {false, false, false, false, false, false};
   const float mu = sqrtf(fmaxf(friction[world], 0.f));
   // Match torch.triu_indices ordering and calculate all impulses from the
   // pre-contact velocities, then sum them before mutating the state.
@@ -68,6 +69,8 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
         if (overlap[k] < depth) { depth = overlap[k]; axis = k; }
       }
       const bool valid = depth > 0.f;
+      contact_by_robot[i] |= valid;
+      contact_by_robot[j] |= valid;
       const float sign = signed_axis[axis] >= 0.f ? 1.f : -1.f;
       const float nx = ax[axis] * sign, ny = ay[axis] * sign;
       any_robot |= valid;
@@ -132,20 +135,24 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
   }
   robot_contact[world] = robot_contact[world] || any_robot;
   opponent_contact[world] = opponent_contact[world] || any_opponent;
+  #pragma unroll
+  for (int r = 0; r < 6; ++r)
+    robot_contact_by_robot[world * 6 + r] =
+        robot_contact_by_robot[world * 6 + r] || contact_by_robot[r];
 }
 
 __global__ void robot_contacts_single_world_parallel_kernel(
     float* pose, float* velocity, const float* length, const float* width,
     const float* mass, const float* yaw_mult, const float* friction,
     const bool* active, const int64_t* team_ids, bool* robot_contact,
-    bool* opponent_contact) {
+    bool* opponent_contact, bool* robot_contact_by_robot) {
   const int lane = threadIdx.x;
   if (!active[0]) return;
   __shared__ float pair_delta[15][10];
-  __shared__ int any_robot, any_opponent;
+  __shared__ int any_robot, any_opponent, contact_mask;
   const int pair_i[15] = {0,0,0,0,0,1,1,1,1,2,2,2,3,3,4};
   const int pair_j[15] = {1,2,3,4,5,2,3,4,5,3,4,5,4,5,5};
-  if (lane == 0) { any_robot = 0; any_opponent = 0; }
+  if (lane == 0) { any_robot = 0; any_opponent = 0; contact_mask = 0; }
   __syncthreads();
 
   if (lane < 15) {
@@ -182,6 +189,7 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     const bool valid=depth>0.f;
     if (valid) {
       atomicExch(&any_robot,1);
+      atomicOr(&contact_mask, (1 << i) | (1 << j));
       if (team_ids[i]!=team_ids[j]) atomicExch(&any_opponent,1);
     }
     const float sign=signed_axis[axis]>=0.f?1.f:-1.f;
@@ -242,23 +250,28 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     robot_contact[0]=robot_contact[0]||any_robot;
     opponent_contact[0]=opponent_contact[0]||any_opponent;
   }
+  if (lane < 6)
+    robot_contact_by_robot[lane] = robot_contact_by_robot[lane] ||
+        ((contact_mask & (1 << lane)) != 0);
 }
 
 void robot_contacts_launch(float* pose, float* velocity, const float* length,
     const float* width, const float* mass, const float* yaw_mult,
     const float* friction, const bool* active, const int64_t* team_ids,
-    bool* robot_contact, bool* opponent_contact, int n,
+    bool* robot_contact, bool* opponent_contact,
+    bool* robot_contact_by_robot, int n,
     bool parallel_single_world, hipStream_t stream) {
   if (n == 1 && parallel_single_world) {
     hipLaunchKernelGGL(robot_contacts_single_world_parallel_kernel,
         dim3(1), dim3(32), 0, stream, pose, velocity, length, width, mass,
-        yaw_mult, friction, active, team_ids, robot_contact, opponent_contact);
+        yaw_mult, friction, active, team_ids, robot_contact, opponent_contact,
+        robot_contact_by_robot);
   } else {
     constexpr int threads = 128;
     const int blocks = (n + threads - 1) / threads;
     hipLaunchKernelGGL(robot_contacts_kernel, dim3(blocks), dim3(threads), 0, stream,
         pose, velocity, length, width, mass, yaw_mult, friction, active, team_ids,
-        robot_contact, opponent_contact, n);
+        robot_contact, opponent_contact, robot_contact_by_robot, n);
   }
 }
 

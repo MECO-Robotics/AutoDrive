@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 
 import torch
 
+SAFETY_METRICS_SCHEMA = "meco-safety-rates-v1"
+SAFETY_CONTACT_METRIC_NAMES = (
+    "safety_robot_contact_rate",
+    "safety_field_contact_rate",
+    "safety_wall_contact_rate",
+)
+
 
 @dataclass
 class MecoEpisodeMetricLedger:
@@ -27,9 +34,6 @@ class MecoEpisodeMetricLedger:
     fuel_abandoned: int | None = None
     failed_collection: int | None = None
     fuel_event_steps_available: bool = True
-    contact_outer_step_samples: int = 0
-    robot_contact_outer_step_samples: int | None = 0
-    static_contact_outer_step_samples: int | None = 0
     route_ids: list[str | None] = field(default_factory=list)
     goal_attempts: list[dict] = field(default_factory=list)
     _previous_xy: torch.Tensor | None = field(default=None, repr=False)
@@ -47,14 +51,14 @@ class MecoEpisodeMetricLedger:
         return int(value[0, 3].detach().sum().item())
 
     @staticmethod
-    def _focal_contact(env, name: str) -> bool | None:
+    def _focal_physics_counter(env, name: str) -> int | None:
         value = getattr(getattr(env, "sim", None), name, None)
-        if not isinstance(value, torch.Tensor) or value.ndim < 2 or value.shape[1] <= 3:
+        if not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] < 1 or value.shape[1] <= 3:
             return None
-        return bool(value[0, 3].detach().any().item())
+        return int(value[0, 3].detach().item())
 
     def observe_outer_step(self) -> None:
-        """Sample event/contact tensors after one completed ``env.step``."""
+        """Sample per-outer-step game events and evaluator-boundary distance."""
         pose = getattr(getattr(self.env, "sim", None), "pose", None)
         if isinstance(pose, torch.Tensor) and pose.ndim >= 3 and pose.shape[1] > 3:
             xy = pose[0, 3, :2].detach()
@@ -76,21 +80,6 @@ class MecoEpisodeMetricLedger:
                 self.fuel_event_steps_available = False
             else:
                 setattr(self, field_name, getattr(self, field_name) + value)
-
-        robot_contact = self._focal_contact(self.env, "robot_contact")
-        field_contact = self._focal_contact(self.env, "field_contact")
-        wall_contact = self._focal_contact(self.env, "wall_contact")
-        if robot_contact is None:
-            self.robot_contact_outer_step_samples = None
-        elif self.robot_contact_outer_step_samples is not None:
-            self.robot_contact_outer_step_samples += int(robot_contact)
-        if field_contact is None or wall_contact is None:
-            self.static_contact_outer_step_samples = None
-        elif self.static_contact_outer_step_samples is not None:
-            self.static_contact_outer_step_samples += int(field_contact or wall_contact)
-        if (robot_contact is not None or field_contact is not None or
-                wall_contact is not None):
-            self.contact_outer_step_samples += 1
 
     def observe_route(self, route_id: str | None) -> None:
         if self.route_tracking_available:
@@ -136,8 +125,22 @@ class MecoEpisodeMetricLedger:
         goal_heading_attempts = [row for row in self.goal_attempts
                                  if row["goal_heading_rad"] is not None and
                                  row["heading_alignment_opportunity"]]
+        active_physics_ticks = self._focal_physics_counter(
+            self.env, "safety_active_physics_ticks")
+        contact_counters = {
+            "robot": self._focal_physics_counter(self.env, "safety_robot_contact_ticks"),
+            "field": self._focal_physics_counter(self.env, "safety_field_contact_ticks"),
+            "wall": self._focal_physics_counter(self.env, "safety_wall_contact_ticks"),
+        }
+        contact_rates = {
+            f"safety_{name}_contact_rate": (
+                count / active_physics_ticks
+                if count is not None and active_physics_ticks is not None
+                and active_physics_ticks > 0 else None)
+            for name, count in contact_counters.items()
+        }
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "scope": "focal_slot_3_per_episode",
             "availability": {
                 "route_selection": self.route_tracking_available,
@@ -145,6 +148,11 @@ class MecoEpisodeMetricLedger:
                 "fuel_event_outer_step_sampling": self.fuel_event_steps_available,
                 "abandoned_fuel_event": False,
                 "failed_collection_event": False,
+                "safety_contact_tick_rates": (
+                    active_physics_ticks is not None and active_physics_ticks > 0
+                    and all(value is not None for value in contact_counters.values())),
+                "illegal_transition_event": False,
+                "footprint_violation_event": False,
             },
             "outer_env_steps": self.outer_env_steps,
             "elapsed_simulated_seconds": self.elapsed_simulated_seconds,
@@ -180,11 +188,21 @@ class MecoEpisodeMetricLedger:
                 },
             },
             "contacts": {
-                "sample_scope": "outer_env_step_sampled",
-                "sampled_outer_steps": self.contact_outer_step_samples,
-                "robot_contact_outer_step_samples": self.robot_contact_outer_step_samples,
-                "static_contact_outer_step_samples": self.static_contact_outer_step_samples,
-                "provenance": "focal slot-3 contact tensors sampled after each outer environment step; not physics-substep totals",
+                "sample_scope": "low_level_physics_tick",
+                "active_physics_ticks": active_physics_ticks,
+                "robot_contact_ticks": contact_counters["robot"],
+                "field_contact_ticks": contact_counters["field"],
+                "wall_contact_ticks": contact_counters["wall"],
+                "rates_per_active_physics_tick": contact_rates,
+                "provenance": "focal slot-3 contact flags accumulated once per active TensorPhysics.step after its collision passes; field and wall contacts are separate classes; these are observed contacts, not policy-rule violations",
+                "missing_signal_semantics": "null; unavailable counters are never reported as zero",
+            },
+            "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
+            "safety_metrics": contact_rates,
+            "unavailable_safety_metrics": {
+                "illegal_transition_rate": None,
+                "footprint_violation_rate": None,
+                "reason": "no authoritative per-episode illegal-transition or footprint-violation event signal is connected to this evaluator",
             },
             "provenance": {
                 "time": "outer_env_steps multiplied by env.dt; simulator elapsed time at evaluator outer-step cadence",
@@ -194,6 +212,7 @@ class MecoEpisodeMetricLedger:
                 "goal_attempts": "one selected endpoint record per macro execution; Plan A continuation macro steps are included",
                 "heading_alignment_attempts": "macro rows with a planned heading and any within-0.04m XY opportunity during that macro",
                 "heading_joint_endpoint": "success requires both terminal XY distance <= 0.04m and terminal heading error <= 0.1 rad; an earlier in-macro XY opportunity alone is not endpoint success",
-                "claims_excluded": ["interception", "feint detection", "AD* replans", "physics-substep contact totals", "exact curved path length"],
+                "safety_contacts": "per-class focal contact ticks divided by focal active low-level physics ticks; not policy-rule violations",
+                "claims_excluded": ["interception", "feint detection", "AD* replans", "illegal-transition or footprint-violation rates without authoritative event signals", "exact curved path length"],
             },
         }

@@ -431,6 +431,23 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
+def _physics_safety_snapshot(env):
+    """Read cumulative focal contact ticks at a macro boundary."""
+    names = {
+        "active_physics_ticks": "safety_active_physics_ticks",
+        "robot_contact_ticks": "safety_robot_contact_ticks",
+        "field_contact_ticks": "safety_field_contact_ticks",
+        "wall_contact_ticks": "safety_wall_contact_ticks",
+    }
+    snapshot = {}
+    for key, attr in names.items():
+        value = getattr(env.sim, attr, None)
+        if not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] < 1 or value.shape[1] <= 3:
+            return None
+        snapshot[key] = int(value[0, 3].detach().item())
+    return snapshot
+
+
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
                     allow_action7_traversal=False,
@@ -443,6 +460,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     executed_actions = []
     heading_alignment_opportunity = False
     native_goal_preempted = False
+    if safety_counts is not None and "_last_snapshot" not in safety_counts:
+        safety_counts["_last_snapshot"] = _physics_safety_snapshot(env)
     for _ in range(action_ticks):
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
@@ -453,15 +472,16 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             metric_ledger.observe_outer_step()
         executed_actions.append(int(env.last_actions[0, 3].item()))
         if safety_counts is not None:
-            def focal_contact(name):
-                value = getattr(env.sim, name, None)
-                if value is None:
-                    return False
-                focal = value[0, 3] if value.ndim >= 2 and value.shape[1] > 3 else value[0]
-                return bool(focal.any().item()) if isinstance(focal, torch.Tensor) else bool(focal)
-            safety_counts["robot_contact_ticks"] += int(focal_contact("robot_contact"))
-            safety_counts["static_contact_ticks"] += int(
-                focal_contact("field_contact") or focal_contact("wall_contact"))
+            current = _physics_safety_snapshot(env)
+            previous = safety_counts.get("_last_snapshot")
+            if current is None or previous is None:
+                safety_counts["metrics_available"] = False
+                safety_counts["_last_snapshot"] = current
+            else:
+                for key in ("active_physics_ticks", "robot_contact_ticks",
+                            "field_contact_ticks", "wall_contact_ticks"):
+                    safety_counts[key] += current[key] - previous[key]
+                safety_counts["_last_snapshot"] = current
         if goal_xy is not None:
             current_xy = env.sim.pose[0, 3, :2]
             goal_distance = float((current_xy - torch.as_tensor(
@@ -1128,6 +1148,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     control_prediction_modes = {"D1": prediction_mode or "current",
                                  "D2": prediction_mode or "cv"}
     sources = source_identity()
+    source_hash = hashlib.sha256(json.dumps(
+        sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
     loaded = {}
     policy_manifest = {}
     route_weight = None
@@ -1359,8 +1381,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         post_fault_actions = []
                         post_fault_executed_actions = [0] * 8
                         post_fault_macro_count = 0
-                        post_fault_safety = {"robot_contact_ticks": 0,
-                                             "static_contact_ticks": 0}
+                        post_fault_safety = {"active_physics_ticks": 0,
+                            "robot_contact_ticks": 0, "field_contact_ticks": 0,
+                            "wall_contact_ticks": 0, "metrics_available": True}
                         post_fault_metrics_start = None
                         fault_fallback_count = 0
                         decision_prediction_mode = policy_manifest[policy].get("prediction_mode")
@@ -1592,6 +1615,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         outcomes = env.curriculum_metrics.outcomes()
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
                                    for name, value in outcomes.items()}
+                        metric_ledger_record = episode_metric_ledger.to_record()
+                        metrics.update(metric_ledger_record["safety_metrics"])
                         post_fault_metrics = None
                         if inference_fault_run and inference_fault_reached:
                             progress_fields = ("scores", "acquisitions", "deliveries",
@@ -1636,10 +1661,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "post_fault_macro_count": post_fault_macro_count,
                                 "post_fault_executed_action_counts": post_fault_executed_actions,
                                 "post_fault_outcome_and_progress_delta": post_fault_metrics,
-                                "post_fault_safety_ticks": post_fault_safety if inference_fault_reached else None,
+                                "post_fault_safety_ticks": ({key: value for key, value
+                                    in post_fault_safety.items() if not key.startswith("_")}
+                                    if inference_fault_reached else None),
                                 "post_fault_safety_scope": {
-                                    "robot_contact_ticks": "any robot collision in the simulator world",
-                                    "static_contact_ticks": "field or wall contact for controlled slot 3",
+                                    "robot_contact_ticks": "low-level physics ticks with a robot-pair contact involving controlled slot 3",
+                                    "field_contact_ticks": "low-level physics ticks with field contact for controlled slot 3",
+                                    "wall_contact_ticks": "low-level physics ticks with wall contact for controlled slot 3",
+                                    "active_physics_ticks": "active low-level physics ticks for controlled slot 3",
+                                    "claim_scope": "observed contact events, not policy-rule violations",
                                 },
                                 "recovery_claim": "not inferred; fallback activation and post-trigger outcome/safety are reported separately",
                             } if inference_fault_run else None),
@@ -1659,14 +1689,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 if decision_prediction_mode in PREDICTION_MODES else None),
                             "protocol_id": protocol, "split": split,
                             **(qualification_case or {}),
-                            "source_identity_sha256": hashlib.sha256(json.dumps(
-                                sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+                            "source_identity_sha256": source_hash,
+                            "safety_metrics_schema": metric_ledger_record["safety_metrics_schema"],
+                            "safety_metrics_source_identity_sha256": source_hash,
                             "actions": actions_count, "executed_action_trace": executed_action_trace,
                             "selected_action_trace": selected_action_trace,
                             "execution_failures": execution_failures,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
-                            "meco_metric_ledger": episode_metric_ledger.to_record(),
+                            "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
                             "episode_id": episode_id})
                         update_evaluation_status("running", len(records))
@@ -1676,11 +1707,20 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "sources": sources,
+            "safety_metrics_schema": "meco-safety-rates-v1",
+            "safety_metrics_source_identity_sha256": source_hash,
             "episode_metric_ledger_schema": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "record_field": "meco_metric_ledger",
                 "scope": "one ledger per evaluation record, focal slot 3",
-                "outer_step_sampling": "fuel event and contact signals are sampled after each outer CurriculumEnv.step",
+                "outer_step_sampling": "fuel event tensors are sampled after each outer CurriculumEnv.step; contact metrics use cumulative low-level TensorPhysics.step counters",
+                "safety_metrics_schema": "meco-safety-rates-v1",
+                "safety_metrics": {
+                    "safety_robot_contact_rate": "focal slot-3 robot-contact ticks / focal active physics ticks",
+                    "safety_field_contact_rate": "focal slot-3 field-contact ticks / focal active physics ticks",
+                    "safety_wall_contact_rate": "focal slot-3 wall-contact ticks / focal active physics ticks",
+                },
+                "safety_contact_scope": "observed per-class contacts, not policy-rule violations; missing counters remain null",
                 "distance": "XY chord proxy between outer-step pose samples; not exact curved path length",
                 "route_switches": "selected candidate route ID changes; not AD* replans",
                 "route_aba_proxy": "three consecutive selected route IDs A-B-A; not interception or feint detection",
@@ -1733,7 +1773,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "unreached_trigger_is_not_success": True,
                 "fallback": "D1 deterministic scorer using the checkpoint prediction mode",
                 "state_cleared": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
-                "post_fault_safety": "simulation-wide robot-contact and controlled-slot-3 static-contact physics tick counts",
+                "post_fault_safety": "controlled-slot-3 robot, field, and wall contact physics-tick counts from cumulative counters",
                 "post_fault_recovery": "not inferred; fallback action counts, outcome/progress deltas, and safety ticks are reported",
             } if inference_disable_tick is not None else None),
             "component_timing": {
@@ -1752,8 +1792,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "qualification_case": qualification_case,
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "diagnostic_boundary": "matched validation sample only; promotion requires separate held-out gates",
-            "source_identity_sha256": hashlib.sha256(json.dumps(
-                sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+            "source_identity_sha256": source_hash,
             "dashboard_verified": False, "records": records,
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
