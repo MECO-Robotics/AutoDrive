@@ -53,7 +53,8 @@ immutable reports:
 ```bash
 python -m frc_defense.meco_qualification calibrate-d0 \
   --scenario pickup_simple --episodes 100 --repetitions 3 \
-  --master-seed 20261024 --output qualifications/meco/d0-calibration-pickup-simple.json
+  --master-seed 20261024 --device cuda:0 \
+  --output qualifications/meco/d0-calibration-pickup-simple.json
 
 python -m frc_defense.meco_qualification bundle-calibrations \
   --report qualifications/meco/d0-calibration-pickup-simple.json \
@@ -67,11 +68,35 @@ python -m frc_defense.meco_qualification create-protocol \
   --output qualifications/meco/protocol-pickup-simple-v2.json
 ```
 
-Calibration repeats the same seed list independently to separate repeat-run
+Calibration emits the immutable `meco-d0-calibration-v2` report format and
+requires an explicit visible GPU device (`cuda:0`, `cuda:1`, etc.)
+and records the selected device, backend, and runtime version. CPU calibration
+fails closed. Calibration repeats the same seed list independently to separate repeat-run
 variation from across-seed variation. Calibration seeds use split code 3 and
 are checked against train, validation, and test seeds. Existing v1 protocol
-files are not rewritten. The v2 digest binds the calibration report, source
-identity, per-scenario seed pools and gates, gain margins, and safety margins.
+files are not rewritten. The v2 digest binds the calibration report hashes,
+source identity, per-scenario seed pools and gates, gain-margin derivation, and
+safety tolerances. Set the operational useful-gain threshold explicitly for
+each target category; baseline variance only adds a confidence allowance and
+never defines the desired gain. For example:
+
+```json
+{
+  "schema_version": 1,
+  "operational_gain_threshold": {"single": 0.05, "cluster": 0.03},
+  "uncertainty_multiplier": 1.96
+}
+```
+
+The v2 margin is `operational_gain_threshold + uncertainty_multiplier ×
+maximum_stratum_standard_error`, with standard error derived from calibration
+between-seed and within-seed repeat variance. The declaration, derived values,
+method, calibration ID, and report hashes are all bound into the protocol and
+qualification evidence. Safety tolerances remain explicitly declared per
+supported rate and are frozen into the same protocol. Calibration collection
+does not currently expose episode sharding across devices; concurrent jobs
+must use distinct report paths, and bundle intake rejects overlapping seed
+pools.
 It contains exact train/validation/test lists for the target and prerequisite
 closure, and verifies calibration pools are disjoint from all three splits and
 from each other. Only the target can advance promotion; prerequisite runs are

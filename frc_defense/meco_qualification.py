@@ -21,6 +21,7 @@ from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
 
 PROTOCOL_VERSION = "meco-qualification-v1"
 CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
+D0_CALIBRATION_VERSION = "meco-d0-calibration-v2"
 MIN_EPISODES = 100
 TRAIN_SEED_POOL_SIZE = 100
 BOOTSTRAP_REPLICATES = 10_000
@@ -108,17 +109,18 @@ def _retention_scenarios(target: str) -> tuple[str, ...]:
     return tuple(scenario for scenario in _scenario_closure(target) if scenario != target)
 
 
-def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tuple[dict, dict, str]:
+def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tuple[dict, dict, str, dict]:
     """Validate every D0 report and return its IDs, exact seed pools, and shared source."""
     if set(reports) != set(scenarios):
         raise ValueError("D0 calibration bundle must cover the target and every prerequisite exactly")
-    ids, pools, source_hash = {}, {}, None
+    ids, pools, report_hashes, source_hash = {}, {}, {}, None
     calibration_seed_union = set()
     for scenario in scenarios:
         report = reports[scenario]
-        if (not isinstance(report, dict) or report.get("calibration") is not True
+        if (not isinstance(report, dict) or report.get("schema_version") != 2
+                or report.get("calibration") is not True
                 or report.get("scenario_id") != scenario
-                or report.get("protocol_version") != "meco-d0-calibration-v1"):
+                or report.get("protocol_version") != D0_CALIBRATION_VERSION):
             raise ValueError(f"D0 calibration bundle report is invalid for {scenario}")
         unsigned = {key: value for key, value in report.items() if key != "calibration_id"}
         digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True,
@@ -168,6 +170,14 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
                 or report.get("safety_metrics_source_identity_sha256") != current_source
                 or any(row.get("source_identity_sha256") != current_source for row in rows)):
             raise ValueError(f"D0 calibration source/controller provenance is invalid for {scenario}")
+        runtime_device = report.get("runtime_device")
+        if (not isinstance(runtime_device, dict)
+                or runtime_device.get("backend") not in ("hip", "cuda")
+                or not isinstance(runtime_device.get("device"), str)
+                or not runtime_device["device"].startswith("cuda:")
+                or not isinstance(runtime_device.get("device_name"), str)
+                or not runtime_device["device_name"].strip()):
+            raise ValueError(f"D0 calibration did not record a verified GPU device for {scenario}")
         for row in rows:
             metrics = row.get("metrics")
             safety_keys = ({key for key in metrics
@@ -188,6 +198,8 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
             raise ValueError("D0 calibration seed pools overlap across prerequisite scenarios")
         calibration_seed_union.update(seeds)
         ids[scenario] = digest
+        report_hashes[scenario] = hashlib.sha256(json.dumps(report, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
         pools[scenario] = {"master_seed": master_seed, "episodes": episodes,
             "repetitions": repetitions, "cases": [
                 {"category": c.category, "layout_id": c.layout_id,
@@ -195,12 +207,12 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
                  "start_condition": c.start_condition,
                  "sensor_profile": c.sensor_profile, "seeds": list(c.seeds)}
                 for c in cases]}
-    return ids, pools, source_hash
+    return ids, pools, source_hash, report_hashes
 
 
 def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPISODES,
                       master_seed: int = 20261024, calibration_report: dict | None = None,
-                      minimum_useful_gain: dict[str, float] | None = None,
+                      minimum_useful_gain: dict | None = None,
                       safety_noninferiority_margins: dict[str, float] | None = None) -> dict:
     """Canonical target-scoped protocol; the digest is the protocol identity."""
     if scenario_id is not None and scenario_id not in SCENARIOS:
@@ -254,14 +266,10 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
                    else calibration_report)
         if not isinstance(reports, dict):
             raise ValueError("calibration input must be a report or scenario-to-report bundle")
-        calibration_ids, calibration_seed_pools, source_hash = _calibration_report_index(
+        calibration_ids, calibration_seed_pools, source_hash, calibration_report_hashes = _calibration_report_index(
             reports, scenarios)
-        categories = set(SCENARIOS[target].required_categories)
-        if (not isinstance(minimum_useful_gain, dict)
-                or set(minimum_useful_gain) != categories
-                or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
-                       for value in minimum_useful_gain.values())):
-            raise ValueError("provide a nonnegative useful-throughput gain for every target category")
+        minimum_useful_gain, useful_gain_derivation = derive_useful_gain_margins(
+            reports, target, minimum_useful_gain)
         if (not isinstance(safety_noninferiority_margins, dict)
                 or set(safety_noninferiority_margins) != SAFETY_METRIC_NAMES
                 or any(type(value) not in (int, float) or not math.isfinite(value)
@@ -270,7 +278,7 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         baseline_id = hashlib.sha256(json.dumps(calibration_ids, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
     else:
-        calibration_ids, calibration_seed_pools, source_hash, baseline_id = {}, {}, None, None
+        calibration_ids, calibration_seed_pools, calibration_report_hashes, source_hash, baseline_id = {}, {}, {}, None, None
     body = {"protocol_version": CALIBRATED_PROTOCOL_VERSION if calibrated else PROTOCOL_VERSION,
         "promotion_target_scenario": target,
         "scenario_ids": list(scenarios),
@@ -299,8 +307,10 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             else "provisional_pending_baseline_variance_review"),
         "calibration_id": baseline_id, "calibration_ids": calibration_ids,
         "calibration_seed_pools": calibration_seed_pools,
+        "calibration_report_sha256": calibration_report_hashes if calibrated else {},
         "calibration_source_identity_sha256": source_hash,
         "minimum_useful_gain": minimum_useful_gain if calibrated else None,
+        "useful_gain_derivation": useful_gain_derivation if calibrated else None,
         "safety_noninferiority_margins": safety_noninferiority_margins if calibrated else None,
         "safety_gate_status": "metrics_schema_verified" if calibrated else "not_calibrated",
         "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate) for scenario in scenarios},
@@ -347,10 +357,14 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         raise ValueError("calibrated protocol safety schema/source binding is invalid")
     ids = protocol.get("calibration_ids")
     pools = protocol.get("calibration_seed_pools")
-    if not isinstance(ids, dict) or set(ids) != set(scenarios) or not isinstance(pools, dict) or set(pools) != set(scenarios):
+    report_hashes = protocol.get("calibration_report_sha256")
+    if (not isinstance(ids, dict) or set(ids) != set(scenarios)
+            or not isinstance(pools, dict) or set(pools) != set(scenarios)
+            or not isinstance(report_hashes, dict) or set(report_hashes) != set(scenarios)):
         raise ValueError("calibrated protocol is missing prerequisite calibration reports")
     if any(not isinstance(value, str) or len(value) != 64
-           or any(c not in "0123456789abcdef" for c in value) for value in ids.values()):
+           or any(c not in "0123456789abcdef" for c in value)
+           for value in (*ids.values(), *report_hashes.values())):
         raise ValueError("calibrated protocol contains an invalid calibration report ID")
     combined_id = hashlib.sha256(json.dumps(ids, sort_keys=True,
         separators=(",", ":")).encode()).hexdigest()
@@ -383,6 +397,27 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
                    for value in gain_margins.values())):
         raise ValueError("calibrated protocol useful-gain categories or margins are invalid")
+    derivation = protocol.get("useful_gain_derivation")
+    if (not isinstance(derivation, dict)
+            or derivation.get("schema_version") != 1
+            or derivation.get("method") != "declared_operational_threshold_plus_multiplier_times_max_stratum_standard_error"
+            or derivation.get("calibration_id") != ids[target]
+            or not isinstance(derivation.get("operational_gain_threshold"), dict)
+            or set(derivation["operational_gain_threshold"]) != categories
+            or not isinstance(derivation.get("uncertainty_by_category"), dict)
+            or set(derivation["uncertainty_by_category"]) != categories
+            or type(derivation.get("uncertainty_multiplier")) not in (int, float)
+            or not math.isfinite(derivation["uncertainty_multiplier"])
+            or derivation["uncertainty_multiplier"] < 0):
+        raise ValueError("calibrated protocol useful-gain derivation provenance is invalid")
+    for category in categories:
+        uncertainty = derivation["uncertainty_by_category"][category]
+        threshold = derivation["operational_gain_threshold"][category]
+        se = uncertainty.get("maximum_stratum_standard_error") if isinstance(uncertainty, dict) else None
+        if (type(threshold) not in (int, float) or not math.isfinite(threshold) or threshold < 0
+                or type(se) not in (int, float) or not math.isfinite(se) or se < 0
+                or gain_margins[category] != threshold + derivation["uncertainty_multiplier"] * se):
+            raise ValueError("calibrated protocol gain margin does not match its declared derivation")
     if (not isinstance(safety_margins, dict) or set(safety_margins) != SAFETY_METRIC_NAMES
             or any(type(value) not in (int, float) or not math.isfinite(value)
                    or not 0 <= value <= 1 for value in safety_margins.values())):
@@ -407,7 +442,7 @@ _EVIDENCE_FIELDS = ("schema_version", "qualification", "evaluation_id", "protoco
     "retention_scenario_ids",
     "source_identity_sha256", "gate_definition", "gate_calibration_status",
     "protocol_version", "calibration_id", "calibration_ids", "calibration_seed_pools",
-    "minimum_useful_gain",
+    "calibration_report_sha256", "minimum_useful_gain", "useful_gain_derivation",
     "safety_noninferiority_margins", "safety_gate_status",
     "safety_metrics_schema", "safety_metrics_source_identity_sha256",
     "paired_reference_policy", "paired", "episodes_per_category_stratum",
@@ -428,6 +463,7 @@ def _validate_evidence_digest(report: dict) -> None:
 def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
     bindings = ("protocol_id", "protocol_version", "calibration_id",
         "calibration_ids", "calibration_seed_pools",
+        "calibration_report_sha256", "useful_gain_derivation",
         "retention_scenario_ids",
         "gate_calibration_status", "minimum_useful_gain",
         "safety_noninferiority_margins", "safety_gate_status",
@@ -444,9 +480,82 @@ def _variance(values):
     return sum((value - mean) ** 2 for value in values) / len(values)
 
 
+def _require_calibration_gpu(device: str) -> dict:
+    """Require an explicit, visible CUDA/HIP device before D0 calibration."""
+    import torch
+    try:
+        selected = torch.device(device)
+    except (TypeError, RuntimeError) as exc:
+        raise ValueError(f"invalid calibration device {device!r}") from exc
+    if selected.type != "cuda" or selected.index is None:
+        raise ValueError("D0 calibration requires an explicit GPU device such as cuda:0")
+    if (selected.index < 0 or not torch.cuda.is_available()
+            or selected.index >= torch.cuda.device_count()):
+        raise RuntimeError(f"requested calibration GPU {selected} is not available")
+    name = torch.cuda.get_device_name(selected.index)
+    if not isinstance(name, str) or not name.strip():
+        raise RuntimeError(f"could not identify requested calibration GPU {selected}")
+    return {"device": str(selected), "device_name": name,
+        "backend": "hip" if torch.version.hip else "cuda",
+        "torch_version": torch.__version__, "hip_version": torch.version.hip}
+
+
+def derive_useful_gain_margins(reports: dict, target: str, declaration: dict) -> tuple[dict, dict]:
+    """Add declared operational gain to a deterministic calibration uncertainty allowance."""
+    categories = set(SCENARIOS[target].required_categories)
+    if (not isinstance(declaration, dict)
+            or declaration.get("schema_version") != 1
+            or not isinstance(declaration.get("operational_gain_threshold"), dict)
+            or set(declaration["operational_gain_threshold"]) != categories
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                   for value in declaration["operational_gain_threshold"].values())):
+        raise ValueError("useful-gain declaration must give a nonnegative operational threshold for every target category")
+    multiplier = declaration.get("uncertainty_multiplier")
+    if type(multiplier) not in (int, float) or not math.isfinite(multiplier) or multiplier < 0:
+        raise ValueError("useful-gain declaration requires a finite nonnegative uncertainty_multiplier")
+    target_report = reports[target]
+    summaries = target_report.get("summary")
+    if not isinstance(summaries, dict):
+        raise ValueError("target calibration report has no variance summaries")
+    margins, uncertainty = {}, {}
+    for category in sorted(categories):
+        strata = [row for row in summaries.values() if row.get("category") == category]
+        if not strata:
+            raise ValueError(f"calibration report has no uncertainty summary for {category}")
+        # Conservative across the frozen target strata. The operational threshold
+        # is declared by the operator; calibration variance only widens it.
+        bounds = []
+        for row in strata:
+            n = row.get("seed_count")
+            reps = row.get("repetition_count")
+            between = row.get("between_seed_variance")
+            within = row.get("mean_within_seed_repeat_variance")
+            if (type(n) is not int or n <= 0 or type(reps) is not int or reps < 2
+                    or any(type(x) not in (int, float) or not math.isfinite(x) or x < 0
+                           for x in (between, within))):
+                raise ValueError("calibration report variance summary is incomplete or invalid")
+            bounds.append(math.sqrt(between / n + within / (n * reps)))
+        se = max(bounds)
+        threshold = float(declaration["operational_gain_threshold"][category])
+        margins[category] = threshold + float(multiplier) * se
+        uncertainty[category] = {"maximum_stratum_standard_error": se,
+            "stratum_count": len(strata)}
+    declaration_digest = hashlib.sha256(json.dumps(declaration, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    provenance = {"schema_version": 1,
+        "method": "declared_operational_threshold_plus_multiplier_times_max_stratum_standard_error",
+        "standard_error": "sqrt(between_seed_variance/seed_count + mean_within_seed_repeat_variance/(seed_count*repetition_count))",
+        "operational_gain_threshold": declaration["operational_gain_threshold"],
+        "uncertainty_multiplier": float(multiplier), "uncertainty_by_category": uncertainty,
+        "declaration_sha256": declaration_digest,
+        "calibration_id": target_report["calibration_id"]}
+    return margins, provenance
+
+
 def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
                        master_seed: int, device: str = "cpu") -> dict:
     """Collect repeated D0 outcomes on a dedicated, disjoint seed partition."""
+    device_identity = _require_calibration_gpu(device)
     if type(repetitions) is not int or repetitions < 2:
         raise ValueError("D0 calibration requires at least two repeated runs")
     if type(episodes) is not int or episodes < MIN_EPISODES:
@@ -517,8 +626,8 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             "mean_within_seed_repeat_variance": sum(repeat_variances) / len(repeat_variances),
             "seed_digest": hashlib.sha256(json.dumps(list(case.seeds),
                 separators=(",", ":")).encode()).hexdigest()}
-    body = {"schema_version": 1, "calibration": True,
-        "protocol_version": "meco-d0-calibration-v1", "scenario_id": scenario_id,
+    body = {"schema_version": 2, "calibration": True,
+        "protocol_version": D0_CALIBRATION_VERSION, "scenario_id": scenario_id,
         "master_seed": master_seed, "split": "calibration",
         "seed_partition_code": 3, "episodes_per_category_stratum": episodes,
         "repetitions": repetitions, "repeat_semantics": "same exact calibration seeds repeated independently",
@@ -526,6 +635,7 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             "defender_family": c.defender_family, "start_condition": c.start_condition,
             "sensor_profile": c.sensor_profile} for c in cases],
         "policy_manifest": manifest, "source_identity_sha256": source_hash,
+        "runtime_device": device_identity,
         "safety_metrics_schema": safety_schema,
         "safety_metrics_source_identity_sha256": safety_source_hash,
         "summary": summaries, "records": records,
@@ -1000,8 +1110,10 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "calibration_id": protocol.get("calibration_id"),
         "calibration_ids": protocol.get("calibration_ids"),
         "calibration_seed_pools": protocol.get("calibration_seed_pools"),
+        "calibration_report_sha256": protocol.get("calibration_report_sha256"),
         "retention_scenario_ids": protocol.get("retention_scenario_ids"),
         "minimum_useful_gain": protocol.get("minimum_useful_gain"),
+        "useful_gain_derivation": protocol.get("useful_gain_derivation"),
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
         "safety_metrics_schema": safety_schema,
@@ -1097,14 +1209,17 @@ def main(argv=None):
     create.add_argument("--scenario")
     create.add_argument("--calibration-report")
     create.add_argument("--calibration-bundle-json")
-    create.add_argument("--minimum-useful-gain-json")
-    create.add_argument("--safety-margins-json")
+    create.add_argument("--minimum-useful-gain-json",
+        help="JSON with schema_version, per-category operational_gain_threshold, and uncertainty_multiplier")
+    create.add_argument("--safety-margins-json",
+        help="JSON mapping each supported safety rate to its explicit noninferiority tolerance")
     calibrate = commands.add_parser("calibrate-d0")
     calibrate.add_argument("--scenario", required=True)
     calibrate.add_argument("--episodes", type=int, default=MIN_EPISODES)
     calibrate.add_argument("--repetitions", type=int, default=3)
     calibrate.add_argument("--master-seed", type=int, default=20261024)
-    calibrate.add_argument("--device", default="cpu")
+    calibrate.add_argument("--device", required=True,
+        help="explicit GPU device (for example cuda:0); CPU calibration is unsupported")
     calibrate.add_argument("--output", required=True)
     bundle = commands.add_parser("bundle-calibrations")
     bundle.add_argument("--report", action="append", required=True,

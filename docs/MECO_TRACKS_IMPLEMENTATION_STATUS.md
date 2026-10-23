@@ -412,3 +412,24 @@ unchanged. The implementer change `dea6ec05763` passed independent scoped
 review and was integrated as `92ea05e9a`. Static compilation, diff, and JSON
 validation only; no simulator run succeeded, no dataset was validated, and
 simulator/replay validation remains pending.
+
+## D0 calibration GPU and margin provenance implementation (2026-10-23)
+
+The calibration implementation now requires an explicit visible GPU device
+(`cuda:N`), records its runtime identity, and rejects CPU-backed calibration
+reports during bundle intake. Calibrated v2 gain margins now derive from an
+operator-declared per-category operational gain threshold plus a declared
+multiplier times the maximum calibration stratum standard error; the standard
+error uses both between-seed and within-seed repeat variance. The desired gain
+therefore remains explicit and is not inferred from noise. The frozen v2
+protocol records calibration report hashes and the complete gain derivation;
+promotion report evidence binds those fields. Existing frozen v1 construction
+is unchanged. Calibration episode sharding is not supported by the current
+collector API; report destinations already use exclusive creation, and bundle
+intake rejects overlapping seed pools.
+
+This implementer pass received static review only. No calibration, simulation,
+training, test suite, or dashboard evaluation was run, so GPU runtime behavior,
+calibration output acceptance, and the end-to-end report/protocol chain remain
+unproven. Static compilation and diff checks are the only planned checks for
+this worktree.
