@@ -55,7 +55,8 @@
         "Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae submitted for scoped static review; counterfactual v2 digest reviewer confirmed prior fixes and requested fail-closed/custom torch subclass handling follow-up; reviewer re-review pending",
         "Scoped static re-review approved counterfactual v2 digest commit 5e4dba876d7950ff653cf9520990f286c7657561; Section 6 metric-ledger review remains in progress",
         "Scoped static review approved Section 6 metric ledger b246e31efb9b7809c8751f762136c5a445f296ae with one heading endpoint interpretation clarification requested; follow-up review pending",
-        "Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432 submitted for scoped re-review"
+        "Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432 submitted for scoped re-review",
+        "Scoped static re-review approved Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432; joint endpoint now requires the documented XY and heading thresholds"
       ]
     }
   ]
