@@ -9,9 +9,9 @@ Start the dashboard from this checkout with:
 
 ```sh
 .venv/bin/python -m frc_defense.dashboard \
-  --run-dir checkpoints/tensor-ppo \
+  --run-dir '/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-final-plan-training/checkpoints/meco-five' \
   --host 127.0.0.1 --port 8771 \
-  --meco-data-root '/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-reviewed-five-training'
+  --meco-data-root '/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-final-plan-training'
 ```
 
 Open `/meco`. The `/api/meco-status` payload reads queue state, run manifests,
