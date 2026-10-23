@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import hashlib
 import os
+import re
 import warnings
 from pathlib import Path
 import torch
@@ -10,7 +11,44 @@ _EXT = None
 _ATTEMPTED = False
 _EXT_IDENTITY = None
 
-def _binary_identity(path):
+def _mapped_extension_identity(path):
+    """Find the live dlopen mapping by path, device, and inode."""
+    path = Path(path).resolve()
+    expected_path = str(path)
+    maps_path = Path("/proc/self/maps")
+    try:
+        lines = maps_path.read_text().splitlines()
+    except OSError as exc:
+        raise RuntimeError("cannot attest the loaded native HIP mapping via /proc/self/maps") from exc
+    matching = []
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if len(fields) < 5 or len(fields) < 6:
+            continue
+        try:
+            major_hex, minor_hex = fields[3].split(":", 1)
+            mapped_device = (int(major_hex, 16), int(minor_hex, 16))
+            mapped_inode = int(fields[4])
+        except (ValueError, IndexError):
+            continue
+        mapped_path = re.sub(r"\\([0-7]{3})",
+            lambda match: chr(int(match.group(1), 8)), fields[5])
+        if mapped_path.endswith(" (deleted)"):
+            mapped_path = mapped_path[:-10]
+        try:
+            same_path = str(Path(mapped_path).resolve()) == expected_path
+        except OSError:
+            same_path = mapped_path == expected_path
+        if same_path:
+            matching.append((mapped_device, mapped_inode))
+    stat = path.stat()
+    expected_device = (os.major(stat.st_dev), os.minor(stat.st_dev))
+    if not any(device == expected_device and inode == stat.st_ino
+               for device, inode in matching):
+        raise RuntimeError("loaded native HIP mapping does not match its current path inode")
+
+
+def _binary_identity(path, *, require_loaded_mapping=False):
     path = Path(path).resolve()
     before = path.stat()
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -19,6 +57,8 @@ def _binary_identity(path):
     after_id = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
     if before_id != after_id:
         raise RuntimeError("native HIP extension changed while its identity was read")
+    if require_loaded_mapping:
+        _mapped_extension_identity(path)
     return {"module": "autodrive_fuel_physics_hip", "path": str(path),
         "sha256": digest, "device": after.st_dev, "inode": after.st_ino,
         "size": after.st_size, "mtime_ns": after.st_mtime_ns,
@@ -27,7 +67,7 @@ def _binary_identity(path):
 def _verify_loaded_identity():
     if _EXT is None or _EXT_IDENTITY is None:
         return
-    current = _binary_identity(_EXT.__file__)
+    current = _binary_identity(_EXT.__file__, require_loaded_mapping=True)
     if current != _EXT_IDENTITY:
         raise RuntimeError("loaded native HIP extension path or binary changed after load")
 
@@ -114,7 +154,7 @@ def _extension():
                 with_cuda=True, build_directory=str(build_dir) if build_dir else None,
                 extra_cflags=["-O3"], extra_cuda_cflags=flags,
                 verbose=False)
-            _EXT_IDENTITY = _binary_identity(_EXT.__file__)
+            _EXT_IDENTITY = _binary_identity(_EXT.__file__, require_loaded_mapping=True)
         finally:
             cpp_extension.TORCH_LIB_PATH, cpp_extension.ROCM_HOME, cpp_extension.HIP_HOME = old
     except Exception as exc:
