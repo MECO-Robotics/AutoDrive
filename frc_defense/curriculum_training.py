@@ -321,7 +321,7 @@ def source_identity():
                    and p.relative_to(ROOT).as_posix() not in generated_sources)
     identity = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     identity['_runtime_environment'] = {k:v for k,v in sorted(os.environ.items())
-        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_')) or k == 'TORCH_EXTENSIONS_DIR'}
+        if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))}
     config_path=os.environ.get('FRC_DRIVETRAIN_CONFIG')
     if config_path: identity['_drivetrain_config_sha256']=hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
     identity['_native_fuel_extension'] = _native_fuel_extension_source_identity()
