@@ -23,6 +23,7 @@ from .learning_inputs import build_observation_snapshot
 
 
 MECO_INFERENCE_SCHEMA = "meco-inference-v1"
+MECO_MAX_INFERENCE_AGE_S = 0.25
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
     "A2": ("node_features", "edges", "edge_mask", "region_ids", "globals_",
@@ -42,7 +43,9 @@ class MecoInferenceRequest:
     protocol_id: str
     observation_schema: int
     observation_timestamp: float
-    expires_at: float
+    capture_monotonic: float
+    dispatch_monotonic: float
+    expires_monotonic: float
     input_names: tuple[str, ...]
     input_shapes: tuple[tuple[int, ...], ...]
     candidate_ids: tuple[str, ...]
@@ -57,9 +60,14 @@ class MecoInferenceRequest:
         if (len(self.checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.checkpoint_sha256)
                 or not self.protocol_id):
             raise ValueError("checkpoint SHA-256 and protocol identity are required")
-        if (not math.isfinite(self.observation_timestamp) or not math.isfinite(self.expires_at)
-                or self.expires_at < self.observation_timestamp):
-            raise ValueError("invalid observation timestamp or expiry")
+        if (not math.isfinite(self.observation_timestamp) or self.observation_timestamp < 0
+                or not math.isfinite(self.capture_monotonic) or self.capture_monotonic < 0
+                or not math.isfinite(self.dispatch_monotonic)
+                or self.dispatch_monotonic < self.capture_monotonic
+                or not math.isfinite(self.expires_monotonic)
+                or self.expires_monotonic != self.capture_monotonic + MECO_MAX_INFERENCE_AGE_S
+                or self.dispatch_monotonic > self.expires_monotonic):
+            raise ValueError("invalid simulation/capture/dispatch timestamp or expiry")
         if self.input_names != MECO_INPUT_NAMES[self.track] or len(self.input_shapes) != len(self.input_names):
             raise ValueError("track input names/order do not match the versioned contract")
         if (not self.candidate_ids or any(not isinstance(item, str) or not item for item in self.candidate_ids)
@@ -81,22 +89,28 @@ class MecoInferenceResponse:
     checkpoint_sha256: str
     protocol_id: str
     observation_timestamp: float
-    completed_at: float
+    capture_monotonic: float
+    dispatch_monotonic: float
+    completed_monotonic: float
     outputs: Mapping[str, torch.Tensor]
 
 
 def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
                                 table: CandidateTable,
-                                observation_timestamp: float, expires_at: float,
+                                observation_timestamp: float,
+                                capture_monotonic: float,
                                 inputs: Mapping[str, torch.Tensor]) -> MecoInferenceRequest:
     """Freeze request identity/order/shapes from current planner tensors."""
     names = MECO_INPUT_NAMES[adapter.track]
     if tuple(inputs) != names:
         raise ValueError("inputs must be supplied in the track's canonical order")
+    dispatch = time.monotonic()
     return MecoInferenceRequest(track=adapter.track, snapshot_id=table.snapshot_id,
         checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
         observation_schema=1, observation_timestamp=float(observation_timestamp),
-        expires_at=float(expires_at), input_names=names,
+        capture_monotonic=float(capture_monotonic), dispatch_monotonic=dispatch,
+        expires_monotonic=float(capture_monotonic) + MECO_MAX_INFERENCE_AGE_S,
+        input_names=names,
         input_shapes=tuple(tuple(inputs[name].shape) for name in names),
         candidate_ids=table.candidate_ids, valid_mask=table.valid_mask,
         fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1))
@@ -132,7 +146,9 @@ class ProductionMecoAdapter:
         try:
             if (request.track != self.track or request.checkpoint_sha256 != self.checkpoint_sha256
                     or request.protocol_id != self.protocol_id or request.observation_schema != 1
-                    or not math.isfinite(now) or now < request.observation_timestamp or now > request.expires_at
+                    or not math.isfinite(now) or now < request.dispatch_monotonic
+                    or now - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
+                    or now > request.expires_monotonic
                     or tuple(inputs) != request.input_names):
                 return None
             tensors = tuple(inputs[name] for name in request.input_names)
@@ -203,11 +219,12 @@ class ProductionMecoAdapter:
                   or bool((values["uncertainty"] < 0).any())):
                 return None
             done = time.monotonic()
-            if done > request.expires_at:
+            if (done - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
+                    or done > request.expires_monotonic):
                 return None
             return MecoInferenceResponse(MECO_INFERENCE_SCHEMA, self.track,
                 self.checkpoint_sha256, self.protocol_id, request.observation_timestamp,
-                done, values)
+                request.capture_monotonic, request.dispatch_monotonic, done, values)
         except Exception:
             return None
 
@@ -671,7 +688,9 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                      route_cost: torch.Tensor | None = None,
                      risk_cost: torch.Tensor | None = None,
                      inference_request: MecoInferenceRequest | None = None,
-                     inference_now: float | None = None):
+                     inference_now: float | None = None,
+                     observation_timestamp: float | None = None,
+                     capture_monotonic: float | None = None):
     """Run one track and return masked categorical logits plus recurrent state.
 
     Candidate rows for A tracks must name `goal_x_m`, `goal_y_m`,
@@ -706,22 +725,29 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         else:
             ordered_inputs = {name: inputs[name] for name in MECO_INPUT_NAMES[track] if name in inputs}
             if inference_request is None:
-                started = time.monotonic() if inference_now is None else inference_now
+                dispatch = time.monotonic() if inference_now is None else inference_now
                 fallback_index = next((i for i, valid_value in enumerate(table.valid_mask)
                                        if valid_value), -1)
-                if fallback_index < 0:
-                    raise ValueError("production scorer requires a valid deterministic fallback")
-                inference_request = MecoInferenceRequest(
-                    track=track, snapshot_id=table.snapshot_id,
-                    checkpoint_sha256=model.checkpoint_sha256,
-                    protocol_id=model.protocol_id, observation_schema=1,
-                    observation_timestamp=started, expires_at=started + .25,
-                    input_names=MECO_INPUT_NAMES[track],
-                    input_shapes=tuple(tuple(ordered_inputs[name].shape)
-                                       for name in MECO_INPUT_NAMES[track]),
-                    candidate_ids=table.candidate_ids,
-                    valid_mask=table.valid_mask, fallback_index=fallback_index)
-                inference_now = time.monotonic()
+                if (fallback_index >= 0 and observation_timestamp is not None
+                        and capture_monotonic is not None
+                        and dispatch <= capture_monotonic + MECO_MAX_INFERENCE_AGE_S):
+                    try:
+                        inference_request = MecoInferenceRequest(
+                            track=track, snapshot_id=table.snapshot_id,
+                            checkpoint_sha256=model.checkpoint_sha256,
+                            protocol_id=model.protocol_id, observation_schema=1,
+                            observation_timestamp=observation_timestamp,
+                            capture_monotonic=capture_monotonic,
+                            dispatch_monotonic=dispatch,
+                            expires_monotonic=capture_monotonic + MECO_MAX_INFERENCE_AGE_S,
+                            input_names=MECO_INPUT_NAMES[track],
+                            input_shapes=tuple(tuple(ordered_inputs[name].shape)
+                                               for name in MECO_INPUT_NAMES[track]),
+                            candidate_ids=table.candidate_ids,
+                            valid_mask=table.valid_mask, fallback_index=fallback_index)
+                        inference_now = time.monotonic()
+                    except Exception:
+                        inference_request = None
         if (inference_request is None or inference_now is None
                 or inference_request.track != track
                 or inference_request.snapshot_id != table.snapshot_id
@@ -738,9 +764,12 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                     or response.checkpoint_sha256 != inference_request.checkpoint_sha256
                     or response.protocol_id != inference_request.protocol_id
                     or response.observation_timestamp != inference_request.observation_timestamp
-                    or not math.isfinite(response.completed_at)
-                    or response.completed_at > inference_request.expires_at
-                    or response.completed_at < inference_request.observation_timestamp):
+                    or response.capture_monotonic != inference_request.capture_monotonic
+                    or response.dispatch_monotonic != inference_request.dispatch_monotonic
+                    or not math.isfinite(response.completed_monotonic)
+                    or response.completed_monotonic > inference_request.expires_monotonic
+                    or response.completed_monotonic - inference_request.capture_monotonic
+                       > MECO_MAX_INFERENCE_AGE_S):
                 response = None
         if response is None:
             utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)

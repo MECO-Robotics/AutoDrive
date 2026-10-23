@@ -34,7 +34,7 @@ from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, integrate_frozen_routes, project_pose_penalty)
 from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
-    MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA,
+    MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA, MECO_MAX_INFERENCE_AGE_S,
     candidate_policy_logits,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
@@ -61,7 +61,7 @@ TRACK_LOSS_RESET_POLICY = {
     "episode_start": "GRU hidden state is already zero; tracking availability starts unknown",
 }
 TRACK_LOSS_STALE_SECONDS = 2.0
-PRODUCTION_INFERENCE_MAX_AGE_S = 0.25
+PRODUCTION_INFERENCE_MAX_AGE_S = MECO_MAX_INFERENCE_AGE_S
 
 
 def _opponent_tracking_available(raster):
@@ -370,25 +370,39 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                               for node, behavior in zip(pair_nodes, behaviors))
         candidate_mask = tuple(bool(value) for value in
                                support.valid_mask.detach().cpu().tolist())
-        request_started = time.monotonic()
-        request = MecoInferenceRequest(
-            track=track, snapshot_id=safe.observation.snapshot_id,
-            checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
-            observation_schema=safe.observation.schema_version,
-            observation_timestamp=request_started,
-            expires_at=request_started + PRODUCTION_INFERENCE_MAX_AGE_S,
-            input_names=MECO_INPUT_NAMES[track],
-            input_shapes=tuple(tuple(ordered_inputs[name].shape)
-                               for name in MECO_INPUT_NAMES[track]),
-            candidate_ids=candidate_ids,
-            valid_mask=candidate_mask,
-            fallback_index=support.fallback_pair)
-        response = model.infer(request, ordered_inputs, now=time.monotonic())
+        request_dispatch = time.monotonic()
+        request = None
+        if request_dispatch <= safe.observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
+            try:
+                request = MecoInferenceRequest(
+                    track=track, snapshot_id=safe.observation.snapshot_id,
+                    checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
+                    observation_schema=safe.observation.schema_version,
+                    observation_timestamp=safe.observation.timestamp,
+                    capture_monotonic=safe.observation.capture_monotonic,
+                    dispatch_monotonic=request_dispatch,
+                    expires_monotonic=(safe.observation.capture_monotonic
+                                       + PRODUCTION_INFERENCE_MAX_AGE_S),
+                    input_names=MECO_INPUT_NAMES[track],
+                    input_shapes=tuple(tuple(ordered_inputs[name].shape)
+                                       for name in MECO_INPUT_NAMES[track]),
+                    candidate_ids=candidate_ids,
+                    valid_mask=candidate_mask,
+                    fallback_index=support.fallback_pair)
+            except Exception:
+                request = None
+        response = (model.infer(request, ordered_inputs, now=time.monotonic())
+                    if request is not None else None)
         if (response is None or response.schema != MECO_INFERENCE_SCHEMA
                 or response.track != track
                 or response.checkpoint_sha256 != model.checkpoint_sha256
                 or response.protocol_id != model.protocol_id
-                or response.completed_at > request.expires_at):
+                or response.observation_timestamp != safe.observation.timestamp
+                or response.capture_monotonic != safe.observation.capture_monotonic
+                or response.dispatch_monotonic != request_dispatch
+                or not math.isfinite(response.completed_monotonic)
+                or response.completed_monotonic > safe.observation.capture_monotonic
+                    + PRODUCTION_INFERENCE_MAX_AGE_S):
             production_inference_failed = True
             if track == "A1":
                 utility_shape = (1, 8, *raster.shape[-2:])
@@ -496,7 +510,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         preliminary_risk = candidate_set.risk_cost_points.unsqueeze(0)
         preliminary = score_candidates(track, model, raster=raster,
             globals_=globals_, table=candidate_set.table, hidden=hidden_before,
-            graph=graph_data, route_cost=preliminary_cost, risk_cost=preliminary_risk)
+            graph=graph_data, route_cost=preliminary_cost, risk_cost=preliminary_risk,
+            observation_timestamp=candidate_set.observation.timestamp,
+            capture_monotonic=candidate_set.observation.capture_monotonic)
         preliminary_map = project_pose_penalty(track, preliminary["raw"]["penalty"],
             graph.lookup, env.planner, path_geometry["field_length_m"],
             path_geometry["field_width_m"], mode=p_mode)
@@ -510,7 +526,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden_before, graph=graph_data,
-            route_cost=route_cost, risk_cost=risk_cost)
+            route_cost=route_cost, risk_cost=risk_cost,
+            observation_timestamp=candidate_set.observation.timestamp,
+            capture_monotonic=candidate_set.observation.capture_monotonic)
         decision, path_cost = _apply_plan_a_path_cost(track, decision,
             candidate_set, route_cost, risk_cost, graph.lookup, path_geometry,
             p_config, record=record_path_penalty)
@@ -520,7 +538,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden_before, graph=graph_data,
-            route_cost=route_cost, risk_cost=risk_cost)
+            route_cost=route_cost, risk_cost=risk_cost,
+            observation_timestamp=candidate_set.observation.timestamp,
+            capture_monotonic=candidate_set.observation.capture_monotonic)
         decision["logits"] = _apply_candidate_hysteresis(
             decision["logits"], candidate_set.table)
         path_cost = None

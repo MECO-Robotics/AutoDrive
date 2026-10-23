@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Sequence
 
 
@@ -21,7 +22,11 @@ def _finite_tuple(values: Sequence[float], name: str) -> tuple[float, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ObservationSnapshot:
-    """Versioned pose-graph observation; raster is channel-major and flattened."""
+    """Versioned pose-graph observation with simulation and monotonic times.
+
+    ``timestamp`` is simulation time. ``capture_monotonic`` is host monotonic
+    time recorded as this immutable snapshot is constructed.
+    """
 
     snapshot_id: str
     episode_id: str
@@ -31,13 +36,16 @@ class ObservationSnapshot:
     raster: tuple[float, ...]
     globals: tuple[float, ...]
     schema_version: int = 1
+    capture_monotonic: float | None = None
 
     def __post_init__(self) -> None:
         if not self.snapshot_id or not self.episode_id:
             raise ValueError("snapshot_id and episode_id must be nonempty")
         if self.schema_version != 1:
             raise ValueError("unsupported observation schema_version")
-        if self.sequence < 0 or not math.isfinite(self.timestamp):
+        capture = time.monotonic() if self.capture_monotonic is None else float(self.capture_monotonic)
+        if (self.sequence < 0 or not math.isfinite(self.timestamp)
+                or not math.isfinite(capture) or capture < 0):
             raise ValueError("sequence and timestamp must be nonnegative/finite")
         if len(self.raster_shape) != 3 or any(size <= 0 for size in self.raster_shape):
             raise ValueError("raster_shape must contain three positive dimensions")
@@ -51,6 +59,7 @@ class ObservationSnapshot:
         object.__setattr__(self, "raster", raster)
         object.__setattr__(self, "globals", globals_)
         object.__setattr__(self, "raster_shape", tuple(self.raster_shape))
+        object.__setattr__(self, "capture_monotonic", capture)
 
 
 @dataclass(frozen=True, slots=True)

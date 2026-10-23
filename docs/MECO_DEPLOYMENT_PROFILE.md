@@ -94,8 +94,9 @@ dispatches A1–A3 through the adapter in `_prepare_plan_a_decision`, where the
 real full legal pose/behavior support is bound to the request. C1/C2 decisions
 flow through `_prepare_decision` into `score_candidates`, which builds the
 request from the real route-feasible candidate table. The request binds the
-track, checkpoint SHA-256, protocol ID, observation schema, snapshot ID and
-timestamp, expiry, canonical named input order and dimensions, and stable
+track, checkpoint SHA-256, protocol ID, observation schema, snapshot ID,
+simulation timestamp, monotonic snapshot-capture timestamp, dispatch time,
+capture-derived expiry, canonical named input order and dimensions, and stable
 candidate IDs and feasibility mask. A1 accepts six-channel raster input and returns dense `U/P`
 plus five behavior logits; A2/A3 return node-wise `U/P` plus behavior logits;
 C1/C2 return one utility and uncertainty value per candidate. All floating
@@ -108,9 +109,16 @@ exceptions. On failure it uses zero neural utility while retaining the
 existing feasibility mask and route/risk costs; a designated valid candidate
 is used only when route/risk costs are absent. Plan A also retains its
 deterministic route and learned-P path-cost calculation, with a zero P output
-on inference failure. No model result can modify feasibility. Timestamps use
-the same monotonic clock domain as `time.monotonic()` and expire after 250 ms
-in the current planner wiring.
+on inference failure. No model result can modify feasibility.
+`observation_timestamp` is simulation match elapsed time in seconds from
+`ObservationSnapshot.timestamp`. `capture_monotonic` is captured by
+`ObservationSnapshot` construction using `time.monotonic()` after its
+immutable raster/global payload is packed. `dispatch_monotonic` and
+`completed_monotonic` use that same host monotonic clock. Expiry is
+`capture_monotonic + 0.25 s`; dispatch and completion are rejected when they
+exceed that age. Simulation time is never subtracted from host monotonic time.
+The monotonic freshness marker is carried explicitly in requests/responses and
+is excluded from deterministic content digests.
 
 `load_production_adapter` requires an explicit available `cuda:N` device and
 moves the checkpoint model to that device. PyTorch uses the same spelling for
