@@ -78,8 +78,8 @@ def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
     raise ValueError(f"unsupported MECO track: {track}")
 
 
-def _running_freshness(checkpoint: Path, run_id: str, track: str,
-                       update: int) -> dict:
+def _running_heartbeat_status(checkpoint: Path, run_id: str, track: str,
+                              update: int) -> dict:
     """Report whether a running checkpoint has a matching progress heartbeat."""
     heartbeat_path = checkpoint.parent / "heartbeat.json"
     try:
@@ -91,12 +91,17 @@ def _running_freshness(checkpoint: Path, run_id: str, track: str,
             or heartbeat.get("run_id") != run_id or heartbeat.get("track") != track
             or type(heartbeat.get("completed_updates")) is not int
             or heartbeat["completed_updates"] < update
-            or not isinstance(heartbeat.get("heartbeat_utc"), str)):
+            or not isinstance(heartbeat.get("heartbeat_utc"), str)
+            or not heartbeat["heartbeat_utc"].strip()):
         return {"status": "unknown",
                 "reason": "heartbeat does not match checkpoint run, track, or update",
-                "path": str(heartbeat_path)}
-    return {"status": "heartbeat_observed", "path": str(heartbeat_path),
+                "path": str(heartbeat_path),
+                "heartbeat_age_seconds": None,
+                "heartbeat_age_status": "unknown_not_measured"}
+    return {"status": "heartbeat_present_and_matching", "path": str(heartbeat_path),
             "heartbeat_utc": heartbeat["heartbeat_utc"],
+            "heartbeat_age_seconds": None,
+            "heartbeat_age_status": "unknown_not_measured",
             "heartbeat_completed_updates": heartbeat["completed_updates"],
             "checkpoint_update": update,
             "checkpoint_matches_heartbeat_update": heartbeat["completed_updates"] == update,
@@ -167,8 +172,8 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
             or (status in ("complete", "stopped") and
                 (type(completed_updates) is not int or completed_updates != update))):
         raise ValueError(f"checkpoint provenance does not match its run manifest: {checkpoint}")
-    freshness = (_running_freshness(checkpoint, run_id, track, update)
-                 if status == "running" else None)
+    heartbeat_status = (_running_heartbeat_status(checkpoint, run_id, track, update)
+                        if status == "running" else None)
     model = make_meco_track(track, candidate_features=CANDIDATE_BASE_FEATURE_COUNT)
     model.load_state_dict(payload["model"], strict=True)
     provenance = {"checkpoint": str(checkpoint), "sha256": digest,
@@ -178,7 +183,7 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
                   "protocol_id": checkpoint_protocol,
                   "training_status": status,
                   "manifest_completed_updates": completed_updates,
-                  "running_checkpoint_freshness": freshness,
+                  "running_checkpoint_heartbeat": heartbeat_status,
                   "run_manifest": str(manifest_path),
                   "source_trust": "checkpoint source snapshot matches adjacent trainer run manifest; current checkout is not compared"}
     return ExportAdapter(track, model).eval(), provenance

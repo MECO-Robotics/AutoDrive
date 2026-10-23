@@ -41,8 +41,10 @@ manifest with exact equality (including `null` only when both explicitly use
 `null`). For `complete` and `stopped` runs, manifest `completed_updates` must
 equal the checkpoint update. Checkpoints from `failed` runs are rejected and
 the recorded failure is reported. A `running` run records whether a matching
-heartbeat was observed; absent or mismatched heartbeat data is labeled
-freshness unknown, and an ahead heartbeat warns that the checkpoint may lag the
+heartbeat is present for the same run and track with an update at least as new
+as the checkpoint. The heartbeat timestamp is retained, but its age is not
+measured; reports explicitly set heartbeat age to unknown and make no liveness
+or freshness claim. An ahead heartbeat warns that the checkpoint may lag the
 active run. These checks establish consistency between trainer artifacts, not
 a signature or proof of artifact authenticity. The inspector intentionally
 does not compare historical checkpoint source hashes with its current checkout,
