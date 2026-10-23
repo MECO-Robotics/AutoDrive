@@ -37,7 +37,11 @@ DATASET_SCHEMA = "meco-counterfactual-trajectory-v2"
 TARGET_SCHEMA = "meco-matched-prefix-gross-return-v2"
 PLAN_A_P_ROUTE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-v2"
 PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
-STATE_DIGEST_SCHEMA = "meco-full-environment-state-v1"
+# v2 hashes all canonical environment state except the root environment's
+# CUDA-graph execution cache (`env._physics_graphs`). Captured graph objects are
+# device/runtime execution machinery, not simulator state; every other field
+# remains subject to the same fail-closed traversal as v1.
+STATE_DIGEST_SCHEMA = "meco-full-environment-state-v2"
 DEFAULT_GAMMA = 0.993
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
 
@@ -90,7 +94,7 @@ def _module_file_sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _state_value(value, seen, path):
+def _state_value(value, seen, path, *, excluded_attributes=frozenset()):
     """Canonicalize mutable simulator/environment state; unknown state fails closed."""
     # Subclasses use generic object inspection below so extra Python state is
     # included and opaque native state fails closed.
@@ -253,6 +257,8 @@ def _state_value(value, seen, path):
         for name in declared:
             if name in ("__dict__", "__weakref__"):
                 continue
+            if name in excluded_attributes:
+                continue
             actual_name = name
             if name.startswith("__") and not name.endswith("__"):
                 actual_name = f"_{base.__name__.lstrip('_')}{name}"
@@ -261,6 +267,11 @@ def _state_value(value, seen, path):
     if attributes is None and not slot_values:
         raise TypeError(f"cannot canonicalize opaque state at {path}: {type(value)!r}")
     attr_values = {} if attributes is None else attributes
+    if excluded_attributes and type(value) is not dict:
+        # Callers can omit narrowly scoped execution caches while preserving
+        # strict traversal for every other field and nested object.
+        attr_values = {name: item for name, item in attr_values.items()
+                       if name not in excluded_attributes}
     return {"object_id": stable_id,
             "type": f"{cls.__module__}.{cls.__qualname__}",
             "class_source": class_source,
@@ -272,7 +283,8 @@ def _state_value(value, seen, path):
 
 def _simulator_state_digest(env):
     """Hash simulator, reward, planner, fuel-physics, environment, and RNG state."""
-    state = {"environment": _state_value(env, {}, "env"),
+    state = {"environment": _state_value(env, {}, "env",
+            excluded_attributes=frozenset({"_physics_graphs"})),
         "python_global_rng": _state_value(random.getstate(), {}, "python_rng"),
         "numpy_global_rng": _state_value(np.random.get_state(), {}, "numpy_rng"),
         "torch_global_rng": _state_value(torch.random.get_rng_state(), {}, "torch_rng"),

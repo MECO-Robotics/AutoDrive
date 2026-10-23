@@ -346,9 +346,15 @@ mismatch at simulator_state_sha256`; no validated file was written. Repeating
 the same-seed reset comparison produced equal global RNG hashes, while
 `_state_value` differed only at `_physics_graph_command.tensor`. The graph
 command and active-mask buffers were uninitialized `torch.empty` scratch; both
-are copied from commands/active masks before any captured graph replay, and the
-CPU path does not use them. They now start at zero, preserving the strict state
-digest and replay parity checks without exclusions or a schema change. This
-fix passed independent scoped review in isolated commit 45fc59012 and was
-integrated as 0c65857f3. Static compile/diff/JSON checks only; no tests or
-simulator replay were run.
+are copied from commands/active masks before any captured graph replay. They
+were zero-initialized in `0c65857f3` to retain strict digest parity. The
+follow-up GPU run exposed that the root environment's `_physics_graphs` field
+contains device execution cache objects, whose identities are not simulator
+state and cannot be canonically replayed. State digest schema
+`meco-full-environment-state-v2` omits only this exact root attribute from
+traversal; all other environment fields and global RNG state remain hashed
+strictly, and unknown state continues to fail closed. Both dataset manifest
+validation and warm-start artifact validation require schema v2, so v1 artifacts
+cannot be reused under this contract. Scoped implementer change is isolated at
+`codex/meco-cudagraph-digest-v2`; static compile/diff/JSON checks only, with no
+tests or simulator replay in this pass.

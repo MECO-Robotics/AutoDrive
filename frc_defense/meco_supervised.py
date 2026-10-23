@@ -511,7 +511,7 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             manifest.get("sources") != expected_sources or
             manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
             manifest.get("device") != expected_device or
-            manifest.get("state_digest_schema") != "meco-full-environment-state-v1" or
+            manifest.get("state_digest_schema") != "meco-full-environment-state-v2" or
             manifest.get("prediction_mode") not in PREDICTION_MODES or
             manifest.get("prediction_contract") != prediction_contract(manifest.get("prediction_mode")) or
             manifest.get("candidate_boundary") != CANDIDATE_BOUNDARY or
@@ -1557,7 +1557,7 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
             payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
             payload.get("records_have_prefix_replay_parity") is not True or
             payload.get("source_runtime_device_bound") is not True or
-            payload.get("state_digest_schema") != "meco-full-environment-state-v1" or
+            payload.get("state_digest_schema") != "meco-full-environment-state-v2" or
             payload.get("label_provenance") != COUNTERFACTUAL_LABEL_PROVENANCE or
             payload.get("target_semantics") != expected_target or
             payload.get("scoring_semantics") != expected_scoring or
