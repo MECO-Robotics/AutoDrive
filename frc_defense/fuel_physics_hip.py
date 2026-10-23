@@ -12,12 +12,15 @@ import sys
 import tempfile
 import warnings
 import fcntl
+import threading
 from pathlib import Path
 import torch
 _EXT = None
 _ATTEMPTED = False
 _EXT_IDENTITY = None
 _BUILD_FINGERPRINT = None
+_MANIFEST_STAT_IDENTITY = None
+_EXTENSION_LOCK = threading.RLock()
 
 _EXTENSION_NAME = "autodrive_fuel_physics_hip"
 _BUILD_FLAGS = {"extra_cflags": ["-O3"],
@@ -48,6 +51,10 @@ def _path_stat_identity(path):
         return None
     return {"path": str(Path(path).resolve()), "device": stat.st_dev,
         "inode": stat.st_ino, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+def _same_stat_identity(left, right):
+    return bool(left and right and all(left.get(key) == right.get(key)
+        for key in ("path", "device", "inode", "size", "mtime_ns")))
 
 def _build_inputs():
     from torch.utils import cpp_extension
@@ -214,12 +221,20 @@ def _binary_identity(path, *, require_loaded_mapping=False):
         "size": after.st_size, "mtime_ns": after.st_mtime_ns,
         "status": "present"}
 
-def _verify_loaded_identity():
+def _verify_loaded_identity(*, strong=False):
     if _EXT is None or _EXT_IDENTITY is None:
         return
     binary = _extension_path()
     if Path(_EXT.__file__).resolve() != binary:
         raise RuntimeError("loaded native HIP module path differs from the pinned extension path")
+    current_stat = _path_stat_identity(binary)
+    manifest_stat = _path_stat_identity(_manifest_path(binary))
+    if (not _same_stat_identity(current_stat, _EXT_IDENTITY) or
+            not _same_stat_identity(manifest_stat, _MANIFEST_STAT_IDENTITY)):
+        raise RuntimeError("loaded native HIP extension path or manifest changed after load")
+    _mapped_extension_identity(binary)
+    if not strong:
+        return
     build_inputs = _build_inputs()
     fingerprint = _fingerprint(build_inputs)
     current = _binary_identity(binary, require_loaded_mapping=True)
@@ -230,26 +245,27 @@ def _verify_loaded_identity():
 
 def native_extension_identity():
     """Describe the loaded or expected HIP binary without importing/building it."""
-    if _EXT is not None:
-        _verify_loaded_identity()
-        return dict(_EXT_IDENTITY)
-    path = _extension_path()
-    build_inputs = _build_inputs()
-    fingerprint = _fingerprint(build_inputs)
-    try:
-        manifest_identity = _manifest_identity(path, fingerprint, build_inputs)
-        if manifest_identity is not None:
-            return manifest_identity
-        candidate = _binary_identity(path)
-    except FileNotFoundError:
-        candidate = None
-    result = {"module": _EXTENSION_NAME, "path": str(path),
-        "status": "unprepared", "build_fingerprint": fingerprint}
-    if candidate is not None:
-        result.update(candidate_sha256=candidate["sha256"],
-            candidate_device=candidate["device"], candidate_inode=candidate["inode"],
-            candidate_size=candidate["size"], candidate_mtime_ns=candidate["mtime_ns"])
-    return result
+    with _EXTENSION_LOCK:
+        if _EXT is not None:
+            _verify_loaded_identity()
+            return dict(_EXT_IDENTITY)
+        path = _extension_path()
+        build_inputs = _build_inputs()
+        fingerprint = _fingerprint(build_inputs)
+        try:
+            manifest_identity = _manifest_identity(path, fingerprint, build_inputs)
+            if manifest_identity is not None:
+                return manifest_identity
+            candidate = _binary_identity(path)
+        except FileNotFoundError:
+            candidate = None
+        result = {"module": _EXTENSION_NAME, "path": str(path),
+            "status": "unprepared", "build_fingerprint": fingerprint}
+        if candidate is not None:
+            result.update(candidate_sha256=candidate["sha256"],
+                candidate_device=candidate["device"], candidate_inode=candidate["inode"],
+                candidate_size=candidate["size"], candidate_mtime_ns=candidate["mtime_ns"])
+        return result
 
 def prepare_native_fuel_extension(device):
     """Explicitly build/load and pin HIP before capturing GPU run provenance."""
@@ -261,13 +277,18 @@ def prepare_native_fuel_extension(device):
     if requested.index is not None and requested.index >= torch.cuda.device_count():
         raise RuntimeError(f"requested HIP device is unavailable: {requested}")
     extension = _extension()
-    if extension is None or _EXT_IDENTITY is None:
-        raise RuntimeError("native HIP fuel extension could not be prepared; refusing GPU fallback")
-    _verify_loaded_identity()
-    return dict(_EXT_IDENTITY)
+    with _EXTENSION_LOCK:
+        if extension is None or _EXT_IDENTITY is None:
+            raise RuntimeError("native HIP fuel extension could not be prepared; refusing GPU fallback")
+        _verify_loaded_identity(strong=True)
+        return dict(_EXT_IDENTITY)
 
 def _extension():
-    global _EXT, _ATTEMPTED, _EXT_IDENTITY, _BUILD_FINGERPRINT
+    with _EXTENSION_LOCK:
+        return _extension_locked()
+
+def _extension_locked():
+    global _EXT, _ATTEMPTED, _EXT_IDENTITY, _BUILD_FINGERPRINT, _MANIFEST_STAT_IDENTITY
     if _ATTEMPTED:
         _verify_loaded_identity()
         return _EXT
@@ -292,6 +313,8 @@ def _extension():
                     raise RuntimeError("prebuilt native HIP binary changed while loading")
                 _EXT_IDENTITY = pinned
                 _BUILD_FINGERPRINT = fingerprint
+                _MANIFEST_STAT_IDENTITY = _path_stat_identity(_manifest_path(binary))
+                _verify_loaded_identity(strong=True)
                 return _EXT
 
             if _EXTENSION_NAME in sys.modules:
@@ -355,6 +378,8 @@ def _extension():
             _EXT_IDENTITY = {**current, "build_fingerprint": fingerprint}
             _BUILD_FINGERPRINT = fingerprint
             _write_manifest(binary, fingerprint, current, build_inputs)
+            _MANIFEST_STAT_IDENTITY = _path_stat_identity(_manifest_path(binary))
+            _verify_loaded_identity(strong=True)
         finally:
             lock_stream.close()
     except Exception as exc:
