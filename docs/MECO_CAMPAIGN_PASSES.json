@@ -68,7 +68,9 @@
         "Low-level contact-rate instrumentation committed as 948d4f101 in isolated worktree: records focal robot/field/wall contact ticks per active physics tick after collisions, including fused six-robot HIP flags; reports unsupported illegal-transition/footprint metrics null; scoped review pending",
         "Contact-rate reviewer found the default fused two-robot HIP path does not set per-robot robot-contact flags, causing silently zero robot-contact rate; implementer follow-up required; qualification consumer acceptance remains separate",
         "Default two-robot fused HIP per-robot contact fix committed as c530fb92d in contact-rate worktree; both robots now set flags before per-tick counters; re-review pending",
-        "Cross-branch audit found D0 calibration report indexing does not yet require the safety schema/three per-row rates/source bindings; its status correctly remains awaiting_runtime_contact_metric_support until that consumer validation is implemented and reviewed"
+        "Cross-branch audit found D0 calibration report indexing does not yet require the safety schema/three per-row rates/source bindings; its status correctly remains awaiting_runtime_contact_metric_support until that consumer validation is implemented and reviewed",
+        "D0 retention/v1 compatibility/safety calibration consumer fixes committed as 8b1f496cc: binds retained policy manifest to bundle, preserves exact generated v1 schema, and requires exact contact-rate schema/source/row coverage before bundle creation; reviewer pass pending",
+        "Section 7 A/B matrix committed as 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886: immutable six-condition runner includes requested architecture contrasts, P0, K8/16/32, current/CV and inference-disabled D1 fallback; unsupported factors remain explicit; scoped review pending"
       ]
     },
     {
@@ -112,7 +114,9 @@
         "Section 7 experiment-matrix code will receive scoped review for common checkpoint/source/config/seed identity, immutable factor contracts, same-checkpoint K/prediction/fault overrides, and honest unsupported-factor status",
         "Contact-rate instrumentation 948d4f101 submitted for scoped static review; no simulator validation run and contacts remain distinct from policy-rule violations",
         "Contact-rate commit 948d4f101 is not approved yet: two-robot fused HIP path must update per-robot flags (or be rejected for safety evaluation), and D0 consumer schema remains to be integrated",
-        "Contact-rate follow-up c530fb92d submitted for static review; D0 calibration consumer still needs strict acceptance of the emitted schema, source identity and per-row rate fields before safety can be verified"
+        "Contact-rate follow-up c530fb92d submitted for static review; D0 calibration consumer still needs strict acceptance of the emitted schema, source identity and per-row rate fields before safety can be verified",
+        "D0 follow-up 8b1f496cc submitted for re-review covering retention bundle identity, exact v1 schema preservation and safety calibration intake requirements",
+        "A/B matrix 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886 submitted for scoped static review; fault handoff and matched control-mode contrasts are priority checks"
       ]
     }
   ]
