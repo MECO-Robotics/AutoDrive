@@ -819,6 +819,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     if goal_complete or ended or timeout:
                         commitment = None
                 hard_failure = remasked or native_preempted
+                if config.track in ("C1", "C2") and hard_failure:
+                    # Match evaluation semantics: a remasked action or native
+                    # goal preemption invalidates the carried task commitment.
+                    commitment = None
                 if forced_pending_goal:
                     if hard_failure:
                         pending_goal["origin_row"]["execution_failure"] = True
