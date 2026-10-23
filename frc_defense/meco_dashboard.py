@@ -273,6 +273,51 @@ def _safe_metrics(record):
     return selected
 
 
+def _collection_action_bouts(record):
+    """Validate one episode's descriptive collection-bout aggregate."""
+    ledger = record.get("meco_metric_ledger")
+    if not isinstance(ledger, dict):
+        return None
+    availability = ledger.get("availability")
+    available = (availability.get("collection_action_bouts")
+                 if isinstance(availability, dict) else None)
+    if available is not True:
+        return None
+    bouts = ledger.get("collection_action_bouts")
+    if not isinstance(bouts, dict):
+        raise ValueError("available collection_action_bouts must be an object")
+    count, acquired = bouts.get("count"), bouts.get("acquired_count")
+    proportion = bouts.get("acquired_proportion")
+    if (type(count) is not int or count < 0
+            or type(acquired) is not int or acquired < 0 or acquired > count):
+        raise ValueError("invalid available collection_action_bouts counts")
+    if count == 0:
+        if proportion is not None:
+            raise ValueError("zero collection action bouts must have null proportion")
+    elif (type(proportion) not in (int, float)
+            or not _finite_number(proportion)
+            or not 0 <= proportion <= 1
+            or abs(float(proportion) - acquired / count) > 1e-12):
+        raise ValueError("invalid available collection_action_bouts proportion")
+    return {"count": count, "acquired_count": acquired,
+            "acquired_proportion": proportion}
+
+
+def _summarize_collection_action_bouts(rows):
+    """Pool only available episode aggregates; keep no-data values null."""
+    values = [value for value in (_collection_action_bouts(row) for row in rows)
+              if value is not None]
+    count = sum(value["count"] for value in values) if values else None
+    acquired = sum(value["acquired_count"] for value in values) if values else None
+    return {
+        "available_records": len(values),
+        "count": count,
+        "acquired_count": acquired,
+        "acquired_proportion": (acquired / count if count else None),
+        "semantics": "descriptive acquisition proportion among contiguous executed collection-action bouts; not failed-collection rate or causal policy success",
+    }
+
+
 def _finite_number(value):
     return type(value) in (bool, int, float) and value == value and abs(value) != float("inf")
 
@@ -396,6 +441,10 @@ def _comparison(report):
                 or any(not _finite_number(value) for value in metrics.values()
                        if type(value) in (int, float))):
             return None
+        try:
+            _collection_action_bouts(row)
+        except ValueError:
+            return None
         if row["policy"] == "D0":
             trace, actions = row.get("executed_action_trace"), row.get("actions")
             ticks = row.get("elapsed_ticks")
@@ -478,6 +527,14 @@ def _comparison(report):
         return None
     for summary in route_provenance_summary.values():
         summary.pop("_digest_samples", None)
+    policy_metrics = {policy: {category: _summarize([
+        _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
+        for category in categories} for policy in POLICIES}
+    for policy in POLICIES:
+        for category in categories:
+            policy_metrics[policy][category]["collection_action_bouts"] = (
+                _summarize_collection_action_bouts([
+                    found[(category, seed, policy)] for seed in seeds]))
     return {"evaluation_id": report["evaluation_id"],
             "generated_utc": report.get("generated_utc"),
             "comparison_group": comparison_group,
@@ -489,9 +546,7 @@ def _comparison(report):
             "control_definitions": report["control_definitions"],
             "candidate_boundary": report.get("candidate_boundary"),
             "route_cost_provenance": route_provenance_summary,
-            "policy_metrics": {policy: {category: _summarize([
-                _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
-                for category in categories} for policy in POLICIES}}
+            "policy_metrics": policy_metrics}
 
 
 def _qualification_status(project: Path, errors: list, data_root: Path):

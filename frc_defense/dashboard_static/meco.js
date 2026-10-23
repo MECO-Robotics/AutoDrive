@@ -90,13 +90,28 @@
       `<small>Gate ${pretty(qualification.gate_definition || {})}</small>`+
       `<pre>${pretty({failure: qualification.failure, promotion: qualification.promotion, paired_clustered_confidence_intervals: qualification.confidence_intervals})}</pre></article>` :
       "<p class='muted'>No formal qualification round is recorded.</p>";
-    document.querySelector("#groups").innerHTML = groups.length ? groups.map(g =>
-      `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
+    document.querySelector("#groups").innerHTML = groups.length ? groups.map(g => {
+      const boutRows = Object.entries(g.policy_metrics || {}).flatMap(([policy, categories]) =>
+        Object.entries(categories || {}).map(([category, metrics]) => {
+          const bouts = metrics?.collection_action_bouts;
+          const proportion = bouts?.acquired_proportion;
+          const shown = typeof proportion === "number" && Number.isFinite(proportion)
+            ? `${(proportion * 100).toFixed(1)}%` : "unavailable";
+          return `<tr><th scope="row">${esc(policy)}</th><td>${esc(category)}</td>`+
+            `<td>${esc(bouts?.available_records ?? "—")}</td>`+
+            `<td>${esc(bouts?.acquired_count ?? "—")} / ${esc(bouts?.count ?? "—")}</td>`+
+            `<td>${esc(shown)}</td></tr>`;
+        })).join("");
+      return `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+
       `<p>${esc(g.evaluation_ids?.join(", "))}</p><small>Protocol ${esc(g.protocol_id)} · ${esc(g.record_count)} records per policy</small>`+
       `<small>Candidate contract ${pretty({pool: g.candidate_boundary?.selectable_pool,
         oracle: g.candidate_boundary?.reference_pool,
         commitment: g.candidate_boundary?.continue_gap})}</small>`+
-      `<pre>${pretty(g.policy_metrics)}</pre></article>`).join("") : "<p class='muted'>No fully matched, validated comparison is available.</p>";
+      `<h4>Collection action bouts — descriptive acquisition proportion</h4>`+
+      `<p class="muted">Counts include available episode records only. This is descriptive and does not indicate failed collection or causal policy success.</p>`+
+      `<div class="table-wrap"><table><thead><tr><th>Policy</th><th>Category</th><th>Available records</th><th>Acquired / bouts</th><th>Acquired proportion</th></tr></thead><tbody>${boutRows}</tbody></table></div>`+
+      `<pre>${pretty(g.policy_metrics)}</pre></article>`;
+    }).join("") : "<p class='muted'>No fully matched, validated comparison is available.</p>";
     const errors = data.errors || [];
     document.querySelector("#errors").innerHTML = errors.length ? errors.map(e => `<li>${esc(e.source || "status")}: ${esc(e.error)}</li>`).join("") : "<li>None reported.</li>";
   }
