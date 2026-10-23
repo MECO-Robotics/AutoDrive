@@ -50,9 +50,9 @@ CANDIDATE_BOUNDARY = {
     "capture_estimate": "bearing-aligned capture envelope eligibility proxy from sensed target geometry; excluded candidates are ineligible for Plan C ranking; native controller and simulator retain capture authority",
     "capture_feasibility": {
         "basis": "candidate goal XY and target XY projected into inferred target-bearing frame",
-        "longitudinal_min_m": "robot_length_m/2 - 0.075 - fuel_radius_m",
-        "longitudinal_max_m": "robot_length_m/2 + 0.35 + 0.3048 + fuel_radius_m",
-        "lateral_max_m": "robot_width_m/2 + 0.075 + fuel_radius_m",
+        "longitudinal_min_m": "robot_length_m/2 - 0.075 - env._fuel_radius (native collector radius)",
+        "longitudinal_max_m": "robot_length_m/2 + 0.35 + 0.3048 + env._fuel_radius (native collector radius)",
+        "lateral_max_m": "robot_width_m/2 + 0.075 + env._fuel_radius (native collector radius)",
         "orientation": "bearing-aligned estimate; native controller chooses orientation",
         "authority": "candidate eligibility proxy only; native gamepiece collision/capture logic is authoritative",
         "missing_target": "ineligible"
@@ -257,8 +257,10 @@ def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
     if not math.isfinite(distance):
         return {"status": "unavailable", "basis": "nonfinite_target_geometry",
                 "feasible": False, "reason": "nonfinite_target_geometry"}
-    radius = (float(env.fuel_physics.config.radius) if env.fuel_physics is not None
-              else float(env._fuel_radius))
+    # Match the native collector predicates in gamepiece_actions.py exactly;
+    # fuel_physics.config.radius can differ from the collector's effective
+    # radius and would incorrectly reject otherwise capturable candidates.
+    radius = float(env._fuel_radius)
     half_length = float(env.sim.length[0, slot]) * .5
     half_width = float(env.sim.width[0, slot]) * .5
     forward_min = half_length - .075 - radius
