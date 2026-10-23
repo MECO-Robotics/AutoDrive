@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23 from their planner, implementation, and independent review records.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -138,6 +138,53 @@
         "artifact_sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74"
       },
       "limits": "Training reproduction pending; no claim of a repaired five-track run."
+    },
+    {
+      "requirement_id": "phase2-plan-a-expert-goal-warm-start",
+      "title": "Plan A expert-goal annotation intake and fitter",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/phase2-expert-goal-warm-start.md",
+        "artifact_sha256": "bebb95d3a6ee912358e604a217d8cd1c23bc97caf8263b1193fe71487612b7e5"
+      },
+      "implementer": {
+        "commit": "15fa367fd5975a0fc7af641090a46a9ca89284bd",
+        "paths": [
+          "frc_defense/meco_supervised.py",
+          "frc_defense/meco_counterfactual.py",
+          "docs/MECO_SUPERVISED_WARMSTART.md"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/phase2-expert-goal-warm-start.md",
+        "approved_commit": "15fa367fd5975a0fc7af641090a46a9ca89284bd",
+        "verdict": "approved as annotation intake and fitter; external annotations and independent U oracle remain unavailable",
+        "artifact_sha256": "bebb95d3a6ee912358e604a217d8cd1c23bc97caf8263b1193fe71487612b7e5"
+      },
+      "limits": "No annotation producer, annotation dataset, fitted expert-goal artifact, or simulator validation; this does not complete expert-goal Phase 2 evidence."
+    },
+    {
+      "requirement_id": "c1-centered-categorical-replay",
+      "title": "C1 centered categorical log-probability replay",
+      "planner": {
+        "status": "transcript-summary",
+        "artifact": "docs/implementation-provenance/c1-centered-categorical.md",
+        "artifact_sha256": "d37d0e158e6c548163d8d90f95df0b940f25bc31d3b3f181ce08186620d875bd"
+      },
+      "implementer": {
+        "commit": "8587f1f3c11863384df655b7783d0b928ddf89ac",
+        "paths": [
+          "frc_defense/meco_tracks.py",
+          "frc_defense/meco_track_training.py"
+        ]
+      },
+      "reviewer": {
+        "artifact": "docs/implementation-provenance/c1-centered-categorical.md",
+        "approved_commit": "8587f1f3c11863384df655b7783d0b928ddf89ac",
+        "verdict": "approved after independent static review",
+        "artifact_sha256": "d37d0e158e6c548163d8d90f95df0b940f25bc31d3b3f181ce08186620d875bd"
+      },
+      "limits": "Post-fix training diagnostic and broad seeded simulator evaluation/replay are pending."
     }
   ]
 }
