@@ -37,7 +37,7 @@
         "Plan C integrated re-review approved through ed78c5ba9; runtime validation remains outstanding",
         "Formal qualification integrated review approved through 9e02874c155f32f6409678f00ee95de31e2d1cdd; generated HIP source-identity fix approved by scoped reviewer; runtime simulator validation and baseline variance review remain outstanding",
         "Scoped static review approved 0e125c1ff and 1719156d0; runtime evaluation remains outstanding",
-        "Scoped review of Plan A optional candidate metadata correction pending"
+        "Scoped review approved Plan A optional candidate metadata correction 1eec0c487; runtime evaluation remains outstanding"
       ]
     }
   ]
