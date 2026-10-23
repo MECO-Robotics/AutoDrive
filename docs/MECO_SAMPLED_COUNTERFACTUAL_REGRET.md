@@ -28,9 +28,14 @@ The analyzer binds the data and manifest byte hashes, source identity,
 qualification protocol, prediction mode and contract, checkpoint byte hash,
 checkpoint inference configuration hash, candidate boundary, per-row candidate
 table and sampled-support digests, and scoring semantics in the output JSON.
-The model's recurrent hidden state starts at zero for each independently
-replayed branch point; results therefore measure one-step checkpoint scoring at
-the archived observation, not rollout policy performance with recurrent history.
+For each branch point, the analyzer scores every exact archived teacher-prefix
+candidate table in order, applies the checkpoint's tracking-loss hidden-state
+reset rule, and carries the C1/C2 GRU state into the branch decision. It also
+reexecutes every sampled descriptor and compares gross macro/horizon returns,
+discounted return, continuation count/policy, discount semantics, and terminal
+status with the archived row before computing regret. These checks replay the
+simulator repeatedly and can make analysis slow; no archived return is used
+unless strict replay reproduces it.
 
 D1 requires current-pose risk and D2 requires bounded constant-velocity risk.
 The v2 source artifact contains one prediction-mode risk tensor per archived
