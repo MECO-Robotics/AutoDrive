@@ -183,3 +183,36 @@ zeros the unlabelled P head and records `p_mode=p0`; later RL can train P. A
 replay executor that executes and records P-shaped routes plus an independent
 oracle route-cost target is still required to close Plan A traversal-penalty
 supervision in Phase 2. No P target is inferred from U/B returns.
+
+#### Route-execution and coverage gate
+
+The MECO Plan A call path now passes its selected projected P map and scale
+through the macro executor into `TensorThreeVsThreeEnv.step`. On each native
+replan, the same frozen map is applied to the focal neural robot's route; other
+robots retain their unweighted AD* calls. A failed depot route is retried with
+the same P map when the focal route is eligible. P0 passes no map and retains
+the existing route-planning calls. The route override validates its map shape,
+finite nonnegative values and scale once per unchanged frozen map, neural
+slot-3 ownership, and paired goal action. Standard Plan A train/eval invokes
+the P-map path eagerly. If a caller supplies a P map while a CUDA stream is
+being captured, `step` raises `ValueError` and aborts that call; it does not
+fall back silently. The dashboard's existing captured route path supplies no
+P map and remains unchanged. No fallback or graph-compatible P path has been
+validated.
+
+This is code-path integration only. No simulator replay has exercised or
+inspected a P-shaped route from this seam yet, and the independent
+`experimental_route_evaluation.evaluate_routes` probe still returns path
+geometry without executing it through physics. The integration therefore does
+not establish replay-backed P-route behavior or provide an oracle label.
+
+For that reason this checkout still does not define or accept a P-route-oracle
+or exhaustive-route-coverage schema. The v2/v3 artifact validators continue to
+require a null P target, zero P prior, and `p_mode=p0`; a sampled subset of
+legal Plan A support descriptors remains sampled coverage, not exhaustive
+node/path coverage. A versioned oracle contract requires a representative
+simulator replay that proves the selected map affects only the focal native
+route, records the executed route and map provenance, and matches the replayed
+route costs to an independent reference. Until then, P labels and exhaustive
+P-route coverage remain unavailable and must not be inferred from planner API
+capability or U+B return labels.
