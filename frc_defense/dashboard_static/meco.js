@@ -11,7 +11,8 @@
     document.querySelector("#sources").textContent =
       `Live data ${data.data_root || "unavailable"} · checkpoints ${data.checkpoint_root || "unavailable"} · evaluations ${data.evaluation_root || "unavailable"} · three-pass ledger ${data.campaign_ledger_path || "unavailable"}`;
     const activeLanes = Object.entries(data.queue?.lanes || {})
-      .filter(([, lane]) => lane.pid).map(([track, lane]) => `${track} pid ${lane.pid}`);
+      .filter(([, lane]) => lane.pid).map(([track, lane]) =>
+        `${track} pid ${lane.pid}${lane.process_state ? ` OS ${lane.process_state}` : ""}`);
     const queuePhase = data.queue?.phase;
     const cycle = Number(data.queue?.cycle);
     const isAdvancingCycle = data.queue?.state === "fresh" &&
@@ -24,13 +25,14 @@
       const chunk = Number(lane.chunk_updates);
       const target = isAdvancingCycle && Number.isFinite(chunk) && chunk > 0
         ? cycle * chunk : null;
-      const status = lane.status === "complete" && hasKnownUpdates && target !== null && updates < target
-        ? "queued" : lane.status || "unknown";
+      const status = lane.process_state === "D" ? "stalled" :
+        lane.status === "complete" && hasKnownUpdates && target !== null && updates < target
+          ? "queued" : lane.status || "unknown";
       return `${track} ${status} ${hasKnownUpdates ? updates : "—"}${target === null || !hasKnownUpdates ? "" : `/${target}`}`;
     });
     const queueEval = data.queue?.evaluation || {};
     document.querySelector("#queue").textContent =
-      `Queue: ${data.queue?.state || "unavailable"} · ${queuePhase || "no phase"} · cycle ${data.queue?.cycle ?? "—"}`+
+      `Queue file: ${data.queue?.state || "unavailable"} · workers ${data.queue?.worker_state || "unknown"} · ${queuePhase || "no phase"} · cycle ${data.queue?.cycle ?? "—"}`+
       `${activeLanes.length ? ` · workers ${activeLanes.join(", ")}` : ""}`+
       ` · evaluator ${queueEval.status || "idle"}${queueEval.pid ? ` pid ${queueEval.pid}` : ""} (queue is separate from worker liveness)`;
     document.querySelector("#lane-queue").textContent = laneSummary.length

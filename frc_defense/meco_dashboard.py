@@ -85,6 +85,24 @@ def _process_alive(pid) -> bool:
         return False
 
 
+def _process_state(pid, *, alive=None):
+    """Return the Linux process state for a confirmed MECO worker PID."""
+    if alive is None:
+        alive = _process_alive(pid)
+    if not alive or type(pid) is not int or pid <= 0:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # comm is parenthesized and can itself contain spaces or closing parens.
+    closing = stat.rfind(")")
+    if closing < 0:
+        return None
+    fields = stat[closing + 1:].split()
+    return fields[0] if fields and len(fields[0]) == 1 else None
+
+
 def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
                process_probe=_process_alive):
     heartbeat, error = _read_json_within(run_dir / "heartbeat.json", data_root)
@@ -96,15 +114,18 @@ def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
     fresh = age is not None and age <= HEARTBEAT_STALE_SECONDS and stamp <= now + 5.
     pid = heartbeat.get("pid")
     alive = bool(process_probe(pid))
+    process_state = _process_state(pid, alive=alive)
     track = manifest.get("track", manifest.get("config", {}).get("track")
                          if isinstance(manifest.get("config"), dict) else None)
     consistent = (heartbeat.get("schema_version") == 1
                   and heartbeat.get("run_id") == manifest.get("run_id")
                   and heartbeat.get("track") == track)
-    state = "confirmed" if fresh and alive and consistent else (
-        "stale" if stamp is not None else "invalid")
+    state = ("stalled" if alive and process_state == "D" and consistent else
+             "confirmed" if fresh and alive and consistent else
+             "stale" if stamp is not None else "invalid")
     return {"state": state, "age_seconds": age, "fresh": fresh,
             "process_alive": alive, "pid": pid if type(pid) is int else None,
+            "process_state": process_state,
             "error": None if consistent else "heartbeat provenance mismatch"}
 
 
@@ -128,6 +149,7 @@ def _queue_state(root: Path, now: float, data_root: Path):
             lanes[lane["track"]] = {"run_id": lane["run_id"],
                 "status": lane.get("status", "unknown"),
                 "pid": lane.get("pid") if type(lane.get("pid")) is int else None,
+                "process_state": _process_state(lane.get("pid")),
                 "device": lane.get("device") if isinstance(lane.get("device"), str) else None,
                 "run_directory": lane.get("run_directory") if isinstance(
                     lane.get("run_directory"), str) else None,
@@ -137,7 +159,14 @@ def _queue_state(root: Path, now: float, data_root: Path):
                     if type(lane.get("chunk_updates")) is int else None}
     else:
         error = "queue lanes are malformed"
-    return {"state": "fresh" if fresh else "stale", "age_seconds": age,
+    worker_state = ("stalled" if any(lane.get("process_state") == "D"
+                                      for lane in lanes.values()) else
+                    "active" if any(lane.get("pid") is not None
+                                     for lane in lanes.values()) else
+                    "queued" if any(lane.get("status") == "queued"
+                                     for lane in lanes.values()) else "idle")
+    return {"state": "fresh" if fresh else "stale", "worker_state": worker_state,
+            "age_seconds": age,
             "lanes": lanes,
             "phase": payload.get("phase") if isinstance(payload.get("phase"), str) else None,
             "cycle": payload.get("cycle") if type(payload.get("cycle")) is int else None,
@@ -460,7 +489,8 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             heartbeat = _heartbeat(path, manifest, now, data_root, process_probe)
             state = manifest.get("status", "unknown")
             if state == "running":
-                state = "running" if heartbeat["state"] == "confirmed" else "unconfirmed"
+                state = ("stalled" if heartbeat["state"] == "stalled" else
+                         "running" if heartbeat["state"] == "confirmed" else "unconfirmed")
             elif state == "queued":
                 lane = queue["lanes"].get(track, {})
                 state = ("queued" if queue["state"] == "fresh"
