@@ -2,6 +2,10 @@
 
 Diagnostics remain available through `python -m frc_defense.meco_track_training evaluate`; they never update promotion state. Frozen qualification uses a separate command:
 
+Calibration, validation, and final-test commands require `--device cuda:N`
+for an available CUDA or ROCm/HIP device. They do not run scorer inference on CPU.
+Supply the same device explicitly for `run-final-test` as shown for validation.
+
 ```bash
 python -m frc_defense.meco_qualification create-protocol \
   --output qualifications/meco/protocol.json --master-seed 20261024
@@ -11,7 +15,7 @@ python -m frc_defense.meco_qualification run-validation \
   --checkpoint checkpoints/meco-five/A1/latest.pt \
   --protocol qualifications/meco/protocol.json \
   --state qualifications/meco/A1-state.json \
-  --output qualifications/meco/A1-pickup-simple-round-1.json --device cpu
+  --output qualifications/meco/A1-pickup-simple-round-1.json --device cuda:0
 ```
 
 Create the protocol once and retain it unchanged. It freezes exact train,

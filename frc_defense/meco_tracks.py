@@ -115,7 +115,17 @@ class ProductionMecoAdapter:
         if (len(checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in checkpoint_sha256)
                 or not protocol_id):
             raise ValueError("production adapter requires checkpoint and protocol identity")
+        parameters = tuple(model.parameters())
+        if not parameters:
+            raise RuntimeError("production MECO model must have accelerator-resident parameters")
+        devices = {parameter.device for parameter in parameters}
+        if (len(devices) != 1 or next(iter(devices)).type != "cuda"
+                or not torch.cuda.is_available()
+                or next(iter(devices)).index is None
+                or next(iter(devices)).index >= torch.cuda.device_count()):
+            raise RuntimeError("production MECO adapter rejects CPU or unavailable model devices")
         self.track, self.model = track, model
+        self.device = next(iter(devices))
         self.checkpoint_sha256, self.protocol_id = checkpoint_sha256, protocol_id
 
     def infer(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
@@ -129,6 +139,8 @@ class ProductionMecoAdapter:
             if tuple(tuple(t.shape) for t in tensors) != request.input_shapes:
                 return None
             if any(not isinstance(t, torch.Tensor) for t in tensors):
+                return None
+            if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
             if any(t.is_floating_point() and not bool(torch.isfinite(t).all()) for t in tensors):
                 return None
@@ -171,6 +183,7 @@ class ProductionMecoAdapter:
                 return None
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
+                   or value.device != self.device or value.device.type != "cuda"
                    or not bool(torch.isfinite(value).all()) for value in values.values()):
                 return None
             if values["hidden"].shape != (batch, HIDDEN):

@@ -115,6 +115,8 @@ in the current planner wiring.
 `load_production_adapter` requires an explicit available `cuda:N` device and
 moves the checkpoint model to that device. PyTorch uses the same spelling for
 CUDA and ROCm/HIP devices. Missing accelerators and CPU fallback are rejected.
+The `ProductionMecoAdapter` constructor also rejects CPU-resident or mixed-
+device models, and inference rejects CPU tensors or tensors on another device.
 Existing training calls still use their direct model path and do not establish
 production qualification.
 

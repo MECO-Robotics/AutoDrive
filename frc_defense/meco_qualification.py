@@ -586,7 +586,7 @@ def derive_useful_gain_margins(reports: dict, target: str, declaration: dict) ->
 
 
 def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
-                       master_seed: int, device: str = "cpu") -> dict:
+                       master_seed: int, device: str) -> dict:
     """Collect repeated D0 outcomes on a dedicated, disjoint seed partition."""
     device_identity = _require_calibration_gpu(device)
     if type(repetitions) is not int or repetitions < 2:
@@ -1265,7 +1265,8 @@ def main(argv=None):
     run.add_argument("--protocol", required=True)
     run.add_argument("--state", required=True)
     run.add_argument("--output", required=True)
-    run.add_argument("--device", default="cpu")
+    run.add_argument("--device", required=True,
+        help="available CUDA or ROCm/HIP device, for example cuda:0")
     test = commands.add_parser("run-final-test")
     test.add_argument("--scenario", required=True)
     test.add_argument("--candidate-policy", choices=POLICIES, required=True)
@@ -1273,7 +1274,8 @@ def main(argv=None):
     test.add_argument("--protocol", required=True)
     test.add_argument("--state", required=True)
     test.add_argument("--output", required=True)
-    test.add_argument("--device", default="cpu")
+    test.add_argument("--device", required=True,
+        help="available CUDA or ROCm/HIP device, for example cuda:0")
     args = parser.parse_args(argv)
     if args.command == "create-protocol":
         if args.calibration_report and args.calibration_bundle_json:
