@@ -16,6 +16,7 @@ POLICIES = TRACKS + CONTROLS
 STATUS_SCHEMA_VERSION = 1
 HEARTBEAT_STALE_SECONDS = 90
 QUEUE_STALE_SECONDS = 180
+EVALUATION_HEARTBEAT_STALE_SECONDS = 90
 MAX_STATUS_FILE_BYTES = 32 * 1024 * 1024
 
 
@@ -125,10 +126,10 @@ def _safe_metrics(record):
              "feasible_rate", "heading_violations", "swept_violations",
              "p50_latency_ms", "p95_latency_ms", "p99_latency_ms")
     selected = {name: value for name, value in metrics.items()
-                if name in names and type(value) in (int, float)
+                if name in names and type(value) in (bool, int, float)
                 and value == value and abs(value) != float("inf")}
     recall = record.get("candidate_recall")
-    if isinstance(recall, (int, float)) and recall == recall and abs(recall) != float("inf"):
+    if type(recall) in (int, float) and recall == recall and abs(recall) != float("inf"):
         selected["candidate_recall"] = recall
     elif isinstance(recall, dict):
         selected["candidate_recall"] = {
@@ -141,6 +142,31 @@ def _safe_metrics(record):
                                   if isinstance(key, str) and type(value) in (int, float)
                                   and value == value and abs(value) != float("inf")}
     return selected
+
+
+def _finite_number(value):
+    return type(value) in (bool, int, float) and value == value and abs(value) != float("inf")
+
+
+def _summarize(rows):
+    """Expose category means and a transparent normal-approximation interval."""
+    numeric = {}
+    for row in rows:
+        for name, value in row.items():
+            if _finite_number(value):
+                numeric.setdefault(name, []).append(float(value))
+    summary = {}
+    for name, values in numeric.items():
+        count = len(values)
+        mean = sum(values) / count
+        if count > 1:
+            variance = sum((value - mean) ** 2 for value in values) / (count - 1)
+            half = 1.96 * (variance / count) ** .5
+            interval = [mean - half, mean + half]
+        else:
+            interval = None
+        summary[name] = {"n": count, "mean": mean, "normal_95_interval": interval}
+    return summary
 
 
 def _comparison(report):
@@ -166,6 +192,10 @@ def _comparison(report):
             or any(type(seed) is not int for seed in seeds)
             or len(set(seeds)) != len(seeds) or not isinstance(records, list)):
         return None
+    if (not isinstance(report.get("split"), str) or not report["split"]
+            or not isinstance(report.get("source_identity_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", report["source_identity_sha256"])):
+        return None
     expected = {(category, seed, policy) for category in categories
                 for seed in seeds for policy in POLICIES}
     found = {}
@@ -173,7 +203,21 @@ def _comparison(report):
         if (not isinstance(row, dict) or row.get("scenario_id") != scenario
                 or row.get("category") not in categories
                 or type(row.get("seed")) is not int
-                or row.get("policy") not in POLICIES):
+                or row.get("policy") not in POLICIES
+                or row.get("protocol_id") != report["protocol_id"]
+                or row.get("split") != report["split"]
+                or row.get("source_identity_sha256") != report["source_identity_sha256"]
+                or not isinstance(row.get("policy_id"), str)
+                or not isinstance(row.get("metrics"), dict)):
+            return None
+        metrics = row["metrics"]
+        if (type(metrics.get("success")) not in (bool, int, float)
+                or not _finite_number(metrics.get("success"))
+                or not 0 <= metrics["success"] <= 1
+                or not _finite_number(metrics.get("useful_throughput"))
+                or metrics["useful_throughput"] < 0
+                or any(not _finite_number(value) for value in metrics.values()
+                       if type(value) in (int, float))):
             return None
         key = (row["category"], row["seed"], row["policy"])
         if key in found:
@@ -197,10 +241,10 @@ def _comparison(report):
             "protocol_id": report["protocol_id"], "source_hash": source_hash,
             "scenario_id": scenario, "categories": categories, "seeds": seeds,
             "diagnostic": report.get("diagnostic") is True,
-            "decision_grade": report.get("diagnostic") is False,
-            "policy_metrics": {policy: [_safe_metrics(found[(category, seed, policy)])
-                                        for category in categories for seed in seeds]
-                               for policy in POLICIES}}
+            "matched_status": "diagnostic matched" if report.get("diagnostic") is True else "non-diagnostic matched",
+            "policy_metrics": {policy: {category: _summarize([
+                _safe_metrics(found[(category, seed, policy)]) for seed in seeds])
+                for category in categories} for policy in POLICIES}}
 
 
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
@@ -272,8 +316,42 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 "error": stats_error if stats is None and (path / "stats.json").exists() else None})
 
     comparisons = []
+    evaluation_runs = []
     if eval_root.is_dir():
+        for status_path in sorted(eval_root.glob("*.status.json")):
+            status, error = _read_json(status_path)
+            if status is None:
+                errors.append({"source": status_path.name, "error": error or "invalid evaluator status"})
+                continue
+            stamp = _utc_timestamp(status.get("heartbeat_utc"))
+            age = None if stamp is None else max(0., now - stamp)
+            fresh = age is not None and age <= EVALUATION_HEARTBEAT_STALE_SECONDS and stamp <= now + 5.
+            output_name = status.get("output_file")
+            safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
+            report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
+            report, _ = _read_json(report_path) if safe_name and _inside(report_path, eval_root) else (None, None)
+            consistent = (status.get("schema_version") == 1
+                and isinstance(status.get("evaluation_id"), str)
+                and isinstance(status.get("protocol_id"), str)
+                and ((status.get("status") == "running" and report is None)
+                    or (report is not None
+                        and report.get("evaluation_id") == status.get("evaluation_id")
+                        and report.get("protocol_id") == status.get("protocol_id"))))
+            alive = bool(process_probe(status.get("pid")))
+            state = status.get("status", "unknown")
+            if state == "running":
+                state = "running" if fresh and alive and consistent else "stale/unconfirmed"
+            elif state not in ("complete", "failed", "stopped"):
+                state = "unknown"
+            evaluation_runs.append({"evaluation_id": status.get("evaluation_id"),
+                "status": state, "heartbeat_state": "fresh" if fresh else "stale/missing",
+                "heartbeat_age_seconds": age, "process_alive": alive,
+                "protocol_id": status.get("protocol_id"), "split": status.get("split"),
+                "progress": status.get("progress"), "output_file": output_name,
+                "error": None if consistent else "evaluator status/report provenance mismatch"})
         for path in sorted(eval_root.glob("*.json")):
+            if path.name.endswith(".status.json"):
+                continue
             if not path.is_file() or not _inside(path, eval_root):
                 continue
             report, error = _read_json(path)
@@ -299,7 +377,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                "scenario_id": rows[-1]["scenario_id"],
                "categories": rows[-1]["categories"], "seeds": rows[-1]["seeds"],
                "diagnostic": any(row["diagnostic"] for row in rows),
-               "decision_grade": all(row["decision_grade"] for row in rows),
+               "matched_status": rows[-1]["matched_status"],
                "record_count": len(rows[-1]["seeds"]) * len(rows[-1]["categories"]),
                "policy_metrics": rows[-1]["policy_metrics"]}
               for key, rows in sorted(grouped.items())]
@@ -312,27 +390,41 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
                 "source_hash": comparison["source_hash"],
                 "scenario_id": comparison["scenario_id"],
                 "diagnostic": comparison["diagnostic"],
-                "decision_grade": comparison["decision_grade"],
+                "matched_status": comparison["matched_status"],
                 "records": metrics}
     policies = []
     for policy in POLICIES:
         runs = run_by_track.get(policy, [])
-        runs.sort(key=lambda row: (row.get("completed_updates", 0), row["run_id"] or ""))
+        runs.sort(key=lambda row: (
+            row.get("training_state") in ("running", "queued", "unconfirmed"),
+            row.get("heartbeat", {}).get("fresh", False),
+            row.get("manifest_state") == "queued",
+            row.get("completed_updates", 0), row["run_id"] or ""))
         latest_run = runs[-1] if runs else None
+        lane = queue.get("lanes", {}).get(policy) if policy in TRACKS else None
+        if latest_run is None and lane:
+            lane_state = lane.get("status")
+            latest_run = {"run_id": lane.get("run_id"), "track": policy,
+                "manifest_state": lane_state,
+                "training_state": "queued" if queue["state"] == "fresh" and lane_state == "queued" else "unconfirmed",
+                "heartbeat": {"state": "not_started", "fresh": False}, "config": {},
+                "sources": {}, "latest_checkpoint": None, "completed_updates": 0,
+                "latest_training_metrics": None}
         evidence = latest_by_policy.get(policy)
         policies.append({"policy_id": policy,
             "kind": "learned_track" if policy in TRACKS else "deterministic_control",
             "training_state": latest_run["training_state"] if latest_run else
                 ("not_applicable" if policy in CONTROLS else "not_started"),
-            "evaluation_state": ("decision_grade" if evidence and evidence["decision_grade"] else
-                                 "diagnostic" if evidence else "not_evaluated"),
+            "evaluation_state": evidence["matched_status"] if evidence else "not_evaluated",
             "run": latest_run, "latest_evidence": evidence})
     return {"schema_version": STATUS_SCHEMA_VERSION,
         "generated_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "checkpoint_root": str(root), "evaluation_root": str(eval_root),
         "heartbeat_stale_seconds": HEARTBEAT_STALE_SECONDS,
         "queue_stale_seconds": QUEUE_STALE_SECONDS,
-        "queue": queue, "policies": policies, "comparison_groups": groups,
+        "evaluation_heartbeat_stale_seconds": EVALUATION_HEARTBEAT_STALE_SECONDS,
+        "queue": queue, "policies": policies, "evaluation_runs": evaluation_runs,
+        "comparison_groups": groups,
         "errors": errors[:20]}
 
 

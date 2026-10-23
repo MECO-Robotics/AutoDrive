@@ -12,10 +12,11 @@
   <main>
     <section class="summary"><span id="updated">Loading status…</span><span id="queue"></span></section>
     <section><h2>Policies</h2><div class="table-wrap"><table>
-      <thead><tr><th>Policy</th><th>Training</th><th>Evaluation</th><th>Run / evidence</th><th>Checkpoint</th><th>Provenance</th><th>Metrics</th></tr></thead>
+      <thead><tr><th>Policy</th><th>Training</th><th>Evaluation</th><th>Run / evidence</th><th>Checkpoint</th><th>Provenance</th><th>Category aggregates (mean, n, approx. 95% interval)</th></tr></thead>
       <tbody id="policies"></tbody>
     </table></div></section>
-    <section><h2>Validated matched comparisons</h2><div id="groups" class="groups"></div></section>
+    <section><h2>Evaluator runs</h2><p class="muted">Evaluator heartbeat and record progress are independent of completed evidence.</p><div id="evaluators" class="groups"></div></section>
+    <section><h2>Matched comparisons</h2><div id="groups" class="groups"></div></section>
     <section><h2>Status input issues</h2><ul id="errors"><li>None reported.</li></ul></section>
   </main>
   <script src="/assets/meco.js" defer></script>
