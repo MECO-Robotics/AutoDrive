@@ -799,6 +799,11 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                protocol_id: str | None = None,
                task_assignment: dict | None = None):
     config.validate()
+    if (abort_file is None) != (invocation_id is None):
+        raise ValueError("--abort-file and --invocation-id must be supplied together")
+    if invocation_id is not None and (not isinstance(invocation_id, str)
+                                      or not invocation_id.strip()):
+        raise ValueError("--invocation-id must be a nonempty string")
     if resume is not None and warm_start is not None:
         raise ValueError("--resume and --warm-start are separate initialization modes")
     if warm_start is not None and (qualification_protocol is None or not protocol_id):
@@ -1007,7 +1012,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 or not isinstance(marker.get("invocation_id"), str)
                 or not marker["invocation_id"]):
             raise RuntimeError("sibling abort marker has invalid invocation provenance")
-        if invocation_id is not None and marker["invocation_id"] != invocation_id:
+        if marker["invocation_id"] != invocation_id:
             raise RuntimeError("sibling abort marker belongs to a different supervisor invocation")
         return marker
 
