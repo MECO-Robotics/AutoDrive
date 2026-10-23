@@ -33,6 +33,7 @@ TARGET_SCHEMA = "meco-observed-action-target-v1"
 WEIGHTS_SCHEMA = "meco-warm-start-weights-v1"
 COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-warm-start-weights-v2"
 COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-warm-start-weights-v3"
+COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-p-route-warm-start-weights-v1"
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
 PLAN_A_VALUE_LABEL_PROVENANCE = (
     "within-prefix matched simulator gross_horizon_return regression and pairwise comparisons"
@@ -654,6 +655,166 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     return rows, data_sha, manifest_sha, protocol, protocol_id, protocol_sha, manifest
 
 
+def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
+                                 expected_sources: dict):
+    """Read the separate executed-route P schema without weakening v2 checks."""
+    from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY, _device_identity)
+    path = Path(path).resolve()
+    manifest_path = path.with_suffix(path.suffix + ".manifest.json")
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    device = manifest.get("device")
+    if not isinstance(device, dict) or not isinstance(device.get("device"), str):
+        raise ValueError("Plan A P dataset has no frozen device identity")
+    if (manifest.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
+            manifest.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
+            manifest.get("source_counterfactual_schema") != "meco-counterfactual-trajectory-v2" or
+            manifest.get("p_intervention_generator") != "seeded_smooth_positive_xy_maps_v1" or
+            manifest.get("plan_a_p_oracle_target") !=
+                "exact_simulator_gross_horizon_return_for_executed_native_adstar_route" or
+            manifest.get("plan_a_p_supervision_semantics") !=
+                "within_prefix_route_pairwise_preference; no per-cell oracle target" or
+            manifest.get("plan_a_p_target") !=
+                "within-prefix executed-route preference from simulator gross horizon return" or
+            manifest.get("plan_a_p_prior") != 0.0 or
+            manifest.get("plan_a_p_unlabelled_reason") is not None or
+            manifest.get("records_have_exact_weighted_route_replay") is not True or
+            manifest.get("source_runtime_device_bound") is not True or
+            manifest.get("split") != "train" or
+            manifest.get("protocol_id") != protocol_id or
+            manifest.get("qualification_protocol_sha256") != protocol_sha or
+            manifest.get("qualification_protocol_file") != protocol_path.name or
+            manifest.get("sources") != expected_sources or
+            manifest.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+            manifest.get("device") != _device_identity(device["device"]) or
+            manifest.get("continuation_policy") != CONTINUATION_POLICY or
+            type(manifest.get("p_intervention_maps_per_descriptor")) is not int or
+            not 1 <= manifest["p_intervention_maps_per_descriptor"] <= 8 or
+            not _finite_number(manifest.get("p_intervention_scale")) or
+            manifest["p_intervention_scale"] <= 0 or
+            not isinstance(manifest.get("source_counterfactual_dataset_sha256"), str) or
+            len(manifest["source_counterfactual_dataset_sha256"]) != 64 or
+            not isinstance(manifest.get("source_counterfactual_manifest_sha256"), str) or
+            len(manifest["source_counterfactual_manifest_sha256"]) != 64):
+        raise ValueError("Plan A P route dataset manifest identity or semantics mismatch")
+    payload = path.read_bytes()
+    data_sha = hashlib.sha256(payload).hexdigest()
+    if data_sha != manifest.get("dataset_sha256"):
+        raise ValueError("Plan A P route dataset digest mismatch")
+    rows = [json.loads(line) for line in payload.decode("utf-8").splitlines() if line.strip()]
+    if not rows or len(rows) != manifest.get("record_count"):
+        raise ValueError("Plan A P route dataset row count mismatch or empty data")
+    seeds = manifest.get("seeds")
+    scenario, category = manifest.get("scenario_id"), manifest.get("category")
+    allowed = _protocol_train_seeds(protocol, scenario, category)
+    if (not isinstance(seeds, list) or not seeds or len(set(seeds)) != len(seeds) or
+            any(type(seed) is not int or seed not in allowed for seed in seeds)):
+        raise ValueError("Plan A P route dataset seeds are outside the frozen train split")
+    unique, by_seed = set(), {}
+    route_count = 0
+    for row in rows:
+        if (row.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
+                row.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
+                row.get("scenario_id") != scenario or row.get("category") != category or
+                row.get("protocol_id") != protocol_id or
+                row.get("qualification_protocol_sha256") != protocol_sha or
+                row.get("source_identity_sha256") != manifest["source_identity_sha256"] or
+                row.get("device") != manifest["device"]):
+            raise ValueError("mixed schema, source, protocol, task, or device in Plan A P data")
+        if (row.get("gamma_per_macro") != manifest.get("gamma_per_macro") or
+                row.get("discount_semantics") != manifest.get("discount_semantics") or
+                row.get("max_macro_ticks") != manifest.get("max_macro_ticks") or
+                row.get("horizon_physics_ticks") != manifest.get("horizon_physics_ticks")):
+            raise ValueError("Plan A P row discount/horizon differs from its manifest")
+        seed, decision = row.get("seed"), row.get("decision_index")
+        if type(seed) is not int or seed not in seeds or type(decision) is not int or decision < 0:
+            raise ValueError("Plan A P route row is outside the frozen train assignment")
+        key = (scenario, category, seed, decision)
+        if key in unique:
+            raise ValueError("duplicate Plan A P route branch identity")
+        unique.add(key)
+        by_seed.setdefault(seed, []).append(decision)
+        transcript = row.get("prefix_transcript")
+        if (not isinstance(transcript, list) or len(transcript) != decision or
+                row.get("prefix_transcript_sha256") != _canonical_hash(transcript) or
+                row.get("prefix_sha256") != _canonical_hash(transcript) or
+                not isinstance(row.get("branch_state"), dict)):
+            raise ValueError("Plan A P route prefix or state provenance is invalid")
+        groups = row.get("plan_a_p_route_groups")
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("Plan A P route row has no route groups")
+        for group_index, group in enumerate(groups):
+            descriptor, outcomes = group.get("descriptor"), group.get("outcomes")
+            if (not isinstance(descriptor, dict) or
+                    not isinstance(descriptor.get("descriptor_sha256"), str) or
+                    not isinstance(outcomes, list) or len(outcomes) < 2):
+                raise ValueError("malformed Plan A P route group")
+            expected_maps = manifest["p_intervention_maps_per_descriptor"]
+            if (len(outcomes) != expected_maps + 1 or
+                    len({item.get("intervention_id") for item in outcomes}) != len(outcomes)):
+                raise ValueError("duplicate Plan A P intervention identity")
+            if outcomes[0].get("intervention_id") != "P0" or outcomes[0].get("intervention_seed") is not None:
+                raise ValueError("Plan A P route group must begin with its P0 control")
+            paths = set()
+            seed_base = int.from_bytes(hashlib.sha256(
+                f"{seed}:{decision}:{group_index}:p-route-v1".encode()).digest()[:8],
+                "little") & ((1 << 63) - 1)
+            for outcome_index, outcome in enumerate(outcomes):
+                route = outcome.get("native_route")
+                expected_id = "P0" if outcome_index == 0 else f"probe-{outcome_index}"
+                expected_seed = (None if outcome_index == 0 else
+                    (seed_base + outcome_index) & ((1 << 63) - 1))
+                if (not _finite_number(outcome.get("gross_horizon_return")) or
+                        outcome.get("intervention_id") != expected_id or
+                        outcome.get("intervention_seed") != expected_seed or
+                        outcome.get("continuation_policy") != CONTINUATION_POLICY or
+                        outcome.get("discount_semantics") != COUNTERFACTUAL_DISCOUNT_SEMANTICS or
+                        not isinstance(route, dict) or
+                        not isinstance(route.get("route_points_m"), list) or
+                        not route["route_points_m"] or
+                        route.get("route_sha256") != _canonical_hash(route["route_points_m"]) or
+                        not isinstance(route.get("route_trace"), list) or
+                        not route["route_trace"] or
+                        route.get("route_trace_sha256") != _canonical_hash(
+                            [item.get("route_sha256") for item in route["route_trace"]]) or
+                        type(route.get("map_applied")) is not bool):
+                    raise ValueError("invalid Plan A P executed-route outcome")
+                if route["map_applied"] != (outcome.get("intervention_id") != "P0"):
+                    raise ValueError("Plan A P intervention was not applied as declared")
+                if route.get("map_scale") != (None if expected_seed is None else
+                                                manifest["p_intervention_scale"]):
+                    raise ValueError("Plan A P route scale differs from its manifest")
+                previous_tick = -1
+                for snapshot in route["route_trace"]:
+                    points = snapshot.get("route_points_m")
+                    if (type(snapshot.get("tick_index")) is not int or
+                            not previous_tick < snapshot["tick_index"] <
+                                manifest["max_macro_ticks"] or
+                            not isinstance(points, list) or not points or
+                            snapshot.get("route_sha256") != _canonical_hash(points) or
+                            snapshot.get("p_map_applied") != route["map_applied"]):
+                        raise ValueError("invalid P native route trace snapshot")
+                    previous_tick = snapshot["tick_index"]
+                if route["route_trace"][-1]["route_points_m"] != route["route_points_m"]:
+                    raise ValueError("P native route trace does not end at its final route")
+                paths.add(route["route_trace_sha256"])
+            route_count += 1
+            # Identical route variants carry no independent route-shaping signal.
+            if len(paths) < 2:
+                continue
+    if set(row.get("seed") for row in rows) != set(seeds):
+        raise ValueError("Plan A P route dataset omitted a declared train seed")
+    if any(sorted(indices) != list(range(len(indices)))
+           for indices in by_seed.values()):
+        raise ValueError("Plan A P decision indices are not contiguous per train seed")
+    if route_count != manifest.get("route_group_count"):
+        raise ValueError("Plan A P route-group count mismatch")
+    return rows, data_sha, manifest_sha, protocol, protocol_id, protocol_sha, manifest
+
+
 def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
     from .meco_counterfactual import replay_counterfactual_branch, _hash
     from .meco_track_training import _graph_inputs
@@ -1031,6 +1192,263 @@ def warm_start_counterfactual_plan_a_v3(track: str, dataset: Path, output: Path,
         "mean_preference_loss_by_epoch": preference_losses}
 
 
+def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
+    from .meco_counterfactual import (replay_counterfactual_branch,
+        _execute_plan_a_p_route_branch)
+    from .meco_track_training import _graph_inputs
+    device = torch.device(train_device)
+    materialized = []
+    for row in rows:
+        replay = replay_counterfactual_branch(row, manifest)
+        env, graph = replay["env"], replay["graph"]
+        try:
+            safe = replay["observation"]
+            raster = torch.tensor(safe.raster, dtype=torch.float32,
+                device=device).reshape(1, *safe.raster_shape)
+            globals_ = torch.tensor(safe.globals, dtype=torch.float32,
+                device=device).reshape(1, 7)
+            graph_values = _graph_inputs(track, graph, env, raster)
+            graph_values = {} if graph_values is None else {
+                name: value.to(device) for name, value in graph_values.items()}
+            route_groups = []
+            for group in row["plan_a_p_route_groups"]:
+                descriptor = group["descriptor"]
+                verified = []
+                for archived in group["outcomes"]:
+                    replayed = _execute_plan_a_p_route_branch(row, manifest,
+                        descriptor, archived.get("intervention_seed"),
+                        p_cost_scale=manifest["p_intervention_scale"])
+                    for key in ("gross_macro_return", "gross_horizon_return",
+                                "discounted_horizon_return", "continuation_policy",
+                                "continuation_macro_horizon", "discount_semantics",
+                                "native_route", "executed_action_trace"):
+                        if replayed.get(key) != archived.get(key):
+                            raise RuntimeError(
+                                f"Plan A P strict replay mismatch at {key}")
+                    verified.append(archived)
+                route_groups.append(verified)
+            materialized.append({"raster": raster, "globals": globals_,
+                "graph": graph_values, "graph_object": graph,
+                "planner": env.planner,
+                "field_length": float(env.sim.field_length),
+                "field_width": float(env.sim.field_width),
+                "resolution_m": float(env.planner.resolution),
+                "legal_xy_mask": (graph.lookup >= 0).any(0).detach().cpu(),
+                "legal_xy_cell_count": int((graph.lookup >= 0).any(0).sum().item()),
+                "p_cost_scale": float(manifest["p_intervention_scale"]),
+                "route_groups": route_groups})
+        finally:
+            close = getattr(env, "close", None)
+            if callable(close):
+                close()
+    return materialized
+
+
+def _plan_a_p_output_parameters(model, track):
+    if track == "A1":
+        layer = model.pose_head
+        mask = torch.zeros(layer.weight.shape[0], device=layer.weight.device)
+        mask[1::2] = 1.
+    elif track == "A2":
+        layer = model.decoder[-1]
+        mask = torch.tensor([0., 1.], device=layer.weight.device)
+    else:
+        layer = model.node_head
+        mask = torch.tensor([0., 1.], device=layer.weight.device)
+    if layer.weight.shape[0] != mask.numel():
+        raise ValueError("Plan A P output channel schema mismatch")
+    return layer, mask
+
+
+def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
+        value_checkpoint: Path, output: Path, *, qualification_protocol: Path,
+        updates: int = 10, learning_rate: float = 1e-4, device: str = "cpu",
+        route_margin: float = 0.02, map_regularization: float = 0.001,
+        minimum_coverage_fraction: float = 0.01):
+    """Fit the P head from strict simulator outcomes for executed weighted routes."""
+    if (track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1 or
+            not math.isfinite(learning_rate) or learning_rate <= 0 or
+            not math.isfinite(route_margin) or route_margin <= 0 or
+            not math.isfinite(map_regularization) or map_regularization < 0 or
+            not math.isfinite(minimum_coverage_fraction) or
+            not 0 < minimum_coverage_fraction <= 1):
+        raise ValueError("invalid Plan A P route warm-start configuration")
+    from .curriculum_training import source_identity
+    from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
+    from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY, _device_identity)
+    sources = source_identity()
+    value_payload = validate_counterfactual_plan_a_value_artifact(track,
+        Path(value_checkpoint), qualification_protocol=qualification_protocol,
+        expected_sources=sources)
+    rows, data_hash, manifest_hash, _, protocol_id, protocol_sha, manifest = (
+        _read_plan_a_p_route_dataset(dataset,
+            qualification_protocol=qualification_protocol,
+            expected_sources=sources))
+    if manifest["device"] != _device_identity(device):
+        raise ValueError("P route replay/training device differs from frozen dataset")
+    if value_payload.get("protocol_id") != protocol_id:
+        raise ValueError("Plan A U+B value checkpoint uses another qualification protocol")
+    if value_payload.get("prediction_mode") != manifest.get("prediction_mode"):
+        raise ValueError("Plan A U+B checkpoint prediction mode differs from P route data")
+    replayed = _materialize_plan_a_p_route_rows(rows, manifest,
+        track=track, train_device=device)
+    model = make_meco_track(track,
+        candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    model.load_state_dict(value_payload["model"], strict=True)
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    layer, channel_mask = _plan_a_p_output_parameters(model, track)
+    layer.weight.requires_grad_(True)
+    layer.bias.requires_grad_(True)
+    weight_mask = channel_mask.reshape(-1, *([1] * (layer.weight.ndim - 1)))
+    layer.weight.register_hook(lambda grad: grad * weight_mask)
+    layer.bias.register_hook(lambda grad: grad * channel_mask)
+    with torch.no_grad():
+        layer.weight.mul_(weight_mask)
+        # softplus(-20) has effectively zero gradient; seed P at a small
+        # positive cost so route-ranking supervision can move it.
+        initial_cost = torch.tensor(0.02, device=device, dtype=layer.bias.dtype)
+        initial_logit = torch.log(torch.expm1(initial_cost))
+        if track == "A1":
+            layer.bias[1::2] = initial_logit
+        else:
+            layer.bias[1] = initial_logit
+    optimizer = torch.optim.Adam((layer.weight, layer.bias), lr=learning_rate)
+    losses, pair_count = [], 0
+    visited_cells = set()
+    legal_mask = replayed[0]["legal_xy_mask"]
+    if any(not torch.equal(sample["legal_xy_mask"], legal_mask) for sample in replayed):
+        raise ValueError("Plan A P route dataset mixes legal XY grid geometries")
+    legal_cell_count = int(legal_mask.sum().item())
+    model.eval()
+    for _ in range(updates):
+        epoch_losses = []
+        for sample in replayed:
+            raw = model(raster=sample["raster"], globals_=sample["globals"],
+                        **sample["graph"])
+            graph = sample["graph_object"]
+            penalty_map = project_pose_penalty(track, raw["penalty"],
+                graph.lookup, sample["planner"],
+                sample["field_length"], sample["field_width"])
+            route_losses = []
+            for outcomes in sample["route_groups"]:
+                unique = {}
+                for outcome in outcomes:
+                    route = outcome["native_route"]
+                    unique.setdefault(route["route_trace_sha256"], outcome)
+                    for snapshot in route["route_trace"]:
+                        points = snapshot["route_points_m"]
+                        for point in points:
+                            ix = min(legal_mask.shape[0] - 1, max(0,
+                                int(float(point[0]) / sample["resolution_m"])))
+                            iy = min(legal_mask.shape[1] - 1, max(0,
+                                int(float(point[1]) / sample["resolution_m"])))
+                            if bool(legal_mask[ix, iy]):
+                                visited_cells.add((ix, iy))
+                        for first, second in zip(points, points[1:]):
+                            dx = float(second[0]) - float(first[0])
+                            dy = float(second[1]) - float(first[1])
+                            count = max(1, math.ceil(math.hypot(dx, dy) /
+                                (sample["resolution_m"] * .5)))
+                            for index in range(count + 1):
+                                fraction = index / count
+                                x = float(first[0]) + fraction * dx
+                                y = float(first[1]) + fraction * dy
+                                ix = min(legal_mask.shape[0] - 1,
+                                    max(0, int(x / sample["resolution_m"])))
+                                iy = min(legal_mask.shape[1] - 1,
+                                    max(0, int(y / sample["resolution_m"])))
+                                if bool(legal_mask[ix, iy]):
+                                    visited_cells.add((ix, iy))
+                variants = list(unique.values())
+                for index, left in enumerate(variants):
+                    for right in variants[index + 1:]:
+                        delta = left["gross_horizon_return"] - right["gross_horizon_return"]
+                        if delta == 0.:
+                            continue
+                        better, worse = (left, right) if delta > 0 else (right, left)
+                        route_costs = []
+                        for outcome in (better, worse):
+                            records = [{"path_points_m": snapshot["route_points_m"]}
+                                for snapshot in outcome["native_route"]["route_trace"]]
+                            route_costs.append(integrate_frozen_routes(penalty_map,
+                                records, sample["resolution_m"],
+                                map_scale=sample["p_cost_scale"],
+                                points_per_grid_edge=1.).mean())
+                        costs = torch.stack(route_costs)
+                        route_losses.append(F.softplus(
+                            (costs[0] - costs[1] + route_margin)))
+            if not route_losses:
+                continue
+            pair_loss = torch.stack(route_losses).mean()
+            loss = pair_loss + map_regularization * penalty_map.mean()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_((layer.weight, layer.bias), 1.)
+            optimizer.step()
+            epoch_losses.append(float(loss.detach().cpu()))
+            if not losses:
+                pair_count += len(route_losses)
+        if not epoch_losses:
+            raise ValueError("Plan A P data has no non-tied distinct executed-route pair")
+        losses.append(sum(epoch_losses) / len(epoch_losses))
+    coverage_fraction = len(visited_cells) / max(1, legal_cell_count)
+    if coverage_fraction < minimum_coverage_fraction:
+        raise ValueError("Plan A P executed paths do not meet the configured legal-grid coverage floor")
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during Plan A P fitting")
+    payload = {"schema": COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA,
+        "schema_version": 1,
+        "artifact_kind": "weights_only_counterfactual_plan_a_p_route_v1",
+        "track": track, "model_schema_version": 1, "model": model.state_dict(),
+        "dataset_sha256": data_hash, "dataset_manifest_sha256": manifest_hash,
+        "dataset_schema": PLAN_A_P_ROUTE_DATASET_SCHEMA,
+        "target_schema": PLAN_A_P_ROUTE_TARGET_SCHEMA,
+        "source_counterfactual_dataset_sha256": manifest["source_counterfactual_dataset_sha256"],
+        "value_checkpoint_sha256": hashlib.sha256(Path(value_checkpoint).read_bytes()).hexdigest(),
+        "label_provenance": "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions",
+        "target_semantics": "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return",
+        "loss_semantics": "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization",
+        "p_map_initialization": "softplus_inverse_of_0.02_on_penalty_output_channel",
+        "p_route_pair_count": pair_count,
+        "p_route_group_count": sum(len(sample["route_groups"]) for sample in replayed),
+        "p_route_visited_xy_cell_count": len(visited_cells),
+        "p_route_legal_xy_cell_count": legal_cell_count,
+        "p_route_legal_xy_coverage_fraction": coverage_fraction,
+        "p_route_minimum_coverage_fraction": minimum_coverage_fraction,
+        "p_route_coverage_scope": "sampled_native_execution_path_cells; not exhaustive legal-grid coverage",
+        "p_mode": "learned", "p_cost_scale": manifest["p_intervention_scale"],
+        "p_projection": "mean_over_legal_heading_bins_xy_grid_v1",
+        "p_map_units": "dimensionless_additive_penalty_per_cardinal_grid_step",
+        "p_path_units": "normalized_grid_edge_units",
+        "route_margin": route_margin, "map_regularization": map_regularization,
+        "prediction_mode": manifest["prediction_mode"],
+        "prediction_contract": manifest["prediction_contract"],
+        "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": Path(qualification_protocol).name,
+        "split": "train", "scenario_id": manifest["scenario_id"],
+        "category": manifest["category"], "seeds": list(manifest["seeds"]),
+        "sources": sources, "source_identity_sha256": _canonical_hash(sources),
+        "collection_device": manifest["device"],
+        "training_device": _device_identity(device),
+        "continuation_policy": CONTINUATION_POLICY,
+        "optimizer_state_included": False, "resume_compatible": False,
+        "updates": updates, "learning_rate": learning_rate,
+        "mean_route_loss_by_epoch": losses}
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    validate_counterfactual_plan_a_p_artifact(track, output,
+        qualification_protocol=qualification_protocol,
+        expected_sources=sources,
+        expected_prediction_mode=manifest["prediction_mode"])
+    return {"track": track, "checkpoint": str(output),
+        "dataset_sha256": data_hash, "p_route_pair_count": pair_count,
+        "p_route_visited_xy_cell_count": len(visited_cells),
+        "mean_route_loss_by_epoch": losses}
+
+
 def validate_warm_start_artifact(track: str, checkpoint: Path, *,
                                  qualification_protocol: Path,
                                  expected_sources: dict,
@@ -1044,6 +1462,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") == COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA:
         return validate_counterfactual_plan_a_value_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
+    if payload.get("schema") == COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA:
+        return validate_counterfactual_plan_a_p_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
             expected_prediction_mode=expected_prediction_mode)
@@ -1315,6 +1738,108 @@ def validate_counterfactual_plan_a_value_artifact(track: str, checkpoint: Path, 
     return payload
 
 
+def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate an executed-route P-only warm-start artifact."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    mode = payload.get("prediction_mode")
+    _, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    for key in ("dataset_sha256", "dataset_manifest_sha256",
+                "source_counterfactual_dataset_sha256", "value_checkpoint_sha256"):
+        value = payload.get(key)
+        if (not isinstance(value, str) or len(value) != 64 or
+                any(char not in "0123456789abcdef" for char in value)):
+            raise ValueError(f"Plan A P artifact has invalid {key}")
+    losses = payload.get("mean_route_loss_by_epoch")
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or
+            payload.get("artifact_kind") != "weights_only_counterfactual_plan_a_p_route_v1" or
+            payload.get("track") != track or payload.get("model_schema_version") != 1 or
+            payload.get("dataset_schema") != "meco-counterfactual-plan-a-p-route-v1" or
+            payload.get("target_schema") != "meco-executed-route-gross-return-ranking-v1" or
+            payload.get("label_provenance") !=
+                "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions" or
+            payload.get("target_semantics") !=
+                "within_prefix_executed_route_pairwise_preference_from_gross_horizon_return" or
+            payload.get("loss_semantics") !=
+                "softplus_predicted_integrated_P_cost_preference_plus_mean_P_regularization" or
+            payload.get("p_map_initialization") !=
+                "softplus_inverse_of_0.02_on_penalty_output_channel" or
+            payload.get("p_mode") != "learned" or
+            payload.get("p_projection") != "mean_over_legal_heading_bins_xy_grid_v1" or
+            payload.get("p_map_units") !=
+                "dimensionless_additive_penalty_per_cardinal_grid_step" or
+            payload.get("p_path_units") != "normalized_grid_edge_units" or
+            not _finite_number(payload.get("p_cost_scale")) or
+            payload["p_cost_scale"] <= 0 or
+            payload.get("p_route_coverage_scope") !=
+                "sampled_native_execution_path_cells; not exhaustive legal-grid coverage" or
+            type(payload.get("p_route_pair_count")) is not int or
+            payload["p_route_pair_count"] < 1 or
+            type(payload.get("p_route_group_count")) is not int or
+            payload["p_route_group_count"] < 1 or
+            type(payload.get("p_route_visited_xy_cell_count")) is not int or
+            payload["p_route_visited_xy_cell_count"] < 1 or
+            type(payload.get("p_route_legal_xy_cell_count")) is not int or
+            payload["p_route_legal_xy_cell_count"] < payload["p_route_visited_xy_cell_count"] or
+            not _finite_number(payload.get("p_route_legal_xy_coverage_fraction")) or
+            payload["p_route_legal_xy_coverage_fraction"] != (
+                payload["p_route_visited_xy_cell_count"] /
+                payload["p_route_legal_xy_cell_count"]) or
+            not _finite_number(payload.get("p_route_minimum_coverage_fraction")) or
+            not 0 < payload["p_route_minimum_coverage_fraction"] <= 1 or
+            payload["p_route_legal_xy_coverage_fraction"] <
+                payload["p_route_minimum_coverage_fraction"] or
+            mode not in PREDICTION_MODES or
+            payload.get("prediction_contract") != prediction_contract(mode) or
+            (expected_prediction_mode is not None and mode != expected_prediction_mode) or
+            payload.get("protocol_id") != protocol_id or
+            payload.get("qualification_protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_file") != protocol_path.name or
+            payload.get("split") != "train" or
+            not isinstance(payload.get("scenario_id"), str) or
+            not isinstance(payload.get("category"), str) or
+            not isinstance(payload.get("seeds"), list) or not payload["seeds"] or
+            any(type(seed) is not int for seed in payload["seeds"]) or
+            len(set(payload["seeds"])) != len(payload["seeds"]) or
+            not set(payload["seeds"]) <= _protocol_train_seeds(
+                _load_protocol(qualification_protocol)[0],
+                payload["scenario_id"], payload["category"]) or
+            payload.get("sources") != expected_sources or
+            payload.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+            payload.get("collection_device") != payload.get("training_device") or
+            payload.get("continuation_policy") !=
+                "curriculum_scenarios.teacher_actions; deterministic sensed-state policy" or
+            payload.get("optimizer_state_included") is not False or
+            payload.get("resume_compatible") is not False or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            not _finite_number(payload.get("route_margin")) or payload["route_margin"] <= 0 or
+            not _finite_number(payload.get("map_regularization")) or payload["map_regularization"] < 0 or
+            not isinstance(losses, list) or len(losses) != payload.get("updates") or
+            any(not _finite_number(value) or value < 0 for value in losses) or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("Plan A P warm-start artifact identity/schema mismatch")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("Plan A P weights do not match the requested track") from exc
+    layer, mask = _plan_a_p_output_parameters(model, track)
+    selected = (layer.weight.detach() * mask.reshape(-1,
+        *([1] * (layer.weight.ndim - 1)))).abs().sum()
+    if track == "A1":
+        biases = layer.bias.detach()[1::2]
+    else:
+        biases = layer.bias.detach()[1:2]
+    if not bool(torch.isfinite(selected)) or not bool(torch.isfinite(biases).all()) or not bool(
+            (selected > 0) or (biases > -20).any()):
+        raise ValueError("Plan A P artifact contains no trained penalty channel")
+    return payload
+
+
 def load_counterfactual_warm_start(track: str, model, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
@@ -1379,6 +1904,26 @@ def main(argv=None):
     plan_a_v3.add_argument("--updates", type=int, default=10)
     plan_a_v3.add_argument("--learning-rate", type=float, default=1e-4)
     plan_a_v3.add_argument("--device", default="cpu")
+    p_routes = commands.add_parser("collect-plan-a-p-routes-v1")
+    p_routes.add_argument("--dataset", type=Path, required=True,
+        help="strictly replayable counterfactual v2 training dataset")
+    p_routes.add_argument("--output", type=Path, required=True)
+    p_routes.add_argument("--qualification-protocol", type=Path, required=True)
+    p_routes.add_argument("--p-cost-scale", type=float, default=1.0)
+    p_routes.add_argument("--intervention-maps", type=int, default=3)
+    plan_a_p = commands.add_parser("warm-start-plan-a-p-v1")
+    plan_a_p.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    plan_a_p.add_argument("--dataset", type=Path, required=True)
+    plan_a_p.add_argument("--value-checkpoint", type=Path, required=True,
+        help="approved v3 Plan A U+B weights used as the frozen base")
+    plan_a_p.add_argument("--output", type=Path, required=True)
+    plan_a_p.add_argument("--qualification-protocol", type=Path, required=True)
+    plan_a_p.add_argument("--updates", type=int, default=10)
+    plan_a_p.add_argument("--learning-rate", type=float, default=1e-4)
+    plan_a_p.add_argument("--device", default="cpu")
+    plan_a_p.add_argument("--route-margin", type=float, default=0.02)
+    plan_a_p.add_argument("--map-regularization", type=float, default=0.001)
+    plan_a_p.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
     args = parser.parse_args(argv)
     if args.command == "collect":
         result = collect_dataset(args.output, scenario_id=args.scenario,
@@ -1403,6 +1948,20 @@ def main(argv=None):
         result = warm_start_counterfactual_plan_a_v3(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,
             learning_rate=args.learning_rate, device=args.device)
+    elif args.command == "collect-plan-a-p-routes-v1":
+        from .meco_counterfactual import collect_plan_a_p_routes_v1
+        result = collect_plan_a_p_routes_v1(args.output, dataset=args.dataset,
+            qualification_protocol=args.qualification_protocol,
+            p_cost_scale=args.p_cost_scale,
+            intervention_maps=args.intervention_maps)
+    elif args.command == "warm-start-plan-a-p-v1":
+        result = warm_start_counterfactual_plan_a_p_v1(args.track, args.dataset,
+            args.value_checkpoint, args.output,
+            qualification_protocol=args.qualification_protocol,
+            updates=args.updates, learning_rate=args.learning_rate,
+            device=args.device, route_margin=args.route_margin,
+            map_regularization=args.map_regularization,
+            minimum_coverage_fraction=args.minimum_coverage_fraction)
     else:
         result = warm_start_counterfactual_v2(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,

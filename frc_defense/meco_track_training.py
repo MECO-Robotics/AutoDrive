@@ -532,6 +532,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     allow_action7_traversal=False,
                     planner_traversal_cost_override=None,
                     planner_traversal_cost_scale=1.0,
+                    planner_route_trace: list | None = None,
                     safety_counts: dict | None = None,
                     metric_ledger: MecoEpisodeMetricLedger | None = None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
@@ -546,7 +547,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                         dtype=env.sim.pose.dtype).detach().clone())
     if safety_counts is not None and "_last_snapshot" not in safety_counts:
         safety_counts["_last_snapshot"] = _physics_safety_snapshot(env)
-    for _ in range(action_ticks):
+    for tick_index in range(action_ticks):
         planner_kwargs = {}
         if frozen_traversal_cost is not None:
             planner_kwargs = {
@@ -560,6 +561,24 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading,
             **planner_kwargs)
+        if planner_route_trace is not None:
+            planner = env.planner
+            route_length = int(planner.last_lengths[3].detach().item())
+            if route_length > 0:
+                points = planner.last_path[3, :route_length].detach().cpu().tolist()
+                normalized_points = [[float(value) for value in point] for point in points]
+                route_sha = hashlib.sha256(json.dumps(normalized_points,
+                    separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+                if (not planner_route_trace or
+                        planner_route_trace[-1]["route_sha256"] != route_sha):
+                    applied = getattr(env,
+                        "_last_applied_planner_traversal_signature", None)
+                    planner_route_trace.append({"tick_index": tick_index,
+                        "route_points_m": normalized_points,
+                        "route_sha256": route_sha,
+                        "p_map_applied": bool(frozen_traversal_cost is not None and
+                            isinstance(applied, dict) and
+                            applied.get("map") is frozen_traversal_cost)})
         if metric_ledger is not None:
             metric_ledger.observe_outer_step(int(env.last_actions[0, 3].item()))
         executed_actions.append(int(env.last_actions[0, 3].item()))
@@ -807,11 +826,21 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         warm_start_provenance = load_warm_start(config.track, model, Path(warm_start),
             qualification_protocol=Path(qualification_protocol), expected_sources=sources,
             expected_prediction_mode=config.prediction_mode)
+        if (warm_start_provenance.get("artifact_kind") ==
+                "weights_only_counterfactual_plan_a_p_route_v1" and
+                (config.p_mode != "learned" or
+                 config.p_cost_scale != warm_start_provenance.get("p_cost_scale"))):
+            raise ValueError(
+                "Plan A P route warm start requires matching learned p_mode and p_cost_scale")
         initialization_record = {"mode": "weights_only_supervised_warm_start",
             "warm_start_artifact_sha256": hashlib.sha256(
                 Path(warm_start).read_bytes()).hexdigest(),
             "dataset_sha256": warm_start_provenance.get("dataset_sha256"),
             "warm_start_source_identity_sha256": warm_start_provenance.get("source_identity_sha256"),
+            "plan_a_p_mode": warm_start_provenance.get("p_mode"),
+            "p_route_dataset_sha256": (warm_start_provenance.get("dataset_sha256")
+                if warm_start_provenance.get("artifact_kind") ==
+                    "weights_only_counterfactual_plan_a_p_route_v1" else None),
             "qualification_protocol_id": warm_start_provenance.get("protocol_id"),
             "qualification_protocol_sha256": warm_start_provenance.get("qualification_protocol_sha256")}
     value_head = ValueHead().to(config.device)

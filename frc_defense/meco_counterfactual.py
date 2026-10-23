@@ -21,6 +21,7 @@ from functools import lru_cache
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from .curriculum_scenarios import make_curriculum_env, teacher_actions
 from .meco_candidates import (CANDIDATE_BOUNDARY,
@@ -34,6 +35,8 @@ from .training_curriculum import get_scenario
 
 DATASET_SCHEMA = "meco-counterfactual-trajectory-v2"
 TARGET_SCHEMA = "meco-matched-prefix-gross-return-v2"
+PLAN_A_P_ROUTE_DATASET_SCHEMA = "meco-counterfactual-plan-a-p-route-v1"
+PLAN_A_P_ROUTE_TARGET_SCHEMA = "meco-executed-route-gross-return-ranking-v1"
 STATE_DIGEST_SCHEMA = "meco-full-environment-state-v1"
 DEFAULT_GAMMA = 0.993
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
@@ -293,14 +296,87 @@ def _device_identity(device):
 
 
 def _reward_step(env, action, action_ticks, goal_xy=None, goal_heading=None,
-                 allow_action7_traversal=False):
+                 allow_action7_traversal=False,
+                 planner_traversal_cost_override=None,
+                 planner_traversal_cost_scale=1.0,
+                 planner_route_trace=None):
     from .meco_track_training import _run_macro_step
     values = _run_macro_step(env, action, action_ticks, goal_xy,
         goal_heading=goal_heading,
-        allow_action7_traversal=allow_action7_traversal)
+        allow_action7_traversal=allow_action7_traversal,
+        planner_traversal_cost_override=planner_traversal_cost_override,
+        planner_traversal_cost_scale=planner_traversal_cost_scale,
+        planner_route_trace=planner_route_trace)
     reward, ended, timeout = values[:3]
     return (float(reward.detach().cpu().item()), bool(ended), bool(timeout),
             list(values[3]), values[4], values[5], bool(values[7]))
+
+
+def _plan_a_p_map_digest(cost_map):
+    if cost_map is None:
+        return None
+    value = torch.as_tensor(cost_map).detach().contiguous().cpu()
+    metadata = json.dumps({"shape": list(value.shape), "dtype": str(value.dtype)},
+                          sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(metadata + b"\0" + value.numpy().tobytes()).hexdigest()
+
+
+def _plan_a_p_intervention_map(env, intervention_seed):
+    """Model-independent smooth positive route probe map, reproducible from seed."""
+    if type(intervention_seed) is not int or not 0 <= intervention_seed < 2**63:
+        raise ValueError("Plan A P intervention seed is invalid")
+    nx, ny = int(env.planner.nx), int(env.planner.ny)
+    coarse_x, coarse_y = max(2, (nx + 5) // 6), max(2, (ny + 5) // 6)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(intervention_seed)
+    coarse = torch.rand((1, 1, coarse_x, coarse_y), generator=generator,
+                        dtype=torch.float32)
+    smooth = F.interpolate(coarse, size=(nx, ny), mode="bilinear",
+                           align_corners=False)[0, 0]
+    # Keep the probe scale fixed in normalized planner-edge units.
+    result = smooth.to(device=env.device, dtype=env.sim.pose.dtype) * 0.5
+    if (result.shape != (nx, ny) or not bool(torch.isfinite(result).all()) or
+            bool((result < 0).any())):
+        raise RuntimeError("Plan A P intervention map failed validation")
+    return result
+
+
+def _plan_a_p_route_record(env, *, intervention_map, intervention_seed,
+                           selected_action, selected_goal, scale, route_trace):
+    planner = env.planner
+    path_length = int(planner.last_lengths[3].detach().item())
+    if path_length < 1:
+        raise RuntimeError("Plan A P route intervention produced no native route")
+    points = planner.last_path[3, :path_length].detach().cpu().tolist()
+    if not all(len(point) == 2 and all(math.isfinite(float(v)) for v in point)
+               for point in points):
+        raise RuntimeError("Plan A P native route contains invalid coordinates")
+    if not route_trace or route_trace[-1]["route_points_m"] != [
+            [float(v) for v in point] for point in points]:
+        raise RuntimeError("Plan A P route trace does not end at the native planner route")
+    signature = getattr(env, "_last_applied_planner_traversal_signature", None)
+    if intervention_map is None:
+        if signature is not None:
+            raise RuntimeError("P0 branch unexpectedly retained a weighted route signature")
+        applied = False
+    else:
+        if (not isinstance(signature, dict) or signature.get("map") is None or
+                signature.get("action") != selected_action or
+                signature.get("goal") != tuple(float(v) for v in selected_goal) or
+                float(signature.get("scale", -1.)) != scale):
+            raise RuntimeError("P route intervention was not applied to its selected goal")
+        applied = True
+    if any(item.get("p_map_applied") != applied for item in route_trace):
+        raise RuntimeError("Plan A P map application changed within its frozen macro")
+    return {"intervention_seed": intervention_seed,
+        "map_sha256": _plan_a_p_map_digest(intervention_map),
+        "map_applied": applied, "map_scale": scale if applied else None,
+        "route_points_m": [[float(v) for v in point] for point in points],
+        "route_sha256": _hash([[float(v) for v in point] for point in points]),
+        "route_trace_sha256": _hash([item["route_sha256"] for item in route_trace]),
+        "route_trace": route_trace,
+        "selected_action": selected_action,
+        "selected_goal_xy_m": [float(v) for v in selected_goal]}
 
 
 def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
@@ -774,3 +850,141 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
     return {"path": str(output), "record_count": len(rows),
             "dataset_sha256": manifest["dataset_sha256"],
             "schema": DATASET_SCHEMA}
+
+
+def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_seed,
+                                   *, p_cost_scale=1.0):
+    """Strictly replay one branch with a deterministic P intervention map."""
+    if not math.isfinite(float(p_cost_scale)) or p_cost_scale <= 0.:
+        raise ValueError("P route intervention scale must be positive and finite")
+    replay = replay_counterfactual_branch(record, manifest)
+    env = replay["env"]
+    try:
+        expected = next((item for item in replay["snapshot"]["plan_a_descriptors"]
+                         if item["descriptor_sha256"] ==
+                            descriptor.get("descriptor_sha256")), None)
+        if expected != descriptor:
+            raise RuntimeError("P route descriptor differs from exact replay support")
+        intervention_map = (None if intervention_seed is None else
+            _plan_a_p_intervention_map(env, intervention_seed))
+        ticks = record["macro_ticks"]
+        action = int(descriptor["action"])
+        goal = tuple(float(value) for value in descriptor["goal_xy_m"])
+        route_trace = []
+        reward, ended, timeout, trace, _, _, _ = _reward_step(env, action, ticks,
+            goal_xy=goal, goal_heading=descriptor["goal_heading_rad"],
+            allow_action7_traversal=(action == 7),
+            planner_traversal_cost_override=intervention_map,
+            planner_traversal_cost_scale=p_cost_scale,
+            planner_route_trace=route_trace)
+        if any(executed != action for executed in trace):
+            raise RuntimeError("P route branch action was remasked or preempted")
+        route = _plan_a_p_route_record(env, intervention_map=intervention_map,
+            intervention_seed=intervention_seed, selected_action=action,
+            selected_goal=goal, scale=p_cost_scale, route_trace=route_trace)
+        total_return, discounted = reward, reward
+        elapsed = record["macro_start_tick"] + len(trace)
+        continuation_decisions = 0
+        while not (ended or timeout) and elapsed < manifest["horizon_physics_ticks"]:
+            next_action = int(teacher_actions(env, env._last_obs)[0, 3].item())
+            macro_ticks = min(manifest["max_macro_ticks"],
+                manifest["horizon_physics_ticks"] - elapsed)
+            step_reward, ended, timeout, continuation_trace, _, _, _ = _reward_step(
+                env, next_action, macro_ticks)
+            if (len(continuation_trace) != macro_ticks and not (ended or timeout)):
+                raise RuntimeError("P route continuation macro ended early")
+            total_return += step_reward
+            continuation_decisions += 1
+            discounted += manifest["gamma_per_macro"] ** continuation_decisions * step_reward
+            elapsed += len(continuation_trace)
+        return {"gross_macro_return": reward,
+            "gross_horizon_return": total_return,
+            "discounted_horizon_return": discounted,
+            "continuation_policy": CONTINUATION_POLICY,
+            "continuation_macro_horizon": continuation_decisions,
+            "discount_semantics": manifest["discount_semantics"],
+            "terminal": bool(ended or timeout), "native_route": route,
+            "executed_action_trace": trace}
+    finally:
+        close = getattr(env, "close", None)
+        if callable(close):
+            close()
+
+
+def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
+        qualification_protocol: Path, p_cost_scale=1.0,
+        intervention_maps=3):
+    """Collect P0 and model-independent weighted-route simulator outcomes.
+
+    `dataset` must be an already collected strict counterfactual v2 training
+    dataset. This separate schema deliberately leaves the v2 P-null contract
+    unchanged.
+    """
+    from .curriculum_training import source_identity
+    from .meco_supervised import _read_counterfactual_dataset
+    sources = source_identity()
+    base_rows, base_sha, base_manifest_sha, _, protocol_id, protocol_sha, base_manifest = (
+        _read_counterfactual_dataset(Path(dataset),
+            qualification_protocol=Path(qualification_protocol),
+            expected_sources=sources))
+    if (not math.isfinite(float(p_cost_scale)) or p_cost_scale <= 0. or
+            type(intervention_maps) is not int or not 1 <= intervention_maps <= 8):
+        raise ValueError("invalid P route scale or intervention-map count")
+    manifest = {**base_manifest,
+        "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA,
+        "target_schema": PLAN_A_P_ROUTE_TARGET_SCHEMA,
+        "source_counterfactual_dataset_sha256": base_sha,
+        "source_counterfactual_manifest_sha256": base_manifest_sha,
+        "source_counterfactual_schema": DATASET_SCHEMA,
+        "p_intervention_generator": "seeded_smooth_positive_xy_maps_v1",
+        "p_intervention_maps_per_descriptor": intervention_maps,
+        "p_intervention_scale": float(p_cost_scale),
+        "plan_a_p_oracle_target": "exact_simulator_gross_horizon_return_for_executed_native_adstar_route",
+        "plan_a_p_supervision_semantics": "within_prefix_route_pairwise_preference; no per-cell oracle target",
+        "plan_a_p_target": "within-prefix executed-route preference from simulator gross horizon return",
+        "plan_a_p_prior": 0.0,
+        "plan_a_p_unlabelled_reason": None,
+        "records_have_exact_weighted_route_replay": True}
+    result_rows = []
+    for source_row in base_rows:
+        route_groups = []
+        for descriptor_index, descriptor in enumerate(
+                source_row["plan_a_sampled_node_behavior_labels"]):
+            descriptor = descriptor["descriptor"]
+            descriptor_seed_base = int.from_bytes(hashlib.sha256(
+                f"{source_row['seed']}:{source_row['decision_index']}:{descriptor_index}:p-route-v1".encode()
+                ).digest()[:8], "little") & ((1 << 63) - 1)
+            variants = [("P0", None)] + [(f"probe-{index}",
+                (descriptor_seed_base + index) & ((1 << 63) - 1))
+                for index in range(1, intervention_maps + 1)]
+            outcomes = []
+            for intervention_id, seed in variants:
+                outcome = _execute_plan_a_p_route_branch(source_row,
+                    base_manifest, descriptor, seed, p_cost_scale=p_cost_scale)
+                outcomes.append({"intervention_id": intervention_id,
+                    "intervention_seed": seed, **outcome})
+            route_groups.append({"descriptor": descriptor, "outcomes": outcomes})
+        core = {key: value for key, value in source_row.items()
+                if key not in ("plan_c_counterfactuals", "plan_c_pairwise_labels",
+                    "plan_a_sampled_node_behavior_labels", "plan_a_pairwise_preferences")}
+        result_rows.append({**core,
+            "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA,
+            "target_schema": PLAN_A_P_ROUTE_TARGET_SCHEMA,
+            "plan_a_p_route_groups": route_groups})
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during Plan A P route collection")
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = "".join(json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n"
+                      for row in result_rows).encode()
+    output.write_bytes(payload)
+    manifest["record_count"] = len(result_rows)
+    manifest["dataset_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest["route_group_count"] = sum(len(row["plan_a_p_route_groups"])
+                                        for row in result_rows)
+    output.with_suffix(output.suffix + ".manifest.json").write_text(
+        json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+    return {"path": str(output), "record_count": len(result_rows),
+        "route_group_count": manifest["route_group_count"],
+        "dataset_sha256": manifest["dataset_sha256"],
+        "schema": PLAN_A_P_ROUTE_DATASET_SCHEMA}

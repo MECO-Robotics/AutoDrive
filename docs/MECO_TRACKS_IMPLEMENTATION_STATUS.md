@@ -228,3 +228,31 @@ instead of reporting zero. HUB denied remains a distinct simulator denied
 event, while abandoned fuel remains null because this evaluator has no
 authoritative abandoned-event producer. This implementation has only received
 static checks; simulator-record validation remains outstanding.
+
+## Separate Plan A P route warm start (code path only)
+
+The v2 counterfactual dataset and v3 Plan A U+B weights keep their explicit
+P-null/P0 contracts. A separate `meco-counterfactual-plan-a-p-route-v1`
+collector consumes a replay-bound v2 training dataset and executes a P0 branch
+plus reproducibly generated, model-independent positive XY cost-map probes
+through the native slot-3 AD* path. Its target is pairwise preference between
+the actual routes, ranked by simulator gross horizon return under the same
+prefix and deterministic continuation policy. It is not a per-cell oracle
+label. Each branch records every distinct focal route snapshot within the
+selected macro, plus the map-application state and action trace. The route
+warm-start fitter replays every branch and route, trains only
+the Plan A penalty output channel on differentiable integrated route costs,
+and starts that channel at a small positive softplus value to avoid the v3
+zero-head gradient dead zone. The resulting weights-only artifact has its own
+schema and requires `p_mode=learned` when used to initialize training.
+
+CLI entry points are `collect-plan-a-p-routes-v1` and
+`warm-start-plan-a-p-v1`. This implementation has only received static checks;
+no P-route dataset has been collected, no fitting has run, and no fresh
+dashboard-backed simulator replay has verified the resulting behavior. The
+current route coverage field counts sampled execution-path cells and explicitly
+does not claim exhaustive legal-grid coverage. Fitting requires the sampled
+paths to cover at least the configured fraction of legal XY cells (default
+1%); the exact observed and minimum fractions are stored in the artifact.
+P warm-start outcomes therefore
+remain unqualified until the dataset, fit, and representative replay gates run.
