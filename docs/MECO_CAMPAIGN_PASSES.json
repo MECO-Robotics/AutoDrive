@@ -16,7 +16,8 @@
         "Phase 2 counterfactual v2 warm-start consumer plan completed: strict replay-backed v2-only A U+B and C candidate pairwise fitting from within-prefix gross_horizon_return; P remains null/zero, v1 contract unchanged",
         "Phase 0 D0 variance calibration and qualification gate plan completed: separate disjoint calibration seeds, separate repeat-run and cross-seed variance, freeze operational margin/protocol digest, and require paired-CI improvement plus safety non-inferiority for promotion",
         "Phase 5 audit completed: reviewed synthetic exporter/profile harness is isolated on the completed branch; full production-schema parity, ONNX numerical parity, Hailo compilation/device profiling, end-to-end decision latency, and checkpoint-bound simulator replay remain open",
-        "D0 planner completed target-scoped calibration bundle design: immutable protocol covers target scenario plus prerequisite closure, per-scenario calibration IDs/gates/splits, and same-protocol ancestor retention; only the target can promote"
+        "D0 planner completed target-scoped calibration bundle design: immutable protocol covers target scenario plus prerequisite closure, per-scenario calibration IDs/gates/splits, and same-protocol ancestor retention; only the target can promote",
+        "Safety-metric planner identified authoritative contact instrumentation boundary: count focal contact ticks once per class after low-level collision passes and divide by active focal physics ticks; contacts are proxies, not automatic rule violations"
       ]
     },
     {
@@ -58,7 +59,8 @@
         "Phase 5 re-review found running heartbeat status only checks for a timestamp string without parsing age; implementer follow-up will compute age or rename the field to matching heartbeat presence with age unknown",
         "D0 fail-closed review follow-up remains pending; protocol currently covers one scenario while ancestor-retention qualification requires a calibrated scenario bundle or protocol redesign",
         "Phase 5 heartbeat reporting correction committed as 4cd81d964: reports matching heartbeat presence but explicitly marks age unknown; documentation makes no freshness/liveness claim; scoped re-review pending",
-        "D0 implementer is extending the calibrated protocol to target-scoped scenario bundles so ancestor retention reports can be generated under one protocol ID without relaxing safety or split isolation"
+        "D0 implementer is extending the calibrated protocol to target-scoped scenario bundles so ancestor retention reports can be generated under one protocol ID without relaxing safety or split isolation",
+        "Authoritative low-level contact-rate instrumentation implementation started on the approved Section6 metrics branch; outer-step samples are retained only as scoped proxies, while qualification rates will use per-tick numerators/denominators"
       ]
     },
     {
@@ -95,7 +97,8 @@
         "Phase 5 heartbeat reporting correction 4cd81d964 submitted for scoped re-review; previous protocol/update equality and failed-run checks remain intact",
         "D0 fail-closed correction 5f8f667bd approved by scoped static reviewer; multi-scenario calibration/protocol coverage for ancestor retention remains an implementation gap",
         "Scoped static re-review approved Phase 5 heartbeat correction 4cd81d964; heartbeat presence is separated from unknown age, with no freshness/liveness claim",
-        "Target-scoped multi-scenario calibration bundle implementation will receive a separate static review for prerequisite closure, per-scenario seed disjointness, same-protocol ancestor retention, and target-only promotion"
+        "Target-scoped multi-scenario calibration bundle implementation will receive a separate static review for prerequisite closure, per-scenario seed disjointness, same-protocol ancestor retention, and target-only promotion",
+        "Contact-rate instrumentation will receive scoped static review for low-level clear/collision ordering, once-per-tick counts, episode reset, active-tick denominator, and explicit distinction from actual safety-rule violations"
       ]
     }
   ]
