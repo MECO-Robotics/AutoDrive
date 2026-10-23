@@ -204,9 +204,17 @@ Evaluation records now have a distinct `executed_planner_route_trace` for
 A1/A2/A3 and their P0 runs. Each macro entry snapshots focal slot-3
 `last_path[:last_lengths]` and the observed planner goal after macro execution,
 with selected goal, selected action, actual per-physics-step action trace,
-ticks, P mode, and SHA256/shape/dtype/scale for the effective frozen map after executor dtype
-conversion. P0 records null map identity and scale. This is the latest route snapshot after a
-macro, not every within-macro replan and not an exact actuator trajectory.
+ticks, configured P mode, and an applied flag plus SHA256/shape/dtype/scale for
+the effective frozen map after executor dtype conversion. A changed map,
+scale, goal, action, or tensor version forces an immediate focal-only replan
+at the next macro boundary; later ticks
+in the same macro do not repeat it. The signature includes map tensor identity,
+version, scale, goal, and action. P0 records null map identity and scale. The
+map hash identifies the map used for the latest focal route; if action masking
+prevents applying a new map, the prior route's map is reported with its applied
+goal/action signature, until an unweighted focal replan clears that association.
+This is the latest route snapshot after a macro, not every within-macro replan
+and not an exact actuator trajectory.
 
 This is code-path integration only. No simulator replay has exercised or
 inspected a P-shaped route from this seam yet, and the independent
