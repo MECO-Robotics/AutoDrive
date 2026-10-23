@@ -293,6 +293,45 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
     return logits.masked_fill(~support.valid_mask, -torch.inf), path_cost
 
 
+def _plan_a_prediction_risk(env, support, eta, prediction_mode):
+    """Compute Plan A endpoint risk under the shared current/CV contract."""
+    if prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    risk = torch.zeros_like(eta)
+    valid = bool(env.opponent_valid[0, 3])
+    if not valid:
+        return risk, {**prediction_contract(prediction_mode),
+                      "fallback": "none_no_valid_observation", "used_cv": False}
+    position = env.opponent_pose[0, 3, :2]
+    if not bool(torch.isfinite(position).all()):
+        return risk, {**prediction_contract(prediction_mode),
+                      "fallback": "none_nonfinite_observation", "used_cv": False}
+    predicted = position[None].expand(support.goal_xy.shape[0], -1)
+    fallback = None if prediction_mode == "current" else "observed_current_pose"
+    used_cv = False
+    age = float(env.opponent_age[0, 3])
+    velocity = env.opponent_velocity[0, 3, :2]
+    if (prediction_mode == "cv" and math.isfinite(age) and
+            0. <= age <= PREDICTION_MAX_AGE_S and
+            bool(torch.isfinite(velocity).all())):
+        speed = velocity.norm().clamp_min(1e-8)
+        bounded_velocity = velocity * torch.clamp(
+            PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+        predicted = position[None] + eta[:, None] * bounded_velocity[None]
+        fallback = None
+        used_cv = True
+    separation = (support.goal_xy - predicted).norm(dim=-1)
+    risk = PREDICTION_MAX_PENALTY_POINTS * (
+        (PREDICTION_THREAT_RADIUS_M - separation) /
+        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    return risk, {**prediction_contract(prediction_mode,
+        horizon_s=float(eta.max().item()) if eta.numel() else 0.),
+        "fallback": fallback, "used_cv": used_cv,
+        "observed_age_s": age if math.isfinite(age) else None,
+        "horizon_min_s": float(eta.min().item()) if eta.numel() else 0.,
+        "horizon_max_s": float(eta.max().item()) if eta.numel() else 0.}
+
+
 def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
@@ -1118,6 +1157,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   evaluation_policies: tuple[str, ...] | None = None,
                   control_policies: tuple[str, ...] | None = None,
                   prediction_mode: str | None = None,
+                  candidate_k_override: int | None = None,
+                  control_prediction_mode: str | None = None,
                   inference_disable_tick: int | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
@@ -1126,6 +1167,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("split must be train, validation, test, or calibration")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"control_prediction_mode must be one of {PREDICTION_MODES}")
+    if candidate_k_override is not None and candidate_k_override not in (8, 16, 32):
+        raise ValueError("candidate_k_override must be 8, 16, or 32")
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
@@ -1160,8 +1205,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("control_policies must be a unique subset of D0/D1/D2")
     if include_controls and "D0" not in controls:
         raise ValueError("matched evaluation requires D0 as the paired reference")
-    control_prediction_modes = {"D1": prediction_mode or "current",
-                                 "D2": prediction_mode or "cv"}
+    control_prediction_modes = {"D1": control_prediction_mode or "current",
+                                 "D2": control_prediction_mode or "cv"}
     if not selected and (controls != ("D0",) or not include_controls):
         raise ValueError("D0-only evaluation requires exactly the D0 control")
     sources = source_identity()
@@ -1170,7 +1215,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     loaded = {}
     policy_manifest = {}
     route_weight = None
-    candidate_k = None
+    checkpoint_candidate_k = None
     common_training_config = None
     common_training_protocol = None
     protocol_initialized = False
@@ -1194,9 +1239,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             route_weight = track_route_weight
         elif track_route_weight != route_weight:
             raise ValueError("paired evaluation checkpoints must share one route-cost weight")
-        if candidate_k is None:
-            candidate_k = track_candidate_k
-        elif track_candidate_k != candidate_k:
+        if checkpoint_candidate_k is None:
+            checkpoint_candidate_k = track_candidate_k
+        elif track_candidate_k != checkpoint_candidate_k:
             raise ValueError("paired evaluation checkpoints must share one candidate_k")
         model = make_meco_track(track,
             candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(device)
@@ -1255,7 +1300,17 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "training_configuration_sha256": hashlib.sha256(json.dumps(
                 immutable_track_config, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             "source_identity_sha256": hashlib.sha256(
-                json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+            json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+    candidate_k = (checkpoint_candidate_k if candidate_k_override is None
+                   else candidate_k_override)
+    if inference_disable_tick is not None:
+        first_macro_boundary = ((inference_disable_tick + action_ticks - 1) //
+                                action_ticks) * action_ticks
+        scenario_horizon = math.ceil(definition.time_budget_s / OBSERVATION_DT)
+        if first_macro_boundary >= scenario_horizon:
+            raise ValueError("inference disable tick has no macro boundary before episode horizon")
+    effective_prediction_mode = prediction_mode or learned_prediction_mode or "cv"
+    effective_control_modes = control_prediction_modes
     for track in ("A1", "A2", "A3"):
         if track not in policy_manifest:
             continue
@@ -1276,19 +1331,31 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 if control in control_prediction_modes else None),
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+    if inference_disable_tick is not None:
+        for track in selected:
+            base = policy_manifest[track]
+            policy_manifest[f"{track}__INFERENCE_DISABLED_TO_D1"] = {
+                **base,
+                "policy_id": f"{base['policy_id']}|inference_disabled_tick={inference_disable_tick}|fallback=D1",
+                "base_policy": track,
+                "inference_fault": "model_inference_disabled_at_macro_boundary_then_shared_D1"}
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
         "episode_seeds": list(episode_seeds) if episode_seeds is not None else None,
         "qualification_case": qualification_case,
+        "candidate_k": {"checkpoint": checkpoint_candidate_k,
+            "evaluation_override": candidate_k_override, "effective": candidate_k},
+        "prediction": {"learned_mode": effective_prediction_mode,
+            "control_override": control_prediction_mode,
+            "control_modes": effective_control_modes,
+            "contract": prediction_contract(effective_prediction_mode)},
+        "inference_disable_tick": inference_disable_tick,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
             "points_per_grid_edge": p_points_per_grid_edge,
             "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
             "path_units": PENALTY_PATH_UNITS,
             "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
-        "prediction": {"learned_mode": learned_prediction_mode,
-            "control_modes": control_prediction_modes,
-            "contract": {mode: prediction_contract(mode) for mode in PREDICTION_MODES}},
         "inference_disable_fault": {"requested_tick": inference_disable_tick,
             "fallback": "D1 deterministic scorer using checkpoint prediction mode",
             "trigger": "first macro decision boundary at or after requested physics tick"},
@@ -1350,13 +1417,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 seed = (episode_seeds[episode_index] if episode_seeds is not None
                         else master_seed + episode_index)
                 # Same simulator reset seed and task for every control and model.
-                policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
+                base_policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
                     if track in selected] + (list(controls) if include_controls else []))
-                policy_runs = [(policy, False) for policy in policies]
+                policy_runs = [(policy, False) for policy in base_policies]
                 if inference_disable_tick is not None:
                     policy_runs.extend((policy, True) for policy in selected)
                 for policy, inference_fault_run in policy_runs:
-                    record_policy = f"{policy}_inference_disabled" if inference_fault_run else policy
+                    record_policy = (f"{policy}__INFERENCE_DISABLED_TO_D1"
+                                     if inference_fault_run else policy)
                     episode_id = _episode_id(f"eval-{eval_id}-{category}-{record_policy}",
                                              episode_index)
                     is_production_d0 = policy == "D0"
@@ -1403,7 +1471,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "wall_contact_ticks": 0, "metrics_available": True}
                         post_fault_metrics_start = None
                         fault_fallback_count = 0
-                        decision_prediction_mode = policy_manifest[policy].get("prediction_mode")
+                        decision_prediction_mode = (
+                            effective_prediction_mode
+                            if policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")
+                            else effective_control_modes.get(policy))
                         while elapsed < env.horizon:
                             if (inference_fault_run and not inference_fault_reached
                                     and elapsed >= inference_disable_tick):
@@ -1465,11 +1536,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 candidate_set = build_route_feasible_candidates(env, obs, graph,
                                     episode_id=episode_id, action_ticks=action_ticks,
                                     candidate_k=candidate_k,
-                                    prediction_mode=decision_prediction_mode or "current")
+                                    prediction_mode=(effective_prediction_mode if use_d1_fallback
+                                        else effective_control_modes.get(policy, "current")))
                                 last_candidate_recall = candidate_set.candidate_recall
                                 logits = _d1_d2_scores(candidate_set, env,
                                     "D1" if use_d1_fallback else policy,
-                                    prediction_mode=decision_prediction_mode or "current")
+                                    prediction_mode=(effective_prediction_mode if use_d1_fallback
+                                        else effective_control_modes.get(policy, "current")))
                                 choice = int(logits.argmax(-1).item())
                                 _timing_sync(env)
                                 component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
@@ -1661,7 +1734,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "seed": seed, "policy": record_policy,
                             "paired_baseline_policy": policy if inference_fault_run else None,
                             "paired_record_policy": (policy if inference_fault_run else
-                                f"{policy}_inference_disabled" if fault_pair_id else None),
+                                record_policy if fault_pair_id else None),
                             "inference_disable_pair_id": fault_pair_id,
                             "inference_disable_fault": ({
                                 "requested_tick": inference_disable_tick,
@@ -1695,10 +1768,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "controller_cadence": ("native_20ms_physics_step" if is_production_d0
                                                     else "12_physics_step_macro"),
                             "action_count_semantics": ("executed_per_physics_step" if is_production_d0
+                                                       else "model_then_d1_fallback_per_macro" if inference_fault_run
                                                        else "selected_node_behavior_pair_per_macro" if policy in ("A1", "A2", "A3", "A1_P0", "A2_P0", "A3_P0")
                                                        else "selected_candidate_per_macro"),
-                            "policy_id": policy_manifest[policy]["policy_id"],
-                            "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
+                            "policy_id": policy_manifest[record_policy]["policy_id"],
+                            "checkpoint_sha256": policy_manifest[record_policy]["checkpoint_sha256"],
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
                             "prediction_mode": decision_prediction_mode,
@@ -1714,6 +1788,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "execution_failures": execution_failures,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
+                            "candidate_k": candidate_k,
+                            "base_policy": policy if inference_fault_run else None,
                             "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
                             "episode_id": episode_id})
@@ -1751,6 +1827,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
+            "candidate_k_checkpoint": checkpoint_candidate_k,
+            "candidate_k_evaluation_override": candidate_k_override,
+            "prediction": {"model": PREDICTION_MODEL_ID,
+                "learned_mode": effective_prediction_mode,
+                "control_modes": effective_control_modes,
+                "explicit_learned_override": prediction_mode,
+                "explicit_control_override": control_prediction_mode,
+                "contract": prediction_contract(effective_prediction_mode)},
+            "inference_disable_fault": ({
+                "requested_tick": inference_disable_tick,
+                "trigger_boundary": "first_macro_boundary_at_or_after_requested_tick",
+                "fallback_policy": "D1",
+                "trained_policies": list(selected),
+                "paired_normal_and_fault_records": True}
+                if inference_disable_tick is not None else None),
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",
@@ -1760,10 +1851,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "tracks": list(selected), "ablations": [f"{track}_P0" for track in ("A1", "A2", "A3")
                 if track in selected],
             "controls": list(controls) if include_controls else [],
-            "prediction": {"model": PREDICTION_MODEL_ID,
-                "learned_mode": learned_prediction_mode,
-                "control_modes": control_prediction_modes,
-                "explicit_control_override": prediction_mode,
+            "prediction_parameters": {"model": PREDICTION_MODEL_ID,
                 "parameters": {"cv_max_speed_mps": PREDICTION_MAX_SPEED_MPS,
                     "cv_max_track_age_s": PREDICTION_MAX_AGE_S,
                     "fixed_default_horizon_s": 1.0,
@@ -1868,7 +1956,11 @@ def _parser():
     ev.add_argument("--seed", type=int, default=20261024)
     ev.add_argument("--device", default="cpu")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
+        help="override learned A/C prediction mode; default preserves checkpoint mode")
+    ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,
         help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--candidate-k-override", type=int, choices=(8, 16, 32),
+        help="evaluation-only candidate K for C tracks and controls")
     ev.add_argument("--inference-disable-tick", type=int,
         help="also run same-seed learned-policy pairs that disable inference at the first macro boundary at or after this physics tick")
     ev.add_argument("--output", required=True)
@@ -1908,6 +2000,8 @@ def main(argv=None):
         categories=tuple(item for item in args.categories.split(",") if item),
         episodes=args.episodes, master_seed=args.seed, device=args.device,
         output=args.output, prediction_mode=args.prediction_mode,
+        control_prediction_mode=args.control_prediction_mode,
+        candidate_k_override=args.candidate_k_override,
         inference_disable_tick=args.inference_disable_tick)
     print(json.dumps({"evaluation_id": report["evaluation_id"],
         "protocol_id": report["protocol_id"], "records": len(report["records"]),

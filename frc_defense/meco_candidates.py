@@ -512,6 +512,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     oracle_cost_values = [route_costs[i] for i in oracle_indices]
     selected_cost_values = [route_costs[i] for i in range(candidate_k) if valid_mask[i]]
     recall = {"candidate_capacity": candidate_k,
+              "prediction_mode": prediction_mode,
               "reference_pool_capacity": oracle_capacity,
               "valid_executable_candidates": len(requested_ids),
               "reference_scope": "independent_expanded_goal_oracle",

@@ -24,6 +24,13 @@ from .learning_inputs import build_observation_snapshot
 MECO_TRACKS = ("A1", "A2", "A3", "C1", "C2")
 MECO_SCHEMA_VERSION = 1
 HIDDEN = 64
+PREDICTION_MODES = ("current", "cv")
+PREDICTION_MODEL_ID = "meco_opponent_forecast_v1"
+PREDICTION_MAX_SPEED_MPS = 3.0
+PREDICTION_MAX_AGE_S = .5
+PREDICTION_DEFAULT_HORIZON_S = 1.0
+PREDICTION_THREAT_RADIUS_M = 2.0
+PREDICTION_MAX_PENALTY_POINTS = .75
 SAFE_ACTION_FEATURES = (
     "action_index", "sensor_track_buffer_index", "goal_x_m", "goal_y_m",
     "heading_bin", "behavior_index", "field_length_m", "field_width_m",
@@ -731,9 +738,29 @@ def predict_opponent_endpoint(*, valid, position_xy, velocity_xy, age_s,
             float(position_xy[1]) + vy * scale * horizon_s)
 
 
+def prediction_contract(mode: str, *, horizon_s: float | None = None) -> dict:
+    """Canonical forecast parameters included in matched-evaluation provenance."""
+    if mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction mode must be one of {PREDICTION_MODES}")
+    horizon = (0.0 if mode == "current" else
+               None if horizon_s is None else float(horizon_s))
+    if horizon is not None and (not math.isfinite(horizon) or horizon < 0.):
+        raise ValueError("prediction horizon must be finite and nonnegative")
+    return {"model": PREDICTION_MODEL_ID, "mode": mode,
+        "horizon_s": horizon,
+        "horizon_semantics": ("observed_current_pose" if mode == "current" else
+            "caller_supplied_eta_or_fixed_horizon" if horizon is None else "fixed_or_caller_supplied"),
+        "max_speed_mps": PREDICTION_MAX_SPEED_MPS if mode == "cv" else None,
+        "max_track_age_s": PREDICTION_MAX_AGE_S if mode == "cv" else None,
+        "threat_radius_m": PREDICTION_THREAT_RADIUS_M,
+        "max_penalty_points": PREDICTION_MAX_PENALTY_POINTS,
+        "fallback": ("none_if_observed_pose_missing_or_nonfinite" if mode == "current"
+            else "current_finite_observed_pose_when_cv_unavailable; otherwise_none")}
+
+
 def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
                       age_s, horizon_s: float | None = None) -> dict:
-    """Return a finite shared forecast and auditable stale-state fallback."""
+    """Return an observed-pose or bounded CV forecast with explicit fallback."""
     if mode not in PREDICTION_MODES:
         raise ValueError(f"prediction mode must be one of {PREDICTION_MODES}")
     pose = None
