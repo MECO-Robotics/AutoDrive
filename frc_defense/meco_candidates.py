@@ -27,7 +27,7 @@ from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
 CANDIDATE_BOUNDARY = {
-    "version": 6,
+    "version": 7,
     "capacity": [8, 16, 32],
     "source": "existing simulator action slots",
     "configurable_k": True,
@@ -46,8 +46,17 @@ CANDIDATE_BOUNDARY = {
     "commitment_target_matching_tolerance_m": 1.0,
     "commitment_switch_cost_points": 0.10,
     "hysteresis": "when a commitment is active, apply the same fixed switch-cost utility penalty to every feasible non-continue row for C1/C2/D1/D2; continuation remains dynamically revalidated",
-    "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
-    "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
+    "route_feasibility": "route and endpoint clearance plus bearing-aligned collection capture-envelope eligibility; inferred terminal heading is not commanded",
+    "capture_estimate": "bearing-aligned capture envelope eligibility proxy from sensed target geometry; excluded candidates are ineligible for Plan C ranking; native controller and simulator retain capture authority",
+    "capture_feasibility": {
+        "basis": "candidate goal XY and target XY projected into inferred target-bearing frame",
+        "longitudinal_min_m": "robot_length_m/2 - 0.075 - fuel_radius_m",
+        "longitudinal_max_m": "robot_length_m/2 + 0.35 + 0.3048 + fuel_radius_m",
+        "lateral_max_m": "robot_width_m/2 + 0.075 + fuel_radius_m",
+        "orientation": "bearing-aligned estimate; native controller chooses orientation",
+        "authority": "candidate eligibility proxy only; native gamepiece collision/capture logic is authoritative",
+        "missing_target": "ineligible"
+    },
     "plan_a_policy_support": "all reachable legal SE(2) graph nodes crossed with currently executable drive/intake/score/ferry/defense behaviors; carrying dumper ferry pairs are excluded because native release may preempt the selected endpoint",
     "plan_a_support_order": "legal_graph_node_ascending_then_behavior_0_to_4_then_descriptor_ascending_v2",
     "plan_a_support_membership": "one model-independent shortest-path pass over legal SE(2) graph plus vectorized behavior-specific endpoint/target constraints; independent of learned P",
@@ -227,32 +236,57 @@ def _goal_node(env, graph: LegalPoseGraph, xy, heading: float, *, intake_extende
 
 
 def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
-                           goal_xy) -> dict:
-    """Report sensed-target geometry without implying commanded orientation."""
+                           goal_xy, goal_heading: float | None = None) -> dict:
+    """Qualify sensed-target geometry in the candidate's inferred heading frame.
+
+    This is a conservative candidate eligibility proxy, not a command to the
+    native controller. Simulator capture and mechanism behavior remain the
+    final authority.
+    """
     if action >= 4:
-        return {"status": "not_applicable", "basis": "non_collection_action"}
+        return {"status": "not_applicable", "basis": "non_collection_action",
+                "feasible": True}
     row = base.table.features[action]
     if row[2] is None or row[3] is None:
-        return {"status": "unavailable", "basis": "target_not_sensed"}
+        return {"status": "unavailable", "basis": "target_not_sensed",
+                "feasible": False, "reason": "target_not_sensed"}
     slot = 3
     fuel = goal_xy.new_tensor((row[2], row[3]))
     delta = fuel - goal_xy
     distance = float(delta.norm().item())
     if not math.isfinite(distance):
-        return {"status": "unavailable", "basis": "nonfinite_target_geometry"}
+        return {"status": "unavailable", "basis": "nonfinite_target_geometry",
+                "feasible": False, "reason": "nonfinite_target_geometry"}
     radius = (float(env.fuel_physics.config.radius) if env.fuel_physics is not None
               else float(env._fuel_radius))
     half_length = float(env.sim.length[0, slot]) * .5
     half_width = float(env.sim.width[0, slot]) * .5
+    forward_min = half_length - .075 - radius
     forward_limit = (half_length + .35 + .3048 + radius)
     lateral_limit = half_width + .075 + radius
-    # Bearing-aligned point geometry only; actual terminal orientation and
-    # capture are controlled by the native controller and simulator.
-    inside = (-half_length - .075 - radius <= distance <= forward_limit
-              and 0. <= lateral_limit)
+    heading = (math.atan2(float(delta[1]), float(delta[0]))
+               if goal_heading is None and distance > 1e-12 else
+               (0. if goal_heading is None else float(goal_heading)))
+    forward = goal_xy.new_tensor((math.cos(heading), math.sin(heading)))
+    left = goal_xy.new_tensor((-math.sin(heading), math.cos(heading)))
+    longitudinal = float(torch.dot(delta, forward).item())
+    lateral = abs(float(torch.dot(delta, left).item()))
+    inside = (forward_min <= longitudinal <= forward_limit
+              and lateral <= lateral_limit)
+    reason = None
+    if longitudinal < forward_min:
+        reason = "target_behind_or_inside_minimum_capture_distance"
+    elif longitudinal > forward_limit:
+        reason = "target_beyond_forward_capture_limit"
+    elif lateral > lateral_limit:
+        reason = "target_outside_lateral_capture_limit"
     return {"status": "inside_estimate" if inside else "outside_estimate",
             "basis": "sensed_target_bearing_geometry_only",
+            "feasible": bool(inside), "reason": reason,
             "distance_m": distance,
+            "estimated_longitudinal_m": longitudinal,
+            "estimated_lateral_m": lateral,
+            "estimated_min_forward_m": forward_min,
             "estimated_forward_limit_m": forward_limit,
             "estimated_lateral_limit_m": lateral_limit}
 
@@ -351,6 +385,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         for action in range(4):
             specs.append((action, variant, forward, lateral))
     targets, headings, route_queries, goal_nodes = [], [], [], []
+    capture_estimates = []
     hbins, requested, ids = [], [], []
     for row_index, (action, variant, forward_offset, lateral_offset) in enumerate(specs):
         target, heading, allowed, intake = _candidate_target(env, action, base)
@@ -387,6 +422,11 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                     allowed &= node is not None
                     if center is not None:
                         target = center
+        capture_estimate = _capture_pose_estimate(env, base, action, target,
+                                                   goal_heading=heading)
+        if action < 4:
+            allowed &= bool(capture_estimate["feasible"])
+        capture_estimates.append(capture_estimate)
         targets.append(target)
         headings.append(heading)
         goal_nodes.append(node)
@@ -459,7 +499,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         rows.append(tuple(row))
         route_costs.append(0. if eta is None else eta * ROUTE_COST_POINTS_PER_SECOND)
         risk_costs.append(0. if risk is None else risk)
-        capture_estimate = _capture_pose_estimate(env, base, action, goal_xy)
+        capture_estimate = capture_estimates[row_index]
         routes.append({"candidate_id": candidate_id,
             "action_index": action,
             "candidate_row": row_index,
