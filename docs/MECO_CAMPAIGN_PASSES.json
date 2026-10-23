@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -8,24 +8,31 @@
       "status": "complete",
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
-        "planner findings recorded in implementation handoff"
+        "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
+        "Formal qualification and promotion protocol plan; implementation batch now active"
       ]
     },
     {
       "pass": "implementer",
       "status": "complete",
       "provenance": [
-        "branch codex/meco-five-plan",
-        "implementation commits 8e220ee6, 1f910eab, b04c05d9, 8de1ff6a, 22d7bfca, a9071b6b, and 2e53ce08",
-        "Plan A path integration, P=0 controls, supervisor cleanup, dashboard provenance, legal-pose graph indexing, and candidate feature schema"
+        "Phase 5 checkpointed ONNX export and synthetic scorer profiling: codex/meco-plan-remaining commits 8aece6ee5, 4eaf5025a, and e5d9d2898",
+        "Plan A implementation through 77067a2c9e7868f3923a93273c42c1b787ec53d9; approved by integrated static review",
+        "Plan C implementation through ed78c5ba9; approved by integrated static review",
+        "Formal qualification implementation through 9e02874c155f32f6409678f00ee95de31e2d1cdd; failure status is visible even if state persistence fails",
+        "Prior reviewed implementation: branch codex/meco-five-plan; commits 8e220ee6, 1f910eab, b04c05d9, 8de1ff6a, 22d7bfca, a9071b6b, and 2e53ce08"
       ]
     },
     {
       "pass": "reviewer",
       "status": "complete",
       "provenance": [
-        "read-only source review of 8e220ee6, 1f910eab, b04c05d9, 8de1ff6a, 22d7bfca, a9071b6b, and 2e53ce08",
-        "review found no blocker in scoped changes; simulator runtime validation remains outstanding"
+        "Phase 5 static review approved e5d9d2898",
+        "Integrated read-only Plan A review approved through 77067a2c9e7868f3923a93273c42c1b787ec53d9; runtime validation remains outstanding",
+        "Plan C integrated re-review approved through ed78c5ba9; runtime validation remains outstanding",
+        "Formal qualification integrated review approved through 9e02874c155f32f6409678f00ee95de31e2d1cdd; runtime simulator validation and baseline variance review remain outstanding"
       ]
     }
   ]
