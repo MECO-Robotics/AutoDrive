@@ -552,7 +552,8 @@ def main(argv=None):
     counterfactual.add_argument("--prediction-mode", choices=PREDICTION_MODES, default="cv")
     counterfactual.add_argument("--max-c-candidates", type=int, default=8)
     counterfactual.add_argument("--max-a-pairs", type=int, default=8)
-    counterfactual.add_argument("--gamma", type=float, default=.993)
+    counterfactual.add_argument("--gamma-per-macro", type=float, default=.993,
+        help="discount applied once per decision macro, including a final partial macro")
     warm = commands.add_parser("warm-start")
     warm.add_argument("--track", choices=MECO_TRACKS, required=True)
     warm.add_argument("--dataset", type=Path, required=True)
@@ -576,7 +577,7 @@ def main(argv=None):
             horizon_ticks=args.horizon_ticks, action_ticks=args.action_ticks,
             candidate_k=args.candidate_k, prediction_mode=args.prediction_mode,
             max_c_candidates=args.max_c_candidates, max_a_pairs=args.max_a_pairs,
-            gamma=args.gamma)
+            gamma_per_macro=args.gamma_per_macro)
     else:
         result = warm_start(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,

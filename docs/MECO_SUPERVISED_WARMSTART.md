@@ -88,6 +88,15 @@ the current simulator executor does not execute P-modified routes. The common
 continuation policy is the deterministic sensed-state teacher, and the artifact
 binds its source identity, runtime/device, frozen protocol/train split,
 candidate boundary, Plan A support order, horizon, and discount.
+The discount is explicitly per macro decision (`gamma_per_macro`); the branch
+reward has exponent zero and each continuation decision increments it once.
+A final decision may use fewer than `--action-ticks` physics steps to finish
+the fixed physics-tick horizon, and it still receives one macro discount.
+The branch transcript and prefix digest contain only decisions before the
+branch; the current decision's state and descriptor are stored separately.
+Parity hashing covers the environment and simulator object state, reward
+metrics, planner, fuel-physics object, and Python/NumPy/PyTorch RNG states. An
+unknown state object fails collection instead of being silently omitted.
 
 Example (start with a small train seed set; each decision branches multiple
 simulator rollouts):

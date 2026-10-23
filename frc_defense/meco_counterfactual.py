@@ -10,10 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import enum
 import platform
 from pathlib import Path
+import random
 import sys
+import types
 
+import numpy as np
 import torch
 
 from .curriculum_scenarios import make_curriculum_env, teacher_actions
@@ -28,6 +32,7 @@ from .training_curriculum import get_scenario
 
 DATASET_SCHEMA = "meco-counterfactual-trajectory-v2"
 TARGET_SCHEMA = "meco-matched-prefix-gross-return-v2"
+STATE_DIGEST_SCHEMA = "meco-full-environment-state-v1"
 DEFAULT_GAMMA = 0.993
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
 
@@ -42,24 +47,101 @@ def _tensor_digest(tensor):
     digest = hashlib.sha256()
     digest.update(str(value.dtype).encode())
     digest.update(json.dumps(list(value.shape)).encode())
-    digest.update(value.numpy().tobytes())
+    digest.update(value.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
+def _state_value(value, seen, path):
+    """Canonicalize mutable simulator/environment state; unknown state fails closed."""
+    if isinstance(value, torch.Tensor):
+        return {"tensor": _tensor_digest(value), "device": str(value.device)}
+    if isinstance(value, torch.Generator):
+        return {"torch_generator": str(value.device),
+                "state": _state_value(value.get_state(), seen, path + ".state")}
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return {"numpy_array": hashlib.sha256(array.tobytes()).hexdigest(),
+                "dtype": str(array.dtype), "shape": list(array.shape)}
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else {"nonfinite_float": repr(value)}
+    if isinstance(value, (torch.device, torch.dtype, torch.Size, Path)):
+        return {type(value).__name__: str(value)}
+    if isinstance(value, enum.Enum):
+        return {"enum": f"{type(value).__module__}.{type(value).__qualname__}",
+                "value": _state_value(value.value, seen, path + ".value")}
+    if isinstance(value, random.Random):
+        return {"python_random_state": _state_value(value.getstate(), seen,
+                                                     path + ".random_state")}
+    if isinstance(value, np.random.RandomState):
+        return {"numpy_random_state": _state_value(value.get_state(), seen,
+                                                    path + ".random_state")}
+    if isinstance(value, np.random.Generator):
+        return {"numpy_generator": _state_value(value.bit_generator.state, seen,
+                                                 path + ".bit_generator_state")}
+
+    object_id = id(value)
+    if object_id in seen:
+        return {"ref": seen[object_id]}
+    stable_id = len(seen)
+    seen[object_id] = stable_id
+
+    if isinstance(value, dict):
+        entries = [(_state_value(key, seen, f"{path}.key"),
+                    _state_value(item, seen, f"{path}[{key!r}]"))
+                   for key, item in value.items()]
+        entries.sort(key=lambda pair: json.dumps(pair[0], sort_keys=True,
+                                                  separators=(",", ":")))
+        return {"dict_id": stable_id, "entries": entries}
+    if isinstance(value, (list, tuple)):
+        return {"sequence_id": stable_id, "kind": type(value).__name__,
+                "items": [_state_value(item, seen, f"{path}[{index}]")
+                          for index, item in enumerate(value)]}
+    if isinstance(value, (set, frozenset)):
+        items = [_state_value(item, seen, f"{path}.item") for item in value]
+        items.sort(key=lambda item: json.dumps(item, sort_keys=True,
+                                               separators=(",", ":")))
+        return {"set_id": stable_id, "items": items}
+    if isinstance(value, types.MethodType):
+        return {"bound_method": f"{value.__func__.__module__}.{value.__func__.__qualname__}",
+                "self": _state_value(value.__self__, seen, path + ".self")}
+    if isinstance(value, type) or isinstance(value, (types.FunctionType,
+            types.BuiltinFunctionType, types.BuiltinMethodType)):
+        return {"callable_or_type": f"{getattr(value, '__module__', type(value).__module__)}."
+                f"{getattr(value, '__qualname__', type(value).__qualname__)}"}
+
+    attributes = getattr(value, "__dict__", None)
+    if attributes is not None:
+        return {"object_id": stable_id,
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "attributes": {name: _state_value(item, seen, f"{path}.{name}")
+                               for name, item in sorted(attributes.items())}}
+    slots = getattr(type(value), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    slot_values = {name: getattr(value, name) for name in slots
+                   if hasattr(value, name)}
+    if slot_values:
+        return {"object_id": stable_id,
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "slots": {name: _state_value(item, seen, f"{path}.{name}")
+                          for name, item in sorted(slot_values.items())}}
+    raise TypeError(f"cannot canonicalize mutable state at {path}: {type(value)!r}")
+
+
 def _simulator_state_digest(env):
-    """Hash every direct simulator tensor and scalar that defines physics state."""
-    state = {}
-    for name, value in sorted(vars(env.sim).items()):
-        if isinstance(value, torch.Tensor):
-            state[name] = _tensor_digest(value)
-        elif value is None or isinstance(value, (str, int, float, bool)):
-            if isinstance(value, float) and not math.isfinite(value):
-                state[name] = repr(value)
-            else:
-                state[name] = value
-    if not state:
-        raise RuntimeError("simulator exposes no hashable state; refusing weak replay parity")
-    return _hash(state)
+    """Hash simulator, reward, planner, fuel-physics, environment, and RNG state."""
+    state = {"environment": _state_value(env, {}, "env"),
+        "python_global_rng": _state_value(random.getstate(), {}, "python_rng"),
+        "numpy_global_rng": _state_value(np.random.get_state(), {}, "numpy_rng"),
+        "torch_global_rng": _state_value(torch.random.get_rng_state(), {}, "torch_rng"),
+        "torch_cuda_global_rng": [_state_value(value, {}, f"cuda_rng[{index}]")
+            for index, value in enumerate(torch.cuda.get_rng_state_all())]
+            if torch.cuda.is_available() else []}
+    return _hash({"schema": STATE_DIGEST_SCHEMA, "state": state})
 
 
 def _observation_digest(observation):
@@ -142,6 +224,7 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
         item["descriptor_sha256"] = _hash(item)
         a_descriptors.append(item)
     return {"snapshot_id": observation.snapshot_id,
+        "macro_ticks": action_ticks,
         "simulator_state_sha256": _simulator_state_digest(env),
         "observation_sha256": _observation_digest(env._last_obs),
         "safe_observation_sha256": _hash({"snapshot_id": observation.snapshot_id,
@@ -167,7 +250,7 @@ def _rebuild_and_check(env, graph, episode_id, expected, *, action_ticks,
     actual = _prefix_snapshot(env, graph, episode_id, action_ticks=action_ticks,
         candidate_k=candidate_k, prediction_mode=prediction_mode,
         max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs)
-    for field in ("snapshot_id", "simulator_state_sha256", "observation_sha256",
+    for field in ("snapshot_id", "macro_ticks", "simulator_state_sha256", "observation_sha256",
                   "safe_observation_sha256", "candidate_digest",
                   "candidate_replay_digest", "support_digest",
                   "candidate_descriptors", "plan_a_descriptors"):
@@ -179,7 +262,7 @@ def _rebuild_and_check(env, graph, episode_id, expected, *, action_ticks,
 def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
                    action_ticks, decision_index, prefix, descriptor, kind,
                    candidate_k, prediction_mode, max_c_candidates,
-                   max_a_pairs, gamma):
+                   max_a_pairs, gamma_per_macro):
     from .meco_track_training import _reset_episode
     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                               horizon=horizon_ticks)
@@ -189,13 +272,13 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
         _reset_episode(env, seed)
         for row in prefix[:decision_index]:
             current = _rebuild_and_check(env, graph, episode_id, row,
-                action_ticks=action_ticks, candidate_k=candidate_k,
+                action_ticks=row["macro_ticks"], candidate_k=candidate_k,
                 prediction_mode=prediction_mode,
                 max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs)
             if current["teacher_action"] != row["teacher_action"]:
                 raise RuntimeError("teacher prefix action changed during replay")
             _, ended, timeout, trace, _, _, _ = _reward_step(env,
-                row["teacher_action"], action_ticks,
+                row["teacher_action"], row["macro_ticks"],
                 goal_xy=row["prefix_goal_xy_m"],
                 goal_heading=row["prefix_goal_heading_rad"],
                 allow_action7_traversal=row["prefix_action7_traversal"])
@@ -204,9 +287,10 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
             if ended or timeout:
                 raise RuntimeError("prefix ended before its archived branch point")
         current = _rebuild_and_check(env, graph, episode_id, prefix[decision_index],
-            action_ticks=action_ticks, candidate_k=candidate_k,
+            action_ticks=prefix[decision_index]["macro_ticks"], candidate_k=candidate_k,
             prediction_mode=prediction_mode, max_c_candidates=max_c_candidates,
             max_a_pairs=max_a_pairs)
+        branch_ticks = prefix[decision_index]["macro_ticks"]
         if kind == "C":
             choices = current["candidate_descriptors"]
             match = next((item for item in choices
@@ -214,31 +298,37 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
             if match is None:
                 raise RuntimeError("archived Plan C descriptor is absent after strict replay")
             reward, ended, timeout, _, _, _, _ = _reward_step(env, descriptor["action"],
-                action_ticks, goal_xy=descriptor["goal_xy_m"])
+                branch_ticks, goal_xy=descriptor["goal_xy_m"])
         else:
             match = next((item for item in current["plan_a_descriptors"]
                           if item["descriptor_sha256"] == descriptor["descriptor_sha256"]), None)
             if match is None:
                 raise RuntimeError("archived Plan A descriptor is absent after strict replay")
             reward, ended, timeout, _, _, _, _ = _reward_step(env, descriptor["action"],
-                action_ticks, goal_xy=descriptor["goal_xy_m"],
+                branch_ticks, goal_xy=descriptor["goal_xy_m"],
                 goal_heading=descriptor["goal_heading_rad"],
                 allow_action7_traversal=(descriptor["action"] == 7))
         discounted = reward
         total_macro_return = reward
-        ticks = action_ticks
-        remaining = max(0, horizon_ticks - (decision_index + 1) * action_ticks)
-        while not (ended or timeout) and decision_index * action_ticks + ticks < horizon_ticks:
+        elapsed_ticks = sum(row["macro_ticks"] for row in prefix[:decision_index]) + branch_ticks
+        continuation_decisions = 0
+        while not (ended or timeout) and elapsed_ticks < horizon_ticks:
             action = int(teacher_actions(env, env._last_obs)[0, 3].item())
-            step_reward, ended, timeout, _, _, _, _ = _reward_step(env, action, action_ticks)
+            macro_ticks = min(action_ticks, horizon_ticks - elapsed_ticks)
+            step_reward, ended, timeout, trace, _, _, _ = _reward_step(
+                env, action, macro_ticks)
+            if len(trace) != macro_ticks and not (ended or timeout):
+                raise RuntimeError("continuation macro ended before its allotted ticks")
             total_macro_return += step_reward
-            discounted += (gamma ** (ticks / action_ticks)) * step_reward
-            ticks += action_ticks
+            continuation_decisions += 1
+            discounted += (gamma_per_macro ** continuation_decisions) * step_reward
+            elapsed_ticks += len(trace)
         return {"gross_macro_return": reward,
             "gross_horizon_return": total_macro_return,
             "discounted_horizon_return": discounted,
             "continuation_policy": CONTINUATION_POLICY,
-            "continuation_macro_horizon": max(0, math.ceil(remaining / action_ticks)),
+            "continuation_macro_horizon": continuation_decisions,
+            "discount_semantics": "gamma_per_macro_decision; first branch reward exponent 0; each continuation decision increments exponent once, including a final partial macro",
             "terminal": bool(ended or timeout)}
     finally:
         close = getattr(env, "close", None)
@@ -250,7 +340,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         seeds: list[int], qualification_protocol: Path, device="cpu",
         horizon_ticks=160, action_ticks=12, candidate_k=16,
         prediction_mode="cv", max_c_candidates=8, max_a_pairs=8,
-        gamma=DEFAULT_GAMMA):
+        gamma_per_macro=DEFAULT_GAMMA):
     """Collect matched-prefix v2 labels; any parity mismatch aborts the file."""
     from .meco_supervised import _load_protocol, _protocol_train_seeds
     from .meco_track_training import _reset_episode
@@ -272,8 +362,8 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             type(candidate_k) is not int or candidate_k not in (8, 16, 32) or
             type(max_c_candidates) is not int or max_c_candidates < 2 or
             type(max_a_pairs) is not int or max_a_pairs < 2 or
-            not isinstance(gamma, (int, float)) or not math.isfinite(gamma) or
-            not 0 < gamma <= 1):
+            not isinstance(gamma_per_macro, (int, float)) or
+            not math.isfinite(gamma_per_macro) or not 0 < gamma_per_macro <= 1):
         raise ValueError("invalid counterfactual horizon, sample limits, or discount")
     sources = source_identity()
     device_metadata = _device_identity(device)
@@ -283,14 +373,15 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "split": "train", "scenario_id": scenario_id, "category": category,
         "seeds": list(seeds), "sources": sources,
         "source_identity_sha256": _hash(sources), "device": device_metadata,
+        "state_digest_schema": STATE_DIGEST_SCHEMA,
         "prediction_mode": prediction_mode,
         "prediction_contract": prediction_contract(prediction_mode),
         "candidate_boundary": CANDIDATE_BOUNDARY,
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
         "plan_a_support_order": SUPPORT_ORDER,
-        "horizon_physics_ticks": horizon_ticks, "action_ticks": action_ticks,
-        "gamma_per_physics_tick": gamma,
-        "discount_per_macro": gamma ** action_ticks,
+        "horizon_physics_ticks": horizon_ticks, "max_macro_ticks": action_ticks,
+        "gamma_per_macro": gamma_per_macro,
+        "discount_semantics": "one discount transition per macro decision, independent of macro duration; first branch reward exponent 0 and each continuation decision increments exponent once, including a final partial macro",
         "continuation_policy": CONTINUATION_POLICY,
         "max_plan_c_descriptors_per_prefix": max_c_candidates,
         "max_plan_a_pairs_per_prefix": max_a_pairs,
@@ -309,16 +400,19 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
             _reset_episode(env, seed)
             prefix = []
-            max_decisions = max(1, horizon_ticks // action_ticks)
-            for _ in range(max_decisions):
+            elapsed_ticks = 0
+            while elapsed_ticks < horizon_ticks:
+                macro_ticks = min(action_ticks, horizon_ticks - elapsed_ticks)
                 item = _prefix_snapshot(env, graph, episode_id,
-                    action_ticks=action_ticks, candidate_k=candidate_k,
+                    action_ticks=macro_ticks, candidate_k=candidate_k,
                     prediction_mode=prediction_mode,
                     max_c_candidates=max_c_candidates,
                     max_a_pairs=max_a_pairs)
                 prefix.append(item)
                 reward, ended, timeout, trace, heading_error, goal_distance, preempted = _reward_step(
-                    env, item["teacher_action"], action_ticks)
+                    env, item["teacher_action"], macro_ticks)
+                if len(trace) != macro_ticks and not (ended or timeout):
+                    raise RuntimeError("teacher prefix macro ended before its allotted ticks")
                 item.update(prefix_goal_xy_m=None, prefix_goal_heading_rad=None,
                     prefix_action7_traversal=False, executed_action_trace=trace,
                     prefix_gross_return=reward,
@@ -328,6 +422,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     prefix_candidate_commitment=None)
                 if ended or timeout:
                     break
+                elapsed_ticks += len(trace)
         finally:
             close = getattr(env, "close", None)
             if callable(close):
@@ -336,7 +431,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             group = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
                 "scenario_id": scenario_id, "category": category, "seed": seed,
                 "decision_index": decision_index,
-                "prefix_sha256": _hash(prefix[:decision_index + 1]),
+                "prefix_sha256": _hash(prefix[:decision_index]),
                 "protocol_id": protocol_id,
                 "qualification_protocol_sha256": protocol_sha,
                 "source_identity_sha256": manifest["source_identity_sha256"],
@@ -346,9 +441,20 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                 "candidate_digest": item["candidate_digest"],
                 "candidate_replay_digest": item["candidate_replay_digest"],
                 "support_digest": item["support_digest"],
-                "action_ticks": action_ticks, "horizon_physics_ticks": horizon_ticks,
-                "gamma_per_physics_tick": gamma,
-                "discount_per_macro": gamma ** action_ticks,
+                "macro_ticks": item["macro_ticks"],
+                "macro_start_tick": sum(row["macro_ticks"] for row in prefix[:decision_index]),
+                "max_macro_ticks": action_ticks,
+                "horizon_physics_ticks": horizon_ticks,
+                "gamma_per_macro": gamma_per_macro,
+                "discount_semantics": manifest["discount_semantics"],
+                "branch_state": {
+                    "snapshot_id": item["snapshot_id"],
+                    "simulator_state_sha256": item["simulator_state_sha256"],
+                    "observation_sha256": item["observation_sha256"],
+                    "safe_observation_sha256": item["safe_observation_sha256"],
+                    "candidate_digest": item["candidate_digest"],
+                    "candidate_replay_digest": item["candidate_replay_digest"],
+                    "support_digest": item["support_digest"]},
                 "prefix_transcript": [{
                     "predecision_simulator_state_sha256": row["simulator_state_sha256"],
                     "predecision_observation_sha256": row["observation_sha256"],
@@ -356,6 +462,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     "candidate_replay_digest": row["candidate_replay_digest"],
                     "support_digest": row["support_digest"],
                     "snapshot_id": row["snapshot_id"],
+                    "macro_ticks": row["macro_ticks"],
                     "action": row["teacher_action"],
                     "goal_xy_m": row["prefix_goal_xy_m"],
                     "goal_heading_rad": row["prefix_goal_heading_rad"],
@@ -363,7 +470,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     "candidate_commitment": row["prefix_candidate_commitment"],
                     "executed_action_trace": row["executed_action_trace"],
                     "gross_macro_return": row["prefix_gross_return"]}
-                    for row in prefix[:decision_index + 1]]}
+                    for row in prefix[:decision_index]]}
             c_outcomes = []
             for descriptor in item["candidate_descriptors"]:
                 outcome = _branch_return(scenario_id=scenario_id, category=category,
@@ -372,7 +479,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     prefix=prefix, descriptor=descriptor, kind="C",
                     candidate_k=candidate_k, prediction_mode=prediction_mode,
                     max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-                    gamma=gamma)
+                    gamma_per_macro=gamma_per_macro)
                 c_outcomes.append({"descriptor": descriptor, **outcome})
             c_pairs = [{"left_id": left["descriptor"]["candidate_id"],
                 "right_id": right["descriptor"]["candidate_id"],
@@ -391,7 +498,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     prefix=prefix, descriptor=descriptor, kind="A",
                     candidate_k=candidate_k, prediction_mode=prediction_mode,
                     max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-                    gamma=gamma)
+                    gamma_per_macro=gamma_per_macro)
                 a_outcomes.append({"descriptor": descriptor, **outcome,
                     "p_target": None, "p_prior": 0.0,
                     "p_unlabelled_reason": manifest["plan_a_p_unlabelled_reason"]})
@@ -408,7 +515,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                 "plan_c_pairwise_labels": c_pairs,
                 "plan_a_sampled_node_behavior_labels": a_outcomes,
                 "plan_a_pairwise_preferences": a_pairs,
-                "teacher_prefix_action": item["teacher_action"],
+                "branch_teacher_action_reference": item["teacher_action"],
                 "teacher_prefix_provenance": CONTINUATION_POLICY})
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during counterfactual collection")
