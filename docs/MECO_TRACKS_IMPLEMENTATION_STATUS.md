@@ -126,7 +126,13 @@ their ancestors. Stage unlocks mean exposure only; they do not update
 evaluation remains a diagnostic comparison and does not implement the full
 held-out defender-family protocol. Baseline freezes, qualified retention,
 full-game metrics, simulator records, confidence-interval promotion gates,
-supervised warm start, Hailo/ONNX export, and hardware profiling remain open.
+full Phase 2 expert goal-value supervision, Hailo/ONNX export, and hardware
+profiling remain open. The separate v2 matched-prefix gross-return pairwise
+fitter and weights-only loader are implemented alongside the observation-only
+v1 path. They are not behavior-validated: no v2 dataset has been replayed and
+fit here, and no representative end-to-end simulator evaluation has been
+reviewed. See [MECO_SUPERVISED_WARMSTART.md](MECO_SUPERVISED_WARMSTART.md) for
+the v1/v2 commands and contracts.
 
 ## Adapter calls
 

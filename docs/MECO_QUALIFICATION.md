@@ -42,10 +42,59 @@ commands; start lanes and sensor noise also vary in the simulator. These case
 changes have only received static checks in this implementation. They have
 not been validated in an end-to-end simulator evaluation.
 
-Gate values are frozen in the protocol but remain provisional until a
-scripted-reference baseline variance review is completed. The dashboard shows
-that calibration state alongside any passing streak; a reported promotion is
-conditional on those provisional thresholds.
+Gate values in the legacy v1 protocol are provisional. Such a protocol remains
+readable for historical reports, but it cannot advance promotion. Calibrate D0
+on a dedicated seed partition, then freeze a target-scoped v2 protocol with
+reports for the target and every transitive prerequisite, plus explicit useful
+gain and safety noninferiority margins. For a target with prerequisites, run
+`calibrate-d0` once per scenario in its prerequisite closure and bundle those
+immutable reports:
+
+```bash
+python -m frc_defense.meco_qualification calibrate-d0 \
+  --scenario pickup_simple --episodes 100 --repetitions 3 \
+  --master-seed 20261024 --output qualifications/meco/d0-calibration-pickup-simple.json
+
+python -m frc_defense.meco_qualification bundle-calibrations \
+  --report qualifications/meco/d0-calibration-pickup-simple.json \
+  --output qualifications/meco/d0-calibration-pickup-simple-bundle.json
+
+python -m frc_defense.meco_qualification create-protocol \
+  --scenario pickup_simple --episodes 100 --master-seed 20261024 \
+  --calibration-bundle-json qualifications/meco/d0-calibration-pickup-simple-bundle.json \
+  --minimum-useful-gain-json qualifications/meco/useful-gain-margins.json \
+  --safety-margins-json qualifications/meco/safety-margins.json \
+  --output qualifications/meco/protocol-pickup-simple-v2.json
+```
+
+Calibration repeats the same seed list independently to separate repeat-run
+variation from across-seed variation. Calibration seeds use split code 3 and
+are checked against train, validation, and test seeds. Existing v1 protocol
+files are not rewritten. The v2 digest binds the calibration report, source
+identity, per-scenario seed pools and gates, gain margins, and safety margins.
+It contains exact train/validation/test lists for the target and prerequisite
+closure, and verifies calibration pools are disjoint from all three splits and
+from each other. Only the target can advance promotion; prerequisite runs are
+collected as retention evidence under the same protocol and checkpoint bundle.
+Promotion requires each paired
+useful-throughput confidence interval to clear its frozen gain margin. It also
+requires candidate-versus-D0 safety metrics named by the frozen safety-margin
+file. Until the evaluator emits those safety metrics, v2 promotion fails closed
+with an explicit missing-metric failure; calibration alone does not qualify a
+policy. Dashboard status reports protocol version, calibration ID, and safety
+gate readiness.
+
+Promotion consumption revalidates the complete v2 protocol schema, category
+and safety metric name sets, exact seed case table, calibration/source IDs,
+and an `evidence_sha256` over the immutable report's policy manifest, source
+identity, cases, and raw rows. Unknown `safety_*` row fields are rejected.
+These are unkeyed SHA-256 integrity checks: they detect edits when the recorded
+digest is retained, but they do not authenticate the report producer or stop a
+forger from replacing both data and digest. No signing key or trusted attestor
+is configured. For that reason the current protocol marks the safety schema as
+unsupported and promotion remains blocked even if a report claims safety
+metrics; a future metric implementation must bind supported metrics to its
+evaluator provenance before changing that gate status.
 
 Final-test execution is separate and requires the already promoted scenario,
 the same protocol, and the exact checkpoint bundle recorded at promotion. It

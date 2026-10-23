@@ -19,12 +19,13 @@ import torch
 from .experimental_route_evaluation import RouteQuery, evaluate_routes
 from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
-from .meco_tracks import SafeActionCandidates, build_safe_action_candidates, predict_opponent_endpoint
+from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
+    opponent_forecast, prediction_contract, PREDICTION_MODES,
+    PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
+    SAFE_ACTION_FEATURES, EXTRA_FEATURES)
 
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
-RISK_RADIUS_M = 2.0
-RISK_MAX_POINTS = 0.75
 CANDIDATE_BOUNDARY = {
     "version": 6,
     "capacity": [8, 16, 32],
@@ -57,9 +58,11 @@ CANDIDATE_BOUNDARY = {
     "plan_a_route_metadata": "frozen shortest-path parent tree including the root-pose connector and terminal headings; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks and guarded terminal alignment",
     "plan_a_candidate_k": "not used; candidate_k applies only to Plan C candidate scorers",
 }
-EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
-                  "risk_penalty_points", "target_heading_rad",
-                  "is_continue", "commitment_switch_cost")
+# The learned candidate scorers receive both these named table columns and
+# one missingness bit per column. Keep the contract shared with training and
+# checkpoint export rather than inferring it from a stale export fixture.
+CANDIDATE_BASE_FEATURE_COUNT = len(SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)
+CANDIDATE_MODEL_FEATURE_COUNT = 2 * CANDIDATE_BASE_FEATURE_COUNT
 
 
 @dataclass(frozen=True)
@@ -252,12 +255,12 @@ def _capture_pose_estimate(env, base: SafeActionCandidates, action: int,
             "estimated_lateral_limit_m": lateral_limit}
 
 
-def _opponent_prediction(env, slot=3, horizon=0.):
+def _opponent_prediction(env, slot=3, horizon=0., mode="cv"):
     valid = bool(env.opponent_valid[0, slot])
     age = float(env.opponent_age[0, slot])
     position = env.opponent_pose[0, slot, :2].detach().cpu().tolist()
     velocity = env.opponent_velocity[0, slot, :2].detach().cpu().tolist()
-    return predict_opponent_endpoint(valid=valid, position_xy=position,
+    return opponent_forecast(mode=mode, valid=valid, position_xy=position,
         velocity_xy=velocity, age_s=age, horizon_s=max(0., float(horizon)))
 
 
@@ -266,6 +269,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     graph: LegalPoseGraph, *, episode_id: str,
                                     action_ticks: int = 12,
                                     candidate_k: int = 8,
+                                    prediction_mode: str = "cv",
                                     learned_traversal_cost=None,
                                     learned_cost_scale: float = 1.0,
                                     commitment: CandidateCommitment | None = None) -> RouteFeasibleCandidates:
@@ -286,6 +290,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         raise ValueError("action_ticks must be a positive integer")
     if type(candidate_k) is not int or candidate_k not in (8, 16, 32):
         raise ValueError("candidate_k must be one of 8, 16, or 32")
+    if prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     base = build_safe_action_candidates(env, observation, world=0, slot=3,
                                         episode_id=episode_id)
     sequence = int(env.steps[0].item())
@@ -415,14 +421,14 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                               math.cos(headings[row_index] - pose_heading)))
         eta = (None if distance is None else distance / speed + turn / omega
                + action_ticks * float(env.dt))
-        predicted = _opponent_prediction(env, horizon=eta or 0.)
+        forecast = _opponent_prediction(env, horizon=eta or 0., mode=prediction_mode)
+        predicted = forecast["xy"]
         goal_xy = targets[row_index]
-        if predicted is None and bool(env.opponent_valid[0, 3]):
-            predicted = tuple(float(x) for x in env.opponent_pose[0, 3, :2])
         separation = None if predicted is None else math.hypot(
             float(goal_xy[0]) - predicted[0], float(goal_xy[1]) - predicted[1])
-        risk = (None if separation is None else RISK_MAX_POINTS *
-                max(0., min(1., (RISK_RADIUS_M - separation) / RISK_RADIUS_M)))
+        risk = (None if separation is None else PREDICTION_MAX_PENALTY_POINTS *
+                max(0., min(1., (PREDICTION_THREAT_RADIUS_M - separation) /
+                            PREDICTION_THREAT_RADIUS_M)))
         valid = bool(base.table.valid_mask[action] and route_ok)
         valid_mask.append(valid)
         # Update the shared target to the legal route endpoint, and preserve
@@ -460,6 +466,9 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "goal_heading_rad": float(headings[row_index]),
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
+            "opponent_prediction": {**forecast,
+                "contract": prediction_contract(prediction_mode,
+                    horizon_s=eta or 0.)},
             "endpoint_separation_m": separation, "risk_penalty_points": risk,
             "intake_extended": action < 4,
             "path_points_m": (None if result is None else result.path_points_m),
@@ -503,6 +512,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     oracle_cost_values = [route_costs[i] for i in oracle_indices]
     selected_cost_values = [route_costs[i] for i in range(candidate_k) if valid_mask[i]]
     recall = {"candidate_capacity": candidate_k,
+              "prediction_mode": prediction_mode,
               "reference_pool_capacity": oracle_capacity,
               "valid_executable_candidates": len(requested_ids),
               "reference_scope": "independent_expanded_goal_oracle",

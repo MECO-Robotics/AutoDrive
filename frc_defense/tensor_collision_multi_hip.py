@@ -79,7 +79,8 @@ def robot_contacts(sim, active_mask):
     active = torch.as_tensor(active_mask, device=sim.device, dtype=torch.bool)
     tensors = (sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
                sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
-               sim.robot_contact, sim.opponent_contact)
+               sim.robot_contact, sim.opponent_contact,
+               sim.robot_contact_by_robot)
     if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
         return False
     ext = _extension()
@@ -88,6 +89,7 @@ def robot_contacts(sim, active_mask):
     ext.robot_contacts(sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
                        sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
                        sim.robot_contact, sim.opponent_contact,
+                       sim.robot_contact_by_robot,
                        PARALLEL_SINGLE_WORLD)
     return True
 

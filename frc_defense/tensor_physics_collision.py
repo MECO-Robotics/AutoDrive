@@ -76,6 +76,8 @@ class TensorPhysicsCollisionMixin:
         self.velocity[:,0,:2]-=impulse*inv[:,0,None]; self.velocity[:,1,:2]+=impulse*inv[:,1,None]
         self.velocity[:,0,2]-=jt*rt0/I[:,0]; self.velocity[:,1,2]+=jt*rt1/I[:,1]
         self.robot_contact|=valid
+        self.robot_contact_by_robot[:,0] |= valid
+        self.robot_contact_by_robot[:,1] |= valid
         self.opponent_contact|=valid
 
     def _robot_collision_multi(self, active_mask):
@@ -156,6 +158,10 @@ class TensorPhysicsCollisionMixin:
         omega_delta.scatter_add_(1,pair_j[None,:].expand(self.n,-1),dw_j)
         velocity[...,:2].add_(velocity_delta); velocity[...,2].add_(omega_delta)
         self.robot_contact |= valid.any(-1)
+        self.robot_contact_by_robot |= torch.stack([
+            (valid & ((pair_i == robot) | (pair_j == robot))).any(-1)
+            for robot in range(self.num_robots)
+        ], dim=1)
         cross_alliance=self.team_ids[pair_i] != self.team_ids[pair_j]
         self.opponent_contact |= (valid & cross_alliance[None,:]).any(-1)
 

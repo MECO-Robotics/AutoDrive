@@ -25,19 +25,24 @@ from torch import nn
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .curriculum_training import source_identity
 from .training_curriculum import get_scenario
-from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES, CandidateCommitment,
+from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
     RouteFeasibleCandidates, build_route_feasible_candidates)
 from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
 from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, integrate_frozen_routes, project_pose_penalty)
-from .meco_tracks import (MECO_TRACKS, make_meco_track,
-    candidate_policy_logits, predict_opponent_endpoint,
+from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
+    make_meco_track,
+    candidate_policy_logits,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
-    candidate_digest)
+    candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
+    PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
+    PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
+    PREDICTION_MODEL_ID)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     SUPPORT_ORDER)
+from .meco_metric_ledger import MecoEpisodeMetricLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +75,7 @@ class MecoTrainConfig:
     p_mode: str = "learned"
     p_cost_scale: float = 1.0
     p_points_per_grid_edge: float = .05
+    prediction_mode: str = "cv"
     candidate_k: int = 16
     output: str = ""
 
@@ -88,6 +94,8 @@ class MecoTrainConfig:
             raise ValueError("candidate_k must be one of 8, 16, or 32")
         if self.p_mode not in ("learned", "p0"):
             raise ValueError("p_mode must be 'learned' or 'p0'")
+        if self.prediction_mode not in PREDICTION_MODES:
+            raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
         if self.device.startswith("cuda") and not torch.cuda.is_available():
             raise ValueError("requested ROCm/CUDA device is unavailable")
         for name in ("learning_rate", "gamma", "gae_lambda", "clip_coef",
@@ -192,6 +200,43 @@ def _path_cost_for_output(track, output, candidate_set, legal_lookup,
         points_per_grid_edge=config.p_points_per_grid_edge)
 
 
+def _plan_a_prediction_risk(env, support, eta, prediction_mode):
+    """Vectorized application of the shared current/CV forecast contract."""
+    if prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    risk = torch.zeros_like(eta)
+    meta = prediction_contract(prediction_mode,
+        horizon_s=(float(eta.max().item()) if eta.numel() else 0.))
+    if not bool(env.opponent_valid[0, 3]):
+        return risk, {**meta, "fallback": "none_no_valid_observation", "used_cv": False}
+    position = env.opponent_pose[0, 3, :2]
+    if not bool(torch.isfinite(position).all()):
+        return risk, {**meta, "fallback": "none_nonfinite_observation", "used_cv": False}
+    predicted = position[None].expand(support.goal_xy.shape[0], -1)
+    fallback = "observed_current_pose" if prediction_mode == "cv" else None
+    used_cv = False
+    if prediction_mode == "cv":
+        age = float(env.opponent_age[0, 3])
+        velocity = env.opponent_velocity[0, 3, :2]
+        if (math.isfinite(age) and 0. <= age <= PREDICTION_MAX_AGE_S and
+                bool(torch.isfinite(velocity).all())):
+            speed = velocity.norm().clamp_min(1e-8)
+            bounded_velocity = velocity * torch.clamp(
+                PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+            predicted = position[None] + eta[:, None] * bounded_velocity[None]
+            fallback = None
+            used_cv = True
+    separation = (support.goal_xy - predicted).norm(dim=-1)
+    risk = PREDICTION_MAX_PENALTY_POINTS * (
+        (PREDICTION_THREAT_RADIUS_M - separation) /
+        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    return risk, {**meta, "fallback": fallback, "used_cv": used_cv,
+        "observed_age_s": (float(env.opponent_age[0, 3])
+            if math.isfinite(float(env.opponent_age[0, 3])) else None),
+        "horizon_min_s": float(eta.min().item()) if eta.numel() else 0.,
+        "horizon_max_s": float(eta.max().item()) if eta.numel() else 0.}
+
+
 def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cost,
                             legal_lookup, planner_geometry, config, *, record=False):
     path_cost = _path_cost_for_output(track, decision["raw"], candidate_set,
@@ -226,18 +271,9 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
     route = (eta * float(config.route_cost_points_per_second) if route_nodes is None
              else route_nodes)
     risk = torch.zeros_like(route) if risk_nodes is None else risk_nodes
-    if risk_nodes is None and bool(env.opponent_valid[0, 3]):
-        age = float(env.opponent_age[0, 3])
-        position = env.opponent_pose[0, 3, :2]
-        velocity = env.opponent_velocity[0, 3, :2]
-        if 0. <= age <= .5:
-            speed = velocity.norm().clamp_min(1e-8)
-            velocity = velocity * torch.clamp(3. / speed, max=1.)
-            predicted = position[None] + eta[:, None] * velocity[None]
-        else:
-            predicted = position[None].expand(node_count, -1)
-        separation = (support.goal_xy - predicted).norm(dim=-1)
-        risk = .75 * ((2. - separation) / 2.).clamp(0., 1.)
+    if risk_nodes is None and env is not None:
+        risk, _ = _plan_a_prediction_risk(env, support, eta,
+                                          config.prediction_mode)
     path_cost = torch.zeros_like(route)
     if config.p_mode == "learned":
         field_length = (float(env.sim.field_length) if env is not None
@@ -257,10 +293,50 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
     return logits.masked_fill(~support.valid_mask, -torch.inf), path_cost
 
 
+def _plan_a_prediction_risk(env, support, eta, prediction_mode):
+    """Compute Plan A endpoint risk under the shared current/CV contract."""
+    if prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    risk = torch.zeros_like(eta)
+    valid = bool(env.opponent_valid[0, 3])
+    if not valid:
+        return risk, {**prediction_contract(prediction_mode),
+                      "fallback": "none_no_valid_observation", "used_cv": False}
+    position = env.opponent_pose[0, 3, :2]
+    if not bool(torch.isfinite(position).all()):
+        return risk, {**prediction_contract(prediction_mode),
+                      "fallback": "none_nonfinite_observation", "used_cv": False}
+    predicted = position[None].expand(support.goal_xy.shape[0], -1)
+    fallback = None if prediction_mode == "current" else "observed_current_pose"
+    used_cv = False
+    age = float(env.opponent_age[0, 3])
+    velocity = env.opponent_velocity[0, 3, :2]
+    if (prediction_mode == "cv" and math.isfinite(age) and
+            0. <= age <= PREDICTION_MAX_AGE_S and
+            bool(torch.isfinite(velocity).all())):
+        speed = velocity.norm().clamp_min(1e-8)
+        bounded_velocity = velocity * torch.clamp(
+            PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+        predicted = position[None] + eta[:, None] * bounded_velocity[None]
+        fallback = None
+        used_cv = True
+    separation = (support.goal_xy - predicted).norm(dim=-1)
+    risk = PREDICTION_MAX_PENALTY_POINTS * (
+        (PREDICTION_THREAT_RADIUS_M - separation) /
+        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    return risk, {**prediction_contract(prediction_mode,
+        horizon_s=float(eta.max().item()) if eta.numel() else 0.),
+        "fallback": fallback, "used_cv": used_cv,
+        "observed_age_s": age if math.isfinite(age) else None,
+        "horizon_min_s": float(eta.min().item()) if eta.numel() else 0.,
+        "horizon_max_s": float(eta.max().item()) if eta.numel() else 0.}
+
+
 def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
-                             p_mode, p_cost_scale, p_points_per_grid_edge):
+                             p_mode, p_cost_scale, p_points_per_grid_edge,
+                             prediction_mode="cv"):
     """Build stable full-pose support and sample from its exact masked softmax."""
     # Use the existing observation snapshot seam, but do not build or score a
     # bounded candidate table for Plan A. Candidate K remains a Plan C setting.
@@ -274,24 +350,14 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     seed_decision = {"raw": raw, "hidden": raw["hidden"]}
     config = SimpleNamespace(route_cost_points_per_second=route_cost_points_per_second,
         p_mode=p_mode, p_cost_scale=p_cost_scale,
-        p_points_per_grid_edge=p_points_per_grid_edge)
+        p_points_per_grid_edge=p_points_per_grid_edge,
+        prediction_mode=prediction_mode)
     logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
                                        graph, raster, env, config)
     eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1)
     route_nodes = eta * float(route_cost_points_per_second)
-    risk_nodes = torch.zeros_like(route_nodes)
-    if bool(env.opponent_valid[0, 3]):
-        age = float(env.opponent_age[0, 3])
-        position = env.opponent_pose[0, 3, :2]
-        velocity = env.opponent_velocity[0, 3, :2]
-        if 0. <= age <= .5:
-            speed = velocity.norm().clamp_min(1e-8)
-            velocity = velocity * torch.clamp(3. / speed, max=1.)
-            predicted = position[None] + eta[:, None] * velocity[None]
-        else:
-            predicted = position[None].expand(graph.node_count, -1)
-        separation = (support.goal_xy - predicted).norm(dim=-1)
-        risk_nodes = .75 * ((2. - separation) / 2.).clamp(0., 1.)
+    risk_nodes, prediction_metadata = _plan_a_prediction_risk(
+        env, support, eta, config.prediction_mode)
     fallback_used = not bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
     if fallback_used:
         action = torch.tensor([support.fallback_pair], device=env.device, dtype=torch.long)
@@ -311,7 +377,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "path_cost": path_cost, "legal_lookup": graph.lookup,
         "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
         "risk_cost_nodes": risk_nodes, "graph_object": graph,
-        "planner_object": env.planner, "fallback_used": fallback_used}
+        "planner_object": env.planner, "fallback_used": fallback_used,
+        "prediction": prediction_metadata}
 
 
 def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
@@ -331,6 +398,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       action_ticks=12, candidate_k=16, deterministic=False, value_head=None,
                       record_path_penalty=False,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
+                      prediction_mode="cv",
                       commitment: CandidateCommitment | None = None):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
@@ -339,9 +407,11 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             action_ticks=action_ticks, candidate_k=candidate_k,
             deterministic=deterministic, value_head=value_head,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
-            p_points_per_grid_edge=p_points_per_grid_edge)
+            p_points_per_grid_edge=p_points_per_grid_edge,
+            prediction_mode=prediction_mode)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
+        prediction_mode=prediction_mode,
         commitment=(commitment if track in ("C1", "C2") else None))
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     graph_data = _graph_inputs(track, graph, env, raster)
@@ -362,7 +432,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             candidate_set = build_route_feasible_candidates(env, observation, graph,
                 episode_id=episode_id, action_ticks=action_ticks,
                 candidate_k=candidate_k, learned_traversal_cost=preliminary_map,
-                learned_cost_scale=p_cost_scale)
+                learned_cost_scale=p_cost_scale, prediction_mode=prediction_mode)
         route_cost = _route_cost_tensor(candidate_set,
             route_cost_points_per_second, device=env.device)
         risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
@@ -400,9 +470,28 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
+def _physics_safety_snapshot(env):
+    """Read cumulative focal contact ticks at a macro boundary."""
+    names = {
+        "active_physics_ticks": "safety_active_physics_ticks",
+        "robot_contact_ticks": "safety_robot_contact_ticks",
+        "field_contact_ticks": "safety_field_contact_ticks",
+        "wall_contact_ticks": "safety_wall_contact_ticks",
+    }
+    snapshot = {}
+    for key, attr in names.items():
+        value = getattr(env.sim, attr, None)
+        if not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] < 1 or value.shape[1] <= 3:
+            return None
+        snapshot[key] = int(value[0, 3].detach().item())
+    return snapshot
+
+
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
-                    allow_action7_traversal=False):
+                    allow_action7_traversal=False,
+                    safety_counts: dict | None = None,
+                    metric_ledger: MecoEpisodeMetricLedger | None = None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
@@ -410,13 +499,28 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     executed_actions = []
     heading_alignment_opportunity = False
     native_goal_preempted = False
+    if safety_counts is not None and "_last_snapshot" not in safety_counts:
+        safety_counts["_last_snapshot"] = _physics_safety_snapshot(env)
     for _ in range(action_ticks):
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading)
+        if metric_ledger is not None:
+            metric_ledger.observe_outer_step()
         executed_actions.append(int(env.last_actions[0, 3].item()))
+        if safety_counts is not None:
+            current = _physics_safety_snapshot(env)
+            previous = safety_counts.get("_last_snapshot")
+            if current is None or previous is None:
+                safety_counts["metrics_available"] = False
+                safety_counts["_last_snapshot"] = current
+            else:
+                for key in ("active_physics_ticks", "robot_contact_ticks",
+                            "field_contact_ticks", "wall_contact_ticks"):
+                    safety_counts[key] += current[key] - previous[key]
+                safety_counts["_last_snapshot"] = current
         if goal_xy is not None:
             current_xy = env.sim.pose[0, 3, :2]
             goal_distance = float((current_xy - torch.as_tensor(
@@ -597,10 +701,16 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
 
 
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
+               warm_start: str | None = None,
+               qualification_protocol: str | None = None,
                stop_file: str | None = None, run_id_override: str | None = None,
                protocol_id: str | None = None,
                task_assignment: dict | None = None):
     config.validate()
+    if resume is not None and warm_start is not None:
+        raise ValueError("--resume and --warm-start are separate initialization modes")
+    if warm_start is not None and (qualification_protocol is None or not protocol_id):
+        raise ValueError("weights-only warm start requires a frozen qualification protocol and training protocol ID")
     task_assignment = dict(task_assignment or {})
     task_scenario = task_assignment.get("scenario_id", config.scenario_id)
     task_category = task_assignment.get("category", config.category)
@@ -612,6 +722,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         raise ValueError("scheduled task category is not registered for scenario")
     if type(task_seed) is not int or task_seed < 0:
         raise ValueError("scheduled task seed must be nonnegative")
+    qualification_protocol_data = None
+    qualification_protocol_id = None
+    qualification_protocol_sha256 = None
+    if qualification_protocol is not None:
+        from .meco_supervised import _load_protocol, validate_training_assignment
+        (qualification_protocol_data, qualification_protocol_id,
+         qualification_protocol_sha256, _) = _load_protocol(Path(qualification_protocol))
+        validate_training_assignment(qualification_protocol_data,
+            {"scenario_id": task_scenario, "category": task_category, "seed": task_seed})
     torch.set_num_threads(1)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -622,7 +741,23 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     output.mkdir(parents=True, exist_ok=True)
     sources = source_identity()
     model = make_meco_track(config.track,
-        candidate_features=len(__import__("frc_defense.meco_tracks", fromlist=["SAFE_ACTION_FEATURES"]).SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)).to(config.device)
+        candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(config.device)
+    warm_start_provenance = None
+    initialization_record = None
+    if warm_start is not None:
+        if protocol_id is None:
+            raise ValueError("weights-only warm start requires a frozen protocol ID")
+        from .meco_supervised import load_warm_start
+        warm_start_provenance = load_warm_start(config.track, model, Path(warm_start),
+            qualification_protocol=Path(qualification_protocol), expected_sources=sources,
+            expected_prediction_mode=config.prediction_mode)
+        initialization_record = {"mode": "weights_only_supervised_warm_start",
+            "warm_start_artifact_sha256": hashlib.sha256(
+                Path(warm_start).read_bytes()).hexdigest(),
+            "dataset_sha256": warm_start_provenance.get("dataset_sha256"),
+            "warm_start_source_identity_sha256": warm_start_provenance.get("source_identity_sha256"),
+            "qualification_protocol_id": warm_start_provenance.get("protocol_id"),
+            "qualification_protocol_sha256": warm_start_provenance.get("qualification_protocol_sha256")}
     value_head = ValueHead().to(config.device)
     optimizer = torch.optim.Adam(list(model.parameters()) + list(value_head.parameters()),
                                  lr=config.learning_rate)
@@ -636,7 +771,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         payload = torch.load(resume, map_location="cpu", weights_only=False)
         if payload.get("schema_version") != 1 or payload.get("sources") != sources:
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
-        if payload.get("protocol_id") not in (None, protocol_id):
+        if payload.get("protocol_id") != protocol_id:
             raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
         saved_config = payload.get("config")
         requested_config = asdict(config)
@@ -647,6 +782,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         if saved_config != requested_config:
             raise ValueError("MECO immutable run configuration mismatch")
         model.load_state_dict(payload["model"])
+        initialization_record = payload.get("initialization") or {"mode": "random_initialization"}
         value_head.load_state_dict(payload["value_head"])
         optimizer.load_state_dict(payload["optimizer"])
         update, episode, history = payload["update"], payload["episode"], payload["history"]
@@ -690,11 +826,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "graph": {"nodes": graph.node_count, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
+        "prediction_contract": prediction_contract(config.prediction_mode),
+        "qualification_protocol_id": qualification_protocol_id,
+        "qualification_protocol_sha256": qualification_protocol_sha256,
         "candidate_k": config.candidate_k,
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "chunk_start_update": update,
         "chunk_start_seed": chunk_seed,
         "started_utc": datetime.now(timezone.utc).isoformat(), "status": "running"}
+    run_manifest["initialization"] = initialization_record or {"mode": "random_initialization"}
     _atomic_json(output / "run.json", run_manifest)
     heartbeat_path = output / "heartbeat.json"
     def update_heartbeat():
@@ -726,6 +866,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         action_ticks=config.action_ticks, candidate_k=config.candidate_k,
                         p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                         p_points_per_grid_edge=config.p_points_per_grid_edge,
+                        prediction_mode=config.prediction_mode,
                         commitment=commitment,
                         value_head=value_head)
                     action_index = int(prepared["action"][0].item())
@@ -782,6 +923,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "risk_cost": prepared["risk_cost"].detach(),
                     "execution_failure": (forced_pending_goal or sampled_fallback or
                                           remasked or native_preempted),
+                    "prediction": prepared.get("prediction"),
                     "executed_action_trace": executed_trace,
                     "terminal_heading_error": heading_error,
                     "terminal_goal_distance_m": goal_distance,
@@ -869,6 +1011,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         action_ticks=config.action_ticks, candidate_k=config.candidate_k,
                         p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                         p_points_per_grid_edge=config.p_points_per_grid_edge,
+                        prediction_mode=config.prediction_mode,
                         commitment=commitment,
                         deterministic=True,
                         value_head=value_head)
@@ -898,7 +1041,11 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     for row in rows) / len(rows)
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
+                "prediction_contract": prediction_contract(config.prediction_mode),
+                "qualification_protocol_id": qualification_protocol_id,
+                "qualification_protocol_sha256": qualification_protocol_sha256,
                 "protocol_id": protocol_id,
+                "initialization": run_manifest["initialization"],
                 "task_assignment": task_assignment,
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
                 "sources": sources, "run_id": run_id, "update": update,
@@ -934,7 +1081,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "run_id": run_id, "status": run_manifest["status"]}
 
 
-def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str):
+def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
+                  prediction_mode: str | None = None):
     table = candidate_set.table
     cols = {name: i for i, name in enumerate(table.feature_names)}
     values = []
@@ -960,19 +1108,43 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str):
         else:
             score = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}.get(name, 0.)
         if opponent_valid:
-            if policy == "D2":
-                pred = predict_opponent_endpoint(valid=True, position_xy=opponent_xy,
-                    velocity_xy=velocity_xy, age_s=opponent_age,
-                    horizon_s=float(eta or 0.), max_speed_mps=3., max_age_s=.5)
-                enemy = pred or tuple(opponent_xy)
-            else:
-                enemy = tuple(opponent_xy)
-            dx = float(row[cols["goal_x_m"]]) - enemy[0]
-            dy = float(row[cols["goal_y_m"]]) - enemy[1]
-            separation = math.hypot(dx, dy)
-            score -= .75 * max(0., min(1., (2. - separation) / 2.))
+            mode = prediction_mode or ("current" if policy == "D1" else "cv")
+            forecast = opponent_forecast(mode=mode, valid=True,
+                position_xy=opponent_xy, velocity_xy=velocity_xy,
+                age_s=opponent_age, horizon_s=float(eta or 0.))
+            enemy = forecast["xy"]
+            if enemy is not None:
+                dx = float(row[cols["goal_x_m"]]) - enemy[0]
+                dy = float(row[cols["goal_y_m"]]) - enemy[1]
+                separation = math.hypot(dx, dy)
+                score -= PREDICTION_MAX_PENALTY_POINTS * max(0., min(1.,
+                    (PREDICTION_THREAT_RADIUS_M - separation) /
+                    PREDICTION_THREAT_RADIUS_M))
         values.append(score)
     return torch.tensor(values, device=env.device, dtype=torch.float32)[None]
+
+
+def _timing_sync(env):
+    """Synchronize the measured device before/after a host wall interval."""
+    if torch.device(env.device).type == "cuda":
+        torch.cuda.synchronize(env.device)
+
+
+def _timing_summary(samples):
+    """Summarize measured milliseconds using nearest-rank percentiles."""
+    values = sorted(float(value) for value in samples)
+    def percentile(p):
+        if not values:
+            return None
+        return values[max(0, math.ceil(p * len(values)) - 1)]
+    return {"sample_count": len(values), "p50_ms": percentile(.50),
+            "p95_ms": percentile(.95), "p99_ms": percentile(.99),
+            "mean_ms": (sum(values) / len(values)) if values else None}
+
+
+def _metric_snapshot(metrics):
+    return {name: value.detach().cpu().reshape(-1)[0].item()
+            for name, value in metrics.outcomes().items()}
 
 
 @torch.no_grad()
@@ -983,12 +1155,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   split: str = "validation", qualification_case: dict | None = None,
                   qualification_protocol_id: str | None = None,
                   evaluation_policies: tuple[str, ...] | None = None,
-                  control_policies: tuple[str, ...] | None = None):
+                  control_policies: tuple[str, ...] | None = None,
+                  prediction_mode: str | None = None,
+                  candidate_k_override: int | None = None,
+                  control_prediction_mode: str | None = None,
+                  inference_disable_tick: int | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
-    if split not in ("validation", "test", "train"):
-        raise ValueError("split must be train, validation, or test")
+    if split not in ("validation", "test", "train", "calibration"):
+        raise ValueError("split must be train, validation, test, or calibration")
+    if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"control_prediction_mode must be one of {PREDICTION_MODES}")
+    if candidate_k_override is not None and candidate_k_override not in (8, 16, 32):
+        raise ValueError("candidate_k_override must be 8, 16, or 32")
+    if inference_disable_tick is not None and (type(inference_disable_tick) is not int
+            or inference_disable_tick <= 0):
+        raise ValueError("inference_disable_tick must be a positive physics tick")
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1003,9 +1188,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category is not registered for scenario")
+    if inference_disable_tick is not None:
+        scenario_horizon = math.ceil(definition.time_budget_s / OBSERVATION_DT)
+        if inference_disable_tick >= scenario_horizon:
+            raise ValueError("inference_disable_tick must be below the scenario horizon "
+                f"({scenario_horizon} physics ticks) for every category")
+    if split not in ("validation", "test", "train", "calibration"):
+        raise ValueError("split must be train, validation, test, or calibration")
     selected = tuple(MECO_TRACKS if evaluation_policies is None else evaluation_policies)
-    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
-        raise ValueError("evaluation_policies must be a nonempty unique subset of MECO tracks")
+    if len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
+        raise ValueError("evaluation_policies must be a unique subset of MECO tracks")
     if set(checkpoints) != set(selected):
         raise ValueError("evaluation needs exactly the selected policy checkpoints")
     controls = tuple(("D0", "D1", "D2") if control_policies is None else control_policies)
@@ -1013,11 +1205,17 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("control_policies must be a unique subset of D0/D1/D2")
     if include_controls and "D0" not in controls:
         raise ValueError("matched evaluation requires D0 as the paired reference")
+    control_prediction_modes = {"D1": control_prediction_mode or "current",
+                                 "D2": control_prediction_mode or "cv"}
+    if not selected and (controls != ("D0",) or not include_controls):
+        raise ValueError("D0-only evaluation requires exactly the D0 control")
     sources = source_identity()
+    source_hash = hashlib.sha256(json.dumps(
+        sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
     loaded = {}
     policy_manifest = {}
     route_weight = None
-    candidate_k = None
+    checkpoint_candidate_k = None
     common_training_config = None
     common_training_protocol = None
     protocol_initialized = False
@@ -1025,6 +1223,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     p_cost_scale = None
     p_points_per_grid_edge = None
     action_ticks = None
+    learned_prediction_mode = None
     for track, path in checkpoints.items():
         payload = torch.load(path, map_location=device, weights_only=False)
         if payload["config"]["track"] != track or payload["sources"] != sources:
@@ -1040,12 +1239,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             route_weight = track_route_weight
         elif track_route_weight != route_weight:
             raise ValueError("paired evaluation checkpoints must share one route-cost weight")
-        if candidate_k is None:
-            candidate_k = track_candidate_k
-        elif track_candidate_k != candidate_k:
+        if checkpoint_candidate_k is None:
+            checkpoint_candidate_k = track_candidate_k
+        elif track_candidate_k != checkpoint_candidate_k:
             raise ValueError("paired evaluation checkpoints must share one candidate_k")
         model = make_meco_track(track,
-            candidate_features=len(__import__("frc_defense.meco_tracks", fromlist=["SAFE_ACTION_FEATURES"]).SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)).to(device)
+            candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(device)
         model.load_state_dict(payload["model"])
         model.eval()
         loaded[track] = model
@@ -1055,7 +1254,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         track_p_scale = float(track_config.get("p_cost_scale", 1.))
         track_p_edge_points = float(track_config.get("p_points_per_grid_edge", .05))
         track_action_ticks = int(track_config.get("action_ticks", 12))
+        track_prediction_mode = track_config.get("prediction_mode", "cv")
+        expected_prediction = prediction_contract(track_prediction_mode)
+        if payload.get("prediction_contract", expected_prediction) != expected_prediction:
+            raise ValueError(f"{track} checkpoint prediction provenance mismatch")
         if (track_p_mode not in ("learned", "p0")
+                or track_prediction_mode not in PREDICTION_MODES
                 or not all(math.isfinite(v) and v >= 0 for v in
                            (track_p_scale, track_p_edge_points))
                 or track_action_ticks < 1):
@@ -1066,6 +1270,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         elif (track_p_mode, track_p_scale, track_p_edge_points, track_action_ticks) != (
                 p_mode, p_cost_scale, p_points_per_grid_edge, action_ticks):
             raise ValueError("paired checkpoints must share Plan A penalty and cadence settings")
+        if learned_prediction_mode is None:
+            learned_prediction_mode = track_prediction_mode
+        elif learned_prediction_mode != track_prediction_mode:
+            raise ValueError("paired checkpoints must share prediction_mode")
         immutable_track_config = {key: value for key, value in track_config.items()
                                  if key != "updates"}
         shared_track_config = {key: value for key, value in immutable_track_config.items()
@@ -1086,11 +1294,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "p_cost_scale": track_p_scale if track in ("A1", "A2", "A3") else None,
             "p_points_per_grid_edge": (track_p_edge_points
                                        if track in ("A1", "A2", "A3") else None),
+            "prediction_mode": track_prediction_mode,
+            "prediction_contract": prediction_contract(track_prediction_mode),
             "training_protocol_id": payload.get("protocol_id"),
             "training_configuration_sha256": hashlib.sha256(json.dumps(
                 immutable_track_config, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             "source_identity_sha256": hashlib.sha256(
-                json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+            json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+    candidate_k = (checkpoint_candidate_k if candidate_k_override is None
+                   else candidate_k_override)
+    if inference_disable_tick is not None:
+        first_macro_boundary = ((inference_disable_tick + action_ticks - 1) //
+                                action_ticks) * action_ticks
+        scenario_horizon = math.ceil(definition.time_budget_s / OBSERVATION_DT)
+        if first_macro_boundary >= scenario_horizon:
+            raise ValueError("inference disable tick has no macro boundary before episode horizon")
+    effective_prediction_mode = prediction_mode or learned_prediction_mode or "cv"
+    effective_control_modes = control_prediction_modes
     for track in ("A1", "A2", "A3"):
         if track not in policy_manifest:
             continue
@@ -1106,18 +1326,41 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
+            "prediction_mode": control_prediction_modes.get(control),
+            "prediction_contract": (prediction_contract(control_prediction_modes[control])
+                if control in control_prediction_modes else None),
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+    if inference_disable_tick is not None:
+        for track in selected:
+            base = policy_manifest[track]
+            policy_manifest[f"{track}__INFERENCE_DISABLED_TO_D1"] = {
+                **base,
+                "policy_id": f"{base['policy_id']}|inference_disabled_tick={inference_disable_tick}|fallback=D1",
+                "base_policy": track,
+                "inference_fault": "model_inference_disabled_at_macro_boundary_then_shared_D1"}
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
         "episode_seeds": list(episode_seeds) if episode_seeds is not None else None,
         "qualification_case": qualification_case,
+        "candidate_k": {"checkpoint": checkpoint_candidate_k,
+            "evaluation_override": candidate_k_override, "effective": candidate_k},
+        "prediction": {"learned_mode": effective_prediction_mode,
+            "control_override": control_prediction_mode,
+            "control_modes": effective_control_modes,
+            "contract": prediction_contract(effective_prediction_mode)},
+        "inference_disable_tick": inference_disable_tick,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
             "points_per_grid_edge": p_points_per_grid_edge,
             "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
             "path_units": PENALTY_PATH_UNITS,
             "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
+        "inference_disable_fault": {"requested_tick": inference_disable_tick,
+            "fallback": "D1 deterministic scorer using checkpoint prediction mode",
+            "trigger": "first macro decision boundary at or after requested physics tick"},
+        "timing_instrumentation": {"clock": "synchronized host perf_counter wall time",
+            "warmup_count": 0, "decision_boundary": "candidate/feature/model/scoring pipeline"},
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
@@ -1145,10 +1388,28 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "output_file": output_path.name,
             "progress": {"completed_records": completed,
                          "total_records": len(categories) * episodes *
-                             (len(selected) + sum(3 * (track in selected) for track in ("A1", "A2", "A3")) + (len(controls) if include_controls else 0))}})
+                             (len(selected) * (2 if inference_disable_tick is not None else 1) +
+                              sum(3 * (track in selected) for track in ("A1", "A2", "A3")) +
+                              (len(controls) if include_controls else 0))}})
         status_last_written = current
         status_last_completed = completed
     records = []
+    component_timing_ms = {name: [] for name in (
+        "legal_graph_build", "policy_decision_pipeline", "d1_fallback_pipeline",
+        "simulator_macro_step")}
+    timing_device = torch.device(device)
+    timing_provenance = {
+        "clock": "host perf_counter wall time, device synchronized before and after each measured component",
+        "cuda_synchronization": timing_device.type == "cuda",
+        "warmup_count": 0,
+        "warmup_policy": "no unrecorded simulator warmup; all measured decisions belong to reported episodes",
+        "device": str(timing_device),
+        "accelerator_backend": ("ROCm" if torch.version.hip else
+                                "CUDA" if torch.version.cuda else "CPU"),
+        "device_name": (torch.cuda.get_device_name(timing_device)
+                        if timing_device.type == "cuda" else "CPU"),
+        "instrumentation": "component intervals include completion of asynchronous device work; decision pipeline is combined candidate/feature/model/scoring preparation and is not inference-only",
+    }
     try:
         update_evaluation_status("running")
         for category in categories:
@@ -1156,21 +1417,40 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 seed = (episode_seeds[episode_index] if episode_seeds is not None
                         else master_seed + episode_index)
                 # Same simulator reset seed and task for every control and model.
-                policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
+                base_policies = (list(selected) + [f"{track}_P0" for track in ("A1", "A2", "A3")
                     if track in selected] + (list(controls) if include_controls else []))
-                for policy in policies:
-                    episode_id = _episode_id(f"eval-{eval_id}-{category}-{policy}",
+                policy_runs = [(policy, False) for policy in base_policies]
+                if inference_disable_tick is not None:
+                    policy_runs.extend((policy, True) for policy in selected)
+                for policy, inference_fault_run in policy_runs:
+                    record_policy = (f"{policy}__INFERENCE_DISABLED_TO_D1"
+                                     if inference_fault_run else policy)
+                    episode_id = _episode_id(f"eval-{eval_id}-{category}-{record_policy}",
                                              episode_index)
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
                         **(qualification_case or {}))
                     try:
+                        if (inference_disable_tick is not None and
+                                inference_disable_tick >= env.horizon):
+                            raise ValueError("inference_disable_tick must be below the "
+                                f"evaluated environment horizon ({env.horizon} physics ticks)")
                         if is_production_d0 and env.control_modes[3] != "deterministic":
                             raise RuntimeError("production D0 evaluation did not receive the deterministic slot-3 controller")
                         graph = (None if is_production_d0 else
-                                 build_legal_pose_graph(env, slot=3))
+                                 None)
+                        if not is_production_d0:
+                            _timing_sync(env)
+                            graph_started = time.perf_counter()
+                            graph = build_legal_pose_graph(env, slot=3)
+                            _timing_sync(env)
+                            component_timing_ms["legal_graph_build"].append(
+                                (time.perf_counter() - graph_started) * 1000.)
                         hidden = None
+                        episode_metric_ledger = MecoEpisodeMetricLedger(
+                            env, route_tracking_available=not is_production_d0,
+                            goal_tracking_available=not is_production_d0)
                         commitment = None
                         actions_count = [0] * 8
                         routes_seen = []
@@ -1180,7 +1460,33 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         last_candidate_recall = None
                         elapsed = 0
                         pending_eval_goal = None
+                        inference_fault_reached = False
+                        inference_fault_actual_tick = None
+                        pre_fault_action = None
+                        post_fault_actions = []
+                        post_fault_executed_actions = [0] * 8
+                        post_fault_macro_count = 0
+                        post_fault_safety = {"active_physics_ticks": 0,
+                            "robot_contact_ticks": 0, "field_contact_ticks": 0,
+                            "wall_contact_ticks": 0, "metrics_available": True}
+                        post_fault_metrics_start = None
+                        fault_fallback_count = 0
+                        decision_prediction_mode = (
+                            effective_prediction_mode
+                            if policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")
+                            else effective_control_modes.get(policy))
                         while elapsed < env.horizon:
+                            if (inference_fault_run and not inference_fault_reached
+                                    and elapsed >= inference_disable_tick):
+                                inference_fault_reached = True
+                                inference_fault_actual_tick = elapsed
+                                pre_fault_action = (selected_action_trace[-1]
+                                                    if selected_action_trace else None)
+                                hidden = None
+                                commitment = None
+                                pending_eval_goal = None
+                                post_fault_metrics_start = _metric_snapshot(
+                                    env.curriculum_metrics)
                             prepared = None
                             if is_production_d0:
                                 # Native deterministic mode recomputes from
@@ -1189,6 +1495,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                              dtype=torch.long)
                                 _, _, done, truncated, _ = env.step(
                                     native_actions, capture_info=False)
+                                episode_metric_ledger.observe_outer_step()
                                 executed = int(env.last_actions[0, 3].item())
                                 executed_action_trace.append(executed)
                                 actions_count[executed] += 1
@@ -1198,9 +1505,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     break
                                 continue
                             obs = env._last_obs
-                            if policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0"):
+                            use_d1_fallback = inference_fault_run and inference_fault_reached
+                            if (policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")) and not use_d1_fallback:
                                 model_track = policy[:2] if policy.endswith("_P0") else policy
                                 override_mode = "p0" if policy.endswith("_P0") else p_mode
+                                _timing_sync(env)
+                                decision_started = time.perf_counter()
                                 prepared = _prepare_decision(model_track, loaded[model_track],
                                     env, graph, episode_id, hidden,
                                     route_cost_points_per_second=route_weight,
@@ -1208,8 +1518,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     deterministic=True, p_mode=override_mode,
                                     p_cost_scale=p_cost_scale,
                                     p_points_per_grid_edge=p_points_per_grid_edge,
+                                    prediction_mode=decision_prediction_mode,
                                     record_path_penalty=True,
                                     commitment=(commitment if model_track in ("C1", "C2") else None))
+                                _timing_sync(env)
+                                component_timing_ms["policy_decision_pipeline"].append(
+                                    (time.perf_counter() - decision_started) * 1000.)
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
@@ -1217,13 +1531,26 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 hidden = prepared["hidden_next"]
                                 action_source = "model"
                             else:
+                                _timing_sync(env)
+                                fallback_started = time.perf_counter()
                                 candidate_set = build_route_feasible_candidates(env, obs, graph,
                                     episode_id=episode_id, action_ticks=action_ticks,
-                                    candidate_k=candidate_k)
+                                    candidate_k=candidate_k,
+                                    prediction_mode=(effective_prediction_mode if use_d1_fallback
+                                        else effective_control_modes.get(policy, "current")))
                                 last_candidate_recall = candidate_set.candidate_recall
-                                logits = _d1_d2_scores(candidate_set, env, policy)
+                                logits = _d1_d2_scores(candidate_set, env,
+                                    "D1" if use_d1_fallback else policy,
+                                    prediction_mode=(effective_prediction_mode if use_d1_fallback
+                                        else effective_control_modes.get(policy, "current")))
                                 choice = int(logits.argmax(-1).item())
-                                action_source = policy.lower()
+                                _timing_sync(env)
+                                component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
+                                    else "policy_decision_pipeline"].append(
+                                        (time.perf_counter() - fallback_started) * 1000.)
+                                action_source = "d1_inference_disable_fallback" if use_d1_fallback else policy.lower()
+                                if use_d1_fallback:
+                                    fault_fallback_count += 1
                             routes_before_choice = len(routes_seen)
                             plan_a_support = (prepared is not None and
                                               "support" in prepared)
@@ -1262,6 +1589,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         float(support.route_cost[node].item()) /
                                         max(float(env.sim.speed[0, 3]), .1),
                                     "risk_penalty_points": float(prepared["risk_cost_nodes"][node].item()),
+                                    "prediction": prepared.get("prediction"),
                                     "ppo_path_penalty_points": float(prepared["path_cost"][node].item()),
                                     "p_mode": override_mode,
                                     "p_map_scale": p_cost_scale if override_mode == "learned" else 0.,
@@ -1286,13 +1614,26 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     routes_seen.pop()
                             actions_count[action] += 1
                             selected_action_trace.append(action)
+                            if use_d1_fallback:
+                                post_fault_actions.append(action)
+                            _timing_sync(env)
+                            macro_started = time.perf_counter()
                             (_, ended, timeout, actual_trace, heading_error,
                              goal_distance, heading_opportunity,
                              native_preempted) = _run_macro_step(
                                 env, action, action_ticks, goal_xy,
                                 goal_heading=goal_heading,
                                 allow_action7_traversal=(prepared is not None and
-                                                          "support" in prepared and action == 7))
+                                                          "support" in prepared and action == 7),
+                                metric_ledger=episode_metric_ledger,
+                                safety_counts=(post_fault_safety if use_d1_fallback else None))
+                            if use_d1_fallback:
+                                post_fault_macro_count += 1
+                                for executed_action in actual_trace:
+                                    post_fault_executed_actions[executed_action] += 1
+                            _timing_sync(env)
+                            macro_elapsed_ms = (time.perf_counter() - macro_started) * 1000.
+                            component_timing_ms["simulator_macro_step"].append(macro_elapsed_ms)
                             goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
@@ -1318,6 +1659,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             route_id = (pending_eval_goal["route_id"] if forced_eval_goal
                                         else routes_seen[-1].get("candidate_id")
                                         if routes_seen else None)
+                            episode_metric_ledger.observe_route(route_id)
+                            episode_metric_ledger.observe_goal_attempt(
+                                action=action, route_id=route_id, goal_xy=goal_xy,
+                                goal_heading=goal_heading,
+                                terminal_goal_distance_m=goal_distance,
+                                terminal_heading_error_rad=heading_error,
+                                heading_alignment_opportunity=heading_opportunity)
                             if ((not forced_eval_goal and prepared is not None and
                                  prepared.get("fallback_used", False)) or hard_failure):
                                 execution_failures.append({
@@ -1357,28 +1705,92 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         outcomes = env.curriculum_metrics.outcomes()
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
                                    for name, value in outcomes.items()}
+                        metric_ledger_record = episode_metric_ledger.to_record()
+                        metrics.update(metric_ledger_record["safety_metrics"])
+                        post_fault_metrics = None
+                        if inference_fault_run and inference_fault_reached:
+                            progress_fields = ("scores", "acquisitions", "deliveries",
+                                "team_conversions", "staged_conversions",
+                                "initial_staged_conversions", "inactive_conversions",
+                                "inactive_deliveries", "post_boundary_scores",
+                                "post_boundary_deliveries", "completed_cycles",
+                                "score_cycles", "ferry_cycles")
+                            post_fault_metrics = {
+                                "final_episode_success": metrics["success"],
+                                "final_episode_useful_throughput": metrics["useful_throughput"],
+                                "progress_delta": {name: metrics[name] -
+                                    post_fault_metrics_start[name]
+                                    for name in progress_fields
+                                    if name in metrics and name in post_fault_metrics_start},
+                                "route_seen_at_episode_end": metrics.get("route_seen"),
+                            }
+                        fault_pair_id = (hashlib.sha256(json.dumps(
+                            {"evaluation_id": eval_id, "scenario": scenario_id,
+                             "category": category, "seed": seed, "policy": policy,
+                             "split": split}, sort_keys=True).encode()).hexdigest()
+                            if inference_disable_tick is not None and policy in selected
+                            else None)
                         records.append({"scenario_id": scenario_id, "category": category,
-                            "seed": seed, "policy": policy,
+                            "seed": seed, "policy": record_policy,
+                            "paired_baseline_policy": policy if inference_fault_run else None,
+                            "paired_record_policy": (policy if inference_fault_run else
+                                record_policy if fault_pair_id else None),
+                            "inference_disable_pair_id": fault_pair_id,
+                            "inference_disable_fault": ({
+                                "requested_tick": inference_disable_tick,
+                                "actual_trigger_tick": inference_fault_actual_tick,
+                                "reached": inference_fault_reached,
+                                "trigger_semantics": "first macro decision boundary at or after requested physics tick",
+                                "pre_fault_selected_action": pre_fault_action,
+                                "post_fault_selected_actions": post_fault_actions,
+                                "fallback": "deterministic D1 hand-weighted candidate scorer using the checkpoint prediction_mode",
+                                "prediction_mode": decision_prediction_mode,
+                                "model_inference_disabled_after_trigger": inference_fault_reached,
+                                "cleared_state": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                                "fallback_count": fault_fallback_count,
+                                "post_fault_macro_count": post_fault_macro_count,
+                                "post_fault_executed_action_counts": post_fault_executed_actions,
+                                "post_fault_outcome_and_progress_delta": post_fault_metrics,
+                                "post_fault_safety_ticks": ({key: value for key, value
+                                    in post_fault_safety.items() if not key.startswith("_")}
+                                    if inference_fault_reached else None),
+                                "post_fault_safety_scope": {
+                                    "robot_contact_ticks": "low-level physics ticks with a robot-pair contact involving controlled slot 3",
+                                    "field_contact_ticks": "low-level physics ticks with field contact for controlled slot 3",
+                                    "wall_contact_ticks": "low-level physics ticks with wall contact for controlled slot 3",
+                                    "active_physics_ticks": "active low-level physics ticks for controlled slot 3",
+                                    "claim_scope": "observed contact events, not policy-rule violations",
+                                },
+                                "recovery_claim": "not inferred; fallback activation and post-trigger outcome/safety are reported separately",
+                            } if inference_fault_run else None),
                             "action_source": ("production_deterministic" if is_production_d0
                                               else action_source),
                             "controller_cadence": ("native_20ms_physics_step" if is_production_d0
                                                     else "12_physics_step_macro"),
                             "action_count_semantics": ("executed_per_physics_step" if is_production_d0
+                                                       else "model_then_d1_fallback_per_macro" if inference_fault_run
                                                        else "selected_node_behavior_pair_per_macro" if policy in ("A1", "A2", "A3", "A1_P0", "A2_P0", "A3_P0")
                                                        else "selected_candidate_per_macro"),
-                            "policy_id": policy_manifest[policy]["policy_id"],
-                            "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
+                            "policy_id": policy_manifest[record_policy]["policy_id"],
+                            "checkpoint_sha256": policy_manifest[record_policy]["checkpoint_sha256"],
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
+                            "prediction_mode": decision_prediction_mode,
+                            "prediction_contract": (prediction_contract(decision_prediction_mode)
+                                if decision_prediction_mode in PREDICTION_MODES else None),
                             "protocol_id": protocol, "split": split,
                             **(qualification_case or {}),
-                            "source_identity_sha256": hashlib.sha256(json.dumps(
-                                sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+                            "source_identity_sha256": source_hash,
+                            "safety_metrics_schema": metric_ledger_record["safety_metrics_schema"],
+                            "safety_metrics_source_identity_sha256": source_hash,
                             "actions": actions_count, "executed_action_trace": executed_action_trace,
                             "selected_action_trace": selected_action_trace,
                             "execution_failures": execution_failures,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
+                            "candidate_k": candidate_k,
+                            "base_policy": policy if inference_fault_run else None,
+                            "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
                             "episode_id": episode_id})
                         update_evaluation_status("running", len(records))
@@ -1388,12 +1800,48 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "sources": sources,
+            "safety_metrics_schema": "meco-safety-rates-v1",
+            "safety_metrics_source_identity_sha256": source_hash,
+            "episode_metric_ledger_schema": {
+                "schema_version": 2,
+                "record_field": "meco_metric_ledger",
+                "scope": "one ledger per evaluation record, focal slot 3",
+                "outer_step_sampling": "fuel event tensors are sampled after each outer CurriculumEnv.step; contact metrics use cumulative low-level TensorPhysics.step counters",
+                "safety_metrics_schema": "meco-safety-rates-v1",
+                "safety_metrics": {
+                    "safety_robot_contact_rate": "focal slot-3 robot-contact ticks / focal active physics ticks",
+                    "safety_field_contact_rate": "focal slot-3 field-contact ticks / focal active physics ticks",
+                    "safety_wall_contact_rate": "focal slot-3 wall-contact ticks / focal active physics ticks",
+                },
+                "safety_contact_scope": "observed per-class contacts, not policy-rule violations; missing counters remain null",
+                "distance": "XY chord proxy between outer-step pose samples; not exact curved path length",
+                "route_switches": "selected candidate route ID changes; not AD* replans",
+                "route_aba_proxy": "three consecutive selected route IDs A-B-A; not interception or feint detection",
+                "heading_alignment_attempts": "macro rows with a planned heading and any within-0.04m XY opportunity during that macro",
+                "heading_joint_endpoint": "success requires terminal XY distance <= 0.04m and terminal heading error <= 0.1 rad; an earlier in-macro XY opportunity alone is not endpoint success",
+                "unavailable_counts": ["abandoned fuel", "failed collection"],
+            },
             "training_protocol_ids": ([common_training_protocol]
                 if common_training_protocol else []),
             "shared_training_configuration": common_training_config,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
+            "candidate_k_checkpoint": checkpoint_candidate_k,
+            "candidate_k_evaluation_override": candidate_k_override,
+            "prediction": {"model": PREDICTION_MODEL_ID,
+                "learned_mode": effective_prediction_mode,
+                "control_modes": effective_control_modes,
+                "explicit_learned_override": prediction_mode,
+                "explicit_control_override": control_prediction_mode,
+                "contract": prediction_contract(effective_prediction_mode)},
+            "inference_disable_fault": ({
+                "requested_tick": inference_disable_tick,
+                "trigger_boundary": "first_macro_boundary_at_or_after_requested_tick",
+                "fallback_policy": "D1",
+                "trained_policies": list(selected),
+                "paired_normal_and_fault_records": True}
+                if inference_disable_tick is not None else None),
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",
@@ -1403,6 +1851,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "tracks": list(selected), "ablations": [f"{track}_P0" for track in ("A1", "A2", "A3")
                 if track in selected],
             "controls": list(controls) if include_controls else [],
+            "prediction_parameters": {"model": PREDICTION_MODEL_ID,
+                "parameters": {"cv_max_speed_mps": PREDICTION_MAX_SPEED_MPS,
+                    "cv_max_track_age_s": PREDICTION_MAX_AGE_S,
+                    "fixed_default_horizon_s": 1.0,
+                    "candidate_horizon": "route_eta_s",
+                    "plan_a_horizon": "per_node_route_distance_over_current_speed",
+                    "stale_cv_fallback": "observed_current_pose",
+                    "invalid_or_absent_observation": "no_risk_penalty"}},
             "plan_a_penalty": {"trained_mode": p_mode, "p0_ablation_mode": "p0",
                 "cost_scale": p_cost_scale,
                 "points_per_grid_edge": p_points_per_grid_edge,
@@ -1410,16 +1866,38 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "path_units": PENALTY_PATH_UNITS,
                 "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree_including_root_pose_connector"},
             "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
-                "D1": "hand-weighted scorer over the shared feasible candidate table; 12-step macro cadence",
-                "D2": "D1 scorer with kinematic opponent endpoint prediction; 12-step macro cadence"},
+                "D1": "hand-weighted scorer using current-pose prediction by default (explicit evaluation override applies); 12-step macro cadence",
+                "D2": "D1 scorer using bounded constant-velocity prediction by default (explicit evaluation override applies); 12-step macro cadence"},
             "policy_manifest": policy_manifest,
             "paired": True, "split": split, "diagnostic": episodes < 100,
+            "inference_disable_fault_design": ({
+                "requested_tick": inference_disable_tick,
+                "paired_same_seed_normal_records": True,
+                "fault_variants": list(selected),
+                "trigger": "first macro decision boundary at or after requested physics tick",
+                "unreached_trigger_is_not_success": True,
+                "fallback": "D1 deterministic scorer using the checkpoint prediction mode",
+                "state_cleared": ["Plan A pending goal", "C1/C2 commitment", "recurrent hidden state"],
+                "post_fault_safety": "controlled-slot-3 robot, field, and wall contact physics-tick counts from cumulative counters",
+                "post_fault_recovery": "not inferred; fallback action counts, outcome/progress deltas, and safety ticks are reported",
+            } if inference_disable_tick is not None else None),
+            "component_timing": {
+                "provenance": timing_provenance,
+                "coverage_note": "episode construction/reset, checkpoint loading, and native D0 per-physics-step execution are outside these component samples",
+                "components": {name: _timing_summary(values)
+                               for name, values in component_timing_ms.items()},
+                "component_boundaries": {
+                    "legal_graph_build": "legal pose graph construction per non-D0 episode",
+                    "policy_decision_pipeline": "candidate/observation/features/model/scoring preparation, or D1/D2 control candidate generation and scoring; intentionally not labeled inference-only",
+                    "d1_fallback_pipeline": "fallback candidate generation and deterministic D1 scoring after fault trigger",
+                    "simulator_macro_step": "one selected action's complete physics-tick macro execution",
+                },
+            },
             "qualification": qualification_case is not None,
             "qualification_case": qualification_case,
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "diagnostic_boundary": "matched validation sample only; promotion requires separate held-out gates",
-            "source_identity_sha256": hashlib.sha256(json.dumps(
-                sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+            "source_identity_sha256": source_hash,
             "dashboard_verified": False, "records": records,
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
@@ -1460,8 +1938,13 @@ def _parser():
     train.add_argument("--p-mode", choices=("learned", "p0"), default="learned")
     train.add_argument("--p-cost-scale", type=float, default=1.)
     train.add_argument("--p-points-per-grid-edge", type=float, default=.05)
+    train.add_argument("--prediction-mode", choices=PREDICTION_MODES, default="cv")
     train.add_argument("--output", required=True)
     train.add_argument("--resume")
+    train.add_argument("--warm-start",
+        help="initialize model weights from a versioned supervised artifact; optimizer/RNG/cursor remain fresh")
+    train.add_argument("--qualification-protocol",
+        help="frozen qualification artifact required with --warm-start")
     train.add_argument("--stop-file")
     train.add_argument("--run-id")
     train.add_argument("--protocol-id")
@@ -1472,6 +1955,14 @@ def _parser():
     ev.add_argument("--episodes", type=int, default=1)
     ev.add_argument("--seed", type=int, default=20261024)
     ev.add_argument("--device", default="cpu")
+    ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
+        help="override learned A/C prediction mode; default preserves checkpoint mode")
+    ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,
+        help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--candidate-k-override", type=int, choices=(8, 16, 32),
+        help="evaluation-only candidate K for C tracks and controls")
+    ev.add_argument("--inference-disable-tick", type=int,
+        help="also run same-seed learned-policy pairs that disable inference at the first macro boundary at or after this physics tick")
     ev.add_argument("--output", required=True)
     for track in MECO_TRACKS:
         ev.add_argument(f"--{track.lower()}-checkpoint", required=True)
@@ -1491,12 +1982,15 @@ def main(argv=None):
             candidate_k=args.candidate_k,
             p_mode=args.p_mode, p_cost_scale=args.p_cost_scale,
             p_points_per_grid_edge=args.p_points_per_grid_edge,
+            prediction_mode=args.prediction_mode,
             route_cost_points_per_second=args.route_cost_points_per_second,
             output=args.output)
         assignment = (json.loads(args.task_assignment_json)
             if args.task_assignment_json else {"scenario_id": args.scenario,
                 "category": args.category, "seed": config.seed})
-        result = train_meco(config, resume=args.resume, stop_file=args.stop_file,
+        result = train_meco(config, resume=args.resume, warm_start=args.warm_start,
+                            qualification_protocol=args.qualification_protocol,
+                            stop_file=args.stop_file,
                             run_id_override=args.run_id, protocol_id=args.protocol_id,
                             task_assignment=assignment)
         print(json.dumps(result, indent=2))
@@ -1505,7 +1999,10 @@ def main(argv=None):
     report = evaluate_meco(checkpoints, scenario_id=args.scenario,
         categories=tuple(item for item in args.categories.split(",") if item),
         episodes=args.episodes, master_seed=args.seed, device=args.device,
-        output=args.output)
+        output=args.output, prediction_mode=args.prediction_mode,
+        control_prediction_mode=args.control_prediction_mode,
+        candidate_k_override=args.candidate_k_override,
+        inference_disable_tick=args.inference_disable_tick)
     print(json.dumps({"evaluation_id": report["evaluation_id"],
         "protocol_id": report["protocol_id"], "records": len(report["records"]),
         "output": args.output}, indent=2))

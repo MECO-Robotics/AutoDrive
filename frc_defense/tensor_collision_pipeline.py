@@ -80,7 +80,8 @@ def contact_pipeline(sim, active_mask):
                 sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
                 sim.yaw_inertia_multiplier, sim.mu, sim.wall_mu, active_mask,
                 sim.robot_contact, sim.opponent_contact, sim.field_contact,
-                sim.wall_contact, sim.obstacles, sim.field_colliders))):
+                sim.robot_contact_by_robot, sim.wall_contact, sim.obstacles,
+                sim.field_colliders))):
         return False
     ext = _extension()
     if ext is None:
@@ -88,6 +89,7 @@ def contact_pipeline(sim, active_mask):
     ext.contact_pipeline(sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
         sim.yaw_inertia_multiplier, sim.mu, sim.wall_mu, active_mask,
         sim.robot_contact, sim.opponent_contact, sim.field_contact,
-        sim.wall_contact, sim.obstacles, sim.field_colliders,
+        sim.robot_contact_by_robot, sim.wall_contact, sim.obstacles,
+        sim.field_colliders,
         sim.contact_iterations, sim.field_length, sim.field_width, -1)
     return True

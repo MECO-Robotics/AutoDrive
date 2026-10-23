@@ -10,7 +10,7 @@ from hashlib import sha256
 import math
 
 CURRICULUM_VERSION = '2'
-_SPLITS = {'train': 0, 'validation': 1, 'test': 2}
+_SPLITS = {'train': 0, 'validation': 1, 'test': 2, 'calibration': 3}
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ def seed_partition(scenario_id: str, split: str, count: int, *, master_seed: int
     """
     get_scenario(scenario_id)
     if split not in _SPLITS:
-        raise ValueError('split must be train, validation, or test')
+        raise ValueError('split must be train, validation, test, or calibration')
     if type(count) is not int or not 0 <= count < 2**21:
         raise ValueError('count must be an integer in [0, 2**21)')
     if type(master_seed) is not int or master_seed < 0:
@@ -267,7 +267,7 @@ def _failures(result):
     return failures
 
 
-def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, retention_results=()) -> PromotionDecision:
+def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, retention_results=(), additional_failures=()) -> PromotionDecision:
     """Consume one validation round, mutating only progression state.
 
     Retention results share the primary evaluation ID, checkpoint, and protocol.
@@ -276,7 +276,7 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
     historical qualification and checkpoints for callers to schedule recovery.
     """
     scenario = get_scenario(result.scenario_id)
-    failures = _failures(result)
+    failures = _failures(result) + [str(item) for item in additional_failures]
     if result.evaluation_id in state.seen_evaluation_ids:
         state.consecutive_passes[result.scenario_id] = 0
         state.consecutive_protocol.pop(result.scenario_id, None)

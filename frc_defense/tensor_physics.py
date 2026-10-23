@@ -207,9 +207,16 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self._module_radius=torch.sqrt(
             self._module_x_offsets.square()+self._module_y_offsets.square()).amax(-1)
         self.robot_contact=torch.zeros((self.n,),device=self.device,dtype=torch.bool)
+        # Per-robot contact flags are scoped to one low-level physics tick.
+        # The legacy world-level robot_contact flag remains unchanged.
+        self.robot_contact_by_robot=torch.zeros(robot_shape,device=self.device,dtype=torch.bool)
         self.opponent_contact=torch.zeros((self.n,),device=self.device,dtype=torch.bool)
         self.field_contact=torch.zeros(robot_shape,device=self.device,dtype=torch.bool)
         self.wall_contact=torch.zeros((self.n,self.num_robots,2),device=self.device,dtype=torch.bool)
+        self.safety_active_physics_ticks=torch.zeros(robot_shape,device=self.device,dtype=torch.long)
+        self.safety_robot_contact_ticks=torch.zeros_like(self.safety_active_physics_ticks)
+        self.safety_field_contact_ticks=torch.zeros_like(self.safety_active_physics_ticks)
+        self.safety_wall_contact_ticks=torch.zeros_like(self.safety_active_physics_ticks)
         obs=torch.as_tensor(obstacles,dtype=torch.float32,device=self.device)
         self.obstacles=obs.reshape(-1,3) if obs.numel() else torch.empty((0,3),device=self.device)
         boxes=torch.as_tensor(field_colliders,dtype=torch.float32,device=self.device)
@@ -226,7 +233,12 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.pose.zero_(); self.velocity.zero_(); self.module_angle.zero_(); self.module_steer_rate.zero_()
         self.module_drive_speed.zero_(); self.module_current.zero_(); self.module_supply_current.zero_()
         self.robot_current.zero_(); self.robot_contact.zero_(); self.opponent_contact.zero_()
+        self.robot_contact_by_robot.zero_()
         self.field_contact.zero_(); self.wall_contact.zero_()
+        self.safety_active_physics_ticks.zero_()
+        self.safety_robot_contact_ticks.zero_()
+        self.safety_field_contact_ticks.zero_()
+        self.safety_wall_contact_ticks.zero_()
         if self.randomize: self._randomize(torch.ones((self.n,),device=self.device,dtype=torch.bool))
         else: self._randomize(torch.ones((self.n,),device=self.device,dtype=torch.bool), nominal=True)
         if pose is None:
@@ -263,9 +275,14 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.module_supply_current=torch.where(mask[:,None,None],torch.zeros_like(self.module_supply_current),self.module_supply_current)
         self.robot_current=torch.where(mask[:,None],torch.zeros_like(self.robot_current),self.robot_current)
         self.robot_contact &= ~mask
+        self.robot_contact_by_robot &= ~mask[:,None]
         self.opponent_contact &= ~mask
         self.field_contact &= ~mask[:,None]
         self.wall_contact &= ~mask[:,None,None]
+        self.safety_active_physics_ticks.masked_fill_(mask[:,None], 0)
+        self.safety_robot_contact_ticks.masked_fill_(mask[:,None], 0)
+        self.safety_field_contact_ticks.masked_fill_(mask[:,None], 0)
+        self.safety_wall_contact_ticks.masked_fill_(mask[:,None], 0)
         return self.state
 
     def _randomize(self, mask, nominal=False):
@@ -416,6 +433,7 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
                 wrapped=torch.remainder(self.pose[...,2]+math.pi,2*math.pi)-math.pi
                 self.pose[...,2].copy_(torch.where(active_mask[:,None],wrapped,self.pose[...,2]))
         self.robot_contact &= ~active_mask
+        self.robot_contact_by_robot &= ~active_mask[:,None]
         self.opponent_contact &= ~active_mask
         self.field_contact &= ~active_mask[:,None]
         self.wall_contact &= ~active_mask[:,None,None]
@@ -442,6 +460,15 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             for _ in range(self.contact_iterations):
                 self._robot_collision(active_mask); self._walls(active_mask)
                 self._obstacle_collision(active_mask); self._field_collision(active_mask)
+        active_robots = active_mask[:,None]
+        self.safety_active_physics_ticks.add_(active_robots.expand_as(
+            self.safety_active_physics_ticks).long())
+        self.safety_robot_contact_ticks.add_(
+            (self.robot_contact_by_robot & active_robots).long())
+        self.safety_field_contact_ticks.add_(
+            (self.field_contact & active_robots).long())
+        self.safety_wall_contact_ticks.add_(
+            (self.wall_contact.any(-1) & active_robots).long())
         return self.pose, self.velocity
 
     def _swerve(self,cmd,active_mask=None):
