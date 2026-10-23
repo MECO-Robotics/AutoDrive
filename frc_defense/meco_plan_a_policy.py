@@ -62,7 +62,6 @@ class PlanAEmptySupportDiagnostic:
     action_mask: tuple[bool, ...]
     support_pair_count: int
     valid_pair_counts_by_behavior: tuple[tuple[str, int], ...]
-    reachable_node_counts_by_descriptor: tuple[tuple[str, int], ...]
     available_fuel_targets: int
     safe_score_points: int
     possession_count: int
@@ -279,8 +278,6 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     valid = valid_matrix.reshape(-1) & reachable_rows.reshape(-1)
     if not bool(valid.any()):
         counts = valid_matrix.sum(dim=0).detach().cpu().tolist()
-        reachable_counts = (reachable_rows & torch.ones_like(valid_matrix)).sum(
-            dim=0).detach().cpu().tolist()
         pose_values = tuple(float(value) for value in pose.detach().cpu().tolist())
         legal_ids = tuple(int(value) for value in torch.nonzero(
             action_mask, as_tuple=False).flatten().detach().cpu().tolist())
@@ -301,10 +298,6 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
             valid_pair_counts_by_behavior=tuple(zip(
                 ("drive", "intake_0", "intake_1", "intake_2", "intake_3",
                  "score", "ferry", "defense"), (int(value) for value in counts))),
-            reachable_node_counts_by_descriptor=tuple(zip(
-                ("drive", "intake_0", "intake_1", "intake_2", "intake_3",
-                 "score", "ferry", "defense"),
-                (int(value) for value in reachable_counts))),
             available_fuel_targets=int(fuel_valid.sum().item()),
             safe_score_points=int(score_clear.sum().item()),
             possession_count=possession,
