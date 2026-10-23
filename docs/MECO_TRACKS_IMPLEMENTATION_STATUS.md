@@ -356,5 +356,6 @@ traversal; all other environment fields and global RNG state remain hashed
 strictly, and unknown state continues to fail closed. Both dataset manifest
 validation and warm-start artifact validation require schema v2, so v1 artifacts
 cannot be reused under this contract. Scoped implementer change is isolated at
-`codex/meco-cudagraph-digest-v2`; static compile/diff/JSON checks only, with no
-tests or simulator replay in this pass.
+`codex/meco-cudagraph-digest-v2` at `a4ff27922`, approved by the independent
+reviewer and integrated as `07098e82a`; static compile/diff/JSON checks only.
+Fresh GPU collection and simulator replay remain pending.
