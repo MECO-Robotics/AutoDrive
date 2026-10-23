@@ -35,8 +35,10 @@ class PlanAActionSupport:
     traversal_order: torch.Tensor  # [N], parent-before-child ordering
     ancestor_jumps: torch.Tensor  # [ceil(log2 N)+1,N], binary-lifting parent table
     root_node: int
+    root_connector_m: float
     fallback_pair: int
     goal_xy: torch.Tensor       # [N,2], frozen legal node endpoints
+    goal_heading: torch.Tensor  # [N], frozen legal SE(2) heading endpoints
     snapshot_id: str
     support_digest: str
 
@@ -61,6 +63,7 @@ def _plan_a_support_tensors(support: PlanAActionSupport, graph):
         "traversal_order": support.traversal_order,
         "ancestor_jumps": support.ancestor_jumps,
         "goal_xy": support.goal_xy,
+        "goal_heading": support.goal_heading,
         "heading_bin": graph.heading_bin,
         "graph_xy": graph.xy,
         "edges": graph.edges,
@@ -72,7 +75,8 @@ def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
     """Recompute the integrity digest for frozen PPO support/path metadata."""
     digest = hashlib.sha256(SUPPORT_ORDER.encode())
     digest.update(support.snapshot_id.encode())
-    digest.update(f"root_node={support.root_node};fallback_pair={support.fallback_pair}".encode())
+    digest.update(f"root_node={support.root_node};root_connector_m={support.root_connector_m:.17g};"
+                  f"fallback_pair={support.fallback_pair}".encode())
     for name, tensor in _plan_a_support_tensors(support, graph).items():
         digest.update(name.encode())
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
@@ -109,9 +113,10 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     physical_distances = [math.inf] * n
     parents = [-1] * n
     edge_lengths = [0.] * n
-    distances[root] = 0.
-    physical_distances[root] = 0.
-    queue = [(0., root)]
+    root_connector_m = float((pose[:2] - graph.xy[root]).norm())
+    distances[root] = float(start_cost[root])
+    physical_distances[root] = root_connector_m
+    queue = [(distances[root], root)]
     while queue:
         distance, src = heapq.heappop(queue)
         if distance != distances[src]:
@@ -194,13 +199,31 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
                    (lateral <= lateral_radius) & fuel_valid[None, :] &
                    action_mask[:4][None, :] & reachable[:, None])
     safe_points = score_points[score_clear]
+    team_id = int(env.team_ids[3])
+    hub = env.hub_centers[team_id]
+    score_bearing = torch.atan2(hub[1] - graph.xy[:, 1],
+                                hub[0] - graph.xy[:, 0])
+    score_heading_error = torch.atan2(
+        torch.sin(graph.heading - score_bearing),
+        torch.cos(graph.heading - score_bearing)).abs()
+    score_heading_legal = score_heading_error <= math.radians(5.)
     if safe_points.numel():
         score_mask = ((graph.xy[:, None] - safe_points[None]).norm(dim=-1).amin(-1)
-                      <= resolution * .72) & reachable & action_mask[4]
+                      <= resolution * .72) & reachable & action_mask[4] & score_heading_legal
     else:
         score_mask = torch.zeros((n,), device=device, dtype=torch.bool)
+    from .fuel_physics_runtime import ferry_aim_targets
+    team_nodes = torch.full((1, n), team_id, device=device, dtype=torch.long)
+    ferry_aim = ferry_aim_targets(env, graph.xy[None], team_nodes)[0]
+    ferry_bearing = torch.atan2(ferry_aim[:, 1] - graph.xy[:, 1],
+                                ferry_aim[:, 0] - graph.xy[:, 0])
+    ferry_heading_error = torch.atan2(
+        torch.sin(graph.heading - ferry_bearing),
+        torch.cos(graph.heading - ferry_bearing)).abs()
+    ferry_heading_legal = ((not dumper_with_fuel) |
+                           (ferry_heading_error <= math.pi / 4.))
     ferry_mask = (((graph.xy - ferry_target).norm(dim=-1) <= resolution * .72) &
-                  reachable & action_mask[6] & (possession > 0))
+                  reachable & action_mask[6] & (possession > 0) & ferry_heading_legal)
     defense_mask = (((graph.xy - opponent_target).norm(dim=-1) <= resolution * .72) &
                     reachable & action_mask[5])
     # Fixed eight-column descriptor layout per graph node: drive, four
@@ -251,8 +274,10 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         parent_edge_m=torch.tensor(edge_lengths, device=device, dtype=graph.xy.dtype),
         traversal_order=torch.tensor(order, device=device, dtype=torch.long),
         ancestor_jumps=torch.stack(jumps),
-        root_node=root, fallback_pair=fallback_pair,
-        goal_xy=graph.xy.detach().clone(), snapshot_id=snapshot_id,
+        root_node=root, root_connector_m=root_connector_m,
+        fallback_pair=fallback_pair,
+        goal_xy=graph.xy.detach().clone(),
+        goal_heading=graph.heading.detach().clone(), snapshot_id=snapshot_id,
         support_digest="")
     return PlanAActionSupport(**{
         **support.__dict__,
@@ -287,4 +312,5 @@ def graph_path_integral(node_cost: torch.Tensor, support: PlanAActionSupport):
     # aggregate recurrence aligned so shared path prefixes are counted once.
     for parent in support.ancestor_jumps:
         total = total + total.index_select(0, parent)
+    total = total + node_cost[support.root_node] * support.root_connector_m
     return total

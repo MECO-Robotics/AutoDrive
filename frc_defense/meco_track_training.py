@@ -387,6 +387,7 @@ def _value(value_head, globals_, hidden):
 
 
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
+                    goal_heading=None,
                     allow_action7_traversal=False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
@@ -397,7 +398,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
-            planner_goal_override_traversal=allow_action7_traversal)
+            planner_goal_override_traversal=allow_action7_traversal,
+            planner_goal_heading_override=goal_heading)
         executed_actions.append(int(env.last_actions[0, 3].item()))
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
@@ -405,7 +407,13 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         if ended or timeout:
             break
     env._last_obs = env.observe()
-    return total, ended, timeout, executed_actions
+    final_heading_error = None
+    if goal_heading is not None:
+        difference = torch.atan2(
+            torch.sin(env.sim.pose[0, 3, 2] - float(goal_heading)),
+            torch.cos(env.sim.pose[0, 3, 2] - float(goal_heading))).abs()
+        final_heading_error = float(difference)
+    return total, ended, timeout, executed_actions, final_heading_error
 
 
 def _reset_episode(env, seed: int):
@@ -675,15 +683,19 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     action = int(support.action_ids[action_index].item())
                     node = int(support.pair_node_ids[action_index].item())
                     goal_xy = tuple(float(v) for v in support.goal_xy[node].tolist())
+                    goal_heading = float(support.goal_heading[node].item())
                 else:
                     action = candidate.action_indices[action_index]
                     cols = {name: i for i, name in enumerate(candidate.table.feature_names)}
                     selected_row = candidate.table.features[action_index]
                     goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                float(selected_row[cols["goal_y_m"]]))
-                reward, ended, timeout, executed_trace = _run_macro_step(
+                    goal_heading = None
+                reward, ended, timeout, executed_trace, heading_error = _run_macro_step(
                     env, action, config.action_ticks, goal_xy,
-                    allow_action7_traversal=("support" in prepared and action == 7))
+                    goal_heading=goal_heading,
+                    allow_action7_traversal=(prepared is not None and
+                                              "support" in prepared and action == 7))
                 update_heartbeat()
                 rows.append({"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -699,8 +711,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "route_cost": prepared["route_cost"].detach(),
                     "risk_cost": prepared["risk_cost"].detach(),
                     "execution_failure": (prepared.get("fallback_used", False) or
-                                          any(item != action for item in executed_trace)),
+                                          any(item != action for item in executed_trace) or
+                                          (heading_error is not None and heading_error > .1)),
                     "executed_action_trace": executed_trace,
+                    "terminal_heading_error": heading_error,
                     "action": torch.tensor([action_index], device=config.device),
                     "logprob": prepared["logprob"].detach().reshape(()),
                     "hidden_before": hidden_before,
@@ -1070,9 +1084,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "behavior": ("drive", "intake", "score", "ferry", "defense")[behavior_index],
                                     "behavior_descriptor": descriptor,
                                     "goal_xy_m": list(goal_xy),
+                                    "goal_heading_rad": float(support.goal_heading[node].item()),
                                     "graph_path_node_ids": parent_chain,
                                     "graph_path_points_m": [support.goal_xy[i].detach().cpu().tolist()
                                                             for i in parent_chain],
+                                    "graph_path_heading_rad": [float(support.goal_heading[i].item())
+                                                               for i in parent_chain],
+                                    "root_connector_distance_m": support.root_connector_m,
                                     "graph_route_distance_m": float(support.distances_m[node].item()),
                                     "graph_route_cost_m_equivalent": float(support.route_cost[node].item()),
                                     "eta_s": float(prepared["route_cost_nodes"][node].item()) /
@@ -1094,13 +1112,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 routes_seen.append(candidate_set.route_records[choice])
                             actions_count[action] += 1
                             selected_action_trace.append(action)
-                            _, ended, timeout, actual_trace = _run_macro_step(
+                            goal_heading = (float(support.goal_heading[node].item())
+                                            if prepared is not None and "support" in prepared
+                                            else None)
+                            _, ended, timeout, actual_trace, heading_error = _run_macro_step(
                                 env, action, action_ticks, goal_xy,
-                                allow_action7_traversal=("support" in prepared and action == 7))
-                            if (prepared is not None and prepared.get("fallback_used", False)) or any(item != action for item in actual_trace):
+                                goal_heading=goal_heading,
+                                allow_action7_traversal=(prepared is not None and
+                                                          "support" in prepared and action == 7))
+                            if ((prepared is not None and prepared.get("fallback_used", False)) or
+                                    any(item != action for item in actual_trace) or
+                                    (heading_error is not None and heading_error > .1)):
                                 execution_failures.append({
                                     "selected_action": action,
                                     "executed_action_trace": actual_trace,
+                                    "terminal_heading_error": heading_error,
                                     "policy_fallback": (prepared.get("fallback_used", False)
                                                         if prepared is not None else False),
                                     "route_id": (routes_seen[-1].get("candidate_id")
@@ -1150,7 +1176,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "candidate_k": candidate_k,
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
-            "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target constraints",
+            "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints",
+            "plan_a_heading_contract": "selected legal graph heading is an explicit terminal target; simulator pauses at XY goal, checks swept static orientation and conservative observed-robot clearance, then aligns under native physics; intake uses target capture geometry, score uses hub-facing tolerance, ferry uses native release-facing tolerance",
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "ablations": ["A1_P0", "A2_P0", "A3_P0"],
             "controls": ["D0", "D1", "D2"] if include_controls else [],
@@ -1159,7 +1186,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "points_per_grid_edge": p_points_per_grid_edge,
                 "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
                 "path_units": PENALTY_PATH_UNITS,
-                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
+                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree_including_root_pose_connector"},
             "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
                 "D1": "hand-weighted scorer over the shared feasible candidate table; 12-step macro cadence",
                 "D2": "D1 scorer with kinematic opponent endpoint prediction; 12-step macro cadence"},

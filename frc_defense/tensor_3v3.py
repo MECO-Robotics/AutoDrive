@@ -624,7 +624,8 @@ class TensorThreeVsThreeEnv(
     def step(self, actions, active_mask=None, *, capture_observation=True,
              capture_info=True, _active_count=None, _return_info=None,
              planner_goal_override=None, planner_goal_override_action=None,
-             planner_goal_override_traversal=False):
+             planner_goal_override_traversal=False,
+             planner_goal_heading_override=None):
         full_batch=active_mask is None
         if full_batch and self._full_batch_step_scalar is not None:
             self._full_batch_step_scalar+=1
@@ -644,6 +645,8 @@ class TensorThreeVsThreeEnv(
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
         planner_goal_override_mask = torch.zeros_like(action, dtype=torch.bool)
+        planner_goal_heading_mask = torch.zeros_like(action, dtype=torch.bool)
+        planner_goal_heading = None
         if planner_goal_override is not None:
             if self.n != 1:
                 raise ValueError("planner goal overrides currently require a single-world environment")
@@ -668,6 +671,15 @@ class TensorThreeVsThreeEnv(
                 (action[:, 3] == expected_action) & override_permitted)
             targets[:, 3] = torch.where(planner_goal_override_mask[:, 3, None],
                                          goal[None], targets[:, 3])
+            if planner_goal_heading_override is not None:
+                planner_goal_heading = torch.as_tensor(
+                    planner_goal_heading_override, device=self.device,
+                    dtype=targets.dtype).reshape(())
+                if not bool(torch.isfinite(planner_goal_heading)):
+                    raise ValueError("planner goal heading must be finite")
+                planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
+        elif planner_goal_heading_override is not None:
+            raise ValueError("planner goal heading requires its paired XY goal")
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((self.sweeping_enabled &
@@ -950,6 +962,7 @@ class TensorThreeVsThreeEnv(
         # following through waypoint arrival instead of stopping.
         stop_radius = torch.where(deterministic_scorer, .02,
                                   torch.where(deterministic_picker, 0., .3))
+        stop_radius = torch.where(planner_goal_heading_mask, .02, stop_radius)
         command=torch.where(distance<=stop_radius[...,None],torch.zeros_like(command),command)
         # Action 7 is native hold when no explicit strategic goal was supplied.
         # The MECO planner adapter may pair action 7 with a validated target to
@@ -976,6 +989,44 @@ class TensorThreeVsThreeEnv(
         # chassis is aligned so the sidestep cannot push it into a trench arm.
         command=torch.where((trench_alignment & (trench_error.abs()>.25))[...,None],
                             torch.zeros_like(command),command)
+        if planner_goal_heading is not None and bool(planner_goal_heading_mask[:, 3].any()):
+            at_heading_goal = (planner_goal_heading_mask[:, 3] &
+                               (distance[:, 3, 0] <= .04))
+            # Before rotating, check the whole turn against static field
+            # geometry at 22.5-degree samples and keep a conservative
+            # circumscribed-radius clearance from observed robots.
+            current_heading = self.sim.pose[:, 3, 2]
+            heading_delta = torch.atan2(
+                torch.sin(planner_goal_heading - current_heading),
+                torch.cos(planner_goal_heading - current_heading))
+            fractions = torch.linspace(0., 1., 9, device=self.device,
+                                      dtype=self.sim.pose.dtype)
+            sweep_headings = current_heading[0] + heading_delta[0] * fractions
+            sweep_lengths = planner_lengths[0, 3].expand_as(sweep_headings)
+            sweep_widths = self.sim.width[0, 3].expand_as(sweep_headings)
+            blocked = self.planner._blocked(sweep_headings, sweep_lengths, sweep_widths)
+            goal_ix, goal_iy = self.planner._indices(targets[0, 3:4])
+            goal_cell = (goal_ix * self.planner.ny + goal_iy).reshape(1, 1)
+            static_clear = ~blocked.flatten(1).gather(
+                1, goal_cell.expand(blocked.shape[0], 1)).any()
+            obstacles = self._perceived_robot_obstacles().reshape(
+                self.n, NUM_ROBOTS, NUM_ROBOTS, 3)[0, 3]
+            obstacle_valid = obstacles[:, 2] > 0.
+            rotation_radius = .5 * torch.sqrt(
+                self.sim.length[0, 3].square() + self.sim.width[0, 3].square())
+            dynamic_clear = ((targets[0, 3] - obstacles[:, :2]).norm(dim=-1) >
+                             rotation_radius + obstacles[:, 2] + .05) | ~obstacle_valid
+            can_align = static_clear & dynamic_clear.all()
+            # Pause at the endpoint if the turn is currently obstructed. The
+            # native physics collision and route guards remain authoritative.
+            command[:, 3] = torch.where(at_heading_goal[:, None],
+                                        torch.zeros_like(command[:, 3]), command[:, 3])
+            target_omega = swerve_heading_rate(
+                heading_delta, self.sim.omega_limit[:, 3], self.sim.alpha[:, 3],
+                self.sim.velocity[:, 3, 2], self.dt)
+            omega[:, 3] = torch.where(
+                at_heading_goal & can_align, target_omega,
+                torch.where(at_heading_goal, torch.zeros_like(target_omega), omega[:, 3]))
         commands=torch.cat((command,omega[...,None]),-1)
         enabled=self._controlled_mode_mask
         commands=commands*enabled[None,:,None]

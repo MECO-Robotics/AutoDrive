@@ -22,7 +22,7 @@ ROUTE_COST_POINTS_PER_SECOND = 0.05
 RISK_RADIUS_M = 2.0
 RISK_MAX_POINTS = 0.75
 CANDIDATE_BOUNDARY = {
-    "version": 3,
+    "version": 4,
     "capacity": [8, 16, 32],
     "source": "existing simulator action slots",
     "configurable_k": True,
@@ -42,10 +42,12 @@ CANDIDATE_BOUNDARY = {
     "plan_a_support_order": "legal_graph_node_ascending_then_behavior_0_to_4_then_descriptor_ascending_v2",
     "plan_a_support_membership": "one model-independent shortest-path pass over legal SE(2) graph plus vectorized behavior-specific endpoint/target constraints; independent of learned P",
     "plan_a_intake_descriptor": "intake pairs retain exact sensed target slot and require a bearing-aligned capture-geometry envelope",
+    "plan_a_heading_semantics": "each selected legal SE(2) node carries its terminal heading; the simulator stops at the XY goal, checks sampled static rotation and conservative observed-robot clearance, then aligns; intake headings are capture-geometry constrained, score headings are hub-facing within 5 degrees, ferry headings satisfy the native 45-degree release cone",
     "plan_a_drive_semantics": "action 7 is a no-op hold natively; the Plan A adapter permits traversal only when the sampled action 7 is paired with its explicit validated planner goal, retaining native route and obstacle guards; dumper drive is masked while carrying fuel because native action 7 redirects that role to ferry",
     "plan_a_goal_constraints": "score pairs require a safe score-grid endpoint; ferry pairs require carried fuel and current ferry endpoint; defense pairs require the current intercept/post endpoint",
+    "plan_a_behavior_heading_constraints": "intake headings must keep the exact sensed target within the forward capture envelope; score headings must face the HUB within 5 degrees; dumper ferry headings must satisfy the simulator's 45-degree release cone; drive and defense headings use guarded terminal alignment",
     "plan_a_ppo": "sample and recompute log probability over the exact frozen node-major support mask and order",
-    "plan_a_route_metadata": "frozen shortest-path parent tree and edge distances; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks",
+    "plan_a_route_metadata": "frozen shortest-path parent tree including the root-pose connector and terminal headings; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks and guarded terminal alignment",
     "plan_a_candidate_k": "not used; candidate_k applies only to Plan C candidate scorers",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m",

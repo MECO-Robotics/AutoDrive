@@ -38,7 +38,8 @@ candidate table.
   every legal graph node crossed with drive, four target-bound intake choices,
   score, ferry, and defense descriptors. A model-independent shortest-path
   pass fixes reachable nodes, physical distance, heading-weighted route cost,
-  and a parent tree. The support mask/order and selected pair descriptor are
+  and a parent tree including the root-pose connector. The support mask/order
+  and selected pair descriptor are
   retained for PPO log-probability recomputation. `candidate_k` applies only to
   Plan C.
 
@@ -72,8 +73,17 @@ legal-graph reachability/cost reference; it is not the simulator's execution
 route. The simulator still uses XY AD* with swept SE(2) checks and dynamic
 robot arbitration. Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
-grid endpoints; ferry support requires carried fuel and the current ferry
-endpoint; defense support is restricted to the current intercept/post endpoint.
+grid endpoints and heading bins within 5 degrees of the HUB-facing direction;
+ferry support requires carried fuel, the current ferry endpoint, and a heading
+inside the simulator's 45-degree release cone; defense support is restricted to
+the current intercept/post endpoint. Each selected graph heading is passed as
+an explicit terminal target. At the XY endpoint, the controller pauses
+translation, checks sampled static rotation clearance and conservative
+clearance from observed robots, then aligns under the native physics step.
+Blocked turns wait safely and are marked as execution failures if the macro
+ends before alignment. Intake headings must satisfy their target capture
+geometry. P integrates the root-pose-to-root-node connector as well as graph
+edges.
 Action 7 remains a native no-op hold. The Plan A adapter permits it to traverse
 only when paired with the selected frozen planner goal; the existing route,
 obstacle, and action-safety checks remain in force. Dumper drive pairs are
