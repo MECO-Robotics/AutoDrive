@@ -1683,7 +1683,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 map_shape = None
                                 map_dtype = None
                                 if applied_map is not None:
-                                    map_tensor = torch.as_tensor(applied_map).detach().contiguous().cpu()
+                                    # Match _run_macro_step's frozen map: cast to the
+                                    # simulator pose dtype before cloning and routing.
+                                    map_tensor = torch.as_tensor(applied_map,
+                                        device=env.device, dtype=env.sim.pose.dtype
+                                        ).detach().clone().contiguous().cpu()
                                     map_bytes = map_tensor.numpy().tobytes()
                                     map_shape = list(map_tensor.shape)
                                     map_dtype = str(map_tensor.dtype)
@@ -1927,7 +1931,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "selected_goal": "macro-selected goal passed to the executor",
                 "observed_goal": "slot-3 planner.last_goal after macro execution",
                 "actions": "selected macro action and actual per-physics-step env.last_actions trace",
-                "p_map_sha256": "SHA256 of canonical shape/dtype metadata plus contiguous CPU tensor bytes for the P traversal-cost map actually passed to the macro; null when no map was applied, including P0",
+                "p_map_sha256": "SHA256 of canonical shape/dtype metadata plus contiguous CPU tensor bytes for the effective frozen map after the executor's simulator-pose-dtype cast; null when no map was applied, including P0",
                 "p_map_shape_and_dtype": "tensor shape and dtype paired with p_map_sha256; null when no map was applied, including P0",
                 "p_map_scale": "scale passed with that map; null when no map was applied, including P0",
                 "trajectory_claim": "route planner snapshot, not an exact actuator trajectory",

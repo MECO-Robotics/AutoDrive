@@ -204,8 +204,8 @@ Evaluation records now have a distinct `executed_planner_route_trace` for
 A1/A2/A3 and their P0 runs. Each macro entry snapshots focal slot-3
 `last_path[:last_lengths]` and the observed planner goal after macro execution,
 with selected goal, selected action, actual per-physics-step action trace,
-ticks, P mode, and SHA256/shape/dtype/scale for the map actually passed to
-the macro. P0 records null map identity and scale. This is the latest route snapshot after a
+ticks, P mode, and SHA256/shape/dtype/scale for the effective frozen map after executor dtype
+conversion. P0 records null map identity and scale. This is the latest route snapshot after a
 macro, not every within-macro replan and not an exact actuator trajectory.
 
 This is code-path integration only. No simulator replay has exercised or
