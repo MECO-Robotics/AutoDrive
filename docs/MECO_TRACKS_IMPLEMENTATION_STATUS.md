@@ -97,10 +97,11 @@ supervised artifacts continue to fail closed with P null, zero prior, and
 The standard Plan A train/eval call path uses eager steps. A P map supplied
 during CUDA stream capture causes `TensorThreeVsThreeEnv.step` to raise
 `ValueError` and abort that call; it does not silently fall back. Dashboard
-capture currently supplies no P map. Finite/nonnegative map checks are cached
-per unchanged map tensor version, avoiding repeated scalar synchronization
-across the macro's physics ticks. This capture behavior has not been runtime
-validated.
+capture currently supplies no P map. The environment and AD* planner cache
+finite/nonnegative and scaled-finiteness checks per unchanged map tensor
+identity/version/scale, avoiding repeated scalar synchronization across macro
+replans. Shape and scale checks still run per call. This capture behavior has
+not been runtime validated.
 Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
 grid endpoints and heading bins within 5 degrees of the HUB-facing direction;

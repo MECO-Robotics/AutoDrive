@@ -976,17 +976,36 @@ class TensorADStar:
         if learned_traversal_cost is None:
             learned_cost = None
         else:
+            source_cost = torch.as_tensor(learned_traversal_cost)
             learned_cost = torch.as_tensor(learned_traversal_cost,
                                            device=self.device, dtype=self.dtype)
             if learned_cost.shape != (self.nx, self.ny):
                 raise ValueError(
                     f"learned_traversal_cost must have shape {(self.nx, self.ny)}")
-            if not bool(torch.isfinite(learned_cost).all().item()) or \
-                    bool((learned_cost < 0).any().item()):
-                raise ValueError("learned_traversal_cost must be finite and nonnegative")
+            try:
+                source_version = source_cost._version
+            except RuntimeError:
+                # Inference tensors have no version counter; keep validating
+                # those inputs rather than caching a potentially stale map.
+                source_version = None
+            validated_cost = getattr(
+                self, "_validated_learned_traversal_cost", None)
+            if not (source_version is not None and validated_cost is not None and
+                    validated_cost[0] is source_cost and
+                    validated_cost[1] == source_version and
+                    validated_cost[2] == learned_cost_scale):
+                if not bool(torch.isfinite(learned_cost).all().item()) or \
+                        bool((learned_cost < 0).any().item()):
+                    raise ValueError(
+                        "learned_traversal_cost must be finite and nonnegative")
+                if not bool(torch.isfinite(
+                        learned_cost * float(learned_cost_scale)).all().item()):
+                    raise ValueError(
+                        "scaled learned_traversal_cost must remain finite")
+                if source_version is not None:
+                    self._validated_learned_traversal_cost = (
+                        source_cost, source_version, learned_cost_scale)
             learned_cost = learned_cost * float(learned_cost_scale)
-            if not bool(torch.isfinite(learned_cost).all().item()):
-                raise ValueError("scaled learned_traversal_cost must remain finite")
         def select_rows(value):
             if value is None:
                 return None
