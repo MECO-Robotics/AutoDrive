@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from frc_defense.curriculum_training import D1HandWeightedPolicy, _d1_artifacts, _d1_identity
+from frc_defense.curriculum_training import (D1HandWeightedPolicy, D2PredictivePolicy,
+    _d1_artifacts, _d1_identity)
 from frc_defense.learning_contract import CandidateTable, ObservationSnapshot
 
 
@@ -17,6 +18,10 @@ def _sensor_fixture(mask, *, candidate_indices=(0, 1, 2, 3),
     env.track_age = torch.tensor([.1, .2, .3, .4, .1]).reshape(1, 1, 5).expand(1, 6, 5).clone()
     env.track_mask = torch.ones((1, 6, 5), dtype=torch.bool)
     env.sim = SimpleNamespace(pose=torch.tensor([[[0., 0., 0.]]*3 + [[0., 0., 0.]] + [[0., 0., 0.]]*2]))
+    env.opponent_pose = torch.zeros((1, 6, 3))
+    env.opponent_velocity = torch.zeros((1, 6, 3))
+    env.opponent_age = torch.full((1, 6), float('inf'))
+    env.opponent_valid = torch.zeros((1, 6), dtype=torch.bool)
     env._candidates = lambda: (torch.tensor([[list(candidate_indices)]*6]),
                                torch.tensor([[list(candidate_valid)]*6]),
                                torch.zeros((1, 6, 4)))
@@ -72,6 +77,41 @@ def test_d1_rejects_a_mask_with_no_legal_fallback():
 def test_d1_identity_is_stable_and_versioned_by_weights():
     assert _d1_identity() == _d1_identity()
     assert len(_d1_identity()) == 64
+
+
+def test_d2_penalizes_collection_endpoints_but_leaves_fixed_rows_and_mask_unchanged():
+    env, observation = _sensor_fixture([1, 1, 1, 1, 1, 1, 1, 1])
+    env.opponent_pose[0, 3, :2] = torch.tensor([-2., 0.])
+    env.opponent_velocity[0, 3, :2] = torch.tensor([20., 0.])
+    env.opponent_age[0, 3] = .1
+    env.opponent_valid[0, 3] = True
+    _, d1 = D1HandWeightedPolicy().choose(env, observation)
+    action, d2 = D2PredictivePolicy().choose(env, observation)
+    assert d2['candidate_scores'][0, 0] < d1['candidate_scores'][0, 0]
+    assert torch.equal(d2['action_scores'][:, 4:], d1['action_scores'][:, 4:])
+    assert torch.equal(torch.isfinite(d2['action_scores']), torch.isfinite(d1['action_scores']))
+    assert d2['predicted_opponent_endpoint'][0, 0].item() == 1.
+    assert torch.isclose((d2['predicted_opponent_endpoint'][0] -
+                          env.opponent_pose[0, 3, :2]).norm(), torch.tensor(3.))
+    assert d2['candidate_table'].feature_names[-2:] == (
+        'predicted_opponent_endpoint_distance_m', 'threat_penalty')
+    assert d2['candidate_table'].features[4][-2:] == (None, None)
+    assert action.item() in range(8)
+
+
+def test_d2_missing_or_stale_opponent_falls_back_exactly_to_d1():
+    env, observation = _sensor_fixture([1, 1, 1, 1, 1, 1, 1, 1])
+    _, d1 = D1HandWeightedPolicy().choose(env, observation)
+    d2_action, d2 = D2PredictivePolicy().choose(env, observation)
+    d1_action, _ = D1HandWeightedPolicy().choose(env, observation)
+    assert d2_action.tolist() == d1_action.tolist()
+    assert torch.equal(d2['action_scores'], d1['action_scores'])
+    assert torch.equal(d2['threat_penalty'], torch.zeros_like(d2['threat_penalty']))
+    assert torch.isnan(d2['predicted_opponent_endpoint']).all()
+    env.opponent_valid[0, 3] = True
+    env.opponent_age[0, 3] = .6
+    _, stale = D2PredictivePolicy().choose(env, observation)
+    assert torch.equal(stale['action_scores'], d1['action_scores'])
 
 
 def test_scorer_snapshot_ids_are_scoped_to_evaluation_run(monkeypatch):

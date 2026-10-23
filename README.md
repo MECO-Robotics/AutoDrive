@@ -94,10 +94,16 @@ Inspect the versioned stages and outcome gates:
 frc-defense curriculum --help
 ```
 
-The experimental MECO track adds a diagnostic, hand-weighted D1 control over the curriculum's existing masked action rows. D1 records the four collection rows as `collect:track:<index>` where the index is a per-snapshot sensor track buffer slot, not a persistent physical identity (or a unique `collect:unavailable-slot:<rank>` when empty), followed by the fixed `score`, `intercept`, `ferry`, and `hold` rows in action order 0–7. Named feature cells use `null` when unavailable and all route costs are `null`. This is an action trace; it does not describe executable goals, guarantee pickup feasibility, provide planner route costs, or serve as a qualified Plan C/C1 interface. Top-four track ordering is backend-dependent when distances tie, and the categorical mask does not include later intake deployment or pickup-capture clearance. See [docs/LEARNING_TRACKS.md](docs/LEARNING_TRACKS.md) for the staged comparison and current limits. Run a paired-seed D1 diagnostic with:
+The experimental MECO track adds diagnostic D1 and D2 policies over the curriculum's existing masked action rows. D1 records the four collection rows as `collect:track:<index>` where the index is a per-snapshot sensor track buffer slot, not a persistent physical identity (or a unique `collect:unavailable-slot:<rank>` when empty), followed by the fixed `score`, `intercept`, `ferry`, and `hold` rows in action order 0–7. D2 adds a bounded one-second opponent endpoint prediction and penalizes collection endpoints near that prediction; stale or missing opponent tracks fall back exactly to D1. Named feature cells use `null` when unavailable and all route costs are `null`. These are action traces; they do not describe executable goals, guarantee pickup feasibility, provide planner route costs, or serve as a qualified Plan C/C1 interface. Top-four track ordering is backend-dependent when distances tie, and the categorical mask does not include later intake deployment or pickup-capture clearance. See [docs/LEARNING_TRACKS.md](docs/LEARNING_TRACKS.md) for the staged comparison and current limits. Run a paired-seed D1 diagnostic with:
 
 ```sh
 .venv/bin/python -m frc_defense.curriculum_training evaluate --policy d1 --scenario pickup_simple --category single --episodes 1 --seed 20261023 --horizon 120 --action-ticks 12 --device cpu --output evaluations/curriculum-offense/d1-smoke.json
+```
+
+Run D2 with the same protocol and seed for a paired comparison:
+
+```bash
+.venv/bin/python -m frc_defense.curriculum_training evaluate --policy d2 --scenario pickup_simple --category single --episodes 1 --seed 20261023 --horizon 120 --action-ticks 12 --device cpu --output evaluations/curriculum-offense/d2-smoke.json
 ```
 
 Run a short CPU infrastructure check, then resume its optimizer and curriculum state:

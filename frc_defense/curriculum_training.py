@@ -6,6 +6,7 @@ Draft scenario targets and scripted teachers remain unqualified until measured.
 from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -13,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import random
+import time
 import tempfile
 import uuid
 
@@ -122,6 +124,80 @@ class D1HandWeightedPolicy:
         return action, trace
 
 
+class D2PredictivePolicy(D1HandWeightedPolicy):
+    """D1 action ranking with a bounded observed-opponent endpoint penalty."""
+    name = 'd2_predictive_baseline'
+    prediction_horizon_s = 1.0
+    max_speed_mps = 3.0
+    max_track_age_s = 0.5
+    threat_radius_m = 2.0
+    max_penalty = 0.75
+
+    def choose(self, env, observation, *, snapshot_id=None):
+        decision_started = time.perf_counter()
+        action, trace = super().choose(env, observation, snapshot_id=snapshot_id)
+        prediction_started = time.perf_counter()
+        slot = 3
+        observed_pose = env.opponent_pose[:, slot, :2]
+        observed_velocity = env.opponent_velocity[:, slot, :2]
+        age = env.opponent_age[:, slot]
+        valid = (env.opponent_valid[:, slot] & torch.isfinite(observed_pose).all(-1) &
+                 torch.isfinite(observed_velocity).all(-1) & torch.isfinite(age) &
+                 (age >= 0.) & (age <= self.max_track_age_s))
+        speed = observed_velocity.norm(dim=-1)
+        bounded_velocity = observed_velocity * (self.max_speed_mps / speed.clamp_min(1e-8)).clamp(max=1.)[:, None]
+        predicted = observed_pose + bounded_velocity * self.prediction_horizon_s
+        predicted = torch.where(valid[:, None], predicted, torch.full_like(predicted, float('nan')))
+        candidate_points = env.track_pos[:, slot].gather(
+            1, trace['candidate_indices'][..., None].expand(-1, -1, 2))
+        endpoint_distance = (candidate_points - predicted[:, None]).norm(dim=-1)
+        penalty = self.max_penalty * ((self.threat_radius_m - endpoint_distance) /
+                                      self.threat_radius_m).clamp(0., 1.)
+        penalty = torch.where(valid[:, None] & trace['candidate_valid'], penalty,
+                              torch.zeros_like(penalty))
+        candidate_scores = trace['candidate_scores'] - penalty
+        row_scores = trace['action_scores'].clone()
+        row_scores[:, :4] = candidate_scores
+        mask = torch.tensor([trace['candidate_table'].valid_mask], device=env.device,
+                            dtype=torch.bool)
+        row_scores = row_scores.masked_fill(~mask, float('-inf'))
+        selected = masked_argmax(row_scores[0].tolist(), trace['candidate_table'].valid_mask,
+                                 fallback_index=7)
+        if selected is None:
+            raise RuntimeError('D2 requires at least one legal curriculum action')
+        action = torch.tensor([int(trace['candidate_table'].features[selected][0])],
+                              device=env.device, dtype=torch.long)
+        table = trace['candidate_table']
+        enriched = replace(table,
+            feature_names=table.feature_names + ('predicted_opponent_endpoint_distance_m', 'threat_penalty'),
+            features=tuple(row + ((float(endpoint_distance[0, i].item()) if bool(valid[0]) and i < 4 and bool(trace['candidate_valid'][0, i]) else None),
+                                  (float(penalty[0, i].item()) if i < 4 else None))
+                           for i, row in enumerate(table.features)))
+        trace.update({'candidate_scores': candidate_scores, 'action_scores': row_scores,
+                      'candidate_table': enriched, 'selected_row': selected,
+                      'observed_opponent_pose': observed_pose.detach().clone(),
+                      'observed_opponent_velocity': observed_velocity.detach().clone(),
+                      'observed_opponent_age': age.detach().clone(),
+                      'observed_opponent_valid': env.opponent_valid[:, slot].detach().clone(),
+                      'predicted_opponent_endpoint': predicted.detach().clone(),
+                      'candidate_endpoint_distance': endpoint_distance,
+                      'threat_penalty': penalty,
+                      'prediction_seconds': time.perf_counter() - prediction_started,
+                      'decision_seconds': time.perf_counter() - decision_started})
+        return action, trace
+
+
+def _d2_identity():
+    return _hash({'policy': D2PredictivePolicy.name,
+                  'base': _d1_identity(),
+                  'prediction': {'horizon_s': D2PredictivePolicy.prediction_horizon_s,
+                                'max_speed_mps': D2PredictivePolicy.max_speed_mps,
+                                'max_track_age_s': D2PredictivePolicy.max_track_age_s,
+                                'threat_radius_m': D2PredictivePolicy.threat_radius_m,
+                                'max_penalty': D2PredictivePolicy.max_penalty},
+                  'choices': 'd2-endpoint-threat-v1'})
+
+
 def _d1_identity():
     return _hash({'policy': D1HandWeightedPolicy.name,
                   'weights': D1HandWeightedPolicy.weights,
@@ -146,7 +222,8 @@ def _d1_artifacts(env, observation, trace, *, scenario, category, seed,
     scores = tuple(float(score) if math.isfinite(float(score)) else 0.
                    for score in raw_scores)
     timestamp = observation_snapshot.timestamp
-    scored = ScorerSnapshot(_d1_identity(), snapshot_id, table.candidate_ids,
+    scorer_id = _d2_identity() if 'prediction_seconds' in trace else _d1_identity()
+    scored = ScorerSnapshot(scorer_id, snapshot_id, table.candidate_ids,
                             scores, timestamp)
     if not scored.matches(observation_snapshot, table, now=timestamp, max_age=0.):
         raise RuntimeError('D1 scorer snapshot does not match its candidate table')
@@ -484,7 +561,7 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
             frame={'tick':int(env.steps[0]),'action':int(action[0]),'mask':mask[0].tolist(),
                    'hub_active':bool(env.hub_active[0,1]),'metrics':{k:v.tolist() for k,v in env.curriculum_metrics.outcomes().items()}}
             if isinstance(policy,D1HandWeightedPolicy):
-                frame['policy_id']=_d1_identity()
+                frame['policy_id']=_d2_identity() if isinstance(policy,D2PredictivePolicy) else _d1_identity()
                 frame['candidate_action_trace']={
                     'candidate_indices':trace['candidate_indices'][0].tolist(),
                     'candidate_valid':trace['candidate_valid'][0].tolist(),
@@ -494,6 +571,25 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
                     'candidate_nearby_tracks':trace['candidate_nearby_tracks'][0].tolist(),
                     'candidate_confidence':trace['candidate_confidence'][0].tolist(),
                     'candidate_age':trace['candidate_age'][0].tolist()}
+                if isinstance(policy,D2PredictivePolicy):
+                    frame['prediction']={
+                        'schema_version':1,
+                        'observed_state':{'valid':bool(trace['observed_opponent_valid'][0]),
+                            'age_s':(float(trace['observed_opponent_age'][0])
+                                     if math.isfinite(float(trace['observed_opponent_age'][0])) else None),
+                            'pose_xy_m':trace['observed_opponent_pose'][0].tolist(),
+                            'velocity_xy_mps':trace['observed_opponent_velocity'][0].tolist()},
+                        'predicted_endpoint_xy_m':trace['predicted_opponent_endpoint'][0].tolist()
+                            if bool(torch.isfinite(trace['predicted_opponent_endpoint'][0]).all()) else None,
+                        'used':bool(trace['observed_opponent_valid'][0] and
+                                    trace['observed_opponent_age'][0] <= policy.max_track_age_s),
+                        'horizon_s':policy.prediction_horizon_s,
+                        'candidate_endpoint_distance_m':[
+                            float(x) if math.isfinite(float(x)) else None
+                            for x in trace['candidate_endpoint_distance'][0].tolist()],
+                        'collection_penalty':trace['threat_penalty'][0].tolist(),
+                        'prediction_seconds':trace['prediction_seconds'],
+                        'decision_seconds':trace['decision_seconds']}
                 frame.update(_d1_artifacts(env, obs, trace, scenario=name,
                                            category=category, seed=seed,
                                            evaluation_id=evaluation_id))
@@ -530,6 +626,8 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
     checkpoint_hash=None
     if isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) == 'd1':
         policy=D1HandWeightedPolicy()
+    elif isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) == 'd2':
+        policy=D2PredictivePolicy()
     elif isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) != 'teacher':
         checkpoint_path=Path(policy_or_checkpoint);checkpoint_bytes=checkpoint_path.read_bytes()
         checkpoint_hash=hashlib.sha256(checkpoint_bytes).hexdigest()
@@ -546,8 +644,9 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
             frozen.parent.mkdir(parents=True,exist_ok=True); os.replace(temporary,frozen)
         if hashlib.sha256(frozen.read_bytes()).hexdigest() != checkpoint_hash: raise ValueError('frozen checkpoint digest mismatch')
     if policy != 'teacher' and not isinstance(policy,(ActorCritic,DiscreteSAC,D1HandWeightedPolicy)):
-        raise ValueError('expected standard policy, SAC policy, checkpoint, D1, or teacher')
-    identity=(_d1_identity() if isinstance(policy,D1HandWeightedPolicy) else
+        raise ValueError('expected standard policy, SAC policy, checkpoint, D1, D2, or teacher')
+    identity=(_d2_identity() if isinstance(policy,D2PredictivePolicy) else
+              _d1_identity() if isinstance(policy,D1HandWeightedPolicy) else
               _policy_id(policy) if policy != 'teacher' else 'generic-observed-teacher')
     suite=protocol_id(action_ticks=action_ticks,device=device,_sources=sources); round_id=evaluation_id or uuid.uuid4().hex
     results=[];records=[];saved_rng=_rng_state()
@@ -579,12 +678,16 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
     finally: _restore_rng(saved_rng)
     if source_identity()!=sources: raise ValueError('source/runtime changed during evaluation; no current report published')
     report={'curriculum_version':CURRICULUM_VERSION,'sources':sources,'protocol_id':suite,
-            'algorithm':getattr(policy,'algorithm','d1_hand_weighted' if isinstance(policy,D1HandWeightedPolicy) else 'teacher' if policy == 'teacher' else 'ppo'),
+            'algorithm':getattr(policy,'algorithm','d2_predictive_hand_weighted' if isinstance(policy,D2PredictivePolicy) else 'd1_hand_weighted' if isinstance(policy,D1HandWeightedPolicy) else 'teacher' if policy == 'teacher' else 'ppo'),
             'architecture':getattr(policy,'architecture','candidate_action_ranker' if isinstance(policy,D1HandWeightedPolicy) else 'baseline_mlp') if policy != 'teacher' else 'deterministic_teacher',
-            'policy_provenance':({'kind':'hand_weighted_candidate_action_ranker',
+            'policy_provenance':({'kind':'d2_observed_opponent_endpoint_penalty' if isinstance(policy,D2PredictivePolicy) else 'hand_weighted_candidate_action_ranker',
                 'candidate_source':'per-snapshot-four-nearest-valid-sensor-track-buffer-slots',
                 'action_source':'masked curriculum eight-action interface',
                 'weights':D1HandWeightedPolicy.weights,
+                'prediction':({'schema_version':1,'horizon_s':policy.prediction_horizon_s,
+                    'max_speed_mps':policy.max_speed_mps,'max_track_age_s':policy.max_track_age_s,
+                    'threat_radius_m':policy.threat_radius_m,'max_penalty':policy.max_penalty,
+                    'penalized_candidates':'collection rows only'} if isinstance(policy,D2PredictivePolicy) else None),
                 'uses_hidden_fuel_or_opponent_truth':False}
                 if isinstance(policy,D1HandWeightedPolicy) else None),
             'policy_id':identity,'test_seed_index0_reserved':True,'checkpoint_file_sha256':checkpoint_hash,'evaluation_id':round_id,'split':split,
@@ -767,7 +870,7 @@ def main(argv=None):
     train.add_argument('--sac-initial-alpha',type=float,default=.2)
     train.add_argument('--sac-target-entropy-fraction',type=float,default=.98)
     train.add_argument('--resume');train.add_argument('--horizon',type=int)
-    evaluate=commands.add_parser('evaluate');evaluate.add_argument('--checkpoint');evaluate.add_argument('--policy',choices=('teacher','d1'))
+    evaluate=commands.add_parser('evaluate');evaluate.add_argument('--checkpoint');evaluate.add_argument('--policy',choices=('teacher','d1','d2'))
     for command in (evaluate,commands.add_parser('teacher')):
         command.add_argument('--scenario',choices=tuple(SCENARIOS),required=True);command.add_argument('--category')
         command.add_argument('--episodes',type=int,default=1);command.add_argument('--seed',type=int,default=0)
@@ -780,7 +883,7 @@ def main(argv=None):
         resume=values.pop('resume');values['num_envs']=values.pop('envs');result=train_curriculum(TrainingConfig(**values),resume=resume)
     elif command=='evaluate':
         checkpoint=values.pop('checkpoint');policy=values.pop('policy')
-        if bool(checkpoint)==bool(policy): parser.error('choose exactly one of --checkpoint or --policy teacher|d1')
+        if bool(checkpoint)==bool(policy): parser.error('choose exactly one of --checkpoint or --policy teacher|d1|d2')
         scenario=values.pop('scenario');category=values.pop('category');values['master_seed']=values.pop('seed')
         result=evaluate_curriculum(checkpoint or policy,(scenario,),categories=(category,) if category else None,**values)
         result={k:v for k,v in result.items() if k not in ('records','evaluation_results','sources')}
