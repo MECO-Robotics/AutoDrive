@@ -83,8 +83,8 @@ class FuelHIP:
                     math.ceil(s.field_width/self.cell)+2,math.ceil(8/self.cell)+2)
         kw = dict(device=p.device,dtype=torch.int32)
         self.heads = torch.full((p.n,math.prod(self.xyz)),-1,**kw)
-        self.next = torch.empty((p.n,p.p),**kw)
-        self.list = torch.empty((p.n,p.p,c.max_neighbors),**kw)
+        self.next = torch.zeros((p.n,p.p),**kw)
+        self.list = torch.zeros((p.n,p.p,c.max_neighbors),**kw)
         self.counts = torch.zeros((p.n,p.p),**kw)
         self.overflow = torch.zeros(p.n,**kw)
         self.rebuild = torch.ones(p.n,**kw)
@@ -97,9 +97,9 @@ class FuelHIP:
         # Grid compaction bounds storage by neighbor capacity; overflowing
         # contacts use the fused path, preserving every contact impulse.
         capacity = (p.n*p.p*(p.p-1)//2 if c.broadphase == "all_pairs" or c.compact_capacity == "full" else min(p.n*p.p*c.max_neighbors,p.n*p.p*(p.p-1)//2)) if c.contact_mode == "compact" else 1
-        self.contacts = torch.empty((max(1,capacity),2),**kw)
+        self.contacts = torch.zeros((max(1,capacity),2),**kw)
         self.contact_count = torch.zeros(1,**kw)
-        self.robot_candidates = torch.empty((p.n,s.pose.shape[1],p.p),device=p.device,dtype=torch.bool)
+        self.robot_candidates = torch.zeros((p.n,s.pose.shape[1],p.p),device=p.device,dtype=torch.bool)
         self.bumps = getattr(s,"bump_regions",torch.empty((0,4),device=p.device)).contiguous()
         self.support_height = torch.zeros((p.n,p.p),device=p.device,dtype=p.pos.dtype)
         p._support_height = self.support_height

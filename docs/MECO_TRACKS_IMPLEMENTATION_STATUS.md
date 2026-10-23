@@ -359,3 +359,27 @@ cannot be reused under this contract. Scoped implementer change is isolated at
 `codex/meco-cudagraph-digest-v2` at `a4ff27922`, approved by the independent
 reviewer and integrated as `07098e82a`; static compile/diff/JSON checks only.
 Fresh GPU collection and simulator replay remain pending.
+
+## HIP broadphase scratch-state digest follow-up (2026-10-23)
+
+Both GPU retries in `r10` failed before writing validated datasets during
+`_rebuild_and_check` with `RuntimeError: strict prefix replay parity mismatch
+at simulator_state_sha256`. They used source integration commit
+`881bf4b3d`, scenario `pickup_scattered/dense`, seed
+`3540116847380660228` on `cuda:0` and seed `3540116847380660232` on
+`cuda:1`, with attempted outputs
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-final-plan-artifacts-20261023-r10/gpu0/pickup-scattered-dense-3540116847380660228-cf-v2.jsonl`
+and
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-final-plan-artifacts-20261023-r10/gpu1/pickup-scattered-dense-3540116847380660232-cf-v2.jsonl`.
+For the same-device reset comparison on seed `3540116847380660228`,
+observation, candidate, support, and global RNG digests matched; the only
+reported state differences were `env.fuel_physics._hip.contacts.tensor`,
+`_hip.list.tensor`, `_hip.next.tensor`, and `_hip.robot_candidates.tensor`.
+`FuelHIP.__init__` allocated those four execution buffers with
+`torch.empty`. The scoped follow-up initializes only those four to zeros,
+retaining their shapes, devices, and dtypes. `rebuild` still starts at one, so
+the first HIP substep rebuilds/initializes the broadphase buffers before valid
+reads; the buffers remain included in the strict state digest and its schema is
+unchanged. This isolated implementation is submitted for scoped review.
+Static compilation, diff, and JSON validation only; no simulator run succeeded,
+no dataset was validated, and simulator/replay validation remains pending.
