@@ -41,6 +41,10 @@ class RouteResult:
     status: RouteStatus
     feasible: bool
     distance_m: float | None
+    path_points_m: tuple[tuple[float, float], ...] | None = None
+    weighted_cost: float | None = None
+    cost_units: str = "normalized_grid_edge_units"
+    cost_provenance: str = "legacy_bump_cost_path_integral_v1"
 
 
 def _finite_pair(value) -> bool:
@@ -82,6 +86,26 @@ def _pose_clear(scratch, point, heading, length, width, robot_obstacles):
     return static_clear & circle_clear
 
 
+def _path_weighted_cost(scratch, points, learned_cost, scale: float) -> float:
+    """Integrate terrain multipliers along points in cardinal-grid-step units.
+
+    Each segment contributes its length / grid resolution times the mean of
+    endpoint cell multipliers. Bump traversal retains the planner's +0.12 cost;
+    learned map values are additional dimensionless cost per cardinal step.
+    """
+    if points.shape[0] < 2:
+        return 0.0
+    terrain = scratch._bump_cost
+    if learned_cost is not None:
+        terrain = terrain + learned_cost * scale
+    ix, iy = scratch._indices(points)
+    multipliers = terrain[ix, iy]
+    segment_m = (points[1:] - points[:-1]).norm(dim=-1)
+    cost = (segment_m / scratch.resolution) * (
+        multipliers[1:] + multipliers[:-1]) * 0.5
+    return float(cost.sum().item())
+
+
 def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> TensorADStar:
     """Build a fresh planner workspace; never borrow live planner buffers."""
     live = env.planner
@@ -118,7 +142,10 @@ def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> 
 @torch.no_grad()
 def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
                     *, goal_tolerance_m: float = 0.05,
-                    endpoint_tolerance_m: float = 0.05) -> tuple[RouteResult, ...]:
+                    endpoint_tolerance_m: float = 0.05,
+                    learned_traversal_cost=None,
+                    learned_cost_scale: float = 1.0,
+                    learned_cost_provenance: str = "caller_supplied") -> tuple[RouteResult, ...]:
     """Evaluate an ordered batch against current observed robot obstacles.
 
     Starts, footprint and motion limits come from the live simulator state.
@@ -131,12 +158,32 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
     snapshot XY route feasibility check. It does not enforce terminal
     heading, intake capture, mechanism legality, or time-varying collision
     prediction. Callers must validate those task constraints separately.
+
+    ``learned_traversal_cost`` is a shared ``[nx, ny]`` field map on the
+    planner grid. Its finite, nonnegative values are dimensionless additive
+    penalties per cardinal grid step (base cardinal cost 1.0, diagonal sqrt(2));
+    ``learned_cost_scale`` multiplies those values. They affect route choice,
+    never occupancy or footprint safety. Results retain XY path points in
+    meters and report a path-integrated cost in normalized grid-edge units.
+    The provenance string identifies the producer of the supplied map.
     """
     items = tuple(queries)
     if not math.isfinite(goal_tolerance_m) or goal_tolerance_m < 0:
         raise ValueError("goal_tolerance_m must be finite and nonnegative")
     if not math.isfinite(endpoint_tolerance_m) or endpoint_tolerance_m < 0:
         raise ValueError("endpoint_tolerance_m must be finite and nonnegative")
+    try:
+        learned_cost_scale = float(learned_cost_scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("learned_cost_scale must be finite and nonnegative") from exc
+    if not math.isfinite(learned_cost_scale) or learned_cost_scale < 0:
+        raise ValueError("learned_cost_scale must be finite and nonnegative")
+    if not isinstance(learned_cost_provenance, str) or not learned_cost_provenance:
+        raise ValueError("learned_cost_provenance must be a nonempty string")
+    cost_provenance = (f"{learned_cost_provenance}:scale={learned_cost_scale:g}:"
+                       "path_integral_grid_edge_v1"
+                       if learned_traversal_cost is not None else
+                       "legacy_bump_cost_path_integral_v1")
     if not items:
         return ()
     if len(items) > MAX_ROUTE_QUERY_BATCH:
@@ -169,7 +216,8 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
             valid_rows.append((index, query))
         else:
             results[index] = RouteResult(query.candidate_id, query.snapshot_id,
-                query.world, query.slot, "invalid", False, None)
+                query.world, query.slot, "invalid", False, None,
+                cost_provenance=cost_provenance)
 
     if valid_rows:
         obstacle_snapshot = env._perceived_robot_obstacles()
@@ -218,11 +266,24 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
         for local_index in invalid_indices.tolist():
             original_index, query = valid_rows[local_index]
             results[original_index] = RouteResult(query.candidate_id,
-                query.snapshot_id, query.world, query.slot, "invalid", False, None)
+                query.snapshot_id, query.world, query.slot, "invalid", False, None,
+                cost_provenance=cost_provenance)
 
         if valid_indices.numel():
             valid_queries = [planner_rows[i] for i in valid_indices.tolist()]
             scratch = _scratch_planner(env, valid_queries)
+            learned_map = None
+            if learned_traversal_cost is not None:
+                learned_map = torch.as_tensor(learned_traversal_cost,
+                                              device=device,
+                                              dtype=env.sim.pose.dtype)
+                if learned_map.shape != (scratch.nx, scratch.ny):
+                    raise ValueError(
+                        f"learned_traversal_cost must have shape {(scratch.nx, scratch.ny)}")
+                if (not bool(torch.isfinite(learned_map).all().item()) or
+                        bool((learned_map < 0).any().item())):
+                    raise ValueError(
+                        "learned_traversal_cost must be finite and nonnegative")
             start = starts[valid_indices]
             heading = headings[valid_indices]
             goal = goals[valid_indices]
@@ -247,13 +308,16 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
             for local_index in torch.nonzero(at_goal_clear, as_tuple=False).flatten().tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
                 results[original_index] = RouteResult(query.candidate_id,
-                    query.snapshot_id, query.world, query.slot, "at_goal", True, 0.0)
+                    query.snapshot_id, query.world, query.slot, "at_goal", True, 0.0,
+                    tuple((float(x), float(y)) for x, y in start[local_index:local_index+1].tolist()),
+                    0.0, cost_provenance=cost_provenance)
 
             at_goal_blocked = at_goal_mask & ~at_goal_clear
             for local_index in torch.nonzero(at_goal_blocked, as_tuple=False).flatten().tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
                 results[original_index] = RouteResult(query.candidate_id,
-                    query.snapshot_id, query.world, query.slot, "no_path", False, None)
+                    query.snapshot_id, query.world, query.slot, "no_path", False, None,
+                    cost_provenance=cost_provenance)
 
             route_mask = ~at_goal_mask & ~goal_blocked
             rejected_indices = torch.nonzero((~at_goal_mask) & goal_blocked,
@@ -261,21 +325,33 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
             for local_index in rejected_indices.tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
                 results[original_index] = RouteResult(query.candidate_id,
-                    query.snapshot_id, query.world, query.slot, "no_path", False, None)
+                    query.snapshot_id, query.world, query.slot, "no_path", False, None,
+                    cost_provenance=cost_provenance)
 
             if route_mask.any():
-                scratch.plan(start, goal, heading, length, width,
+                # Supplying this keyword only when present preserves the
+                # planner's original fused/legacy route path by default.
+                planner_kwargs = dict(
                     speed=speed[valid_indices],
                     lateral_friction=friction[valid_indices],
                     acceleration=acceleration[valid_indices],
                     active_mask=route_mask, robot_obstacles=obstacle)
+                if learned_map is None:
+                    scratch.plan(start, goal, heading, length, width,
+                                 **planner_kwargs)
+                else:
+                    scratch.plan(start, goal, heading, length, width,
+                        learned_traversal_cost=learned_map,
+                        learned_cost_scale=learned_cost_scale,
+                        **planner_kwargs)
                 for batch_local in torch.nonzero(route_mask, as_tuple=False).flatten().tolist():
                     original_index, query = valid_rows[valid_indices[batch_local].item()]
                     count = int(scratch.last_lengths[batch_local].item())
                     points = scratch.last_path[batch_local, :count]
                     if count <= 1:
                         result = RouteResult(query.candidate_id, query.snapshot_id,
-                            query.world, query.slot, "no_path", False, None)
+                            query.world, query.slot, "no_path", False, None,
+                            cost_provenance=cost_provenance)
                     else:
                         # AD* may start from a projected visible cell when the
                         # measured pose lies in a blocked raster cell. Include
@@ -293,14 +369,22 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
                             width[batch_local:batch_local+1],
                             torch.cat((scratch._extra_circles.reshape(1, -1, 3),
                                        obstacle[batch_local:batch_local+1]), dim=1))
+                        path_points = tuple((float(x), float(y))
+                                            for x, y in points.tolist())
+                        weighted_cost = _path_weighted_cost(
+                            scratch, points, learned_map, learned_cost_scale)
                         if (not clear or not bool(endpoint_circle_clear[0].item()) or
                                 not math.isfinite(distance) or
                                 endpoint_error > endpoint_tolerance_m):
                             result = RouteResult(query.candidate_id, query.snapshot_id,
-                                query.world, query.slot, "no_path", False, None)
+                                query.world, query.slot, "no_path", False, None,
+                                path_points, weighted_cost,
+                                cost_provenance=cost_provenance)
                         else:
                             result = RouteResult(query.candidate_id, query.snapshot_id,
-                                query.world, query.slot, "feasible", True, distance)
+                                query.world, query.slot, "feasible", True, distance,
+                                path_points, weighted_cost,
+                                cost_provenance=cost_provenance)
                     results[original_index] = result
 
     return tuple(result for result in results if result is not None)
