@@ -21,7 +21,8 @@
         "Section 7 A/B planner completed an audit: matched five-track/D0-D1-D2 evaluation, P0 and bounded candidate-recall summaries exist, but no frozen experiment matrix, same-checkpoint K sweep, prediction-mode matrix, or explicit inference-disable scenario; feint/delay/low-confidence factors remain unrepresented",
         "Phase 4 factor planner completed frozen definitions for deterministic telegraph/reversal feint, physics-tick observation buffering, confidence-only degradation, abrupt opponent A-to-B switching, matched baseline contracts, and factor-level status projection through the campaign dashboard.",
         "Phase 5 synthetic scorer timing correction planned: compute raw scorer argmax from the already-timed model outputs so the interval contains one forward pass; retain age as an explicitly non-independent timing proxy.",
-        "Plan A Phase 2 v3 planner pass: use strict replay-bound v2 counterfactual samples for direct gross-horizon U(node)+B(behavior) regression plus pairwise preferences; keep P null until P-modified routes and an independent oracle cost target exist."
+        "Plan A Phase 2 v3 planner pass: use strict replay-bound v2 counterfactual samples for direct gross-horizon U(node)+B(behavior) regression plus pairwise preferences; keep P null until P-modified routes and an independent oracle cost target exist.",
+        "Plan A P-oracle/coverage planner audit on codex/meco-p-route-oracle: native TensorThreeVsThreeEnv.step calls TensorADStar without the learned P grid; the isolated weighted-route evaluator returns path geometry without simulator execution. Do not define a P oracle or claim exhaustive route coverage until prescribed P-shaped paths are executed and replay-bound."
       ]
     },
     {
@@ -93,7 +94,8 @@
         "Phase 5 synthetic timing correction implemented in isolated worktree codex/meco-deployment-timing: scorer-plus-argmax reuses the timed forward output; docs retain explicit non-independent/non-physical age limitations. Static review pending; no tests, exports, simulator, or hardware runs.",
         "Phase 5 profiling follow-up: scoped reviewer identified dict output extraction as a KeyError risk; `_pipeline` now selects `utility` or `candidate_utility` by track while preserving tuple output support and one-forward timing. Correction awaits re-review; no runtime or hardware work.",
         "Scoped reviewer confirmed the named-dictionary scorer extraction correction; follow-up now warms model and argmax together for each warmup iteration, with synchronization after warmup and one forward pass per timed iteration. Re-review pending; static-only.",
-        "Plan A Phase 2 v3 direct value fitter committed as 00b6a01550021e5338c43a9cfe92d2c73bf1859d in isolated ZFS worktree codex/meco-phase2-plan-a-v3; reuses strict v2 replay data, fits sampled U+B values plus pairwise preference, and zeros the unlabelled P head; scoped static review approved."
+        "Plan A Phase 2 v3 direct value fitter committed as 00b6a01550021e5338c43a9cfe92d2c73bf1859d in isolated ZFS worktree codex/meco-phase2-plan-a-v3; reuses strict v2 replay data, fits sampled U+B values plus pairwise preference, and zeros the unlabelled P head; scoped static review approved.",
+        "P route-oracle implementation tranche on codex/meco-p-route-oracle: native prescribed-route execution is unavailable, so no schema or fabricated targets were added. Documentation makes the P-null/zero-prior/p0 limitation and sampled-not-exhaustive coverage explicit; v2/v3 validators remain fail-closed. No tests or simulator runs."
       ]
     },
     {
@@ -158,7 +160,8 @@
         "Scoped review found Phase 5 `_pipeline` assumed tuple output and would KeyError for dict outputs; named-key extraction correction is committed in codex/meco-deployment-timing and awaits re-review. One-forward timing and explicit age-proxy limitations remain in scope; no runtime or hardware validation requested.",
         "Scoped review approved the named-dictionary scorer extraction correction in e300fff36; follow-up warmup coverage now requires re-review: verify each warmup runs model plus argmax, synchronization boundary, and one forward pass per timed iteration.",
         "Scoped review approved Phase 5 synthetic timing fix at 0e3eef933: dictionary/tuple scorer outputs are supported, model plus argmax are warmed together, and every timed interval contains one forward pass. Overall campaign reviewer pass remains in progress; empirical CPU/accelerator profiling, ONNX numerical parity, Hailo checks, and end-to-end latency evidence remain pending.",
-        "Scoped static review approved Plan A Phase 2 v3 commit 00b6a01550021e5338c43a9cfe92d2c73bf1859d for exact replay/support/source/protocol/train-split binding, sampled direct U+B gross-return and pairwise losses, weights-only loading, and explicit P-unlabelled zero initialization. Global Phase 2 remains open: coverage is sampled rather than exhaustive, and P route execution/oracle labels, empirical simulator replay, and warm-start outcome evaluation remain outstanding."
+        "Scoped static review approved Plan A Phase 2 v3 commit 00b6a01550021e5338c43a9cfe92d2c73bf1859d for exact replay/support/source/protocol/train-split binding, sampled direct U+B gross-return and pairwise losses, weights-only loading, and explicit P-unlabelled zero initialization. Global Phase 2 remains open: coverage is sampled rather than exhaustive, and P route execution/oracle labels, empirical simulator replay, and warm-start outcome evaluation remain outstanding.",
+        "P route-oracle documentation tranche submitted for scoped review on codex/meco-p-route-oracle: review the native planner call-path evidence, ensure no unsupported route-oracle/coverage contract is implied, and confirm P remains null with sampled coverage only. Static documentation/ledger changes; no tests or simulator evaluation."
       ]
     }
   ],

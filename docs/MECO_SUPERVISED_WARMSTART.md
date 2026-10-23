@@ -183,3 +183,25 @@ zeros the unlabelled P head and records `p_mode=p0`; later RL can train P. A
 replay executor that executes and records P-shaped routes plus an independent
 oracle route-cost target is still required to close Plan A traversal-penalty
 supervision in Phase 2. No P target is inferred from U/B returns.
+
+#### Route-execution and coverage gate
+
+The current native simulator path does not satisfy that prerequisite. The
+Plan A macro executor supplies a selected XY goal and heading to
+`TensorThreeVsThreeEnv.step`; the environment's controller calls
+`TensorADStar.plan` without `learned_traversal_cost`. Although the planner API
+accepts a learned-cost grid, and `experimental_route_evaluation.evaluate_routes`
+can construct a cost-weighted path in an isolated scratch planner, that probe
+returns path geometry and does not execute the path through simulator physics.
+Neither API establishes replay-backed behavior for a P-shaped native route.
+
+For that reason this checkout does not define or accept a P-route-oracle or
+exhaustive-route-coverage schema. The v2/v3 artifact validators continue to
+require a null P target, zero P prior, and `p_mode=p0`; a sampled subset of
+legal Plan A support descriptors remains sampled coverage, not exhaustive
+node/path coverage. Adding a versioned oracle contract is gated on wiring the
+model's projected P map into native environment planning, recording the exact
+executed route and map provenance in replay, and demonstrating replay parity.
+Until those prerequisites exist, P labels and exhaustive P-route coverage are
+unavailable and must not be inferred from planner API capability or U+B return
+labels.
