@@ -26,6 +26,9 @@ TRAIN_SEED_POOL_SIZE = 100
 BOOTSTRAP_REPLICATES = 10_000
 POLICIES = ("A1", "A2", "A3", "C1", "C2")
 REFERENCE_POLICY = "D0"
+SAFETY_METRICS_SCHEMA = "meco-safety-rates-v1"
+SAFETY_METRIC_NAMES = frozenset(("safety_robot_contact_rate",
+    "safety_field_contact_rate", "safety_wall_contact_rate"))
 
 # Each named layout/noise/family is applied by the simulator constructor or
 # per-step scenario controller. New variants require a corresponding runtime
@@ -178,6 +181,7 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             raise ValueError("provide a nonnegative minimum useful-throughput gain for every category")
         if (not isinstance(safety_noninferiority_margins, dict)
                 or not safety_noninferiority_margins
+                or set(safety_noninferiority_margins) != SAFETY_METRIC_NAMES
                 or any(not isinstance(key, str) or not key.startswith("safety_")
                        or type(value) not in (int, float)
                        or not math.isfinite(value) or not 0 <= value <= 1
@@ -219,6 +223,82 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
     body["protocol_id"] = hashlib.sha256(json.dumps(body, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return body
+
+
+def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
+    """Validate the complete calibrated protocol contract before use."""
+    if not isinstance(protocol, dict) or protocol.get("protocol_version") != CALIBRATED_PROTOCOL_VERSION:
+        raise ValueError("promotion requires a calibrated v2 protocol")
+    body = {key: value for key, value in protocol.items() if key != "protocol_id"}
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if protocol.get("protocol_id") != digest:
+        raise ValueError("qualification protocol file hash is invalid")
+    if protocol.get("scenario_ids") != [scenario]:
+        raise ValueError("calibrated protocol must cover exactly the report scenario")
+    if scenario not in SCENARIOS:
+        raise ValueError("calibrated protocol names an unknown scenario")
+    if (protocol.get("gate_calibration_status") != "calibrated_baseline_frozen"
+            or protocol.get("safety_gate_status") != "awaiting_runtime_contact_metric_support"):
+        raise ValueError("calibrated protocol status fields are invalid or unsupported")
+    for field in ("calibration_id", "calibration_source_identity_sha256"):
+        value = protocol.get(field)
+        if (not isinstance(value, str) or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)):
+            raise ValueError(f"calibrated protocol has invalid {field}")
+    categories = set(SCENARIOS[scenario].required_categories)
+    gain_margins = protocol.get("minimum_useful_gain")
+    safety_margins = protocol.get("safety_noninferiority_margins")
+    if (not isinstance(gain_margins, dict) or set(gain_margins) != categories
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                   for value in gain_margins.values())):
+        raise ValueError("calibrated protocol useful-gain categories or margins are invalid")
+    if (not isinstance(safety_margins, dict) or set(safety_margins) != SAFETY_METRIC_NAMES
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                   or not 0 <= value <= 1 for value in safety_margins.values())):
+        raise ValueError("calibrated protocol safety metric names or margins are invalid")
+    episodes, master_seed = protocol.get("episodes_per_category_stratum"), protocol.get("master_seed")
+    if type(episodes) is not int or episodes < MIN_EPISODES or type(master_seed) is not int:
+        raise ValueError("calibrated protocol episode or seed settings are invalid")
+    expected_cases = [asdict(case) | {"seeds": list(case.seeds)}
+        for split in ("train", "validation", "test")
+        for case in protocol_cases(scenario, split,
+            episodes=TRAIN_SEED_POOL_SIZE if split == "train" else episodes,
+            master_seed=master_seed)]
+    if protocol.get("cases") != expected_cases:
+        raise ValueError("calibrated protocol case table or exact seed lists are invalid")
+
+
+_EVIDENCE_FIELDS = ("schema_version", "qualification", "evaluation_id", "protocol_id",
+    "scenario_id", "split", "candidate_policy", "bundle_id", "policy_manifest",
+    "source_identity_sha256", "gate_definition", "gate_calibration_status",
+    "protocol_version", "calibration_id", "minimum_useful_gain",
+    "safety_noninferiority_margins", "safety_gate_status",
+    "safety_metrics_schema", "safety_metrics_source_identity_sha256",
+    "paired_reference_policy", "paired", "episodes_per_category_stratum",
+    "master_seed", "records", "case_ids", "reference_report", "generated_utc")
+
+
+def _evidence_digest(report: dict) -> str:
+    evidence = {key: report.get(key) for key in _EVIDENCE_FIELDS}
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _validate_evidence_digest(report: dict) -> None:
+    if not isinstance(report, dict) or report.get("evidence_sha256") != _evidence_digest(report):
+        raise ValueError("qualification evidence digest is missing or invalid")
+
+
+def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
+    bindings = ("protocol_id", "protocol_version", "calibration_id",
+        "gate_calibration_status", "minimum_useful_gain",
+        "safety_noninferiority_margins", "safety_gate_status",
+        "episodes_per_category_stratum", "master_seed")
+    if any(report.get(field) != protocol.get(field) for field in bindings):
+        raise ValueError("qualification report calibration/protocol provenance mismatch")
+    if report.get("paired_reference_policy") != REFERENCE_POLICY or report.get("paired") is not True:
+        raise ValueError("qualification report reference pairing provenance is invalid")
 
 
 def _variance(values):
@@ -415,6 +495,19 @@ def _validate_case_rows(report, expected_cases, policy):
                 or row.get("source_identity_sha256") != report.get("source_identity_sha256")):
             raise ValueError("qualification record policy/checkpoint/source provenance mismatch")
         metrics = row.get("metrics")
+        safety_keys = ({key for key in metrics if isinstance(key, str) and key.startswith("safety_")}
+                       if isinstance(metrics, dict) else set())
+        if safety_keys - SAFETY_METRIC_NAMES:
+            raise ValueError("qualification row contains an unknown safety metric")
+        if safety_keys and safety_keys != SAFETY_METRIC_NAMES:
+            raise ValueError("qualification row has incomplete safety metric coverage")
+        if safety_keys and (report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                or report.get("safety_metrics_source_identity_sha256") != report.get("source_identity_sha256")):
+            raise ValueError("qualification safety metrics lack evaluator schema/source provenance")
+        if any(type(metrics.get(key)) not in (int, float)
+               or not math.isfinite(metrics[key]) or not 0 <= metrics[key] <= 1
+               for key in safety_keys):
+            raise ValueError("qualification safety metric must be a finite rate in [0, 1]")
         if (not isinstance(metrics, dict) or type(metrics.get("success")) not in
                 (bool, int) or not math.isfinite(float(metrics["success"]))
                 or not 0 <= float(metrics["success"]) <= 1
@@ -439,18 +532,18 @@ def consume_validation_round(report: dict, *, protocol: dict,
     """
     if report.get("qualification") is not True or report.get("split") != "validation":
         raise ValueError("only qualification validation reports may advance promotion")
+    scenario = report.get("scenario_id")
+    _validate_v2_protocol(protocol, scenario)
+    _validate_evidence_digest(report)
+    _validate_report_protocol_binding(report, protocol)
+    from .curriculum_training import source_identity
+    current_source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    if protocol.get("calibration_source_identity_sha256") != current_source_hash:
+        raise ValueError("calibration source identity differs from current evaluation source")
     protocol_id = protocol.get("protocol_id")
     if not isinstance(protocol_id, str) or report.get("protocol_id") != protocol_id:
         raise ValueError("frozen qualification protocol mismatch")
-    protocol_body = {key: value for key, value in protocol.items() if key != "protocol_id"}
-    computed_protocol_id = hashlib.sha256(json.dumps(protocol_body, sort_keys=True,
-        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    if computed_protocol_id != protocol_id:
-        raise ValueError("qualification protocol file hash is invalid")
-    calibrated = protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION
-    if not calibrated:
-        raise ValueError("provisional v1 protocol cannot advance promotion; freeze a calibrated v2 protocol")
-    scenario = report.get("scenario_id")
     if protocol.get("promotion_gates", {}).get(scenario) != asdict(SCENARIOS[scenario].gate):
         raise ValueError("qualification gate definition differs from the frozen protocol")
     expected_cases = tuple(case for case in protocol_cases(scenario, "validation",
@@ -473,6 +566,13 @@ def consume_validation_round(report: dict, *, protocol: dict,
     categories = []
     ci = {}
     gate_failures = []
+    if (report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or report.get("safety_metrics_source_identity_sha256") != report.get("source_identity_sha256")):
+        gate_failures.append("safety metric schema/source provenance is unavailable")
+    if protocol.get("safety_gate_status") != "metrics_schema_verified":
+        gate_failures.append("protocol does not authorize a verified safety metric implementation")
+    if report.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256"):
+        raise ValueError("qualification report source identity differs from calibrated protocol")
     for category in SCENARIOS[scenario].required_categories:
         case_rows = [case for case in expected_cases if case.category == category]
         seeds = tuple(seed for case in case_rows for seed in case.seeds)
@@ -556,11 +656,16 @@ def consume_validation_round(report: dict, *, protocol: dict,
 
 def _retention_result(report, protocol, primary):
     """Convert a complete retention report; promotion gate enforces same bundle."""
+    _validate_evidence_digest(report)
+    _validate_v2_protocol(protocol, protocol.get("scenario_ids", [None])[0])
+    _validate_report_protocol_binding(report, protocol)
     if (report.get("qualification") is not True or report.get("split") != "validation"
             or report.get("protocol_id") != protocol.get("protocol_id")
             or report.get("evaluation_id") != primary.get("evaluation_id")
             or report.get("bundle_id") != primary.get("bundle_id")):
         raise ValueError("retention must use the same round, frozen protocol, and checkpoint bundle")
+    if report.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256"):
+        raise ValueError("retention report source identity differs from calibrated protocol")
     scenario = report["scenario_id"]
     cases = protocol_cases(scenario, "validation",
         episodes=protocol["episodes_per_category_stratum"],
@@ -624,6 +729,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         raise ValueError("qualification needs exactly the selected candidate checkpoint")
     if scenario_id not in protocol.get("scenario_ids", ()):
         raise ValueError("scenario is not in the frozen qualification protocol")
+    if split == "validation":
+        _validate_v2_protocol(protocol, scenario_id)
     if protocol.get("promotion_gates", {}).get(scenario_id) != asdict(SCENARIOS[scenario_id].gate):
         raise ValueError("protocol gate definition does not match curriculum version")
     episodes = protocol.get("episodes_per_category_stratum")
@@ -701,6 +808,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "minimum_useful_gain": protocol.get("minimum_useful_gain"),
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
+        "safety_metrics_schema": None,
+        "safety_metrics_source_identity_sha256": None,
         "paired_reference_policy": REFERENCE_POLICY, "paired": True,
         "episodes_per_category_stratum": episodes,
         "master_seed": master_seed, "records": records,
@@ -709,6 +818,7 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "generated_utc": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat()}
     round_report["reference_report"] = {"policy_manifest": manifest}
+    round_report["evidence_sha256"] = _evidence_digest(round_report)
     if collect_only:
         return None, round_report
     if split == "test":

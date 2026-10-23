@@ -72,6 +72,18 @@ with an explicit missing-metric failure; calibration alone does not qualify a
 policy. Dashboard status reports protocol version, calibration ID, and safety
 gate readiness.
 
+Promotion consumption revalidates the complete v2 protocol schema, category
+and safety metric name sets, exact seed case table, calibration/source IDs,
+and an `evidence_sha256` over the immutable report's policy manifest, source
+identity, cases, and raw rows. Unknown `safety_*` row fields are rejected.
+These are unkeyed SHA-256 integrity checks: they detect edits when the recorded
+digest is retained, but they do not authenticate the report producer or stop a
+forger from replacing both data and digest. No signing key or trusted attestor
+is configured. For that reason the current protocol marks the safety schema as
+unsupported and promotion remains blocked even if a report claims safety
+metrics; a future metric implementation must bind supported metrics to its
+evaluator provenance before changing that gate status.
+
 Final-test execution is separate and requires the already promoted scenario,
 the same protocol, and the exact checkpoint bundle recorded at promotion. It
 uses only the selected candidate plus D0 and never changes promotion state.
