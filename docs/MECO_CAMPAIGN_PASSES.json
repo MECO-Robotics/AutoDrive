@@ -17,7 +17,8 @@
         "Phase 0 D0 variance calibration and qualification gate plan completed: separate disjoint calibration seeds, separate repeat-run and cross-seed variance, freeze operational margin/protocol digest, and require paired-CI improvement plus safety non-inferiority for promotion",
         "Phase 5 audit completed: reviewed synthetic exporter/profile harness is isolated on the completed branch; full production-schema parity, ONNX numerical parity, Hailo compilation/device profiling, end-to-end decision latency, and checkpoint-bound simulator replay remain open",
         "D0 planner completed target-scoped calibration bundle design: immutable protocol covers target scenario plus prerequisite closure, per-scenario calibration IDs/gates/splits, and same-protocol ancestor retention; only the target can promote",
-        "Safety-metric planner identified authoritative contact instrumentation boundary: count focal contact ticks once per class after low-level collision passes and divide by active focal physics ticks; contacts are proxies, not automatic rule violations"
+        "Safety-metric planner identified authoritative contact instrumentation boundary: count focal contact ticks once per class after low-level collision passes and divide by active focal physics ticks; contacts are proxies, not automatic rule violations",
+        "Section 7 A/B planner completed an audit: matched five-track/D0-D1-D2 evaluation, P0 and bounded candidate-recall summaries exist, but no frozen experiment matrix, same-checkpoint K sweep, prediction-mode matrix, or explicit inference-disable scenario; feint/delay/low-confidence factors remain unrepresented"
       ]
     },
     {
@@ -62,7 +63,8 @@
         "D0 implementer is extending the calibrated protocol to target-scoped scenario bundles so ancestor retention reports can be generated under one protocol ID without relaxing safety or split isolation",
         "Authoritative low-level contact-rate instrumentation implementation started on the approved Section6 metrics branch; outer-step samples are retained only as scoped proxies, while qualification rates will use per-tick numerators/denominators",
         "D0 target-scoped calibration bundle committed as da1f7d236 in isolated worktree: protocol binds target+prerequisite closure, per-scenario calibration IDs/seed pools/gates/splits; only target can promote, ancestors collect retention under the same protocol; scoped review pending",
-        "D0 bundle reviewer found retention policy_manifest bundle_id is not recomputed at consumption and v1 protocol_document output shape changed while PROTOCOL_VERSION remains v1; implementer follow-up will bind retention manifests and dispatch v1/v2 schemas explicitly"
+        "D0 bundle reviewer found retention policy_manifest bundle_id is not recomputed at consumption and v1 protocol_document output shape changed while PROTOCOL_VERSION remains v1; implementer follow-up will bind retention manifests and dispatch v1/v2 schemas explicitly",
+        "Section 7 A/B matrix implementation started in isolated branch codex/meco-ablation-matrix; scope covers exact paired checkpoint/seed/condition contracts and supported forecast, P0, K=8/16/32 and fallback factors"
       ]
     },
     {
@@ -102,7 +104,8 @@
         "Target-scoped multi-scenario calibration bundle implementation will receive a separate static review for prerequisite closure, per-scenario seed disjointness, same-protocol ancestor retention, and target-only promotion",
         "Contact-rate instrumentation will receive scoped static review for low-level clear/collision ordering, once-per-tick counts, episode reset, active-tick denominator, and explicit distinction from actual safety-rule violations",
         "D0 target-scoped bundle da1f7d236 submitted for scoped review; safety metrics remain pending, so calibrated promotion still fails closed",
-        "D0 bundle review pending two fixes: recompute retention policy bundle identity and preserve generated v1 protocol schema unchanged under explicit v1/v2 dispatch"
+        "D0 bundle review pending two fixes: recompute retention policy bundle identity and preserve generated v1 protocol schema unchanged under explicit v1/v2 dispatch",
+        "Section 7 experiment-matrix code will receive scoped review for common checkpoint/source/config/seed identity, immutable factor contracts, same-checkpoint K/prediction/fault overrides, and honest unsupported-factor status"
       ]
     }
   ]
