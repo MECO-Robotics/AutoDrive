@@ -260,7 +260,8 @@ def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cos
 
 
 def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
-                   route_nodes=None, risk_nodes=None, planner=None):
+                   route_nodes=None, risk_nodes=None, planner=None,
+                   penalty_map=None):
     """Score all frozen node × behavior pairs with current U, P and behavior heads."""
     planner = (env.planner if env is not None else planner)
     logits = gather_pose_behavior_logits(track, raw, graph, raster, support,
@@ -276,13 +277,13 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
                                           config.prediction_mode)
     path_cost = torch.zeros_like(route)
     if config.p_mode == "learned":
-        field_length = (float(env.sim.field_length) if env is not None
-                        else float(planner.length))
-        field_width = (float(env.sim.field_width) if env is not None
-                       else float(planner.width))
-        penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
-            planner, field_length, field_width,
-            mode="learned")
+        if penalty_map is None:
+            field_length = (float(env.sim.field_length) if env is not None
+                            else float(planner.length))
+            field_width = (float(env.sim.field_width) if env is not None
+                           else float(planner.width))
+            penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
+                planner, field_length, field_width, mode="learned")
         ix = torch.floor(support.goal_xy[:, 0] / graph.resolution_m).long().clamp(0, graph.nx - 1)
         iy = torch.floor(support.goal_xy[:, 1] / graph.resolution_m).long().clamp(0, graph.ny - 1)
         per_node = penalty_map[ix, iy]
@@ -348,12 +349,18 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     graph_data = _graph_inputs(track, graph, env, raster)
     raw = model(raster=raster, globals_=globals_, hidden=hidden, **(graph_data or {}))
     seed_decision = {"raw": raw, "hidden": raw["hidden"]}
+    penalty_map = None
+    if p_mode == "learned":
+        penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
+            env.planner, float(env.sim.field_length), float(env.sim.field_width),
+            mode="learned")
     config = SimpleNamespace(route_cost_points_per_second=route_cost_points_per_second,
         p_mode=p_mode, p_cost_scale=p_cost_scale,
         p_points_per_grid_edge=p_points_per_grid_edge,
         prediction_mode=prediction_mode)
     logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
-                                       graph, raster, env, config)
+                                       graph, raster, env, config,
+                                       penalty_map=penalty_map)
     eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1)
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
@@ -375,6 +382,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "hidden_next": seed_decision["hidden"], "value": value,
         "route_cost": route_nodes[None], "risk_cost": risk_nodes[None],
         "path_cost": path_cost, "legal_lookup": graph.lookup,
+        "planner_traversal_cost": penalty_map,
+        "planner_traversal_cost_scale": (p_cost_scale if penalty_map is not None else 1.),
         "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
         "risk_cost_nodes": risk_nodes, "graph_object": graph,
         "planner_object": env.planner, "fallback_used": fallback_used,
@@ -490,6 +499,8 @@ def _physics_safety_snapshot(env):
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
                     allow_action7_traversal=False,
+                    planner_traversal_cost_override=None,
+                    planner_traversal_cost_scale=1.0,
                     safety_counts: dict | None = None,
                     metric_ledger: MecoEpisodeMetricLedger | None = None):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
@@ -499,14 +510,25 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     executed_actions = []
     heading_alignment_opportunity = False
     native_goal_preempted = False
+    frozen_traversal_cost = (None if planner_traversal_cost_override is None else
+        torch.as_tensor(planner_traversal_cost_override, device=env.device,
+                        dtype=env.sim.pose.dtype).detach().clone())
     if safety_counts is not None and "_last_snapshot" not in safety_counts:
         safety_counts["_last_snapshot"] = _physics_safety_snapshot(env)
     for _ in range(action_ticks):
+        planner_kwargs = {}
+        if frozen_traversal_cost is not None:
+            planner_kwargs = {
+                "planner_traversal_cost_override": frozen_traversal_cost,
+                "planner_traversal_cost_override_action": int(action_index),
+                "planner_traversal_cost_override_scale": planner_traversal_cost_scale,
+            }
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
             planner_goal_override_traversal=allow_action7_traversal,
-            planner_goal_heading_override=goal_heading)
+            planner_goal_heading_override=goal_heading,
+            **planner_kwargs)
         if metric_ledger is not None:
             metric_ledger.observe_outer_step()
         executed_actions.append(int(env.last_actions[0, 3].item()))
@@ -832,6 +854,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "sampled at the next macro boundary. Incomplete goals are not censored. "
             "Sampled fallback, native remask, and native goal preemption are "
             "critic-only and counted separately by reason. C1/C2 semantics unchanged."),
+        "plan_a_route_execution_contract": (
+            "A1/A2/A3 learned mode: freeze the projected P map at the policy decision "
+            "and pass it through the full macro to native AD* for focal slot 3 on "
+            "every replan and eligible depot retry; other robot routes are unweighted. "
+            "P0 passes no map. Map/action/goal binding and map shape/value/scale are "
+            "validated. This is an unvalidated implementation seam until a replay "
+            "exercises and inspects the resulting route."),
         "prediction_contract": prediction_contract(config.prediction_mode),
         "qualification_protocol_id": qualification_protocol_id,
         "qualification_protocol_sha256": qualification_protocol_sha256,
@@ -898,7 +927,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     env, action, config.action_ticks, goal_xy,
                     goal_heading=goal_heading,
                     allow_action7_traversal=(prepared is not None and
-                                              "support" in prepared and action == 7))
+                                              "support" in prepared and action == 7),
+                    planner_traversal_cost_override=(
+                        None if prepared.get("fallback_used", False) else
+                        prepared.get("planner_traversal_cost")),
+                    planner_traversal_cost_scale=prepared.get(
+                        "planner_traversal_cost_scale", 1.))
                 update_heartbeat()
                 remasked = any(item != action for item in executed_trace)
                 sampled_fallback = bool(prepared.get("fallback_used", False))
@@ -1346,7 +1380,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "points_per_grid_edge": p_points_per_grid_edge,
             "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
             "path_units": PENALTY_PATH_UNITS,
-            "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
+            "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree",
+            "native_route_execution": "projected P map routed to focal slot-3 AD* on every replan and eligible depot retry; other robots unweighted; P0 passes no map",
+            "runtime_route_validation": "pending_representative_simulator_replay"},
         "inference_disable_fault": {"requested_tick": inference_disable_tick,
             "fallback": "D1 deterministic scorer using checkpoint prediction mode",
             "trigger": "first macro decision boundary at or after requested physics tick"},
@@ -1616,6 +1652,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 goal_heading=goal_heading,
                                 allow_action7_traversal=(prepared is not None and
                                                           "support" in prepared and action == 7),
+                                planner_traversal_cost_override=(
+                                    prepared.get("planner_traversal_cost")
+                                    if (prepared is not None and not use_d1_fallback and
+                                        not prepared.get("fallback_used", False)) else None),
+                                planner_traversal_cost_scale=(
+                                    prepared.get("planner_traversal_cost_scale", 1.)
+                                    if (prepared is not None and not use_d1_fallback and
+                                        not prepared.get("fallback_used", False)) else 1.),
                                 metric_ledger=episode_metric_ledger,
                                 safety_counts=(post_fault_safety if use_d1_fallback else None))
                             if use_d1_fallback:
@@ -1872,7 +1916,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "points_per_grid_edge": p_points_per_grid_edge,
                 "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
                 "path_units": PENALTY_PATH_UNITS,
-                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree_including_root_pose_connector"},
+                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree_including_root_pose_connector",
+                "native_route_execution": "projected P map routed to focal slot-3 AD* on every replan and eligible depot retry; other robots unweighted; P0 passes no map",
+                "runtime_route_validation": "pending_representative_simulator_replay"},
             "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
                 "D1": "hand-weighted scorer using current-pose prediction by default (explicit evaluation override applies); 12-step macro cadence",
                 "D2": "D1 scorer using bounded constant-velocity prediction by default (explicit evaluation override applies); 12-step macro cadence"},

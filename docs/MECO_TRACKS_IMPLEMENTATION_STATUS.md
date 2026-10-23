@@ -84,13 +84,17 @@ integrals with O(N log N) tensor gathers rather than per-candidate planner
 calls. `p_mode=p0` remains a zero-P matched ablation. This tree is a static
 legal-graph reachability/cost reference; it is not the simulator's execution
 route. The simulator still uses XY AD* with swept SE(2) checks and dynamic
-robot arbitration. The native environment currently calls AD* without the
-learned traversal map; the isolated weighted-route probe does not execute its
-returned path in the simulator. Thus P affects Plan A pair scoring, but there
-is no replay-backed P-shaped native route or P route-oracle label. The v2/v3
-supervised artifacts fail closed with P null, zero prior, and `p_mode=p0`;
-their sampled support is not exhaustive node/path coverage. Intake support
-binds a sensed target slot and a
+robot arbitration. The MECO Plan A training and evaluation call path now passes
+the projected P map through each macro to native AD*, using the same frozen
+map on focal slot-3 replans and eligible depot retries; other robot routes
+remain unweighted. P0 supplies no map and preserves the existing planner path.
+This wiring has not yet been exercised or inspected in a simulator replay, so
+it is not runtime evidence for P-shaped native routes. The isolated weighted-
+route probe still returns geometry without executing it in physics. No
+P-route oracle or exhaustive route-coverage labels are defined; v2/v3
+supervised artifacts continue to fail closed with P null, zero prior, and
+`p_mode=p0`, and their sampled support is not exhaustive node/path coverage.
+Intake support binds a sensed target slot and a
 bearing-aligned capture envelope; score support is restricted to clear score
 grid endpoints and heading bins within 5 degrees of the HUB-facing direction;
 ferry support requires carried fuel, a controllable current ferry endpoint,
