@@ -101,10 +101,13 @@ map on focal slot-3 replans and eligible depot retries; other robot routes
 remain unweighted. P0 supplies no map and preserves the existing planner path.
 This wiring has not yet been exercised or inspected in a simulator replay, so
 it is not runtime evidence for P-shaped native routes. The isolated weighted-
-route probe still returns geometry without executing it in physics. No
-P-route oracle or exhaustive route-coverage labels are defined; v2/v3
-supervised artifacts continue to fail closed with P null, zero prior, and
-`p_mode=p0`, and their sampled support is not exhaustive node/path coverage.
+legacy weighted-route probe still returns geometry without executing it in
+physics. The
+legacy v2/v3 supervised artifacts continue to fail closed with P null, zero
+prior, and `p_mode=p0`. Separate Plan A P route-v2 supervision now supplies
+sampled within-prefix route-preference targets from simulator returns; it
+does not provide independent per-cell oracle labels or exhaustive route
+coverage. Collection, fitting, and outcome validation remain pending.
 The standard Plan A train/eval call path uses eager steps. A P map supplied
 during CUDA stream capture causes `TensorThreeVsThreeEnv.step` to raise
 `ValueError` and abort that call; it does not silently fall back. Dashboard

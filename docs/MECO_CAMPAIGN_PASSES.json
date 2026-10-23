@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -191,7 +191,8 @@
         "Scoped reviewer approved collection-action-bout commit 572df38b3eead8c719acb8831fac4e76d2b99eaf: executed action sequence/counts and half-open tick bounds align; focal acquired-event quantities gate acquired=true; missing signals fail closed; HUB denial remains separate. Evaluation exceptions do not serialize partial episode records. Static review only; representative simulator validation pending.",
         "Integrated read-only review approved exact HEAD fee5b6dccbb0f9b1e34caa4436f16a78498f8997: collection metrics sample actual executed slot-3 actions; empty-support training recovery creates no action/metric/PPO row; evaluation exceptions close in-memory bouts and fail without partial records; source_identity binds code into checkpoints/reports. Static review only; representative simulator validation remains pending.",
         "Scoped reviewer approved Section 6 dashboard projection commits ce9a42bcc0bd7042d8c93e2ccdef08f16f3c284f and 44858c12d56ac731157428158ec9670b5094b2b6: summaries validate counts/proportions, pool only available matched episode records, preserve unavailable vs N/A zero-bout semantics, and remain outside qualification/training. Static review only; current-source simulator replay remains pending.",
-        "Sibling-failure abort implementation is in isolated worktree codex/meco-sibling-failure-abort from 94fe36939; scoped reviewer pass pending. Static compilation and diff checks only; no tests or simulator runs."
+        "Sibling-failure abort implementation is in isolated worktree codex/meco-sibling-failure-abort from 94fe36939; scoped reviewer pass pending. Static compilation and diff checks only; no tests or simulator runs.",
+        "Integrated A-P and C target-recall work at edd55a2aa: Plan A P route-v2 sampled route-ranking targets and Plan C selected sensed-target steering/remask fail-fast are statically reviewed; P route dataset collection/fitting and seeded simulator replay remain pending. Integrated commit chains: A-P 2854417e2, 6f99143dd, 4f40ac587; C 962ed04c5, 6b8e8ad38, 4e56de637, edd55a2aa. No tests or simulator evaluation were run; runtime checkpoints remain source-bound to the frozen training checkout."
       ]
     }
   ],
