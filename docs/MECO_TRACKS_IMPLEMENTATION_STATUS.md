@@ -303,6 +303,7 @@ buffers, while the expanded-target and commitment consumers treated the first
 dimension as a track dimension after partially indexing only the mask. Commit
 `7ba2d89de` retains `env.n == 1`, validates aligned batched position, velocity,
 and mask shapes, and explicitly selects world 0 for both consumers. The failed
-attempt produced no validated dataset. This correction awaits independent
-scoped review; only static compile/diff checks were run, with simulator
-collection and replay still outstanding.
+attempt produced no validated dataset. This correction passed independent scoped review in isolated commits
+7ba2d89de/f5bd75922 and was integrated as 2dbd0e1a9/b91fe581f. Only static
+compile/diff checks were run; simulator collection and replay remain
+outstanding.
