@@ -4,6 +4,8 @@ Date: 2026-10-20
 
 Status: curriculum infrastructure implemented; scenario budgets, thresholds, scripted references, and learned policies remain unqualified.
 
+The MECO model comparison is a separate, opt-in research layer over these scenarios. It preserves the current 137-scalar/eight-action policy contract and uses the curriculum outcomes for evaluation. See [Learning Tracks](LEARNING_TRACKS.md) for the D0-D2 controls, model sequence, and current planner-interface limits.
+
 ## Objective and priorities
 
 Train a robot that reliably collects FUEL and converts it into useful team outcomes under the current HUB state:
