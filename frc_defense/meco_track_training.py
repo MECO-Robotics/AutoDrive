@@ -1159,7 +1159,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   prediction_mode: str | None = None,
                   candidate_k_override: int | None = None,
                   control_prediction_mode: str | None = None,
-                  inference_disable_tick: int | None = None):
+                  inference_disable_tick: int | None = None,
+                  phase4_factor: dict | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -1174,6 +1175,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
+    from .meco_phase4 import validate_phase4_factor
+    from .meco_device import normalized_device_info
+    phase4_factor = validate_phase4_factor(phase4_factor)
+    execution_device = normalized_device_info(device)
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1350,6 +1355,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "control_modes": effective_control_modes,
             "contract": prediction_contract(effective_prediction_mode)},
         "inference_disable_tick": inference_disable_tick,
+        "phase4_factor": phase4_factor,
+        "execution_device": execution_device,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
             "points_per_grid_edge": p_points_per_grid_edge,
@@ -1384,6 +1391,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             return
         _atomic_json(status_path, {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "split": split, "status": status,
+            "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "output_file": output_path.name,
             "progress": {"completed_records": completed,
@@ -1397,15 +1405,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     component_timing_ms = {name: [] for name in (
         "legal_graph_build", "policy_decision_pipeline", "d1_fallback_pipeline",
         "simulator_macro_step")}
-    timing_device = torch.device(device)
+    timing_device = torch.device(execution_device["device"])
     timing_provenance = {
         "clock": "host perf_counter wall time, device synchronized before and after each measured component",
         "cuda_synchronization": timing_device.type == "cuda",
         "warmup_count": 0,
         "warmup_policy": "no unrecorded simulator warmup; all measured decisions belong to reported episodes",
-        "device": str(timing_device),
-        "accelerator_backend": ("ROCm" if torch.version.hip else
-                                "CUDA" if torch.version.cuda else "CPU"),
+        **execution_device,
         "device_name": (torch.cuda.get_device_name(timing_device)
                         if timing_device.type == "cuda" else "CPU"),
         "instrumentation": "component intervals include completion of asynchronous device work; decision pipeline is combined candidate/feature/model/scoring preparation and is not inference-only",
@@ -1430,6 +1436,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
+                        phase4_factor=phase4_factor,
                         **(qualification_case or {}))
                     try:
                         if (inference_disable_tick is not None and
@@ -1789,6 +1796,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
                             "candidate_k": candidate_k,
+                            "phase4_factor": phase4_factor,
+                            "phase4_factor_runtime": ({
+                                **env.phase4_runtime_metrics,
+                                "fuel_track_confidence_mean": float(
+                                    env.track_confidence[0, 3][env.track_mask[0, 3]].mean().item())
+                                    if bool(env.track_mask[0, 3].any()) else None,
+                                "confidence_semantics": "cap applied only to track_confidence; positions, velocities, ages, masks, dropout and noise unchanged",
+                            } if phase4_factor is not None else None),
+                            "phase4_response_metrics": ({name: metrics.get(name)
+                                for name in ("success", "useful_throughput",
+                                    "route_switches", "route_aba_proxy",
+                                    "safety_robot_contact_rate",
+                                    "safety_field_contact_rate",
+                                    "safety_wall_contact_rate")}
+                                if phase4_factor is not None else None),
                             "base_policy": policy if inference_fault_run else None,
                             "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
@@ -1827,6 +1849,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
+            "execution_device": execution_device,
             "candidate_k_checkpoint": checkpoint_candidate_k,
             "candidate_k_evaluation_override": candidate_k_override,
             "prediction": {"model": PREDICTION_MODEL_ID,
@@ -1842,6 +1865,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "trained_policies": list(selected),
                 "paired_normal_and_fault_records": True}
                 if inference_disable_tick is not None else None),
+            "phase4_factor": phase4_factor,
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",

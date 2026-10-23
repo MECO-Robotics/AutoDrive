@@ -19,7 +19,7 @@
         "D0 planner completed target-scoped calibration bundle design: immutable protocol covers target scenario plus prerequisite closure, per-scenario calibration IDs/gates/splits, and same-protocol ancestor retention; only the target can promote",
         "Safety-metric planner identified authoritative contact instrumentation boundary: count focal contact ticks once per class after low-level collision passes and divide by active focal physics ticks; contacts are proxies, not automatic rule violations",
         "Section 7 A/B planner completed an audit: matched five-track/D0-D1-D2 evaluation, P0 and bounded candidate-recall summaries exist, but no frozen experiment matrix, same-checkpoint K sweep, prediction-mode matrix, or explicit inference-disable scenario; feint/delay/low-confidence factors remain unrepresented",
-        "Phase 4 planner completed the four frozen adversarial factors and paired-seed/provenance design."
+        "Phase 4 factor planner completed frozen definitions for deterministic telegraph/reversal feint, physics-tick observation buffering, confidence-only degradation, abrupt opponent A-to-B switching, matched baseline contracts, and factor-level status projection through the campaign dashboard."
       ]
     },
     {
@@ -84,7 +84,8 @@
         "Plan A PPO action/logprob pairing and per-reason execution diagnostics implemented in isolated branch codex/meco-plan-a-actor-fix at 5d6f8940f5cad0f2c9e158a3e4374e85f1c90b7f; reviewer pass pending. The active campaign remains on its original source identity and is not using this fix.",
         "Phase 5 synthetic profiler timing correction committed on isolated branch codex/meco-deployment-timing through 0e3eef933695cdca49624f08e996d2ad1624abb6: each timed iteration uses one forward, named A/C utility output, and warmed argmax; real deployment profiling remains unrun.",
         "Phase 2 Plan A v3 warm-start implemented and scoped reviewed on isolated branch codex/meco-phase2-plan-a-v3 through a0b8db9842551ceb521d4c08f935e59fd949a11a. It adds direct sampled U+B gross-horizon regression plus pairwise preference from strict replay-bound v2 data; P remains unlabelled and exhaustive-node coverage/empirical warm-start outcome remain open.",
-        "Plan A actor action/log-probability pairing fix implemented and scoped reviewed on isolated branch codex/meco-plan-a-actor-fix through c1b69bf9d8ec9229759b1f29f05db4d19902c8b3; old source-bound checkpoints cannot resume under the changed source identity. Active workers remain on old code."
+        "Plan A actor action/log-probability pairing fix implemented and scoped reviewed on isolated branch codex/meco-plan-a-actor-fix through c1b69bf9d8ec9229759b1f29f05db4d19902c8b3; old source-bound checkpoints cannot resume under the changed source identity. Active workers remain on old code.",
+        "Integrated reviewed Phase 4 factor code, matrix, docs, and dashboard/API projection from codex/meco-phase4-integrated commit 5a543832ae082e05eb470d4a777bd818966daaed; runtime factor evaluation remains pending. This is separate from the active worker source identity."
       ]
     },
     {
@@ -143,8 +144,51 @@
         "Scoped Phase 4 review approved fef1eebf73eab9c06d6300b14bc8e9954f25176a after device/backend identity was bound into matrix, condition, and evaluator protocol IDs and report validation. Static review only; no tests or simulator evaluations.",
         "Scoped reviewer approved Phase 5 timing correction at 0e3eef933695cdca49624f08e996d2ad1624abb6. Static review only; no ONNX export, numerical parity, simulator timing, Hailo compile, or hardware profile.",
         "Scoped reviewer approved the Plan A PPO actor pairing/failure-reason correction through c1b69bf9d8ec9229759b1f29f05db4d19902c8b3; A1-A3 semantics changed, all five old checkpoints are source-incompatible, and simulator revalidation is pending.",
-        "Scoped reviewer approved Phase 2 Plan A v3 through a0b8db9842551ceb521d4c08f935e59fd949a11a. Static review only; full-node coverage, P route execution/oracle labels, replayed fitting, and outcome evaluation remain outstanding."
+        "Scoped reviewer approved Phase 2 Plan A v3 through a0b8db9842551ceb521d4c08f935e59fd949a11a. Static review only; full-node coverage, P route execution/oracle labels, replayed fitting, and outcome evaluation remain outstanding.",
+        "Phase 4 changes are integrated into isolated final-plan worktree for a fresh scoped review. Prior feature-branch review remains recorded separately; runtime factor experiments, held-out generalization, and qualification remain outstanding."
       ]
     }
-  ]
+  ],
+  "phase4_factors": {
+    "schema_version": 1,
+    "planner_status": "complete",
+    "factors": [
+      {
+        "factor_id": "feinting_opponent",
+        "status": "in_progress",
+        "planner_status": "complete",
+        "implementation_status": "complete",
+        "review_status": "complete",
+        "evaluation_status": "pending",
+        "summary": "Slot 0 telegraphs then reverses at physics tick 360; paired against the matched reactive-pressure baseline."
+      },
+      {
+        "factor_id": "observation_delay",
+        "status": "in_progress",
+        "planner_status": "complete",
+        "implementation_status": "complete",
+        "review_status": "complete",
+        "evaluation_status": "pending",
+        "summary": "Buffers policy observation and sensor-track frames by six 20 ms physics ticks (120 ms), not by changing perception cadence."
+      },
+      {
+        "factor_id": "independent_low_confidence",
+        "status": "in_progress",
+        "planner_status": "complete",
+        "implementation_status": "complete",
+        "review_status": "complete",
+        "evaluation_status": "pending",
+        "summary": "Caps only learner FUEL track_confidence at 0.2; preserves track geometry, age, mask, dropout, and noise."
+      },
+      {
+        "factor_id": "abrupt_opponent_policy_change",
+        "status": "in_progress",
+        "planner_status": "complete",
+        "implementation_status": "complete",
+        "review_status": "complete",
+        "evaluation_status": "pending",
+        "summary": "Switches slot 0 from orbit to direct pursuit at physics tick 360."
+      }
+    ]
+  }
 }

@@ -641,6 +641,27 @@ def meco_status_payload(project_root: Path | str) -> bytes:
                     for item in passes["passes"])):
         valid_passes = {"campaign": passes.get("campaign"),
             "agent_liveness": False, "passes": passes["passes"]}
+        factor_status = passes.get("phase4_factors")
+        valid_factor_statuses = {"planned", "pending", "in_progress", "complete", "blocked"}
+        expected_factor_ids = ["feinting_opponent", "observation_delay",
+            "independent_low_confidence", "abrupt_opponent_policy_change"]
+        if (isinstance(factor_status, dict)
+                and factor_status.get("schema_version") == 1
+                and factor_status.get("planner_status") in valid_factor_statuses
+                and isinstance(factor_status.get("factors"), list)
+                and [factor.get("factor_id") for factor in factor_status["factors"]
+                     if isinstance(factor, dict)] == expected_factor_ids
+                and all(isinstance(factor, dict)
+                    and isinstance(factor.get("factor_id"), str)
+                    and factor.get("status") in valid_factor_statuses
+                    and factor.get("planner_status") in valid_factor_statuses
+                    and factor.get("implementation_status") in valid_factor_statuses
+                    and factor.get("review_status") in valid_factor_statuses
+                    and factor.get("evaluation_status") in valid_factor_statuses
+                    and isinstance(factor.get("summary"), str)
+                    for factor in factor_status["factors"])):
+            valid_passes["phase4_planner_status"] = factor_status["planner_status"]
+            valid_passes["phase4_factors"] = factor_status["factors"]
     payload["implementation_passes"] = valid_passes
     if valid_passes is None:
         payload["errors"].append({"source": str(pass_path.relative_to(project)),
