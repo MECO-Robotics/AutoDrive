@@ -223,7 +223,7 @@ retain and inspect an end-to-end simulator record under the repository's
 
 ## Section 6 collection-action bouts
 
-The typed episode metric ledger schema v3 records contiguous focal slot-3
+The typed episode metric ledger schema v4 records contiguous focal slot-3
 executed actions 0 through 3 as collection-action bouts. Each closed bout keeps
 its zero-based start and exclusive end outer-step ticks, executed action
 sequence and per-action counts, focal acquired quantity, acquisition result,
@@ -242,6 +242,10 @@ The `unsuccessful_collection_action_bouts` count includes only finalized bouts
 whose authoritative focal acquired quantity is known to be zero. It is null
 when collection-bout acquisition evidence is unavailable. This is a descriptive
 bout outcome, not a causal intake-failure measure.
+Dashboard ingestion accepts v3 and v4 ledgers. V3 records retain their available
+bout count/acquisition summaries, while the v4-only unsuccessful count stays
+null for those records. Summary coverage reports how many episode records
+contribute an observed unsuccessful-bout count.
 
 ## Separate Plan A P route warm start (code path only)
 

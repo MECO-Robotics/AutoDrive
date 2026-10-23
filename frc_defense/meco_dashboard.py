@@ -278,6 +278,9 @@ def _collection_action_bouts(record):
     ledger = record.get("meco_metric_ledger")
     if not isinstance(ledger, dict):
         return None
+    schema_version = ledger.get("schema_version")
+    if schema_version not in (3, 4):
+        raise ValueError("unsupported meco_metric_ledger schema")
     availability = ledger.get("availability")
     available = (availability.get("collection_action_bouts")
                  if isinstance(availability, dict) else None)
@@ -292,7 +295,11 @@ def _collection_action_bouts(record):
     if (type(count) is not int or count < 0
             or type(acquired) is not int or acquired < 0 or acquired > count):
         raise ValueError("invalid available collection_action_bouts counts")
-    if (type(unsuccessful) is not int or unsuccessful < 0
+    if unsuccessful is None and schema_version == 3:
+        # Older v3 records predate this field. Preserve their other bout
+        # metrics while exposing this new metric as unavailable.
+        pass
+    elif (type(unsuccessful) is not int or unsuccessful < 0
             or unsuccessful > count or acquired + unsuccessful != count):
         raise ValueError("invalid unsuccessful_collection_action_bouts count")
     if count == 0:
@@ -314,13 +321,17 @@ def _summarize_collection_action_bouts(rows):
               if value is not None]
     count = sum(value["count"] for value in values) if values else None
     acquired = sum(value["acquired_count"] for value in values) if values else None
-    unsuccessful = (sum(value["unsuccessful_collection_action_bouts"] for value in values)
-                    if values else None)
+    unsuccessful_values = [value["unsuccessful_collection_action_bouts"]
+                            for value in values
+                            if value["unsuccessful_collection_action_bouts"] is not None]
+    unsuccessful = sum(unsuccessful_values) if unsuccessful_values else None
     return {
         "available_records": len(values),
         "count": count,
         "acquired_count": acquired,
         "unsuccessful_collection_action_bouts": unsuccessful,
+        "unsuccessful_collection_action_bouts_available_records": len(unsuccessful_values),
+        "unsuccessful_collection_action_bouts_total_records": len(rows),
         "acquired_proportion": (acquired / count if count else None),
         "semantics": "unsuccessful_collection_action_bouts counts finalized focal collection-action bouts with authoritative acquired quantity known to be zero; it is a descriptive bout outcome, not causal intake failure",
     }

@@ -98,10 +98,14 @@
           const shown = typeof proportion === "number" && Number.isFinite(proportion)
             ? `${(proportion * 100).toFixed(1)}%`
             : bouts?.count === 0 ? "N/A (zero bouts)" : "unavailable";
+          const unsuccessfulCoverage = `${bouts?.unsuccessful_collection_action_bouts_available_records ?? 0}/${bouts?.unsuccessful_collection_action_bouts_total_records ?? bouts?.available_records ?? 0} records`;
+          const unsuccessfulShown = bouts?.unsuccessful_collection_action_bouts == null
+            ? `unavailable (${unsuccessfulCoverage})`
+            : `${bouts.unsuccessful_collection_action_bouts} (${unsuccessfulCoverage})`;
           return `<tr><th scope="row">${esc(policy)}</th><td>${esc(category)}</td>`+
             `<td>${esc(bouts?.available_records ?? "—")}</td>`+
             `<td>${esc(bouts?.acquired_count ?? "—")} / ${esc(bouts?.count ?? "—")}</td>`+
-            `<td>${esc(bouts?.unsuccessful_collection_action_bouts ?? "unavailable")}</td>`+
+            `<td>${esc(unsuccessfulShown)}</td>`+
             `<td>${esc(shown)}</td></tr>`;
         })).join("");
       return `<article class="group"><h3>${esc(g.scenario_id)} · ${esc(g.matched_status)}</h3>`+

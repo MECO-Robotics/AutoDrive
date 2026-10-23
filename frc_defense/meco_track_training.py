@@ -2326,7 +2326,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "safety_metrics_schema": "meco-safety-rates-v1",
             "safety_metrics_source_identity_sha256": source_hash,
             "episode_metric_ledger_schema": {
-                "schema_version": 3,
+                "schema_version": 4,
                 "record_field": "meco_metric_ledger",
                 "scope": "one ledger per evaluation record, focal slot 3",
                 "outer_step_sampling": "fuel event tensors are sampled after each outer CurriculumEnv.step; contact metrics use cumulative low-level TensorPhysics.step counters",

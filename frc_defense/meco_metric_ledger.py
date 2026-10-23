@@ -186,7 +186,7 @@ class MecoEpisodeMetricLedger:
             for name, count in contact_counters.items()
         }
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "scope": "focal_slot_3_per_episode",
             "availability": {
                 "route_selection": self.route_tracking_available,
