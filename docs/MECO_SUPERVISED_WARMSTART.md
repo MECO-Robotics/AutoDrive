@@ -148,3 +148,38 @@ succeeds on the configured runtime/device. A successful v2 fit requires that
 replay to pass when the command is run; Phase 2 still needs a representative
 end-to-end simulator evaluation before its behavior claims are treated as
 validated.
+
+### Plan A direct value warm start (v3 artifact)
+
+Plan A can use the same strict, replay-bound v2 counterfactual dataset with a
+direct regression objective:
+
+```sh
+python -m frc_defense.meco_supervised warm-start-plan-a-v3 \
+  --track A1 --dataset evaluations/meco-supervised/counterfactual-v2.jsonl \
+  --output checkpoints/meco-warmstart/A1-plan-a-v3.pt \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --device cpu
+```
+
+Collect that v2 dataset from this exact source checkout first; its source
+identity is checked during fitting, so datasets collected before the v3 code
+change are rejected rather than silently reused.
+
+This command accepts A1/A2/A3 only. On each replayed branch it fits
+`U(node) + B(behavior)` to the descriptor's archived `gross_horizon_return`
+with smooth-L1 loss and retains the within-prefix pairwise preference loss.
+Only the deterministic sample of feasible node×behavior descriptors archived
+from the full, ordered Plan A support is directly value-supervised; the v3
+artifact binds the v2 dataset and manifest digests, support-order contract,
+source identity, frozen protocol/train split, prediction mode, runtime/device,
+horizon, and discount semantics. This is sampled support coverage, not a claim
+that every legal node was labeled.
+
+The v3 artifact is weights-only and is consumable through the existing generic
+warm-start validator/loader. Its P target remains null because the current
+counterfactual executor does not execute P-modified AD* routes. The fitter
+zeros the unlabelled P head and records `p_mode=p0`; later RL can train P. A
+replay executor that executes and records P-shaped routes plus an independent
+oracle route-cost target is still required to close Plan A traversal-penalty
+supervision in Phase 2. No P target is inferred from U/B returns.

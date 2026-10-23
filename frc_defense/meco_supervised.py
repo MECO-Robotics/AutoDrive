@@ -32,7 +32,11 @@ DATASET_SCHEMA = "meco-supervised-trajectory-v1"
 TARGET_SCHEMA = "meco-observed-action-target-v1"
 WEIGHTS_SCHEMA = "meco-warm-start-weights-v1"
 COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-warm-start-weights-v2"
+COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-warm-start-weights-v3"
 COUNTERFACTUAL_LABEL_PROVENANCE = "within-prefix matched simulator gross_horizon_return pairwise comparisons"
+PLAN_A_VALUE_LABEL_PROVENANCE = (
+    "within-prefix matched simulator gross_horizon_return regression and pairwise comparisons"
+)
 COUNTERFACTUAL_DISCOUNT_SEMANTICS = (
     "one discount transition per macro decision, independent of macro duration; "
     "first branch reward exponent 0 and each continuation decision increments "
@@ -821,6 +825,9 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         "model_schema_version": 1, "model": model.state_dict(),
         "dataset_sha256": data_hash, "dataset_schema": manifest["schema"],
         "dataset_manifest_sha256": manifest_hash,
+        "records_have_prefix_replay_parity": manifest["records_have_prefix_replay_parity"],
+        "source_runtime_device_bound": manifest["source_runtime_device_bound"],
+        "state_digest_schema": manifest["state_digest_schema"],
         "target_schema": manifest["target_schema"],
         "label_provenance": COUNTERFACTUAL_LABEL_PROVENANCE,
         "target_semantics": "within_prefix_pairwise_preference_from_gross_horizon_return",
@@ -864,12 +871,182 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
             "mean_loss_by_epoch": losses}
 
 
+def _initialize_unlabelled_plan_a_penalty_head(model, track):
+    """Keep an unlabelled P output at zero until RL or an oracle trains it."""
+    with torch.no_grad():
+        if track == "A1":
+            weight = model.pose_head.weight.reshape(8, 2, *model.pose_head.weight.shape[1:])
+            bias = model.pose_head.bias.reshape(8, 2)
+            weight[:, 1].zero_()
+            bias[:, 1].fill_(-20.)
+        elif track == "A2":
+            model.decoder[-1].weight[1].zero_()
+            model.decoder[-1].bias[1].fill_(-20.)
+        elif track == "A3":
+            model.node_head.weight[1].zero_()
+            model.node_head.bias[1].fill_(-20.)
+        else:
+            raise ValueError("Plan A value warm start only supports A1/A2/A3")
+
+
+def warm_start_counterfactual_plan_a_v3(track: str, dataset: Path, output: Path, *,
+        qualification_protocol: Path, updates: int = 10,
+        learning_rate: float = 1e-4, device: str = "cpu"):
+    """Regress sampled feasible Plan A U+B values to replayed gross returns.
+
+    The v2 replay-bound dataset is reused unchanged. This v3 artifact adds a
+    direct value loss; it does not label or train the P head because the replay
+    executor does not execute P-modified routes.
+    """
+    if track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1:
+        raise ValueError("Plan A v3 requires A1/A2/A3 and a positive update count")
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning rate must be positive and finite")
+    from .curriculum_training import source_identity
+    from .meco_counterfactual import _device_identity
+    from .meco_plan_a_policy import gather_pose_behavior_logits
+
+    sources = source_identity()
+    rows, data_hash, manifest_hash, _, protocol_id, protocol_sha, manifest = _read_counterfactual_dataset(
+        dataset, qualification_protocol=qualification_protocol,
+        expected_sources=sources)
+    if _device_identity(device) != manifest["device"]:
+        raise ValueError("counterfactual replay/training device must match the frozen dataset runtime")
+    rows = [row for row in rows if row["scenario_id"] == manifest["scenario_id"]]
+    replayed = _materialize_counterfactual_rows(rows, manifest, track=track, train_device=device)
+    if not replayed or any(sample["kind"] != "A" for sample in replayed):
+        raise ValueError("Plan A v3 requires replayed Plan A support rows")
+    non_tied_pair_count = sum(
+        1 for sample in replayed for i, (_, left, _) in enumerate(sample["pairs"])
+        for _, right, _ in sample["pairs"][i + 1:] if left != right)
+    tied_pair_count = sum(
+        1 for sample in replayed for i, (_, left, _) in enumerate(sample["pairs"])
+        for _, right, _ in sample["pairs"][i + 1:] if left == right)
+    if non_tied_pair_count < 1:
+        raise ValueError("Plan A v3 dataset has no non-tied feasible gross-return pair")
+
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    value_losses, preference_losses = [], []
+    model.train()
+    value_count = sum(len(sample["pairs"]) for sample in replayed)
+    for _ in range(updates):
+        epoch_value, epoch_preference = [], []
+        for sample in replayed:
+            raw = model(raster=sample["raster"], globals_=sample["globals"],
+                        **sample["graph"])
+            logits = gather_pose_behavior_logits(track, raw, sample["graph_object"],
+                sample["raster"], sample["support"],
+                field_length=sample["field_length"],
+                field_width=sample["field_width"])
+            pairs = sample["pairs"]
+            indices = [index for index, _, _ in pairs]
+            targets = torch.tensor([value for _, value, _ in pairs],
+                device=device, dtype=logits.dtype)
+            predictions = logits[indices]
+            if not bool(torch.isfinite(targets).all()) or not bool(torch.isfinite(predictions).all()):
+                raise ValueError("Plan A v3 value sample contains nonfinite values")
+            value_loss = F.smooth_l1_loss(predictions, targets, beta=1.)
+            preference_terms = []
+            for left_index, (_, left_return, _) in enumerate(pairs):
+                for right_index in range(left_index + 1, len(pairs)):
+                    right_return = pairs[right_index][1]
+                    if left_return == right_return:
+                        continue
+                    sign = 1. if left_return > right_return else -1.
+                    preference_terms.append(F.softplus(-sign *
+                        (predictions[left_index] - predictions[right_index])))
+            preference_loss = (torch.stack(preference_terms).mean()
+                if preference_terms else value_loss.new_zeros(()))
+            loss = value_loss + preference_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            optimizer.step()
+            epoch_value.append(float(value_loss.detach().cpu()))
+            if preference_terms:
+                epoch_preference.append(float(preference_loss.detach().cpu()))
+        if not epoch_value:
+            raise ValueError("no replayed Plan A branch produced a trainable value loss")
+        value_losses.append(sum(epoch_value) / len(epoch_value))
+        preference_losses.append(sum(epoch_preference) / len(epoch_preference)
+            if epoch_preference else 0.)
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during Plan A v3 fitting")
+    _initialize_unlabelled_plan_a_penalty_head(model, track)
+    p_unlabelled_reason = manifest["plan_a_p_unlabelled_reason"]
+    payload = {"schema": COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA,
+        "schema_version": 3,
+        "artifact_kind": "weights_only_counterfactual_plan_a_goal_value_v3",
+        "track": track, "model_schema_version": 1, "model": model.state_dict(),
+        "dataset_sha256": data_hash, "dataset_schema": manifest["schema"],
+        "dataset_manifest_sha256": manifest_hash,
+        "target_schema": manifest["target_schema"],
+        "label_provenance": PLAN_A_VALUE_LABEL_PROVENANCE,
+        "target_semantics": "sampled_feasible_node_behavior_gross_horizon_return_regression",
+        "scoring_semantics": "raw_U_node_plus_B_behavior; direct gross_horizon_return value and pairwise losses",
+        "value_loss_semantics": "smooth_l1_raw_U_plus_B_to_gross_horizon_return_beta_1",
+        "preference_loss_semantics": "within_prefix_non_tied_gross_horizon_return_pairwise_softplus",
+        "plan_a_support_order": manifest["plan_a_support_order"],
+        "plan_a_support_coverage": "sampled_valid_node_behavior_descriptors_from_exact_replayed_full_support",
+        "plan_a_value_target_count": value_count,
+        "plan_a_p_target": None, "plan_a_p_prior": 0.0,
+        "plan_a_p_mode": "p0",
+        "plan_a_p_unlabelled_reason": p_unlabelled_reason,
+        "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+        "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+        "candidate_feature_names": list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)),
+        "prediction_mode": manifest["prediction_mode"],
+        "prediction_contract": manifest["prediction_contract"],
+        "candidate_boundary": manifest["candidate_boundary"],
+        "candidate_k": manifest["candidate_k"],
+        "max_plan_c_descriptors_per_prefix": manifest["max_plan_c_descriptors_per_prefix"],
+        "max_plan_a_pairs_per_prefix": manifest["max_plan_a_pairs_per_prefix"],
+        "route_cost_points_per_second": manifest["route_cost_points_per_second"],
+        "horizon_physics_ticks": manifest["horizon_physics_ticks"],
+        "max_macro_ticks": manifest["max_macro_ticks"],
+        "gamma_per_macro": manifest["gamma_per_macro"],
+        "discount_semantics": manifest["discount_semantics"],
+        "continuation_policy": manifest["continuation_policy"],
+        "source_identity_sha256": _canonical_hash(sources), "sources": sources,
+        "collection_device": manifest["device"], "training_device": _device_identity(device),
+        "protocol_id": protocol_id,
+        "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": Path(qualification_protocol).name,
+        "split": "train", "scenario_id": manifest["scenario_id"],
+        "category": manifest["category"], "seeds": list(manifest["seeds"]),
+        "optimizer_state_included": False, "resume_compatible": False,
+        "updates": updates, "learning_rate": learning_rate,
+        "non_tied_pair_count": non_tied_pair_count,
+        "tied_pair_count": tied_pair_count,
+        "mean_value_loss_by_epoch": value_losses,
+        "mean_preference_loss_by_epoch": preference_losses}
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    return {"track": track, "checkpoint": str(output), "dataset_sha256": data_hash,
+        "value_target_count": value_count,
+        "non_tied_pair_count": payload["non_tied_pair_count"],
+        "mean_value_loss_by_epoch": value_losses,
+        "mean_preference_loss_by_epoch": preference_losses}
+
+
 def validate_warm_start_artifact(track: str, checkpoint: Path, *,
                                  qualification_protocol: Path,
                                  expected_sources: dict,
                                  expected_prediction_mode: str | None = None):
     """Validate immutable metadata without restoring any training state."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == COUNTERFACTUAL_WEIGHTS_SCHEMA:
+        return validate_counterfactual_warm_start_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
+    if payload.get("schema") == COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA:
+        return validate_counterfactual_plan_a_value_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     mode = payload.get("prediction_mode")
     if (mode not in PREDICTION_MODES or
             payload.get("prediction_contract") != prediction_contract(mode)):
@@ -949,6 +1126,9 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
             payload.get("dataset_schema") != "meco-counterfactual-trajectory-v2" or
             payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
+            payload.get("records_have_prefix_replay_parity") is not True or
+            payload.get("source_runtime_device_bound") is not True or
+            payload.get("state_digest_schema") != "meco-full-environment-state-v1" or
             payload.get("label_provenance") != COUNTERFACTUAL_LABEL_PROVENANCE or
             payload.get("target_semantics") != expected_target or
             payload.get("scoring_semantics") != expected_scoring or
@@ -1020,6 +1200,121 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
     return payload
 
 
+def validate_counterfactual_plan_a_value_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate v3 direct Plan A value weights and their explicit P gap."""
+    from .meco_counterfactual import CONTINUATION_POLICY
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    mode = payload.get("prediction_mode")
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    losses = payload.get("mean_value_loss_by_epoch")
+    preferences = payload.get("mean_preference_loss_by_epoch")
+    digest, manifest_digest = (payload.get("dataset_sha256"),
+                               payload.get("dataset_manifest_sha256"))
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 3 or
+            payload.get("artifact_kind") != "weights_only_counterfactual_plan_a_goal_value_v3" or
+            payload.get("track") != track or payload.get("model_schema_version") != 1 or
+            payload.get("dataset_schema") != "meco-counterfactual-trajectory-v2" or
+            payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
+            payload.get("label_provenance") != PLAN_A_VALUE_LABEL_PROVENANCE or
+            payload.get("target_semantics") !=
+                "sampled_feasible_node_behavior_gross_horizon_return_regression" or
+            payload.get("scoring_semantics") !=
+                "raw_U_node_plus_B_behavior; direct gross_horizon_return value and pairwise losses" or
+            payload.get("value_loss_semantics") !=
+                "smooth_l1_raw_U_plus_B_to_gross_horizon_return_beta_1" or
+            payload.get("preference_loss_semantics") !=
+                "within_prefix_non_tied_gross_horizon_return_pairwise_softplus" or
+            payload.get("plan_a_support_order") != SUPPORT_ORDER or
+            payload.get("plan_a_support_coverage") !=
+                "sampled_valid_node_behavior_descriptors_from_exact_replayed_full_support" or
+            type(payload.get("plan_a_value_target_count")) is not int or
+            payload["plan_a_value_target_count"] < 1 or
+            payload.get("plan_a_p_target", "missing") is not None or
+            payload.get("plan_a_p_prior") != 0.0 or
+            payload.get("plan_a_p_mode") != "p0" or
+            payload.get("plan_a_p_unlabelled_reason") !=
+                "simulator executor does not execute P-modified routes" or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") !=
+                list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            mode not in PREDICTION_MODES or
+            payload.get("prediction_contract") != prediction_contract(mode) or
+            (expected_prediction_mode is not None and mode != expected_prediction_mode) or
+            payload.get("protocol_id") != protocol_id or
+            payload.get("qualification_protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_file") != protocol_path.name or
+            Path(payload.get("qualification_protocol_file", "")).name !=
+                payload.get("qualification_protocol_file") or
+            payload.get("split") != "train" or
+            not isinstance(payload.get("scenario_id"), str) or
+            not isinstance(payload.get("category"), str) or
+            not isinstance(payload.get("seeds"), list) or not payload["seeds"] or
+            any(type(seed) is not int or seed < 0 for seed in payload["seeds"]) or
+            len(set(payload["seeds"])) != len(payload["seeds"]) or
+            not set(payload["seeds"]) <= _protocol_train_seeds(
+                protocol, payload["scenario_id"], payload["category"]) or
+            payload.get("sources") != expected_sources or
+            payload.get("source_identity_sha256") != _canonical_hash(expected_sources) or
+            not isinstance(digest, str) or len(digest) != 64 or
+            any(c not in "0123456789abcdef" for c in digest) or
+            not isinstance(manifest_digest, str) or len(manifest_digest) != 64 or
+            any(c not in "0123456789abcdef" for c in manifest_digest) or
+            payload.get("candidate_boundary") != CANDIDATE_BOUNDARY or
+            payload.get("candidate_k") not in (8, 16, 32) or
+            type(payload.get("max_plan_c_descriptors_per_prefix")) is not int or
+            payload["max_plan_c_descriptors_per_prefix"] < 2 or
+            type(payload.get("max_plan_a_pairs_per_prefix")) is not int or
+            payload["max_plan_a_pairs_per_prefix"] < 2 or
+            payload.get("route_cost_points_per_second") != ROUTE_COST_POINTS_PER_SECOND or
+            payload.get("plan_a_support_order") != SUPPORT_ORDER or
+            type(payload.get("horizon_physics_ticks")) is not int or
+            payload["horizon_physics_ticks"] < 1 or
+            type(payload.get("max_macro_ticks")) is not int or
+            payload["max_macro_ticks"] < 1 or
+            not _finite_number(payload.get("gamma_per_macro")) or
+            not 0 < payload["gamma_per_macro"] <= 1 or
+            payload.get("discount_semantics") != COUNTERFACTUAL_DISCOUNT_SEMANTICS or
+            payload.get("continuation_policy") != CONTINUATION_POLICY or
+            not isinstance(payload.get("collection_device"), dict) or
+            payload.get("training_device") != payload.get("collection_device") or
+            type(payload.get("non_tied_pair_count")) is not int or
+            payload["non_tied_pair_count"] < 1 or
+            type(payload.get("tied_pair_count")) is not int or
+            payload["tied_pair_count"] < 0 or
+            not isinstance(losses, list) or not losses or
+            any(not _finite_number(loss) or loss < 0 for loss in losses) or
+            not isinstance(preferences, list) or len(preferences) != len(losses) or
+            any(not _finite_number(loss) or loss < 0 for loss in preferences) or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            payload.get("optimizer_state_included") is not False or
+            payload.get("resume_compatible") is not False or
+            any(key in payload for key in ("optimizer", "optimizer_state", "rng_state", "cursor")) or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("v3 Plan A counterfactual warm-start artifact identity/schema mismatch")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("v3 Plan A weights do not match the requested track") from exc
+    if track == "A1":
+        penalty_weight = model.pose_head.weight.reshape(8, 2, *model.pose_head.weight.shape[1:])[:, 1]
+        penalty_bias = model.pose_head.bias.reshape(8, 2)[:, 1]
+    elif track == "A2":
+        penalty_weight, penalty_bias = model.decoder[-1].weight[1], model.decoder[-1].bias[1]
+    else:
+        penalty_weight, penalty_bias = model.node_head.weight[1], model.node_head.bias[1]
+    if bool(penalty_weight.any()) or not bool((penalty_bias == -20.).all()):
+        raise ValueError("v3 Plan A unlabelled penalty head must be initialized to zero")
+    return payload
+
+
 def load_counterfactual_warm_start(track: str, model, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
@@ -1076,6 +1371,14 @@ def main(argv=None):
     cf_warm.add_argument("--updates", type=int, default=10)
     cf_warm.add_argument("--learning-rate", type=float, default=1e-4)
     cf_warm.add_argument("--device", default="cpu")
+    plan_a_v3 = commands.add_parser("warm-start-plan-a-v3")
+    plan_a_v3.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
+    plan_a_v3.add_argument("--dataset", type=Path, required=True)
+    plan_a_v3.add_argument("--output", type=Path, required=True)
+    plan_a_v3.add_argument("--qualification-protocol", type=Path, required=True)
+    plan_a_v3.add_argument("--updates", type=int, default=10)
+    plan_a_v3.add_argument("--learning-rate", type=float, default=1e-4)
+    plan_a_v3.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
     if args.command == "collect":
         result = collect_dataset(args.output, scenario_id=args.scenario,
@@ -1094,6 +1397,10 @@ def main(argv=None):
             gamma_per_macro=args.gamma_per_macro)
     elif args.command == "warm-start":
         result = warm_start(args.track, args.dataset, args.output,
+            qualification_protocol=args.qualification_protocol, updates=args.updates,
+            learning_rate=args.learning_rate, device=args.device)
+    elif args.command == "warm-start-plan-a-v3":
+        result = warm_start_counterfactual_plan_a_v3(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,
             learning_rate=args.learning_rate, device=args.device)
     else:
