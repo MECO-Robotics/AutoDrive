@@ -64,7 +64,11 @@ def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_
     stamp = "2027-01-15T08:00:00+00:00"
     (checkpoint_root / "queue-status.json").write_text(json.dumps({
         "schema_version": 1, "updated_utc": stamp,
-        "lanes": [{"track": "A1", "run_id": "r1", "status": "queued"}],
+        "phase": "training", "cycle": 3,
+        "evaluation": {"active": True, "status": "running", "pid": 101},
+        "lanes": [{"track": "A1", "run_id": "r1", "status": "queued",
+                   "pid": 99, "device": "cuda:0", "completed_updates": 12,
+                   "chunk_updates": 100}],
     }))
     result = _collect_status(checkpoint_root, evaluation_root, now=now,
                              process_probe=lambda _pid: True)
@@ -72,6 +76,10 @@ def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_
     assert result["queue"]["state"] == "fresh"
     assert policy["training_state"] == "queued"
     assert policy["run"]["heartbeat"]["state"] == "not_started"
+    assert policy["run"]["worker_pid"] == 99
+    assert policy["run"]["completed_updates"] == 12
+    assert result["queue"]["lanes"]["A1"]["device"] == "cuda:0"
+    assert result["queue"]["evaluation"]["pid"] == 101
 
 
 def test_live_requires_fresh_consistent_heartbeat_and_process(tmp_path):

@@ -110,11 +110,25 @@ def _queue_state(root: Path, now: float):
                     or not isinstance(lane.get("run_id"), str)):
                 continue
             lanes[lane["track"]] = {"run_id": lane["run_id"],
-                                    "status": lane.get("status", "unknown")}
+                "status": lane.get("status", "unknown"),
+                "pid": lane.get("pid") if type(lane.get("pid")) is int else None,
+                "device": lane.get("device") if isinstance(lane.get("device"), str) else None,
+                "run_directory": lane.get("run_directory") if isinstance(
+                    lane.get("run_directory"), str) else None,
+                "completed_updates": lane.get("completed_updates")
+                    if type(lane.get("completed_updates")) is int else None,
+                "chunk_updates": lane.get("chunk_updates")
+                    if type(lane.get("chunk_updates")) is int else None}
     else:
         error = "queue lanes are malformed"
     return {"state": "fresh" if fresh else "stale", "age_seconds": age,
-            "lanes": lanes, "error": error if not fresh else None}
+            "lanes": lanes,
+            "phase": payload.get("phase") if isinstance(payload.get("phase"), str) else None,
+            "cycle": payload.get("cycle") if type(payload.get("cycle")) is int else None,
+            "evaluation": payload.get("evaluation") if isinstance(payload.get("evaluation"), dict) else None,
+            "supervisor_id": payload.get("supervisor_id")
+                if isinstance(payload.get("supervisor_id"), str) else None,
+            "error": error if not fresh else None}
 
 
 def _safe_metrics(record):
@@ -445,8 +459,11 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, now=None,
             latest_run = {"run_id": lane.get("run_id"), "track": policy,
                 "manifest_state": lane_state,
                 "training_state": "queued" if queue["state"] == "fresh" and lane_state == "queued" else "unconfirmed",
-                "heartbeat": {"state": "not_started", "fresh": False}, "config": {},
-                "sources": {}, "latest_checkpoint": None, "completed_updates": 0,
+                "heartbeat": {"state": "not_started", "fresh": False,
+                              "pid": lane.get("pid")}, "config": {},
+                "worker_pid": lane.get("pid"), "device": lane.get("device"),
+                "sources": {}, "latest_checkpoint": None,
+                "completed_updates": lane.get("completed_updates") or 0,
                 "latest_training_metrics": None}
         evidence = latest_by_policy.get(policy)
         policies.append({"policy_id": policy,
