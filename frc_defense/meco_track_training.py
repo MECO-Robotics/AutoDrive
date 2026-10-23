@@ -195,7 +195,8 @@ def _tensor_evidence(tensor):
     if not isinstance(tensor, torch.Tensor):
         return {"present": False}
     value = tensor.detach().contiguous()
-    digest = hashlib.sha256(value.cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
+    digest = hashlib.sha256(value.cpu().reshape(-1).view(
+        torch.uint8).numpy().tobytes()).hexdigest()
     return {"present": True, "sha256": digest, "shape": list(value.shape),
         "dtype": str(value.dtype), "device": str(value.device)}
 
@@ -239,6 +240,22 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
     path = Path(output) / f"ppo-logprob-replay-failure-{track}-update-{update_number:08d}.json"
     _atomic_json(path, payload)
     return path, payload
+
+
+def _logprob_replay_error(message, track, model, row, replay, replay_logprob,
+                          *, update_number, output):
+    """Preserve the strict replay failure even if writing evidence fails."""
+    try:
+        path, diagnostic = _logprob_replay_diagnostic(track, model, row,
+            replay, replay_logprob, update_number=update_number, output=output)
+    except Exception as exc:
+        return RuntimeError(
+            f"{message}; diagnostic recording failed: {type(exc).__name__}: {exc}")
+    return RuntimeError(
+        f"{message}; abs_delta={diagnostic['absolute_logprob_delta']}, "
+        f"rel_delta={diagnostic['relative_logprob_delta']}, "
+        f"max_logits_delta={diagnostic['max_logits_delta']}, "
+        f"action={diagnostic['chosen_action']}, diagnostics={path}")
 
 
 def _episode_id(run_id: str, episode: int) -> str:
@@ -887,15 +904,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
-                path, diagnostic = _logprob_replay_diagnostic(track, model, row,
-                    replay, replay_logprob, update_number=update_number,
-                    output=diagnostic_output)
-                raise RuntimeError(
-                    "Plan A rollout log-probability does not replay under frozen support; "
-                    f"abs_delta={diagnostic['absolute_logprob_delta']}, "
-                    f"rel_delta={diagnostic['relative_logprob_delta']}, "
-                    f"max_logits_delta={diagnostic['max_logits_delta']}, "
-                    f"action={diagnostic['chosen_action']}, diagnostics={path}")
+                raise _logprob_replay_error(
+                    "Plan A rollout log-probability does not replay under frozen support",
+                    track, model, row, replay, replay_logprob,
+                    update_number=update_number, output=diagnostic_output)
         for row in rows:
             if track not in ("C1", "C2") or row.get("candidate_set") is None:
                 continue
@@ -913,15 +925,10 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
-                path, diagnostic = _logprob_replay_diagnostic(track, model, row,
-                    replay, replay_logprob, update_number=update_number,
-                    output=diagnostic_output)
-                raise RuntimeError(
-                    "Plan C rollout log-probability does not replay under frozen candidate table; "
-                    f"abs_delta={diagnostic['absolute_logprob_delta']}, "
-                    f"rel_delta={diagnostic['relative_logprob_delta']}, "
-                    f"max_logits_delta={diagnostic['max_logits_delta']}, "
-                    f"action={diagnostic['chosen_action']}, diagnostics={path}")
+                raise _logprob_replay_error(
+                    "Plan C rollout log-probability does not replay under frozen candidate table",
+                    track, model, row, replay, replay_logprob,
+                    update_number=update_number, output=diagnostic_output)
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))
