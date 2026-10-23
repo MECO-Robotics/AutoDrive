@@ -74,6 +74,7 @@ def _counterfactual_rng_scope(seed):
             torch.cuda.set_rng_state_all(cuda_states)
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
 MIN_ELIGIBLE_BRANCHES_PER_SEED = 2
+_VALIDATED_EPISODE_ELIGIBILITY_CACHE = {}
 
 
 def _hash(value):
@@ -599,6 +600,21 @@ def _replay_episode_eligibility(record, manifest):
     if (not isinstance(episode, list) or not episode or
             _hash(episode) != record.get("episode_transcript_sha256")):
         raise ValueError("final eligible row lacks the complete episode transcript")
+    summary = record.get("seed_branch_summary")
+    if not isinstance(summary, dict) or manifest.get("seed_branch_summaries", {}).get(
+            str(record["seed"])) != summary:
+        raise ValueError("episode eligibility summary differs from the manifest")
+    cache_key = _hash({
+        "seed": record["seed"],
+        "device": manifest.get("device"),
+        "episode_transcript_sha256": record["episode_transcript_sha256"],
+        "summary_sha256": summary.get("summary_sha256"),
+        "source_identity_sha256": manifest.get("source_identity_sha256"),
+        "native_extension_identity": manifest.get("native_extension_identity"),
+        "artifact_identity_sha256": manifest.get("artifact_identity_sha256")})
+    cached = _VALIDATED_EPISODE_ELIGIBILITY_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
     env = make_curriculum_env(scenario_id, category, 1, manifest["device"]["device"],
         seed, horizon=manifest["horizon_physics_ticks"])
     try:
@@ -607,9 +623,12 @@ def _replay_episode_eligibility(record, manifest):
         _reset_episode(env, seed)
         elapsed = 0
         statuses = []
+        ended_episode = False
         for index, expected in enumerate(episode):
             ticks = expected.get("macro_ticks")
-            if type(ticks) is not int or not 1 <= ticks <= manifest["max_macro_ticks"]:
+            remaining = manifest["horizon_physics_ticks"] - elapsed
+            if (type(ticks) is not int or not 1 <= ticks <= manifest["max_macro_ticks"] or
+                    ticks > remaining or ticks != min(manifest["max_macro_ticks"], remaining)):
                 raise ValueError("episode eligibility transcript has invalid macro ticks")
             actual = _prefix_snapshot(env, graph, episode_id, action_ticks=ticks,
                 candidate_k=manifest["candidate_k"],
@@ -624,7 +643,8 @@ def _replay_episode_eligibility(record, manifest):
             statuses.append(actual["branch_eligibility"])
             reward, ended, timeout, trace, _, _, _ = _reward_step(env,
                 actual["teacher_action"], ticks)
-            if (trace != expected.get("executed_action_trace") or
+            if (len(trace) > remaining or
+                    trace != expected.get("executed_action_trace") or
                     not math.isfinite(reward) or reward != expected.get("gross_macro_return")):
                 raise RuntimeError(f"full episode teacher replay mismatch at decision {index}")
             elapsed += len(trace)
@@ -632,6 +652,10 @@ def _replay_episode_eligibility(record, manifest):
                 raise RuntimeError("full episode terminated before archived suffix ended")
             if elapsed >= manifest["horizon_physics_ticks"] and index != len(episode) - 1:
                 raise RuntimeError("full episode transcript continues beyond the horizon")
+            ended_episode = bool(ended or timeout)
+        if not ended_episode and elapsed < manifest["horizon_physics_ticks"]:
+            raise RuntimeError("full episode transcript ends before termination or configured horizon")
+        _VALIDATED_EPISODE_ELIGIBILITY_CACHE[cache_key] = tuple(statuses)
         return statuses
     finally:
         close = getattr(env, "close", None)
