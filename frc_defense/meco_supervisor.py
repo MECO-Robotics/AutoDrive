@@ -980,9 +980,7 @@ def _parser():
     parser = argparse.ArgumentParser(description="Continuous round-robin MECO supervisor")
     parser.add_argument("--output", default=str(ROOT / "checkpoints" / "meco-five"))
     parser.add_argument("--evaluation-output", default=str(ROOT / "evaluations" / "meco-five"))
-    default_devices = (",".join(f"cuda:{index}" for index in range(torch.cuda.device_count()))
-                       if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--devices", default=default_devices,
+    parser.add_argument("--devices", default=None,
         help="comma-separated devices; at most one trainer runs on each device")
     parser.add_argument("--scenario", default="pickup_simple")
     parser.add_argument("--category", default="single")
@@ -1026,7 +1024,11 @@ def _parser():
 
 def main(argv=None):
     args = _parser().parse_args(argv)
-    devices = tuple(item.strip() for item in args.devices.split(",") if item.strip())
+    device_spec = args.devices
+    if device_spec is None:
+        device_spec = (",".join(f"cuda:{index}" for index in range(
+            torch.cuda.device_count())) if torch.cuda.is_available() else "cpu")
+    devices = tuple(item.strip() for item in device_spec.split(",") if item.strip())
     categories = tuple(item.strip() for item in args.evaluation_categories.split(",")
                        if item.strip())
     supervisor = MecoSupervisor(output=args.output, evaluation_output=args.evaluation_output,
