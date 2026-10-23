@@ -55,6 +55,33 @@ def _inside_field(point, length: float, width: float) -> bool:
             0.0 <= float(point[1]) <= width)
 
 
+def _pose_clear_of_circles(points, heading, length, width, circles) -> torch.Tensor:
+    """Exact oriented-rectangle clearance against center/radius circles."""
+    if circles.shape[-2] == 0:
+        return torch.ones(points.shape[0], device=points.device, dtype=torch.bool)
+    delta = circles[..., :2] - points[:, None, :]
+    c, s = heading.cos()[:, None], heading.sin()[:, None]
+    forward = delta[..., 0] * c + delta[..., 1] * s
+    lateral = -delta[..., 0] * s + delta[..., 1] * c
+    dx = (forward.abs() - length[:, None] * .5).clamp_min(0.)
+    dy = (lateral.abs() - width[:, None] * .5).clamp_min(0.)
+    overlap = (dx.square() + dy.square() <= circles[..., 2].clamp_min(0.).square())
+    overlap &= circles[..., 2] > 0.
+    return ~overlap.any(dim=-1)
+
+
+def _pose_clear(scratch, point, heading, length, width, robot_obstacles):
+    """Check an exact pose against field geometry and observed robot circles."""
+    path = point[:, None, :].expand(-1, 2, -1)
+    static_clear = scratch._footprint_path_clear(path, heading, length, width)
+    static_circles = scratch._extra_circles.reshape(1, -1, 3).expand(
+        point.shape[0], -1, -1)
+    circles = torch.cat((static_circles,
+                         robot_obstacles), dim=1)
+    circle_clear = _pose_clear_of_circles(point, heading, length, width, circles)
+    return static_clear & circle_clear
+
+
 def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> TensorADStar:
     """Build a fresh planner workspace; never borrow live planner buffers."""
     live = env.planner
@@ -205,28 +232,31 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
             goal_distance = (goal - start).norm(dim=-1)
             at_goal_mask = goal_distance <= goal_tolerance_m
 
-            # Reject blocked endpoints before plan() can project them onto a
-            # nearby free cell and accidentally report the wrong candidate.
-            sx, sy = scratch._indices(start)
+            # Goals on blocked cells are not silently accepted after AD* projects
+            # them. Starts may occupy blocked raster cells: AD* has a visible
+            # escape path for those while preserving the measured pose.
             gx, gy = scratch._indices(goal)
             blocked = scratch._blocked(heading, length, width)
             blocked = scratch._block_robot_obstacles(blocked, length, width, obstacle)
             rows = torch.arange(start.shape[0], device=device)
-            endpoint_blocked = blocked[rows, sx, sy] | blocked[rows, gx, gy]
-            at_goal_valid = at_goal_mask & ~endpoint_blocked
-            for local_index in torch.nonzero(at_goal_valid, as_tuple=False).flatten().tolist():
+            goal_blocked = blocked[rows, gx, gy]
+            at_goal_clear = at_goal_mask & _pose_clear(
+                scratch, start, heading, length, width, obstacle)
+            at_goal_clear &= _pose_clear(
+                scratch, goal, heading, length, width, obstacle)
+            for local_index in torch.nonzero(at_goal_clear, as_tuple=False).flatten().tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
                 results[original_index] = RouteResult(query.candidate_id,
                     query.snapshot_id, query.world, query.slot, "at_goal", True, 0.0)
 
-            at_goal_blocked = at_goal_mask & endpoint_blocked
+            at_goal_blocked = at_goal_mask & ~at_goal_clear
             for local_index in torch.nonzero(at_goal_blocked, as_tuple=False).flatten().tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
                 results[original_index] = RouteResult(query.candidate_id,
                     query.snapshot_id, query.world, query.slot, "no_path", False, None)
 
-            route_mask = ~at_goal_mask & ~endpoint_blocked
-            rejected_indices = torch.nonzero((~at_goal_mask) & endpoint_blocked,
+            route_mask = ~at_goal_mask & ~goal_blocked
+            rejected_indices = torch.nonzero((~at_goal_mask) & goal_blocked,
                                              as_tuple=False).flatten()
             for local_index in rejected_indices.tolist():
                 original_index, query = valid_rows[valid_indices[local_index].item()]
@@ -247,13 +277,24 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
                         result = RouteResult(query.candidate_id, query.snapshot_id,
                             query.world, query.slot, "no_path", False, None)
                     else:
+                        # AD* may start from a projected visible cell when the
+                        # measured pose lies in a blocked raster cell. Include
+                        # that escape segment in both clearance and distance.
+                        points = torch.cat((start[batch_local:batch_local+1], points), dim=0)
                         endpoint_error = float((points[-1] - goal[batch_local]).norm().item())
                         clear = bool(scratch._footprint_path_clear(
                             points[None], heading[batch_local:batch_local+1],
                             length[batch_local:batch_local+1],
                             width[batch_local:batch_local+1])[0].item())
                         distance = float((points[1:] - points[:-1]).norm(dim=-1).sum().item())
-                        if (not clear or not math.isfinite(distance) or
+                        endpoint_circle_clear = _pose_clear_of_circles(
+                            points[-1:], heading[batch_local:batch_local+1],
+                            length[batch_local:batch_local+1],
+                            width[batch_local:batch_local+1],
+                            torch.cat((scratch._extra_circles.reshape(1, -1, 3),
+                                       obstacle[batch_local:batch_local+1]), dim=1))
+                        if (not clear or not bool(endpoint_circle_clear[0].item()) or
+                                not math.isfinite(distance) or
                                 endpoint_error > endpoint_tolerance_m):
                             result = RouteResult(query.candidate_id, query.snapshot_id,
                                 query.world, query.slot, "no_path", False, None)
