@@ -1191,11 +1191,27 @@ def _gather_graph_candidates(output, table):
     return torch.stack(scores)[None]
 
 
+def categorical_from_candidate_logits(logits: torch.Tensor):
+    """Build the MECO policy distribution from translation-stabilized logits.
+
+    Categorical normalization is invariant to a shared additive constant per
+    row. Removing each row's maximum before constructing the distribution keeps
+    logsumexp near zero and avoids losing float32 precision when candidate
+    scores have a large common offset. Invalid candidates represented by
+    ``-inf`` remain ``-inf`` after centering, so the legal action support is
+    unchanged.
+    """
+    if logits.ndim < 1:
+        raise ValueError("candidate logits must have an action dimension")
+    centered_logits = logits - logits.amax(dim=-1, keepdim=True)
+    return torch.distributions.Categorical(logits=centered_logits)
+
+
 def sample_candidate_action(logits: torch.Tensor, *, deterministic=False):
     """Sample a legal categorical choice and return action and PPO log-probability."""
     if logits.ndim != 2 or not bool(torch.isfinite(torch.logsumexp(logits, dim=-1)).all()):
         raise ValueError("each decision requires at least one finite candidate logit")
-    distribution = torch.distributions.Categorical(logits=logits)
+    distribution = categorical_from_candidate_logits(logits)
     action = logits.argmax(-1) if deterministic else distribution.sample()
     return action, distribution.log_prob(action), distribution.entropy()
 

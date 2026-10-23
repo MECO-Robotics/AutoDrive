@@ -36,7 +36,8 @@ from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
 from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
     MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA, MECO_MAX_INFERENCE_AGE_S,
-    candidate_policy_logits, ordered_candidate_mask_digest,
+    candidate_policy_logits, categorical_from_candidate_logits,
+    ordered_candidate_mask_digest,
     managed_meco_adapters,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
@@ -830,8 +831,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 continue
             replay = _policy_inputs_for_row(track, model, row,
                                             row["hidden_before"], config)
-            replay_logprob = torch.distributions.Categorical(
-                logits=replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
+            replay_logprob = categorical_from_candidate_logits(
+                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
                 raise RuntimeError("Plan A rollout log-probability does not replay under frozen support")
@@ -848,8 +849,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 raise RuntimeError("Plan C candidate route/risk costs changed between rollout and PPO update")
             replay = _policy_inputs_for_row(track, model, row,
                                             row["hidden_before"], config)
-            replay_logprob = torch.distributions.Categorical(
-                logits=replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
+            replay_logprob = categorical_from_candidate_logits(
+                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
                 raise RuntimeError("Plan C rollout log-probability does not replay under frozen candidate table")
@@ -889,7 +890,7 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 value_losses.append(float(value_loss.detach()))
                 entropies.append(0.)
                 continue
-            dist = torch.distributions.Categorical(logits=logits)
+            dist = categorical_from_candidate_logits(logits)
             action = row["action"].reshape(1)
             logprob = dist.log_prob(action).reshape(())
             entropy = dist.entropy().mean()
