@@ -32,6 +32,62 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_VERSION = 2
 
 
+class D1HandWeightedPolicy:
+    """Opt-in hand-weighted ranking over the curriculum's sensed choices.
+
+    The four collection choices are the environment's nearest valid sensor
+    tracks. Other choices are the existing masked actions; this is not a pose
+    generator or route planner.
+    """
+    name = 'd1_hand_weighted'
+    weights = {'proximity': 1.0, 'nearby_tracks': .12,
+               'confidence': .10, 'track_age': -.05,
+               'score': .65, 'ferry': .20, 'intercept': -.25, 'hold': -.5}
+    def choose(self, env, observation):
+        indices, valid, _ = env._candidates()
+        slot = 3
+        points = env.track_pos[:, slot].gather(
+            1, indices[:, slot, :, None].expand(-1, -1, 2))
+        distances = (points - env.sim.pose[:, slot, None, :2]).norm(dim=-1)
+        confidence = env.track_confidence[:, slot].gather(1, indices[:, slot]).clamp(0., 1.)
+        age = env.track_age[:, slot].gather(1, indices[:, slot]).clamp(0., 2.)
+        track_points = env.track_pos[:, slot]
+        sensed = env.track_mask[:, slot]
+        nearby = (((points[:, :, None] - track_points[:, None]).norm(dim=-1) < 1.25) &
+                  sensed[:, None]).sum(-1).clamp(max=4).to(points.dtype)
+        candidate_valid = valid[:, slot] & torch.isfinite(distances)
+        target_scores = (self.weights['proximity'] / (1. + distances) +
+                         self.weights['nearby_tracks'] * nearby +
+                         self.weights['confidence'] * confidence +
+                         self.weights['track_age'] * age)
+        target_scores = target_scores.masked_fill(~candidate_valid, float('-inf'))
+
+        mask = observation[:, -8:].bool()
+        scores = torch.full((env.n, 8), float('-inf'), device=env.device)
+        scores[:, :4] = target_scores
+        scores[:, 4] = torch.where(mask[:, 4], torch.full_like(distances[:, 0], self.weights['score']), scores[:, 4])
+        scores[:, 5] = torch.where(mask[:, 5], torch.full_like(distances[:, 0], self.weights['intercept']), scores[:, 5])
+        scores[:, 6] = torch.where(mask[:, 6], torch.full_like(distances[:, 0], self.weights['ferry']), scores[:, 6])
+        scores[:, 7] = torch.where(mask[:, 7], torch.full_like(distances[:, 0], self.weights['hold']), scores[:, 7])
+        scores[:, :4] = scores[:, :4].masked_fill(~mask[:, :4], float('-inf'))
+        # argmax is stable and resolves exact ties to the lower action id.
+        action = scores.argmax(-1)
+        best = scores.gather(1, action[:, None]).squeeze(1)
+        action = torch.where(torch.isfinite(best), action, torch.full_like(action, 7))
+        trace = {'candidate_scores': target_scores, 'action_scores': scores,
+                 'candidate_indices': indices[:, slot], 'candidate_valid': candidate_valid,
+                 'candidate_distance': distances, 'candidate_nearby_tracks': nearby,
+                 'candidate_confidence': confidence, 'candidate_age': age}
+        return action, trace
+
+
+def _d1_identity():
+    return _hash({'policy': D1HandWeightedPolicy.name,
+                  'weights': D1HandWeightedPolicy.weights,
+                  'candidate_source': 'four-nearest-valid-sensor-tracks',
+                  'choices': 'masked-eight-action-interface-v1'})
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     architecture: str = 'baseline_mlp'
@@ -346,11 +402,28 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *, dem
     stride=max(1,math.ceil(env.horizon/action_ticks/64))
     while True:
         obs=env._last_obs[:,3]; mask=obs[:,-8:].bool()
+        trace=None
         with torch.no_grad():
-            action=(teacher_actions(env,env._last_obs)[:,3] if policy == 'teacher' else policy.sample(builder(env._last_obs) if builder else obs,deterministic=True,action_mask=mask)[0])
+            if policy == 'teacher':
+                action=teacher_actions(env,env._last_obs)[:,3]
+            elif isinstance(policy,D1HandWeightedPolicy):
+                action,trace=policy.choose(env,obs)
+            else:
+                action=policy.sample(builder(env._last_obs) if builder else obs,deterministic=True,action_mask=mask)[0]
         if demonstration or decisions%stride == 0:
             frame={'tick':int(env.steps[0]),'action':int(action[0]),'mask':mask[0].tolist(),
                    'hub_active':bool(env.hub_active[0,1]),'metrics':{k:v.tolist() for k,v in env.curriculum_metrics.outcomes().items()}}
+            if isinstance(policy,D1HandWeightedPolicy):
+                frame['policy_id']=_d1_identity()
+                frame['candidate_action_trace']={
+                    'candidate_indices':trace['candidate_indices'][0].tolist(),
+                    'candidate_valid':trace['candidate_valid'][0].tolist(),
+                    'candidate_scores':[float(x) if math.isfinite(float(x)) else None for x in trace['candidate_scores'][0].tolist()],
+                    'action_scores':[float(x) if math.isfinite(float(x)) else None for x in trace['action_scores'][0].tolist()],
+                    'candidate_distance':trace['candidate_distance'][0].tolist(),
+                    'candidate_nearby_tracks':trace['candidate_nearby_tracks'][0].tolist(),
+                    'candidate_confidence':trace['candidate_confidence'][0].tolist(),
+                    'candidate_age':trace['candidate_age'][0].tolist()}
             if demonstration: frame['observation']=obs[0].tolist()
             frames.append(frame)
         actions=torch.full((1,6),7,device=env.device,dtype=torch.long); actions[:,3]=action
@@ -382,7 +455,9 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
     if isinstance(scenario_ids,str): scenario_ids=(scenario_ids,)
     sources=source_identity()
     checkpoint_hash=None
-    if isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) != 'teacher':
+    if isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) == 'd1':
+        policy=D1HandWeightedPolicy()
+    elif isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) != 'teacher':
         checkpoint_path=Path(policy_or_checkpoint);checkpoint_bytes=checkpoint_path.read_bytes()
         checkpoint_hash=hashlib.sha256(checkpoint_bytes).hexdigest()
         policy,_,_=load_checkpoint(io.BytesIO(checkpoint_bytes),device=device)
@@ -397,9 +472,10 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
                 temporary=Path(stream.name); stream.write(checkpoint_bytes)
             frozen.parent.mkdir(parents=True,exist_ok=True); os.replace(temporary,frozen)
         if hashlib.sha256(frozen.read_bytes()).hexdigest() != checkpoint_hash: raise ValueError('frozen checkpoint digest mismatch')
-    if policy != 'teacher' and not isinstance(policy,(ActorCritic,DiscreteSAC)):
-        raise ValueError('expected standard policy, SAC policy, checkpoint, or teacher')
-    identity=_policy_id(policy) if policy != 'teacher' else 'generic-observed-teacher'
+    if policy != 'teacher' and not isinstance(policy,(ActorCritic,DiscreteSAC,D1HandWeightedPolicy)):
+        raise ValueError('expected standard policy, SAC policy, checkpoint, D1, or teacher')
+    identity=(_d1_identity() if isinstance(policy,D1HandWeightedPolicy) else
+              _policy_id(policy) if policy != 'teacher' else 'generic-observed-teacher')
     suite=protocol_id(action_ticks=action_ticks,device=device,_sources=sources); round_id=evaluation_id or uuid.uuid4().hex
     results=[];records=[];saved_rng=_rng_state()
     try:
@@ -429,8 +505,14 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
     finally: _restore_rng(saved_rng)
     if source_identity()!=sources: raise ValueError('source/runtime changed during evaluation; no current report published')
     report={'curriculum_version':CURRICULUM_VERSION,'sources':sources,'protocol_id':suite,
-            'algorithm':getattr(policy,'algorithm','teacher' if policy == 'teacher' else 'ppo'),
-            'architecture':getattr(policy,'architecture','baseline_mlp') if policy != 'teacher' else 'deterministic_teacher',
+            'algorithm':getattr(policy,'algorithm','d1_hand_weighted' if isinstance(policy,D1HandWeightedPolicy) else 'teacher' if policy == 'teacher' else 'ppo'),
+            'architecture':getattr(policy,'architecture','candidate_action_ranker' if isinstance(policy,D1HandWeightedPolicy) else 'baseline_mlp') if policy != 'teacher' else 'deterministic_teacher',
+            'policy_provenance':({'kind':'hand_weighted_candidate_action_ranker',
+                'candidate_source':'four-nearest-valid-sensor-tracks',
+                'action_source':'masked curriculum eight-action interface',
+                'weights':D1HandWeightedPolicy.weights,
+                'uses_hidden_fuel_or_opponent_truth':False}
+                if isinstance(policy,D1HandWeightedPolicy) else None),
             'policy_id':identity,'test_seed_index0_reserved':True,'checkpoint_file_sha256':checkpoint_hash,'evaluation_id':round_id,'split':split,
             'dt':.02,'action_ticks':action_ticks,'strategic_rate_hz':1/(.02*action_ticks),
             'diagnostic':horizon is not None or episodes<100 or categories is not None or split!='validation',
@@ -611,7 +693,7 @@ def main(argv=None):
     train.add_argument('--sac-initial-alpha',type=float,default=.2)
     train.add_argument('--sac-target-entropy-fraction',type=float,default=.98)
     train.add_argument('--resume');train.add_argument('--horizon',type=int)
-    evaluate=commands.add_parser('evaluate');evaluate.add_argument('--checkpoint');evaluate.add_argument('--policy',choices=('teacher',))
+    evaluate=commands.add_parser('evaluate');evaluate.add_argument('--checkpoint');evaluate.add_argument('--policy',choices=('teacher','d1'))
     for command in (evaluate,commands.add_parser('teacher')):
         command.add_argument('--scenario',choices=tuple(SCENARIOS),required=True);command.add_argument('--category')
         command.add_argument('--episodes',type=int,default=1);command.add_argument('--seed',type=int,default=0)
@@ -624,7 +706,7 @@ def main(argv=None):
         resume=values.pop('resume');values['num_envs']=values.pop('envs');result=train_curriculum(TrainingConfig(**values),resume=resume)
     elif command=='evaluate':
         checkpoint=values.pop('checkpoint');policy=values.pop('policy')
-        if bool(checkpoint)==bool(policy): parser.error('choose exactly one of --checkpoint or --policy teacher')
+        if bool(checkpoint)==bool(policy): parser.error('choose exactly one of --checkpoint or --policy teacher|d1')
         scenario=values.pop('scenario');category=values.pop('category');values['master_seed']=values.pop('seed')
         result=evaluate_curriculum(checkpoint or policy,(scenario,),categories=(category,) if category else None,**values)
         result={k:v for k,v in result.items() if k not in ('records','evaluation_results','sources')}
