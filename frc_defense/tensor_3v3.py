@@ -634,6 +634,8 @@ class TensorThreeVsThreeEnv(
     def step(self, actions, active_mask=None, *, capture_observation=True,
              capture_info=True, _active_count=None, _return_info=None,
              planner_goal_override=None, planner_goal_override_action=None,
+             planner_goal_override_target_track=None,
+             planner_goal_override_target_xy=None,
              planner_goal_override_traversal=False,
              planner_goal_heading_override=None,
              planner_traversal_cost_override=None,
@@ -655,9 +657,45 @@ class TensorThreeVsThreeEnv(
         if active_count == 0:
             obs=self._last_obs
             return obs,torch.zeros((self.n,6),device=self.device),torch.zeros_like(active),torch.zeros_like(active),{}
+        if planner_goal_override_target_track is not None:
+            if (type(planner_goal_override_target_track) is not int or
+                    not 0 <= planner_goal_override_target_track < self.track_mask.shape[-1]):
+                raise ValueError("planner collection target must be a valid sensor-track buffer index")
+            if (self.n != 1 or self.control_modes[3] != "nn" or
+                    self.robot_roles[3] != "offense"):
+                raise ValueError("planner collection target override is restricted to neural offense slot 3")
+            if (planner_goal_override is None or
+                    type(planner_goal_override_action) is not int or
+                    not 0 <= planner_goal_override_action < 4):
+                raise ValueError("planner collection target must bind to a paired collect goal")
+            if planner_goal_override_target_xy is None:
+                raise ValueError("planner collection target requires its snapshot XY")
+            planner_target_source_xy = torch.as_tensor(
+                planner_goal_override_target_xy, device=self.device,
+                dtype=self.sim.pose.dtype).reshape(2)
+            if not bool(torch.isfinite(planner_target_source_xy).all()):
+                raise ValueError("planner collection target snapshot XY must be finite")
+        elif planner_goal_override_target_xy is not None:
+            raise ValueError("planner collection target XY requires its sensor-track index")
         self._prepare_raster_cursor(active)
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
             actions,active,full_batch)
+        self._last_planner_collection_target_valid = None
+        self._last_planner_collection_goal_heading = None
+        collection_target_valid = torch.zeros_like(active)
+        collection_target_xy = None
+        if planner_goal_override_target_track is not None:
+            track_index = planner_goal_override_target_track
+            collection_target_xy = self.track_pos[:, 3, track_index]
+            source_gap = (collection_target_xy - planner_target_source_xy[None]).norm(dim=-1)
+            collection_target_valid = (
+                active & (action[:, 3] == planner_goal_override_action) &
+                self.track_mask[:, 3, track_index] &
+                (self.track_age[:, 3, track_index] <= self.perception_track_timeout) &
+                torch.isfinite(collection_target_xy).all(-1) & (source_gap <= 1.0))
+            if bool((active & (action[:, 3] == planner_goal_override_action)).any()):
+                self._last_planner_collection_target_valid = bool(
+                    collection_target_valid[0].item())
         planner_goal_override_mask = torch.zeros_like(action, dtype=torch.bool)
         planner_goal_heading_mask = torch.zeros_like(action, dtype=torch.bool)
         planner_goal_heading = None
@@ -683,9 +721,22 @@ class TensorThreeVsThreeEnv(
             override_permitted = expected_action != 7 or bool(planner_goal_override_traversal)
             planner_goal_override_mask[:, 3] = (
                 (action[:, 3] == expected_action) & override_permitted)
+            if planner_goal_override_target_track is not None:
+                planner_goal_override_mask[:, 3] &= collection_target_valid
             targets[:, 3] = torch.where(planner_goal_override_mask[:, 3, None],
                                          goal[None], targets[:, 3])
-            if planner_goal_heading_override is not None:
+            if planner_goal_override_target_track is not None:
+                target_delta = collection_target_xy - goal[None]
+                target_distance = target_delta.norm(dim=-1)
+                selected_heading = torch.atan2(target_delta[:, 1], target_delta[:, 0])
+                selected_heading = torch.where(target_distance > 1e-8,
+                    selected_heading, self.sim.pose[:, 3, 2])
+                planner_goal_heading = selected_heading[0]
+                planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
+                if bool(planner_goal_heading_mask[0, 3]):
+                    self._last_planner_collection_goal_heading = float(
+                        selected_heading[0].item())
+            elif planner_goal_heading_override is not None:
                 planner_goal_heading = torch.as_tensor(
                     planner_goal_heading_override, device=self.device,
                     dtype=targets.dtype).reshape(())

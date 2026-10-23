@@ -27,7 +27,7 @@ from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
 CANDIDATE_BOUNDARY = {
-    "version": 8,
+    "version": 9,
     "capacity": [8, 16, 32],
     "source": "all currently sensed fuel tracks plus existing simulator action slots",
     "configurable_k": True,
@@ -36,10 +36,11 @@ CANDIDATE_BOUNDARY = {
     "reference_pool": "all route-qualified ordinary rows plus independent 18-offset route-qualified oracle rows for every currently sensed target",
     "recall_limit": "snapshot-bounded deterministic oracle over currently sensed tracks, not a simulator-optimality oracle",
     "expanded_goals": "one selectable direct approach per sensed target in stable distance/buffer order, followed by bounded approach offsets; oracle adds 18 offsets per sensed target",
-    "execution": "selected XY endpoint and sensed track identity are preserved in candidate provenance; paired native collect action uses the endpoint override; action mask/mechanisms remain simulator-owned",
-    "target_execution_boundary": "native collector is geometric and may collect any physically contacted eligible fuel; selected sensed target is an intended route goal, not an exclusive pickup constraint",
+    "execution": "selected XY endpoint and sensor buffer identity flow through the paired native goal override; slot-3 native controller revalidates the sensed track each physics step and safely aligns the intake toward it at the endpoint; action mask/mechanisms remain simulator-owned",
+    "target_controller_override": "restricted to the neural offense in slot 3 and a paired collect action; each physics step requires the same sensor-buffer track to remain present, within perception timeout, and within 1.0 m of snapshot XY; derive terminal intake bearing from current track XY relative to the selected endpoint; on loss or buffer reuse, clear goal/heading override and end the macro for a fresh candidate decision",
+    "target_execution_boundary": "native collector is geometric and may collect any physically contacted eligible fuel; selected sensed target is an intended route goal and terminal bearing, not an exclusive pickup constraint",
     "selectable_order": "legacy eight action rows, then direct goals for sensed targets beyond the native top-four ordered by robot distance and sensor buffer index, then legacy offsets; K8 prefix is unchanged",
-    "heading_execution": "no terminal heading command; sensed-target bearing is used for graph lookup and nonbinding estimate; native controller owns orientation",
+    "heading_execution": "selected collection track supplies a dynamically revalidated terminal intake bearing; native controller waits at endpoint and applies swept static/observed-robot turn-clearance checks before alignment",
     "future_swept_dynamic_collision_check": False,
     "continue_behavior_candidate": True,
     "continue_gap": "one dynamically revalidated continue row follows the stable K-prefix; target loss, route invalidity, expiry, completion, phase incompatibility, and episode reset clear it",
@@ -609,8 +610,10 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "source_fuel_xy_m": ([float(old[2]), float(old[3])]
                 if action < 4 and old[2] is not None and old[3] is not None else None),
             "sensor_track_buffer_index": (target_track if action < 4 else None),
-            "target_identity_execution": ("route_goal_with_native_geometric_capture"
+            "target_identity_execution": ("slot3_revalidated_track_terminal_bearing_with_native_geometric_capture"
                 if target_track is not None and action < 4 else "native_action_target"),
+            "target_track_snapshot_tolerance_m": (1.0 if target_track is not None
+                and action < 4 else None),
             "goal_heading_rad": float(headings[row_index]),
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,

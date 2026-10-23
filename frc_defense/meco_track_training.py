@@ -529,6 +529,8 @@ def _physics_safety_snapshot(env):
 
 def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     goal_heading=None,
+                    goal_track_index=None,
+                    goal_track_source_xy=None,
                     allow_action7_traversal=False,
                     planner_traversal_cost_override=None,
                     planner_traversal_cost_scale=1.0,
@@ -543,6 +545,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
     executed_actions = []
     heading_alignment_opportunity = False
     native_goal_preempted = False
+    selected_target_lost = False
     frozen_traversal_cost = (None if planner_traversal_cost_override is None else
         torch.as_tensor(planner_traversal_cost_override, device=env.device,
                         dtype=env.sim.pose.dtype).detach().clone())
@@ -559,6 +562,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None,
+            planner_goal_override_target_track=goal_track_index,
+            planner_goal_override_target_xy=goal_track_source_xy,
             planner_goal_override_traversal=allow_action7_traversal,
             planner_goal_heading_override=goal_heading,
             planner_force_goal_replan=(planner_force_goal_replan and tick_index == 0),
@@ -584,6 +589,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         if metric_ledger is not None:
             metric_ledger.observe_outer_step(int(env.last_actions[0, 3].item()))
         executed_actions.append(int(env.last_actions[0, 3].item()))
+        selected_target_lost |= (
+            getattr(env, "_last_planner_collection_target_valid", None) is False)
         if safety_counts is not None:
             current = _physics_safety_snapshot(env)
             previous = safety_counts.get("_last_snapshot")
@@ -609,22 +616,25 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
-        if ended or timeout:
+        if ended or timeout or selected_target_lost:
             break
     env._last_obs = env.observe()
     final_heading_error = None
     final_goal_distance = None
-    if goal_heading is not None:
+    final_heading_target = (goal_heading if goal_heading is not None else
+        getattr(env, "_last_planner_collection_goal_heading", None))
+    if final_heading_target is not None and not selected_target_lost:
         difference = torch.atan2(
-            torch.sin(env.sim.pose[0, 3, 2] - float(goal_heading)),
-            torch.cos(env.sim.pose[0, 3, 2] - float(goal_heading))).abs()
+            torch.sin(env.sim.pose[0, 3, 2] - float(final_heading_target)),
+            torch.cos(env.sim.pose[0, 3, 2] - float(final_heading_target))).abs()
         final_heading_error = float(difference)
     if goal_xy is not None:
         final_goal_distance = float((env.sim.pose[0, 3, :2] - torch.as_tensor(
             goal_xy, device=env.device, dtype=env.sim.pose.dtype)).norm())
     native_goal_preempted &= final_goal_distance is not None and final_goal_distance > .04
     return (total, ended, timeout, executed_actions, final_heading_error,
-            final_goal_distance, heading_alignment_opportunity, native_goal_preempted)
+            final_goal_distance, heading_alignment_opportunity, native_goal_preempted,
+            selected_target_lost)
 
 
 def _reset_episode(env, seed: int):
@@ -1060,6 +1070,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 hidden = prepared["hidden_next"].detach()
                 value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
+                selected_target_track = None
+                selected_target_xy = None
                 if "support" in prepared:
                     support = prepared["support"]
                     action = int(support.action_ids[action_index].item())
@@ -1073,12 +1085,19 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                float(selected_row[cols["goal_y_m"]]))
                     goal_heading = None
+                    selected_target_track = candidate.route_records[
+                        action_index].get("sensor_track_buffer_index")
+                    selected_target_xy = candidate.route_records[
+                        action_index].get("source_fuel_xy_m")
                 selected_candidate_id = (candidate.table.candidate_ids[action_index]
                     if "support" not in prepared else None)
                 (reward, ended, timeout, executed_trace, heading_error,
-                 goal_distance, heading_opportunity, native_preempted) = _run_macro_step(
+                 goal_distance, heading_opportunity, native_preempted,
+                 selected_target_lost) = _run_macro_step(
                     env, action, config.action_ticks, goal_xy,
                     goal_heading=goal_heading,
+                    goal_track_index=selected_target_track,
+                    goal_track_source_xy=selected_target_xy,
                     allow_action7_traversal=(prepared is not None and
                                               "support" in prepared and action == 7),
                     planner_traversal_cost_override=(
@@ -1096,6 +1115,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     failure_reasons.append("action_remasked")
                 if native_preempted:
                     failure_reasons.append("native_goal_preempted")
+                if selected_target_lost:
+                    failure_reasons.append("selected_target_lost")
                 row = {"episode_id": episode_generation,
                     "raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -1123,6 +1144,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "terminal_goal_distance_m": goal_distance,
                     "heading_alignment_opportunity": heading_opportunity,
                     "native_goal_preempted": native_preempted,
+                    "selected_target_track_lost": selected_target_lost,
                     "executed_high_level_action": action,
                     "action": torch.tensor([action_index], device=config.device),
                     "logprob": prepared["logprob"].detach().reshape(()),
@@ -1154,10 +1176,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                 "commitment_expiry_macro_actions"] * config.action_ticks)
                     if goal_complete or ended or timeout:
                         commitment = None
-                hard_failure = remasked or native_preempted
+                hard_failure = remasked or native_preempted or selected_target_lost
                 if config.track in ("C1", "C2") and hard_failure:
-                    # Match evaluation semantics: a remasked action or native
-                    # goal preemption invalidates the carried task commitment.
+                    # A remasked action, preemption, or lost sensed target
+                    # invalidates the carried task commitment.
                     commitment = None
                 if ended or timeout:
                     outcome = env.curriculum_metrics.outcomes()["success"]
@@ -1561,7 +1583,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
-            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2 and controls D1/D2: one shared stable configurable K=8/16/32 route-qualified candidate table, common action/route eligibility and prediction risk, one appended snapshot-revalidated continue row when committed, ten-macro expiry, target-loss/invalid-route/completion/failure/episode clearing, and a shared fixed 0.10-point switch-cost hysteresis; only candidate utility scoring differs"}},
+            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2 and controls D1/D2: one shared stable configurable K=8/16/32 route-qualified candidate table, including distance-ordered direct goals for sensed targets beyond native top-four, common action/route eligibility and prediction risk, one appended snapshot-revalidated continue row when committed, ten-macro expiry, target-loss/invalid-route/completion/failure/episode clearing, and a shared fixed 0.10-point switch-cost hysteresis. Selected collection tracks flow through the paired slot-3 collect goal; each physics step revalidates the buffer index, freshness, and <=1 m snapshot displacement, dynamically aims terminal intake heading at the current track position using native swept turn-clearance checks, and cancels the macro on loss; physical pickup remains geometric and non-exclusive; only candidate utility scoring differs"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     if qualification_protocol_id is not None:
         protocol = qualification_protocol_id
@@ -1761,6 +1783,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             routes_before_choice = len(routes_seen)
                             plan_a_support = (prepared is not None and
                                               "support" in prepared)
+                            selected_target_track = None
+                            selected_target_xy = None
                             if prepared is not None and "support" in prepared:
                                 support = prepared["support"]
                                 action = int(support.action_ids[choice].item())
@@ -1809,6 +1833,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 goal_xy = (float(selected_row[cols["goal_x_m"]]),
                                            float(selected_row[cols["goal_y_m"]]))
                                 routes_seen.append(candidate_set.route_records[choice])
+                                selected_target_track = candidate_set.route_records[
+                                    choice].get("sensor_track_buffer_index")
+                                selected_target_xy = candidate_set.route_records[
+                                    choice].get("source_fuel_xy_m")
                             goal_heading = (float(support.goal_heading[node].item())
                                             if prepared is not None and "support" in prepared
                                             else None)
@@ -1817,6 +1845,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 action = pending_eval_goal["action"]
                                 goal_xy = pending_eval_goal["goal_xy"]
                                 goal_heading = pending_eval_goal["goal_heading"]
+                                selected_target_track = None
+                                selected_target_xy = None
                                 if len(routes_seen) > routes_before_choice:
                                     routes_seen.pop()
                             actions_count[action] += 1
@@ -1827,9 +1857,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             macro_started = time.perf_counter()
                             (_, ended, timeout, actual_trace, heading_error,
                              goal_distance, heading_opportunity,
-                             native_preempted) = _run_macro_step(
+                             native_preempted, selected_target_lost) = _run_macro_step(
                                 env, action, action_ticks, goal_xy,
                                 goal_heading=goal_heading,
+                                goal_track_index=selected_target_track,
+                                goal_track_source_xy=selected_target_xy,
                                 allow_action7_traversal=(prepared is not None and
                                                           "support" in prepared and action == 7),
                                 planner_traversal_cost_override=(
@@ -1907,7 +1939,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
-                            hard_failure = remasked or native_preempted
+                            hard_failure = (remasked or native_preempted or
+                                            selected_target_lost)
                             if policy in ("C1", "C2", "D1", "D2"):
                                 selected_id = candidate_set.table.candidate_ids[choice]
                                 if selected_id.startswith("continue:"):
@@ -1944,10 +1977,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "terminal_heading_error": heading_error,
                                     "terminal_goal_distance_m": goal_distance,
                                         "heading_alignment_opportunity": heading_opportunity,
-                                        "reason": ("native_behavior_preempted_selected_goal"
+                                        "reason": ("selected_target_lost"
+                                                   if selected_target_lost else
+                                                   "native_behavior_preempted_selected_goal"
                                                    if native_preempted else
                                                    "action_was_remasked"),
                                         "native_goal_preempted": native_preempted,
+                                        "selected_target_track_lost": selected_target_lost,
                                     "policy_fallback": (prepared.get("fallback_used", False)
                                                         if prepared is not None else False),
                                     "route_id": route_id})
