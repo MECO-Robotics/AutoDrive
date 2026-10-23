@@ -16,7 +16,7 @@
       "status": "complete",
       "provenance": [
         "branch codex/meco-five-plan",
-        "implementation commits 8e220ee6, 1f910eab, b04c05d9, and 8de1ff6a",
+        "implementation commits 8e220ee6, 1f910eab, b04c05d9, 8de1ff6a, and 22d7bfca",
         "Plan A path integration, P=0 controls, supervisor cleanup, and dashboard route provenance checks"
       ]
     },
@@ -24,7 +24,7 @@
       "pass": "reviewer",
       "status": "complete",
       "provenance": [
-        "read-only source review of 8e220ee6, 1f910eab, b04c05d9, and 8de1ff6a",
+        "read-only source review of 8e220ee6, 1f910eab, b04c05d9, 8de1ff6a, and 22d7bfca",
         "review found no launch blocker in scoped changes; runtime validation remains outstanding"
       ]
     }
