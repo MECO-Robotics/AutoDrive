@@ -179,10 +179,11 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     if category not in definition.required_categories:
         raise ValueError(f'unknown category for {scenario_id}: {category}')
     phase4_factor = validate_phase4_factor(phase4_factor)
+    pressure_level = _pressure_level(category)
     if phase4_factor is not None and (scenario_id not in (
             'offense_vs_scripted_pressure', 'full_match_offense')
-            or not category.endswith('level_4_reactive')):
-        raise ValueError('Phase 4 adversarial factors require a level_4_reactive pressure category')
+            or pressure_level not in (1, 2, 3, 4, 5)):
+        raise ValueError('Phase 4 adversarial factors require a registered level_1 through level_5 pressure category')
     requested_device = torch.device(device)
     if requested_device.type == 'cuda' and requested_device.index is not None:
         # Native simulator kernels use the current device/stream at setup.
@@ -242,12 +243,20 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
 
 def _pressure(category, seed, family='category_scripted'):
     marker = next((part for part in category.split('/') if part.startswith('level_')), 'level_0')
-    level = int(marker.split('_')[1])
+    level = _pressure_level(category)
     if family in ('orbiting_interceptor', 'split_chaser'):
         level = max(level, 4)
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
             'phase': (int(seed) % 1000) / 1000 * 2 * math.pi, 'anchor_y': 4.035,
             'family': family}
+
+
+def _pressure_level(category):
+    marker = next((part for part in category.split('/') if part.startswith('level_')), 'level_0')
+    try:
+        return int(marker.split('_')[1])
+    except (IndexError, ValueError):
+        return 0
 
 
 def _refresh(env):

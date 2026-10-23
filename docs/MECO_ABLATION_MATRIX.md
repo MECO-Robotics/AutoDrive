@@ -63,8 +63,9 @@ different device or backend.
 
 The following plan conditions are not represented as completed experiments:
 
-- Phase 4 factors remain unsupported for categories outside the registered
-  reactive-pressure domain; see the explicit scenario constraints below.
+- Phase 4 factors run for registered level 1–5 pressure categories in the two
+  pressure scenarios. Level 0 and categories outside that domain remain
+  explicitly unsupported and are listed with reasons in the matrix protocol.
 
 They remain listed as open in the matrix protocol. Do not infer that general
 noisy or shifted layouts cover these distinct conditions.
@@ -88,11 +89,14 @@ noisy or shifted layouts cover these distinct conditions.
   declared bounded route-qualified pool.
 - Check fault records for requested tick, actual trigger tick, `reached`,
   fallback count, and paired normal policy ID.
-- For `offense_vs_scripted_pressure` or `full_match_offense` with only registered
-  `level_4_reactive` categories, the runner also executes the four Phase 4
-  conditions from `docs/MECO_PHASE4_FACTORS.md`. Each treatment uses the exact
-  checkpoint bundle, source identity, categories, and seed list from the
-  matched no-factor condition; all five MECO tracks and D0/D1/D2 controls are
-  evaluated. Unsupported categories leave these conditions explicitly open.
+- For `offense_vs_scripted_pressure` or `full_match_offense`, the runner also
+  executes the four Phase 4 conditions for requested registered level 1–5
+  categories. Each treatment is scoped to those eligible categories and uses
+  the exact checkpoint bundle, source identity, and seed list from the
+  no-factor condition; all five MECO tracks and D0/D1/D2 controls are
+  evaluated. Slot 0 is the treated pressure participant; any other scripted
+  pressure slots retain their category behavior. Level 0 has no pressure slot,
+  so it remains only in the no-factor run and is recorded as unsupported for
+  Phase 4.
 - Use the project qualification protocol for promotion; these diagnostic
   records alone do not establish a win or simulator qualification.

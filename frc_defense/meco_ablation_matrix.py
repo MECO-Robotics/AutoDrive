@@ -40,6 +40,7 @@ class MatrixCondition:
     candidate_k: int
     inference_disable_tick: int | None = None
     phase4_factor: dict | None = None
+    categories: tuple[str, ...] | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -217,17 +218,27 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
         MatrixCondition("inference_disabled_fallback_current_k16", "current",
                         "current", 16, fault_tick),
     )
-    phase4_supported = (scenario_id in ("offense_vs_scripted_pressure",
-        "full_match_offense") and categories is not None and bool(categories)
-        and all(category.endswith("level_4_reactive") for category in categories))
-    if phase4_supported:
+    pressure_domain = scenario_id in ("offense_vs_scripted_pressure", "full_match_offense")
+    supported_categories = tuple(category for category in (categories or ())
+        if _registered_pressure_level(category) in (1, 2, 3, 4, 5))
+    if pressure_domain and supported_categories:
         conditions += tuple(MatrixCondition(
             f"phase4_{name}", "cv", "cv", 16,
-            phase4_factor=phase4_factor_config(name))
+            phase4_factor=phase4_factor_config(name),
+            categories=supported_categories)
             for name in PHASE4_FACTORS)
     for condition in conditions:
         condition.validate()
     return conditions
+
+
+def _registered_pressure_level(category: str) -> int:
+    marker = next((part for part in category.split("/")
+                   if part.startswith("level_")), "level_0")
+    try:
+        return int(marker.split("_")[1])
+    except (IndexError, ValueError):
+        return 0
 
 
 def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
@@ -329,6 +340,13 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     conditions = default_conditions(scenario_id, categories=categories,
         inference_disable_tick=inference_disable_tick)
     phase4_enabled = any(condition.phase4_factor is not None for condition in conditions)
+    pressure_domain = scenario_id in ("offense_vs_scripted_pressure", "full_match_offense")
+    unsupported_phase4 = ([{"category": category,
+        "reason": ("scenario is outside the registered pressure domain" if not pressure_domain
+                   else "level_0 has no scripted pressure slot" if _registered_pressure_level(category) == 0
+                   else "category is outside the registered level_1 through level_5 pressure domain")}
+        for category in categories
+        if not pressure_domain or _registered_pressure_level(category) not in (1, 2, 3, 4, 5)])
     condition_specs = [asdict(condition) for condition in conditions]
     matrix_protocol = {"schema_version": MATRIX_SCHEMA_VERSION,
         "scenario_id": scenario_id, "categories": list(categories),
@@ -345,7 +363,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
         "conditions": condition_specs,
-        "phase4_factor_schema": ("meco-phase4-four-factor-v1" if phase4_enabled else None),
+        "phase4_factor_schema": ("meco-phase4-five-level-pressure-v2" if phase4_enabled else None),
+        "phase4_unsupported_categories": unsupported_phase4,
         "unsupported_conditions_open": ([] if phase4_enabled else [
             "explicit_feint_behavior", "sensor_delay_ablation",
             "separate_low_confidence_profile", "abrupt_opponent_policy_change"])}
@@ -367,8 +386,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "source_identity_sha256": source_hash, "seed_list": list(seeds),
             "execution_device": execution_device})
         report_path = output_root / f"{condition_id}.evaluation.json"
+        condition_categories = condition.categories or categories
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
-            categories=categories, episodes=len(seeds), master_seed=seeds[0],
+            categories=condition_categories, episodes=len(seeds), master_seed=seeds[0],
             episode_seeds=seeds, device=device, split=evaluation_split,
             qualification_protocol_id=(None if qualification_provenance is None else
                 qualification_provenance["protocol_id"]),
@@ -508,9 +528,12 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         factor_policies = (*MECO_TRACKS, "D0", "D1", "D2")
         for name in PHASE4_FACTORS:
             treatment_name = f"phase4_{name}"
+            if treatment_name not in evaluation_reports:
+                continue
             treatment = evaluation_reports[treatment_name]
+            treatment_categories = treatment["report"]["categories"]
             for policy in factor_policies:
-                for category in categories:
+                for category in treatment_categories:
                     for seed in seeds:
                         treated = treatment["records"].get((policy, category, seed))
                         control = baseline["records"].get((policy, category, seed))
@@ -574,13 +597,14 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 "training_protocol_id"] for track in MECO_TRACKS},
         "conditions": results,
         "contrasts": contrasts,
+        "phase4_unsupported_categories": unsupported_phase4,
         "interpretation_limits": [
             "Paired rows are reported without confidence intervals; use the calibrated qualification gate for promotion.",
             "Candidate recall is relative to the declared bounded route-qualified reference pool, not a simulator-optimality oracle.",
             "P=0 is an inference-time ablation using the same learned A checkpoint.",
             "Fault rows hand off at the first 12-step macro boundary at or after the requested tick.",
-            ("All four Phase 4 factors use explicit same-seed baseline pairs; metrics remain diagnostic until held-out evaluation and calibrated gates." if phase4_enabled else
-             "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require the registered level_4_reactive pressure categories.")],
+            ("Each Phase 4 factor replaces only registered slot-0 pressure behavior and is paired with the no-factor row at the same category and seed; unsupported categories are listed explicitly. Metrics remain diagnostic until held-out evaluation and calibrated gates." if phase4_enabled else
+             "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require registered level_1 through level_5 pressure categories; level_0 has no scripted pressure slot.")],
     }
     matrix_report["report_sha256"] = _canonical_hash(matrix_report)
     output_root.mkdir(parents=True, exist_ok=True)
