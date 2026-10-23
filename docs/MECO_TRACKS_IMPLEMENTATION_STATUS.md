@@ -349,5 +349,6 @@ command and active-mask buffers were uninitialized `torch.empty` scratch; both
 are copied from commands/active masks before any captured graph replay, and the
 CPU path does not use them. They now start at zero, preserving the strict state
 digest and replay parity checks without exclusions or a schema change. This
-fix is in isolated worktree `codex/meco-r6-scratch-init`; review is pending.
-Static compile/diff/JSON checks only; no tests or simulator replay were run.
+fix passed independent scoped review in isolated commit 45fc59012 and was
+integrated as 0c65857f3. Static compile/diff/JSON checks only; no tests or
+simulator replay were run.
