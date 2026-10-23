@@ -238,8 +238,12 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
     finite_valid_max_logits_delta = None
     per_index_logits_delta = None
     candidate_set = row.get("candidate_set")
-    valid_mask = (list(candidate_set.table.valid_mask)
+    replay_candidate_ids = (list(candidate_set.table.candidate_ids)
+                            if candidate_set is not None else None)
+    replay_valid_mask = ([bool(value) for value in candidate_set.table.valid_mask]
                   if candidate_set is not None else [])
+    rollout_candidate_ids = row.get("rollout_candidate_ids")
+    rollout_valid_mask = row.get("rollout_valid_mask")
     if (isinstance(rollout_logits, torch.Tensor) and
             isinstance(replay_logits, torch.Tensor) and
             rollout_logits.shape == replay_logits.shape):
@@ -248,8 +252,8 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
         deltas = (rollout_flat - replay_flat).abs()
         max_logits_delta = float(deltas.max().cpu()) if deltas.numel() else None
         finite = torch.isfinite(rollout_flat) & torch.isfinite(replay_flat)
-        if valid_mask and len(valid_mask) == finite.numel():
-            finite &= torch.tensor(valid_mask, device=finite.device, dtype=torch.bool)
+        if replay_valid_mask and len(replay_valid_mask) == finite.numel():
+            finite &= torch.tensor(replay_valid_mask, device=finite.device, dtype=torch.bool)
         finite_deltas = deltas[finite]
         finite_valid_max_logits_delta = (float(finite_deltas.max().cpu())
             if finite_deltas.numel() else None)
@@ -301,6 +305,13 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
         "rollout_logits_values": _logits_evidence(rollout_logits),
         "replay_logits_values": _logits_evidence(replay_logits),
         "candidate_table": _candidate_identity_evidence(candidate_set),
+        "candidate_identity_comparison": {
+            "rollout_candidate_ids": rollout_candidate_ids,
+            "replay_candidate_ids": replay_candidate_ids,
+            "candidate_ids_match": rollout_candidate_ids == replay_candidate_ids,
+            "rollout_valid_mask": rollout_valid_mask,
+            "replay_valid_mask": replay_valid_mask,
+            "valid_mask_match": rollout_valid_mask == replay_valid_mask},
         "rollout_fingerprints": row.get("replay_fingerprints"),
         "replay_fingerprints": replay_fingerprints,
         "repeated_exact_row_replays": repeated_replay,
@@ -1433,6 +1444,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "candidate_set": prepared["candidate_set"],
                     "candidate_digest": prepared.get("candidate_digest"),
                     "candidate_replay_digest": prepared.get("candidate_replay_digest"),
+                    "rollout_candidate_ids": (
+                        list(prepared["candidate_set"].table.candidate_ids)
+                        if config.track in ("C1", "C2") else None),
+                    "rollout_valid_mask": (
+                        [bool(value) for value in
+                         prepared["candidate_set"].table.valid_mask]
+                        if config.track in ("C1", "C2") else None),
                     # Diagnostic instrumentation adds five tensor SHA-256
                     # copies and one candidate-feature JSON hash per C-track
                     # decision; model parameters are hashed once per update.
