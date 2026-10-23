@@ -1560,6 +1560,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
         "episode_seeds": list(episode_seeds) if episode_seeds is not None else None,
+        "split": split,
+        "qualification_protocol_id": qualification_protocol_id,
         "qualification_case": qualification_case,
         "candidate_k": {"checkpoint": checkpoint_candidate_k,
             "evaluation_override": candidate_k_override, "effective": candidate_k},
@@ -1591,8 +1593,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
             "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C C1/C2 and controls D1/D2: one shared stable configurable K=8/16/32 route-qualified candidate table, including distance-ordered direct goals for sensed targets beyond native top-four, common action/route eligibility and prediction risk, one appended snapshot-revalidated continue row when committed, ten-macro expiry, target-loss/invalid-route/completion/failure/episode clearing, and a shared fixed 0.10-point switch-cost hysteresis. Selected collection tracks flow through the paired slot-3 collect goal; each physics step revalidates the buffer index, freshness, and <=1 m snapshot displacement, dynamically aims terminal intake heading at the current track position using native swept turn-clearance checks, and cancels the macro on loss; physical pickup remains geometric and non-exclusive; only candidate utility scoring differs"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
-    if qualification_protocol_id is not None:
-        protocol = qualification_protocol_id
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
     status_path = (output_path.with_name(output_path.name + ".status.json")
@@ -1608,7 +1608,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 and current - status_last_written < 5.):
             return
         _atomic_json(status_path, {"schema_version": 1, "evaluation_id": eval_id,
-            "protocol_id": protocol, "split": split, "status": status,
+            "protocol_id": protocol,
+            "qualification_protocol_id": qualification_protocol_id,
+            "split": split, "status": status,
             "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "output_file": output_path.name,
@@ -2092,7 +2094,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "prediction_mode": decision_prediction_mode,
                             "prediction_contract": (prediction_contract(decision_prediction_mode)
                                 if decision_prediction_mode in PREDICTION_MODES else None),
-                            "protocol_id": protocol, "split": split,
+                            "protocol_id": protocol,
+                            "qualification_protocol_id": qualification_protocol_id,
+                            "split": split,
                             **(qualification_case or {}),
                             "source_identity_sha256": source_hash,
                             "safety_metrics_schema": metric_ledger_record["safety_metrics_schema"],
@@ -2135,7 +2139,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         if callable(close):
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
-            "protocol_id": protocol, "sources": sources,
+            "protocol_id": protocol,
+            "qualification_protocol_id": qualification_protocol_id,
+            "sources": sources,
             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
             "safety_metrics_schema": "meco-safety-rates-v1",
             "safety_metrics_source_identity_sha256": source_hash,

@@ -129,6 +129,7 @@ def _held_out_seed_assignments(protocol: dict, scenario_id: str,
 def _validate_condition_manifest(report: dict, *,
                                  frozen_checkpoint_hashes: dict[str, str],
                                  frozen_source_hash: str,
+                                 expected_qualification_protocol_id: str | None,
                                  expected_configs: dict[str, str] | None,
                                  expected_protocols: dict[str, str] | None,
                                  expected_shared_config: dict | None,
@@ -139,6 +140,8 @@ def _validate_condition_manifest(report: dict, *,
         raise ValueError("evaluation manifest is missing one or more learned tracks")
     if report.get("source_identity_sha256") != frozen_source_hash:
         raise ValueError("evaluation source identity differs from frozen matrix provenance")
+    if report.get("qualification_protocol_id") != expected_qualification_protocol_id:
+        raise ValueError("evaluation qualification protocol ID differs from frozen matrix provenance")
     if report.get("execution_device") != expected_device:
         raise ValueError("evaluation report device/backend differs from frozen matrix provenance")
     component_timing = report.get("component_timing")
@@ -330,6 +333,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
         "evaluation_design": evaluation_design,
         "evaluation_split": evaluation_split,
+        "qualification_protocol_id": (None if qualification_provenance is None else
+            qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "source_identity_sha256": source_hash,
@@ -376,6 +381,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         observed_configs, observed_protocols, shared_config = _validate_condition_manifest(
             report, frozen_checkpoint_hashes=bundle_hashes,
             frozen_source_hash=source_hash,
+            expected_qualification_protocol_id=(None if qualification_provenance is None else
+                qualification_provenance["protocol_id"]),
             expected_configs=expected_configs,
             expected_protocols=expected_protocols,
             expected_shared_config=expected_shared_config,
@@ -388,6 +395,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "condition_id": condition_id, "condition": spec,
             "evaluation_design": evaluation_design,
             "evaluation_split": evaluation_split,
+            "qualification_protocol_id": (None if qualification_provenance is None else
+                qualification_provenance["protocol_id"]),
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments}
         _atomic_json(report_path, report)
@@ -395,6 +404,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         results[condition.condition_name] = {"condition_id": condition_id,
             "evaluation_id": report["evaluation_id"],
             "protocol_id": report["protocol_id"],
+            "qualification_protocol_id": report["qualification_protocol_id"],
             "evaluation_design": evaluation_design,
             "evaluation_split": evaluation_split,
             "qualification_protocol": qualification_provenance,
@@ -524,6 +534,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "execution_device": execution_device,
         "evaluation_design": evaluation_design,
         "evaluation_split": evaluation_split,
+        "qualification_protocol_id": (None if qualification_provenance is None else
+            qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
@@ -544,6 +556,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "protocol": matrix_protocol,
         "evaluation_design": evaluation_design,
         "evaluation_split": evaluation_split,
+        "qualification_protocol_id": (None if qualification_provenance is None else
+            qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
         "seed_split_assignments": seed_split_assignments,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
