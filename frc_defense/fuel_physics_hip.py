@@ -65,6 +65,9 @@ def _build_inputs():
         (rocm_bundled if rocm_bundled.exists() else
          (cpp_extension._find_rocm_home() if torch.version.hip is not None else None)))
     rocm = Path(rocm_value).resolve() if rocm_value else None
+    hip_clang_value = os.environ.get("HIP_CLANG_PATH")
+    hip_clang_path = (Path(hip_clang_value).expanduser().resolve() if hip_clang_value
+        else (rocm / "lib/llvm/bin").resolve() if rocm else None)
     device_lib = next((p for p in (rocm / "lib/llvm/amdgcn/bitcode",
                                     rocm / "amdgcn/bitcode") if p.is_dir()), None) if rocm else None
     base_flags = list(_BUILD_FLAGS["extra_cuda_cflags"])
@@ -76,7 +79,7 @@ def _build_inputs():
     if compiler and not compiler.exists():
         compiler = rocm / "lib/llvm/bin/clang++"
     relevant_env = {name: os.environ.get(name) for name in (
-        "ROCM_HOME", "ROCM_PATH", "HIP_CLANG_PATH", "PYTORCH_ROCM_ARCH",
+        "PYTORCH_ROCM_ARCH",
         "TORCH_CUDA_ARCH_LIST", "CXX", "CC", "CFLAGS", "CXXFLAGS",
         "CPPFLAGS", "LDFLAGS", "HIPCC_COMPILE_FLAGS_APPEND",
         "HIPCC_LINK_FLAGS_APPEND")}
@@ -94,6 +97,8 @@ def _build_inputs():
         "python": {"version": platform.python_version(),
             "abi_tag": getattr(sys.implementation, "cache_tag", None),
             "abiflags": getattr(sys, "abiflags", "")},
+        "toolchain_environment": {"effective_rocm_home": str(rocm) if rocm else None,
+            "effective_hip_clang_path": str(hip_clang_path) if hip_clang_path else None},
         "rocm": str(rocm) if rocm else None,
         "hipcc": _path_stat_identity(compiler) if compiler else None,
         "host_compilers": {"cxx": _path_stat_identity(cxx) if cxx else None,
