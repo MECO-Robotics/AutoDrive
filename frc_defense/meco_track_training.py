@@ -88,7 +88,7 @@ class MecoTrainConfig:
     epochs: int = 4
     action_ticks: int = 12
     seed: int = 7
-    device: str = "cpu"
+    device: str | None = None
     learning_rate: float = 3e-4
     gamma: float = .993
     gae_lambda: float = .95
@@ -104,7 +104,8 @@ class MecoTrainConfig:
     candidate_k: int = 16
     output: str = ""
 
-    def validate(self, *, validate_device: bool = True):
+    def validate(self):
+        from .meco_device import require_indexed_cuda_device
         if self.track not in MECO_TRACKS:
             raise ValueError(f"track must be one of {MECO_TRACKS}")
         definition = get_scenario(self.scenario_id)
@@ -121,8 +122,7 @@ class MecoTrainConfig:
             raise ValueError("p_mode must be 'learned' or 'p0'")
         if self.prediction_mode not in PREDICTION_MODES:
             raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
-        if validate_device and self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise ValueError("requested ROCm/CUDA device is unavailable")
+        require_indexed_cuda_device(self.device, purpose="MECO training")
         for name in ("learning_rate", "gamma", "gae_lambda", "clip_coef",
                      "entropy_coef", "value_coef", "max_grad_norm",
                      "route_cost_points_per_second", "p_cost_scale",
@@ -2400,7 +2400,8 @@ def _parser():
     train.add_argument("--epochs", type=int, default=4)
     train.add_argument("--action-ticks", type=int, default=12)
     train.add_argument("--seed", type=int, default=7)
-    train.add_argument("--device", default="cpu")
+    train.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     train.add_argument("--learning-rate", type=float, default=3e-4)
     train.add_argument("--gamma", type=float, default=.993)
     train.add_argument("--gae-lambda", type=float, default=.95)
@@ -2434,7 +2435,8 @@ def _parser():
     ev.add_argument("--categories", default="single,cluster")
     ev.add_argument("--episodes", type=int, default=1)
     ev.add_argument("--seed", type=int, default=20261024)
-    ev.add_argument("--device", default="cuda:0")
+    ev.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
         help="override learned A/C prediction mode; default preserves checkpoint mode")
     ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,

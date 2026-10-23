@@ -168,18 +168,20 @@ class MecoSupervisor:
                  candidate_k: int,
                  evaluation_categories: tuple[str, ...], evaluation_episodes: int,
                  evaluation_seed: int, evaluation_device: str | None,
-                 cycles: int, stop_file: str | None, devices_explicit: bool = False,
+                 cycles: int, stop_file: str | None,
                  stage_exposure_chunks: int = 10, p_mode: str = "learned",
                  p_cost_scale: float = 1.0, p_points_per_grid_edge: float = .05,
                  prediction_mode: str = "cv",
                  evaluation_prediction_mode: str | None = None,
                  warm_start_artifacts: dict[str, str] | None = None,
                  qualification_protocol: str | None = None):
+        from .meco_device import require_indexed_cuda_device
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
-        if (not devices_explicit and any(device.startswith("cuda") for device in devices)
-                and not torch.cuda.is_available()):
-            raise ValueError("a configured ROCm/CUDA device is unavailable")
+        for device in devices:
+            require_indexed_cuda_device(device, purpose="MECO supervisor training")
+        require_indexed_cuda_device(evaluation_device,
+            purpose="MECO supervisor evaluation")
         if cycles < 0 or chunk_updates < 1 or evaluation_episodes < 1:
             raise ValueError("cycles must be nonnegative; chunk/evaluation counts positive")
         self.output = Path(output).expanduser().resolve()
@@ -191,7 +193,7 @@ class MecoSupervisor:
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
         from .fuel_physics_hip import prepare_native_fuel_extension
-        for device in sorted(set(devices) | {evaluation_device or "cpu"}):
+        for device in sorted(set(devices) | {evaluation_device}):
             prepare_native_fuel_extension(device)
         self.warm_start_paths = {}
         self.warm_start_hashes = {}
@@ -231,7 +233,7 @@ class MecoSupervisor:
         self.evaluation_categories = evaluation_categories
         self.evaluation_episodes = evaluation_episodes
         self.evaluation_seed = evaluation_seed
-        self.evaluation_device = evaluation_device or "cpu"
+        self.evaluation_device = evaluation_device
         self.cycles = cycles  # zero means continue until stopped
         self.stop_file = Path(stop_file).expanduser().resolve() if stop_file else self.output / "STOP"
         self.queue_path = self.output / "queue-status.json"
@@ -259,7 +261,7 @@ class MecoSupervisor:
                 prediction_mode=prediction_mode,
                 candidate_k=candidate_k,
                 output=str(self.output / track))
-            config.validate(validate_device=not devices_explicit)
+            config.validate()
             self.configs[track] = config
         self.sources = source_identity()
         self.source_hash = _hash(self.sources)
@@ -1021,8 +1023,8 @@ def _parser():
     parser = argparse.ArgumentParser(description="Continuous round-robin MECO supervisor")
     parser.add_argument("--output", default=str(ROOT / "checkpoints" / "meco-five"))
     parser.add_argument("--evaluation-output", default=str(ROOT / "evaluations" / "meco-five"))
-    parser.add_argument("--devices", default=None,
-        help="comma-separated devices; at most one trainer runs on each device")
+    parser.add_argument("--devices", required=True,
+        help="comma-separated explicit indexed CUDA/ROCm devices; at most one trainer runs on each device")
     parser.add_argument("--scenario", default="pickup_simple")
     parser.add_argument("--category", default="single")
     parser.add_argument("--seed", type=int, default=7)
@@ -1051,8 +1053,8 @@ def _parser():
     parser.add_argument("--evaluation-categories", default="single,cluster")
     parser.add_argument("--evaluation-episodes", type=int, default=1)
     parser.add_argument("--evaluation-seed", type=int, default=20261024)
-    parser.add_argument("--evaluation-device", default="cpu",
-        help="device for the paired evaluator; defaults to CPU so learners keep their devices")
+    parser.add_argument("--evaluation-device", required=True,
+        help="explicit indexed CUDA/ROCm device for the paired evaluator")
     parser.add_argument("--qualification-protocol",
         help="frozen qualification protocol used to constrain scheduled scenario/category/seeds")
     parser.add_argument("--warm-start-artifacts", type=json.loads, default=None,
@@ -1065,11 +1067,7 @@ def _parser():
 
 def main(argv=None):
     args = _parser().parse_args(argv)
-    device_spec = args.devices
-    if device_spec is None:
-        device_spec = (",".join(f"cuda:{index}" for index in range(
-            torch.cuda.device_count())) if torch.cuda.is_available() else "cpu")
-    devices = tuple(item.strip() for item in device_spec.split(",") if item.strip())
+    devices = tuple(item.strip() for item in args.devices.split(",") if item.strip())
     categories = tuple(item.strip() for item in args.evaluation_categories.split(",")
                        if item.strip())
     supervisor = MecoSupervisor(output=args.output, evaluation_output=args.evaluation_output,
@@ -1088,7 +1086,6 @@ def main(argv=None):
         evaluation_categories=categories, evaluation_episodes=args.evaluation_episodes,
         evaluation_seed=args.evaluation_seed, evaluation_device=args.evaluation_device,
         cycles=args.cycles, stop_file=args.stop_file,
-        devices_explicit=args.devices is not None,
         stage_exposure_chunks=args.stage_exposure_chunks,
         qualification_protocol=args.qualification_protocol,
         warm_start_artifacts=args.warm_start_artifacts)

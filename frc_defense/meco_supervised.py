@@ -47,9 +47,10 @@ ACTION_TO_BEHAVIOR = {0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 6: 3, 5: 4}
 
 
 def _prepare_native_gpu_runtime(device):
-    if str(device).startswith("cuda"):
-        from .fuel_physics_hip import prepare_native_fuel_extension
-        prepare_native_fuel_extension(device)
+    from .meco_device import require_indexed_cuda_device
+    selected = require_indexed_cuda_device(device, purpose="MECO data collection or fitting")
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(str(selected))
 
 
 def _canonical_hash(value):
@@ -195,7 +196,7 @@ def validate_training_assignment(protocol: dict, assignment: dict):
 
 
 def collect_dataset(output: Path, *, scenario_id: str, category: str,
-                    seeds: list[int], qualification_protocol: Path, device: str = "cpu",
+                    seeds: list[int], qualification_protocol: Path, device: str | None = None,
                     horizon: int = 160, action_ticks: int = 12,
                     candidate_k: int = 16, prediction_mode: str = "cv"):
     """Collect deterministic teacher observations from train-partition seeds."""
@@ -390,7 +391,7 @@ def _read_dataset(path, *, qualification_protocol, expected_sources):
 
 
 def warm_start(track: str, dataset: Path, output: Path, *, qualification_protocol: Path,
-               updates: int = 10, learning_rate: float = 1e-4, device: str = "cpu"):
+               updates: int = 10, learning_rate: float = 1e-4, device: str | None = None):
     """Fit observed action preferences and save model weights only."""
     if track not in MECO_TRACKS or type(updates) is not int or updates < 1:
         raise ValueError("invalid track or update count")
@@ -1074,7 +1075,7 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
 
 def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         qualification_protocol: Path, updates: int = 10,
-        learning_rate: float = 1e-4, device: str = "cpu"):
+        learning_rate: float = 1e-4, device: str | None = None):
     """Fit only within-prefix gross-return pairwise preferences from v2 data."""
     if track not in MECO_TRACKS or type(updates) is not int or updates < 1:
         raise ValueError("invalid track or update count")
@@ -1223,7 +1224,7 @@ def _initialize_unlabelled_plan_a_penalty_head(model, track):
 
 def warm_start_counterfactual_plan_a_v3(track: str, dataset: Path, output: Path, *,
         qualification_protocol: Path, updates: int = 10,
-        learning_rate: float = 1e-4, device: str = "cpu"):
+        learning_rate: float = 1e-4, device: str | None = None):
     """Regress sampled feasible Plan A U+B values to replayed gross returns.
 
     The v2 replay-bound dataset is reused unchanged. This v3 artifact adds a
@@ -1488,20 +1489,9 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
             not math.isfinite(minimum_coverage_fraction) or
             not 0 < minimum_coverage_fraction <= 1):
         raise ValueError("invalid Plan A P route warm-start configuration")
-    if oracle_labels:
-        if not isinstance(device, str) or not device.strip():
-            raise ValueError("Plan A P oracle warm-start requires an explicit CUDA device")
-        try:
-            requested_device = torch.device(device)
-        except (TypeError, RuntimeError) as exc:
-            raise ValueError("Plan A P oracle warm-start requires an explicit CUDA device") from exc
-        if (requested_device.type != "cuda" or requested_device.index is None or
-                not torch.cuda.is_available() or
-                requested_device.index >= torch.cuda.device_count()):
-            raise ValueError("Plan A P oracle warm-start requires an available explicit CUDA device")
-        device = str(requested_device)
-    elif device is None:
-        device = "cpu"
+    from .meco_device import require_indexed_cuda_device
+    device = str(require_indexed_cuda_device(device,
+        purpose="Plan A P warm-start"))
     from .curriculum_training import source_identity
     from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
@@ -2127,7 +2117,8 @@ def main(argv=None):
     collect.add_argument("--category", required=True)
     collect.add_argument("--seeds", type=int, nargs="+", required=True)
     collect.add_argument("--qualification-protocol", type=Path, required=True)
-    collect.add_argument("--device", default="cpu")
+    collect.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     collect.add_argument("--horizon", type=int, default=160)
     collect.add_argument("--action-ticks", type=int, default=12)
     collect.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
@@ -2138,7 +2129,8 @@ def main(argv=None):
     counterfactual.add_argument("--category", required=True)
     counterfactual.add_argument("--seeds", type=int, nargs="+", required=True)
     counterfactual.add_argument("--qualification-protocol", type=Path, required=True)
-    counterfactual.add_argument("--device", default="cpu")
+    counterfactual.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     counterfactual.add_argument("--horizon-ticks", type=int, default=160)
     counterfactual.add_argument("--action-ticks", type=int, default=12)
     counterfactual.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
@@ -2154,7 +2146,8 @@ def main(argv=None):
     warm.add_argument("--qualification-protocol", type=Path, required=True)
     warm.add_argument("--updates", type=int, default=10)
     warm.add_argument("--learning-rate", type=float, default=1e-4)
-    warm.add_argument("--device", default="cpu")
+    warm.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     cf_warm = commands.add_parser("warm-start-counterfactual-v2")
     cf_warm.add_argument("--track", choices=MECO_TRACKS, required=True)
     cf_warm.add_argument("--dataset", type=Path, required=True)
@@ -2162,7 +2155,8 @@ def main(argv=None):
     cf_warm.add_argument("--qualification-protocol", type=Path, required=True)
     cf_warm.add_argument("--updates", type=int, default=10)
     cf_warm.add_argument("--learning-rate", type=float, default=1e-4)
-    cf_warm.add_argument("--device", default="cpu")
+    cf_warm.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     plan_a_v3 = commands.add_parser("warm-start-plan-a-v3")
     plan_a_v3.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
     plan_a_v3.add_argument("--dataset", type=Path, required=True)
@@ -2170,7 +2164,8 @@ def main(argv=None):
     plan_a_v3.add_argument("--qualification-protocol", type=Path, required=True)
     plan_a_v3.add_argument("--updates", type=int, default=10)
     plan_a_v3.add_argument("--learning-rate", type=float, default=1e-4)
-    plan_a_v3.add_argument("--device", default="cpu")
+    plan_a_v3.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     p_routes = commands.add_parser("collect-plan-a-p-routes-v1")
     p_routes.add_argument("--dataset", type=Path, required=True,
         help="strictly replayable counterfactual v2 training dataset")
@@ -2178,6 +2173,8 @@ def main(argv=None):
     p_routes.add_argument("--qualification-protocol", type=Path, required=True)
     p_routes.add_argument("--p-cost-scale", type=float, default=1.0)
     p_routes.add_argument("--intervention-maps", type=int, default=3)
+    p_routes.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device matching the source dataset")
     plan_a_p = commands.add_parser("warm-start-plan-a-p-v1")
     plan_a_p.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
     plan_a_p.add_argument("--dataset", type=Path, required=True)
@@ -2187,7 +2184,8 @@ def main(argv=None):
     plan_a_p.add_argument("--qualification-protocol", type=Path, required=True)
     plan_a_p.add_argument("--updates", type=int, default=10)
     plan_a_p.add_argument("--learning-rate", type=float, default=1e-4)
-    plan_a_p.add_argument("--device", default="cpu")
+    plan_a_p.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device, for example cuda:0")
     plan_a_p.add_argument("--route-margin", type=float, default=0.02)
     plan_a_p.add_argument("--map-regularization", type=float, default=0.001)
     plan_a_p.add_argument("--minimum-coverage-fraction", type=float, default=0.01)
@@ -2197,6 +2195,8 @@ def main(argv=None):
     p_routes_v3.add_argument("--qualification-protocol", type=Path, required=True)
     p_routes_v3.add_argument("--p-cost-scale", type=float, default=1.0)
     p_routes_v3.add_argument("--intervention-maps", type=int, default=3)
+    p_routes_v3.add_argument("--device", required=True,
+        help="explicit indexed CUDA/ROCm device matching the source dataset")
     plan_a_p_v3 = commands.add_parser("warm-start-plan-a-p-v3")
     plan_a_p_v3.add_argument("--track", choices=("A1", "A2", "A3"), required=True)
     plan_a_p_v3.add_argument("--dataset", type=Path, required=True)
@@ -2239,7 +2239,7 @@ def main(argv=None):
         result = collect_plan_a_p_routes_v1(args.output, dataset=args.dataset,
             qualification_protocol=args.qualification_protocol,
             p_cost_scale=args.p_cost_scale,
-            intervention_maps=args.intervention_maps)
+            intervention_maps=args.intervention_maps, device=args.device)
     elif args.command == "warm-start-plan-a-p-v1":
         result = warm_start_counterfactual_plan_a_p_v1(args.track, args.dataset,
             args.value_checkpoint, args.output,
@@ -2253,7 +2253,7 @@ def main(argv=None):
         result = collect_plan_a_p_routes_v3(args.output, dataset=args.dataset,
             qualification_protocol=args.qualification_protocol,
             p_cost_scale=args.p_cost_scale,
-            intervention_maps=args.intervention_maps)
+            intervention_maps=args.intervention_maps, device=args.device)
     elif args.command == "warm-start-plan-a-p-v3":
         result = warm_start_counterfactual_plan_a_p_v1(args.track, args.dataset,
             args.value_checkpoint, args.output,

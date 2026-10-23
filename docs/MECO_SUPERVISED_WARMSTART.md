@@ -28,22 +28,27 @@ Subsequent resume checkpoints retain the original initialization provenance.
 For C1/C2, model input width includes both candidate values and their explicit
 missingness indicators.
 
+Collection, fitting, and training require an explicit available indexed GPU
+device (`cuda:N`, including ROCm/HIP devices exposed through PyTorch). Simulator
+and model compute runs on that device; orchestration, tensor serialization,
+checkpoint map-location, and RNG handling may use the host CPU.
+
 Example using seeds assigned to the protocol's training partition:
 
 ```sh
 python -m frc_defense.meco_supervised collect \
   --output evaluations/meco-supervised/train.jsonl \
   --scenario pickup_simple --category single --seeds 101 102 \
-  --qualification-protocol qualifications/meco/protocol.json
+  --qualification-protocol qualifications/meco/protocol.json --device cuda:0
 python -m frc_defense.meco_supervised warm-start \
   --track C1 --dataset evaluations/meco-supervised/train.jsonl \
   --output checkpoints/meco-warmstart/C1.pt \
-  --qualification-protocol qualifications/meco/protocol.json
+  --qualification-protocol qualifications/meco/protocol.json --device cuda:0
 python -m frc_defense.meco_track_training train --track C1 \
   --protocol-id <training-protocol-id> \
   --qualification-protocol qualifications/meco/protocol.json \
   --warm-start checkpoints/meco-warmstart/C1.pt \
-  --output checkpoints/meco-five/C1
+  --output checkpoints/meco-five/C1 --device cuda:0
 ```
 
 For a new five-lane campaign, pass the frozen qualification artifact and all
@@ -51,12 +56,9 @@ five track artifacts to `frc_defense.meco_supervisor`:
 
 ```sh
 python -m frc_defense.meco_supervisor --seed 20261024 \
+  --devices cuda:0,cuda:1 --evaluation-device cuda:0 \
   --qualification-protocol qualifications/meco/protocol.json \
-  --warm-start A1=checkpoints/meco-warmstart/A1.pt \
-  --warm-start A2=checkpoints/meco-warmstart/A2.pt \
-  --warm-start A3=checkpoints/meco-warmstart/A3.pt \
-  --warm-start C1=checkpoints/meco-warmstart/C1.pt \
-  --warm-start C2=checkpoints/meco-warmstart/C2.pt
+  --warm-start-artifacts '{"A1":"checkpoints/meco-warmstart/A1.pt","A2":"checkpoints/meco-warmstart/A2.pt","A3":"checkpoints/meco-warmstart/A3.pt","C1":"checkpoints/meco-warmstart/C1.pt","C2":"checkpoints/meco-warmstart/C2.pt"}'
 ```
 
 The supervisor's `protocol_id` identifies its complete training configuration;
@@ -110,7 +112,7 @@ simulator rollouts):
 python -m frc_defense.meco_supervised collect-counterfactual-v2 \
   --output evaluations/meco-supervised/counterfactual-v2.jsonl \
   --scenario pickup_simple --category single --seeds 101 \
-  --qualification-protocol qualifications/meco/protocol.json
+  --qualification-protocol qualifications/meco/protocol.json --device cuda:0
 ```
 
 This is a label collector, not an expert policy or simulator oracle. The v1
@@ -122,7 +124,7 @@ python -m frc_defense.meco_supervised warm-start-counterfactual-v2 \
   --track C1 --dataset evaluations/meco-supervised/counterfactual-v2.jsonl \
   --output checkpoints/meco-warmstart/C1-counterfactual-v2.pt \
   --qualification-protocol qualifications/meco/protocol.json \
-  --device cpu
+  --device cuda:0
 ```
 
 The v2 fitter verifies dataset bytes, manifest and row schemas, protocol/train
@@ -159,7 +161,7 @@ python -m frc_defense.meco_supervised warm-start-plan-a-v3 \
   --track A1 --dataset evaluations/meco-supervised/counterfactual-v2.jsonl \
   --output checkpoints/meco-warmstart/A1-plan-a-v3.pt \
   --qualification-protocol qualifications/meco/protocol.json \
-  --device cpu
+  --device cuda:0
 ```
 
 Collect that v2 dataset from this exact source checkout first; its source

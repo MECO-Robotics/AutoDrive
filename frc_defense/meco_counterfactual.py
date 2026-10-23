@@ -400,6 +400,9 @@ def _observation_digest(observation):
 
 
 def _device_identity(device):
+    from .meco_device import require_indexed_cuda_device
+    device = str(require_indexed_cuda_device(device,
+        purpose="MECO counterfactual collection or fitting"))
     resolved = torch.device(device)
     identity = {"torch": str(torch.__version__), "python": sys.version,
                 "device": str(resolved), "platform": platform.platform()}
@@ -921,7 +924,7 @@ def _branch_return_seeded(*, scenario_id, category, seed, device, horizon_ticks,
 
 
 def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
-        seeds: list[int], qualification_protocol: Path, device="cpu",
+        seeds: list[int], qualification_protocol: Path, device=None,
         horizon_ticks=160, action_ticks=12, candidate_k=16,
         prediction_mode="cv", max_c_candidates=8, max_a_pairs=8,
         gamma_per_macro=DEFAULT_GAMMA):
@@ -949,6 +952,9 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             not isinstance(gamma_per_macro, (int, float)) or
             not math.isfinite(gamma_per_macro) or not 0 < gamma_per_macro <= 1):
         raise ValueError("invalid counterfactual horizon, sample limits, or discount")
+    from .meco_device import require_indexed_cuda_device
+    device = str(require_indexed_cuda_device(device,
+        purpose="MECO counterfactual collection"))
     from .fuel_physics_hip import prepare_native_fuel_extension
     prepare_native_fuel_extension(device)
     native_extension_identity = _native_fuel_extension_identity()
@@ -1251,7 +1257,7 @@ def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_se
 
 def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
         qualification_protocol: Path, p_cost_scale=1.0,
-        intervention_maps=3):
+        intervention_maps=3, device=None):
     """Collect P0 and model-independent weighted-route simulator outcomes.
 
     `dataset` must be an already collected strict counterfactual v2 training
@@ -1263,7 +1269,11 @@ def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
     dataset_path = Path(dataset).resolve()
     base_manifest_path = dataset_path.with_suffix(dataset_path.suffix + ".manifest.json")
     base_manifest_hint = json.loads(base_manifest_path.read_text())
-    base_device = base_manifest_hint.get("device", {}).get("device", "cpu")
+    from .meco_device import require_indexed_cuda_device
+    base_device = str(require_indexed_cuda_device(device,
+        purpose="Plan A P route collection"))
+    if base_device != base_manifest_hint.get("device", {}).get("device"):
+        raise ValueError("Plan A P route collection device must match the source dataset device")
     from .fuel_physics_hip import prepare_native_fuel_extension
     prepare_native_fuel_extension(base_device)
     sources = source_identity()
@@ -1384,7 +1394,7 @@ def _plan_a_p_oracle_grid(env, intervention_map):
 
 def collect_plan_a_p_routes_v3(output: Path, *, dataset: Path,
         qualification_protocol: Path, p_cost_scale=1.0,
-        intervention_maps=3):
+        intervention_maps=3, device=None):
     """Collect executed P0/probe routes with independent frozen-grid cost labels.
 
     The v2 reward-ranked collector remains the source of the matched replay
@@ -1393,7 +1403,7 @@ def collect_plan_a_p_routes_v3(output: Path, *, dataset: Path,
     temporary = Path(output).with_suffix(Path(output).suffix + ".routes-v2")
     collect_plan_a_p_routes_v1(temporary, dataset=dataset,
         qualification_protocol=qualification_protocol, p_cost_scale=p_cost_scale,
-        intervention_maps=intervention_maps)
+        intervention_maps=intervention_maps, device=device)
     manifest_path = temporary.with_suffix(temporary.suffix + ".manifest.json")
     manifest = json.loads(manifest_path.read_text())
     rows = [json.loads(line) for line in temporary.read_text().splitlines() if line]
