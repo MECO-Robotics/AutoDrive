@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -26,7 +26,7 @@
         "Plan A P-route independent-cost oracle v3 implementation in codex/meco-p-route-oracle-v3: additive collector archives/replays base bump plus effective P grids and scores actually executed paths with an independent pure-Python grid integrator; labels are sampled path preferences only, ties omitted. Static checks only; runtime oracle qualification remains pending.",
         "Section 6 collection-action-bout planner contract: contiguous focal executed action IDs 0..3; acquire iff focal acquired-event quantity rises during the bout; close on action transition/finalization/error; missing required signal is unavailable; HUB denial stays distinct and abandoned fuel remains null without a producer.",
         "Sibling failure handling planner scope approved: a nonzero lane exit writes an invocation-scoped abort marker for active siblings; workers observe it at a safe update boundary after atomic checkpoint; manifests distinguish aborted_due_to_sibling_failure; supervisor uses bounded process-group TERM/KILL fallback; the pending matched-cycle assignment remains available for catch-up.",
-        "Plan A legal-node Phase 2 tranche contract: strict full-support replay; deterministic heading-bin \u00d7 graph-region node sample including feasible root; behavior-marginal U and feasible within-node B preferences; 2 paired repeats; explicit 512/prefix and 12,000/dataset rollout caps; sampled coverage only.",
+        "Plan A legal-node Phase 2 tranche contract: strict full-support replay; deterministic heading-bin × graph-region node sample including feasible root; behavior-marginal U and feasible within-node B preferences; 2 paired repeats; explicit 512/prefix and 12,000/dataset rollout caps; sampled coverage only.",
         "Plan A joint U+B+P warm-start contract: one shared model/encoder and optimizer over legal-node U/B plus independent oracle-v3 P; exact trajectory-v3 data+manifest cross-binding; learned P requires exact scale; old artifacts unchanged."
       ]
     },
@@ -132,7 +132,7 @@
         "GPU-only defaults and snapshot capture follow-up implemented in isolated worktree codex/meco-gpu-only-freshness based on 755633d3; scoped static review approved at e94a96f80. No tests, simulator run, GPU runtime, calibration, dashboard replay, or qualification outcomes are claimed; runtime/evaluation/calibration/dashboard evidence remains pending.",
         "Section 4 asynchronous inference broker implemented in isolated worktree codex/meco-async-inference-snapshot-broker and integrated at 2318d696e. Commits de3da7252/2caee3c36 add immutable versioned A/C requests, candidate/support ordering digests, nonblocking deterministic fallback, inference_mode worker execution, serialized sequence/queue replacement, and atomic response completion; f25a9f596 adds evaluator-scoped idempotent worker shutdown for normal/exceptional and partial-construction exits plus complete Plan C timestamp provenance. Static compile/diff checks only; no tests/simulator evidence.",
         "Plan A legal-node tranche v1 implemented in isolated worktree codex/meco-plan-a-legal-node-supervision: distinct replay-bound dataset/fitter/weights schema; source/protocol/train/device and full support bindings; stratified sampled node support with uniform hash-ranked descriptors, inclusion weights, 2 paired repeats, U plus centered B losses, null P; static compilation and diff checks passed; scoped review approved at f91d76237; runtime validation pending.",
-        "Joint Plan A U+B+P warm-start implementation started in isolated worktree codex/meco-plan-a-joint-ubp-warmstart: new shared-model weights-only schema, replay-bound dual-dataset identity, learned-P scale gate; static review pending, runtime evidence pending."
+        "Joint Plan A U+B+P warm-start implemented and committed as `15d5ef218595513700ef889d7ef923109a339615` in isolated worktree codex/meco-plan-a-joint-ubp-warmstart; strict shared-source/protocol/device binding, all-row epochs, joint U/B/P loss and learned-P scale gate are in place. Static checks only; runtime fitting/evaluation remain pending."
       ]
     },
     {
@@ -220,7 +220,7 @@
         "Scoped static review approved GPU-only defaults and snapshot capture follow-up commit e94a96f80 in codex/meco-gpu-only-freshness; confirmed explicit indexed available CUDA/ROCm validation across scoped supervisor, trainer, collection, fitting, and qualification paths, and early monotonic snapshot capture. Static review only; runtime GPU behavior, simulator evaluation/replay, calibration, and qualification remain pending.",
         "Scoped reviewer approved integrated async inference at exact full-plan HEAD 2318d696e: A/C action paths poll without waiting and do not reuse stale responses; worker inference_mode, sequence/queue serialization and atomic publication are correct; evaluation scope closes worker threads on all exits and partial checkpoint construction; Plan C observation_timestamp is preserved. Static review only; runtime inference, memory, simulator and replay checks remain pending.",
         "Scoped reviewer approved Plan A legal-node tranche v1 commit f91d762377c4ee22de0fd969c8e3c62f4add9c29: replay binding, censored-feasible-behavior U handling, independent valid B labels, missing-target optimizer skip, rollout caps, and CUDA-only artifact loading. Static review only; no tests or simulator evaluation.",
-        "Joint Plan A U+B+P warm-start scoped review pending; static compilation/diff/JSON checks only, no tests, collection, fitting, GPU training, or simulator evaluation."
+        "Scoped review approved the joint Plan A U+B+P implementation at exact integrated full-plan HEAD `05338ce727c9886cca1b81f00ce58699ae61f930`; its tree matches approved scoped commit 15d5ef218. Shared encoder, strict dual-dataset replay/provenance, learned-P scale and all-row epoch semantics were reviewed. Static only; no tests, collection, fitting, GPU or simulator execution; runtime evidence remains pending."
       ]
     }
   ],

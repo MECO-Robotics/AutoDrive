@@ -307,7 +307,7 @@ protocol, source identity, train split, prediction mode/contract and indexed
 device, and strictly replays both datasets before fitting. The new
 weights-only artifact binds both dataset and manifest digests and loads only
 on its indexed CUDA device. Training accepts it only when `p_mode=learned` and
-`p_cost_scale` exactly matches the frozen P-route scale. Implementation is
-complete pending scoped review; runtime evidence is pending. This pass ran
-static compilation, diff and JSON checks only; no tests, collection, fitting,
-GPU training or simulator evaluation were run.
+`p_cost_scale` exactly matches the frozen P-route scale. Implementation is complete and scoped review approved integrated candidate
+`05338ce72`; runtime evidence is pending. This pass ran static compilation,
+diff and JSON checks only; no tests, collection, fitting, GPU training or
+simulator evaluation were run.

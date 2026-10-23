@@ -525,6 +525,7 @@ both dataset manifests, plus protocol, identity, train split, prediction mode,
 and indexed device. Its weights-only schema binds both datasets/manifests,
 records explicit equal task weights and loss masks, and requires `p_mode=learned`
 with the exact P scale in training. Existing U+B and P-only artifact schemas
-remain unchanged. Implementation complete; scoped review and runtime evidence
-pending. Static checks only; no tests, collection, fitting, GPU training or
-simulator runs were performed.
+remain unchanged. Implementation committed as `15d5ef218`; scoped static review approved the
+integrated candidate at `05338ce72`. Runtime evidence remains pending. Static
+checks only; no tests, collection, fitting, GPU training or simulator runs
+were performed.
