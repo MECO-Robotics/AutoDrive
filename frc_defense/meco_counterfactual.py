@@ -73,6 +73,7 @@ def _counterfactual_rng_scope(seed):
         if cuda_states is not None:
             torch.cuda.set_rng_state_all(cuda_states)
 CONTINUATION_POLICY = "curriculum_scenarios.teacher_actions; deterministic sensed-state policy"
+MIN_ELIGIBLE_BRANCHES_PER_SEED = 2
 
 
 def _hash(value):
@@ -532,8 +533,16 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     valid_a = torch.nonzero(support.valid_mask, as_tuple=False).reshape(-1).tolist()
     valid_a = _deterministic_sample(valid_a, max_a_pairs,
         f"A:{episode_id}:{int(env.steps[0].item())}")
-    if len(valid_c) < 2 or len(valid_a) < 2:
-        raise RuntimeError("counterfactual branch needs at least two valid C and Plan A descriptors")
+    skip_reasons = []
+    if len(valid_c) < 2:
+        skip_reasons.append("fewer_than_two_plan_c_descriptors")
+    if len(valid_a) < 2:
+        skip_reasons.append("fewer_than_two_plan_a_descriptors")
+    eligibility = {"eligible": not skip_reasons,
+        "plan_c_descriptor_count": len(valid_c),
+        "plan_a_descriptor_count": len(valid_a),
+        "skip_reasons": skip_reasons}
+    eligibility["metadata_sha256"] = _hash(eligibility)
     a_descriptors = []
     for pair in valid_a:
         node = int(support.pair_node_ids[pair].item())
@@ -556,7 +565,8 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
         "support_digest": support_hash,
         "teacher_action": int(teacher_actions(env, env._last_obs)[0, 3].item()),
         "candidate_descriptors": c_descriptors,
-        "plan_a_descriptors": a_descriptors}
+        "plan_a_descriptors": a_descriptors,
+        "branch_eligibility": eligibility}
     if materialize:
         result["_training_inputs"] = {"observation": observation,
             "candidate_set": candidates, "route_cost": route,
@@ -621,6 +631,8 @@ def _replay_counterfactual_branch_seeded(record, manifest):
                 action_ticks=ticks, candidate_k=candidate_k,
                 prediction_mode=prediction_mode, max_c_candidates=max_c,
                 max_a_pairs=max_a)
+            if expected.get("branch_eligibility") != current["branch_eligibility"]:
+                raise RuntimeError(f"strict v2 eligibility parity mismatch at transcript[{index}]")
             mapping = {"snapshot_id": "snapshot_id",
                 "predecision_simulator_state_sha256": "simulator_state_sha256",
                 "predecision_observation_sha256": "observation_sha256",
@@ -655,6 +667,29 @@ def _replay_counterfactual_branch_seeded(record, manifest):
         current = _prefix_snapshot(env, graph, episode_id, action_ticks=ticks,
             candidate_k=candidate_k, prediction_mode=prediction_mode,
             max_c_candidates=max_c, max_a_pairs=max_a, materialize=True)
+        if record.get("branch_eligibility") != current["branch_eligibility"] or not current["branch_eligibility"]["eligible"]:
+            raise RuntimeError("strict v2 branch eligibility mismatch or ineligible branch point")
+        summary = record.get("seed_branch_summary")
+        if not isinstance(summary, dict) or summary.get("minimum_eligible_branches_per_seed") != MIN_ELIGIBLE_BRANCHES_PER_SEED:
+            raise ValueError("counterfactual seed eligibility summary is missing")
+        if manifest.get("seed_branch_summaries", {}).get(str(seed)) != summary:
+            raise RuntimeError("row and manifest seed eligibility summaries differ")
+        if decision_index == summary.get("coverage_through_decision_index"):
+            statuses = [item["branch_eligibility"] for item in transcript] + [current["branch_eligibility"]]
+            eligible = [i for i, item in enumerate(statuses) if item["eligible"]]
+            reasons = {}
+            for item in statuses:
+                for reason in item["skip_reasons"]:
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            reconstructed = {"eligible_decision_indices": eligible,
+                "coverage_through_decision_index": decision_index,
+                "covered_prefix_count": len(statuses),
+                "skipped_count": sum(not item["eligible"] for item in statuses),
+                "skipped_reason_counts": reasons,
+                "minimum_eligible_branches_per_seed": MIN_ELIGIBLE_BRANCHES_PER_SEED}
+            reconstructed["summary_sha256"] = _hash(reconstructed)
+            if summary != reconstructed or len(eligible) < MIN_ELIGIBLE_BRANCHES_PER_SEED:
+                raise RuntimeError("strict v2 seed eligibility summary reconstruction failed")
         state = record.get("branch_state")
         mapping = {"snapshot_id": "snapshot_id",
             "simulator_state_sha256": "simulator_state_sha256",
@@ -860,6 +895,8 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "continuation_policy": CONTINUATION_POLICY,
         "max_plan_c_descriptors_per_prefix": max_c_candidates,
         "max_plan_a_pairs_per_prefix": max_a_pairs,
+        "minimum_eligible_branches_per_seed": MIN_ELIGIBLE_BRANCHES_PER_SEED,
+        "eligibility_coverage_policy": "prefix through final eligible branch point; later teacher-only suffix excluded",
         "plan_c_target_semantics": "gross simulator reward; exact archived candidate; same deterministic teacher continuation",
         "plan_a_target_semantics": "gross simulator reward per sampled valid node_behavior_descriptor; no P route-cost label",
         "plan_a_p_target": None,
@@ -867,6 +904,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "plan_a_p_unlabelled_reason": "simulator executor does not execute P-modified routes",
         "source_runtime_device_bound": True}
     rows = []
+    seed_branch_summaries = {}
     for seed in seeds:
         with _counterfactual_rng_scope(seed):
             env = make_curriculum_env(scenario_id, category, 1, device, seed,
@@ -904,7 +942,28 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                 close = getattr(env, "close", None)
                 if callable(close):
                     close()
+            eligible_indexes = [i for i, snapshot in enumerate(prefix)
+                                if snapshot["branch_eligibility"]["eligible"]]
+            if len(eligible_indexes) < MIN_ELIGIBLE_BRANCHES_PER_SEED:
+                raise RuntimeError(f"seed {seed} has {len(eligible_indexes)} eligible branch points; "
+                    f"minimum is {MIN_ELIGIBLE_BRANCHES_PER_SEED}")
+            coverage_end = eligible_indexes[-1]
+            covered = prefix[:coverage_end + 1]
+            reason_counts = {}
+            for snapshot in covered:
+                for reason in snapshot["branch_eligibility"]["skip_reasons"]:
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            summary = {"eligible_decision_indices": [i for i in eligible_indexes if i <= coverage_end],
+                "coverage_through_decision_index": coverage_end,
+                "covered_prefix_count": len(covered),
+                "skipped_count": sum(not x["branch_eligibility"]["eligible"] for x in covered),
+                "skipped_reason_counts": reason_counts,
+                "minimum_eligible_branches_per_seed": MIN_ELIGIBLE_BRANCHES_PER_SEED}
+            summary["summary_sha256"] = _hash(summary)
+            seed_branch_summaries[str(seed)] = summary
             for decision_index, item in enumerate(prefix):
+                if decision_index not in eligible_indexes:
+                    continue
                 prefix_transcript = [{
                     "predecision_simulator_state_sha256": row["simulator_state_sha256"],
                     "predecision_observation_sha256": row["observation_sha256"],
@@ -920,8 +979,10 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                     "allow_action7_traversal": row["prefix_action7_traversal"],
                     "candidate_commitment": row["prefix_candidate_commitment"],
                     "executed_action_trace": row["executed_action_trace"],
-                    "gross_macro_return": row["prefix_gross_return"]}
+                    "gross_macro_return": row["prefix_gross_return"],
+                    "branch_eligibility": row["branch_eligibility"]}
                     for row in prefix[:decision_index]]
+                group_summary = summary
                 group = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
                     "scenario_id": scenario_id, "category": category, "seed": seed,
                     "decision_index": decision_index,
@@ -950,7 +1011,9 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                         "candidate_digest": item["candidate_digest"],
                         "candidate_replay_digest": item["candidate_replay_digest"],
                         "support_digest": item["support_digest"]},
-                    "prefix_transcript": prefix_transcript}
+                    "prefix_transcript": prefix_transcript,
+                    "branch_eligibility": item["branch_eligibility"],
+                    "seed_branch_summary": group_summary}
                 c_outcomes = []
                 for descriptor in item["candidate_descriptors"]:
                     outcome = _branch_return(scenario_id=scenario_id, category=category,
@@ -1008,6 +1071,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                       for row in rows).encode()
     output.write_bytes(payload)
     manifest["record_count"] = len(rows)
+    manifest["seed_branch_summaries"] = seed_branch_summaries
     manifest["dataset_sha256"] = hashlib.sha256(payload).hexdigest()
     manifest["records_have_prefix_replay_parity"] = True
     output.with_suffix(output.suffix + ".manifest.json").write_text(

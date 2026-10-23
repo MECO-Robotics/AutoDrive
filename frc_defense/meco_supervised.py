@@ -493,6 +493,7 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     """Validate v2 bytes and frozen identities before any replay is attempted."""
     from .meco_counterfactual import (DATASET_SCHEMA as cf_dataset_schema,
         TARGET_SCHEMA as cf_target_schema, CONTINUATION_POLICY,
+        MIN_ELIGIBLE_BRANCHES_PER_SEED,
         _artifact_identity_sha256, _device_identity,
         _require_native_extension_manifest_identity,
         _verify_native_fuel_extension)
@@ -536,6 +537,10 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             manifest.get("plan_a_p_prior") != 0.0 or
             manifest.get("source_runtime_device_bound") is not True):
         raise ValueError("counterfactual v2 manifest identity or semantics mismatch")
+    if (manifest.get("minimum_eligible_branches_per_seed") != MIN_ELIGIBLE_BRANCHES_PER_SEED or
+            manifest.get("eligibility_coverage_policy") !=
+                "prefix through final eligible branch point; later teacher-only suffix excluded"):
+        raise ValueError("counterfactual manifest lacks the required branch eligibility policy")
     for key, minimum in (("horizon_physics_ticks", 1), ("max_macro_ticks", 1),
                          ("candidate_k", 1),
                          ("max_plan_c_descriptors_per_prefix", 2),
@@ -588,6 +593,30 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     if category not in scenario_definition.required_categories:
         raise ValueError("counterfactual manifest category is not registered for its scenario")
     keys, by_seed = set(), {}
+    seed_summaries = manifest.get("seed_branch_summaries")
+    if not isinstance(seed_summaries, dict) or set(seed_summaries) != {str(s) for s in seeds}:
+        raise ValueError("counterfactual manifest has incomplete per-seed eligibility summaries")
+    for seed_key, summary in seed_summaries.items():
+        if not isinstance(summary, dict):
+            raise ValueError("counterfactual seed eligibility summary is malformed")
+        summary_body = {k: v for k, v in summary.items() if k != "summary_sha256"}
+        eligible_indices = summary.get("eligible_decision_indices")
+        reason_counts = summary.get("skipped_reason_counts")
+        if (summary.get("minimum_eligible_branches_per_seed") != MIN_ELIGIBLE_BRANCHES_PER_SEED or
+                not isinstance(eligible_indices, list) or
+                any(type(i) is not int or i < 0 for i in eligible_indices) or
+                eligible_indices != sorted(set(eligible_indices)) or
+                len(eligible_indices) < MIN_ELIGIBLE_BRANCHES_PER_SEED or
+                summary.get("coverage_through_decision_index") != eligible_indices[-1] or
+                summary.get("covered_prefix_count") != eligible_indices[-1] + 1 or
+                summary.get("skipped_count") != summary.get("covered_prefix_count", 0) - len(eligible_indices) or
+                not isinstance(reason_counts, dict) or
+                any(key not in ("fewer_than_two_plan_c_descriptors",
+                                "fewer_than_two_plan_a_descriptors") or
+                    type(value) is not int or value < 0 or value > summary.get("skipped_count", -1)
+                    for key, value in reason_counts.items()) or
+                summary.get("summary_sha256") != _canonical_hash(summary_body)):
+            raise ValueError(f"counterfactual seed {seed_key} eligibility summary is invalid")
     for row in rows:
         if (not isinstance(row, dict) or row.get("schema") != cf_dataset_schema or
                 row.get("target_schema") != cf_target_schema or
@@ -605,6 +634,20 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             raise ValueError("duplicate counterfactual branch identity")
         keys.add(key)
         by_seed.setdefault(seed, []).append(row)
+        summary = seed_summaries[str(seed)]
+        if (row.get("seed_branch_summary") != summary or
+                index not in summary["eligible_decision_indices"] or
+                not isinstance(row.get("branch_eligibility"), dict) or
+                row["branch_eligibility"].get("eligible") is not True or
+                row["branch_eligibility"].get("skip_reasons") != [] or
+                row["branch_eligibility"].get("metadata_sha256") != _canonical_hash({
+                    k: v for k, v in row["branch_eligibility"].items()
+                    if k != "metadata_sha256"}) or
+                row["branch_eligibility"].get("plan_c_descriptor_count") !=
+                    len(row.get("plan_c_counterfactuals", [])) or
+                row["branch_eligibility"].get("plan_a_descriptor_count") !=
+                    len(row.get("plan_a_sampled_node_behavior_labels", []))):
+            raise ValueError("counterfactual row eligibility metadata differs from manifest")
         if (row.get("gamma_per_macro") != gamma or
                 row.get("discount_semantics") != COUNTERFACTUAL_DISCOUNT_SEMANTICS or
                 row.get("max_macro_ticks") != manifest["max_macro_ticks"] or
@@ -676,8 +719,9 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
                         pair.get(preferred_key) != preferred):
                     raise ValueError(f"Plan {kind} pair label is not derived from gross horizon returns")
     if any(sorted(row.get("decision_index") for row in seed_rows) !=
-           list(range(len(seed_rows))) for seed_rows in by_seed.values()):
-        raise ValueError("counterfactual decision indices are not contiguous per train seed")
+           seed_summaries[str(seed)].get("eligible_decision_indices")
+           for seed, seed_rows in by_seed.items()):
+        raise ValueError("counterfactual branch indices differ from declared eligible points")
     if set(by_seed) != set(seeds):
         raise ValueError("counterfactual dataset omitted one or more declared train seeds")
     return rows, data_sha, manifest_sha, protocol, protocol_id, protocol_sha, manifest
