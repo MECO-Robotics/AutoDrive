@@ -1748,6 +1748,7 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
     """Validate an executed-route P-only warm-start artifact."""
+    from .meco_counterfactual import PLAN_A_P_ROUTE_DATASET_SCHEMA
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     mode = payload.get("prediction_mode")
     _, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
@@ -1763,7 +1764,7 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
             payload.get("schema_version") != 1 or
             payload.get("artifact_kind") != "weights_only_counterfactual_plan_a_p_route_v1" or
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
-            payload.get("dataset_schema") != "meco-counterfactual-plan-a-p-route-v1" or
+            payload.get("dataset_schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
             payload.get("target_schema") != "meco-executed-route-gross-return-ranking-v1" or
             payload.get("label_provenance") !=
                 "strict replay of simulator returns for model-independent P0 and seeded weighted AD* route interventions" or
