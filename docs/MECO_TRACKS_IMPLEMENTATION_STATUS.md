@@ -34,10 +34,17 @@ candidate table.
   eight masked action rows in canonical row order. `deterministic_candidate_scores`
   and `predict_opponent_endpoint` provide a small matched D1/D2 comparator seam
   over those same rows.
+- **Plan A PPO support:** A1/A2/A3 sample from a fixed node-major tensor over
+  every legal graph node crossed with drive, four target-bound intake choices,
+  score, ferry, and defense descriptors. A model-independent shortest-path
+  pass fixes reachable nodes, physical distance, heading-weighted route cost,
+  and a parent tree. The support mask/order and selected pair descriptor are
+  retained for PPO log-probability recomputation. `candidate_k` applies only to
+  Plan C.
 
 ## Deliberate limits
 
-The candidate service now exposes K=8/16/32 tables from eight existing action
+The Plan C/D1/D2 candidate service exposes K=8/16/32 tables from eight existing action
 primitives, with stable collection-offset rows, a current-snapshot AD* route
 query, ETA/risk features, and selected XY endpoint override. Its recall report
 is explicitly within this same pool; K32 is not an independent or larger
@@ -49,23 +56,28 @@ does not command or guarantee the inferred terminal heading. Dynamic future
 swept-robot collision remains outside this candidate feasibility check, and
 the simulator's native intake/action executor remains authoritative.
 
-A1 gathers legal-pose heading values for route candidates. A2 and A3 consume
-the corresponding node from the same deterministic legal graph
-(`node_features`, directed `edges`, `edge_mask`, and `region_ids`). If a sensed
-target bearing has no legal heading at an otherwise legal XY cell, the row's
-heading feature is taken from the selected legal node; inferred bearing remains
-separate metadata and does not make the endpoint feasible.
+Plan A and Plan C share the deterministic legal SE(2) graph inputs for A2/A3
+(`node_features`, directed `edges`, `edge_mask`, and `region_ids`). The bounded
+candidate adapter's sensed-target heading behavior applies to Plan C and the
+D1/D2 controls; it does not define A1/A2/A3's stochastic action support.
 
-For A1-A3, the nonnegative Plan A traversal field is projected to the weighted
-XY AD* API by averaging only legal heading bins at each cell. A preliminary
-current-observation score supplies the map used for route selection, then the
-selected route's retained geometry is integrated against the current model
-field and subtracted once from candidate logits. PPO recomputes that integral
-differentiably over the frozen rollout route. `p_mode=p0` is an explicit
-matched ablation with no learned route weight and a zero differentiable path
-term. This is an XY projection of the SE(2) field, not heading-conditioned
-traversal inside AD*; the projection, units, scale, route provenance, and P=0
-mode are recorded in the protocol and evaluation evidence. C1/C2 keep their
+For A1-A3, the nonnegative Plan A traversal field is projected to the XY
+planner grid by averaging only legal heading bins at each cell. The stochastic
+policy combines `U(node)`, the selected behavior logit, deterministic ETA/risk
+costs, and the current model's P integral over the frozen legal SE(2)
+shortest-path tree. Binary-lifting parent tables let PPO recompute all node
+integrals with O(N log N) tensor gathers rather than per-candidate planner
+calls. `p_mode=p0` remains a zero-P matched ablation. This tree is a static
+legal-graph reachability/cost reference; it is not the simulator's execution
+route. The simulator still uses XY AD* with swept SE(2) checks and dynamic
+robot arbitration. Intake support binds a sensed target slot and a
+bearing-aligned capture envelope; score support is restricted to clear score
+grid endpoints; ferry support requires carried fuel and the current ferry
+endpoint; defense support is restricted to the current intercept/post endpoint.
+If the native action executor remasks the sampled action during a macro, the
+transition is recorded as an execution failure and excluded from the PPO actor
+loss while remaining available to the critic. Dynamic route mismatch beyond
+action remasking is not yet separately qualified. C1/C2 keep their bounded
 candidate-only scoring path.
 
 The code now has a matched PPO/evaluation harness and a resumable five-lane

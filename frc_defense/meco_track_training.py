@@ -33,7 +33,10 @@ from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, integrate_frozen_routes, project_pose_penalty)
 from .meco_tracks import (MECO_TRACKS, make_meco_track,
     candidate_policy_logits, predict_opponent_endpoint,
-    sample_candidate_action, score_candidates)
+    sample_candidate_action, score_candidates, build_safe_action_candidates)
+from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
+    gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
+    SUPPORT_ORDER)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,6 +205,106 @@ def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cos
     return decision, path_cost
 
 
+def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
+                   route_nodes=None, risk_nodes=None, planner=None):
+    """Score all frozen node × behavior pairs with current U, P and behavior heads."""
+    planner = (env.planner if env is not None else planner)
+    logits = gather_pose_behavior_logits(track, raw, graph, raster, support,
+        field_length=(float(env.sim.field_length) if env is not None else float(planner.length)),
+        field_width=(float(env.sim.field_width) if env is not None else float(planner.width)))
+    node_count = graph.node_count
+    eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1) if env is not None else None
+    route = (eta * float(config.route_cost_points_per_second) if route_nodes is None
+             else route_nodes)
+    risk = torch.zeros_like(route) if risk_nodes is None else risk_nodes
+    if risk_nodes is None and bool(env.opponent_valid[0, 3]):
+        age = float(env.opponent_age[0, 3])
+        position = env.opponent_pose[0, 3, :2]
+        velocity = env.opponent_velocity[0, 3, :2]
+        if 0. <= age <= .5:
+            speed = velocity.norm().clamp_min(1e-8)
+            velocity = velocity * torch.clamp(3. / speed, max=1.)
+            predicted = position[None] + eta[:, None] * velocity[None]
+        else:
+            predicted = position[None].expand(node_count, -1)
+        separation = (support.goal_xy - predicted).norm(dim=-1)
+        risk = .75 * ((2. - separation) / 2.).clamp(0., 1.)
+    path_cost = torch.zeros_like(route)
+    if config.p_mode == "learned":
+        field_length = (float(env.sim.field_length) if env is not None
+                        else float(planner.length))
+        field_width = (float(env.sim.field_width) if env is not None
+                       else float(planner.width))
+        penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
+            planner, field_length, field_width,
+            mode="learned")
+        ix = torch.floor(support.goal_xy[:, 0] / graph.resolution_m).long().clamp(0, graph.nx - 1)
+        iy = torch.floor(support.goal_xy[:, 1] / graph.resolution_m).long().clamp(0, graph.ny - 1)
+        per_node = penalty_map[ix, iy]
+        graph_integral = graph_path_integral(per_node, support) / graph.resolution_m
+        path_cost = graph_integral * config.p_cost_scale * config.p_points_per_grid_edge
+    pair_node = support.pair_node_ids
+    logits = logits - route[pair_node] - risk[pair_node] - path_cost[pair_node]
+    return logits.masked_fill(~support.valid_mask, -torch.inf), path_cost
+
+
+def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
+                             route_cost_points_per_second, action_ticks,
+                             candidate_k, deterministic, value_head,
+                             p_mode, p_cost_scale, p_points_per_grid_edge):
+    """Build stable full-pose support and sample from its exact masked softmax."""
+    # Use the existing observation snapshot seam, but do not build or score a
+    # bounded candidate table for Plan A. Candidate K remains a Plan C setting.
+    safe = build_safe_action_candidates(env, env._last_obs, world=0, slot=3,
+                                        episode_id=episode_id)
+    support = build_plan_a_support(env, graph, env._last_obs,
+                                   safe.observation.snapshot_id)
+    raster, globals_ = _snapshot_tensors(safe.observation, device=env.device)
+    graph_data = _graph_inputs(track, graph, env, raster)
+    raw = model(raster=raster, globals_=globals_, hidden=hidden, **(graph_data or {}))
+    seed_decision = {"raw": raw, "hidden": raw["hidden"]}
+    config = SimpleNamespace(route_cost_points_per_second=route_cost_points_per_second,
+        p_mode=p_mode, p_cost_scale=p_cost_scale,
+        p_points_per_grid_edge=p_points_per_grid_edge)
+    logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
+                                       graph, raster, env, config)
+    eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1)
+    route_nodes = eta * float(route_cost_points_per_second)
+    risk_nodes = torch.zeros_like(route_nodes)
+    if bool(env.opponent_valid[0, 3]):
+        age = float(env.opponent_age[0, 3])
+        position = env.opponent_pose[0, 3, :2]
+        velocity = env.opponent_velocity[0, 3, :2]
+        if 0. <= age <= .5:
+            speed = velocity.norm().clamp_min(1e-8)
+            velocity = velocity * torch.clamp(3. / speed, max=1.)
+            predicted = position[None] + eta[:, None] * velocity[None]
+        else:
+            predicted = position[None].expand(graph.node_count, -1)
+        separation = (support.goal_xy - predicted).norm(dim=-1)
+        risk_nodes = .75 * ((2. - separation) / 2.).clamp(0., 1.)
+    fallback_used = not bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
+    if fallback_used:
+        action = torch.tensor([support.fallback_pair], device=env.device, dtype=torch.long)
+        logprob = torch.zeros((1,), device=env.device, dtype=logits.dtype)
+        entropy = torch.zeros_like(logprob)
+    else:
+        action, logprob, entropy = sample_candidate_action(logits[None],
+                                                            deterministic=deterministic)
+    value = (_value(value_head, globals_, seed_decision["hidden"])
+             if value_head is not None else None)
+    return {"snapshot": safe.observation, "candidate_set": None,
+        "support": support, "raster": raster, "globals": globals_,
+        "graph": (graph_data or {}), "decision": {**seed_decision, "logits": logits[None]},
+        "action": action, "logprob": logprob, "entropy": entropy,
+        "hidden_next": seed_decision["hidden"], "value": value,
+        "route_cost": route_nodes[None], "risk_cost": risk_nodes[None],
+        "path_cost": path_cost, "legal_lookup": graph.lookup,
+        "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
+        "risk_cost_nodes": risk_nodes, "graph_object": graph,
+        "planner_object": env.planner, "fallback_used": fallback_used}
+
+
 def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
     if track not in ("A2", "A3"):
         return None
@@ -220,6 +323,13 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       record_path_penalty=False,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05):
     observation = env._last_obs
+    if track in ("A1", "A2", "A3"):
+        return _prepare_plan_a_decision(track, model, env, graph, episode_id,
+            hidden, route_cost_points_per_second=route_cost_points_per_second,
+            action_ticks=action_ticks, candidate_k=candidate_k,
+            deterministic=deterministic, value_head=value_head,
+            p_mode=p_mode, p_cost_scale=p_cost_scale,
+            p_points_per_grid_edge=p_points_per_grid_edge)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k)
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
@@ -281,17 +391,19 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None):
     actions[0, 3] = int(action_index)
     total = torch.zeros((), device=env.device)
     ended = timeout = False
+    executed_actions = []
     for _ in range(action_ticks):
         _, _, done, truncated, _ = env.step(actions, capture_info=False,
             planner_goal_override=goal_xy,
             planner_goal_override_action=action_index if goal_xy is not None else None)
+        executed_actions.append(int(env.last_actions[0, 3].item()))
         total += env.curriculum_metrics.reward_delta()[0]
         ended = bool(done[0].item())
         timeout = bool(truncated[0].item())
         if ended or timeout:
             break
     env._last_obs = env.observe()
-    return total, ended, timeout
+    return total, ended, timeout, executed_actions
 
 
 def _reset_episode(env, seed: int):
@@ -313,6 +425,17 @@ def _gae(rewards, dones, values, next_value, gamma, lam):
 
 
 def _policy_inputs_for_row(track, model, row, hidden, config):
+    if track in ("A1", "A2", "A3") and "support" in row:
+        raw = model(raster=row["raster"], globals_=row["globals"],
+                    hidden=hidden, **(row["graph"] or {}))
+        decision = {"raw": raw, "hidden": raw["hidden"]}
+        logits, path_cost = _plan_a_logits(track, decision["raw"], row["support"],
+            row["graph_object"], row["raster"], None, config,
+            route_nodes=row["route_cost_nodes"], risk_nodes=row["risk_cost_nodes"],
+            planner=row["planner_object"])
+        decision["logits"] = logits[None]
+        decision["path_cost"] = path_cost
+        return decision
     decision = score_candidates(track, model, raster=row["raster"],
         globals_=row["globals"], table=row["candidate_set"].table,
         hidden=hidden, graph=row["graph"],
@@ -330,12 +453,40 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                          dtype=rewards.dtype)
     old_logprob = torch.stack([row["logprob"] for row in rows]).detach()
     old_value = torch.stack([row["value"] for row in rows]).detach()
+    # Validate exact rollout/replay identity for Plan A before any optimizer
+    # step. The support tensors are shared by each row, so digesting catches
+    # accidental in-place mutation of pair IDs, descriptors, mask, or paths.
+    with torch.no_grad():
+        for row in rows:
+            support = row.get("support")
+            if support is None:
+                continue
+            expected_digest = row.get("support_digest")
+            actual_digest = plan_a_support_digest(support, row["graph_object"])
+            if (not expected_digest or expected_digest != support.support_digest or
+                    actual_digest != expected_digest):
+                raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
+            if row.get("execution_failure", False):
+                continue
+            replay = _policy_inputs_for_row(track, model, row,
+                                            row["hidden_before"], config)
+            replay_logprob = torch.distributions.Categorical(
+                logits=replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
+            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
+                                  atol=5e-5, rtol=5e-5):
+                raise RuntimeError("Plan A rollout log-probability does not replay under frozen support")
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))
     advantage, returns = _gae(rewards, dones, old_value, next_value,
                               config.gamma, config.gae_lambda)
-    advantage = (advantage - advantage.mean()) / advantage.std(unbiased=False).clamp_min(1e-8)
+    actor_rows = torch.tensor([not row.get("execution_failure", False) for row in rows],
+                              device=advantage.device, dtype=torch.bool)
+    actor_advantage = torch.zeros_like(advantage)
+    if bool(actor_rows.any()):
+        eligible_advantage = advantage[actor_rows]
+        actor_advantage[actor_rows] = (eligible_advantage - eligible_advantage.mean()) / \
+            eligible_advantage.std(unbiased=False).clamp_min(1e-8)
     policy_losses = []; value_losses = []; entropies = []
     count = len(rows)
     for _ in range(config.epochs):
@@ -345,16 +496,29 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             current = _policy_inputs_for_row(track, model, row,
                                              row["hidden_before"], config)
             logits = current["logits"]
+            value = _value(value_head, row["globals"], current["hidden"]).reshape(())
+            value_loss = .5 * (value - returns[idx]).square()
+            if row.get("execution_failure", False):
+                # Do not credit a safely remasked fallback as the sampled PPO
+                # action. Keep the transition for critic learning and audit.
+                loss = config.value_coef * value_loss
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
+                                         config.max_grad_norm)
+                optimizer.step()
+                policy_losses.append(0.)
+                value_losses.append(float(value_loss.detach()))
+                entropies.append(0.)
+                continue
             dist = torch.distributions.Categorical(logits=logits)
             action = row["action"].reshape(1)
             logprob = dist.log_prob(action).reshape(())
             entropy = dist.entropy().mean()
-            value = _value(value_head, row["globals"], current["hidden"]).reshape(())
             ratio = (logprob - old_logprob[idx]).exp()
-            unclipped = ratio * advantage[idx]
-            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * advantage[idx]
+            unclipped = ratio * actor_advantage[idx]
+            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * actor_advantage[idx]
             policy_loss = -torch.minimum(unclipped, clipped)
-            value_loss = .5 * (value - returns[idx]).square()
             loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -504,19 +668,36 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     hidden = prepared["hidden_next"].detach()
                     value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
-                action = candidate.action_indices[action_index]
-                cols = {name: i for i, name in enumerate(candidate.table.feature_names)}
-                selected_row = candidate.table.features[action_index]
-                goal_xy = (float(selected_row[cols["goal_x_m"]]),
-                           float(selected_row[cols["goal_y_m"]]))
-                reward, ended, timeout = _run_macro_step(env, action, config.action_ticks, goal_xy)
+                if "support" in prepared:
+                    support = prepared["support"]
+                    action = int(support.action_ids[action_index].item())
+                    node = int(support.pair_node_ids[action_index].item())
+                    goal_xy = tuple(float(v) for v in support.goal_xy[node].tolist())
+                else:
+                    action = candidate.action_indices[action_index]
+                    cols = {name: i for i, name in enumerate(candidate.table.feature_names)}
+                    selected_row = candidate.table.features[action_index]
+                    goal_xy = (float(selected_row[cols["goal_x_m"]]),
+                               float(selected_row[cols["goal_y_m"]]))
+                reward, ended, timeout, executed_trace = _run_macro_step(
+                    env, action, config.action_ticks, goal_xy)
                 update_heartbeat()
                 rows.append({"raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
                     "graph": prepared["graph"],
                     "candidate_set": prepared["candidate_set"],
+                    **({"support": prepared["support"],
+                        "support_digest": prepared["support"].support_digest,
+                        "route_cost_nodes": prepared["route_cost_nodes"].detach(),
+                        "risk_cost_nodes": prepared["risk_cost_nodes"].detach(),
+                        "graph_object": prepared["graph_object"],
+                        "planner_object": prepared["planner_object"]}
+                       if "support" in prepared else {}),
                     "route_cost": prepared["route_cost"].detach(),
                     "risk_cost": prepared["risk_cost"].detach(),
+                    "execution_failure": (prepared.get("fallback_used", False) or
+                                          any(item != action for item in executed_trace)),
+                    "executed_action_trace": executed_trace,
                     "action": torch.tensor([action_index], device=config.device),
                     "logprob": prepared["logprob"].detach().reshape(()),
                     "hidden_before": hidden_before,
@@ -524,7 +705,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "reward": reward.detach().reshape(()), "done": ended or timeout,
                     "legal_lookup": graph.lookup,
                     "path_geometry": prepared["path_geometry"],
-                    "candidate_recall": candidate.candidate_recall})
+                    "candidate_recall": (None if "support" in prepared
+                                          else candidate.candidate_recall)})
                 if ended or timeout:
                     outcome = env.curriculum_metrics.outcomes()["success"]
                     success = bool(outcome.reshape(-1)[0].item())
@@ -557,12 +739,21 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                          scenario_id=task_scenario, category=task_category,
                          task_assignment_id=task_assignment.get("assignment_id"),
                          learning_rate=config.learning_rate,
-                         candidate_k=config.candidate_k,
-                         within_candidate_pool_recall=sum(
-                             row["candidate_recall"]["within_candidate_pool_recall"]
-                             for row in rows) / len(rows),
+                         candidate_k=(None if config.track in ("A1", "A2", "A3")
+                                      else config.candidate_k),
                          graph_nodes=graph.node_count,
                          update_utc=datetime.now(timezone.utc).isoformat())
+            if config.track in ("A1", "A2", "A3"):
+                stats.update(policy_support_order=SUPPORT_ORDER,
+                    policy_support_pair_count=rows[0]["support"].pair_count,
+                    policy_support_digests=[row["support"].support_digest for row in rows],
+                    execution_failure_count=sum(bool(row["execution_failure"]) for row in rows),
+                    actor_loss_skipped_execution_failures=sum(
+                        bool(row["execution_failure"]) for row in rows))
+            else:
+                stats["within_candidate_pool_recall"] = sum(
+                    row["candidate_recall"]["within_candidate_pool_recall"]
+                    for row in rows) / len(rows)
             history.append(stats)
             payload = {"schema_version": 1, "config": asdict(config),
                 "protocol_id": protocol_id,
@@ -755,11 +946,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "points_per_grid_edge": p_points_per_grid_edge,
             "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
             "path_units": PENALTY_PATH_UNITS,
-            "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_rollout_routes"},
+            "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
         "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
                "execution": "records actual env.last_actions at every physics step"},
         "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
-            "candidate_contract": "configurable K=8/16/32; verified static legal XY and target-bearing heading bin; heading is not commanded; current-snapshot AD* route"}},
+            "candidate_contract": "Plan A: fixed full legal-graph node/behavior support with model-independent shortest-path tree and behavior-specific descriptors; Plan C and D1/D2: configurable K=8/16/32 candidate table"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
@@ -808,9 +999,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         actions_count = [0] * 8
                         routes_seen = []
                         executed_action_trace = []
+                        selected_action_trace = []
+                        execution_failures = []
                         last_candidate_recall = None
                         elapsed = 0
                         while elapsed < env.horizon:
+                            prepared = None
                             if is_production_d0:
                                 # Native deterministic mode recomputes from
                                 # current state at every 20 ms simulator step.
@@ -839,7 +1033,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     p_points_per_grid_edge=p_points_per_grid_edge,
                                     record_path_penalty=True)
                                 candidate_set = prepared["candidate_set"]
-                                last_candidate_recall = candidate_set.candidate_recall
+                                last_candidate_recall = (None if "support" in prepared
+                                                         else candidate_set.candidate_recall)
                                 choice = int(prepared["action"].item())
                                 hidden = prepared["hidden_next"]
                                 action_source = "model"
@@ -851,14 +1046,61 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 logits = _d1_d2_scores(candidate_set, env, policy)
                                 choice = int(logits.argmax(-1).item())
                                 action_source = policy.lower()
-                            action = candidate_set.action_indices[choice]
-                            cols = {name: i for i, name in enumerate(candidate_set.table.feature_names)}
-                            selected_row = candidate_set.table.features[choice]
-                            goal_xy = (float(selected_row[cols["goal_x_m"]]),
-                                       float(selected_row[cols["goal_y_m"]]))
+                            if prepared is not None and "support" in prepared:
+                                support = prepared["support"]
+                                action = int(support.action_ids[choice].item())
+                                node = int(support.pair_node_ids[choice].item())
+                                behavior_index = int(support.behavior_ids[choice].item())
+                                descriptor = int(support.descriptor_ids[choice].item())
+                                goal_xy = tuple(float(v) for v in
+                                                support.goal_xy[node].tolist())
+                                parent_chain = [node]
+                                parent = int(support.parent_ids[node].item())
+                                while parent >= 0:
+                                    parent_chain.append(parent)
+                                    parent = int(support.parent_ids[parent].item())
+                                parent_chain.reverse()
+                                routes_seen.append({"candidate_id": f"node:{node}:behavior:{behavior_index}:descriptor:{descriptor}",
+                                    "support_order": SUPPORT_ORDER,
+                                    "support_digest": support.support_digest,
+                                    "policy_fallback": prepared.get("fallback_used", False),
+                                    "behavior": ("drive", "intake", "score", "ferry", "defense")[behavior_index],
+                                    "behavior_descriptor": descriptor,
+                                    "goal_xy_m": list(goal_xy),
+                                    "graph_path_node_ids": parent_chain,
+                                    "graph_path_points_m": [support.goal_xy[i].detach().cpu().tolist()
+                                                            for i in parent_chain],
+                                    "graph_route_distance_m": float(support.distances_m[node].item()),
+                                    "graph_route_cost_m_equivalent": float(support.route_cost[node].item()),
+                                    "eta_s": float(prepared["route_cost_nodes"][node].item()) /
+                                        max(route_weight, 1e-12) if route_weight > 0 else
+                                        float(support.route_cost[node].item()) /
+                                        max(float(env.sim.speed[0, 3]), .1),
+                                    "risk_penalty_points": float(prepared["risk_cost_nodes"][node].item()),
+                                    "ppo_path_penalty_points": float(prepared["path_cost"][node].item()),
+                                    "p_mode": override_mode,
+                                    "p_map_scale": p_cost_scale if override_mode == "learned" else 0.,
+                                    "p_points_per_grid_edge": p_points_per_grid_edge,
+                                    "route_feasibility": "model_independent_legal_graph_reachability"})
+                            else:
+                                action = candidate_set.action_indices[choice]
+                                cols = {name: i for i, name in enumerate(candidate_set.table.feature_names)}
+                                selected_row = candidate_set.table.features[choice]
+                                goal_xy = (float(selected_row[cols["goal_x_m"]]),
+                                           float(selected_row[cols["goal_y_m"]]))
+                                routes_seen.append(candidate_set.route_records[choice])
                             actions_count[action] += 1
-                            routes_seen.append(candidate_set.route_records[choice])
-                            _, ended, timeout = _run_macro_step(env, action, action_ticks, goal_xy)
+                            selected_action_trace.append(action)
+                            _, ended, timeout, actual_trace = _run_macro_step(
+                                env, action, action_ticks, goal_xy)
+                            if (prepared is not None and prepared.get("fallback_used", False)) or any(item != action for item in actual_trace):
+                                execution_failures.append({
+                                    "selected_action": action,
+                                    "executed_action_trace": actual_trace,
+                                    "policy_fallback": (prepared.get("fallback_used", False)
+                                                        if prepared is not None else False),
+                                    "route_id": (routes_seen[-1].get("candidate_id")
+                                                 if routes_seen else None)})
                             elapsed += action_ticks
                             update_evaluation_status("running", len(records))
                             if ended or timeout:
@@ -873,6 +1115,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "controller_cadence": ("native_20ms_physics_step" if is_production_d0
                                                     else "12_physics_step_macro"),
                             "action_count_semantics": ("executed_per_physics_step" if is_production_d0
+                                                       else "selected_node_behavior_pair_per_macro" if policy in ("A1", "A2", "A3", "A1_P0", "A2_P0", "A3_P0")
                                                        else "selected_candidate_per_macro"),
                             "policy_id": policy_manifest[policy]["policy_id"],
                             "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
@@ -882,6 +1125,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "source_identity_sha256": hashlib.sha256(json.dumps(
                                 sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
                             "actions": actions_count, "executed_action_trace": executed_action_trace,
+                            "selected_action_trace": selected_action_trace,
+                            "execution_failures": execution_failures,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
                             "route_trace": routes_seen,
@@ -899,6 +1144,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "scenario_id": scenario_id, "categories": list(categories),
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
+            "plan_a_candidate_k_used": False,
+            "plan_a_support_order": SUPPORT_ORDER,
+            "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target constraints",
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "ablations": ["A1_P0", "A2_P0", "A3_P0"],
             "controls": ["D0", "D1", "D2"] if include_controls else [],
@@ -907,7 +1155,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "points_per_grid_edge": p_points_per_grid_edge,
                 "projection": PENALTY_MAP_PROJECTION, "map_units": PENALTY_MAP_UNITS,
                 "path_units": PENALTY_PATH_UNITS,
-                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_rollout_routes"},
+                "ppo_recomputation": "current_policy_penalty_integrated_on_frozen_legal_se2_shortest_path_tree"},
             "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
                 "D1": "hand-weighted scorer over the shared feasible candidate table; 12-step macro cadence",
                 "D2": "D1 scorer with kinematic opponent endpoint prediction; 12-step macro cadence"},

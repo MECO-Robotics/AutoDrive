@@ -22,7 +22,7 @@ ROUTE_COST_POINTS_PER_SECOND = 0.05
 RISK_RADIUS_M = 2.0
 RISK_MAX_POINTS = 0.75
 CANDIDATE_BOUNDARY = {
-    "version": 2,
+    "version": 3,
     "capacity": [8, 16, 32],
     "source": "existing simulator action slots",
     "configurable_k": True,
@@ -38,6 +38,14 @@ CANDIDATE_BOUNDARY = {
     "continue_gap": "no persistent selected commitment exists; hold is the stationary fallback",
     "route_feasibility": "route and endpoint clearance only; inferred terminal heading is not commanded",
     "capture_estimate": "nonbinding geometry estimate from sensed target position; never used as a legality mask",
+    "plan_a_policy_support": "all reachable legal SE(2) graph nodes crossed with currently legal drive/intake/score/ferry/defense behaviors",
+    "plan_a_support_order": "legal_graph_node_ascending_then_behavior_0_to_4_then_descriptor_ascending_v2",
+    "plan_a_support_membership": "one model-independent shortest-path pass over legal SE(2) graph plus vectorized behavior-specific endpoint/target constraints; independent of learned P",
+    "plan_a_intake_descriptor": "intake pairs retain exact sensed target slot and require a bearing-aligned capture-geometry envelope",
+    "plan_a_goal_constraints": "score pairs require a safe score-grid endpoint; ferry pairs require carried fuel and current ferry endpoint; defense pairs require the current intercept/post endpoint",
+    "plan_a_ppo": "sample and recompute log probability over the exact frozen node-major support mask and order",
+    "plan_a_route_metadata": "frozen shortest-path parent tree and edge distances; this is graph-route metadata, while execution remains XY AD* with swept SE(2) checks",
+    "plan_a_candidate_k": "not used; candidate_k applies only to Plan C candidate scorers",
 }
 EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
                   "risk_penalty_points", "target_heading_rad")
