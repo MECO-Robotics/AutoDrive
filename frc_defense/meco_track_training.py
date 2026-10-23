@@ -52,6 +52,28 @@ DEFAULT_CATEGORIES = {"pickup_simple": ("single", "cluster")}
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
     "shared scheduled task seed initializes the episode; subsequent episode seeds "
     "are task seed + global episode index")
+TRACK_LOSS_RESET_POLICY = {
+    "id": "opponent-track-loss-v1",
+    "signal": "opponent-confidence-and-signed-time observation raster channels 4 and 5",
+    "available_when": "any cell has confidence > 0 and signed_time >= -2.0 seconds",
+    "reset_when": "previous decision had an available opponent track and current decision does not",
+    "episode_start": "GRU hidden state is already zero; tracking availability starts unknown",
+}
+TRACK_LOSS_STALE_SECONDS = 2.0
+
+
+def _opponent_tracking_available(raster):
+    """Use only the shared observation raster to apply the protocol stale-time rule."""
+    confidence = raster[:, 4]
+    signed_time = raster[:, 5]
+    return bool(((confidence > 0.) &
+                 (signed_time >= -TRACK_LOSS_STALE_SECONDS)).any().item())
+
+
+def _tracking_reset_hidden(hidden, previously_available, raster):
+    available = _opponent_tracking_available(raster)
+    reset = previously_available is True and not available
+    return (None if reset else hidden), available, reset
 
 
 @dataclass(frozen=True)
@@ -321,7 +343,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
                              p_mode, p_cost_scale, p_points_per_grid_edge,
-                             prediction_mode="cv"):
+                             prediction_mode="cv", tracking_was_available=None):
     """Build stable full-pose support and sample from its exact masked softmax."""
     # Use the existing observation snapshot seam, but do not build or score a
     # bounded candidate table for Plan A. Candidate K remains a Plan C setting.
@@ -330,8 +352,11 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     support = build_plan_a_support(env, graph, env._last_obs,
                                    safe.observation.snapshot_id)
     raster, globals_ = _snapshot_tensors(safe.observation, device=env.device)
+    hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
+        hidden, tracking_was_available, raster)
     graph_data = _graph_inputs(track, graph, env, raster)
-    raw = model(raster=raster, globals_=globals_, hidden=hidden, **(graph_data or {}))
+    raw = model(raster=raster, globals_=globals_, hidden=hidden_before,
+                **(graph_data or {}))
     seed_decision = {"raw": raw, "hidden": raw["hidden"]}
     penalty_map = None
     if p_mode == "learned":
@@ -361,6 +386,9 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
              if value_head is not None else None)
     return {"snapshot": safe.observation, "candidate_set": None,
         "support": support, "raster": raster, "globals": globals_,
+        "hidden_before": hidden_before,
+        "tracking_available": tracking_available,
+        "tracking_reset": tracking_reset,
         "graph": (graph_data or {}), "decision": {**seed_decision, "logits": logits[None]},
         "action": action, "logprob": logprob, "entropy": entropy,
         "hidden_next": seed_decision["hidden"], "value": value,
@@ -392,7 +420,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       record_path_penalty=False,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
                       prediction_mode="cv",
-                      commitment: CandidateCommitment | None = None):
+                      commitment: CandidateCommitment | None = None,
+                      tracking_was_available=None):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
         return _prepare_plan_a_decision(track, model, env, graph, episode_id,
@@ -401,12 +430,15 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             deterministic=deterministic, value_head=value_head,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
             p_points_per_grid_edge=p_points_per_grid_edge,
-            prediction_mode=prediction_mode)
+            prediction_mode=prediction_mode,
+            tracking_was_available=tracking_was_available)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
         commitment=commitment)
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
+    hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
+        hidden, tracking_was_available, raster)
     graph_data = _graph_inputs(track, graph, env, raster)
     path_geometry = _path_geometry(env)
     p_config = SimpleNamespace(p_mode=p_mode, p_cost_scale=p_cost_scale,
@@ -416,7 +448,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             route_cost_points_per_second, device=env.device)
         preliminary_risk = candidate_set.risk_cost_points.unsqueeze(0)
         preliminary = score_candidates(track, model, raster=raster,
-            globals_=globals_, table=candidate_set.table, hidden=hidden,
+            globals_=globals_, table=candidate_set.table, hidden=hidden_before,
             graph=graph_data, route_cost=preliminary_cost, risk_cost=preliminary_risk)
         preliminary_map = project_pose_penalty(track, preliminary["raw"]["penalty"],
             graph.lookup, env.planner, path_geometry["field_length_m"],
@@ -430,7 +462,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             route_cost_points_per_second, device=env.device)
         risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
-            table=candidate_set.table, hidden=hidden, graph=graph_data,
+            table=candidate_set.table, hidden=hidden_before, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost)
         decision, path_cost = _apply_plan_a_path_cost(track, decision,
             candidate_set, route_cost, risk_cost, graph.lookup, path_geometry,
@@ -440,7 +472,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             route_cost_points_per_second, device=env.device)
         risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
-            table=candidate_set.table, hidden=hidden, graph=graph_data,
+            table=candidate_set.table, hidden=hidden_before, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost)
         decision["logits"] = _apply_candidate_hysteresis(
             decision["logits"], candidate_set.table)
@@ -450,6 +482,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
+            "hidden_before": hidden_before,
+            "tracking_available": tracking_available,
+            "tracking_reset": tracking_reset,
             "candidate_digest": candidate_digest(candidate_set.table),
             "candidate_replay_digest": _candidate_replay_digest(
                 candidate_set.table, route_cost, risk_cost),
@@ -870,6 +905,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "validated. This is an unvalidated implementation seam until a replay "
             "exercises and inspects the resulting route."),
         "prediction_contract": prediction_contract(config.prediction_mode),
+        "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
         "qualification_protocol_id": qualification_protocol_id,
         "qualification_protocol_sha256": qualification_protocol_sha256,
         "candidate_k": config.candidate_k,
@@ -887,6 +923,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "completed_updates": update})
     update_heartbeat()
     hidden = None
+    tracking_was_available = None
     commitment = None
     task_successes = 0
     task_failures = 0
@@ -904,6 +941,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         task_successes = resume_task_progress["successes"]
         task_failures = resume_task_progress["failures"]
         task_aborts = resume_task_progress["aborted_no_legal_support"]
+    tracking_loss_reset_count = 0
     empty_support_diagnostics = []
     episode_generation = _episode_id(run_id, episode)
     stop_path = Path(stop_file) if stop_file else None
@@ -925,6 +963,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
 
     def abort_empty_support(exc, rows, update_number, update_events):
         nonlocal episode, task_aborts, hidden, commitment, episode_generation
+        nonlocal tracking_was_available
         aborted_episode_id = episode_generation
         retained = [row for row in rows if row.get("episode_id") != aborted_episode_id]
         discarded_count = len(rows) - len(retained)
@@ -953,6 +992,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         episode = next_episode
         _reset_episode(env, task_seed + episode)
         hidden = None
+        tracking_was_available = None
         commitment = None
         episode_generation = _episode_id(run_id, episode)
         update_heartbeat()
@@ -966,7 +1006,6 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             for _ in range(config.rollout_steps):
                 if source_identity() != sources:
                     raise RuntimeError("source/runtime changed during MECO training; stopping before checkpoint write")
-                hidden_before = None if hidden is None else hidden.detach().clone()
                 try:
                     with torch.no_grad():
                         prepared = _prepare_decision(config.track, model, env, graph,
@@ -977,11 +1016,16 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
                             commitment=commitment,
+                            tracking_was_available=tracking_was_available,
                             value_head=value_head)
                 except PlanAEmptySupportError as exc:
                     abort_empty_support(exc, rows, update, update_empty_support_events)
                     continue
                 action_index = int(prepared["action"][0].item())
+                hidden_before = (None if prepared["hidden_before"] is None else
+                                 prepared["hidden_before"].detach().clone())
+                tracking_was_available = prepared["tracking_available"]
+                tracking_loss_reset_count += int(prepared["tracking_reset"])
                 hidden = prepared["hidden_next"].detach()
                 value = prepared["value"].detach().reshape(())
                 candidate = prepared["candidate_set"]
@@ -1094,6 +1138,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     episode_seed = task_seed + episode
                     _reset_episode(env, episode_seed)
                     hidden = None
+                    tracking_was_available = None
                     episode_generation = _episode_id(run_id, episode)
             if not rows:
                 raise RuntimeError(
@@ -1111,6 +1156,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
                             commitment=commitment,
+                            tracking_was_available=tracking_was_available,
                             deterministic=True,
                             value_head=value_head)
                     bootstrap_value = bootstrap["value"].detach().reshape(())
@@ -1136,6 +1182,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                       else config.candidate_k),
                          graph_nodes=graph.node_count,
                          update_utc=datetime.now(timezone.utc).isoformat())
+            stats["tracking_loss_reset_count"] = tracking_loss_reset_count
             if update_empty_support_events:
                 stats["plan_a_empty_support_abort_count"] = len(update_empty_support_events)
                 stats["plan_a_empty_support_aborts"] = update_empty_support_events
@@ -1568,6 +1615,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             component_timing_ms["legal_graph_build"].append(
                                 (time.perf_counter() - graph_started) * 1000.)
                         hidden = None
+                        tracking_was_available = None
+                        tracking_loss_reset_count = 0
                         episode_metric_ledger = MecoEpisodeMetricLedger(
                             env, route_tracking_available=not is_production_d0,
                             goal_tracking_available=not is_production_d0)
@@ -1604,6 +1653,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 pre_fault_action = (selected_action_trace[-1]
                                                     if selected_action_trace else None)
                                 hidden = None
+                                tracking_was_available = None
                                 commitment = None
                                 pending_eval_goal = None
                                 post_fault_metrics_start = _metric_snapshot(
@@ -1641,7 +1691,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     p_points_per_grid_edge=p_points_per_grid_edge,
                                     prediction_mode=decision_prediction_mode,
                                     record_path_penalty=True,
-                                    commitment=commitment)
+                                    commitment=commitment,
+                                    tracking_was_available=tracking_was_available)
                                 _timing_sync(env)
                                 component_timing_ms["policy_decision_pipeline"].append(
                                     (time.perf_counter() - decision_started) * 1000.)
@@ -1650,6 +1701,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                          else candidate_set.candidate_recall)
                                 choice = int(prepared["action"].item())
                                 hidden = prepared["hidden_next"]
+                                tracking_was_available = prepared["tracking_available"]
+                                tracking_loss_reset_count += int(prepared["tracking_reset"])
                                 action_source = "model"
                             else:
                                 _timing_sync(env)
@@ -1977,6 +2030,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "elapsed_ticks": elapsed,
                             "metrics": metrics, "candidate_recall": last_candidate_recall,
                             "candidate_k": candidate_k,
+                            "tracking_loss_reset_count": tracking_loss_reset_count,
+                            "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
                             "phase4_factor": phase4_factor,
                             "phase4_factor_runtime": ({
                                 **env.phase4_runtime_metrics,
@@ -2008,6 +2063,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol, "sources": sources,
+            "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
             "safety_metrics_schema": "meco-safety-rates-v1",
             "safety_metrics_source_identity_sha256": source_hash,
             "episode_metric_ledger_schema": {

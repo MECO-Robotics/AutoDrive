@@ -200,9 +200,12 @@ For A2, `score_candidates` requires fine and coarse graph transition tensors;
 A3 requires fine graph tensors. Node coordinates must be normalized to the
 field, heading bins must be integer values from 0 through 7, and valid pose and
 node indices are rejected if they fall outside their declared domains. Empty
-regions are excluded from attention. Preserve the returned GRU `hidden` state between decisions and
-reset it on episode reset or tracking-loss events. Resetting is the caller's
-responsibility in this prototype.
+regions are excluded from attention. Preserve the returned GRU `hidden` state between decisions.
+Training and matched evaluation now reset it when an opponent track that was
+available on the previous decision becomes unavailable or older than 2.0 seconds
+according to raster channels 4/5 (opponent confidence/signed time). The transition
+rule and threshold are recorded in run and evaluation protocol metadata. The same
+post-reset hidden input is saved for PPO replay.
 
 No simulator behavior evaluation or dashboard replay is claimed by the
 focused model/contract tests. Any game-behavior training or evaluation must
