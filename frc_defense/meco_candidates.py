@@ -421,7 +421,17 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                               math.cos(headings[row_index] - pose_heading)))
         eta = (None if distance is None else distance / speed + turn / omega
                + action_ticks * float(env.dt))
-        forecast = _opponent_prediction(env, horizon=eta or 0., mode=prediction_mode)
+        if eta is None:
+            # An unreachable route has no arrival-time forecast. Keep the
+            # missing forecast explicit instead of silently treating it as a
+            # zero-second arrival at the current opponent pose.
+            forecast = {"xy": None, "mode": prediction_mode,
+                "horizon_s": 0. if prediction_mode == "current" else None,
+                "observed_age_s": (float(env.opponent_age[0, 3])
+                    if math.isfinite(float(env.opponent_age[0, 3])) else None),
+                "used_cv": False, "fallback": "not_applicable_unreachable_route"}
+        else:
+            forecast = _opponent_prediction(env, horizon=eta, mode=prediction_mode)
         predicted = forecast["xy"]
         goal_xy = targets[row_index]
         separation = None if predicted is None else math.hypot(
@@ -468,7 +478,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
             "opponent_prediction": {**forecast,
                 "contract": prediction_contract(prediction_mode,
-                    horizon_s=eta or 0.)},
+                    horizon_s=(eta if eta is not None else None))},
             "endpoint_separation_m": separation, "risk_penalty_points": risk,
             "intake_extended": action < 4,
             "path_points_m": (None if result is None else result.path_points_m),

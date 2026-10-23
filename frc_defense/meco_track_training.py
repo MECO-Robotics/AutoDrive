@@ -200,43 +200,6 @@ def _path_cost_for_output(track, output, candidate_set, legal_lookup,
         points_per_grid_edge=config.p_points_per_grid_edge)
 
 
-def _plan_a_prediction_risk(env, support, eta, prediction_mode):
-    """Vectorized application of the shared current/CV forecast contract."""
-    if prediction_mode not in PREDICTION_MODES:
-        raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
-    risk = torch.zeros_like(eta)
-    meta = prediction_contract(prediction_mode,
-        horizon_s=(float(eta.max().item()) if eta.numel() else 0.))
-    if not bool(env.opponent_valid[0, 3]):
-        return risk, {**meta, "fallback": "none_no_valid_observation", "used_cv": False}
-    position = env.opponent_pose[0, 3, :2]
-    if not bool(torch.isfinite(position).all()):
-        return risk, {**meta, "fallback": "none_nonfinite_observation", "used_cv": False}
-    predicted = position[None].expand(support.goal_xy.shape[0], -1)
-    fallback = "observed_current_pose" if prediction_mode == "cv" else None
-    used_cv = False
-    if prediction_mode == "cv":
-        age = float(env.opponent_age[0, 3])
-        velocity = env.opponent_velocity[0, 3, :2]
-        if (math.isfinite(age) and 0. <= age <= PREDICTION_MAX_AGE_S and
-                bool(torch.isfinite(velocity).all())):
-            speed = velocity.norm().clamp_min(1e-8)
-            bounded_velocity = velocity * torch.clamp(
-                PREDICTION_MAX_SPEED_MPS / speed, max=1.)
-            predicted = position[None] + eta[:, None] * bounded_velocity[None]
-            fallback = None
-            used_cv = True
-    separation = (support.goal_xy - predicted).norm(dim=-1)
-    risk = PREDICTION_MAX_PENALTY_POINTS * (
-        (PREDICTION_THREAT_RADIUS_M - separation) /
-        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
-    return risk, {**meta, "fallback": fallback, "used_cv": used_cv,
-        "observed_age_s": (float(env.opponent_age[0, 3])
-            if math.isfinite(float(env.opponent_age[0, 3])) else None),
-        "horizon_min_s": float(eta.min().item()) if eta.numel() else 0.,
-        "horizon_max_s": float(eta.max().item()) if eta.numel() else 0.}
-
-
 def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cost,
                             legal_lookup, planner_geometry, config, *, record=False):
     path_cost = _path_cost_for_output(track, decision["raw"], candidate_set,
@@ -298,16 +261,35 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
     """Compute Plan A endpoint risk under the shared current/CV contract."""
     if prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
+    if eta.ndim != 1 or eta.shape[0] != support.goal_xy.shape[0]:
+        raise ValueError("Plan A ETA must contain one value per legal graph node")
+    pair_valid = support.valid_mask.reshape(-1, 8)
+    valid_nodes = pair_valid.any(dim=-1)
+    finite_nonnegative_eta = torch.isfinite(eta) & (eta >= 0.)
+    if bool((valid_nodes & ~finite_nonnegative_eta).any()):
+        raise ValueError("Plan A support-valid node has nonfinite or negative ETA")
+    valid_eta = eta[valid_nodes]
+    has_valid_endpoint = bool(valid_eta.numel())
+    horizon_min = float(valid_eta.min().item()) if has_valid_endpoint else None
+    horizon_max = float(valid_eta.max().item()) if has_valid_endpoint else None
+    horizon = horizon_max
     risk = torch.zeros_like(eta)
+    meta = prediction_contract(prediction_mode, horizon_s=horizon)
+    horizon_semantics = (
+        "observed_current_pose" if prediction_mode == "current" else
+        "maximum_eta_over_support_valid_pair_nodes; unreachable_and_masked_nodes_excluded; null_when_no_valid_endpoint")
     valid = bool(env.opponent_valid[0, 3])
     if not valid:
-        return risk, {**prediction_contract(prediction_mode),
+        return risk, {**meta, "horizon_semantics": horizon_semantics,
+                      "horizon_min_s": horizon_min, "horizon_max_s": horizon_max,
                       "fallback": "none_no_valid_observation", "used_cv": False}
     position = env.opponent_pose[0, 3, :2]
     if not bool(torch.isfinite(position).all()):
-        return risk, {**prediction_contract(prediction_mode),
+        return risk, {**meta, "horizon_semantics": horizon_semantics,
+                      "horizon_min_s": horizon_min, "horizon_max_s": horizon_max,
                       "fallback": "none_nonfinite_observation", "used_cv": False}
-    predicted = position[None].expand(support.goal_xy.shape[0], -1)
+    safe_eta = torch.where(finite_nonnegative_eta, eta, torch.zeros_like(eta))
+    predicted = position[None].expand(support.goal_xy.shape[0], -1).clone()
     fallback = None if prediction_mode == "current" else "observed_current_pose"
     used_cv = False
     age = float(env.opponent_age[0, 3])
@@ -318,19 +300,20 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         speed = velocity.norm().clamp_min(1e-8)
         bounded_velocity = velocity * torch.clamp(
             PREDICTION_MAX_SPEED_MPS / speed, max=1.)
-        predicted = position[None] + eta[:, None] * bounded_velocity[None]
+        predicted = position[None] + safe_eta[:, None] * bounded_velocity[None]
         fallback = None
         used_cv = True
     separation = (support.goal_xy - predicted).norm(dim=-1)
-    risk = PREDICTION_MAX_PENALTY_POINTS * (
+    risk_values = PREDICTION_MAX_PENALTY_POINTS * (
         (PREDICTION_THREAT_RADIUS_M - separation) /
         PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
-    return risk, {**prediction_contract(prediction_mode,
-        horizon_s=float(eta.max().item()) if eta.numel() else 0.),
+    risk = torch.where(valid_nodes, risk_values, risk)
+    age = float(env.opponent_age[0, 3])
+    return risk, {**meta, "horizon_semantics": horizon_semantics,
         "fallback": fallback, "used_cv": used_cv,
         "observed_age_s": age if math.isfinite(age) else None,
-        "horizon_min_s": float(eta.min().item()) if eta.numel() else 0.,
-        "horizon_max_s": float(eta.max().item()) if eta.numel() else 0.}
+        "horizon_min_s": horizon_min,
+        "horizon_max_s": horizon_max}
 
 
 def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
@@ -1417,7 +1400,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "progress": {"completed_records": completed,
                          "total_records": len(categories) * episodes *
                              (len(selected) * (2 if inference_disable_tick is not None else 1) +
-                              sum(3 * (track in selected) for track in ("A1", "A2", "A3")) +
+                              sum(track in selected for track in ("A1", "A2", "A3")) +
                               (len(controls) if include_controls else 0))}})
         status_last_written = current
         status_last_completed = completed
@@ -1969,6 +1952,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",
+            "plan_a_prediction_risk_provenance": "risk is computed for each legal graph node with at least one support-valid behavior/descriptor pair; finite nonnegative ETA is required for every such node; unreachable and fully masked nodes receive inert zero risk placeholders and are excluded from CV endpoint forecasts and horizon min/max; CV contract horizon is the maximum valid-node ETA and is null when no valid endpoint exists; current mode uses observed pose with contract horizon zero",
             "plan_a_heading_contract": "selected Plan A goals persist across macro steps until XY and heading completion; C1/C2/D1/D2 retain their original per-macro action semantics. The simulator pauses at the selected XY goal, samples the rectangular chassis sweep every 5 degrees, requires chassis translation to settle, and applies a point-forecast clearance check against known teammate poses and the observed opponent using constant velocity over estimated turn time plus stopping drift. This estimate has no uncertainty inflation, and the 5-degree static samples do not prove continuous swept clearance; native route and collision checks remain authoritative. Slot-3 score/pass events before the selected goal are recorded as execution failures and excluded from Plan A actor credit. The native slot-3 dumper ferry action can release fuel anywhere; Plan A masks that carrying dumper ferry pair, and the event censor remains for any actual early slot-3 pass. Intake uses target capture geometry, score uses hub-facing tolerance, and executable non-dumper ferry actions use the native release-facing tolerance",
             "seeds": (list(episode_seeds) if episode_seeds is not None else
                       [master_seed + i for i in range(episodes)]),
@@ -1980,7 +1964,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     "cv_max_track_age_s": PREDICTION_MAX_AGE_S,
                     "fixed_default_horizon_s": 1.0,
                     "candidate_horizon": "route_eta_s",
-                    "plan_a_horizon": "per_node_route_distance_over_current_speed",
+                    "plan_a_horizon": "maximum_finite_nonnegative_eta_over_nodes_with_at_least_one_support_valid_pair; unreachable_and_fully_masked_nodes_excluded; null_when_no_valid_endpoint",
                     "stale_cv_fallback": "observed_current_pose",
                     "invalid_or_absent_observation": "no_risk_penalty"}},
             "plan_a_penalty": {"trained_mode": p_mode, "p0_ablation_mode": "p0",
