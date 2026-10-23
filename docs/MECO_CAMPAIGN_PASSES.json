@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -70,7 +70,8 @@
         "Default two-robot fused HIP per-robot contact fix committed as c530fb92d in contact-rate worktree; both robots now set flags before per-tick counters; re-review pending",
         "Cross-branch audit found D0 calibration report indexing does not yet require the safety schema/three per-row rates/source bindings; its status correctly remains awaiting_runtime_contact_metric_support until that consumer validation is implemented and reviewed",
         "D0 retention/v1 compatibility/safety calibration consumer fixes committed as 8b1f496cc: binds retained policy manifest to bundle, preserves exact generated v1 schema, and requires exact contact-rate schema/source/row coverage before bundle creation; reviewer pass pending",
-        "Section 7 A/B matrix committed as 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886: immutable six-condition runner includes requested architecture contrasts, P0, K8/16/32, current/CV and inference-disabled D1 fallback; unsupported factors remain explicit; scoped review pending"
+        "Section 7 A/B matrix committed as 52a6500c8b9aa4e698cee5b7a1b28f00f59b8886: immutable six-condition runner includes requested architecture contrasts, P0, K8/16/32, current/CV and inference-disabled D1 fallback; unsupported factors remain explicit; scoped review pending",
+        "Phase 5 checkpointed ONNX export and synthetic scorer profiling harness integrated at e5f77bd99 and checkpoint compatibility fix b2dc4868c on the isolated integration branch; deployment remains non-qualification, with Hailo hardware and full-path profile evidence outstanding."
       ]
     },
     {
