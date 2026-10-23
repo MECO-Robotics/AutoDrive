@@ -294,7 +294,7 @@ class MecoSupervisor:
                     candidate_boundary=CANDIDATE_BOUNDARY, protocol_id=self.protocol_id)
                 _atomic_json(manifest_path, manifest)
 
-    def _run_training_batch(self, tracks, cycle, statuses):
+    def _run_training_batch(self, tracks, cycle, statuses, target_update):
         processes = {}
         logs = {}
         for track in tracks:
@@ -302,7 +302,13 @@ class MecoSupervisor:
                 break
             if source_identity() != self.sources:
                 raise RuntimeError("source identity changed; refusing to continue queued training")
-            config = self.configs[track]
+            remaining_updates = target_update - self._completed_updates(track)
+            if remaining_updates <= 0:
+                statuses[track] = "complete"
+                continue
+            base_config = self.configs[track]
+            config = MecoTrainConfig(**{**asdict(base_config),
+                "updates": min(self.chunk_updates, remaining_updates)})
             latest = self.output / track / "latest.pt"
             command = _train_command(config=config, output=self.output / track,
                 run_id=self.run_ids[track], stop_file=self.stop_file,
@@ -311,7 +317,8 @@ class MecoSupervisor:
             log_path = self.output / track / "supervisor.log"
             logs[track] = log_path.open("ab")
             processes[track] = subprocess.Popen(command, cwd=ROOT,
-                stdout=logs[track], stderr=subprocess.STDOUT)
+                stdout=logs[track], stderr=subprocess.STDOUT,
+                start_new_session=True)
             self.worker_pids[track] = processes[track].pid
             statuses[track] = "running"
         self._write_queued_manifests(statuses)
@@ -385,8 +392,9 @@ class MecoSupervisor:
         try:
             self.evaluator_job = job
             self.evaluator_log = job["output"].with_suffix(".log").open("ab")
-            self.evaluator = subprocess.Popen(command, cwd=ROOT,
-                stdout=self.evaluator_log, stderr=subprocess.STDOUT)
+        self.evaluator = subprocess.Popen(command, cwd=ROOT,
+            stdout=self.evaluator_log, stderr=subprocess.STDOUT,
+            start_new_session=True)
         except OSError as exc:
             if self.evaluator_log is not None:
                 self.evaluator_log.close()
@@ -477,7 +485,7 @@ class MecoSupervisor:
                 if selected is not None:
                     batch.append(selected)
                     remaining.remove(selected)
-            self._run_training_batch(batch, cycle, statuses)
+            self._run_training_batch(batch, cycle, statuses, target_update)
             remaining = [track for track in order
                          if self._completed_updates(track) < target_update]
             self._poll_evaluator(cycle, statuses)
@@ -503,8 +511,6 @@ class MecoSupervisor:
 
     def _run_locked(self):
         self._read_or_create_runs()
-        if any(value % self.chunk_updates for value in self.completed_updates.values()):
-            raise ValueError("checkpoint updates are not aligned to configured chunk size")
         self.supervisor_id = uuid.uuid4().hex
         self.configuration_hash = _hash(self.configuration)
         matched_update = max(self.completed_updates.values())
