@@ -3,20 +3,22 @@ from types import SimpleNamespace
 import torch
 
 from frc_defense.curriculum_training import D1HandWeightedPolicy, _d1_artifacts, _d1_identity
-from frc_defense.learning_contract import ObservationSnapshot
+from frc_defense.learning_contract import CandidateTable, ObservationSnapshot
 
 
-def _sensor_fixture(mask):
+def _sensor_fixture(mask, *, candidate_indices=(0, 1, 2, 3),
+                    candidate_valid=(True, True, True, True)):
     # Intentionally exposes only learner-side pose and sensor track fields.
     env = SimpleNamespace(n=1, device=torch.device('cpu'))
+    env.steps = torch.tensor([0])
     track_points = torch.tensor([[1., 0.], [3., 0.], [6., 0.], [9., 0.], [2., .2]])
     env.track_pos = track_points.reshape(1, 1, 5, 2).expand(1, 6, 5, 2).clone()
     env.track_confidence = torch.tensor([.9, .8, .7, .6, .95]).reshape(1, 1, 5).expand(1, 6, 5).clone()
     env.track_age = torch.tensor([.1, .2, .3, .4, .1]).reshape(1, 1, 5).expand(1, 6, 5).clone()
     env.track_mask = torch.ones((1, 6, 5), dtype=torch.bool)
     env.sim = SimpleNamespace(pose=torch.tensor([[[0., 0., 0.]]*3 + [[0., 0., 0.]] + [[0., 0., 0.]]*2]))
-    env._candidates = lambda: (torch.tensor([[[0, 1, 2, 3]]*6]),
-                               torch.tensor([[[True, True, True, True]]*6]),
+    env._candidates = lambda: (torch.tensor([[list(candidate_indices)]*6]),
+                               torch.tensor([[list(candidate_valid)]*6]),
                                torch.zeros((1, 6, 4)))
     observation = torch.zeros((1, 137))
     observation[:, -8:] = torch.tensor(mask, dtype=torch.float32)
@@ -37,6 +39,27 @@ def test_d1_uses_safe_hold_when_no_candidate_or_other_action_is_legal():
     action, trace = D1HandWeightedPolicy().choose(env, observation)
     assert action.tolist() == [7]
     assert trace['action_scores'][0, :7].isneginf().all()
+
+
+def test_d1_candidate_ids_are_unique_with_placeholder_indices():
+    env, observation = _sensor_fixture(
+        [1, 0, 0, 0, 0, 0, 0, 1], candidate_indices=(0, 0, 0, 0),
+        candidate_valid=(True, False, False, False))
+    action, trace = D1HandWeightedPolicy().choose(env, observation,
+                                                   snapshot_id='episode:0')
+    table = trace['candidate_table']
+    assert table.candidate_ids == (
+        'collect:track:0', 'collect:unavailable-slot:1',
+        'collect:unavailable-slot:2', 'collect:unavailable-slot:3',
+        'score', 'intercept', 'ferry', 'hold')
+    assert len(set(table.candidate_ids)) == 8
+    assert table.valid_mask == (True, False, False, False, False, False, False, True)
+    assert table.feature_names == (
+        'action_index', 'sensor_track_buffer_index', 'target_distance_m',
+        'nearby_sensed_track_count', 'track_confidence', 'track_age_s')
+    assert table.features[1] == (1., None, None, None, None, None)
+    assert table.route_costs == (None,) * 8
+    assert action.item() == 0
 
 
 def test_d1_rejects_a_mask_with_no_legal_fallback():
@@ -64,15 +87,30 @@ def test_scorer_snapshot_ids_are_scoped_to_evaluation_run(monkeypatch):
     env = SimpleNamespace(steps=torch.tensor([0]))
     obs = torch.zeros((1, 137))
     obs[0, -8:] = 1.
-    trace = {
-        'candidate_distance': torch.zeros((1, 4)),
-        'candidate_nearby_tracks': torch.zeros((1, 4)),
-        'candidate_confidence': torch.zeros((1, 4)),
-        'candidate_age': torch.zeros((1, 4)),
-        'action_scores': torch.zeros((1, 8)),
-    }
-    first = _d1_artifacts(env, obs, trace, scenario='pickup_simple',
+    def trace_for(run_id):
+        snapshot_id=f'{run_id}:pickup_simple:single:seed-9:0'
+        table = CandidateTable(
+            snapshot_id,
+            ('collect:track:0', 'collect:track:1', 'collect:track:2',
+             'collect:track:3', 'score', 'intercept', 'ferry', 'hold'),
+            tuple((float(i), None, None, None, None, None) for i in range(8)),
+            (True,) * 8,
+            ('action_index', 'sensor_track_buffer_index', 'target_distance_m',
+             'nearby_sensed_track_count', 'track_confidence', 'track_age_s'),
+            (None,) * 8)
+        return {
+            'candidate_distance': torch.zeros((1, 4)),
+            'candidate_nearby_tracks': torch.zeros((1, 4)),
+            'candidate_confidence': torch.zeros((1, 4)),
+            'candidate_age': torch.zeros((1, 4)),
+            'action_scores': torch.zeros((1, 8)),
+            'candidate_table': table,
+            'selected_row': 0,
+        }
+    first = _d1_artifacts(env, obs, trace_for('run-a'), scenario='pickup_simple',
                           category='single', seed=9, evaluation_id='run-a')
-    second = _d1_artifacts(env, obs, trace, scenario='pickup_simple',
+    second = _d1_artifacts(env, obs, trace_for('run-b'), scenario='pickup_simple',
                            category='single', seed=9, evaluation_id='run-b')
     assert first['scorer_snapshot']['snapshot_id'] != second['scorer_snapshot']['snapshot_id']
+    assert first['selected_candidate_id'] == 'collect:track:0'
+    assert second['selected_candidate_id'] == 'collect:track:0'

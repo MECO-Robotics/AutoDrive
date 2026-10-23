@@ -23,7 +23,7 @@ from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .tensor_training_runtime import ActorCritic, _gae_advantages
 from .curriculum_policy import ARCHITECTURES, PerceptionActorCritic, make_policy
 from .architecture_inputs import PerceptionInputs
-from .learning_contract import CandidateTable, ScorerSnapshot
+from .learning_contract import CandidateTable, ScorerSnapshot, masked_argmax
 from .learning_inputs import build_observation_snapshot
 from .discrete_sac import (DiscreteSAC, ScenarioReplayBuffer, make_sac_optimizers,
                            sac_update)
@@ -45,7 +45,7 @@ class D1HandWeightedPolicy:
     weights = {'proximity': 1.0, 'nearby_tracks': .12,
                'confidence': .10, 'track_age': -.05,
                'score': .65, 'ferry': .20, 'intercept': -.25, 'hold': -.5}
-    def choose(self, env, observation):
+    def choose(self, env, observation, *, snapshot_id=None):
         indices, valid, _ = env._candidates()
         slot = 3
         points = env.track_pos[:, slot].gather(
@@ -64,34 +64,69 @@ class D1HandWeightedPolicy:
                          self.weights['track_age'] * age)
         target_scores = target_scores.masked_fill(~candidate_valid, float('-inf'))
 
-        mask = observation[:, -8:].bool()
-        scores = torch.full((env.n, 8), float('-inf'), device=env.device)
-        scores[:, :4] = target_scores
-        scores[:, 4] = torch.where(mask[:, 4], torch.full_like(distances[:, 0], self.weights['score']), scores[:, 4])
-        scores[:, 5] = torch.where(mask[:, 5], torch.full_like(distances[:, 0], self.weights['intercept']), scores[:, 5])
-        scores[:, 6] = torch.where(mask[:, 6], torch.full_like(distances[:, 0], self.weights['ferry']), scores[:, 6])
-        scores[:, 7] = torch.where(mask[:, 7], torch.full_like(distances[:, 0], self.weights['hold']), scores[:, 7])
-        scores[:, :4] = scores[:, :4].masked_fill(~mask[:, :4], float('-inf'))
-        # argmax is stable and resolves exact ties to the lower action id.
-        action = scores.argmax(-1)
-        best = scores.gather(1, action[:, None]).squeeze(1)
-        fallback = torch.where(mask[:, 7], torch.full_like(action, 7),
-                               mask.to(torch.int64).argmax(-1))
-        if not bool(mask.any(-1).all()):
+        if env.n != 1:
+            raise ValueError('D1 action-trace evaluation requires one world')
+        mask = observation[0, -8:].bool().tolist()
+        snapshot_id = snapshot_id or f'd1:{int(env.steps[0].item())}'
+        feature_names = ('action_index', 'sensor_track_buffer_index', 'target_distance_m',
+                         'nearby_sensed_track_count', 'track_confidence',
+                         'track_age_s')
+        fixed_ids = {4: 'score', 5: 'intercept', 6: 'ferry', 7: 'hold'}
+        candidate_ids = []
+        features = []
+        for row in range(8):
+            if row < 4:
+                track_index = int(indices[0, slot, row].item())
+                if bool(candidate_valid[0, row].item()):
+                    candidate_ids.append(f'collect:track:{track_index}')
+                    row_features = (float(row), float(track_index),
+                                    float(distances[0, row].item()),
+                                    float(nearby[0, row].item()),
+                                    float(confidence[0, row].item()),
+                                    float(age[0, row].item()))
+                else:
+                    candidate_ids.append(f'collect:unavailable-slot:{row}')
+                    row_features = (float(row), None, None, None, None, None)
+            else:
+                candidate_ids.append(fixed_ids[row])
+                row_features = (float(row), None, None, None, None, None)
+            features.append(row_features)
+        table = CandidateTable(snapshot_id, tuple(candidate_ids), tuple(features),
+                               tuple(bool(value) for value in mask), feature_names,
+                               route_costs=(None,) * 8)
+        fixed_scores = {'score': self.weights['score'],
+                        'intercept': self.weights['intercept'],
+                        'ferry': self.weights['ferry'],
+                        'hold': self.weights['hold']}
+        row_scores = []
+        for row, candidate_id in enumerate(table.candidate_ids):
+            if row < 4:
+                row_scores.append(float(target_scores[0, row].item()))
+            else:
+                row_scores.append(float(fixed_scores[candidate_id]))
+        selected_row = masked_argmax(row_scores, table.valid_mask,
+                                     fallback_index=7)
+        if selected_row is None:
             raise RuntimeError('D1 requires at least one legal curriculum action')
-        action = torch.where(torch.isfinite(best), action, fallback)
+        # The table's named row and action_index feature define the scorer mapping.
+        action_index = int(table.features[selected_row][0])
+        action = torch.tensor([action_index], device=env.device, dtype=torch.long)
+        scores = torch.tensor([row_scores], device=env.device, dtype=observation.dtype)
+        scores = scores.masked_fill(~torch.tensor([table.valid_mask], device=env.device),
+                                    float('-inf'))
         trace = {'candidate_scores': target_scores, 'action_scores': scores,
                  'candidate_indices': indices[:, slot], 'candidate_valid': candidate_valid,
                  'candidate_distance': distances, 'candidate_nearby_tracks': nearby,
-                 'candidate_confidence': confidence, 'candidate_age': age}
+                 'candidate_confidence': confidence, 'candidate_age': age,
+                 'candidate_table': table, 'selected_row': selected_row}
         return action, trace
 
 
 def _d1_identity():
     return _hash({'policy': D1HandWeightedPolicy.name,
                   'weights': D1HandWeightedPolicy.weights,
-                  'candidate_source': 'four-nearest-valid-sensor-tracks',
-                  'choices': 'masked-eight-action-interface-v1'})
+                  'candidate_source': 'per-snapshot-four-nearest-valid-sensor-track-buffer-slots',
+                  'choices': 'd1-action-trace-v2'})
 
 
 def _d1_artifacts(env, observation, trace, *, scenario, category, seed,
@@ -104,32 +139,19 @@ def _d1_artifacts(env, observation, trace, *, scenario, category, seed,
     observation_snapshot = build_observation_snapshot(
         env, episode_id=episode_id, sequence=tick)
     snapshot_id = observation_snapshot.snapshot_id
-    candidate_ids = tuple(f'action:{index}' for index in range(8))
-    mask = tuple(bool(value) for value in observation[0, -8:].tolist())
-    distances = trace['candidate_distance'][0].detach().cpu().tolist()
-    nearby = trace['candidate_nearby_tracks'][0].detach().cpu().tolist()
-    confidence = trace['candidate_confidence'][0].detach().cpu().tolist()
-    age = trace['candidate_age'][0].detach().cpu().tolist()
-    features = []
-    for action in range(8):
-        values = [float(index == action) for index in range(8)]
-        values.extend((float(distances[action]) if action < 4 else 0.,
-                       float(nearby[action]) if action < 4 else 0.,
-                       float(confidence[action]) if action < 4 else 0.,
-                       float(age[action]) if action < 4 else 0.,
-                       float(action < 4)))
-        features.append(tuple(values))
-    table = CandidateTable(snapshot_id, candidate_ids, tuple(features), mask,
-                           route_costs=(None,) * 8)
+    table = trace['candidate_table']
+    if table.snapshot_id != snapshot_id:
+        raise RuntimeError('D1 candidate table does not match its observation snapshot')
     raw_scores = trace['action_scores'][0].detach().cpu().tolist()
     scores = tuple(float(score) if math.isfinite(float(score)) else 0.
                    for score in raw_scores)
     timestamp = observation_snapshot.timestamp
-    scored = ScorerSnapshot(_d1_identity(), snapshot_id, candidate_ids,
+    scored = ScorerSnapshot(_d1_identity(), snapshot_id, table.candidate_ids,
                             scores, timestamp)
     if not scored.matches(observation_snapshot, table, now=timestamp, max_age=0.):
         raise RuntimeError('D1 scorer snapshot does not match its candidate table')
-    return {'candidate_table': asdict(table), 'scorer_snapshot': asdict(scored)}
+    return {'candidate_table': asdict(table), 'scorer_snapshot': asdict(scored),
+            'selected_candidate_id': table.candidate_ids[trace['selected_row']]}
 
 
 @dataclass(frozen=True)
@@ -446,6 +468,7 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
     builder=PerceptionInputs(env,(3,)) if isinstance(actor,PerceptionActorCritic) else None
     frames=[]; decisions=0
     stride=max(1,math.ceil(env.horizon/action_ticks/64))
+    episode_id=f'{evaluation_id}:{name}:{category}:seed-{seed}'
     while True:
         obs=env._last_obs[:,3]; mask=obs[:,-8:].bool()
         trace=None
@@ -453,7 +476,8 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
             if policy == 'teacher':
                 action=teacher_actions(env,env._last_obs)[:,3]
             elif isinstance(policy,D1HandWeightedPolicy):
-                action,trace=policy.choose(env,obs)
+                snapshot_id=f'{episode_id}:{int(env.steps[0].item())}'
+                action,trace=policy.choose(env,obs,snapshot_id=snapshot_id)
             else:
                 action=policy.sample(builder(env._last_obs) if builder else obs,deterministic=True,action_mask=mask)[0]
         if demonstration or decisions%stride == 0:
@@ -558,7 +582,7 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
             'algorithm':getattr(policy,'algorithm','d1_hand_weighted' if isinstance(policy,D1HandWeightedPolicy) else 'teacher' if policy == 'teacher' else 'ppo'),
             'architecture':getattr(policy,'architecture','candidate_action_ranker' if isinstance(policy,D1HandWeightedPolicy) else 'baseline_mlp') if policy != 'teacher' else 'deterministic_teacher',
             'policy_provenance':({'kind':'hand_weighted_candidate_action_ranker',
-                'candidate_source':'four-nearest-valid-sensor-tracks',
+                'candidate_source':'per-snapshot-four-nearest-valid-sensor-track-buffer-slots',
                 'action_source':'masked curriculum eight-action interface',
                 'weights':D1HandWeightedPolicy.weights,
                 'uses_hidden_fuel_or_opponent_truth':False}

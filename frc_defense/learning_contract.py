@@ -55,31 +55,38 @@ class ObservationSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class CandidateTable:
-    """Stable ordered candidate rows paired with features, mask and route costs."""
+    """Stable ordered action-trace rows with named, nullable features."""
 
     snapshot_id: str
     candidate_ids: tuple[str, ...]
-    features: tuple[tuple[float, ...], ...]
+    features: tuple[tuple[float | None, ...], ...]
     valid_mask: tuple[bool, ...]
+    feature_names: tuple[str, ...]
     route_costs: tuple[float | None, ...] | None = None
-    schema_version: int = 1
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or not self.snapshot_id:
+        if self.schema_version != 2 or not self.snapshot_id:
             raise ValueError("unsupported schema or empty snapshot_id")
         ids = tuple(self.candidate_ids)
-        features = tuple(_finite_tuple(row, "candidate feature") for row in self.features)
+        names = tuple(self.feature_names)
+        features = tuple(tuple(None if value is None else _finite_tuple((value,), "candidate feature")[0]
+                               for value in row) for row in self.features)
         mask = tuple(self.valid_mask)
         if not ids or any(not isinstance(item, str) or not item for item in ids):
             raise ValueError("candidate_ids must be nonempty strings")
         if len(set(ids)) != len(ids):
             raise ValueError("candidate_ids must be unique")
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("feature_names must be nonempty strings")
+        if len(set(names)) != len(names):
+            raise ValueError("feature_names must be unique")
         if len(features) != len(ids) or len(mask) != len(ids):
             raise ValueError("candidate rows, features, and mask must have equal lengths")
         if any(type(value) is not bool for value in mask):
             raise ValueError("valid_mask entries must be bool")
-        if features and len({len(row) for row in features}) != 1:
-            raise ValueError("candidate feature rows must have equal width")
+        if any(len(row) != len(names) for row in features):
+            raise ValueError("candidate feature rows must match feature_names")
         costs = self.route_costs
         if costs is not None:
             costs = tuple(None if value is None else float(value) for value in costs)
@@ -90,6 +97,7 @@ class CandidateTable:
         object.__setattr__(self, "candidate_ids", ids)
         object.__setattr__(self, "features", features)
         object.__setattr__(self, "valid_mask", mask)
+        object.__setattr__(self, "feature_names", names)
         object.__setattr__(self, "route_costs", costs)
 
 
