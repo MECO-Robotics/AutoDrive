@@ -539,6 +539,20 @@ def main(argv=None):
     collect.add_argument("--action-ticks", type=int, default=12)
     collect.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
     collect.add_argument("--prediction-mode", choices=PREDICTION_MODES, default="cv")
+    counterfactual = commands.add_parser("collect-counterfactual-v2")
+    counterfactual.add_argument("--output", type=Path, required=True)
+    counterfactual.add_argument("--scenario", required=True)
+    counterfactual.add_argument("--category", required=True)
+    counterfactual.add_argument("--seeds", type=int, nargs="+", required=True)
+    counterfactual.add_argument("--qualification-protocol", type=Path, required=True)
+    counterfactual.add_argument("--device", default="cpu")
+    counterfactual.add_argument("--horizon-ticks", type=int, default=160)
+    counterfactual.add_argument("--action-ticks", type=int, default=12)
+    counterfactual.add_argument("--candidate-k", type=int, choices=(8, 16, 32), default=16)
+    counterfactual.add_argument("--prediction-mode", choices=PREDICTION_MODES, default="cv")
+    counterfactual.add_argument("--max-c-candidates", type=int, default=8)
+    counterfactual.add_argument("--max-a-pairs", type=int, default=8)
+    counterfactual.add_argument("--gamma", type=float, default=.993)
     warm = commands.add_parser("warm-start")
     warm.add_argument("--track", choices=MECO_TRACKS, required=True)
     warm.add_argument("--dataset", type=Path, required=True)
@@ -554,6 +568,15 @@ def main(argv=None):
             qualification_protocol=args.qualification_protocol,
             device=args.device, horizon=args.horizon, action_ticks=args.action_ticks,
             candidate_k=args.candidate_k, prediction_mode=args.prediction_mode)
+    elif args.command == "collect-counterfactual-v2":
+        from .meco_counterfactual import collect_counterfactual_v2
+        result = collect_counterfactual_v2(args.output,
+            scenario_id=args.scenario, category=args.category, seeds=args.seeds,
+            qualification_protocol=args.qualification_protocol, device=args.device,
+            horizon_ticks=args.horizon_ticks, action_ticks=args.action_ticks,
+            candidate_k=args.candidate_k, prediction_mode=args.prediction_mode,
+            max_c_candidates=args.max_c_candidates, max_a_pairs=args.max_a_pairs,
+            gamma=args.gamma)
     else:
         result = warm_start(args.track, args.dataset, args.output,
             qualification_protocol=args.qualification_protocol, updates=args.updates,

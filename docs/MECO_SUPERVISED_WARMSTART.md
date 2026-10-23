@@ -1,0 +1,107 @@
+# MECO supervised warm start
+
+`frc_defense.meco_supervised` defines `meco-supervised-trajectory-v1`, target
+schema `meco-observed-action-target-v1`, and weights artifact schema
+`meco-warm-start-weights-v1`. Collection writes a JSONL record per macro
+decision plus a content-hashed manifest. Every row binds the exact source
+identity and frozen protocol ID, scenario/category, train seed, sensor raster,
+global inputs, candidate table, route/risk costs, deterministic teacher action,
+and label provenance. Collection rejects unbound protocol IDs and non-train
+data is never implicitly selected.
+
+The bundled `teacher_actions` policy is a diagnostic sensed-state heuristic,
+not an expert or simulator oracle. Its action label is used as follows:
+
+- A1/A2/A3 train only the behavior head for observed actions 0–6. Action 7 is
+  excluded from their behavior labels because this teacher uses it as a no-op
+  hold and supplies no explicit Plan A drive goal. They receive no legal-node
+  goal-value or traversal-penalty target from this dataset.
+- C1/C2 increase the probability mass over feasible candidate rows sharing the
+  observed action. They do not receive candidate gross-reward, pairwise, or
+  counterfactual preference labels.
+
+The collection and training source identities must match exactly, and both
+must name the same frozen protocol. Warm-start artifacts contain model weights
+and provenance only: no optimizer state, RNG state, update cursor, or replay
+state. `train --warm-start` and exact `train --resume` are mutually exclusive.
+Subsequent resume checkpoints retain the original initialization provenance.
+For C1/C2, model input width includes both candidate values and their explicit
+missingness indicators.
+
+Example using seeds assigned to the protocol's training partition:
+
+```sh
+python -m frc_defense.meco_supervised collect \
+  --output evaluations/meco-supervised/train.jsonl \
+  --scenario pickup_simple --category single --seeds 101 102 \
+  --qualification-protocol qualifications/meco/protocol.json
+python -m frc_defense.meco_supervised warm-start \
+  --track C1 --dataset evaluations/meco-supervised/train.jsonl \
+  --output checkpoints/meco-warmstart/C1.pt \
+  --qualification-protocol qualifications/meco/protocol.json
+python -m frc_defense.meco_track_training train --track C1 \
+  --protocol-id <training-protocol-id> \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --warm-start checkpoints/meco-warmstart/C1.pt \
+  --output checkpoints/meco-five/C1
+```
+
+For a new five-lane campaign, pass the frozen qualification artifact and all
+five track artifacts to `frc_defense.meco_supervisor`:
+
+```sh
+python -m frc_defense.meco_supervisor --seed 20261024 \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --warm-start A1=checkpoints/meco-warmstart/A1.pt \
+  --warm-start A2=checkpoints/meco-warmstart/A2.pt \
+  --warm-start A3=checkpoints/meco-warmstart/A3.pt \
+  --warm-start C1=checkpoints/meco-warmstart/C1.pt \
+  --warm-start C2=checkpoints/meco-warmstart/C2.pt
+```
+
+The supervisor's `protocol_id` identifies its complete training configuration;
+`qualification_protocol_id` separately identifies the frozen split artifact.
+Both identities and every warm-start file hash appear in supervisor status and
+configuration hashes. The supervisor rejects partial track maps, mismatched
+source/protocol artifacts, non-train scheduled seeds, or a changed artifact.
+Each worker receives only its own track's weights artifact on the first chunk;
+later chunks use exact resume and retain the original initialization metadata.
+
+## Matched-prefix v2 counterfactual collection
+
+`collect-counterfactual-v2` writes the distinct
+`meco-counterfactual-trajectory-v2` / `meco-matched-prefix-gross-return-v2`
+schemas. It never reads v1 rows as return labels. For each frozen train seed,
+the collector records the deterministic teacher prefix, predecision simulator
+tensor-state and observation digests, candidate and Plan A support digests,
+selected candidate descriptors, and executed action traces. Each branch starts
+from a fresh environment, replays that prefix, and aborts on any digest or
+executed-trace mismatch. It uses the archived candidate descriptor without
+reselecting after replay.
+
+Plan C records gross macro and fixed-horizon simulator returns, discounted
+horizon returns, and pairwise return preferences over a deterministic bounded
+sample of valid candidate descriptors. Plan A records a deterministic bounded
+sample of valid node × behavior × descriptor pairs with gross returns and
+pairwise preferences. Its P target is explicitly null with zero prior because
+the current simulator executor does not execute P-modified routes. The common
+continuation policy is the deterministic sensed-state teacher, and the artifact
+binds its source identity, runtime/device, frozen protocol/train split,
+candidate boundary, Plan A support order, horizon, and discount.
+
+Example (start with a small train seed set; each decision branches multiple
+simulator rollouts):
+
+```sh
+python -m frc_defense.meco_supervised collect-counterfactual-v2 \
+  --output evaluations/meco-supervised/counterfactual-v2.jsonl \
+  --scenario pickup_simple --category single --seeds 101 \
+  --qualification-protocol qualifications/meco/protocol.json
+```
+
+This is a label collector, not an expert policy or simulator oracle. The v1
+`warm-start` command still consumes only v1 observed-behavior rows; v2-to-model
+fitting and training-checkpoint integration remain open. No simulator run has
+been performed to establish that reset-and-replay parity succeeds on the
+configured runtime/device. Until a v2 artifact is collected and reviewed with
+that parity evidence, Phase 2 remains incomplete.
