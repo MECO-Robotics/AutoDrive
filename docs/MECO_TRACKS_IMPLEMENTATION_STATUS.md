@@ -478,10 +478,19 @@ loading. Worker close is idempotent, rejects new requests, discards queued
 work, sends a stop sentinel, and joins before evaluator-owned models are
 released. Accepted Plan C provenance includes the simulation observation time.
 
-Three-pass ledger: Planner complete; implementer implemented in the isolated
-worktree; scoped static review approved the nonblocking/inference-mode/sequence
-fixes. The lifecycle and provenance follow-up is pending scoped review. Runtime
-evidence pending. This pass ran `py_compile` and `git diff --check` only. No
-tests or simulator evaluation were run, so shutdown, queue replacement,
-stale/out-of-order rejection, and fallback behavior have not been validated in
-simulation or replay.
+Three-pass ledger: Planner complete; implementer complete at `f25a9f596`;
+scoped static review approved the integrated candidate at `2318d696e`. Static
+checks only (`py_compile`, `git diff --check`); no tests or simulator evaluation
+were run. Worker lifecycle, queue replacement, stale/out-of-order rejection,
+and fallback behavior still require runtime and replay validation.
+
+## Next Phase 2 implementation gap
+
+The plan calls for Plan A legal-node goal/routing value supervision and
+feasible behavior preferences. Existing v3 U+B fitting uses sampled
+counterfactual choices; P-v3 labels sampled executed-route costs. Neither
+provides legal-node U targets. A separate replay-bound legal-node dataset and
+weights-only CUDA fitter are now in a planner-complete, implementation-in-
+progress pass. It must preserve the existing v3/P-null contract and must not
+use AD* internal costs as simulator-outcome labels. Static implementation and
+review will not establish simulator coverage or training benefit.
