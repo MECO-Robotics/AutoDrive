@@ -82,7 +82,9 @@
         "Phase 4 four-factor implementation committed at fef1eebf73eab9c06d6300b14bc8e9954f25176a on isolated branch codex/meco-phase4-four-factor; dashboard/API factor-state rendering is implemented there. Runtime factor evaluations remain outstanding.",
         "Live campaign diagnostic at 2026-10-23 12:00 UTC: A1 had 383/384 and A2 351/352 actor rows masked with zero rollout return. Read-only diagnosis traced likely masking to Plan A pending-goal continuation/origin censoring in isolated code review; exact per-row cause is not persisted. A corrected Plan A action/credit-assignment contract is being implemented on an isolated branch. Active workers remain untouched.",
         "Plan A PPO action/logprob pairing and per-reason execution diagnostics implemented in isolated branch codex/meco-plan-a-actor-fix at 5d6f8940f5cad0f2c9e158a3e4374e85f1c90b7f; reviewer pass pending. The active campaign remains on its original source identity and is not using this fix.",
-        "Phase 5 synthetic profiler timing correction committed on isolated branch codex/meco-deployment-timing through 0e3eef933695cdca49624f08e996d2ad1624abb6: each timed iteration uses one forward, named A/C utility output, and warmed argmax; real deployment profiling remains unrun."
+        "Phase 5 synthetic profiler timing correction committed on isolated branch codex/meco-deployment-timing through 0e3eef933695cdca49624f08e996d2ad1624abb6: each timed iteration uses one forward, named A/C utility output, and warmed argmax; real deployment profiling remains unrun.",
+        "Phase 2 Plan A v3 warm-start implemented and scoped reviewed on isolated branch codex/meco-phase2-plan-a-v3 through a0b8db9842551ceb521d4c08f935e59fd949a11a. It adds direct sampled U+B gross-horizon regression plus pairwise preference from strict replay-bound v2 data; P remains unlabelled and exhaustive-node coverage/empirical warm-start outcome remain open.",
+        "Plan A actor action/log-probability pairing fix implemented and scoped reviewed on isolated branch codex/meco-plan-a-actor-fix through c1b69bf9d8ec9229759b1f29f05db4d19902c8b3; old source-bound checkpoints cannot resume under the changed source identity. Active workers remain on old code."
       ]
     },
     {
@@ -139,7 +141,9 @@
         "Scoped static integrated review approved branch codex/meco-evaluation-plan-integration through 260fdfbe3. The integration has been merged into the full-plan checkout; simulator/replay validation, runtime D0 calibration and safety evidence, ONNX/Hailo hardware qualification, and actual matrix experiments remain outstanding.",
         "Fresh scoped reviewer approved integrated full-plan training checkout fd5ba1317 after verifying the two-parent merge retains full-plan and reviewed integration code/docs, all five-track batching, continuous --cycles 0 support, current dashboard three-pass rendering, and fresh/stale queued-lane handling. Static review only: no tests or simulator evaluation were run. Runtime calibration, matched five-track results, qualification, matrix outcomes, and deployment evidence remain outstanding.",
         "Scoped Phase 4 review approved fef1eebf73eab9c06d6300b14bc8e9954f25176a after device/backend identity was bound into matrix, condition, and evaluator protocol IDs and report validation. Static review only; no tests or simulator evaluations.",
-        "Scoped reviewer approved Phase 5 timing correction at 0e3eef933695cdca49624f08e996d2ad1624abb6. Static review only; no ONNX export, numerical parity, simulator timing, Hailo compile, or hardware profile."
+        "Scoped reviewer approved Phase 5 timing correction at 0e3eef933695cdca49624f08e996d2ad1624abb6. Static review only; no ONNX export, numerical parity, simulator timing, Hailo compile, or hardware profile.",
+        "Scoped reviewer approved the Plan A PPO actor pairing/failure-reason correction through c1b69bf9d8ec9229759b1f29f05db4d19902c8b3; A1-A3 semantics changed, all five old checkpoints are source-incompatible, and simulator revalidation is pending.",
+        "Scoped reviewer approved Phase 2 Plan A v3 through a0b8db9842551ceb521d4c08f935e59fd949a11a. Static review only; full-node coverage, P route execution/oracle labels, replayed fitting, and outcome evaluation remain outstanding."
       ]
     }
   ]
