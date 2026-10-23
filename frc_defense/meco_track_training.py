@@ -1109,13 +1109,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
-    if split not in ("validation", "test", "train"):
-        raise ValueError("split must be train, validation, or test")
+    if split not in ("validation", "test", "train", "calibration"):
+        raise ValueError("split must be train, validation, test, or calibration")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
+=======
+>>>>>>> 9fff8d555 (Add D0 calibration and calibrated promotion gates)
     if episode_seeds is not None and (len(episode_seeds) != episodes or
             len(set(episode_seeds)) != episodes or any(type(seed) is not int
             or not 0 <= seed < 2**63 for seed in episode_seeds)):
@@ -1135,9 +1137,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if inference_disable_tick >= scenario_horizon:
             raise ValueError("inference_disable_tick must be below the scenario horizon "
                 f"({scenario_horizon} physics ticks) for every category")
+    if split not in ("validation", "test", "train", "calibration"):
+        raise ValueError("split must be train, validation, test, or calibration")
     selected = tuple(MECO_TRACKS if evaluation_policies is None else evaluation_policies)
-    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
-        raise ValueError("evaluation_policies must be a nonempty unique subset of MECO tracks")
+    if len(set(selected)) != len(selected) or not set(selected) <= set(MECO_TRACKS):
+        raise ValueError("evaluation_policies must be a unique subset of MECO tracks")
     if set(checkpoints) != set(selected):
         raise ValueError("evaluation needs exactly the selected policy checkpoints")
     controls = tuple(("D0", "D1", "D2") if control_policies is None else control_policies)
@@ -1147,6 +1151,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("matched evaluation requires D0 as the paired reference")
     control_prediction_modes = {"D1": prediction_mode or "current",
                                  "D2": prediction_mode or "cv"}
+    if not selected and (controls != ("D0",) or not include_controls):
+        raise ValueError("D0-only evaluation requires exactly the D0 control")
     sources = source_identity()
     source_hash = hashlib.sha256(json.dumps(
         sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
