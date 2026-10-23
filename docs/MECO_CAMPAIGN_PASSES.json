@@ -14,7 +14,8 @@
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
         "Phase 2 counterfactual v2 warm-start consumer plan completed: strict replay-backed v2-only A U+B and C candidate pairwise fitting from within-prefix gross_horizon_return; P remains null/zero, v1 contract unchanged",
-        "Phase 0 D0 variance calibration and qualification gate plan completed: separate disjoint calibration seeds, separate repeat-run and cross-seed variance, freeze operational margin/protocol digest, and require paired-CI improvement plus safety non-inferiority for promotion"
+        "Phase 0 D0 variance calibration and qualification gate plan completed: separate disjoint calibration seeds, separate repeat-run and cross-seed variance, freeze operational margin/protocol digest, and require paired-CI improvement plus safety non-inferiority for promotion",
+        "Phase 5 audit completed: reviewed synthetic exporter/profile harness is isolated on the completed branch; full production-schema parity, ONNX numerical parity, Hailo compilation/device profiling, end-to-end decision latency, and checkpoint-bound simulator replay remain open"
       ]
     },
     {
@@ -42,7 +43,9 @@
         "Section 6 metric ledger implementation b246e31efb9b7809c8751f762136c5a445f296ae received scoped static approval; heading opportunity-versus-terminal endpoint semantics are being clarified in a narrow follow-up before integration",
         "Section 6 heading metric clarification committed as 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432: heading attempts are separate from joint endpoint success, which now requires terminal XY <=0.04m and heading error <=0.1rad; static re-review pending",
         "Phase 2 v2 warm-start consumer implementation started in isolated worktree from approved planner checklist; v2 data labels are not yet consumed by training",
-        "Phase 0 D0 calibration/qualification implementation started in an isolated worktree; current provisional protocol remains ineligible for promotion until calibrated gate evidence is frozen"
+        "Phase 0 D0 calibration/qualification implementation started in an isolated worktree; current provisional protocol remains ineligible for promotion until calibrated gate evidence is frozen",
+        "D0 calibration/protocol-gate first implementation slice committed as 9fff8d555 in isolated worktree; adds disjoint calibration split, repeated-seed baseline report, versioned calibrated protocol, paired useful-gain CI promotion gate, and fail-closed safety readiness; reviewer pass pending and safety metrics still unavailable",
+        "Phase 5 synthetic ONNX/export/profile harness integration started in a separate worktree from reviewed commits 12ad40fd5 and 445c80e9b; actual hardware/profile evidence remains gated on a matched five-checkpoint bundle"
       ]
     },
     {
@@ -62,7 +65,9 @@
         "Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432 submitted for scoped re-review",
         "Scoped static re-review approved Section 6 heading metric clarification 8cdcde5a1ee0dc8f7b2c76bd6b512d3786cb5432; joint endpoint now requires the documented XY and heading thresholds",
         "Phase 2 v2 warm-start consumer reviewer pass is pending implementation; required checks cover transcript replay/digest gates, exact support/candidate mapping, target semantics, and weights-only artifact provenance",
-        "Phase 0 scoped reviewer pass will check disjoint seeds, immutable report/protocol provenance, repeat versus cross-seed variance, CI-based promotion gating, and safety non-inferiority"
+        "Phase 0 scoped reviewer pass will check disjoint seeds, immutable report/protocol provenance, repeat versus cross-seed variance, CI-based promotion gating, and safety non-inferiority",
+        "D0 calibration/protocol-gate commit 9fff8d555 submitted for scoped static review; expected blocker checks include case coverage, repeat-versus-cross-seed variance, immutable protocol and CI/safety gating",
+        "Phase 5 harness integration reviewer pass pending; review scope will preserve synthetic-only limitations and verify exact checkpoint/config/source provenance contracts"
       ]
     }
   ]
