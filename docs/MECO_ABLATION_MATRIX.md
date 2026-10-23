@@ -49,10 +49,8 @@ intervals.
 
 The following plan conditions are not represented as completed experiments:
 
-- Explicit opponent feint behavior.
-- Sensor-delay ablation.
-- A separately defined low-confidence sensing profile.
-- Abrupt opponent policy change.
+- Phase 4 factors remain unsupported for categories outside the registered
+  reactive-pressure domain; see the explicit scenario constraints below.
 
 They remain listed as open in the matrix protocol. Do not infer that general
 noisy or shifted layouts cover these distinct conditions.
@@ -75,6 +73,11 @@ noisy or shifted layouts cover these distinct conditions.
   declared bounded route-qualified pool.
 - Check fault records for requested tick, actual trigger tick, `reached`,
   fallback count, and paired normal policy ID.
-- Keep unsupported feint, delay, low-confidence, and abrupt-change items open.
+- For `offense_vs_scripted_pressure` or `full_match_offense` with only registered
+  `level_4_reactive` categories, the runner also executes the four Phase 4
+  conditions from `docs/MECO_PHASE4_FACTORS.md`. Each treatment uses the exact
+  checkpoint bundle, source identity, categories, and seed list from the
+  matched no-factor condition; all five MECO tracks and D0/D1/D2 controls are
+  evaluated. Unsupported categories leave these conditions explicitly open.
 - Use the project qualification protocol for promotion; these diagnostic
   records alone do not establish a win or simulator qualification.
