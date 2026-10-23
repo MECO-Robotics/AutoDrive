@@ -21,7 +21,7 @@ import uuid
 import torch
 from torch import nn
 
-from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario, teacher_actions
+from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .curriculum_training import get_scenario, source_identity
 from .meco_candidates import (CANDIDATE_BOUNDARY, EXTRA_FEATURES,
     ROUTE_COST_POINTS_PER_SECOND,
@@ -579,7 +579,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     for control in ("D0", "D1", "D2"):
-        control_policy_id = {"D0": "D0_teacher_proxy",
+        control_policy_id = {"D0": "D0_production_deterministic",
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
@@ -588,7 +588,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     protocol = hashlib.sha256(json.dumps({"sources": sources, "scenario": scenario_id,
         "categories": categories, "episodes": episodes, "master_seed": master_seed,
         "dt": OBSERVATION_DT, "action_ticks": 12, "route_weight": route_weight,
-        "candidate_contract": "eight masked actions; verified static terminal SE(2) pose and current-snapshot AD* route"},
+        "D0": {"controller": "production deterministic offense", "decision_cadence": "native physics step (20 ms)",
+               "execution": "records actual env.last_actions at every physics step"},
+        "learned_and_D1_D2": {"decision_cadence": "12 physics steps per macro decision",
+            "candidate_contract": "configurable K=8/16/32; verified static terminal SE(2) pose and current-snapshot AD* route"}},
         sort_keys=True, allow_nan=False).encode()).hexdigest()
     eval_id = uuid.uuid4().hex
     output_path = Path(output) if output else None
@@ -623,18 +626,41 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 for policy in policies:
                     episode_id = _episode_id(f"eval-{eval_id}-{category}-{policy}",
                                              episode_index)
-                    env = make_curriculum_env(scenario_id, category, 1, device, seed)
+                    is_production_d0 = policy == "D0"
+                    env = make_curriculum_env(scenario_id, category, 1, device, seed,
+                                              production_d0=is_production_d0)
                     try:
-                        graph = build_legal_pose_graph(env, slot=3)
+                        if is_production_d0 and env.control_modes[3] != "deterministic":
+                            raise RuntimeError("production D0 evaluation did not receive the deterministic slot-3 controller")
+                        graph = (None if is_production_d0 else
+                                 build_legal_pose_graph(env, slot=3))
                         hidden = None
                         actions_count = [0] * 8
                         routes_seen = []
+                        executed_action_trace = []
+                        last_candidate_recall = None
                         elapsed = 0
                         while elapsed < env.horizon:
+                            if is_production_d0:
+                                # Native deterministic mode recomputes from
+                                # current state at every 20 ms simulator step.
+                                native_actions = torch.zeros((env.n, 6), device=env.device,
+                                                             dtype=torch.long)
+                                _, _, done, truncated, _ = env.step(
+                                    native_actions, capture_info=False)
+                                executed = int(env.last_actions[0, 3].item())
+                                executed_action_trace.append(executed)
+                                actions_count[executed] += 1
+                                elapsed += 1
+                                update_evaluation_status("running", len(records))
+                                if bool(done[0].item()) or bool(truncated[0].item()):
+                                    break
+                                continue
                             obs = env._last_obs
                             candidate_set = build_route_feasible_candidates(env, obs, graph,
                                 episode_id=episode_id, action_ticks=12,
                                 candidate_k=candidate_k)
+                            last_candidate_recall = candidate_set.candidate_recall
                             raster, globals_ = _snapshot_tensors(candidate_set.observation,
                                                                  device=env.device)
                             if policy in MECO_TRACKS:
@@ -649,12 +675,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 choice = int(action_tensor[0].item())
                                 hidden = scored["hidden"]
                                 action_source = "model"
-                            elif policy == "D0":
-                                teacher = int(teacher_actions(env, obs)[0, 3].item())
-                                candidates = [i for i, action_id in enumerate(candidate_set.action_indices)
-                                              if action_id == teacher and candidate_set.table.valid_mask[i]]
-                                choice = candidates[0] if candidates else candidate_set.table.candidate_ids.index(candidate_set.fallback_candidate_id)
-                                action_source = "d0_teacher"
                             else:
                                 logits = _d1_d2_scores(candidate_set, env, policy)
                                 choice = int(logits.argmax(-1).item())
@@ -675,14 +695,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         metrics = {name: value.detach().cpu().reshape(-1)[0].item()
                                    for name, value in outcomes.items()}
                         records.append({"scenario_id": scenario_id, "category": category,
-                            "seed": seed, "policy": policy, "action_source": action_source,
+                            "seed": seed, "policy": policy,
+                            "action_source": ("production_deterministic" if is_production_d0
+                                              else action_source),
+                            "controller_cadence": ("native_20ms_physics_step" if is_production_d0
+                                                    else "12_physics_step_macro"),
+                            "action_count_semantics": ("executed_per_physics_step" if is_production_d0
+                                                       else "selected_candidate_per_macro"),
                             "policy_id": policy_manifest[policy]["policy_id"],
                             "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
                             "protocol_id": protocol, "split": "validation",
                             "source_identity_sha256": hashlib.sha256(json.dumps(
                                 sources, sort_keys=True).encode()).hexdigest(),
-                            "actions": actions_count, "elapsed_ticks": elapsed,
-                            "metrics": metrics, "candidate_recall": candidate_set.candidate_recall,
+                            "actions": actions_count, "executed_action_trace": executed_action_trace,
+                            "elapsed_ticks": elapsed,
+                            "metrics": metrics, "candidate_recall": last_candidate_recall,
                             "route_trace": routes_seen,
                             "episode_id": episode_id})
                         update_evaluation_status("running", len(records))
@@ -700,9 +727,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "candidate_k": candidate_k,
             "seeds": [master_seed + i for i in range(episodes)],
             "tracks": list(selected), "controls": ["D0", "D1", "D2"] if include_controls else [],
-            "control_definitions": {"D0": "curriculum teacher proxy; not production AutoDrive controller",
-                "D1": "hand-weighted scorer over the shared feasible candidate table",
-                "D2": "D1 scorer with kinematic opponent endpoint prediction"},
+            "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
+                "D1": "hand-weighted scorer over the shared feasible candidate table; 12-step macro cadence",
+                "D2": "D1 scorer with kinematic opponent endpoint prediction; 12-step macro cadence"},
             "policy_manifest": policy_manifest,
         "paired": True, "split": "validation", "diagnostic": episodes < 100,
         "candidate_boundary": CANDIDATE_BOUNDARY,
