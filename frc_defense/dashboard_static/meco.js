@@ -10,11 +10,26 @@
     updated.dataset.stale = "false";
     const activeLanes = Object.entries(data.queue?.lanes || {})
       .filter(([, lane]) => lane.pid).map(([track, lane]) => `${track} pid ${lane.pid}`);
+    const queuePhase = data.queue?.phase;
+    const cycle = Number(data.queue?.cycle);
+    const isAdvancingCycle = ["training", "catching_up"].includes(queuePhase) &&
+      Number.isInteger(cycle) && cycle > 0;
+    const laneSummary = Object.entries(data.queue?.lanes || {}).map(([track, lane]) => {
+      const updates = Number(lane.completed_updates || 0);
+      const chunk = Number(lane.chunk_updates);
+      const target = isAdvancingCycle && Number.isFinite(chunk) && chunk > 0
+        ? cycle * chunk : null;
+      const status = lane.status === "complete" && target !== null && updates < target
+        ? "queued" : lane.status || "unknown";
+      return `${track} ${status} ${updates}${target === null ? "" : `/${target}`}`;
+    });
     const queueEval = data.queue?.evaluation || {};
     document.querySelector("#queue").textContent =
-      `Queue: ${data.queue?.state || "unavailable"} · ${data.queue?.phase || "no phase"} · cycle ${data.queue?.cycle ?? "—"}`+
+      `Queue: ${data.queue?.state || "unavailable"} · ${queuePhase || "no phase"} · cycle ${data.queue?.cycle ?? "—"}`+
       `${activeLanes.length ? ` · workers ${activeLanes.join(", ")}` : ""}`+
       ` · evaluator ${queueEval.status || "idle"}${queueEval.pid ? ` pid ${queueEval.pid}` : ""} (queue is separate from worker liveness)`;
+    document.querySelector("#lane-queue").textContent = laneSummary.length
+      ? `Tracks: ${laneSummary.join(" · ")}` : "No track queue data";
     document.querySelector("#policies").innerHTML = (data.policies || []).map(p => {
       const run = p.run || {}, evidence = p.latest_evidence || {};
       return `<tr><td><strong>${esc(p.policy_id)}</strong><small>${esc(p.kind)}</small></td>`+
