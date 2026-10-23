@@ -18,7 +18,8 @@ import torch
 from torch import nn
 
 from .meco_candidates import CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_MODEL_FEATURE_COUNT
-from .meco_tracks import MECO_TRACKS, make_meco_track
+from .meco_tracks import (MECO_TRACKS, ProductionMecoAdapter,
+                          make_meco_track)
 
 BATCH = 1
 NODES = 256
@@ -187,6 +188,14 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
                   "run_manifest": str(manifest_path),
                   "source_trust": "checkpoint source snapshot matches adjacent trainer run manifest; current checkout is not compared"}
     return ExportAdapter(track, model).eval(), provenance
+
+
+def load_production_adapter(track: str, checkpoint: Path) -> tuple[ProductionMecoAdapter, dict]:
+    """Load an identity-checked checkpoint for use at score_candidates seam."""
+    export_adapter, provenance = load_track_model(track, checkpoint)
+    return ProductionMecoAdapter(track, export_adapter.model,
+        checkpoint_sha256=provenance["sha256"],
+        protocol_id=provenance["protocol_id"]), provenance
 
 
 def operator_inventory(onnx_path: Path) -> dict:

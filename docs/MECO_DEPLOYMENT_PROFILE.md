@@ -85,3 +85,32 @@ No model is declared deployable from parameter count or this synthetic profile.
 Retain the generated JSON and ONNX files together with the source revision,
 device/driver details, simulator scenario, and seed when extending the work to
 end-to-end simulator or robot measurements.
+
+## Production inference request boundary (Phase 5A)
+
+`meco-inference-v1` in `frc_defense.meco_tracks` is the versioned request and
+response boundary for a checkpoint-backed scorer at the shared A/C candidate
+scoring seam. Callers construct the request from the current planner tensors
+with `make_meco_inference_request`; the request binds the track, checkpoint
+SHA-256, protocol ID, observation schema, snapshot ID and timestamp, expiry,
+canonical named input order and dimensions, and the stable candidate IDs and
+feasibility mask. A1 accepts six-channel raster input and returns dense `U/P`
+plus five behavior logits; A2/A3 return node-wise `U/P` plus behavior logits;
+C1/C2 return one utility and uncertainty value per candidate. All floating
+inputs and required outputs must be finite, graph/candidate dimensions and
+masks must align, and C uncertainty/A penalty must be nonnegative.
+
+The adapter rejects mismatched identity, schema, input order/shape/dtype,
+expired observations, malformed/nonfinite outputs, and scorer faults. The
+planner then uses zero neural utility with the existing feasibility mask and
+deterministic route/risk costs, preserving its first valid deterministic
+fallback. No model result can modify feasibility. Timestamps use the same
+monotonic clock domain as `time.monotonic()`; callers must provide a bounded
+expiry in that domain. Existing trainer calls remain direct model calls and
+are marked `trainer_direct`; they do not establish production qualification.
+
+This is an implemented interface and static validation boundary, not evidence
+of ONNX parity, Hailo operator support, accelerator execution, full planner
+latency, simulator fallback behavior, or robot actuation. The synthetic export
+and profile harness remains diagnostic and its zero tensors are never passed
+into this production request adapter.
