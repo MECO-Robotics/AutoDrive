@@ -189,6 +189,7 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                     body = json.dumps({"schema_version": 1, "policies": [],
                         "comparison_groups": [], "errors": [{"error": "MECO status unavailable"}]}).encode()
                     self.send_response(503)
+                self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/curriculum-status":
                 body = curriculum_status_payload(run_dir, curriculum_root=curriculum_root)
                 self.send_response(200)
