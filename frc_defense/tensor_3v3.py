@@ -1012,7 +1012,9 @@ class TensorThreeVsThreeEnv(
             goal_cell = (goal_ix * self.planner.ny + goal_iy).reshape(1, 1)
             static_clear = ~blocked.flatten(1).gather(
                 1, goal_cell.expand(blocked.shape[0], 1)).any()
-            known_ids = torch.stack(self._team_robot_ids)[self.team_ids][0, 3]
+            # Robot 3 is on the blue alliance; use its three same-team robot
+            # slots (including itself, which is marked invalid below).
+            known_ids = torch.stack(self._team_robot_ids)[self.team_ids[3]]
             known_xy = self.sim.pose[0, known_ids, :2]
             known_valid = known_ids != 3
             known_radius = .5 * torch.sqrt(
