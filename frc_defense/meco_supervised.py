@@ -46,6 +46,12 @@ LABEL_PROVENANCE = "curriculum_scenarios.teacher_actions; sensed observations on
 ACTION_TO_BEHAVIOR = {0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 6: 3, 5: 4}
 
 
+def _prepare_native_gpu_runtime(device):
+    if str(device).startswith("cuda"):
+        from .fuel_physics_hip import prepare_native_fuel_extension
+        prepare_native_fuel_extension(device)
+
+
 def _canonical_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                    allow_nan=False).encode()).hexdigest()
@@ -209,6 +215,7 @@ def collect_dataset(output: Path, *, scenario_id: str, category: str,
     from .curriculum_training import source_identity
     from .meco_track_training import (_atomic_json, _graph_inputs, _reset_episode,
         _run_macro_step)
+    _prepare_native_gpu_runtime(device)
     sources = source_identity()
     manifest = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
         "label_provenance": LABEL_PROVENANCE, "track_scope": "all",
@@ -390,6 +397,7 @@ def warm_start(track: str, dataset: Path, output: Path, *, qualification_protoco
     if not math.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError("learning rate must be positive and finite")
     from .curriculum_training import source_identity
+    _prepare_native_gpu_runtime(device)
     sources = source_identity()
     records, dataset_hash, protocol_id, protocol_sha256, dataset_manifest = _read_dataset(dataset,
         qualification_protocol=qualification_protocol, expected_sources=sources)
@@ -486,6 +494,7 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     from .meco_counterfactual import (DATASET_SCHEMA as cf_dataset_schema,
         TARGET_SCHEMA as cf_target_schema, CONTINUATION_POLICY,
         _artifact_identity_sha256, _device_identity,
+        _require_native_extension_manifest_identity,
         _verify_native_fuel_extension)
 
     path = Path(path).resolve()
@@ -497,6 +506,9 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     device_metadata = manifest.get("device")
     if not isinstance(device_metadata, dict) or not isinstance(device_metadata.get("device"), str):
         raise ValueError("counterfactual dataset has no frozen device identity")
+    if (device_metadata["device"].startswith("cuda") and
+            not isinstance(manifest.get("native_extension_identity"), dict)):
+        raise ValueError("legacy counterfactual v2 dataset lacks native HIP identity; recollect it")
     expected_device = _device_identity(device_metadata["device"])
     if type(manifest.get("record_count")) is not int or manifest["record_count"] < 1:
         raise ValueError("counterfactual manifest has an invalid record count")
@@ -543,13 +555,17 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             "simulator executor does not execute P-modified routes"):
         raise ValueError("counterfactual target semantics differ from v2 pairwise contract")
     native_extension_identity = manifest.get("native_extension_identity")
+    if manifest.get("native_extension_identity_schema") != 1:
+        raise ValueError("legacy counterfactual v2 dataset lacks native identity schema v1; recollect it")
     if (device_metadata["device"].startswith("cuda") and
-            not isinstance(native_extension_identity, dict)):
+            (not isinstance(native_extension_identity, dict) or
+             native_extension_identity.get("status") != "present")):
         raise ValueError("GPU counterfactual artifact has no native HIP binary identity")
     if manifest.get("artifact_identity_sha256") != _artifact_identity_sha256(
             manifest.get("source_identity_sha256"), native_extension_identity):
         raise ValueError("counterfactual artifact identity digest mismatch")
     try:
+        _require_native_extension_manifest_identity(manifest)
         _verify_native_fuel_extension(native_extension_identity)
     except RuntimeError as exc:
         raise ValueError(f"counterfactual native HIP artifact identity mismatch: {exc}") from exc
@@ -671,7 +687,10 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
                                  expected_sources: dict):
     """Read the separate executed-route P schema without weakening v2 checks."""
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
-        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY, _device_identity)
+        PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY,
+        _artifact_identity_sha256, _device_identity,
+        _require_native_extension_manifest_identity,
+        _verify_native_fuel_extension)
     path = Path(path).resolve()
     manifest_path = path.with_suffix(path.suffix + ".manifest.json")
     manifest_bytes = manifest_path.read_bytes()
@@ -681,6 +700,12 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
     device = manifest.get("device")
     if not isinstance(device, dict) or not isinstance(device.get("device"), str):
         raise ValueError("Plan A P dataset has no frozen device identity")
+    if (device["device"].startswith("cuda") and
+            (not isinstance(manifest.get("native_extension_identity"), dict) or
+             manifest["native_extension_identity"].get("status") != "present")):
+        raise ValueError("legacy Plan A P dataset lacks native HIP identity; recollect it")
+    if manifest.get("native_extension_identity_schema") != 1:
+        raise ValueError("legacy Plan A P dataset lacks native identity schema v1; recollect it")
     if (manifest.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
             manifest.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
             manifest.get("source_counterfactual_schema") != "meco-counterfactual-trajectory-v2" or
@@ -712,6 +737,15 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
             not isinstance(manifest.get("source_counterfactual_manifest_sha256"), str) or
             len(manifest["source_counterfactual_manifest_sha256"]) != 64):
         raise ValueError("Plan A P route dataset manifest identity or semantics mismatch")
+    native_identity = manifest.get("native_extension_identity")
+    if manifest.get("artifact_identity_sha256") != _artifact_identity_sha256(
+            manifest.get("source_identity_sha256"), native_identity):
+        raise ValueError("Plan A P route artifact identity digest mismatch")
+    try:
+        _require_native_extension_manifest_identity(manifest)
+        _verify_native_fuel_extension(native_identity)
+    except RuntimeError as exc:
+        raise ValueError(f"Plan A P route native HIP identity mismatch: {exc}") from exc
     payload = path.read_bytes()
     data_sha = hashlib.sha256(payload).hexdigest()
     if data_sha != manifest.get("dataset_sha256"):
@@ -932,6 +966,7 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
     from .meco_counterfactual import _device_identity
     from .meco_plan_a_policy import gather_pose_behavior_logits
 
+    _prepare_native_gpu_runtime(device)
     sources = source_identity()
     rows, data_hash, manifest_hash, _, protocol_id, protocol_sha, manifest = _read_counterfactual_dataset(
         dataset, qualification_protocol=qualification_protocol,
@@ -1085,6 +1120,7 @@ def warm_start_counterfactual_plan_a_v3(track: str, dataset: Path, output: Path,
     from .meco_counterfactual import _device_identity
     from .meco_plan_a_policy import gather_pose_behavior_logits
 
+    _prepare_native_gpu_runtime(device)
     sources = source_identity()
     rows, data_hash, manifest_hash, _, protocol_id, protocol_sha, manifest = _read_counterfactual_dataset(
         dataset, qualification_protocol=qualification_protocol,
@@ -1295,6 +1331,7 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
     from .meco_path_penalty import project_pose_penalty, integrate_frozen_routes
     from .meco_counterfactual import (PLAN_A_P_ROUTE_DATASET_SCHEMA,
         PLAN_A_P_ROUTE_TARGET_SCHEMA, CONTINUATION_POLICY, _device_identity)
+    _prepare_native_gpu_runtime(device)
     sources = source_identity()
     value_payload = validate_counterfactual_plan_a_value_artifact(track,
         Path(value_checkpoint), qualification_protocol=qualification_protocol,

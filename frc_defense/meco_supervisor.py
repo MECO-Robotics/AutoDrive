@@ -175,6 +175,9 @@ class MecoSupervisor:
                 or self.evaluation_output != expected_evaluation_root):
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
+        from .fuel_physics_hip import prepare_native_fuel_extension
+        for device in sorted(set(devices) | {evaluation_device or "cpu"}):
+            prepare_native_fuel_extension(device)
         self.warm_start_paths = {}
         self.warm_start_hashes = {}
         self.qualification_protocol_path = (Path(qualification_protocol).expanduser().resolve()

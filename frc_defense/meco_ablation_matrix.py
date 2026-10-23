@@ -296,6 +296,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(device)
     qualification_provenance = None
     if qualification_protocol is None:
         seed_split_assignments = None

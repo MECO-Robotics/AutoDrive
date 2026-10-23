@@ -895,6 +895,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         collect_only: bool = False, split: str = "validation"):
     """Run a full frozen split suite; diagnostics use `meco_track_training evaluate`."""
     from .meco_track_training import evaluate_meco
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(device)
     if split not in ("validation", "test"):
         raise ValueError("qualification runs support validation or final test only")
     if candidate_policy not in POLICIES or set(checkpoints) != {candidate_policy}:

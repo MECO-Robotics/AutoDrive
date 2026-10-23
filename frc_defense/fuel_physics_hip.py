@@ -1,16 +1,71 @@
 """Device-resident cached linked-list broadphase and fused fuel contacts."""
 from __future__ import annotations
 import math
+import hashlib
 import os
 import warnings
 from pathlib import Path
 import torch
 _EXT = None
 _ATTEMPTED = False
+_EXT_IDENTITY = None
+
+def _binary_identity(path):
+    path = Path(path).resolve()
+    before = path.stat()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    after = path.stat()
+    before_id = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    after_id = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if before_id != after_id:
+        raise RuntimeError("native HIP extension changed while its identity was read")
+    return {"module": "autodrive_fuel_physics_hip", "path": str(path),
+        "sha256": digest, "device": after.st_dev, "inode": after.st_ino,
+        "size": after.st_size, "mtime_ns": after.st_mtime_ns,
+        "status": "present"}
+
+def _verify_loaded_identity():
+    if _EXT is None or _EXT_IDENTITY is None:
+        return
+    current = _binary_identity(_EXT.__file__)
+    if current != _EXT_IDENTITY:
+        raise RuntimeError("loaded native HIP extension path or binary changed after load")
+
+def native_extension_identity():
+    """Describe the loaded or expected HIP binary without importing/building it."""
+    if _EXT is not None:
+        _verify_loaded_identity()
+        return dict(_EXT_IDENTITY)
+    root = os.environ.get("TORCH_EXTENSIONS_DIR")
+    path = (Path(root) / "autodrive_fuel_physics_hip" /
+            "autodrive_fuel_physics_hip.so") if root else (
+            Path(__file__).parent.parent / "outputs/fuel_physics/extensions/native" /
+            "autodrive_fuel_physics_hip.so")
+    try:
+        return _binary_identity(path)
+    except FileNotFoundError:
+        return {"module": "autodrive_fuel_physics_hip",
+            "path": str(path.resolve()), "status": "missing"}
+
+def prepare_native_fuel_extension(device):
+    """Explicitly build/load and pin HIP before capturing GPU run provenance."""
+    requested = torch.device(device)
+    if requested.type != "cuda":
+        return None
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        raise RuntimeError("CUDA-device MECO work requires an available HIP runtime")
+    if requested.index is not None and requested.index >= torch.cuda.device_count():
+        raise RuntimeError(f"requested HIP device is unavailable: {requested}")
+    extension = _extension()
+    if extension is None or _EXT_IDENTITY is None:
+        raise RuntimeError("native HIP fuel extension could not be prepared; refusing GPU fallback")
+    _verify_loaded_identity()
+    return dict(_EXT_IDENTITY)
 
 def _extension():
-    global _EXT, _ATTEMPTED
+    global _EXT, _ATTEMPTED, _EXT_IDENTITY
     if _ATTEMPTED:
+        _verify_loaded_identity()
         return _EXT
     _ATTEMPTED = True
     if not (torch.cuda.is_available() and torch.version.hip):
@@ -59,6 +114,7 @@ def _extension():
                 with_cuda=True, build_directory=str(build_dir) if build_dir else None,
                 extra_cflags=["-O3"], extra_cuda_cflags=flags,
                 verbose=False)
+            _EXT_IDENTITY = _binary_identity(_EXT.__file__)
         finally:
             cpp_extension.TORCH_LIB_PATH, cpp_extension.ROCM_HOME, cpp_extension.HIP_HOME = old
     except Exception as exc:

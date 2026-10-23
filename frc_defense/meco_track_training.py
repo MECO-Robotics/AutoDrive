@@ -827,6 +827,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     random.seed(config.seed)
     if config.device.startswith("cuda"):
         torch.cuda.set_device(torch.device(config.device))
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(config.device)
     run_id = run_id_override or uuid.uuid4().hex
     output = Path(config.output or ROOT / "checkpoints" / "meco-five" / config.track)
     output.mkdir(parents=True, exist_ok=True)
@@ -1388,6 +1390,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("inference_disable_tick must be a positive physics tick")
     from .meco_phase4 import validate_phase4_factor
     from .meco_device import normalized_device_info
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
     execution_device = normalized_device_info(device)
     if episode_seeds is not None and (len(episode_seeds) != episodes or

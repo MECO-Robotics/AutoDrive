@@ -34,7 +34,6 @@ from .training_curriculum import (SCENARIOS, CURRICULUM_VERSION, CategoryResult,
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_VERSION = 2
-NATIVE_FUEL_EXTENSION = 'autodrive_fuel_physics_hip'
 
 
 class D1HandWeightedPolicy:
@@ -332,32 +331,13 @@ def source_identity():
 def _native_fuel_extension_source_identity():
     """Identify the active/default HIP binary without importing or building it."""
     from . import fuel_physics_hip
+    return fuel_physics_hip.native_extension_identity()
 
-    extension = fuel_physics_hip._EXT
-    if extension is not None:
-        path = Path(extension.__file__).resolve()
-    else:
-        extension_root = os.environ.get('TORCH_EXTENSIONS_DIR')
-        if extension_root:
-            path = (Path(extension_root) / NATIVE_FUEL_EXTENSION /
-                    f'{NATIVE_FUEL_EXTENSION}.so').resolve()
-        else:
-            path = (ROOT / 'outputs/fuel_physics/extensions/native' /
-                    f'{NATIVE_FUEL_EXTENSION}.so').resolve()
-    result = {'module': NATIVE_FUEL_EXTENSION, 'path': str(path)}
-    try:
-        before = path.stat()
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        after = path.stat()
-    except FileNotFoundError:
-        result['status'] = 'missing'
-        return result
-    before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if before_identity != after_identity:
-        raise RuntimeError('native HIP extension changed while source identity was read')
-    result.update(status='present', sha256=digest, size=after.st_size)
-    return result
+
+def _prepare_native_gpu_runtime(device):
+    if str(device).startswith('cuda'):
+        from .fuel_physics_hip import prepare_native_fuel_extension
+        prepare_native_fuel_extension(device)
 
 
 def _hash(data):
@@ -667,6 +647,7 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
         raise ValueError('episodes and action_ticks must be positive integers')
     if split not in ('train','validation','test'): raise ValueError('invalid split')
     if isinstance(scenario_ids,str): scenario_ids=(scenario_ids,)
+    _prepare_native_gpu_runtime(device)
     sources=source_identity()
     checkpoint_hash=None
     if isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) == 'd1':
@@ -750,6 +731,7 @@ def _decode_result(data):
 def train_curriculum(config: TrainingConfig, *, resume=None):
     config.validate();torch.set_num_threads(1)
     if config.disable_miopen: torch.backends.cudnn.enabled=False
+    _prepare_native_gpu_runtime(config.device)
     sources=source_identity()
     output=Path(config.output);output.mkdir(parents=True,exist_ok=True)
     if resume is None and (output/'latest.pt').exists():
@@ -875,6 +857,7 @@ def export_teacher(scenario_id, category, *, episodes=1, master_seed=0, device='
     torch.set_num_threads(1)
     if type(episodes) is not int or episodes<1: raise ValueError('episodes must be positive')
     output=Path(output or ROOT/'evaluations/curriculum-offense/teacher.jsonl');output.parent.mkdir(parents=True,exist_ok=True)
+    _prepare_native_gpu_runtime(device)
     provenance=source_identity();count=0
     with tempfile.NamedTemporaryFile(mode='w',dir=output.parent,delete=False) as stream:
         temp=Path(stream.name)

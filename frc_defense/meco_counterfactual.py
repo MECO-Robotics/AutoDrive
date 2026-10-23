@@ -81,31 +81,18 @@ def _hash(value):
 
 
 def _native_fuel_extension_identity():
-    """Return the loaded native HIP binary identity without triggering a build."""
+    """Return the active/default native HIP identity without triggering a build."""
     from . import fuel_physics_hip
-    extension = fuel_physics_hip._EXT
-    if extension is None:
-        return None
-    path = Path(extension.__file__).resolve()
-    before = path.stat()
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    after = path.stat()
-    identity = {"module": "autodrive_fuel_physics_hip", "path": str(path),
-        "sha256": digest, "device": after.st_dev, "inode": after.st_ino,
-        "size": after.st_size, "mtime_ns": after.st_mtime_ns}
-    if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
-        raise RuntimeError("native HIP extension changed while its identity was read")
-    return identity
+    return fuel_physics_hip.native_extension_identity()
 
 
 def _verify_native_fuel_extension(identity):
     """Fail closed if the loaded extension or its on-disk path was replaced."""
-    if identity is None:
-        return
     current = _native_fuel_extension_identity()
-    if current is not None and current != identity:
+    if current != identity:
         raise RuntimeError("loaded native HIP extension identity changed")
+    if identity is None or identity.get("status") == "missing":
+        return
     path = Path(identity["path"])
     try:
         stat = path.stat()
@@ -121,6 +108,25 @@ def _verify_native_fuel_extension(identity):
 def _artifact_identity_sha256(sources_sha256, native_extension_identity):
     return _hash({"source_identity_sha256": sources_sha256,
         "native_extension_identity": native_extension_identity})
+
+
+def _require_native_extension_manifest_identity(manifest):
+    device = manifest.get("device", {}).get("device") if isinstance(
+        manifest.get("device"), dict) else None
+    identity = manifest.get("native_extension_identity")
+    if manifest.get("native_extension_identity_schema") != 1:
+        raise ValueError("legacy counterfactual artifact lacks native identity schema v1; recollect it")
+    if device and device.startswith("cuda") and (
+            not isinstance(identity, dict) or identity.get("status") != "present"):
+        raise ValueError("legacy counterfactual v2 artifact lacks required native HIP identity; recollect it")
+    if manifest.get("artifact_identity_sha256") != _artifact_identity_sha256(
+            manifest.get("source_identity_sha256"), identity):
+        raise ValueError("counterfactual native HIP artifact identity digest mismatch")
+    sources = manifest.get("sources")
+    if not isinstance(sources, dict) or sources.get("_native_fuel_extension") != identity:
+        raise ValueError("counterfactual source identity does not bind its native HIP binary")
+    _verify_native_fuel_extension(identity)
+    return identity
 
 
 def _tensor_digest(tensor):
@@ -544,6 +550,16 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
 
 def replay_counterfactual_branch(record, manifest):
     """Replay under the record seed while restoring the caller's RNG streams."""
+    device = manifest.get("device", {}).get("device") if isinstance(
+        manifest.get("device"), dict) else None
+    if device is None:
+        raise ValueError("counterfactual replay manifest has no device identity")
+    if device.startswith("cuda"):
+        from .fuel_physics_hip import prepare_native_fuel_extension
+        prepare_native_fuel_extension(device)
+    identity = _require_native_extension_manifest_identity(manifest)
+    if identity is not None:
+        _verify_native_fuel_extension(identity)
     seed = record.get("seed") if isinstance(record, dict) else None
     with _counterfactual_rng_scope(seed):
         return _replay_counterfactual_branch_seeded(record, manifest)
@@ -795,16 +811,26 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             not isinstance(gamma_per_macro, (int, float)) or
             not math.isfinite(gamma_per_macro) or not 0 < gamma_per_macro <= 1):
         raise ValueError("invalid counterfactual horizon, sample limits, or discount")
-    sources = source_identity()
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(device)
+    native_extension_identity = _native_fuel_extension_identity()
     device_metadata = _device_identity(device)
+    if (device_metadata["device"].startswith("cuda") and
+            native_extension_identity.get("status") != "present"):
+        raise RuntimeError("GPU counterfactual collection did not prepare the native HIP extension")
+    sources = source_identity()
+    if sources.get("_native_fuel_extension") != native_extension_identity:
+        raise RuntimeError("native HIP extension identity changed before collection snapshot")
     manifest = {"schema": DATASET_SCHEMA, "target_schema": TARGET_SCHEMA,
         "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
         "qualification_protocol_file": protocol_path.name,
         "split": "train", "scenario_id": scenario_id, "category": category,
         "seeds": list(seeds), "sources": sources,
         "source_identity_sha256": _hash(sources), "device": device_metadata,
-        "native_extension_identity": None,
-        "artifact_identity_sha256": None,
+        "native_extension_identity_schema": 1,
+        "native_extension_identity": native_extension_identity,
+        "artifact_identity_sha256": _artifact_identity_sha256(
+            _hash(sources), native_extension_identity),
         "state_digest_schema": STATE_DIGEST_SCHEMA,
         "prediction_mode": prediction_mode,
         "prediction_contract": prediction_contract(prediction_mode),
@@ -830,13 +856,6 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
             env = make_curriculum_env(scenario_id, category, 1, device, seed,
                                       horizon=horizon_ticks)
             try:
-                loaded_extension = _native_fuel_extension_identity()
-                if device_metadata["device"].startswith("cuda") and loaded_extension is None:
-                    raise RuntimeError("GPU counterfactual collection did not load the native HIP extension")
-                if manifest["native_extension_identity"] is None:
-                    manifest["native_extension_identity"] = loaded_extension
-                    manifest["artifact_identity_sha256"] = _artifact_identity_sha256(
-                        manifest["source_identity_sha256"], loaded_extension)
                 _verify_native_fuel_extension(manifest["native_extension_identity"])
                 graph = build_legal_pose_graph(env, slot=3)
                 episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
@@ -1055,9 +1074,15 @@ def collect_plan_a_p_routes_v1(output: Path, *, dataset: Path,
     """
     from .curriculum_training import source_identity
     from .meco_supervised import _read_counterfactual_dataset
+    dataset_path = Path(dataset).resolve()
+    base_manifest_path = dataset_path.with_suffix(dataset_path.suffix + ".manifest.json")
+    base_manifest_hint = json.loads(base_manifest_path.read_text())
+    base_device = base_manifest_hint.get("device", {}).get("device", "cpu")
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(base_device)
     sources = source_identity()
     base_rows, base_sha, base_manifest_sha, _, protocol_id, protocol_sha, base_manifest = (
-        _read_counterfactual_dataset(Path(dataset),
+        _read_counterfactual_dataset(dataset_path,
             qualification_protocol=Path(qualification_protocol),
             expected_sources=sources))
     if (not math.isfinite(float(p_cost_scale)) or p_cost_scale <= 0. or
