@@ -432,8 +432,6 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost)
-        decision["logits"] = _apply_candidate_hysteresis(
-            decision["logits"], candidate_set.table)
         decision, path_cost = _apply_plan_a_path_cost(track, decision,
             candidate_set, route_cost, risk_cost, graph.lookup, path_geometry,
             p_config, record=record_path_penalty)
@@ -444,6 +442,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost)
+        decision["logits"] = _apply_candidate_hysteresis(
+            decision["logits"], candidate_set.table)
         path_cost = None
     action, logprob, entropy = sample_candidate_action(decision["logits"],
                                                        deterministic=deterministic)
@@ -1166,7 +1166,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
 
 
 def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
-                  prediction_mode: str | None = None):
+                  prediction_mode: str | None = None,
+                  route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND):
     table = candidate_set.table
     cols = {name: i for i, name in enumerate(table.feature_names)}
     values = []
@@ -1185,7 +1186,9 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
                      - .04 * float(age or 0.))
         else:
             score = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}.get(name, 0.)
-        score -= (float(candidate_set.route_cost_points[index].item()) +
+        route_cost = (float(candidate_set.route_cost_points[index].item()) /
+                      ROUTE_COST_POINTS_PER_SECOND * route_cost_points_per_second)
+        score -= (route_cost +
                   float(candidate_set.risk_cost_points[index].item()))
         switch_col = cols.get("commitment_switch_cost")
         if switch_col is not None:
@@ -1628,7 +1631,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 logits = _d1_d2_scores(candidate_set, env,
                                     "D1" if use_d1_fallback else policy,
                                     prediction_mode=(effective_prediction_mode if use_d1_fallback
-                                        else effective_control_modes.get(policy, "current")))
+                                        else effective_control_modes.get(policy, "current")),
+                                    route_cost_points_per_second=route_weight)
                                 choice = int(logits.argmax(-1).item())
                                 _timing_sync(env)
                                 component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
