@@ -116,10 +116,11 @@ class MecoEpisodeMetricLedger:
             "heading_alignment_opportunity": bool(heading_alignment_opportunity),
             "terminal_heading_error_rad": (None if terminal_heading_error_rad is None
                                             else float(terminal_heading_error_rad)),
-            "heading_endpoint_within_0_1rad": (
-                None if (not heading_alignment_opportunity or
+            "heading_joint_endpoint_within_0_04m_and_0_1rad": (
+                None if (terminal_goal_distance_m is None or
                          terminal_heading_error_rad is None)
-                else terminal_heading_error_rad <= .1),
+                else terminal_goal_distance_m <= .04 and
+                     terminal_heading_error_rad <= .1),
         })
 
     def to_record(self) -> dict:
@@ -159,8 +160,8 @@ class MecoEpisodeMetricLedger:
                 if self.goal_tracking_available else None),
             "heading_alignment_attempt_macro_count": (
                 len(goal_heading_attempts) if self.goal_tracking_available else None),
-            "heading_endpoint_within_0_1rad_count": (
-                sum(row["heading_endpoint_within_0_1rad"] is True
+            "heading_joint_endpoint_within_0_04m_and_0_1rad_count": (
+                sum(row["heading_joint_endpoint_within_0_04m_and_0_1rad"] is True
                     for row in goal_heading_attempts)
                 if self.goal_tracking_available else None),
             "goal_attempts": self.goal_attempts if self.goal_tracking_available else None,
@@ -191,6 +192,8 @@ class MecoEpisodeMetricLedger:
                 "route_switches": "selected route IDs across macro decisions; not AD* replans",
                 "route_aba_proxy_count": "three consecutive selected IDs A-B-A; route-selection oscillation proxy, not replanning or feint detection",
                 "goal_attempts": "one selected endpoint record per macro execution; Plan A continuation macro steps are included",
+                "heading_alignment_attempts": "macro rows with a planned heading and any within-0.04m XY opportunity during that macro",
+                "heading_joint_endpoint": "success requires both terminal XY distance <= 0.04m and terminal heading error <= 0.1 rad; an earlier in-macro XY opportunity alone is not endpoint success",
                 "claims_excluded": ["interception", "feint detection", "AD* replans", "physics-substep contact totals", "exact curved path length"],
             },
         }

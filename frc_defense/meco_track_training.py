@@ -1684,6 +1684,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "distance": "XY chord proxy between outer-step pose samples; not exact curved path length",
                 "route_switches": "selected candidate route ID changes; not AD* replans",
                 "route_aba_proxy": "three consecutive selected route IDs A-B-A; not interception or feint detection",
+                "heading_alignment_attempts": "macro rows with a planned heading and any within-0.04m XY opportunity during that macro",
+                "heading_joint_endpoint": "success requires terminal XY distance <= 0.04m and terminal heading error <= 0.1 rad; an earlier in-macro XY opportunity alone is not endpoint success",
                 "unavailable_counts": ["abandoned fuel", "failed collection"],
             },
             "training_protocol_ids": ([common_training_protocol]
