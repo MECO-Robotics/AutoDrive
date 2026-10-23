@@ -192,17 +192,21 @@ def _comparison(report):
         return None
     scenario = report.get("scenario_id")
     categories, seeds, records = report.get("categories"), report.get("seeds"), report.get("records")
-    if (not isinstance(scenario, str) or not scenario
+    episodes = report.get("episodes_per_category")
+    if (type(episodes) is not int or episodes < 1
+            or not isinstance(scenario, str) or not scenario
             or not isinstance(categories, list) or not categories
             or any(not isinstance(category, str) or not category for category in categories)
             or len(set(categories)) != len(categories)
             or not isinstance(seeds, list) or not seeds
             or any(type(seed) is not int for seed in seeds)
-            or len(set(seeds)) != len(seeds) or not isinstance(records, list)):
+            or len(set(seeds)) != len(seeds) or episodes != len(seeds)
+            or report["diagnostic"] is not (episodes < 100)
+            or not isinstance(records, list)):
         return None
     try:
         canonical_source_hash = hashlib.sha256(json.dumps(
-            report["sources"], sort_keys=True).encode()).hexdigest()
+        report["sources"], sort_keys=True, allow_nan=False).encode()).hexdigest()
     except (TypeError, ValueError):
         return None
     if (not isinstance(report.get("source_identity_sha256"), str)

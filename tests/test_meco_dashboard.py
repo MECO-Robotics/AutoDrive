@@ -24,6 +24,7 @@ def _report():
         "schema_version": 1, "evaluation_id": "eval-001", "protocol_id": "proto-a",
         "sources": sources, "source_identity_sha256": source_hash,
         "scenario_id": "fuel-test", "categories": categories, "seeds": seeds,
+        "episodes_per_category": len(seeds),
         "tracks": list(TRACKS), "controls": list(CONTROLS), "paired": True,
         "split": "validation", "diagnostic": True,
         "policy_manifest": policy_manifest,
@@ -127,6 +128,21 @@ def test_record_metrics_and_provenance_are_required(tmp_path):
     (evaluation_root / "policy.json").write_text(json.dumps(bad_policy))
     (evaluation_root / "split.json").write_text(json.dumps(bad_split))
     (evaluation_root / "diagnostic.json").write_text(json.dumps(bad_diagnostic))
+    result = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.)
+    assert result["comparison_groups"] == []
+
+
+def test_episode_count_and_diagnostic_flag_must_agree(tmp_path):
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    falsely_final = _report()
+    falsely_final["diagnostic"] = False
+    falsely_final["episodes_per_category"] = 100
+    (evaluation_root / "false-final.json").write_text(json.dumps(falsely_final))
+    wrong_count = _report()
+    wrong_count["episodes_per_category"] = 3
+    (evaluation_root / "wrong-count.json").write_text(json.dumps(wrong_count))
     result = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.)
     assert result["comparison_groups"] == []
 
