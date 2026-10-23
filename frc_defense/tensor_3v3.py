@@ -696,6 +696,20 @@ class TensorThreeVsThreeEnv(
             if bool((active & (action[:, 3] == planner_goal_override_action)).any()):
                 self._last_planner_collection_target_valid = bool(
                     collection_target_valid[0].item())
+            selected_target_delta = collection_target_xy - self.sim.pose[:, 3, :2]
+            selected_target_distance = selected_target_delta.norm(dim=-1, keepdim=True)
+            current_forward = torch.stack((self.sim.pose[:, 3, 2].cos(),
+                                           self.sim.pose[:, 3, 2].sin()), dim=-1)
+            selected_target_delta = torch.where(selected_target_distance > 1e-8,
+                selected_target_delta, current_forward)
+            fuel_delta = fuel_delta.clone()
+            fuel_delta[:, 3] = torch.where(collection_target_valid[:, None],
+                selected_target_delta, fuel_delta[:, 3])
+            selected_target_pickup_active = torch.zeros_like(action, dtype=torch.bool)
+            selected_target_pickup_active[:, 3] = collection_target_valid
+        else:
+            selected_target_delta = None
+            selected_target_pickup_active = torch.zeros_like(action, dtype=torch.bool)
         planner_goal_override_mask = torch.zeros_like(action, dtype=torch.bool)
         planner_goal_heading_mask = torch.zeros_like(action, dtype=torch.bool)
         planner_goal_heading = None
@@ -1066,7 +1080,13 @@ class TensorThreeVsThreeEnv(
                                 ~self._defense_role_mask)[None]
         pickup_active=(deterministic_offense &
                        ((action<4)|((action==6)&~carrying)))
-        pickup_fuel_delta=(self._last_audit_fuel_targets-
+        pickup_fuel_targets = self._last_audit_fuel_targets
+        if planner_goal_override_target_track is not None:
+            pickup_fuel_targets = pickup_fuel_targets.clone()
+            pickup_fuel_targets[:, 3] = torch.where(
+                collection_target_valid[:, None], collection_target_xy,
+                pickup_fuel_targets[:, 3])
+        pickup_fuel_delta=(pickup_fuel_targets-
                            self.sim.pose[:,:,:2])
         pickup_fuel_distance=pickup_fuel_delta.norm(dim=-1)
         pickup_direction=fuel_delta
@@ -1096,6 +1116,11 @@ class TensorThreeVsThreeEnv(
                 final_intake_approach[...,None],fuel_delta,target_based_tangent)
             pickup_direction=torch.where(target_based_picker[...,None],
                                          target_based_tangent,pickup_direction)
+        if planner_goal_override_target_track is not None:
+            pickup_direction = pickup_direction.clone()
+            pickup_direction[:, 3] = torch.where(
+                collection_target_valid[:, None], selected_target_delta,
+                pickup_direction[:, 3])
         # While tracing a cluster, fuel_delta can point toward its inward
         # normal; keep following the route tangent until entering final pickup.
         pickup_bearing=torch.atan2(pickup_direction[...,1],pickup_direction[...,0])
@@ -1103,7 +1128,8 @@ class TensorThreeVsThreeEnv(
                                  torch.cos(pickup_bearing-self.sim.pose[:,:,2]))
         pickup_omega=swerve_heading_rate(pickup_error,self.sim.omega_limit,self.sim.alpha,
                                          self.sim.velocity[:,:,2],self.dt)
-        omega=torch.where(pickup_active,pickup_omega,omega)
+        pickup_heading_active = pickup_active | selected_target_pickup_active
+        omega=torch.where(pickup_heading_active,pickup_omega,omega)
         trench_alignment=self.planner.last_trench_alignment.reshape(self.n,6)
         trench_heading=self.planner.last_heading.reshape(self.n,6)
         trench_error=torch.atan2(torch.sin(trench_heading-self.sim.pose[:,:,2]),
