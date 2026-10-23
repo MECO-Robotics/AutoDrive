@@ -32,10 +32,17 @@ def test_d1_ranks_nearest_sensor_candidate_and_masks_actions():
 
 
 def test_d1_uses_safe_hold_when_no_candidate_or_other_action_is_legal():
-    env, observation = _sensor_fixture([0, 0, 0, 0, 0, 0, 0, 0])
+    env, observation = _sensor_fixture([0, 0, 0, 0, 0, 0, 0, 1])
     action, trace = D1HandWeightedPolicy().choose(env, observation)
     assert action.tolist() == [7]
     assert trace['action_scores'][0, :7].isneginf().all()
+
+
+def test_d1_rejects_a_mask_with_no_legal_fallback():
+    env, observation = _sensor_fixture([0, 0, 0, 0, 0, 0, 0, 0])
+    import pytest
+    with pytest.raises(RuntimeError, match='at least one legal'):
+        D1HandWeightedPolicy().choose(env, observation)
 
 
 def test_d1_identity_is_stable_and_versioned_by_weights():

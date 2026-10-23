@@ -23,6 +23,8 @@ from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
 from .tensor_training_runtime import ActorCritic, _gae_advantages
 from .curriculum_policy import ARCHITECTURES, PerceptionActorCritic, make_policy
 from .architecture_inputs import PerceptionInputs
+from .learning_contract import CandidateTable, ScorerSnapshot
+from .learning_inputs import build_observation_snapshot
 from .discrete_sac import (DiscreteSAC, ScenarioReplayBuffer, make_sac_optimizers,
                            sac_update)
 from .training_curriculum import (SCENARIOS, CURRICULUM_VERSION, CategoryResult, EvaluationResult,
@@ -73,7 +75,11 @@ class D1HandWeightedPolicy:
         # argmax is stable and resolves exact ties to the lower action id.
         action = scores.argmax(-1)
         best = scores.gather(1, action[:, None]).squeeze(1)
-        action = torch.where(torch.isfinite(best), action, torch.full_like(action, 7))
+        fallback = torch.where(mask[:, 7], torch.full_like(action, 7),
+                               mask.to(torch.int64).argmax(-1))
+        if not bool(mask.any(-1).all()):
+            raise RuntimeError('D1 requires at least one legal curriculum action')
+        action = torch.where(torch.isfinite(best), action, fallback)
         trace = {'candidate_scores': target_scores, 'action_scores': scores,
                  'candidate_indices': indices[:, slot], 'candidate_valid': candidate_valid,
                  'candidate_distance': distances, 'candidate_nearby_tracks': nearby,
@@ -86,6 +92,41 @@ def _d1_identity():
                   'weights': D1HandWeightedPolicy.weights,
                   'candidate_source': 'four-nearest-valid-sensor-tracks',
                   'choices': 'masked-eight-action-interface-v1'})
+
+
+def _d1_artifacts(env, observation, trace, *, scenario, category, seed):
+    """Serialize D1's exact action ordering and score snapshot for audit."""
+    tick = int(env.steps[0].item())
+    episode_id = f'{scenario}:{category}:seed-{seed}'
+    observation_snapshot = build_observation_snapshot(
+        env, episode_id=episode_id, sequence=tick)
+    snapshot_id = observation_snapshot.snapshot_id
+    candidate_ids = tuple(f'action:{index}' for index in range(8))
+    mask = tuple(bool(value) for value in observation[0, -8:].tolist())
+    distances = trace['candidate_distance'][0].detach().cpu().tolist()
+    nearby = trace['candidate_nearby_tracks'][0].detach().cpu().tolist()
+    confidence = trace['candidate_confidence'][0].detach().cpu().tolist()
+    age = trace['candidate_age'][0].detach().cpu().tolist()
+    features = []
+    for action in range(8):
+        values = [float(index == action) for index in range(8)]
+        values.extend((float(distances[action]) if action < 4 else 0.,
+                       float(nearby[action]) if action < 4 else 0.,
+                       float(confidence[action]) if action < 4 else 0.,
+                       float(age[action]) if action < 4 else 0.,
+                       float(action < 4)))
+        features.append(tuple(values))
+    table = CandidateTable(snapshot_id, candidate_ids, tuple(features), mask,
+                           route_costs=(None,) * 8)
+    raw_scores = trace['action_scores'][0].detach().cpu().tolist()
+    scores = tuple(float(score) if math.isfinite(float(score)) else 0.
+                   for score in raw_scores)
+    timestamp = observation_snapshot.timestamp
+    scored = ScorerSnapshot(_d1_identity(), snapshot_id, candidate_ids,
+                            scores, timestamp)
+    if not scored.matches(observation_snapshot, table, now=timestamp, max_age=0.):
+        raise RuntimeError('D1 scorer snapshot does not match its candidate table')
+    return {'candidate_table': asdict(table), 'scorer_snapshot': asdict(scored)}
 
 
 @dataclass(frozen=True)
@@ -424,6 +465,8 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *, dem
                     'candidate_nearby_tracks':trace['candidate_nearby_tracks'][0].tolist(),
                     'candidate_confidence':trace['candidate_confidence'][0].tolist(),
                     'candidate_age':trace['candidate_age'][0].tolist()}
+                frame.update(_d1_artifacts(env, obs, trace, scenario=name,
+                                           category=category, seed=seed))
             if demonstration: frame['observation']=obs[0].tolist()
             frames.append(frame)
         actions=torch.full((1,6),7,device=env.device,dtype=torch.long); actions[:,3]=action

@@ -94,6 +94,12 @@ Inspect the versioned stages and outcome gates:
 frc-defense curriculum --help
 ```
 
+The experimental MECO track adds a diagnostic, hand-weighted D1 control over the curriculum's existing sensed targets and masked actions. It does not add arbitrary goals or planner route costs. See [docs/LEARNING_TRACKS.md](docs/LEARNING_TRACKS.md) for the staged comparison and current limits. Run a paired-seed D1 diagnostic with:
+
+```sh
+.venv/bin/python -m frc_defense.curriculum_training evaluate --policy d1 --scenario pickup_simple --category single --episodes 1 --seed 20261023 --horizon 120 --action-ticks 12 --device cpu --output evaluations/curriculum-offense/d1-smoke.json
+```
+
 Run a short CPU infrastructure check, then resume its optimizer and curriculum state:
 
 ```sh
