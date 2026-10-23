@@ -607,9 +607,13 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
                 any(type(i) is not int or i < 0 for i in eligible_indices) or
                 eligible_indices != sorted(set(eligible_indices)) or
                 len(eligible_indices) < MIN_ELIGIBLE_BRANCHES_PER_SEED or
+                type(summary.get("episode_decision_count")) is not int or
+                summary.get("episode_decision_count") < len(eligible_indices) or
                 summary.get("coverage_through_decision_index") != eligible_indices[-1] or
-                summary.get("covered_prefix_count") != eligible_indices[-1] + 1 or
-                summary.get("skipped_count") != summary.get("covered_prefix_count", 0) - len(eligible_indices) or
+                summary.get("covered_prefix_count") != summary.get("episode_decision_count") or
+                any(i >= summary.get("episode_decision_count", 0) for i in eligible_indices) or
+                summary.get("skipped_count") != summary.get("episode_decision_count", 0) - len(eligible_indices) or
+                summary.get("eligibility_digest") is None or
                 not isinstance(reason_counts, dict) or
                 any(key not in ("fewer_than_two_plan_c_descriptors",
                                 "fewer_than_two_plan_a_descriptors") or
@@ -722,6 +726,29 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
            seed_summaries[str(seed)].get("eligible_decision_indices")
            for seed, seed_rows in by_seed.items()):
         raise ValueError("counterfactual branch indices differ from declared eligible points")
+    for seed, seed_rows in by_seed.items():
+        summary = seed_summaries[str(seed)]
+        terminal_rows = [row for row in seed_rows if row.get("decision_index") ==
+                         summary["coverage_through_decision_index"]]
+        episode = terminal_rows[0].get("episode_transcript") if len(terminal_rows) == 1 else None
+        eligibility = ([item.get("branch_eligibility") for item in episode]
+                       if isinstance(episode, list) and all(isinstance(item, dict) for item in episode)
+                       else None)
+        if (eligibility is None or len(episode) != summary["episode_decision_count"] or
+                any(not isinstance(item, dict) or
+                    not isinstance(item.get("skip_reasons"), list) or
+                    any(reason not in ("fewer_than_two_plan_c_descriptors",
+                                       "fewer_than_two_plan_a_descriptors")
+                        for reason in item.get("skip_reasons", [])) or
+                    item.get("eligible") is not (not item.get("skip_reasons")) or
+                    item.get("metadata_sha256") != _canonical_hash({
+                        k: v for k, v in item.items() if k != "metadata_sha256"})
+                    for item in eligibility) or
+                [i for i, item in enumerate(eligibility) if item["eligible"]] !=
+                    summary["eligible_decision_indices"] or
+                _canonical_hash(eligibility) != summary["eligibility_digest"] or
+                terminal_rows[0].get("episode_transcript_sha256") != _canonical_hash(episode)):
+            raise ValueError("counterfactual final eligible row lacks full episode eligibility evidence")
     if set(by_seed) != set(seeds):
         raise ValueError("counterfactual dataset omitted one or more declared train seeds")
     return rows, data_sha, manifest_sha, protocol, protocol_id, protocol_sha, manifest
@@ -752,7 +779,7 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
         raise ValueError("legacy Plan A P dataset lacks native identity schema v1; recollect it")
     if (manifest.get("schema") != PLAN_A_P_ROUTE_DATASET_SCHEMA or
             manifest.get("target_schema") != PLAN_A_P_ROUTE_TARGET_SCHEMA or
-            manifest.get("source_counterfactual_schema") != "meco-counterfactual-trajectory-v2" or
+            manifest.get("source_counterfactual_schema") != "meco-counterfactual-trajectory-v3" or
             manifest.get("p_intervention_generator") != "seeded_smooth_positive_xy_maps_v1" or
             manifest.get("plan_a_p_oracle_target") !=
                 "exact_simulator_gross_horizon_return_for_executed_native_adstar_route" or
@@ -1646,8 +1673,8 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
             payload.get("schema_version") != 2 or
             payload.get("artifact_kind") != "weights_only_counterfactual_pairwise_v2" or
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
-            payload.get("dataset_schema") != "meco-counterfactual-trajectory-v2" or
-            payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
+            payload.get("dataset_schema") != "meco-counterfactual-trajectory-v3" or
+            payload.get("target_schema") != "meco-matched-prefix-gross-return-v3" or
             payload.get("records_have_prefix_replay_parity") is not True or
             payload.get("source_runtime_device_bound") is not True or
             payload.get("state_digest_schema") != "meco-full-environment-state-v2" or
@@ -1740,8 +1767,8 @@ def validate_counterfactual_plan_a_value_artifact(track: str, checkpoint: Path, 
             payload.get("schema_version") != 3 or
             payload.get("artifact_kind") != "weights_only_counterfactual_plan_a_goal_value_v3" or
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
-            payload.get("dataset_schema") != "meco-counterfactual-trajectory-v2" or
-            payload.get("target_schema") != "meco-matched-prefix-gross-return-v2" or
+            payload.get("dataset_schema") != "meco-counterfactual-trajectory-v3" or
+            payload.get("target_schema") != "meco-matched-prefix-gross-return-v3" or
             payload.get("label_provenance") != PLAN_A_VALUE_LABEL_PROVENANCE or
             payload.get("target_semantics") !=
                 "sampled_feasible_node_behavior_gross_horizon_return_regression" or
