@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import operator
 
 import torch
 
@@ -67,6 +68,23 @@ def _gated_angular_track_association(track_pos,track_mask,track_age,
 
 class TensorThreeVsThreeObservationMixin:
     """Methods that maintain sensor tracks and build policy observations."""
+
+    def _perceived_fuel(self, focal):
+        """Return one robot's tracked FUEL position, velocity, and validity.
+
+        These are views into the bounded native perception buffers. In
+        particular, this accessor does not consult simulator piece positions,
+        active flags, or ownership, so consumers retain anonymous sensor
+        semantics.
+        """
+        try:
+            focal = operator.index(focal)
+        except TypeError as exc:
+            raise TypeError("focal robot index must be an integer") from exc
+        if focal < 0 or focal >= NUM_ROBOTS:
+            raise IndexError(f"focal robot index must be in [0, {NUM_ROBOTS})")
+        return (self.track_pos[:, focal], self.track_vel[:, focal],
+                self.track_mask[:, focal])
 
     @property
     def num_agents(self):
