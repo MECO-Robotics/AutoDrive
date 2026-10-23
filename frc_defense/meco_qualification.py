@@ -147,18 +147,23 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
         if not isinstance(rows, list) or len(rows) != len(expected_rows):
             raise ValueError(f"D0 calibration raw coverage is incomplete for {scenario}")
         found = set()
+        throughput_by_stratum_seed = {}
         for row in rows:
             key = (row.get("repetition"), row.get("category"), row.get("layout_id"),
                 row.get("defender_family"), row.get("start_condition"),
                 row.get("sensor_profile"), row.get("seed"))
-            metric = row.get("metrics", {}).get("useful_throughput")
+            metrics = row.get("metrics")
+            metric = metrics.get("useful_throughput") if isinstance(metrics, dict) else None
             if (key not in expected_rows or key in found or row.get("policy") != REFERENCE_POLICY
                     or row.get("split") != "calibration"
                     or row.get("policy_id") != "D0_production_deterministic"
                     or row.get("checkpoint_sha256") is not None
+                    or type(row.get("repetition")) is not int
                     or type(metric) not in (int, float) or not math.isfinite(metric) or metric < 0):
                 raise ValueError(f"D0 calibration raw row is invalid for {scenario}")
             found.add(key)
+            stratum = key[1:6]
+            throughput_by_stratum_seed.setdefault(stratum, {}).setdefault(key[6], []).append(float(metric))
         if found != expected_rows:
             raise ValueError(f"D0 calibration seed/repetition coverage is incomplete for {scenario}")
         current_source = report.get("source_identity_sha256")
@@ -189,6 +194,33 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
                         or not math.isfinite(metrics[name]) or not 0 <= metrics[name] <= 1
                         for name in SAFETY_METRIC_NAMES)):
                 raise ValueError(f"D0 calibration safety metric coverage is invalid for {scenario}")
+        # The uncertainty summaries drive frozen promotion margins. Recompute
+        # them from the exact raw rows and reject missing, extra, or edited
+        # summary strata before any margin derivation can consume them.
+        summaries = report.get("summary")
+        expected_summary = {}
+        for case in cases:
+            stratum = (case.category, case.layout_id, case.defender_family,
+                case.start_condition, case.sensor_profile)
+            by_seed = throughput_by_stratum_seed.get(stratum, {})
+            if set(by_seed) != set(case.seeds) or any(
+                    len(values) != repetitions for values in by_seed.values()):
+                raise ValueError(f"D0 calibration summary source rows are incomplete for {scenario}")
+            seed_means = [sum(by_seed[seed]) / repetitions for seed in case.seeds]
+            repeat_variances = [_variance(by_seed[seed]) for seed in case.seeds]
+            expected_summary["/".join(stratum)] = {
+                "category": case.category, "layout_id": case.layout_id,
+                "defender_family": case.defender_family,
+                "start_condition": case.start_condition,
+                "sensor_profile": case.sensor_profile,
+                "seed_count": len(case.seeds), "repetition_count": repetitions,
+                "mean_useful_throughput": sum(seed_means) / len(seed_means),
+                "between_seed_variance": _variance(seed_means),
+                "mean_within_seed_repeat_variance": sum(repeat_variances) / len(repeat_variances),
+                "seed_digest": hashlib.sha256(json.dumps(list(case.seeds),
+                    separators=(",", ":")).encode()).hexdigest()}
+        if not isinstance(summaries, dict) or summaries != expected_summary:
+            raise ValueError(f"D0 calibration summaries do not exactly match raw records for {scenario}")
         if source_hash is None:
             source_hash = current_source
         elif source_hash != current_source:
