@@ -280,9 +280,10 @@ until the independent P-v3 oracle supplies them. Fresh deterministic
 recollection must byte-match the dataset before fitting; the dedicated
 weights-only consumer rejects CPU and nonmatching track/device/P contracts.
 
-Planner is complete. This implementation pass has static compilation and diff
-checks only; scoped review and runtime evidence remain pending. No tests or
-simulator runs were performed.
+Planner and implementation are complete; scoped static review approved commit
+`f91d76237`. Static compilation, diff and JSON checks only; runtime collection,
+fitting and simulator evidence remain pending. No tests or simulator runs were
+performed.
 
 #### Joint Plan A U+B+P warm start v1
 
