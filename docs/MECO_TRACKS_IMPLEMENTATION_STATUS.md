@@ -424,15 +424,30 @@ error uses both between-seed and within-seed repeat variance. The desired gain
 therefore remains explicit and is not inferred from noise. The frozen v2
 protocol records calibration report hashes and the complete gain derivation;
 promotion report evidence binds those fields. Existing frozen v1 construction
-is unchanged. Calibration episode sharding is not supported by the current
-collector API; report destinations already use exclusive creation, and bundle
-intake rejects overlapping seed pools.
+is unchanged. Deterministic, resumable episode sharding and strict merge into the existing
+v2 report shape are now implemented in a separate scoped pass. Shards bind exact
+repeat/case/seed work units, source/runtime/configuration and case-table identity;
+merge rejects missing/duplicate/unexpected work, provenance or safety drift,
+recomputes summaries from raw rows, and keeps protocol intake as the sole
+acceptance gate. GPU runtime, merged-report intake and protocol creation remain
+unvalidated.
 
 This implementer pass received static review only. No calibration, simulation,
 training, test suite, or dashboard evaluation was run, so GPU runtime behavior,
 calibration output acceptance, and the end-to-end report/protocol chain remain
 unproven. Static compilation and diff checks are the only planned checks for
 this worktree.
+
+## D0 calibration sharding tranche v1
+
+Planner and implementation are complete in isolated worktree
+`codex/meco-d0-calibration-shards` at commits `8d18502c5` and `7c1ba15fa`. The
+source identity hash was corrected to match the evaluator's existing
+serialization. Scoped feature-branch review approved `7c1ba15fa`; integrated
+review remains pending. Shards are immutable, resumable, deterministically
+assigned and merge only after exact tuple coverage and normalized runtime
+checks. No calibration, GPU collection, simulator evaluation, or protocol
+creation was run. Runtime evidence remains pending.
 
 ## GPU-only defaults and snapshot capture follow-up (2026-10-23)
 
