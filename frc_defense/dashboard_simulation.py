@@ -26,6 +26,14 @@ _ACTIVE_SIMULATION_SLOTS: dict[int, bool] = {}
 _SIMULATION_CAMPAIGN_PAUSED = False
 
 
+def _dashboard_gpu_process_env() -> dict[str, str]:
+    """Keep short-lived ROCm workers from creating oversized CPU thread pools."""
+    env = os.environ.copy()
+    env.setdefault("OMP_NUM_THREADS", "4")
+    env.setdefault("MKL_NUM_THREADS", "4")
+    return env
+
+
 def _dashboard_gpu_count() -> int:
     """Return the number of GPUs visible to the project runtime."""
     try:
@@ -39,8 +47,10 @@ def _dashboard_gpu_count() -> int:
         return 0
     try:
         result=subprocess.run([str(interpreter),"-c",
-            "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)"],
-            cwd=Path.cwd(),capture_output=True,text=True,timeout=30)
+            "import os,sys,torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0); "
+            "sys.stdout.flush(); os._exit(0)"],
+            cwd=Path.cwd(),capture_output=True,text=True,timeout=30,
+            env=_dashboard_gpu_process_env())
         if result.returncode == 0:
             return max(0,int(result.stdout.strip().splitlines()[-1]))
     except (OSError,ValueError,subprocess.SubprocessError):
@@ -267,8 +277,10 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         if not interpreter.is_file():
             raise RuntimeError("GPU scenario generation requires the project GPU virtual environment")
         gpu_probe=subprocess.run([str(interpreter),"-c",
-            "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)"],
-            cwd=Path.cwd(),capture_output=True,text=True,timeout=30)
+            "import os,sys,torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0); "
+            "sys.stdout.flush(); os._exit(0)"],
+            cwd=Path.cwd(),capture_output=True,text=True,timeout=30,
+            env=_dashboard_gpu_process_env())
         try:
             gpu_count=int(gpu_probe.stdout.strip().splitlines()[-1])
         except (ValueError,IndexError):
@@ -279,7 +291,7 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
         selected_index=int(selected_device.split(":")[1]) if ":" in selected_device else 0
         if selected_index >= gpu_count:
             raise RuntimeError(f"Requested simulation device {selected_device} is unavailable")
-        source=("import json,sys; from pathlib import Path; from frc_defense.dashboard import generate_zone_playback; "
+        source=("import json,os,sys; from pathlib import Path; from frc_defense.dashboard import generate_zone_playback; "
                 "print(json.dumps(generate_zone_playback(Path(sys.argv[1]),sys.argv[2],sys.argv[3],"
                 "sys.argv[4],int(sys.argv[5]),task=sys.argv[6],control_modes=json.loads(sys.argv[7]),"
                 "robot_types=json.loads(sys.argv[8]),progress_path=Path(sys.argv[9]) if sys.argv[9] else None,"
@@ -287,14 +299,15 @@ def run_zone_playback(run_dir: Path, run_name: str, start_zone: str,
                 "teammate_coordination_enabled=sys.argv[12]=='true',"
                 "sweeping_enabled=sys.argv[13]=='true',behavior_mode=sys.argv[14],"
                 "random_gamepiece_placement=sys.argv[15]=='true',device=sys.argv[16]),"
-                "separators=(',',':')))")
+                "separators=(',',':'))); sys.stdout.flush(); os._exit(0)")
         result=subprocess.run([str(interpreter),"-c",source,str(run_dir.resolve()),run_name,
             start_zone,goal_zone,str(seed),task or "",json.dumps(control_modes),
             json.dumps(robot_types or ["dumper"]*6),str(progress_path or ""),
             str(hopper_capacity),str(scoring_bps),str(bool(teammate_coordination_enabled)).lower(),
             str(bool(sweeping_enabled)).lower(),behavior_mode,
             str(bool(random_gamepiece_placement)).lower(),selected_device],
-            cwd=Path.cwd(),capture_output=True,text=True,timeout=1800)
+            cwd=Path.cwd(),capture_output=True,text=True,timeout=1800,
+            env=_dashboard_gpu_process_env())
         if result.returncode:
             raise RuntimeError(result.stderr.strip()[-1200:] or "zone rollout process failed")
         return json.loads(result.stdout)
