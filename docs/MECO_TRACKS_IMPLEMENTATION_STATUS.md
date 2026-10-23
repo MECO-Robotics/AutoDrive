@@ -465,7 +465,11 @@ digest and include sensed-target descriptor IDs in the canonical candidate
 ordering. The single pending slot replaces an older queued request; the worker
 rejects expired requests and publishes only complete validated responses.
 Action-boundary consumers verify all echoed identity and digest fields and
-reject late or superseded responses. Decisions expose request provenance and
+reject late or superseded responses. A and C paths compute their deterministic
+fallback while inference runs, then poll once without waiting before action
+commit; an unavailable result is discarded for that snapshot. The worker uses
+`torch.inference_mode()`, and sequence acceptance plus queue replacement are
+serialized under one broker lock. Decisions expose request provenance and
 dropped, late, and inference-fault counters. Existing feasibility, route/risk,
 deterministic fallback, and Plan A P path-cost behavior are preserved; there is
 no CPU model fallback.

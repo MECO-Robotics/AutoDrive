@@ -191,8 +191,12 @@ class ProductionMecoAdapter:
     def inference_counters(self):
         return self._broker.counters()
 
-    def infer(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
-        return self._broker.submit_and_wait(request, inputs, now=now)
+    def submit_inference(self, request: MecoInferenceRequest,
+                         inputs: Mapping[str, torch.Tensor]):
+        return self._broker.submit(request, inputs)
+
+    def poll_inference(self, request: MecoInferenceRequest, handle):
+        return self._broker.poll(request, handle)
 
     def _infer_sync(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
         try:
@@ -314,7 +318,7 @@ class _AsyncInferenceBroker:
                     "generation_id": self.adapter._generation_id,
                     "last_published_sequence": self.latest_published_sequence}
 
-    def submit_and_wait(self, request, inputs, *, now):
+    def submit(self, request, inputs):
         if (request.generation_id != self.adapter._generation_id
                 or request.request_sequence <= 0
                 or request.request_sequence > self.adapter._request_sequence
@@ -332,47 +336,70 @@ class _AsyncInferenceBroker:
                 self.faults += 1
             return None
         item = {"request": request, "inputs": frozen_inputs,
-                "event": threading.Event(), "response": None,
+                "response": None, "done": False, "consumed": False,
                 "discarded": False, "late_counted": False}
         with self.lock:
             if request.request_sequence <= self.latest_submitted_sequence:
                 self.faults += 1
                 return None
-            self.latest_submitted_sequence = request.request_sequence
-        try:
-            self.pending.put_nowait(item)
-        except queue.Full:
-            try:
-                replaced_item = self.pending.get_nowait()
-                self.pending.task_done()
-            except queue.Empty:
-                replaced_item = None
-            if replaced_item is not None:
-                with self.lock:
-                    self.dropped += 1
-                    replaced_item["discarded"] = True
-                replaced_item["event"].set()
+            # Sequence acceptance and queue replacement are one serialized
+            # operation, so an older submitter cannot replace a newer request.
             try:
                 self.pending.put_nowait(item)
             except queue.Full:
-                with self.lock:
+                try:
+                    replaced_item = self.pending.get_nowait()
+                    self.pending.task_done()
+                except queue.Empty:
+                    replaced_item = None
+                if replaced_item is not None:
+                    replaced_item["discarded"] = True
                     self.dropped += 1
+                try:
+                    self.pending.put_nowait(item)
+                except queue.Full:
                     item["discarded"] = True
-                return None
-        remaining = max(0., request.expires_monotonic - time.monotonic())
-        item["event"].wait(remaining)
-        response = item["response"]
-        if response is None:
-            if not item["discarded"] and time.monotonic() >= request.expires_monotonic:
-                self._mark_late(item)
+                    self.dropped += 1
+                    return None
+            self.latest_submitted_sequence = request.request_sequence
+        return item
+
+    def poll(self, request, item):
+        if item is None or item.get("request") != request:
             return None
-        return response
+        with self.lock:
+            if item["consumed"] or item["discarded"]:
+                return None
+            if (request.request_sequence != self.latest_submitted_sequence
+                    or request.generation_id != self.adapter._generation_id):
+                self._mark_late_locked(item)
+                return None
+            if not item["done"]:
+                # This poll is the action boundary. Closing the handle prevents
+                # a later worker completion from being published or reused.
+                item["consumed"] = True
+                if time.monotonic() >= request.expires_monotonic:
+                    self._mark_late_locked(item)
+                return None
+            response = item["response"]
+            if response is None:
+                item["consumed"] = True
+                return None
+            if (time.monotonic() > request.expires_monotonic
+                    or response.completed_monotonic > request.expires_monotonic):
+                self._mark_late_locked(item)
+                return None
+            item["consumed"] = True
+            return response
 
     def _mark_late(self, item):
         with self.lock:
-            if not item["late_counted"]:
-                self.late += 1
-                item["late_counted"] = True
+            self._mark_late_locked(item)
+
+    def _mark_late_locked(self, item):
+        if not item["late_counted"]:
+            self.late += 1
+            item["late_counted"] = True
 
     def _run(self):
         while True:
@@ -383,13 +410,15 @@ class _AsyncInferenceBroker:
                         or time.monotonic() > request.expires_monotonic):
                     self._mark_late(item)
                     continue
-                response = self.adapter._infer_sync(request, item["inputs"],
-                                                    now=time.monotonic())
+                with torch.inference_mode():
+                    response = self.adapter._infer_sync(request, item["inputs"],
+                                                        now=time.monotonic())
                 late_response = False
                 with self.lock:
                     if (response is None or time.monotonic() > request.expires_monotonic
                             or request.request_sequence != self.latest_submitted_sequence
-                            or request.request_sequence <= self.latest_published_sequence):
+                            or request.request_sequence <= self.latest_published_sequence
+                            or item["consumed"]):
                         if response is None:
                             self.faults += 1
                         else:
@@ -401,7 +430,8 @@ class _AsyncInferenceBroker:
                 if late_response:
                     self._mark_late(item)
             finally:
-                item["event"].set()
+                with self.lock:
+                    item["done"] = True
                 self.pending.task_done()
 
 
@@ -896,79 +926,77 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             raise ValueError("graph data cannot override observation state or recurrent context")
         inputs.update(graph)
     if isinstance(model, ProductionMecoAdapter):
-        if model.track != track:
-            response = None
+        response = None
+        broker_handle = None
+        ordered_inputs = ({name: inputs[name] for name in MECO_INPUT_NAMES[track]
+                           if name in inputs} if track == model.track else {})
+        if track == model.track and inference_request is None:
+            dispatch = time.monotonic()
+            if (observation_timestamp is not None and capture_monotonic is not None
+                    and dispatch <= capture_monotonic + MECO_MAX_INFERENCE_AGE_S):
+                try:
+                    inference_request = make_meco_inference_request(model, table=table,
+                        observation_timestamp=observation_timestamp,
+                        capture_monotonic=capture_monotonic, inputs=ordered_inputs)
+                except Exception:
+                    inference_request = None
+        request_matches = (inference_request is not None and track == model.track
+            and inference_request.track == track
+            and inference_request.snapshot_id == table.snapshot_id
+            and inference_request.candidate_ids == table.candidate_ids
+            and inference_request.valid_mask == table.valid_mask
+            and inference_request.candidate_mask_digest ==
+                ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask))
+        if request_matches:
+            ordered_inputs = {name: inputs[name] for name in inference_request.input_names
+                              if name in inputs}
+            broker_handle = model.submit_inference(inference_request, ordered_inputs)
+
+        # Compute the complete deterministic decision while accelerator
+        # inference is in flight. A missing result uses this exact fallback.
+        utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)
+        valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
+        if route_cost is not None or risk_cost is not None:
+            fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
         else:
-            ordered_inputs = {name: inputs[name] for name in MECO_INPUT_NAMES[track] if name in inputs}
-            if inference_request is None:
-                dispatch = time.monotonic() if inference_now is None else inference_now
-                fallback_index = next((i for i, valid_value in enumerate(table.valid_mask)
-                                       if valid_value), -1)
-                if (fallback_index >= 0 and observation_timestamp is not None
-                        and capture_monotonic is not None
-                        and dispatch <= capture_monotonic + MECO_MAX_INFERENCE_AGE_S):
-                    try:
-                        inference_request = make_meco_inference_request(
-                            model, table=table,
-                            observation_timestamp=observation_timestamp,
-                            capture_monotonic=capture_monotonic, inputs=ordered_inputs)
-                        inference_now = time.monotonic()
-                    except Exception:
-                        inference_request = None
-        if (inference_request is None or inference_now is None
-                or inference_request.track != track
-                or inference_request.snapshot_id != table.snapshot_id
-                or inference_request.candidate_ids != table.candidate_ids
-                or inference_request.valid_mask != table.valid_mask
-                or inference_request.candidate_mask_digest !=
-                   ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask)):
+            fallback = (inference_request.fallback_index if inference_request is not None else
+                        next((i for i, ok in enumerate(table.valid_mask) if ok), -1))
+            fallback_logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
+                                         device=utility.device, dtype=utility.dtype)
+            if fallback < 0 or not table.valid_mask[fallback]:
+                raise ValueError("invalid deterministic fallback for failed inference")
+            fallback_logits[0, fallback] = 0.
+
+        if request_matches:
+            response = model.poll_inference(inference_request, broker_handle)
+        if response is not None and (
+                response.schema != MECO_INFERENCE_SCHEMA
+                or response.track != inference_request.track
+                or response.model_id != inference_request.model_id
+                or response.checkpoint_sha256 != inference_request.checkpoint_sha256
+                or response.protocol_id != inference_request.protocol_id
+                or response.request_sequence != inference_request.request_sequence
+                or response.generation_id != inference_request.generation_id
+                or response.snapshot_id != inference_request.snapshot_id
+                or response.candidate_mask_digest != inference_request.candidate_mask_digest
+                or response.legal_pose_order_digest != inference_request.legal_pose_order_digest
+                or response.observation_timestamp != inference_request.observation_timestamp
+                or response.capture_monotonic != inference_request.capture_monotonic
+                or response.dispatch_monotonic != inference_request.dispatch_monotonic
+                or not math.isfinite(response.completed_monotonic)
+                or response.completed_monotonic < inference_request.dispatch_monotonic
+                or response.expires_monotonic != inference_request.expires_monotonic
+                or response.completed_monotonic > inference_request.expires_monotonic
+                or time.monotonic() > inference_request.expires_monotonic):
             response = None
-        else:
-            # Keep exact track-specific tensor order as part of the wire contract.
-            ordered_inputs = {name: inputs[name] for name in inference_request.input_names if name in inputs}
-            response = model.infer(inference_request, ordered_inputs, now=inference_now)
-            if response is not None and (
-                    response.schema != MECO_INFERENCE_SCHEMA
-                    or response.track != inference_request.track
-                    or response.model_id != inference_request.model_id
-                    or response.checkpoint_sha256 != inference_request.checkpoint_sha256
-                    or response.protocol_id != inference_request.protocol_id
-                    or response.request_sequence != inference_request.request_sequence
-                    or response.generation_id != inference_request.generation_id
-                    or response.snapshot_id != inference_request.snapshot_id
-                    or response.candidate_mask_digest != inference_request.candidate_mask_digest
-                    or response.legal_pose_order_digest != inference_request.legal_pose_order_digest
-                    or response.observation_timestamp != inference_request.observation_timestamp
-                    or response.capture_monotonic != inference_request.capture_monotonic
-                    or response.dispatch_monotonic != inference_request.dispatch_monotonic
-                    or not math.isfinite(response.completed_monotonic)
-                    or response.completed_monotonic < inference_request.dispatch_monotonic
-                    or response.expires_monotonic != inference_request.expires_monotonic
-                    or response.completed_monotonic > inference_request.expires_monotonic
-                    or response.completed_monotonic - inference_request.capture_monotonic
-                       > MECO_MAX_INFERENCE_AGE_S):
-                response = None
         if response is None:
-            utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)
-            valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
-            if route_cost is not None or risk_cost is not None:
-                logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
-            else:
-                fallback = inference_request.fallback_index if inference_request is not None else next(
-                    (i for i, ok in enumerate(table.valid_mask) if ok), -1)
-                logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
-                                    device=utility.device, dtype=utility.dtype)
-                if fallback < 0 or fallback >= len(table.candidate_ids) or not table.valid_mask[fallback]:
-                    raise ValueError("invalid deterministic fallback for failed inference")
-                logits[0, fallback] = 0.
             provenance = {"schema": MECO_INFERENCE_SCHEMA,
-                "model_id": f"meco:{track}",
-                "checkpoint_sha256": model.checkpoint_sha256,
+                "model_id": f"meco:{track}", "checkpoint_sha256": model.checkpoint_sha256,
                 "protocol_id": model.protocol_id,
                 "request_sequence": (inference_request.request_sequence
-                                     if inference_request is not None else None),
+                    if inference_request is not None else None),
                 "generation_id": (inference_request.generation_id
-                                  if inference_request is not None else None),
+                    if inference_request is not None else None),
                 "snapshot_id": table.snapshot_id,
                 "candidate_mask_digest": (inference_request.candidate_mask_digest
                     if inference_request is not None else None),
@@ -980,7 +1008,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 "expires_monotonic": (inference_request.expires_monotonic
                     if inference_request is not None else None),
                 "counters": model.inference_counters}
-            return {"logits": logits, "utility": utility, "hidden": hidden,
+            return {"logits": fallback_logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
                     "inference_status": "deterministic_fallback",
                     "inference_provenance": provenance}

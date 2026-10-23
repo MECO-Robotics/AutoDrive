@@ -132,10 +132,13 @@ worker and one replaceable pending slot. Inputs are cloned before enqueueing;
 an older pending request is discarded when a newer request arrives. Expired
 requests are rejected before execution and responses are published only after
 all outputs pass shape, device, finiteness, and freshness checks. The action
-boundary waits only until the request's capture-derived expiry; if no complete
-matching result arrives, the deterministic route/risk/feasibility fallback is
-used. Each decision carries request/checkpoint/protocol/snapshot provenance and
-the broker's dropped, late, and fault counters. Plan A's P path-cost semantics
+boundary polls once without waiting before committing the action; if no
+complete matching result is already available, the deterministic
+route/risk/feasibility fallback is used for that snapshot. It never carries a
+late result into a later snapshot. Each decision carries
+request/checkpoint/protocol/snapshot provenance and the broker's dropped, late,
+and fault counters. The worker runs the model forward under
+`torch.inference_mode()`. Plan A's P path-cost semantics
 remain active, with zero P on inference failure.
 
 `load_production_adapter` requires an explicit available `cuda:N` device and

@@ -358,6 +358,9 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         hidden, tracking_was_available, raster)
     graph_data = _graph_inputs(track, graph, env, raster)
     production_inference_failed = False
+    inference_request = None
+    inference_handle = None
+    response = None
     if isinstance(model, ProductionMecoAdapter):
         hidden_input = (hidden_before if hidden_before is not None else
                         raster.new_zeros((raster.shape[0], 64)))
@@ -398,53 +401,17 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     model_id=f"meco:{track}")
             except Exception:
                 request = None
-        response = (model.infer(request, ordered_inputs, now=time.monotonic())
-                    if request is not None else None)
-        if (response is None or response.schema != MECO_INFERENCE_SCHEMA
-                or response.track != track
-                or response.checkpoint_sha256 != model.checkpoint_sha256
-                or response.protocol_id != model.protocol_id
-                or response.model_id != request.model_id
-                or response.request_sequence != request.request_sequence
-                or response.generation_id != request.generation_id
-                or response.snapshot_id != request.snapshot_id
-                or response.candidate_mask_digest != request.candidate_mask_digest
-                or response.legal_pose_order_digest != request.legal_pose_order_digest
-                or response.expires_monotonic != request.expires_monotonic
-                or response.observation_timestamp != safe.observation.timestamp
-                or response.capture_monotonic != safe.observation.capture_monotonic
-                or response.dispatch_monotonic != request_dispatch
-                or not math.isfinite(response.completed_monotonic)
-                or response.completed_monotonic < request.dispatch_monotonic
-                or response.completed_monotonic > safe.observation.capture_monotonic
-                    + PRODUCTION_INFERENCE_MAX_AGE_S):
-            production_inference_failed = True
-            if track == "A1":
-                utility_shape = (1, 8, *raster.shape[-2:])
-            else:
-                utility_shape = (1, graph.node_count)
-            raw = {"utility": raster.new_zeros(utility_shape),
-                   "penalty": raster.new_zeros(utility_shape),
-                   "behavior_logits": raster.new_zeros((1, 5)),
-                   "hidden": hidden_input}
+        if request is not None:
+            inference_handle = model.submit_inference(request, ordered_inputs)
+        if track == "A1":
+            utility_shape = (1, 8, *raster.shape[-2:])
         else:
-            raw = response.outputs
-        inference_provenance = {"schema": MECO_INFERENCE_SCHEMA,
-            "model_id": f"meco:{track}", "checkpoint_sha256": model.checkpoint_sha256,
-            "protocol_id": model.protocol_id,
-            "observation_timestamp": safe.observation.timestamp,
-            "request_sequence": request.request_sequence if request else None,
-            "generation_id": request.generation_id if request else None,
-            "snapshot_id": safe.observation.snapshot_id,
-            "candidate_mask_digest": request.candidate_mask_digest if request else None,
-            "legal_pose_order_digest": support.support_digest,
-            "captured_monotonic": safe.observation.capture_monotonic,
-            "dispatch_monotonic": request.dispatch_monotonic if request else None,
-            "completed_monotonic": response.completed_monotonic if response else None,
-            "expires_monotonic": request.expires_monotonic if request else None,
-            "status": "accepted" if response is not None and not production_inference_failed
-                     else "deterministic_fallback",
-            "counters": model.inference_counters}
+            utility_shape = (1, graph.node_count)
+        # Deterministic zero-U/P fallback is prepared while the worker scores.
+        raw = {"utility": raster.new_zeros(utility_shape),
+               "penalty": raster.new_zeros(utility_shape),
+               "behavior_logits": raster.new_zeros((1, 5)),
+               "hidden": hidden_input}
     else:
         raw = model(raster=raster, globals_=globals_, hidden=hidden_before,
                     **(graph_data or {}))
@@ -465,6 +432,56 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
         env, support, eta, config.prediction_mode)
+    if isinstance(model, ProductionMecoAdapter):
+        response = (model.poll_inference(request, inference_handle)
+                    if request is not None and inference_handle is not None else None)
+        response_valid = (response is not None and request is not None
+            and response.schema == MECO_INFERENCE_SCHEMA
+            and response.track == track
+            and response.model_id == request.model_id
+            and response.checkpoint_sha256 == model.checkpoint_sha256
+            and response.protocol_id == model.protocol_id
+            and response.request_sequence == request.request_sequence
+            and response.generation_id == request.generation_id
+            and response.snapshot_id == request.snapshot_id == safe.observation.snapshot_id
+            and response.candidate_mask_digest == request.candidate_mask_digest
+            and response.legal_pose_order_digest == support.support_digest
+            and request.legal_pose_order_digest == support.support_digest
+            and response.observation_timestamp == safe.observation.timestamp
+            and response.capture_monotonic == safe.observation.capture_monotonic
+            and response.dispatch_monotonic == request.dispatch_monotonic
+            and response.expires_monotonic == request.expires_monotonic
+            and math.isfinite(response.completed_monotonic)
+            and request.dispatch_monotonic <= response.completed_monotonic
+            and response.completed_monotonic <= request.expires_monotonic
+            and time.monotonic() <= request.expires_monotonic)
+        if response_valid:
+            raw = response.outputs
+            seed_decision = {"raw": raw, "hidden": raw["hidden"]}
+            penalty_map = None
+            if p_mode == "learned":
+                penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
+                    env.planner, float(env.sim.field_length), float(env.sim.field_width),
+                    mode="learned")
+            logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
+                env, config, penalty_map=penalty_map)
+        else:
+            production_inference_failed = True
+        inference_provenance = {"schema": MECO_INFERENCE_SCHEMA,
+            "model_id": f"meco:{track}", "checkpoint_sha256": model.checkpoint_sha256,
+            "protocol_id": model.protocol_id,
+            "observation_timestamp": safe.observation.timestamp,
+            "request_sequence": request.request_sequence if request else None,
+            "generation_id": request.generation_id if request else None,
+            "snapshot_id": safe.observation.snapshot_id,
+            "candidate_mask_digest": request.candidate_mask_digest if request else None,
+            "legal_pose_order_digest": support.support_digest,
+            "captured_monotonic": safe.observation.capture_monotonic,
+            "dispatch_monotonic": request.dispatch_monotonic if request else None,
+            "completed_monotonic": response.completed_monotonic if response_valid else None,
+            "expires_monotonic": request.expires_monotonic if request else None,
+            "status": "accepted" if response_valid else "deterministic_fallback",
+            "counters": model.inference_counters}
     finite_decision = bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
     fallback_used = production_inference_failed or not finite_decision
     if not finite_decision:
