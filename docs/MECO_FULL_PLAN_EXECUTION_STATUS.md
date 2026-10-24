@@ -2,7 +2,9 @@
 
 > **Matched-evaluation controls integrated — 2026-10-24 08:49 UTC.** The
 > planner → implementer → independent reviewer tranche is integrated into
-> candidate HEAD `049c81e07` (implementer fix `0db1e6436fbd753d82e49fbab02850d81fce1f07`;
+> candidate HEAD `2e610f88d284680f71857a00e0d8f05d0d00fe87` (code integration
+> `049c81e076bba74897590d66621592553bd7ddf8`; implementer fix
+> `0db1e6436fbd753d82e49fbab02850d81fce1f07`;
 > initial feature commit `415ce63d457f076c112a25b648ad6f58e404ffde`). It adds
 > protocol-bound exact seed manifests, condition/policy replay selection,
 > paired runtime/fallback diagnostics, report digest validation, and a
@@ -14,9 +16,16 @@
 > [`implementation-provenance/matched-evaluation-controls.md`](implementation-provenance/matched-evaluation-controls.md).
 > Focused verification reported 78 tests, Python compilation, and diff checks
 > passing; the independent reviewer rechecked 10 matched-control and 9
-> supervisor-dispatch tests. No simulator, GPU, dashboard, or live training
-> operation was run for this tranche. The dashboard still requires restart
-> and current-checkout verification after this integration. The live main
+> supervisor-dispatch tests. Provenance integration passed 14 tests. After the
+> commit, `frc-defense-dashboard.service` was restarted; user-systemd reports
+> it active as PID 1676539 with this candidate worktree as its working
+> directory. `/meco`, `/api/meco-status`, `/api/curriculum-status`, and
+> `/assets/meco.js` returned HTTP 200; the served MECO JavaScript SHA-256
+> matches the candidate asset (`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`).
+> The curriculum API reports `validated_summary_only`, 18 tranches, with
+> `matched-evaluation-controls` latest. The dashboard reads training data from
+> live main. No simulator, GPU, or live training operation was run for this
+> tranche, and no replay was generated. The live main
 > supervisor remains a separate checkout at source identity
 > `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`; at the
 > latest poll cycle 2 is training with no error, A2/A3 running on the two
