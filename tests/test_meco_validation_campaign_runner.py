@@ -8,6 +8,8 @@ from frc_defense.meco_qualification import protocol_document
 from frc_defense.meco_tracks import MECO_TRACKS
 from frc_defense.meco_validation_campaign import compile_validation_campaign
 from frc_defense.meco_validation_campaign_runner import (
+    _sha,
+    _validate_replay_artifact,
     aggregate_campaign,
     run_campaign,
 )
@@ -123,3 +125,66 @@ def test_campaign_aggregator_rejects_missing_job(tmp_path):
     path.write_text(json.dumps(campaign), encoding="utf-8")
     with pytest.raises(ValueError, match="exact 28 planned jobs"):
         aggregate_campaign(plan, path)
+
+
+def test_replay_validator_accepts_actual_replay_provenance_schema(tmp_path):
+    source = {"sha256": "a" * 64}
+    checkpoint = "b" * 64
+    case = {"layout_id": "layout", "defender_family": "scripted",
+        "start_condition": "start", "sensor_profile": "standard"}
+    safety = {"robot_contact_ticks": 0}
+    row = {"scenario_id": "pickup_simple", "category": "single", "seed": 17,
+        "policy": "A1", "split": "validation", "protocol_id": "train-protocol",
+        "checkpoint_sha256": checkpoint, "metrics": {"success": 1.0},
+        "meco_metric_ledger": {"safety_metrics": safety},
+        "execution_failures": [], "route_trace": [],
+        "executed_planner_route_trace": []}
+    record_digest = _sha(row)
+    report_path = tmp_path / "condition.evaluation.json"
+    condition_id = "condition-1"
+    evaluation_id = "evaluation-1"
+    route_digest = _sha({"route_trace": row["route_trace"],
+        "executed_planner_route_trace": row["executed_planner_route_trace"]})
+    outcome_digest = _sha({"metrics": row["metrics"], "safety_metrics": safety,
+        "execution_failures": row["execution_failures"]})
+    safety_digest = _sha(safety)
+    replay_ref = {"simulation_id": "scenario-meco-sample",
+        "result_path": str(tmp_path / "scenario-meco-sample.result.json"),
+        "evaluation_report_path": str(report_path), "evaluation_record_index": 3,
+        "evaluation_record_digest": record_digest}
+    row["dashboard_replay"] = replay_ref
+    provenance = {"evaluation_id": evaluation_id, "condition_id": condition_id,
+        "evaluation_report_path": str(report_path), "evaluation_record_index": 3,
+        "evaluation_record_digest": record_digest, "replay_source_sha256": source["sha256"],
+        "checkpoint_sha256": checkpoint, "protocol_id": row["protocol_id"],
+        "qualification_protocol_id": "qualification-protocol",
+        "scenario_id": row["scenario_id"], "category": row["category"],
+        "split": row["split"], "seed": row["seed"], "qualification_case": case,
+        "policy": row["policy"], "route_digest": route_digest,
+        "outcome_digest": outcome_digest, "safety_digest": safety_digest}
+    replay = {"simulation_id": replay_ref["simulation_id"],
+        "scenario_id": row["scenario_id"], "category": row["category"],
+        "seed": row["seed"], "policy": row["policy"], "split": row["split"],
+        "qualification_case": case, "evaluation_id": evaluation_id,
+        "condition_id": condition_id, "evaluation_report_path": str(report_path),
+        "evaluation_record_index": 3, "evaluation_record_digest": record_digest,
+        "source_identity_sha256": source["sha256"],
+        "replay_source_sha256": source["sha256"],
+        "qualification_protocol_id": "qualification-protocol",
+        "protocol_id": row["protocol_id"], "checkpoint_sha256": checkpoint,
+        "route_digest": route_digest, "outcome_digest": outcome_digest,
+        "safety_digest": safety_digest, "replay_provenance": provenance}
+    report = {"evaluation_id": evaluation_id,
+        "experiment_matrix": {"condition_id": condition_id}}
+    job = {"scenario_id": row["scenario_id"], "qualification_case": case,
+        "source_identity": source,
+        "seed_manifest": {"protocol_id": "qualification-protocol"},
+        "checkpoint_sha256": {"A1": checkpoint}}
+
+    _validate_replay_artifact(replay, replay_ref, report=report,
+        report_path=report_path, row=row, report_index=3, job=job)
+    bad = json.loads(json.dumps(replay))
+    bad["replay_provenance"]["evaluation_record_digest"] = "0" * 64
+    with pytest.raises(ValueError, match="campaign source/protocol/row binding"):
+        _validate_replay_artifact(bad, replay_ref, report=report,
+            report_path=report_path, row=row, report_index=3, job=job)

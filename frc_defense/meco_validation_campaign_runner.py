@@ -128,6 +128,73 @@ def _expected_keys(condition: dict) -> set[tuple[str, str, int]]:
     return expected
 
 
+def _validate_replay_artifact(replay_record: dict, replay_ref: dict, *,
+                              report: dict, report_path: Path, row: dict,
+                              report_index: int, job: dict) -> None:
+    """Bind a producer-shaped replay bundle back to its exact evaluation row."""
+    provenance = replay_record.get("replay_provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("replay bundle lacks producer replay_provenance")
+    expected_record_digest = _sha({key: value for key, value in row.items()
+                                   if key != "dashboard_replay"})
+    expected_policy = row.get("policy")
+    expected_checkpoint = row.get("checkpoint_sha256")
+    expected_case = job["qualification_case"]
+    if (replay_record.get("evaluation_id") != report.get("evaluation_id")
+            or replay_record.get("condition_id") != report.get("experiment_matrix", {}).get("condition_id")
+            or replay_ref.get("simulation_id") != replay_record.get("simulation_id")
+            or replay_record.get("scenario_id") != job["scenario_id"]
+            or replay_record.get("category") != row.get("category")
+            or replay_record.get("seed") != row.get("seed")
+            or replay_record.get("policy") != expected_policy
+            or replay_record.get("split") != "validation"
+            or replay_record.get("qualification_case") != expected_case):
+        raise ValueError("replay root identity differs from its selected evaluation row")
+    if (replay_ref.get("evaluation_report_path") != str(report_path.resolve())
+            or replay_record.get("evaluation_report_path") != str(report_path.resolve())
+            or replay_ref.get("evaluation_record_index") != report_index
+            or replay_record.get("evaluation_record_index") != report_index
+            or replay_ref.get("evaluation_record_digest") != expected_record_digest
+            or replay_record.get("evaluation_record_digest") != expected_record_digest):
+        raise ValueError("replay pointer/digest does not bind the exact evaluation row")
+    source_sha = job["source_identity"]["sha256"]
+    protocol_id = job["seed_manifest"]["protocol_id"]
+    if (replay_record.get("source_identity_sha256") != source_sha
+            or replay_record.get("replay_source_sha256") != source_sha
+            or provenance.get("replay_source_sha256") != source_sha
+            or replay_record.get("qualification_protocol_id") != protocol_id
+            or provenance.get("qualification_protocol_id") != protocol_id
+            or replay_record.get("protocol_id") != row.get("protocol_id")
+            or provenance.get("protocol_id") != row.get("protocol_id")
+            or replay_record.get("checkpoint_sha256") != expected_checkpoint
+            or provenance.get("checkpoint_sha256") != expected_checkpoint
+            or provenance.get("evaluation_id") != report.get("evaluation_id")
+            or provenance.get("condition_id") != replay_record.get("condition_id")
+            or provenance.get("scenario_id") != job["scenario_id"]
+            or provenance.get("category") != row.get("category")
+            or provenance.get("seed") != row.get("seed")
+            or provenance.get("policy") != expected_policy
+            or provenance.get("split") != "validation"
+            or provenance.get("qualification_case") != expected_case
+            or provenance.get("evaluation_record_index") != report_index
+            or provenance.get("evaluation_record_digest") != expected_record_digest):
+        raise ValueError("replay provenance differs from campaign source/protocol/row binding")
+    safety_metrics = row.get("meco_metric_ledger", {}).get("safety_metrics")
+    route_digest = _sha({"route_trace": row.get("route_trace"),
+        "executed_planner_route_trace": row.get("executed_planner_route_trace")})
+    outcome_digest = _sha({"metrics": row.get("metrics"),
+        "safety_metrics": safety_metrics,
+        "execution_failures": row.get("execution_failures")})
+    safety_digest = _sha(safety_metrics)
+    for field, expected in (("route_digest", route_digest),
+                            ("outcome_digest", outcome_digest),
+                            ("safety_digest", safety_digest)):
+        if replay_record.get(field) != expected or provenance.get(field) != expected:
+            raise ValueError(f"replay {field} differs from its source evaluation record")
+    if expected_policy in MECO_TRACKS and expected_checkpoint != job["checkpoint_sha256"][expected_policy]:
+        raise ValueError("replay checkpoint differs from the bound learned-track checkpoint")
+
+
 def validate_job_artifacts(job: dict, job_dir: Path, *, device: str) -> dict:
     """Validate a complete matrix and every condition/replay before permitting a seal."""
     matrix_dir = job_dir / "matrix"
@@ -207,13 +274,8 @@ def validate_job_artifacts(job: dict, job_dir: Path, *, device: str) -> dict:
             if not replay_path.is_file():
                 raise ValueError("selected replay artifact is missing")
             replay_record = _read_json(replay_path)
-            provenance = replay_record.get("provenance", {})
-            if (provenance.get("scenario_id") != job["scenario_id"]
-                    or provenance.get("category") != row.get("category")
-                    or provenance.get("seed") != row.get("seed")
-                    or provenance.get("policy") != row.get("policy")
-                    or provenance.get("split") != "validation"):
-                raise ValueError("replay provenance differs from selected condition record")
+            _validate_replay_artifact(replay_record, replay, report=report,
+                report_path=report_path, row=row, report_index=index, job=job)
             replay_digests[str(replay_path)] = _file_sha(replay_path)
             referenced_replays.add(replay_path)
         if exported != selected:
