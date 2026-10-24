@@ -10,8 +10,14 @@
 > dry run, and diff checks passed; independent review rejected a missing-
 > stratum case before approving the complete case-table validation. No matrix,
 > simulator, GPU, or final-test operation was run. Three-pass provenance is
-> now 19 scoped tranches. Dashboard restart/current-checkout verification for
-> this new code and manifest update is pending.
+> now 19 scoped tranches. After integration, `frc-defense-dashboard.service`
+> was restarted and is active as PID 1690905 from this candidate worktree.
+> `/meco`, `/api/meco-status`, `/api/curriculum-status`, and `/assets/meco.js`
+> returned HTTP 200; the served JavaScript SHA-256 matches the checkout
+> (`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`). The
+> curriculum API returned `validated_summary_only` with 19 entries and
+> `validation-campaign-planner` latest. The dashboard reads training data from
+> live main; no replay was generated.
 
 > **Matched-evaluation controls integrated — 2026-10-24 08:49 UTC.** The
 > planner → implementer → independent reviewer tranche is integrated into
