@@ -84,11 +84,13 @@
 > It adds opt-in bounded production-request capture and binds the exact captured
 > tensors, checkpoint/protocol/source provenance, ONNX graph, and parity report;
 > capture loading preflights size limits and validates request metadata. No tests,
-> simulator, or model workloads were run for this tranche. Integration is
-> deferred while the active supervisor checks the pinned main-source identity;
-> after training is manually stopped, this branch still needs integration review
-> and a representative seeded simulator capture/replay with the dashboard
-> restarted and verified current.
+> simulator, or model workloads were run for this tranche. Integration candidate
+> `codex/meco-production-input-parity-integration` at `eebd4ae57b9f226dade8bac99a6734596381759e`
+> merges the approved branch into main `4d93b2f97`; a second scoped review
+> approved the clean merge. It is ready to fast-forward after training is manually
+> stopped and the final worker/checkpoint source-binding audit passes. The
+> representative seeded simulator capture/replay and dashboard restart/currentness
+> check remain outstanding.
 
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
