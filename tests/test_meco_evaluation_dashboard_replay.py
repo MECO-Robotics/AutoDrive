@@ -20,7 +20,8 @@ from frc_defense.meco_ablation_matrix import run_matrix
 import torch
 from frc_defense.meco_track_training import (
     _capture_meco_replay_frame, _evaluation_record_digest,
-    _validate_meco_replay_alignment, _validate_replay_seed_selection,
+    _selected_policy_candidate_id, _validate_meco_replay_alignment,
+    _validate_replay_seed_selection,
 )
 from scripts import run_meco_ablation_matrix as matrix_cli
 from frc_defense.meco_tracks import MECO_TRACKS
@@ -32,6 +33,14 @@ def _row():
         "metrics": {"success": 1, "useful_throughput": 2.},
         "meco_metric_ledger": {"safety_metrics": {"safety_robot_contact_rate": 0.}},
         "execution_failures": [], "route_trace": [{"candidate_id": "fuel:4"}],
+        "executed_policy_decision_trace_schema": "meco-executed-policy-decision-v1",
+        "executed_policy_decision_trace": [
+            {"schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:4",
+             "selected_action": 0, "selected_goal_xy_m": [1., 2.], "start_tick": 0,
+             "end_tick": 12, "actual_tick_actions": [0]},
+            {"schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:5",
+             "selected_action": 4, "selected_goal_xy_m": [3., 4.], "start_tick": 12,
+             "end_tick": 24, "actual_tick_actions": [4]}],
         "executed_planner_route_trace": [
             {"start_tick": 0, "end_tick": 12, "selected_action": 0,
              "executed_action_trace": [0]},
@@ -43,10 +52,10 @@ def _frames():
     return [{"tick": 0, "meco_policy_decision": None},
         {"tick": 12, "meco_policy_decision": {"policy": "C1", "kind": "policy_decision",
             "macro_start_tick": 0, "macro_end_tick": 12, "action": 0,
-            "executed_actions": [0]}},
+            "executed_actions": [0], "candidate_id": "fuel:4", "goal_xy_m": [1., 2.]}},
         {"tick": 24, "meco_policy_decision": {"policy": "C1", "kind": "policy_decision",
             "macro_start_tick": 12, "macro_end_tick": 24, "action": 4,
-            "executed_actions": [4]}}]
+            "executed_actions": [4], "candidate_id": "fuel:5", "goal_xy_m": [3., 4.]}}]
 
 
 def test_replay_alignment_rejects_seed_record_tick_and_policy_divergence():
@@ -66,6 +75,63 @@ def test_replay_alignment_rejects_seed_record_tick_and_policy_divergence():
         _validate_meco_replay_alignment(record, bad, final_tick=24)
 
 
+def test_versioned_executed_policy_trace_is_bound_to_replay_actions_and_candidate():
+    record = _row()
+    record["executed_policy_decision_trace"] = [
+        {"schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:4",
+         "selected_action": 0, "selected_goal_xy_m": [1., 2.],
+         "start_tick": 0, "end_tick": 12, "actual_tick_actions": [0]},
+        {"schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:5",
+         "selected_action": 4, "selected_goal_xy_m": [3., 4.],
+         "start_tick": 12, "end_tick": 24, "actual_tick_actions": [4]}]
+    frames = _frames()
+    for frame, candidate, goal in zip(frames[1:], ("fuel:4", "fuel:5"),
+                                     ([1., 2.], [3., 4.])):
+        frame["meco_policy_decision"].update(candidate_id=candidate, goal_xy_m=goal)
+    _validate_meco_replay_alignment(record, frames, final_tick=24)
+    frames[1]["meco_policy_decision"]["candidate_id"] = "fuel:other"
+    with pytest.raises(ValueError, match="executed policy decision trace"):
+        _validate_meco_replay_alignment(record, frames, final_tick=24)
+
+
+@pytest.mark.parametrize("track", MECO_TRACKS)
+def test_each_learned_track_requires_candidate_bound_decision_trace(track):
+    record = _row()
+    record["policy"] = track
+    record["executed_policy_decision_trace_schema"] = "meco-executed-policy-decision-v1"
+    record["executed_policy_decision_trace"] = [
+        {"schema": "meco-executed-policy-decision-v1", "candidate_id": f"{track}:a",
+         "selected_action": 0, "selected_goal_xy_m": [1., 2.],
+         "start_tick": 0, "end_tick": 12, "actual_tick_actions": [0]},
+        {"schema": "meco-executed-policy-decision-v1", "candidate_id": f"{track}:b",
+         "selected_action": 4, "selected_goal_xy_m": [3., 4.],
+         "start_tick": 12, "end_tick": 24, "actual_tick_actions": [4]}]
+    frames = _frames()
+    for frame, candidate, goal in zip(frames[1:], (f"{track}:a", f"{track}:b"),
+                                     ([1., 2.], [3., 4.])):
+        frame["meco_policy_decision"].update(policy=track,
+            candidate_id=candidate, goal_xy_m=goal)
+    _validate_meco_replay_alignment(record, frames, final_tick=24)
+    missing = dict(record)
+    missing.pop("executed_policy_decision_trace")
+    with pytest.raises(ValueError, match="requires the versioned"):
+        _validate_meco_replay_alignment(missing, frames, final_tick=24)
+
+
+@pytest.mark.parametrize("track", ("A1", "A2", "A3"))
+def test_plan_a_trace_candidate_identity_survives_missing_route_capture(track):
+    support = SimpleNamespace(pair_node_ids=torch.tensor([17]),
+        behavior_ids=torch.tensor([2]), descriptor_ids=torch.tensor([4]))
+    prepared = {"support": support}
+    assert _selected_policy_candidate_id(prepared, None, 0) == \
+        "node:17:behavior:2:descriptor:4"
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+def test_plan_c_trace_candidate_identity_survives_missing_route_capture(track):
+    candidate_set = SimpleNamespace(table=SimpleNamespace(
+        candidate_ids=("fuel:91:score", "continue:active")))
+    assert _selected_policy_candidate_id(None, candidate_set, 0) == "fuel:91:score"
 def test_replay_seed_capture_is_explicit_and_subset_bounded(tmp_path):
     assert _validate_replay_seed_selection(None, None, (90, 91)) == set()
     assert _validate_replay_seed_selection(tmp_path, (91,), (90, 91)) == {91}
@@ -259,15 +325,20 @@ def test_replay_discovery_and_load_reject_corrupted_generation(tmp_path):
 
 def test_replay_alignment_matches_selected_and_executed_actions_including_remask():
     record = _row()
+    record["executed_policy_decision_trace"] = [{
+        "schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:4",
+        "selected_action": 0, "selected_goal_xy_m": [1., 2.], "start_tick": 0,
+        "end_tick": 24, "actual_tick_actions": [0, 1]}]
     record["executed_planner_route_trace"] = [{"start_tick": 0, "end_tick": 24,
         "selected_action": 0, "executed_action_trace": [0, 1]}]
     frames = [{"tick": 0, "meco_policy_decision": None},
         {"tick": 24, "meco_policy_decision": {"policy": "C1",
          "kind": "policy_decision", "macro_start_tick": 0, "macro_end_tick": 24,
-         "action": 0, "executed_actions": [0, 1]}}]
+         "action": 0, "executed_actions": [0, 1], "candidate_id": "fuel:4",
+         "goal_xy_m": [1., 2.]}}]
     _validate_meco_replay_alignment(record, frames, final_tick=24)
     frames[1]["meco_policy_decision"]["executed_actions"] = [0, 0]
-    with pytest.raises(ValueError, match="actions differ"):
+    with pytest.raises(ValueError, match="differs from executed policy decision trace"):
         _validate_meco_replay_alignment(record, frames, final_tick=24)
 
 
@@ -276,15 +347,20 @@ def test_replay_alignment_compares_full_no_route_macro_trace_and_allows_remask()
     record.update({"policy": "C1", "elapsed_ticks": 3,
         "executed_planner_route_trace": [], "executed_action_trace": [0, 2, 1],
         "selected_action_trace": [0]})
+    record["executed_policy_decision_trace"] = [{
+        "schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:4",
+        "selected_action": 0, "selected_goal_xy_m": [1., 2.], "start_tick": 0,
+        "end_tick": 3, "actual_tick_actions": [0, 2, 1]}]
     frames = [{"tick": 0, "meco_policy_decision": None},
         {"tick": 3, "meco_policy_decision": {"policy": "C1",
          "kind": "policy_decision", "macro_start_tick": 0, "macro_end_tick": 3,
-         "action": 0, "executed_actions": [0, 2, 1]}}]
+         "action": 0, "executed_actions": [0, 2, 1], "candidate_id": "fuel:4",
+         "goal_xy_m": [1., 2.]}}]
     _validate_meco_replay_alignment(record, frames, final_tick=3)
     # Preserve the selected action and final executed action while corrupting
     # only the middle tick: endpoint-only comparisons would miss this change.
     frames[1]["meco_policy_decision"]["executed_actions"] = [0, 9, 1]
-    with pytest.raises(ValueError, match="macro slice"):
+    with pytest.raises(ValueError, match="differs from executed policy decision trace"):
         _validate_meco_replay_alignment(record, frames, final_tick=3)
 
 
@@ -293,10 +369,15 @@ def test_replay_alignment_rejects_no_route_trace_with_omitted_prefix():
     record.update({"policy": "C1", "elapsed_ticks": 3,
         "executed_planner_route_trace": [], "executed_action_trace": [0, 2, 1],
         "selected_action_trace": [0]})
+    record["executed_policy_decision_trace"] = [{
+        "schema": "meco-executed-policy-decision-v1", "candidate_id": "fuel:4",
+        "selected_action": 0, "selected_goal_xy_m": [1., 2.], "start_tick": 1,
+        "end_tick": 3, "actual_tick_actions": [2, 1]}]
     frames = [{"tick": 0, "meco_policy_decision": None},
         {"tick": 3, "meco_policy_decision": {"policy": "C1",
          "kind": "policy_decision", "macro_start_tick": 1, "macro_end_tick": 3,
-         "action": 0, "executed_actions": [2, 1]}}]
+         "action": 0, "executed_actions": [2, 1], "candidate_id": "fuel:4",
+         "goal_xy_m": [1., 2.]}}]
     with pytest.raises(ValueError, match="macro slice"):
         _validate_meco_replay_alignment(record, frames, final_tick=3)
 

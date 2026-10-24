@@ -525,6 +525,27 @@ def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
         raise ValueError("each post-initial replay frame must identify its scored policy decision")
     macro_decisions = [decision for decision in decisions
         if decision.get("kind") == "policy_decision"]
+    learned_policy = record.get("policy") in MECO_TRACKS
+    executed_policy = record.get("executed_policy_decision_trace")
+    if learned_policy and (record.get("executed_policy_decision_trace_schema") !=
+            "meco-executed-policy-decision-v1" or not isinstance(executed_policy, list)):
+        raise ValueError("learned-track replay requires the versioned executed policy decision trace")
+    if executed_policy is not None:
+        if (not isinstance(executed_policy, list) or
+                len(executed_policy) != len(macro_decisions)):
+            raise ValueError("replay macro count differs from executed policy decision trace")
+        for decision, row in zip(macro_decisions, executed_policy):
+            if (row.get("schema") != "meco-executed-policy-decision-v1" or
+                    not isinstance(row.get("candidate_id"), str) or not row["candidate_id"]):
+                raise ValueError("executed policy decision trace lacks versioned candidate identity")
+            expected = (row.get("selected_action"), row.get("actual_tick_actions"),
+                        row.get("start_tick"), row.get("end_tick"),
+                        row.get("candidate_id"), row.get("selected_goal_xy_m"))
+            actual = (decision.get("action"), decision.get("executed_actions"),
+                      decision.get("macro_start_tick"), decision.get("macro_end_tick"),
+                      decision.get("candidate_id"), decision.get("goal_xy_m"))
+            if actual != expected:
+                raise ValueError("replay decision differs from executed policy decision trace")
     route_rows = record.get("executed_planner_route_trace") or []
     if route_rows:
         if len(route_rows) != len(macro_decisions):
@@ -567,6 +588,19 @@ def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
                 # D0 chooses anew at every physics tick; its replay action is
                 # the actual choice on the final tick of the sampled macro.
                 raise ValueError("replay action differs from evaluator tick action trace")
+
+
+def _selected_policy_candidate_id(prepared, candidate_set, choice):
+    """Return the exact selected support/table identity, independent of route capture."""
+    if prepared is not None and "support" in prepared:
+        support = prepared["support"]
+        node = int(support.pair_node_ids[choice].item())
+        behavior = int(support.behavior_ids[choice].item())
+        descriptor = int(support.descriptor_ids[choice].item())
+        return f"node:{node}:behavior:{behavior}:descriptor:{descriptor}"
+    if candidate_set is not None and 0 <= int(choice) < len(candidate_set.table.candidate_ids):
+        return str(candidate_set.table.candidate_ids[int(choice)])
+    return None
 
 
 def _snapshot_tensors(snapshot, *, device):
@@ -2492,6 +2526,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         actions_count = [0] * 8
                         routes_seen = []
                         executed_planner_route_trace = []
+                        executed_policy_decision_trace = []
                         executed_action_trace = []
                         selected_action_trace = []
                         execution_failures = []
@@ -2609,6 +2644,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 action_source = "d1_inference_disable_fallback" if use_d1_fallback else policy.lower()
                                 if use_d1_fallback:
                                     fault_fallback_count += 1
+                            selected_candidate_id = _selected_policy_candidate_id(
+                                prepared, candidate_set, choice)
                             routes_before_choice = len(routes_seen)
                             plan_a_support = (prepared is not None and
                                               "support" in prepared)
@@ -2677,6 +2714,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 action = pending_eval_goal["action"]
                                 goal_xy = pending_eval_goal["goal_xy"]
                                 goal_heading = pending_eval_goal["goal_heading"]
+                                selected_candidate_id = (pending_eval_goal.get("route_id") or
+                                                         selected_candidate_id)
                                 selected_target_track = None
                                 selected_target_xy = None
                                 if len(routes_seen) > routes_before_choice:
@@ -2761,6 +2800,38 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "route_length": route_length,
                                     "route_points_m": route_points,
                                 })
+                            if policy in MECO_TRACKS:
+                                inference = (prepared.get("inference_provenance")
+                                    if prepared is not None else None)
+                                if inference is None and prepared is not None:
+                                    inference = prepared.get("decision", {}).get(
+                                        "inference_provenance")
+                                inference_outcome = None
+                                if inference and isinstance(loaded.get(policy), ProductionMecoAdapter):
+                                    counters = loaded[policy].inference_counters
+                                    seq = inference.get("request_sequence")
+                                    inference_outcome = next((row for row in reversed(
+                                        counters.get("recent_outcomes", []))
+                                        if row.get("request_sequence") == seq), None)
+                                candidate_id = selected_candidate_id
+                                selected_goal = [float(goal_xy[0]), float(goal_xy[1])]
+                                executed_policy_decision_trace.append({
+                                    "schema": "meco-executed-policy-decision-v1",
+                                    "candidate_id": candidate_id,
+                                    "selected_action": int(action),
+                                    "selected_goal_xy_m": selected_goal,
+                                    "start_tick": int(elapsed),
+                                    "end_tick": int(elapsed + len(actual_trace)),
+                                    "actual_tick_actions": list(actual_trace),
+                                    "divergence": any(value != action for value in actual_trace),
+                                    "fallback": bool(not forced_eval_goal and prepared is not None and
+                                        prepared.get("fallback_used", False)),
+                                    "status": ("pending_goal_continuation" if forced_eval_goal else
+                                        "inference_disabled_fallback" if use_d1_fallback else
+                                        "deterministic_fallback" if prepared is not None and
+                                        prepared.get("fallback_used", False) else "selected"),
+                                    "inference_outcome": inference_outcome,
+                                    "inference_provenance": inference})
                             if use_d1_fallback:
                                 post_fault_macro_count += 1
                                 for executed_action in actual_trace:
@@ -2848,6 +2919,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "p_mode": ("p0" if policy.endswith("_P0") else
                                                p_mode if policy in ("A1", "A2", "A3") else None),
                                     "inference_disabled": bool(use_d1_fallback)}
+                                if policy in MECO_TRACKS:
+                                    decision.update({
+                                        "candidate_id": selected_candidate_id,
+                                        "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])]})
                                 replay_frames.append(_capture_meco_replay_frame(
                                     env, int(env.steps[0].item()), decision))
                             update_evaluation_status("running", len(records))
@@ -2953,6 +3028,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "split": split,
                             **(qualification_case or {}),
                             "source_identity_sha256": source_hash,
+                            "executed_policy_decision_trace_schema": (
+                                "meco-executed-policy-decision-v1" if policy in MECO_TRACKS else None),
                             "safety_metrics_schema": metric_ledger_record["safety_metrics_schema"],
                             "safety_metrics_source_identity_sha256": source_hash,
                             "actions": actions_count, "executed_action_trace": executed_action_trace,
@@ -2982,6 +3059,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
                             "executed_planner_route_trace": executed_planner_route_trace,
+                            "executed_policy_decision_trace": (
+                                executed_policy_decision_trace if policy in MECO_TRACKS else None),
                             "episode_id": episode_id}
                         if capture_replay:
                             final_tick = int(env.steps[0].item())

@@ -6,6 +6,8 @@ legality, and only the deterministic arbiter may execute an action.
 """
 from __future__ import annotations
 
+from collections import deque
+import copy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -217,6 +219,7 @@ class ProductionMecoAdapter:
         self.device = next(iter(devices))
         self.checkpoint_sha256, self.protocol_id = checkpoint_sha256, protocol_id
         self.source_snapshot_sha256 = source_snapshot_sha256
+        self._last_inference_exception_type = None
         self._request_lock = threading.Lock()
         self._request_sequence = 0
         self._generation_id = uuid.uuid4().hex
@@ -256,6 +259,7 @@ class ProductionMecoAdapter:
         self._broker.close()
 
     def _infer_sync(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
+        self._last_inference_exception_type = None
         try:
             from .meco_input_provenance import input_contract_digest
             if (request.track != self.track or request.model_id != f"meco:{self.track}"
@@ -352,6 +356,7 @@ class ProductionMecoAdapter:
                 input_contract_sha256=request.input_contract_sha256,
                 outputs=MappingProxyType(dict(values)))
         except Exception:
+            self._last_inference_exception_type = "model_exception"
             return None
 
 
@@ -369,6 +374,8 @@ class _AsyncInferenceBroker:
         self.dropped = 0
         self.late = 0
         self.faults = 0
+        self.recent_outcomes = deque(maxlen=128)
+        self.active_item = None
         self.thread = threading.Thread(target=self._run,
             name=f"meco-inference-{adapter.track}", daemon=True)
         self.thread.start()
@@ -380,7 +387,54 @@ class _AsyncInferenceBroker:
                     "inference_faults": self.faults,
                     "generation_id": self.adapter._generation_id,
                     "last_published_sequence": self.latest_published_sequence,
+                    "outcome_schema": "meco-inference-outcomes-v1",
+                    "recent_outcomes": [copy.deepcopy(row) for row in self.recent_outcomes],
                     "closed": self.closed}
+
+    @staticmethod
+    def _identity(request):
+        return {"track": getattr(request, "track", None),
+                "request_sequence": getattr(request, "request_sequence", None),
+                "generation_id": getattr(request, "generation_id", None),
+                "snapshot_id": getattr(request, "snapshot_id", None)}
+
+    def _finish_locked(self, item, status, *, now=None):
+        if item.get("terminal"):
+            if item.get("status") == "published" and status == "consumed":
+                terminal_time = time.monotonic() if now is None else now
+                item.setdefault("times", {})["consumed"] = terminal_time
+                item.setdefault("events", []).append("consumed")
+                item["status"] = "consumed"
+                outcome = item.get("outcome")
+                if outcome is not None:
+                    outcome["status"] = "consumed"
+                    outcome["times_monotonic"] = dict(item["times"])
+                    outcome["events"] = list(item["events"])
+                    outcome["durations_s"]["request_age_at_terminal"] = max(0.,
+                        terminal_time - getattr(item["request"], "capture_monotonic", terminal_time))
+            return
+        item["terminal"] = True
+        item["status"] = status
+        item.setdefault("times", {})[status] = time.monotonic() if now is None else now
+        times = dict(item.get("times", {}))
+        queued = times.get("queued")
+        item_identity = self._identity(item["request"])
+        outcome = {"schema": "meco-inference-outcome-v1",
+            **item_identity, "status": status,
+            "times_monotonic": times,
+            "durations_s": ({"queue_wait": max(0., times["started"] - queued)
+                if queued is not None and times.get("started") is not None else None,
+                "inference": max(0., times["published"] - times["started"])
+                if times.get("published") is not None and times.get("started") is not None else None,
+                "request_age_at_terminal": max(0., times[status] - getattr(
+                    item["request"], "capture_monotonic", times[status]))}),
+            "events": list(item.get("events", ()))}
+        item["outcome"] = outcome
+        self.recent_outcomes.append(outcome)
+
+    def _reject_locked(self, request, status):
+        item = {"request": request, "times": {}, "events": [], "terminal": False}
+        self._finish_locked(item, status)
 
     def submit(self, request, inputs):
         if (request.generation_id != self.adapter._generation_id
@@ -391,6 +445,7 @@ class _AsyncInferenceBroker:
                 or request.model_id != f"meco:{self.adapter.track}"):
             with self.lock:
                 self.faults += 1
+                self._reject_locked(request, "identity_mismatch")
             return None
         try:
             frozen_inputs = {name: tensor.detach().clone()
@@ -398,16 +453,20 @@ class _AsyncInferenceBroker:
         except Exception:
             with self.lock:
                 self.faults += 1
+                self._reject_locked(request, "model_exception")
             return None
         item = {"request": request, "inputs": frozen_inputs,
                 "response": None, "done": False, "consumed": False,
-                "discarded": False, "late_counted": False}
+                "discarded": False, "late_counted": False, "terminal": False,
+                "times": {"queued": time.monotonic()}, "events": ["queued"]}
         with self.lock:
             if self.closed:
                 self.faults += 1
+                self._finish_locked(item, "close")
                 return None
             if request.request_sequence <= self.latest_submitted_sequence:
                 self.faults += 1
+                self._finish_locked(item, "identity_mismatch")
                 return None
             # Sequence acceptance and queue replacement are one serialized
             # operation, so an older submitter cannot replace a newer request.
@@ -422,11 +481,13 @@ class _AsyncInferenceBroker:
                 if replaced_item is not None:
                     replaced_item["discarded"] = True
                     self.dropped += 1
+                    self._finish_locked(replaced_item, "superseded")
                 try:
                     self.pending.put_nowait(item)
                 except queue.Full:
                     item["discarded"] = True
                     self.dropped += 1
+                    self._finish_locked(item, "superseded")
                     return None
             self.latest_submitted_sequence = request.request_sequence
         return item
@@ -435,6 +496,8 @@ class _AsyncInferenceBroker:
         with self.lock:
             if not self.closed:
                 self.closed = True
+                if self.active_item is not None:
+                    self._finish_locked(self.active_item, "close")
                 while True:
                     try:
                         item = self.pending.get_nowait()
@@ -444,15 +507,19 @@ class _AsyncInferenceBroker:
                         item["discarded"] = True
                         item["done"] = True
                         self.dropped += 1
+                        self._finish_locked(item, "close")
                     self.pending.task_done()
                 self.pending.put_nowait(self._STOP)
         if threading.current_thread() is not self.thread:
             self.thread.join()
 
     def poll(self, request, item):
-        if item is None or item.get("request") != request:
+        if item is None:
             return None
         with self.lock:
+            if item.get("request") != request:
+                self._reject_locked(request, "identity_mismatch")
+                return None
             if item["consumed"] or item["discarded"]:
                 return None
             if (request.request_sequence != self.latest_submitted_sequence
@@ -463,18 +530,24 @@ class _AsyncInferenceBroker:
                 # This poll is the action boundary. Closing the handle prevents
                 # a later worker completion from being published or reused.
                 item["consumed"] = True
+                item["times"]["consumed"] = time.monotonic()
+                item["events"].append("consumed")
+                self._finish_locked(item, "consumed_before_completion")
                 if time.monotonic() >= request.expires_monotonic:
                     self._mark_late_locked(item)
                 return None
             response = item["response"]
             if response is None:
                 item["consumed"] = True
+                self._finish_locked(item, item.get("status") or "model_none")
                 return None
             if (time.monotonic() > request.expires_monotonic
                     or response.completed_monotonic > request.expires_monotonic):
                 self._mark_late_locked(item)
+                self._finish_locked(item, "expired_completion")
                 return None
             item["consumed"] = True
+            self._finish_locked(item, "consumed")
             return response
 
     def _mark_late(self, item):
@@ -497,24 +570,45 @@ class _AsyncInferenceBroker:
                 if (request.generation_id != self.adapter._generation_id
                         or time.monotonic() > request.expires_monotonic):
                     self._mark_late(item)
+                    with self.lock:
+                        self._finish_locked(item, "expiry_before_start" if time.monotonic() > request.expires_monotonic else "identity_mismatch")
                     continue
+                with self.lock:
+                    self.active_item = item
+                    item["times"]["started"] = time.monotonic()
+                    item["events"].append("started")
                 with torch.inference_mode():
+                    if hasattr(self.adapter, "_last_inference_exception_type"):
+                        self.adapter._last_inference_exception_type = None
                     response = self.adapter._infer_sync(request, item["inputs"],
                                                         now=time.monotonic())
                 late_response = False
                 with self.lock:
-                    if (response is None or time.monotonic() > request.expires_monotonic
+                    if (self.closed or response is None or time.monotonic() > request.expires_monotonic
                             or request.request_sequence != self.latest_submitted_sequence
                             or request.request_sequence <= self.latest_published_sequence
                             or item["consumed"]):
-                        if response is None:
+                        if self.closed:
+                            self._finish_locked(item, "close")
+                        elif response is None:
                             self.faults += 1
+                            status = ("expired_completion" if time.monotonic() > request.expires_monotonic
+                                else getattr(self.adapter, "_last_inference_exception_type", None)
+                                or "model_none")
+                            self._finish_locked(item, status)
                         else:
                             late_response = True
+                            reason = ("expired_completion" if time.monotonic() > request.expires_monotonic
+                                or response.completed_monotonic > request.expires_monotonic else
+                                "consumed_before_completion" if item["consumed"] else "superseded")
+                            self._finish_locked(item, reason)
                     else:
                         # Publish only after the complete output mapping is validated.
                         item["response"] = response
                         self.latest_published_sequence = request.request_sequence
+                        item["times"]["published"] = time.monotonic()
+                        item["events"].append("published")
+                        self._finish_locked(item, "published")
                     # Make completion visible in the same critical section as
                     # any complete response publication.
                     item["done"] = True
@@ -526,9 +620,12 @@ class _AsyncInferenceBroker:
                 with self.lock:
                     self.faults += 1
                     item["response"] = None
+                    self._finish_locked(item, "model_exception")
             finally:
                 with self.lock:
                     item["done"] = True
+                    if self.active_item is item:
+                        self.active_item = None
                 self.pending.task_done()
 
 

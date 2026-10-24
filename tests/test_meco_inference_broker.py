@@ -71,8 +71,16 @@ def test_newest_pending_request_replaces_older_queued_request():
         release.set()
         broker.pending.join()
         assert calls == [1, 3]
+        outcomes = broker.counters()["recent_outcomes"]
+        assert any(row["request_sequence"] == 2 and row["status"] == "superseded"
+                   for row in outcomes)
         assert broker.poll(r1, h1) is None
         assert broker.poll(r3, h3) is not None
+        published = next(row for row in broker.counters()["recent_outcomes"]
+                         if row["request_sequence"] == 3)
+        assert published["status"] == "consumed"
+        assert published["events"] == ["queued", "started", "published", "consumed"]
+        assert published["durations_s"]["inference"] >= 0
     finally:
         release.set()
         broker.close()
@@ -93,9 +101,16 @@ def test_submit_and_poll_reject_mismatched_identity():
         forged = SimpleNamespace(**vars(request))
         forged.snapshot_id = "another-snapshot"
         assert broker.poll(forged, handle) is None
+        assert broker.counters()["recent_outcomes"][-1]["status"] == "identity_mismatch"
         result = broker.poll(request, handle)
         assert result is not None
         assert broker.poll(request, handle) is None
+        for _ in range(140):
+            stale = adapter.request(generation="stale-generation")
+            assert broker.submit(stale, {"x": torch.tensor([0.0])}) is None
+        outcomes = broker.counters()["recent_outcomes"]
+        assert len(outcomes) == 128
+        assert all("outputs" not in row and "tensor" not in row for row in outcomes)
     finally:
         broker.close()
 
@@ -120,6 +135,9 @@ def test_poll_before_completion_consumes_handle_and_prevents_late_reuse():
         assert handle["response"] is None
         assert broker.poll(request, handle) is None
         assert broker.counters()["late_responses"] == 1
+        outcome = broker.counters()["recent_outcomes"][-1]
+        assert outcome["status"] == "consumed_before_completion"
+        assert outcome["events"] == ["queued", "started", "consumed"]
     finally:
         release.set()
         broker.close()
@@ -146,6 +164,7 @@ def test_expired_none_and_raised_inference_faults_are_isolated():
         assert expired_handle["done"] and expired_handle["response"] is None
         assert calls == []
         assert broker.counters()["late_responses"] == 1
+        assert broker.counters()["recent_outcomes"][-1]["status"] == "expiry_before_start"
 
         missing = adapter.request()
         missing_handle = broker.submit(missing, {"x": torch.tensor([0.0])})
@@ -153,6 +172,7 @@ def test_expired_none_and_raised_inference_faults_are_isolated():
         broker.pending.join()
         assert broker.poll(missing, missing_handle) is None
         assert broker.counters()["inference_faults"] == 1
+        assert broker.counters()["recent_outcomes"][-1]["status"] == "model_none"
 
         raised = adapter.request()
         raised_handle = broker.submit(raised, {"x": torch.tensor([0.0])})
@@ -160,6 +180,7 @@ def test_expired_none_and_raised_inference_faults_are_isolated():
         broker.pending.join()
         assert broker.poll(raised, raised_handle) is None
         assert broker.counters()["inference_faults"] == 2
+        assert broker.counters()["recent_outcomes"][-1]["status"] == "model_exception"
 
         subsequent = adapter.request()
         subsequent_handle = broker.submit(subsequent, {"x": torch.tensor([1.0])})
