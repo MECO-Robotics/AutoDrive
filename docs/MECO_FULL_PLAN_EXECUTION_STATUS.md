@@ -1,12 +1,14 @@
 # MECO learning tracks plan: execution status
 
-> **Latest integrated and runtime snapshot — 2026-10-24 23:00 UTC.** The
+> **Latest integrated and runtime snapshot — 2026-10-24 23:14 UTC.** The
 > implementation candidate was fast-forwarded into `main` at
-> `08b93828032ca6561552358142bb6b1781bc5071`; the previously untracked GPU
-> inventory was preserved and verified byte-identical to the integrated file.
-> Two startup/replay defects were fixed and reviewed: deferred initial
-> observation, then D0 replay cadence when no learned-policy cadence exists.
-> The focused replay module passed 33 tests, plus compilation and diff checks.
+> `08b93828032ca6561552358142bb6b1781bc5071`; the evidence and dashboard-pin
+> update is committed at `e852a0770da9fc014746e4fcd53255b210849ff4`. The
+> previously untracked GPU inventory was preserved and verified byte-identical
+> to the integrated file. Two startup/replay defects were fixed and reviewed:
+> deferred initial observation, then D0 replay cadence when no learned-policy
+> cadence exists. The focused replay module passed 33 tests, plus compilation
+> and diff checks.
 >
 > A fresh representative GPU diagnostic completed on this checkout: D0,
 > `pickup_simple/cluster`, seed `61720261024`, `cuda:0` (AMD Radeon Pro
@@ -14,10 +16,12 @@
 > seconds. Replay `scenario-meco-1e00f4361b661a9d7dc18096` has 59 frames; its
 > initial frame marks action audits unavailable and the next frame contains
 > action-derived values. The report and replay are under
-> `evaluations/meco-five/`; the dashboard discovered and served the replay with
-> current source commit `08b938280`, no dirty files, and `outdated=false`.
-> After restart, the dashboard ran from the current `main` checkout and its
-> status, curriculum, replay, page, and asset endpoints returned HTTP 200.
+> `evaluations/meco-five/`; final replay
+> `scenario-meco-78afe74b3281fb35512778bf` was generated after the dashboard
+> restart and reports source commit `e852a0770`, no dirty files, and
+> `outdated=false`. The dashboard ran from the current `main` checkout; its
+> status, curriculum, replay, page, and asset endpoints returned HTTP 200, and
+> the API validated 51 provenance tranches.
 >
 > This runtime check is diagnostic evidence only. The five-track supervisor
 > remains stopped; the prior run's A1/A2/A3/C1/C2 counts (525/526/500/500/500)
@@ -74,7 +78,9 @@ training, or replay work was performed for these integrations.
 > planned scenario families had zero exposure. These counts do not establish
 > 100/100 evaluation cases, pass status, or a qualified winner.
 >
-> Qualification-v4 code and workflow admission are implemented and reviewed,
+> The five-track supervisor has not yet been restarted on the isolated
+> source-bound campaign; the previous supervisor remains stopped. Qualification-v4
+> code and workflow admission are implemented and reviewed,
 > but the checked-in protocol is still provisional v1. The only calibration
 > artifact is D0 `pickup_simple`; there is no v4 protocol, reviewed operational
 > margin set, matched held-out result, learned-policy confidence interval, or
