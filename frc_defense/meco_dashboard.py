@@ -28,6 +28,7 @@ WORKER_STALL_SECONDS = 600
 QUEUE_STALE_SECONDS = 180
 EVALUATION_HEARTBEAT_STALE_SECONDS = 90
 MAX_STATUS_FILE_BYTES = 32 * 1024 * 1024
+TRUSTED_GIT_EXECUTABLE = "/usr/bin/git"
 
 
 def _read_json(path: Path):
@@ -1034,11 +1035,13 @@ def _three_pass_provenance(project: Path) -> dict:
             for commit in commits.values():
                 try:
                     checked = subprocess.run(
-                        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                        [TRUSTED_GIT_EXECUTABLE, "cat-file", "-e", f"{commit}^{{commit}}"],
                         cwd=project, stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         timeout=2, check=False,
-                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                        # Never let an inherited PATH select the git executable
+                        # (or helpers) used to validate dashboard provenance.
+                        env={"PATH": "/usr/bin:/bin",
                              "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:

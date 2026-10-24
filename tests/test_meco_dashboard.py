@@ -312,6 +312,14 @@ def test_three_pass_summary_manifest_rejects_nonexistent_commit_object(tmp_path,
     monkeypatch.setattr(dashboard, "_EXPECTED_THREE_PASS_PROVENANCE_SHA256",
                         hashlib.sha256(manifest_path.read_bytes()).hexdigest())
 
+    # A poisoned PATH must not let a fake git approve nonexistent commit IDs.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text("#!/bin/sh\nexit 0\n")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+
     result = dashboard._three_pass_provenance(tmp_path)
     assert result["status"] == "untrusted"
     assert "not present as a commit object" in result["untrusted_reason"]
