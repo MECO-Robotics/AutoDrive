@@ -438,7 +438,7 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         "validation_ready": validation_ready,
         "qualification_ready": qualification_ready,
         "launch_ready": False,
-        "launch_blocker": "manifest is not consumed by a supervisor that supports isolated campaign_root; current supervisor is pinned to legacy live roots",
+        "launch_blocker": "supervisor launch requires explicit --diagnostic-launch, starts fresh outputs, and remains permanently non-qualifying without Phase 2 evidence",
         "phase2_ready": phase2_ready, "phase2_complete": False,
         "phase2_blockers": [f"{t}: valid U/P/behavior or gross/pairwise target coverage missing"
             for t, item in warm.items() if not item["phase2_covered"]]}

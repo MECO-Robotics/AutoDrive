@@ -48,6 +48,7 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
     supervisor.configs = {track: MecoTrainConfig(track=track,
         device="cuda:0" if index % 2 == 0 else "cuda:1")
         for index, track in enumerate(MECO_TRACKS)}
+    supervisor.track_dirs = {track: tmp_path / track for track in MECO_TRACKS}
     supervisor.warm_start_paths = {}
     supervisor.warm_start_hashes = {}
     supervisor.qualification_protocol_path = None
@@ -259,3 +260,97 @@ def test_target_barrier_rejects_a_track_that_did_not_reach_frontier(
     with pytest.raises(RuntimeError, match="matched target"):
         supervisor._train_to_update(10, 1,
             {track: "queued" for track in MECO_TRACKS}, list(MECO_TRACKS), {})
+
+
+def test_manifest_mode_rejects_overrides_before_read_or_output(tmp_path):
+    manifest = tmp_path / "missing-manifest.json"
+    output = tmp_path / "must-not-exist"
+    with pytest.raises(ValueError, match="CLI overrides"):
+        module.main(["--campaign-manifest", str(manifest), "--output", str(output)])
+    assert not output.exists()
+
+
+def test_manifest_mode_without_diagnostic_opt_in_is_read_only(tmp_path, monkeypatch, capsys):
+    manifest_path = tmp_path / "manifest.json"
+    campaign_root = tmp_path / "fresh-campaign"
+    evaluation_root = tmp_path / "fresh-evaluations"
+    manifest_path.write_text(json.dumps({"campaign": {"id": "fixture",
+        "root": str(campaign_root), "evaluation_output": str(evaluation_root)}}))
+    monkeypatch.setattr("frc_defense.meco_training_manifest.validate_campaign_manifest",
+        lambda _manifest: {"valid": True, "canonical_sha256": "a" * 64,
+            "phase2_ready": False, "phase2_complete": False,
+            "implementation_ready": True})
+    monkeypatch.setattr(module, "MecoSupervisor",
+        lambda **_kwargs: pytest.fail("read-only manifest mode must not construct supervisor"))
+    result = module.main(["--campaign-manifest", str(manifest_path)])
+    assert result["qualification_eligible"] is False
+    assert result["launch_ready"] is False
+    assert "diagnostic-launch" in result["blocker"]
+    assert not campaign_root.exists()
+    assert not evaluation_root.exists()
+    assert json.loads(capsys.readouterr().out)["phase2_complete"] is False
+
+
+def _fresh_manifest_supervisor(output, evaluation_output):
+    supervisor = MecoSupervisor.__new__(MecoSupervisor)
+    supervisor.output = output
+    supervisor.evaluation_output = evaluation_output
+    supervisor.devices = ("cuda:0", "cuda:1")
+    supervisor.evaluation_device = "cuda:1"
+    supervisor.manifest = {"campaign": {"id": "fresh"}}
+    supervisor.manifest_digest = "a" * 64
+    return supervisor
+
+
+def test_run_rejects_campaign_root_created_after_construction(tmp_path, monkeypatch):
+    output = tmp_path / "fresh"
+    evaluation = output / "evaluations"
+    supervisor = _fresh_manifest_supervisor(output, evaluation)
+    output.mkdir()
+    monkeypatch.setattr(supervisor, "_run_locked",
+        lambda: pytest.fail("must reject the newly appeared campaign root"))
+    with pytest.raises(ValueError, match="roots must remain absent"):
+        supervisor.run()
+    from frc_defense.meco_device_lease import lease_devices
+    with lease_devices(("cuda:0", "cuda:1"), owner="after-rejected-run"):
+        pass
+
+
+def test_run_rejects_evaluation_root_claimed_during_campaign_claim(tmp_path, monkeypatch):
+    output = tmp_path / "fresh"
+    evaluation = output / "evaluations"
+    supervisor = _fresh_manifest_supervisor(output, evaluation)
+    monkeypatch.setattr(supervisor, "_run_locked",
+        lambda: pytest.fail("must reject the newly appeared evaluation root"))
+    original_mkdir = Path.mkdir
+
+    def competing_mkdir(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if Path(path) == output:
+            original_mkdir(evaluation, parents=True, exist_ok=False)
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", competing_mkdir)
+    with pytest.raises(ValueError, match="evaluation root appeared"):
+        supervisor.run()
+    assert output.is_dir() and evaluation.is_dir()
+
+
+def test_run_removes_empty_campaign_claim_if_evaluation_claim_fails(
+        tmp_path, monkeypatch):
+    output = tmp_path / "fresh"
+    evaluation = output / "evaluations"
+    supervisor = _fresh_manifest_supervisor(output, evaluation)
+    monkeypatch.setattr(supervisor, "_run_locked",
+        lambda: pytest.fail("must fail before supervisor work"))
+    original_mkdir = Path.mkdir
+
+    def failing_evaluation_mkdir(path, *args, **kwargs):
+        if Path(path) == evaluation:
+            raise PermissionError("simulated evaluation root claim failure")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", failing_evaluation_mkdir)
+    with pytest.raises(PermissionError, match="simulated"):
+        supervisor.run()
+    assert not output.exists()

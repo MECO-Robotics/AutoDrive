@@ -248,7 +248,35 @@ class MecoSupervisor:
                  evaluation_protocol: str | None = None,
                  evaluation_split: str = "diagnostic",
                  evaluation_case: dict | None = None,
-                 phase4_train_exposure: bool = False):
+                 phase4_train_exposure: bool = False,
+                 campaign_manifest: dict | None = None):
+        self.manifest = None
+        self.manifest_validation = None
+        self.manifest_digest = None
+        self.manifest_configs = None
+        if campaign_manifest is not None:
+            from .meco_training_manifest import validate_campaign_manifest
+            self.manifest_validation = validate_campaign_manifest(campaign_manifest)
+            if not self.manifest_validation["valid"]:
+                raise ValueError("campaign manifest failed validation")
+            self.manifest = campaign_manifest
+            self.manifest_digest = self.manifest_validation["canonical_sha256"]
+            campaign = campaign_manifest["campaign"]
+            output = campaign["root"]
+            evaluation_output = campaign["evaluation_output"]
+            if Path(output).exists() or Path(evaluation_output).exists():
+                raise ValueError("manifest diagnostic launch requires fresh, absent campaign output roots")
+            self.manifest_configs = {track: MecoTrainConfig(**campaign_manifest["tracks"][track]["config"])
+                                     for track in MECO_TRACKS}
+            expected_devices = tuple(campaign_manifest["devices"]["training_pool"])
+            expected_eval_device = campaign_manifest["devices"]["evaluation"]
+            if tuple(devices) != expected_devices or evaluation_device != expected_eval_device:
+                raise ValueError("runtime device arguments conflict with validated campaign manifest")
+            if (self.manifest_configs[MECO_TRACKS[0]].scenario_id != scenario or
+                    self.manifest_configs[MECO_TRACKS[0]].category != category or
+                    self.manifest_configs[MECO_TRACKS[0]].seed != seed or
+                    self.manifest_configs[MECO_TRACKS[0]].updates != chunk_updates):
+                raise ValueError("runtime training arguments conflict with validated campaign manifest")
         from .meco_device import require_indexed_cuda_device
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
@@ -262,8 +290,8 @@ class MecoSupervisor:
         self.evaluation_output = Path(evaluation_output).expanduser().resolve()
         expected_checkpoint_root = (ROOT / "checkpoints" / "meco-five").resolve()
         expected_evaluation_root = (ROOT / "evaluations" / "meco-five").resolve()
-        if (self.output != expected_checkpoint_root
-                or self.evaluation_output != expected_evaluation_root):
+        if (self.manifest is None and (self.output != expected_checkpoint_root
+                or self.evaluation_output != expected_evaluation_root)):
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
         from .fuel_physics_hip import prepare_native_fuel_extension
@@ -349,7 +377,7 @@ class MecoSupervisor:
         self.completed_updates = {track: 0 for track in MECO_TRACKS}
         self.configs = {}
         for index, track in enumerate(MECO_TRACKS):
-            config = MecoTrainConfig(track=track, scenario_id=scenario, category=category,
+            config = self.manifest_configs[track] if self.manifest_configs else MecoTrainConfig(track=track, scenario_id=scenario, category=category,
                 updates=chunk_updates, rollout_steps=rollout_steps, epochs=epochs,
                 action_ticks=action_ticks, seed=seed, device=devices[index % len(devices)],
                 learning_rate=learning_rate, gamma=gamma, gae_lambda=gae_lambda,
@@ -362,6 +390,8 @@ class MecoSupervisor:
                 output=str(self.output / track))
             config.validate()
             self.configs[track] = config
+        self.track_dirs = {track: Path(self.configs[track].output).expanduser().resolve()
+            for track in MECO_TRACKS}
         self.sources = source_identity()
         self.source_hash = _hash(self.sources)
         if warm_start_artifacts:
@@ -419,7 +449,7 @@ class MecoSupervisor:
 
     def _heartbeat_updates(self, track):
         try:
-            heartbeat = json.loads((self.output / track / "heartbeat.json").read_text())
+            heartbeat = json.loads((self.track_dirs[track] / "heartbeat.json").read_text())
             if (heartbeat.get("run_id") == self.run_ids[track]
                     and type(heartbeat.get("completed_updates")) is int):
                 return heartbeat["completed_updates"]
@@ -439,7 +469,7 @@ class MecoSupervisor:
             "category_exposures", "recovery_pressure", "phase4_exposure_counts")}
 
     def _refresh_progress(self, track):
-        payload = _checkpoint_info(self.output / track / "latest.pt")
+        payload = _checkpoint_info(self.track_dirs[track] / "latest.pt")
         if payload:
             self.completed_updates[track] = int(payload.get("update", 0))
 
@@ -474,8 +504,11 @@ class MecoSupervisor:
                 "head_sha256": (history_entries[-1].get("entry_sha256")
                     if history_entries else None)},
             "evaluation": self._evaluation_status()}
+        if getattr(self, "manifest", None) is not None:
+            binding = self._manifest_status_binding()
+            queue["campaign_manifest"] = binding
         _atomic_json(self.queue_path, queue)
-        _atomic_json(self.status_path, {"schema_version": 1,
+        status = {"schema_version": 1,
             "supervisor_id": self.supervisor_id, "protocol_id": self.protocol_id,
             "prediction_mode": self.prediction_mode,
             "prediction_contract": prediction_contract(self.prediction_mode),
@@ -498,7 +531,26 @@ class MecoSupervisor:
             "exact_episode_seeds": self.evaluation_episode_seeds,
             "evaluation": evaluation, "error": error,
             "stop_requested": self.request_stop,
-            "candidate_boundary": CANDIDATE_BOUNDARY})
+            "candidate_boundary": CANDIDATE_BOUNDARY}
+        if getattr(self, "manifest", None) is not None:
+            status["campaign_manifest"] = self._manifest_status_binding()
+        _atomic_json(self.status_path, status)
+
+    def _manifest_status_binding(self):
+        manifest = self.manifest
+        return {"canonical_sha256": self.manifest_digest,
+            "campaign_id": manifest["campaign"]["id"],
+            "campaign_root": str(self.output),
+            "evaluation_output": str(self.evaluation_output),
+            "source": manifest["source"],
+            "track_config_sha256": {t: manifest["tracks"][t]["config_sha256"]
+                for t in MECO_TRACKS},
+            "qualification_protocol": manifest["qualification_protocol"],
+            "evaluation_protocol": manifest["evaluation_protocol"],
+            "device_lease": manifest["devices"]["indexed_device_leases"],
+            "launch_profile": "diagnostic_fresh_start",
+            "phase2_ready": self.manifest_validation["phase2_ready"],
+            "phase2_complete": False, "qualification_eligible": False}
 
     def _evaluation_status(self):
         status_path = (Path(str(self.evaluator_job["output"]) + ".status.json")
@@ -534,7 +586,7 @@ class MecoSupervisor:
         if self.stop_file.exists():
             raise RuntimeError(f"stop file already exists: {self.stop_file}; remove it to resume")
         for track in MECO_TRACKS:
-            run_dir = self.output / track
+            run_dir = self.track_dirs[track]
             run_dir.mkdir(parents=True, exist_ok=True)
             latest = run_dir / "latest.pt"
             payload = _checkpoint_info(latest)
@@ -614,7 +666,7 @@ class MecoSupervisor:
         return self.request_stop
 
     def _recover_task_outcome(self, track, assignment):
-        checkpoint_path = self.output / track / "latest.pt"
+        checkpoint_path = self.track_dirs[track] / "latest.pt"
         checkpoint = _checkpoint_info(checkpoint_path)
         target_update = assignment.get("target_update")
         progress = checkpoint.get("task_progress") if isinstance(checkpoint, dict) else None
@@ -641,14 +693,14 @@ class MecoSupervisor:
             "assignment_id", "cycle", "scenario_id", "category", "episodes",
             "successes", "failures", "aborted_no_legal_support")}
         outcome["completed_updates"] = target_update
-        outcome_path = self.output / track / "task-outcomes.json"
+        outcome_path = self.track_dirs[track] / "task-outcomes.json"
         try:
             current = json.loads(outcome_path.read_text())
         except (OSError, json.JSONDecodeError):
             current = {}
         if current != outcome:
             _atomic_json(outcome_path, outcome)
-        manifest_path = self.output / track / "run.json"
+        manifest_path = self.track_dirs[track] / "run.json"
         try:
             manifest = json.loads(manifest_path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -676,7 +728,7 @@ class MecoSupervisor:
         for track in MECO_TRACKS:
             if statuses.get(track) != "queued":
                 continue
-            run_dir = self.output / track
+            run_dir = self.track_dirs[track]
             manifest_path = run_dir / "run.json"
             if (run_dir / "latest.pt").is_file():
                 try:
@@ -715,20 +767,20 @@ class MecoSupervisor:
             base_config = self.configs[track]
             config = MecoTrainConfig(**{**asdict(base_config),
                 "updates": min(self.chunk_updates, remaining_updates)})
-            latest = self.output / track / "latest.pt"
+            latest = self.track_dirs[track] / "latest.pt"
             warm_artifact = (self.warm_start_paths.get(track)
                 if not latest.is_file() else None)
             if warm_artifact is not None and hashlib.sha256(
                     warm_artifact.read_bytes()).hexdigest() != self.warm_start_hashes[track]:
                 raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
-            command = _train_command(config=config, output=self.output / track,
+            command = _train_command(config=config, output=self.track_dirs[track],
                 run_id=self.run_ids[track], stop_file=self.stop_file,
                 abort_file=abort_file, invocation_id=self.supervisor_id,
                 resume=latest if latest.is_file() else None,
                 protocol_id=self.protocol_id, task_assignment=task_assignment,
                 warm_start=warm_artifact,
                 qualification_protocol=self.qualification_protocol_path)
-            log_path = self.output / track / "supervisor.log"
+            log_path = self.track_dirs[track] / "supervisor.log"
             logs[track] = log_path.open("ab")
             try:
                 process = subprocess.Popen(command, cwd=ROOT,
@@ -771,7 +823,7 @@ class MecoSupervisor:
                     except Exception as exc:
                         failed[selected] = repr(exc)
                         statuses[selected] = "failed"
-                        _atomic_json(self.output / selected / "run.json", {
+                        _atomic_json(self.track_dirs[selected] / "run.json", {
                             "schema_version": 1, "run_id": self.run_ids[selected],
                             "track": selected, "config": asdict(self.configs[selected]),
                             "sources": self.sources,
@@ -807,7 +859,7 @@ class MecoSupervisor:
                     if result != 0:
                         try:
                             worker_manifest = json.loads(
-                                (self.output / track / "run.json").read_text())
+                                (self.track_dirs[track] / "run.json").read_text())
                         except (OSError, json.JSONDecodeError):
                             worker_manifest = {}
                         if (abort_started is not None and
@@ -821,7 +873,7 @@ class MecoSupervisor:
                                 sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_observed_utc=_utc(),
                                 worker_exit_code=result)
-                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                         else:
                             failed[track] = result
                             statuses[track] = "failed"
@@ -831,7 +883,7 @@ class MecoSupervisor:
                                 failed_utc=worker_manifest.get("failed_utc") or _utc(),
                                 worker_exit_code=result,
                                 completed_updates=self._completed_updates(track))
-                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                             if abort_started is None:
                                 abort_started = time.monotonic()
                                 _atomic_json(abort_file, {
@@ -849,7 +901,7 @@ class MecoSupervisor:
                     else:
                         try:
                             worker_manifest = json.loads(
-                                (self.output / track / "run.json").read_text())
+                                (self.track_dirs[track] / "run.json").read_text())
                         except (OSError, json.JSONDecodeError):
                             worker_manifest = {}
                         worker_status = worker_manifest.get("status")
@@ -860,13 +912,13 @@ class MecoSupervisor:
                                 sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_reap="process_group_killed",
                                 completed_updates=self._completed_updates(track))
-                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                         elif abort_started is not None and worker_status == "aborted_due_to_sibling_failure":
                             statuses[track] = worker_status
                             worker_manifest.update(sibling_abort_file=str(abort_file),
                                 sibling_abort_invocation_id=self.supervisor_id,
                                 sibling_abort_marker=json.loads(abort_file.read_text()))
-                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                         else:
                             completed = self._completed_updates(track)
                             if completed < target_update:
@@ -877,7 +929,7 @@ class MecoSupervisor:
                                         f"worker exited successfully at update {completed}, below matched target {target_update}"),
                                     worker_exit_code=result, completed_updates=completed,
                                     failed_utc=worker_manifest.get("failed_utc") or _utc())
-                                _atomic_json(self.output / track / "run.json", worker_manifest)
+                                _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                             else:
                                 statuses[track] = "complete"
                                 self.completed_chunks += 1
@@ -900,7 +952,7 @@ class MecoSupervisor:
                             statuses[track] = "aborted_due_to_sibling_failure"
                             try:
                                 worker_manifest = json.loads(
-                                    (self.output / track / "run.json").read_text())
+                                    (self.track_dirs[track] / "run.json").read_text())
                             except (OSError, json.JSONDecodeError):
                                 worker_manifest = {}
                             worker_manifest.update(status=statuses[track],
@@ -909,7 +961,7 @@ class MecoSupervisor:
                                 sibling_abort_reap="process_group_killed",
                                 worker_exit_code=process.returncode,
                                 completed_updates=self._completed_updates(track))
-                            _atomic_json(self.output / track / "run.json", worker_manifest)
+                            _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                     if unreaped:
                         raise RuntimeError(
                             f"worker process groups remained after bounded sibling-abort reap: {unreaped}")
@@ -950,7 +1002,7 @@ class MecoSupervisor:
                                    else "queued")
                 if statuses[track] in ("stopped", "aborted_due_to_sibling_failure"):
                     try:
-                        manifest = json.loads((self.output / track / "run.json").read_text())
+                        manifest = json.loads((self.track_dirs[track] / "run.json").read_text())
                     except (OSError, json.JSONDecodeError):
                         manifest = {}
                     manifest.update(schema_version=1, run_id=self.run_ids[track],
@@ -962,7 +1014,7 @@ class MecoSupervisor:
                     if abort_started is not None:
                         manifest.update(sibling_abort_file=str(abort_file),
                             sibling_abort_invocation_id=self.supervisor_id)
-                    _atomic_json(self.output / track / "run.json", manifest)
+                    _atomic_json(self.track_dirs[track] / "run.json", manifest)
         if pending:
             self._write_queued_manifests(statuses)
             self._publish(cycle=cycle,
@@ -978,7 +1030,7 @@ class MecoSupervisor:
         output = self.evaluation_output / f"{suffix}.json"
         snapshot_dir = self.evaluation_output / "checkpoint-snapshots" / suffix
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        latest = {track: self.output / track / "latest.pt" for track in MECO_TRACKS}
+        latest = {track: self.track_dirs[track] / "latest.pt" for track in MECO_TRACKS}
         if any(not path.is_file() for path in latest.values()):
             raise RuntimeError("all five learned tracks need a checkpoint before evaluation")
         checkpoints = {}
@@ -1094,7 +1146,7 @@ class MecoSupervisor:
         for track in MECO_TRACKS:
             if statuses.get(track) not in ("queued", "stopped"):
                 continue
-            run_dir = self.output / track
+            run_dir = self.track_dirs[track]
             manifest_path = run_dir / "run.json"
             try:
                 manifest = json.loads(manifest_path.read_text())
@@ -1125,19 +1177,58 @@ class MecoSupervisor:
             if wrong:
                 raise RuntimeError(f"track updates did not reach matched target {target_update}: {wrong}")
 
+    def _claim_fresh_manifest_roots(self):
+        if self.manifest is None:
+            self.output.mkdir(parents=True, exist_ok=True)
+            return
+        if self.output.exists() or self.evaluation_output.exists():
+            raise ValueError("manifest campaign roots must remain absent until device leases are acquired")
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.output.mkdir(exist_ok=False)
+        except FileExistsError as exc:
+            raise ValueError("manifest campaign root was claimed by another process") from exc
+        if self.evaluation_output.exists():
+            try:
+                self.output.rmdir()
+            except OSError:
+                pass
+            raise ValueError("manifest evaluation root appeared while claiming the campaign root")
+        try:
+            self.evaluation_output.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            try:
+                self.output.rmdir()
+            except OSError:
+                pass
+            raise ValueError("manifest evaluation root was claimed by another process") from exc
+        except OSError:
+            try:
+                self.output.rmdir()
+            except OSError:
+                pass
+            raise
+
     def run(self):
-        self.output.mkdir(parents=True, exist_ok=True)
-        lock_handle = (self.output / ".supervisor.lock").open("a+")
+        from .meco_device_lease import lease_devices
+        device_lease = lease_devices(tuple(sorted(set(self.devices) | {self.evaluation_device})),
+            owner=(f"supervisor:{self.manifest_digest}" if self.manifest_digest else "supervisor"))
+        device_lease.acquire()
         try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            lock_handle.close()
-            raise RuntimeError("another MECO supervisor already owns this output root") from exc
-        try:
-            return self._run_locked()
+            self._claim_fresh_manifest_roots()
+            lock_handle = (self.output / ".supervisor.lock").open("a+")
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                lock_handle.close()
+                raise RuntimeError("another MECO supervisor already owns this output root") from exc
+            try:
+                return self._run_locked()
+            finally:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                lock_handle.close()
         finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
+            device_lease.release()
 
     def _run_locked(self):
         self._read_or_create_runs()
@@ -1264,6 +1355,9 @@ class MecoSupervisor:
 def _parser():
     parser = argparse.ArgumentParser(description="Continuous round-robin MECO supervisor")
     parser.add_argument("--output", default=str(ROOT / "checkpoints" / "meco-five"))
+    parser.add_argument("--campaign-manifest", help="source-bound isolated campaign manifest")
+    parser.add_argument("--diagnostic-launch", action="store_true",
+        help="explicitly start a fresh diagnostic campaign from a validated manifest; never qualifies")
     parser.add_argument("--evaluation-output", default=str(ROOT / "evaluations" / "meco-five"))
     parser.add_argument("--devices", required=True,
         help="comma-separated explicit indexed CUDA/ROCm devices; at most one trainer runs on each device")
@@ -1317,7 +1411,60 @@ def _parser():
 
 
 def main(argv=None):
-    args = _parser().parse_args(argv)
+    import sys
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if "--campaign-manifest" in raw_argv:
+        allowed = {"--campaign-manifest", "--diagnostic-launch"}
+        flags = [item for item in raw_argv if item.startswith("--")]
+        if any(item not in allowed for item in flags):
+            raise ValueError("manifest mode derives all configuration; CLI overrides are forbidden")
+        parser = argparse.ArgumentParser(description="Launch a source-bound MECO diagnostic campaign")
+        parser.add_argument("--campaign-manifest", required=True)
+        parser.add_argument("--diagnostic-launch", action="store_true")
+        args = parser.parse_args(raw_argv)
+        manifest_path = Path(args.campaign_manifest).expanduser().resolve()
+        manifest = json.loads(manifest_path.read_text())
+        from .meco_training_manifest import validate_campaign_manifest
+        validation = validate_campaign_manifest(manifest)
+        campaign = manifest["campaign"]
+        status = {"valid": True, "manifest_sha256": validation["canonical_sha256"],
+            "campaign_id": campaign["id"], "campaign_root": campaign["root"],
+            "phase2_ready": validation["phase2_ready"], "phase2_complete": False,
+            "qualification_eligible": False,
+            "diagnostic_launch_requested": args.diagnostic_launch,
+            "launch_ready": False}
+        if not args.diagnostic_launch:
+            status["blocker"] = "pass --diagnostic-launch to start an isolated fresh diagnostic campaign"
+            print(json.dumps(status, indent=2))
+            return status
+        if not validation["implementation_ready"] or not validation["valid"]:
+            raise ValueError("validated manifest is not implementation-ready")
+        cfg = manifest["tracks"][MECO_TRACKS[0]]["config"]
+        ev = manifest["evaluation_protocol"]
+        devices = tuple(manifest["devices"]["training_pool"])
+        supervisor = MecoSupervisor(output=campaign["root"],
+            evaluation_output=campaign["evaluation_output"], devices=devices,
+            scenario=cfg["scenario_id"], category=cfg["category"], seed=cfg["seed"],
+            chunk_updates=cfg["updates"], rollout_steps=cfg["rollout_steps"],
+            epochs=cfg["epochs"], action_ticks=cfg["action_ticks"],
+            learning_rate=cfg["learning_rate"], gamma=cfg["gamma"],
+            gae_lambda=cfg["gae_lambda"], clip_coef=cfg["clip_coef"],
+            entropy_coef=cfg["entropy_coef"], value_coef=cfg["value_coef"],
+            max_grad_norm=cfg["max_grad_norm"],
+            route_cost_weight=cfg["route_cost_points_per_second"],
+            p_mode=cfg["p_mode"], p_cost_scale=cfg["p_cost_scale"],
+            p_points_per_grid_edge=cfg["p_points_per_grid_edge"],
+            prediction_mode=cfg["prediction_mode"], candidate_k=cfg["candidate_k"],
+            evaluation_categories=(ev["category"],), evaluation_episodes=len(ev["episode_seeds"]),
+            evaluation_seed=ev["episode_seeds"][0],
+            evaluation_device=manifest["devices"]["evaluation"], cycles=0, stop_file=None,
+            qualification_protocol=manifest["qualification_protocol"]["path"],
+            evaluation_protocol=ev["path"], evaluation_split=ev["split"],
+            campaign_manifest=manifest)
+        result = supervisor.run()
+        print(json.dumps(result, indent=2))
+        return result
+    args = _parser().parse_args(raw_argv)
     devices = tuple(item.strip() for item in args.devices.split(",") if item.strip())
     categories = tuple(item.strip() for item in args.evaluation_categories.split(",")
                        if item.strip())

@@ -16,6 +16,7 @@ from .meco_tracks import MECO_TRACKS
 from .training_curriculum import SCENARIOS
 from .meco_validation_campaign import _artifact_bytes, _canonical_bytes, _sha
 from .meco_validation_campaign import compile_validation_campaign
+from .meco_device_lease import lease_devices
 
 
 CAMPAIGN_SCHEMA = "meco-validation-campaign-complete-v1"
@@ -1108,16 +1109,14 @@ def run_campaign(plan: dict, *, output_dir: str | Path, device: str,
     if _canonical_bytes(rebuilt) != _canonical_bytes(plan):
         raise ValueError("plan differs from deterministic all-scenario validation compilation")
     root = Path(output_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    device_lock_root = Path(tempfile.gettempdir()) / "autodrive-meco-validation-locks"
-    device_lock_root.mkdir(parents=True, exist_ok=True)
-    device_lock = device_lock_root / f"{device.replace(':', '-')}.lock"
     campaign_lock = root / ".campaign.lock"
-    locks = (device_lock, campaign_lock)
+    device_lease = lease_devices((device,), owner=f"validation:{plan['plan_digest']}")
+    device_lease.acquire()
     acquired = []
     success = False
     try:
-        for lock in locks:
+        root.mkdir(parents=True, exist_ok=True)
+        for lock in (campaign_lock,):
             try:
                 fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError as exc:
@@ -1133,6 +1132,7 @@ def run_campaign(plan: dict, *, output_dir: str | Path, device: str,
         # failed before work began; existing locks are never cleared.
         for lock in acquired:
             lock.unlink(missing_ok=True)
+        device_lease.release()
         raise
     try:
         plan_path = root / "plan.json"
@@ -1222,6 +1222,7 @@ def run_campaign(plan: dict, *, output_dir: str | Path, device: str,
         if success:
             for lock in acquired:
                 lock.unlink(missing_ok=True)
+        device_lease.release()
 
 
 def aggregate_campaign(plan: dict, campaign_path: str | Path) -> dict:
