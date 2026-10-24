@@ -188,6 +188,98 @@ def phase4_pair_contact_event_record(sim, *, factor_id: str = "contact.robot_bum
     }
 
 
+def phase4_selected_goal_endpoint_completion_record(goal_attempts, *, episode_id: str,
+        source_identity_sha256: str, geometry_id: str) -> dict:
+    """Summarize only correctly bound, cleanly executed selected-goal endpoints."""
+    binding = {"episode_id": episode_id,
+        "source_identity_sha256": source_identity_sha256,
+        "geometry_id": geometry_id}
+    valid_binding = all(isinstance(value, str) and value
+                        for value in binding.values())
+    exclusions: dict[str, int] = {}
+    selected_goal_ids = set()
+    complete_count = valid_count = attempted_rows = 0
+    for row in goal_attempts if isinstance(goal_attempts, list) else []:
+        attempted_rows += 1
+        if not isinstance(row, dict):
+            exclusions["malformed_attempt_row"] = exclusions.get("malformed_attempt_row", 0) + 1
+            continue
+        reasons = row.get("execution_exclusion_reasons")
+        if row.get("execution_valid") is not True or reasons:
+            reason_list = reasons if isinstance(reasons, list) and reasons else [
+                "execution_validity_unavailable"]
+            if row.get("execution_valid") is True and reasons:
+                exclusions["execution_validity_conflicts_with_exclusion_reasons"] = (
+                    exclusions.get(
+                        "execution_validity_conflicts_with_exclusion_reasons", 0) + 1)
+            for reason in set(str(value) for value in reason_list):
+                exclusions[reason] = exclusions.get(reason, 0) + 1
+            continue
+        if not valid_binding or any(row.get(key) != value
+                                    for key, value in binding.items()):
+            exclusions["episode_source_or_geometry_binding_mismatch"] = (
+                exclusions.get("episode_source_or_geometry_binding_mismatch", 0) + 1)
+            continue
+        goal_id = row.get("selected_goal_id")
+        goal_xy = row.get("goal_xy_m")
+        if (not isinstance(goal_id, str) or not goal_id or
+                not isinstance(goal_xy, list) or len(goal_xy) != 2 or
+                any(type(value) not in (int, float) or
+                    not math.isfinite(value) for value in goal_xy)):
+            exclusions["selected_goal_identity_invalid"] = (
+                exclusions.get("selected_goal_identity_invalid", 0) + 1)
+            continue
+        distance = row.get("terminal_goal_distance_m")
+        if type(distance) not in (int, float) or not math.isfinite(distance):
+            exclusions["terminal_endpoint_measurement_unavailable"] = (
+                exclusions.get("terminal_endpoint_measurement_unavailable", 0) + 1)
+            continue
+        heading_required = row.get("goal_heading_required")
+        if type(heading_required) is not bool:
+            exclusions["heading_requirement_unavailable"] = (
+                exclusions.get("heading_requirement_unavailable", 0) + 1)
+            continue
+        goal_heading = row.get("goal_heading_rad")
+        if heading_required and (type(goal_heading) not in (int, float) or
+                                not math.isfinite(goal_heading)):
+            exclusions["selected_goal_heading_invalid"] = (
+                exclusions.get("selected_goal_heading_invalid", 0) + 1)
+            continue
+        heading_error = row.get("terminal_heading_error_rad")
+        if heading_required and (type(heading_error) not in (int, float) or
+                                 not math.isfinite(heading_error)):
+            exclusions["required_heading_measurement_unavailable"] = (
+                exclusions.get("required_heading_measurement_unavailable", 0) + 1)
+            continue
+        valid_count += 1
+        selected_goal_ids.add(goal_id)
+        if distance <= .04 and (not heading_required or heading_error <= .1):
+            complete_count += 1
+    return {
+        "schema": "meco-phase4-selected-goal-endpoint-diagnostic-v1",
+        "diagnostic_only": True,
+        "observation_scope": "episode-wide selected-goal attempts during assigned contact geometry; not contact-caused recovery",
+        "binding": binding,
+        "contact_pair_slots": [2, 3],
+        "selected_goal_ids": sorted(selected_goal_ids),
+        "numerator": complete_count,
+        "denominator": valid_count,
+        "selected_goal_endpoint_completion_rate": (
+            complete_count / valid_count if valid_count else None),
+        "attempted_goal_rows": attempted_rows,
+        "excluded_goal_rows": attempted_rows - valid_count,
+        "exclusions_by_reason": exclusions,
+        "heading_required_when": "the selected goal row carries a finite goal_heading_rad; completion requires absolute terminal heading error <= 0.1 rad",
+        "endpoint_rule": "terminal distance to selected goal <= 0.04 m",
+        "empty_denominator_reason": (None if valid_count else
+            "no_valid_bound_selected_goal_attempts"),
+        "route_completion_rate": None,
+        "recovery_time_after_bump_s": None,
+        "authoritative_signal_available": False,
+        "qualification_eligible": False,
+    }
+
+
 def route_remaining_distance_m(path_xy, pose_xy, goal_xy, *, goal_tolerance_m):
     """Return route distance after nearest polyline projection, or None if invalid."""
     try:

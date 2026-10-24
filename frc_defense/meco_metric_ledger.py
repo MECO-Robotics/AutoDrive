@@ -133,14 +133,27 @@ class MecoEpisodeMetricLedger:
                              goal_heading: float | None,
                              terminal_goal_distance_m: float | None,
                              terminal_heading_error_rad: float | None,
-                             heading_alignment_opportunity: bool) -> None:
+                             heading_alignment_opportunity: bool,
+                             selected_goal_id: str | None = None,
+                             episode_id: str | None = None,
+                             source_identity_sha256: str | None = None,
+                             geometry_id: str | None = None,
+                             execution_valid: bool | None = None,
+                             execution_exclusion_reasons: tuple[str, ...] = ()) -> None:
         if not self.goal_tracking_available or goal_xy is None:
             return
         self.goal_attempts.append({
             "action": int(action),
             "route_id": route_id,
+            "selected_goal_id": selected_goal_id,
+            "episode_id": episode_id,
+            "source_identity_sha256": source_identity_sha256,
+            "geometry_id": geometry_id,
+            "execution_valid": execution_valid,
+            "execution_exclusion_reasons": list(execution_exclusion_reasons),
             "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
             "goal_heading_rad": (None if goal_heading is None else float(goal_heading)),
+            "goal_heading_required": goal_heading is not None,
             "terminal_goal_distance_m": (None if terminal_goal_distance_m is None
                                           else float(terminal_goal_distance_m)),
             "goal_endpoint_within_0_04m": (None if terminal_goal_distance_m is None

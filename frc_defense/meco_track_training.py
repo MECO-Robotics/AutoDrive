@@ -52,6 +52,7 @@ from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
     phase4_pair_contact_event_record, route_remaining_distance_m,
+    phase4_selected_goal_endpoint_completion_record,
     FirstRouteProgressInterval,
     PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR)
 
@@ -3037,17 +3038,50 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             route_id = (pending_eval_goal["route_id"] if forced_eval_goal
                                         else routes_seen[-1].get("candidate_id")
                                         if routes_seen else None)
+                            policy_fallback = bool(not forced_eval_goal and
+                                prepared is not None and prepared.get("fallback_used", False))
+                            fallback_reason = (prepared.get("fallback_reason")
+                                if prepared is not None else None)
+                            selected_goal_id = (selected_candidate_id or route_id)
+                            goal_identity_is_finite = (goal_xy is not None and
+                                len(goal_xy) == 2 and all(math.isfinite(float(value))
+                                    for value in goal_xy) and
+                                (goal_heading is None or
+                                 math.isfinite(float(goal_heading))))
+                            if not selected_goal_id and goal_identity_is_finite:
+                                goal_identity_payload = {"goal_xy_m": [float(goal_xy[0]),
+                                    float(goal_xy[1])], "goal_heading_rad": goal_heading,
+                                    "action": int(action)}
+                                selected_goal_id = "selected_goal:" + hashlib.sha256(
+                                    json.dumps(goal_identity_payload, sort_keys=True,
+                                        separators=(",", ":"), allow_nan=False
+                                    ).encode()).hexdigest()
+                            goal_exclusion_reasons = []
+                            if policy_fallback:
+                                goal_exclusion_reasons.append("policy_inference_fallback")
+                            if use_d1_fallback:
+                                goal_exclusion_reasons.append("inference_disabled_d1_fallback")
+                            if remasked:
+                                goal_exclusion_reasons.append("action_remasked")
+                            if native_preempted:
+                                goal_exclusion_reasons.append("native_goal_preempted_selection")
+                            if selected_target_lost:
+                                goal_exclusion_reasons.append("selected_target_lost")
+                            if not actual_trace:
+                                goal_exclusion_reasons.append("no_executed_outer_action")
                             episode_metric_ledger.observe_route(route_id)
                             episode_metric_ledger.observe_goal_attempt(
                                 action=action, route_id=route_id, goal_xy=goal_xy,
                                 goal_heading=goal_heading,
                                 terminal_goal_distance_m=goal_distance,
                                 terminal_heading_error_rad=heading_error,
-                                heading_alignment_opportunity=heading_opportunity)
-                            policy_fallback = bool(not forced_eval_goal and
-                                prepared is not None and prepared.get("fallback_used", False))
-                            fallback_reason = (prepared.get("fallback_reason")
-                                if prepared is not None else None)
+                                heading_alignment_opportunity=heading_opportunity,
+                                selected_goal_id=selected_goal_id,
+                                episode_id=episode_id,
+                                source_identity_sha256=source_hash,
+                                geometry_id=contact_geometry_id,
+                                execution_valid=not goal_exclusion_reasons,
+                                execution_exclusion_reasons=tuple(goal_exclusion_reasons))
                             if policy_fallback or hard_failure:
                                 execution_failures.append({
                                     "selected_action": action,
@@ -3258,7 +3292,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "qualification_eligible": False,
                                 "recovery_time_after_bump_s": None,
                                 "route_completion_rate": None,
-                                "status": "exposure_and_route_crossing_only_recovery_unavailable",
+                                "selected_goal_endpoint_completion_rate":
+                                    phase4_selected_goal_endpoint_completion_record(
+                                        metric_ledger_record.get("goal_attempts"),
+                                        episode_id=episode_id,
+                                        source_identity_sha256=source_hash,
+                                        geometry_id=contact_geometry_id),
+                                "status": "exposure_route_crossing_and_selected_goal_endpoint_diagnostic_only_recovery_unavailable",
                             } if contact_geometry_id is not None else None),
                             "first_route_progress_interval": (
                                 contact_progress_observer.record()
