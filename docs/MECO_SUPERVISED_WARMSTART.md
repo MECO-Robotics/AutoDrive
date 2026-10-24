@@ -362,6 +362,11 @@ labels from teacher actions, rules, simulator metrics, or default zero values.
 The authority JSON's `source_id` is a declaration only; it does not authenticate
 identity or prove expertise or optimality. Packaging is not replay acceptance:
 the strict annotation loader/fitter must still validate exact simulator replay.
+The writer stages both outputs and rolls back caught in-process write/replace
+failures. The dataset and manifest paths are still replaced sequentially, so
+abrupt process termination or power loss between those replacements is not
+crash-atomic. The manifest binds the dataset SHA-256 and the consumer rejects a
+mixed pair; after an interrupted write, rerun materialization before fitting.
 
 ```sh
 python -m frc_defense.meco_plan_a_annotations \

@@ -104,6 +104,7 @@ def test_materializer_writes_deterministic_loader_schema_and_disclaimer(tmp_path
     assert row["schema"] == supervised.PLAN_A_EXPERT_GOAL_DATASET_SCHEMA
     assert row["u_status"] == "unavailable" and row["u_target"] is None
     assert manifest["replay_validation_required"] is True
+    assert manifest["pair_publish_semantics"].endswith("not crash_atomic")
     assert manifest["authority_is_authenticated_identity"] is False
     assert manifest["authority_proves_expertise_or_optimality"] is False
 
@@ -224,6 +225,31 @@ def test_pair_publish_staging_write_failure_preserves_outputs_and_cleans_temps(t
 
     monkeypatch.setattr(materializer, "_stage_bytes", fail_second_stage)
     with pytest.raises(RuntimeError, match="failed to publish.*injected staging write failure"):
+        _run(paths, output)
+    assert output.read_bytes() == b"old dataset"
+    assert manifest.read_bytes() == b"old manifest"
+    _assert_no_staging_files(tmp_path)
+
+
+@pytest.mark.parametrize("fail_call", (3, 4))
+def test_pair_publish_backup_staging_failure_preserves_outputs(tmp_path, monkeypatch, fail_call):
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "published.jsonl"
+    manifest = output.with_suffix(output.suffix + ".manifest.json")
+    output.write_bytes(b"old dataset")
+    manifest.write_bytes(b"old manifest")
+    real_stage = materializer._stage_bytes
+    calls = 0
+
+    def fail_backup_stage(data, destination):
+        nonlocal calls
+        calls += 1
+        if calls == fail_call:
+            raise OSError(f"injected backup staging failure #{fail_call}")
+        return real_stage(data, destination)
+
+    monkeypatch.setattr(materializer, "_stage_bytes", fail_backup_stage)
+    with pytest.raises(RuntimeError, match="failed to publish.*backup staging failure"):
         _run(paths, output)
     assert output.read_bytes() == b"old dataset"
     assert manifest.read_bytes() == b"old manifest"

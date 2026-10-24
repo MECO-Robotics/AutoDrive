@@ -104,8 +104,10 @@ def _fsync_directory(path: Path):
 
 
 def _publish_pair(output: Path, manifest_path: Path, data: bytes, manifest_data: bytes):
-    """Publish two staged files and restore the prior pair if either replace fails."""
+    """Publish staged files with exception rollback; this is not crash-atomic."""
     staged, backups = [], []
+    existed_before = []
+    replacement_attempted = [False, False]
     preserve_backups = False
     destinations = (output, manifest_path)
     try:
@@ -114,29 +116,39 @@ def _publish_pair(output: Path, manifest_path: Path, data: bytes, manifest_data:
         for destination in destinations:
             if destination.is_dir():
                 raise ValueError(f"output destination is a directory: {destination}")
+            existed_before.append(destination.exists())
             backups.append(None)
-            if destination.exists():
+            if existed_before[-1]:
                 backups[-1] = _stage_bytes(destination.read_bytes(), destination)
+        # Until both backups exist, the old destinations have not been changed.
+        # Mark before replace: an exception may occur after the OS performed it.
+        replacement_attempted[0] = True
         os.replace(staged[0], output)
         staged[0] = None
+        replacement_attempted[1] = True
         os.replace(staged[1], manifest_path)
         staged[1] = None
         _fsync_directory(output.parent)
     except BaseException as exc:
         rollback_errors = []
-        for index, (destination, backup) in enumerate(zip(destinations, backups)):
+        if any(replacement_attempted):
+            for index, (destination, backup, existed) in enumerate(zip(destinations, backups, existed_before)):
+                if not replacement_attempted[index]:
+                    continue
+                try:
+                    if existed and backup is not None:
+                        os.replace(backup, destination)
+                        backups[index] = None
+                    elif existed:
+                        raise RuntimeError("prior destination has no staged rollback copy")
+                    else:
+                        destination.unlink(missing_ok=True)
+                except BaseException as rollback_exc:
+                    rollback_errors.append(f"{destination}: {rollback_exc}")
             try:
-                if backup is not None:
-                    os.replace(backup, destination)
-                    backups[index] = None
-                else:
-                    destination.unlink(missing_ok=True)
+                _fsync_directory(output.parent)
             except BaseException as rollback_exc:
-                rollback_errors.append(f"{destination}: {rollback_exc}")
-        try:
-            _fsync_directory(output.parent)
-        except BaseException as rollback_exc:
-            rollback_errors.append(f"directory fsync: {rollback_exc}")
+                rollback_errors.append(f"directory fsync: {rollback_exc}")
         preserve_backups = bool(rollback_errors)
         detail = ("; rollback errors: " + "; ".join(rollback_errors)) if rollback_errors else ""
         if preserve_backups:
@@ -312,6 +324,7 @@ def materialize_plan_a_annotations(*, authored_rows: Path, source_dataset: Path,
         "authority_is_authenticated_identity": False,
         "authority_proves_expertise_or_optimality": False,
         "replay_validation_required": True,
+        "pair_publish_semantics": "staged_two_file_publish_with_process_exception_rollback; not crash_atomic",
         "support_order": supervised.SUPPORT_ORDER, "record_count": len(rows),
         "materializer_schema": "meco-plan-a-human-annotation-materializer-v1",
         "authored_rows_sha256": _sha(authored_rows.read_bytes()),
