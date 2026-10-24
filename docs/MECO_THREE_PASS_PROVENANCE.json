@@ -792,6 +792,47 @@
         "status": "approved-summary"
       },
       "limits": "Thirteen focused tests, compile, and diff checks passed. No data collection, human-authored labels, independent oracle, simulator/replay, fit, GPU, training, or qualification evidence."
+    },
+    {
+      "requirement_id": "validation-campaign-runner",
+      "title": "Resumable, validation-only 28-job execution and cross-scenario summaries",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/validation-campaign-runner.md",
+          "sha256": "bd9f7dc98518ff2d83c96c5ea7b5b58471ad30ff526655b6c0d232e88615f0fc",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "4ad9291ed652cf02ccae3958fc024afa9f90fb51",
+        "final_fix_commit": "6c1d5eb04acb39b192f1b491f753ca68d338096c",
+        "candidate_integration_commit": "99dd35995a90727fa244a5fa2daa2b7f2091d871",
+        "initial_commit": "c25b59c06396ebeda44b6c7b386136bc47bdb7d1",
+        "paths": [
+          "frc_defense/meco_validation_campaign.py",
+          "frc_defense/meco_validation_campaign_runner.py",
+          "scripts/run_meco_validation_campaign.py",
+          "scripts/summarize_meco_validation_campaign.py",
+          "docs/MECO_VALIDATION_CAMPAIGN_PLANNER.md",
+          "tests/test_meco_validation_campaign_runner.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/validation-campaign-runner.md",
+          "sha256": "bd9f7dc98518ff2d83c96c5ea7b5b58471ad30ff526655b6c0d232e88615f0fc",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "6c1d5eb04acb39b192f1b491f753ca68d338096c",
+        "verdict": "approved",
+        "verdict_detail": "Independent review found and required correction of the replay_provenance key mismatch, then approved the exact final head after producer-shaped replay digest coverage and review of gates, seals, resume, locks, and scenario grouping.",
+        "status": "approved-summary"
+      },
+      "limits": "Ten focused planner/runner tests passed, with mocked matrix execution. No actual campaign, simulator/GPU, dashboard replay, final-test operation, outcome estimate, or qualification result."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -804,6 +845,7 @@
     "The inference observability and decision-trace tranche has focused implementation/review evidence only; simulator, fresh replay, dashboard review, and qualification gates remain open.",
     "The D0 campaign orchestration tranche provides implementation and eight-test review evidence only; 139,800 planned D0 records remain unrun, with no GPU/simulator results, CI, or qualification claim.",
     "The D0 offline schedule compiler reports work counts only; all 139,800 calibration records remain unrun.",
-    "The Plan A offline oracle audit validates future artifacts; no Plan A labels, collected dataset, replay, fit, or warm-start evidence exists."
+    "The Plan A offline oracle audit validates future artifacts; no Plan A labels, collected dataset, replay, fit, or warm-start evidence exists.",
+    "The validation campaign runner has not been executed; no matched matrix or scenario outcome results exist."
   ]
 }

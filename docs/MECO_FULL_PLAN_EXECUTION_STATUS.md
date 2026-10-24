@@ -1,5 +1,15 @@
 # MECO learning tracks plan: execution status
 
+> **Resumable validation campaign runner integrated — 2026-10-24.** Reviewed
+> runner `6c1d5eb04acb39b192f1b491f753ca68d338096c` now executes and seals
+> the exact 28 validation-only jobs with protocol/source/checkpoint/config and
+> report/replay bindings, safe resume, fail-closed partial outputs, and
+> scenario-separated summaries. Ten focused planner/runner tests, compile, and
+> diff checks passed; execution was mocked. No campaign, simulator, GPU,
+> dashboard, replay, or final-test operation was run. Three-pass provenance
+> now contains 22 scoped tranches. Dashboard restart/endpoint verification is
+> pending; no replay is present.
+
 > **Plan A offline oracle audit integrated — 2026-10-24.** Reviewed audit
 > `18faf13c42bb5e5d5168a0b24c4f48726ca14593` now validates source/protocol
 > bindings, recomputes stored U/B evidence and sampling weights, reproduces
