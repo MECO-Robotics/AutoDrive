@@ -1,5 +1,17 @@
 # MECO learning tracks plan: execution status
 
+> **Runtime identity correction — 2026-10-24 23:25 UTC.** The first relaunch
+> passed manifest validation and created its isolated campaign root, but both
+> workers exited before checkpoint writes: ROCm hipify reformatted the tracked
+> generated `tensor_collision_multi_hip_kernel.hip`, changing the source
+> identity during rollout. The scoped three-pass correction is integrated at
+> `2cf6c2b63e7ad444566cca1a3c148ce451d97f52`; it excludes that generated file
+> while retaining its maintained `.cu` and `.cpp` inputs. The failed campaign
+> root is retained with zero completed updates. A fresh campaign root and
+> source-bound manifest are required for the next attempt. No training is
+> currently running; qualification and all document-wide evidence gates remain
+> open.
+
 > **Launch correction — 2026-10-24 23:24 UTC.** A new isolated five-track
 > diagnostic campaign was attempted using two WX9100 devices, but the
 > supervisor exited before creating its campaign root or starting GPU work.
