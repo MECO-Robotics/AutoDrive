@@ -29,6 +29,7 @@ from frc_defense.curriculum_training import source_identity
 from frc_defense.meco_supervised import _load_protocol
 from frc_defense.meco_tracks import MECO_TRACKS, make_meco_track
 from frc_defense.meco_track_training import ValueHead
+from frc_defense.meco_track_training import load_evaluation_protocol
 from frc_defense.meco_qualification import TRAIN_SEED_POOL_SIZE, protocol_cases
 from frc_defense.meco_phase4 import validate_phase4_training_assignment
 
@@ -168,20 +169,107 @@ def _assert_supervisor_quiescent(root: Path):
     return fd
 
 
-def _validate_evaluation_report(report, protocol, protocol_id, protocol_sha, checkpoints):
+def _validate_evaluation_report(report, checkpoints,
+                                *, evaluation_protocol_path, queue_status,
+                                supervisor_status, status):
     split = report.get("split")
     scenario = report.get("scenario_id")
     categories = report.get("categories")
     seeds = report.get("seeds")
     records = report.get("records")
-    if report.get("qualification_protocol_id") is None:
-        raise ValueError("unbound supervisor evaluation is inventoried but rejected for transition")
-    if (split not in ("validation", "test") or report.get("qualification_protocol_id") != protocol_id
-            or not isinstance(scenario, str) or not isinstance(categories, list)
+    if (not isinstance(scenario, str) or not isinstance(categories, list)
             or not categories or not isinstance(seeds, list) or not seeds
             or not isinstance(records, list) or not records):
-        raise ValueError("evaluation lacks a recognized held-out split/protocol/case/seed manifest")
-    protocol_cases = [row for row in protocol.get("cases", [])
+        raise ValueError("evaluation lacks a recognized case/seed manifest")
+    if split == "diagnostic":
+        if (report.get("evaluation_design") != "diagnostic_unbound"
+                or report.get("evaluation_protocol_id") is not None
+                or report.get("evaluation_protocol_sha256") is not None
+                or report.get("evaluation_case") is not None
+                or report.get("exact_episode_seeds") is not None
+                or queue_status.get("evaluation_split") != "diagnostic"
+                or supervisor_status.get("evaluation_split") != "diagnostic"
+                or any(payload.get(key) is not None for payload in
+                    (queue_status, supervisor_status) for key in (
+                        "evaluation_protocol_id", "evaluation_protocol_sha256",
+                        "evaluation_binding", "exact_episode_seeds"))
+                or status.get("evaluation_protocol_id") is not None
+                or status.get("evaluation_protocol_sha256") is not None
+                or status.get("evaluation_case") is not None
+                or status.get("exact_episode_seeds") is not None):
+            raise ValueError("unbound evaluation is not explicitly diagnostic and nonqualifying")
+        for record in records:
+            if (not isinstance(record, dict) or record.get("split") != "diagnostic"
+                    or record.get("evaluation_protocol_id") is not None
+                    or record.get("evaluation_protocol_sha256") is not None
+                    or record.get("evaluation_case_id") is not None):
+                raise ValueError("diagnostic record carries held-out protocol provenance")
+        return
+    if split not in ("validation", "test"):
+        raise ValueError("evaluation split is neither diagnostic nor a recognized held-out split")
+    if evaluation_protocol_path is None:
+        raise ValueError("held-out transition audit requires --evaluation-protocol")
+    try:
+        eval_protocol, eval_id, eval_sha, _ = load_evaluation_protocol(
+            evaluation_protocol_path, scenario_id=scenario)
+    except Exception as exc:
+        raise ValueError(f"cannot validate frozen evaluation protocol: {exc}") from exc
+    binding = report.get("evaluation_case")
+    queue_binding = queue_status.get("evaluation_binding")
+    status_binding = supervisor_status.get("evaluation_binding")
+    expected_binding = queue_binding
+    if (report.get("evaluation_design") != "frozen_protocol_held_out"
+            or report.get("evaluation_protocol_id") != eval_id
+            or report.get("evaluation_protocol_sha256") != eval_sha
+            or status.get("evaluation_protocol_id") != eval_id
+            or status.get("evaluation_protocol_sha256") != eval_sha
+            or status.get("evaluation_case") != binding
+            or status.get("qualification_protocol_id") != report.get("qualification_protocol_id")
+            or report.get("evaluation_protocol_id") != queue_status.get("evaluation_protocol_id")
+            or report.get("evaluation_protocol_sha256") != queue_status.get("evaluation_protocol_sha256")
+            or report.get("evaluation_protocol_id") != supervisor_status.get("evaluation_protocol_id")
+            or report.get("evaluation_protocol_sha256") != supervisor_status.get("evaluation_protocol_sha256")
+            or report.get("split") != queue_status.get("evaluation_split")
+            or report.get("split") != supervisor_status.get("evaluation_split")
+            or report.get("split") != status.get("split")
+            or not isinstance(binding, dict) or not isinstance(expected_binding, dict)
+            or not isinstance(status_binding, dict)
+            or binding.get("protocol_id") != eval_id
+            or binding.get("protocol_sha256") != eval_sha
+            or binding.get("split") != split
+            or binding.get("scenario_id") != scenario
+            or binding.get("categories") != categories
+            or binding.get("seeds") != seeds
+            or report.get("exact_episode_seeds") != seeds
+            or queue_status.get("exact_episode_seeds") != seeds
+            or supervisor_status.get("exact_episode_seeds") != seeds
+            or status.get("exact_episode_seeds") != seeds
+            or binding.get("protocol_id") != queue_binding.get("protocol_id")
+            or binding.get("protocol_sha256") != queue_binding.get("protocol_sha256")
+            or binding.get("split") != queue_binding.get("split")
+            or binding.get("scenario_id") != queue_binding.get("scenario_id")
+            or binding.get("categories") != queue_binding.get("categories")
+            or binding.get("qualification_case") != queue_binding.get("qualification_case")
+            or binding.get("seeds") != queue_binding.get("seeds")
+            or queue_status.get("evaluation_case") != binding
+            or supervisor_status.get("evaluation_case") != binding
+            or status_binding != queue_binding):
+        raise ValueError("held-out evaluation protocol/case/seeds/split disagree with supervisor or protocol bytes")
+    case = binding.get("qualification_case")
+    if not isinstance(case, dict):
+        raise ValueError("held-out evaluation case stratum is malformed")
+    # Training qualification provenance is retained as its own field. It is
+    # deliberately not inferred from, or substituted for, evaluation identity.
+    try:
+        from frc_defense.meco_track_training import resolve_evaluation_protocol
+        verified_binding = resolve_evaluation_protocol(evaluation_protocol_path,
+            scenario_id=scenario, categories=tuple(categories), split=split,
+            episode_seeds=seeds, qualification_case=case)
+    except Exception as exc:
+        raise ValueError(f"held-out evaluation case is invalid for frozen protocol: {exc}") from exc
+    if verified_binding != binding:
+        raise ValueError("report evaluation case binding differs from frozen protocol resolution")
+    protocol_cases = [row for row in eval_protocol.get("cases", [])
                       if row.get("scenario_id") == scenario and row.get("split") == split]
     if not protocol_cases:
         raise ValueError("evaluation scenario/split is absent from the checked protocol")
@@ -195,7 +283,10 @@ def _validate_evaluation_report(report, protocol, protocol_id, protocol_sha, che
     for record in records:
         if (not isinstance(record, dict) or record.get("scenario_id") != scenario
                 or record.get("split") != split
-                or record.get("qualification_protocol_id") != protocol_id
+                or record.get("evaluation_protocol_id") != eval_id
+                or record.get("evaluation_protocol_sha256") != eval_sha
+                or record.get("qualification_protocol_id") != report.get("qualification_protocol_id")
+                or record.get("evaluation_case_id") != binding.get("case_ids")
                 or record.get("source_identity_sha256") != report.get("source_identity_sha256")):
             raise ValueError("evaluation record has missing or inconsistent protocol provenance")
         category, seed = record.get("category"), record.get("seed")
@@ -206,14 +297,13 @@ def _validate_evaluation_report(report, protocol, protocol_id, protocol_sha, che
         allowed = allowed_by_case.get(case_key)
         if allowed is None or seed not in allowed:
             raise ValueError("evaluation record has unknown stratum or seed for its declared split")
-        if any(seed in row.get("seeds", []) for row in protocol.get("cases", [])
+        if any(seed in row.get("seeds", []) for row in eval_protocol.get("cases", [])
                if row.get("scenario_id") == scenario and row.get("category") == category
                and row.get("split") != split):
             raise ValueError("evaluation seed leaks across train/validation/test splits")
-        if report.get("qualification_case") is not None:
-            for field in ("layout_id", "defender_family", "start_condition", "sensor_profile"):
-                if report["qualification_case"].get(field) != record.get(field):
-                    raise ValueError("evaluation record stratum differs from report qualification case")
+        for field in ("layout_id", "defender_family", "start_condition", "sensor_profile"):
+            if case.get(field) != record.get(field):
+                raise ValueError("evaluation record stratum differs from report evaluation case")
         policy = record.get("policy")
         if not isinstance(policy, str) or not policy:
             raise ValueError("evaluation record has no policy identity")
@@ -345,12 +435,14 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
         if status.get("status") != "complete":
             raise ValueError(f"evaluation report is not terminal-complete: {report_path.name}")
         if (status.get("evaluation_id") != report.get("evaluation_id")
+                or status.get("protocol_id") != report.get("protocol_id")
                 or status.get("output_file") != report_path.name):
             raise ValueError(f"evaluation report/status identity mismatch: {report_path.name}")
         report_sha, status_sha = _sha(report_path.read_bytes()), _sha(status_path.read_bytes())
         history_row = indexed[report_path.name]
         if (history_row.get("status") != "complete"
                 or history_row.get("evaluation_id") != report.get("evaluation_id")
+                or history_row.get("protocol_id") != report.get("protocol_id")
                 or history_row.get("report_sha256") != report_sha
                 or history_row.get("status_file") != status_path.name
                 or history_row.get("status_sha256") != status_sha):
@@ -375,7 +467,8 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
         entries.append({"path": str(report_path), "sha256": report_sha,
             "status_path": str(status_path), "status_sha256": status_sha,
             "snapshot_inventory": snapshot_rows,
-            "evaluation_id": report.get("evaluation_id"), "report": report})
+            "evaluation_id": report.get("evaluation_id"), "report": report,
+            "status": status})
     inventory_digest = _sha(_canonical({"history_sha256": _sha(history_bytes),
         "entries": [{key: value for key, value in row.items() if key != "report"}
                     for row in entries]}))
@@ -383,18 +476,20 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
 
 
 def audit_segment(segment_dir: Path, qualification_protocol: Path,
-                  evaluation_root: Path) -> dict:
+                  evaluation_root: Path, evaluation_protocol: Path | None = None) -> dict:
     root = Path(segment_dir).resolve()
     lock_fd = _assert_supervisor_quiescent(root)
     try:
-        return _audit_segment_locked(root, qualification_protocol, evaluation_root)
+        return _audit_segment_locked(root, qualification_protocol, evaluation_root,
+                                     evaluation_protocol)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
 
 def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
-                           evaluation_root: Path) -> dict:
+                           evaluation_root: Path,
+                           evaluation_protocol: Path | None = None) -> dict:
     """Reconcile scheduler history, all five lane frontiers, and report hashes."""
     root = Path(segment_dir).resolve()
     protocol, protocol_id, protocol_sha, _ = _load_protocol(Path(qualification_protocol))
@@ -534,6 +629,7 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
     # queue-status is the durable evaluation state; supervisor-status may only
     # contain the dispatch snapshot from its final loop.
     queue_status = _json(root / "queue-status.json")
+    supervisor_status = _json(root / "supervisor-status.json")
     supervisor_evaluation = queue_status.get("evaluation") or {}
     latest_evaluation = supervisor_evaluation.get("output_file")
     inventoried_names = {Path(row["path"]).name for row in inventory_entries}
@@ -541,23 +637,35 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
         raise ValueError("terminal supervisor has no evaluation inventory anchor")
     if latest_evaluation not in inventoried_names:
         raise ValueError("evaluation root inventory is not anchored to supervisor's terminal evaluation record")
+    terminal_evaluation = supervisor_status.get("evaluation") or {}
+    if (terminal_evaluation.get("output_file") != latest_evaluation
+            or terminal_evaluation.get("evaluation_id") != supervisor_evaluation.get("evaluation_id")
+            or terminal_evaluation.get("protocol_id") != supervisor_evaluation.get("protocol_id")
+            or terminal_evaluation.get("status") != supervisor_evaluation.get("status")):
+        raise ValueError("terminal supervisor evaluation record disagrees with durable queue status")
     if latest_evaluation is not None:
         latest_entry = next(row for row in inventory_entries
                             if Path(row["path"]).name == latest_evaluation)
         if (supervisor_evaluation.get("status") != "complete"
-                or supervisor_evaluation.get("evaluation_id") != latest_entry["evaluation_id"]):
+                or supervisor_evaluation.get("evaluation_id") != latest_entry["evaluation_id"]
+                or supervisor_evaluation.get("protocol_id") !=
+                    latest_entry["report"].get("protocol_id")):
             raise ValueError("supervisor terminal evaluation record does not match latest report/status")
     eval_index = []
     for entry in inventory_entries:
         report_path = Path(entry["path"])
         report = entry.pop("report")
+        evaluation_status = entry.pop("status")
         if report.get("source_identity_sha256") != _source_digest(source_value):
             raise ValueError(f"evaluation source identity mismatch: {report_path}")
         evaluation_cycle, evaluation_checkpoints = _validate_evaluation_snapshots(
             evaluation_root, report_path, report, history, checkpoints,
             source_value, shared_config)
-        _validate_evaluation_report(report, protocol, protocol_id, protocol_sha,
-                                    evaluation_checkpoints)
+        _validate_evaluation_report(report, evaluation_checkpoints,
+                                    evaluation_protocol_path=evaluation_protocol,
+                                    queue_status=queue_status,
+                                    supervisor_status=supervisor_status,
+                                    status=evaluation_status)
         policy_manifest = report.get("policy_manifest")
         if not isinstance(policy_manifest, dict):
             raise ValueError(f"evaluation lacks policy manifest: {report_path}")
@@ -570,6 +678,12 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
             "status_path": entry["status_path"], "status_sha256": entry["status_sha256"],
             "evaluation_id": report.get("evaluation_id"),
             "protocol_id": report.get("protocol_id"),
+            "evaluation_protocol_id": report.get("evaluation_protocol_id"),
+            "evaluation_protocol_sha256": report.get("evaluation_protocol_sha256"),
+            "evaluation_case": report.get("evaluation_case"),
+            "exact_episode_seeds": report.get("exact_episode_seeds"),
+            "split": report.get("split"),
+            "training_qualification_protocol_id": report.get("qualification_protocol_id"),
             "cycle": evaluation_cycle, "checkpoint_snapshots": evaluation_checkpoints,
             "snapshot_inventory": entry["snapshot_inventory"],
             "source_identity_sha256": report["source_identity_sha256"]})
@@ -584,6 +698,13 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
         "scheduler_history_sha256": _sha((root / "task-scheduler-state.json").read_bytes()),
         "qualification_protocol_id_checked": protocol_id,
         "qualification_protocol_sha256_checked": protocol_sha,
+        "training_qualification_protocol_id": queue_status.get("qualification_protocol_id"),
+        "training_qualification_protocol_sha256": queue_status.get("qualification_protocol_sha256"),
+        "evaluation_protocol_path_checked": (str(Path(evaluation_protocol).resolve())
+            if evaluation_protocol is not None else None),
+        "evaluation_protocol_id_checked": queue_status.get("evaluation_protocol_id"),
+        "evaluation_protocol_sha256_checked": (_sha(Path(evaluation_protocol).read_bytes())
+            if evaluation_protocol is not None else None),
         "supervisor_status_sha256": _sha((root / "supervisor-status.json").read_bytes()),
         "queue_status_sha256": _sha((root / "queue-status.json").read_bytes()),
         "evaluation_inventory_root": str(evaluation_root),
@@ -619,6 +740,24 @@ def _export_transition_locked(audit_path: Path, output_path: Path, audit: dict) 
             _sha((segment_root / "task-scheduler-state.json").read_bytes()) !=
             audit.get("scheduler_history_sha256")):
         raise ValueError("supervisor or scheduler state changed since audit")
+    held_out_evaluations = [row for row in audit.get("evaluations", [])
+        if row.get("split") in ("validation", "test")]
+    if held_out_evaluations:
+        protocol_path = Path(audit.get("evaluation_protocol_path_checked") or "")
+        if (not protocol_path.is_file()
+                or _sha(protocol_path.read_bytes()) !=
+                    audit.get("evaluation_protocol_sha256_checked")):
+            raise ValueError("frozen evaluation protocol artifact changed or disappeared since audit")
+        for evaluation in held_out_evaluations:
+            try:
+                _, eval_id, eval_sha, _ = load_evaluation_protocol(protocol_path,
+                    scenario_id=evaluation["evaluation_case"]["scenario_id"])
+            except Exception as exc:
+                raise ValueError(f"frozen evaluation protocol no longer validates: {exc}") from exc
+            if (eval_id != evaluation.get("evaluation_protocol_id")
+                    or eval_sha != evaluation.get("evaluation_protocol_sha256")
+                    or eval_id != audit.get("evaluation_protocol_id_checked")):
+                raise ValueError("frozen evaluation protocol identity changed since audit")
     evaluation_root, current_evaluations, inventory_sha = _evaluation_inventory(
         Path(audit.get("evaluation_inventory_root", "")),
         segment_root / "queue-status.json")
@@ -800,6 +939,8 @@ def main(argv=None):
     audit_parser = subparsers.add_parser("audit")
     audit_parser.add_argument("--segment-dir", type=Path, required=True)
     audit_parser.add_argument("--qualification-protocol", type=Path, required=True)
+    audit_parser.add_argument("--evaluation-protocol", type=Path,
+        help="frozen held-out evaluation protocol; required when the segment contains held-out reports")
     audit_parser.add_argument("--evaluation-root", type=Path, required=True,
         help="complete supervisor evaluation output directory; every report/status is inventoried")
     audit_parser.add_argument("--output", type=Path, required=True)
@@ -808,7 +949,8 @@ def main(argv=None):
     export_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "audit":
-        report = audit_segment(args.segment_dir, args.qualification_protocol, args.evaluation_root)
+        report = audit_segment(args.segment_dir, args.qualification_protocol,
+            args.evaluation_root, args.evaluation_protocol)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, sort_keys=True, indent=2,
                                           allow_nan=False) + "\n")

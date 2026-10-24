@@ -109,6 +109,23 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
             if row["scenario_id"] == "pickup_simple" and row["category"] == "single"
             and row["split"] == "validation")
         eval_seed = case["seeds"][0]
+        evaluation_protocol = {**protocol, "protocol_scope": "held-out-evaluation"}
+        for row in evaluation_protocol["cases"]:
+            if row["split"] == "validation":
+                row["seeds"] = [eval_seed]
+        evaluation_protocol.pop("protocol_id", None)
+        evaluation_protocol["protocol_id"] = hashlib.sha256(json.dumps(
+            evaluation_protocol, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode()).hexdigest()
+        eval_protocol_path = root.parent / "evaluation-protocol.json"
+        eval_protocol_path.write_text(json.dumps(evaluation_protocol))
+        evaluation_case = {key: case[key] for key in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}
+        from frc_defense.meco_track_training import resolve_evaluation_protocol
+        evaluation_binding = resolve_evaluation_protocol(
+            eval_protocol_path, scenario_id="pickup_simple", categories=("single",),
+            split="validation", episode_seeds=[eval_seed],
+            qualification_case=evaluation_case)
         eval_stem = "cycle-000001-1234abcd"
         eval_root = root.parent / "evaluations"
         snapshot_dir = eval_root / "checkpoint-snapshots" / eval_stem
@@ -128,13 +145,21 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
             records.append({"scenario_id": "pickup_simple", "category": "single",
                 "seed": eval_seed, "policy": track,
                 "checkpoint_sha256": policy_manifest[track]["checkpoint_sha256"],
-                "split": "validation", "qualification_protocol_id": protocol["protocol_id"],
+                "split": "validation", "qualification_protocol_id": None,
+                "evaluation_protocol_id": evaluation_binding["protocol_id"],
+                "evaluation_protocol_sha256": evaluation_binding["protocol_sha256"],
+                "evaluation_case_id": evaluation_binding["case_ids"],
                 "layout_id": case["layout_id"], "defender_family": case["defender_family"],
                 "start_condition": case["start_condition"],
                 "sensor_profile": case["sensor_profile"],
                 "source_identity_sha256": source_sha})
-        report = {"evaluation_id": "eval-1", "protocol_id": "evaluation-protocol",
-            "qualification_protocol_id": protocol["protocol_id"],
+        report = {"evaluation_id": "eval-1", "protocol_id": "evaluation-protocol-run",
+            "qualification_protocol_id": None,
+            "evaluation_protocol_id": evaluation_binding["protocol_id"],
+            "evaluation_protocol_sha256": evaluation_binding["protocol_sha256"],
+            "evaluation_case": evaluation_binding,
+            "exact_episode_seeds": [eval_seed],
+            "evaluation_design": "frozen_protocol_held_out",
             "scenario_id": "pickup_simple", "split": "validation",
             "categories": ["single"], "seeds": [eval_seed],
             "qualification_case": {key: case[key] for key in (
@@ -144,6 +169,33 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
         report_path = eval_root / f"{eval_stem}.json"
         _write_evaluation(report_path, report)
         _mark_supervisor_evaluation(root, report_path)
+        queue_path = root / "queue-status.json"
+        queue = json.loads(queue_path.read_text())
+        queue.update(evaluation_protocol_id=evaluation_binding["protocol_id"],
+            evaluation_protocol_sha256=evaluation_binding["protocol_sha256"],
+            evaluation_split="validation", evaluation_binding=evaluation_binding,
+            evaluation_case=evaluation_binding,
+            exact_episode_seeds=[eval_seed],
+            qualification_protocol_id="training-qualification-distinct",
+            qualification_protocol_sha256="training-qualification-sha")
+        queue_path.write_text(json.dumps(queue))
+        status_path = root / "supervisor-status.json"
+        supervisor_status = json.loads(status_path.read_text())
+        supervisor_status.update(evaluation_protocol_id=evaluation_binding["protocol_id"],
+            evaluation_protocol_sha256=evaluation_binding["protocol_sha256"],
+            evaluation_split="validation", evaluation_binding=evaluation_binding,
+            evaluation_case=evaluation_binding,
+            exact_episode_seeds=[eval_seed],
+            qualification_protocol_id="training-qualification-distinct",
+            qualification_protocol_sha256="training-qualification-sha")
+        status_path.write_text(json.dumps(supervisor_status))
+        status_file = report_path.with_suffix(report_path.suffix + ".status.json")
+        eval_status = json.loads(status_file.read_text())
+        eval_status.update(evaluation_protocol_id=evaluation_binding["protocol_id"],
+            evaluation_protocol_sha256=evaluation_binding["protocol_sha256"],
+            evaluation_case=evaluation_binding, exact_episode_seeds=[eval_seed],
+            split="validation")
+        status_file.write_text(json.dumps(eval_status))
         _append_evaluation_history(eval_root, cycle=1, output=report_path,
             completion={"status": "complete", "evaluation_id": report["evaluation_id"],
                 "protocol_id": report["protocol_id"], "return_code": 0},
@@ -155,14 +207,20 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
 def _audit(segment, protocol_path):
     evaluation_root = segment.parent / "evaluations"
     evaluation_root.mkdir(exist_ok=True)
-    return transition.audit_segment(segment, protocol_path, evaluation_root)
+    return transition.audit_segment(segment, protocol_path, evaluation_root,
+        segment.parent / "evaluation-protocol.json")
 
 
 def _write_evaluation(path, report):
     path.write_text(json.dumps(report))
     path.with_suffix(path.suffix + ".status.json").write_text(json.dumps({
         "status": "complete", "evaluation_id": report["evaluation_id"],
-        "output_file": path.name}))
+        "protocol_id": report["protocol_id"],
+        "evaluation_protocol_id": report.get("evaluation_protocol_id"),
+        "evaluation_protocol_sha256": report.get("evaluation_protocol_sha256"),
+        "evaluation_case": report.get("evaluation_case"),
+        "exact_episode_seeds": report.get("exact_episode_seeds"),
+        "split": report.get("split"), "output_file": path.name}))
 
 
 def _mark_supervisor_evaluation(segment, path):
@@ -170,12 +228,13 @@ def _mark_supervisor_evaluation(segment, path):
     status = json.loads(status_path.read_text())
     report = json.loads(path.read_text())
     status["evaluation"] = {"status": "complete", "output_file": path.name,
-        "evaluation_id": report["evaluation_id"]}
+        "evaluation_id": report["evaluation_id"], "protocol_id": report["protocol_id"]}
     status_path.write_text(json.dumps(status))
     queue_path = segment / "queue-status.json"
     queue = json.loads(queue_path.read_text())
     queue["evaluation"] = {"active": False, "pending": 0, "status": "complete",
-        "output_file": path.name, "evaluation_id": report["evaluation_id"]}
+        "output_file": path.name, "evaluation_id": report["evaluation_id"],
+        "protocol_id": report["protocol_id"]}
     queue_path.write_text(json.dumps(queue))
 
 
@@ -235,6 +294,10 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             self.assertEqual(audit["audit_status"], "consistent_historical_segment")
             self.assertFalse(audit["qualification_eligible"])
             self.assertEqual(audit["historical_protocol_binding"], "unbound")
+            self.assertEqual(audit["training_qualification_protocol_id"],
+                "training-qualification-distinct")
+            self.assertNotEqual(audit["evaluations"][0]["evaluation_protocol_id"],
+                audit["training_qualification_protocol_id"])
             self.assertEqual(set(audit["checkpoints"]), set(MECO_TRACKS))
             self.assertEqual(len(audit["evaluations"]), 1)
             self.assertIn("queue_status_sha256", audit)
@@ -247,17 +310,19 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             _segment(root / "segment", protocol)
             evaluation_root = root / "evaluations"
             evaluation_path = evaluation_root / "cycle-000001-1234abcd.json"
-            audited = transition.audit_segment(root / "segment", protocol_path, evaluation_root)
+            audited = transition.audit_segment(root / "segment", protocol_path, evaluation_root,
+                root / "evaluation-protocol.json")
             self.assertEqual(audited["evaluations"][0]["sha256"],
                 hashlib.sha256(evaluation_path.read_bytes()).hexdigest())
             report = json.loads(evaluation_path.read_text())
-            report["qualification_protocol_id"] = None
+            report["evaluation_protocol_id"] = None
             for record in report["records"]:
-                record["qualification_protocol_id"] = None
+                record["evaluation_protocol_id"] = None
             _write_evaluation(evaluation_path, report)
             _refresh_history_report(root / "segment", evaluation_path)
-            with self.assertRaisesRegex(ValueError, "unbound supervisor evaluation"):
-                transition.audit_segment(root / "segment", protocol_path, evaluation_root)
+            with self.assertRaisesRegex(ValueError, "held-out evaluation protocol"):
+                transition.audit_segment(root / "segment", protocol_path, evaluation_root,
+                    root / "evaluation-protocol.json")
 
     def test_validation_seed_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,6 +332,76 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             _segment(root / "segment", _protocol(protocol_path), seed=VALIDATION_SEED)
             with self.assertRaisesRegex(ValueError, "exact train split"):
                 _audit(root / "segment", protocol_path)
+
+    def test_one_field_evaluation_protocol_sha_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, _protocol(protocol_path))
+            queue_path = segment / "queue-status.json"
+            queue = json.loads(queue_path.read_text())
+            queue["evaluation_protocol_sha256"] = "0" * 64
+            queue_path.write_text(json.dumps(queue))
+            with self.assertRaisesRegex(ValueError, "held-out evaluation protocol"):
+                _audit(segment, protocol_path)
+
+    def test_heldout_audit_requires_explicit_evaluation_protocol_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, _protocol(protocol_path))
+            with self.assertRaisesRegex(ValueError, "requires --evaluation-protocol"):
+                transition.audit_segment(segment, protocol_path,
+                    root / "evaluations")
+
+    def test_export_rejects_evaluation_protocol_bytes_changed_after_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, protocol)
+            audit = _audit(segment, protocol_path)
+            audit_path = root / "audit.json"
+            audit_path.write_text(json.dumps(audit))
+            eval_protocol_path = root / "evaluation-protocol.json"
+            eval_protocol_path.write_text(eval_protocol_path.read_text() + " ")
+            with self.assertRaisesRegex(ValueError, "protocol artifact changed"):
+                transition.export_transition(audit_path, root / "transition.pt")
+
+    def test_diagnostic_unbound_evaluation_stays_nonqualifying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, protocol)
+            report_path = root / "evaluations" / "cycle-000001-1234abcd.json"
+            report = json.loads(report_path.read_text())
+            report.update(split="diagnostic", evaluation_design="diagnostic_unbound",
+                evaluation_protocol_id=None, evaluation_protocol_sha256=None,
+                evaluation_case=None, exact_episode_seeds=None)
+            for record in report["records"]:
+                record.update(split="diagnostic", evaluation_protocol_id=None,
+                    evaluation_protocol_sha256=None, evaluation_case_id=None)
+            _write_evaluation(report_path, report)
+            for filename in ("queue-status.json", "supervisor-status.json"):
+                path = segment / filename
+                payload = json.loads(path.read_text())
+                payload.update(evaluation_split="diagnostic", evaluation_protocol_id=None,
+                    evaluation_protocol_sha256=None, evaluation_binding=None,
+                    evaluation_case=None,
+                    exact_episode_seeds=None)
+                path.write_text(json.dumps(payload))
+            _refresh_history_report(segment, report_path)
+            audit = _audit(segment, protocol_path)
+            self.assertFalse(audit["qualification_eligible"])
+            self.assertEqual(audit["evaluations"][0]["split"], "diagnostic")
+            self.assertIsNone(audit["evaluations"][0]["evaluation_protocol_id"])
 
     def test_missing_lane_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,7 +479,8 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             _mark_supervisor_evaluation(segment, report_path)
             _refresh_history_report(segment, report_path)
             with self.assertRaisesRegex(ValueError, "category/seed|unknown stratum"):
-                transition.audit_segment(segment, protocol_path, evaluation_root)
+                transition.audit_segment(segment, protocol_path, evaluation_root,
+                    root / "evaluation-protocol.json")
 
     def test_checkpoint_tamper_after_audit_blocks_export(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,7 +532,8 @@ class MecoProtocolTransitionTests(unittest.TestCase):
                     "protocol_id": report["protocol_id"], "return_code": 0},
                 checkpoints={track: second_snapshots / f"{track}.pt" for track in MECO_TRACKS})
             _mark_history_anchor(segment, evaluation_root)
-            audit = transition.audit_segment(segment, protocol_path, evaluation_root)
+            audit = transition.audit_segment(segment, protocol_path, evaluation_root,
+                root / "evaluation-protocol.json")
             audit_path = root / "audit.json"
             audit_path.write_text(json.dumps(audit))
             first_report.unlink()
@@ -405,7 +542,8 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "complete report inventory"):
                 transition.export_transition(audit_path, root / "transition.pt")
             with self.assertRaisesRegex(ValueError, "complete report inventory"):
-                transition.audit_segment(segment, protocol_path, evaluation_root)
+                transition.audit_segment(segment, protocol_path, evaluation_root,
+                    root / "evaluation-protocol.json")
 
     def test_legacy_evaluation_root_without_history_is_not_claimed_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
