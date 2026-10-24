@@ -59,6 +59,45 @@ def _atomic_json(path: Path, payload):
             os.unlink(temporary)
 
 
+def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Path,
+                              completion: dict, checkpoints: dict):
+    """Persist every terminal evaluation before queue status can advance."""
+    evaluation_root, output = Path(evaluation_root), Path(output)
+    history_path = evaluation_root / "evaluation-history.json"
+    try:
+        history = json.loads(history_path.read_text())
+    except FileNotFoundError:
+        history = {"schema_version": 1, "entries": []}
+    if history.get("schema_version") != 1 or not isinstance(history.get("entries"), list):
+        raise ValueError("evaluation history is malformed")
+    entries = history["entries"]
+    prior = entries[-1].get("entry_sha256") if entries else None
+    if any(row.get("output_file") == output.name for row in entries):
+        raise ValueError("evaluation output is already present in durable history")
+    snapshot_rows = []
+    for track, path in sorted(checkpoints.items()):
+        path = Path(path)
+        snapshot_rows.append({"track": track, "path": str(path.resolve()),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    status_path = Path(str(output) + ".status.json")
+    row = {"sequence": len(entries) + 1, "previous_entry_sha256": prior,
+        "cycle": cycle, "output_file": output.name,
+        "status": completion.get("status"),
+        "evaluation_id": completion.get("evaluation_id"),
+        "protocol_id": completion.get("protocol_id"),
+        "return_code": completion.get("return_code"),
+        "report_sha256": (hashlib.sha256(output.read_bytes()).hexdigest()
+            if output.is_file() else None),
+        "status_file": status_path.name,
+        "status_sha256": (hashlib.sha256(status_path.read_bytes()).hexdigest()
+            if status_path.is_file() else None),
+        "checkpoint_snapshots": snapshot_rows}
+    row["entry_sha256"] = _hash(row)
+    entries.append(row)
+    _atomic_json(history_path, history)
+    return {"count": len(entries), "head_sha256": row["entry_sha256"]}
+
+
 def _checkpoint_info(path: Path):
     if not path.is_file():
         return None
@@ -344,6 +383,11 @@ class MecoSupervisor:
 
     def _publish(self, *, cycle, phase, statuses, evaluation=None, error=None):
         now = _utc()
+        history_path = self.evaluation_output / "evaluation-history.json"
+        try:
+            history_entries = json.loads(history_path.read_text()).get("entries", [])
+        except (OSError, json.JSONDecodeError):
+            history_entries = []
         queue = {"schema_version": 1, "updated_utc": now,
             "supervisor_id": self.supervisor_id, "protocol_id": self.protocol_id,
             "prediction_mode": self.prediction_mode,
@@ -358,6 +402,9 @@ class MecoSupervisor:
             "lanes": [self._lane_payload(track, statuses) for track in MECO_TRACKS],
             "task_assignment": self.current_assignment,
             "task_scheduler": self._task_scheduler_status(),
+            "evaluation_history": {"count": len(history_entries),
+                "head_sha256": (history_entries[-1].get("entry_sha256")
+                    if history_entries else None)},
             "evaluation": self._evaluation_status()}
         _atomic_json(self.queue_path, queue)
         _atomic_json(self.status_path, {"schema_version": 1,
@@ -901,24 +948,28 @@ class MecoSupervisor:
         if result is None:
             return
         self.evaluator_log.close()
-        output = self.evaluator_job["output"]
+        job = self.evaluator_job
+        output = job["output"]
         try:
             evaluator_status = json.loads(Path(str(output) + ".status.json").read_text())
         except (OSError, json.JSONDecodeError):
             evaluator_status = {}
-        completion = {"cycle": self.evaluator_job["cycle"],
+        completion = {"cycle": job["cycle"],
             "output_file": output.name, "status_file": output.name + ".status.json",
             "return_code": result,
             "evaluation_id": evaluator_status.get("evaluation_id"),
             "protocol_id": evaluator_status.get("protocol_id"),
             "progress": evaluator_status.get("progress"),
-            "seed": self.evaluator_job.get("seed")}
+            "seed": job.get("seed")}
         self.evaluator = None
         self.evaluator_log = None
         self.evaluator_job = None
         completion["status"] = "stopped" if self.request_stop else (
             "complete" if result == 0 else "failed")
         self.last_evaluation = completion
+        _append_evaluation_history(self.evaluation_output,
+            cycle=job["cycle"], output=output, completion=completion,
+            checkpoints=job["checkpoints"])
         self._start_next_evaluation()
         self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
                       statuses=statuses, evaluation=completion)

@@ -291,16 +291,52 @@ def _validate_evaluation_snapshots(evaluation_root, report_path, report, history
     return cycle, snapshot_identities
 
 
-def _evaluation_inventory(evaluation_root: Path):
+def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
     root = Path(evaluation_root).resolve()
     if not root.is_dir():
         raise ValueError("an explicit existing evaluation root is required for complete inventory")
     reports = sorted(path for path in root.glob("*.json")
-                     if not path.name.endswith(".status.json"))
+                     if not path.name.endswith(".status.json")
+                     and path.name != "evaluation-history.json")
     statuses = sorted(root.glob("*.json.status.json"))
     status_by_report = {path.with_suffix("").with_suffix(""): path for path in statuses}
     if set(reports) != set(status_by_report):
         raise ValueError("evaluation root contains a report without status or orphan status file")
+    history_path = root / "evaluation-history.json"
+    if not history_path.is_file():
+        raise ValueError("legacy evaluation root has no durable history index; completeness is unverifiable")
+    history_bytes = history_path.read_bytes()
+    history = json.loads(history_bytes)
+    history_rows = history.get("entries") if history.get("schema_version") == 1 else None
+    if not isinstance(history_rows, list):
+        raise ValueError("durable evaluation history index is malformed")
+    indexed = {}
+    previous = None
+    for sequence, row in enumerate(history_rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError("durable evaluation history row is malformed")
+        digest = row.get("entry_sha256")
+        body = {key: value for key, value in row.items() if key != "entry_sha256"}
+        row_digest = _sha(json.dumps(body, sort_keys=True, allow_nan=False).encode())
+        if (row.get("sequence") != sequence
+                or row.get("previous_entry_sha256") != previous
+                or digest != row_digest):
+            raise ValueError("durable evaluation history chain is broken")
+        previous = digest
+        name = row.get("output_file")
+        if not isinstance(name, str) or name in indexed:
+            raise ValueError("durable evaluation history has duplicate or malformed output")
+        indexed[name] = row
+    try:
+        queue = _json(Path(queue_status_path))
+        anchor = queue.get("evaluation_history") or {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        raise ValueError("supervisor queue lacks a durable evaluation history anchor")
+    if (anchor.get("count") != len(history_rows)
+            or anchor.get("head_sha256") != previous):
+        raise ValueError("durable evaluation history differs from supervisor queue anchor")
+    if set(indexed) != {path.name for path in reports}:
+        raise ValueError("durable evaluation history does not cover the complete report inventory")
     entries = []
     for report_path in reports:
         status_path = status_by_report[report_path]
@@ -311,11 +347,38 @@ def _evaluation_inventory(evaluation_root: Path):
         if (status.get("evaluation_id") != report.get("evaluation_id")
                 or status.get("output_file") != report_path.name):
             raise ValueError(f"evaluation report/status identity mismatch: {report_path.name}")
-        entries.append({"path": str(report_path), "sha256": _sha(report_path.read_bytes()),
-            "status_path": str(status_path), "status_sha256": _sha(status_path.read_bytes()),
+        report_sha, status_sha = _sha(report_path.read_bytes()), _sha(status_path.read_bytes())
+        history_row = indexed[report_path.name]
+        if (history_row.get("status") != "complete"
+                or history_row.get("evaluation_id") != report.get("evaluation_id")
+                or history_row.get("report_sha256") != report_sha
+                or history_row.get("status_file") != status_path.name
+                or history_row.get("status_sha256") != status_sha):
+            raise ValueError(f"evaluation report/status disagrees with durable history: {report_path.name}")
+        snapshot_dir = root / "checkpoint-snapshots" / report_path.stem
+        if (not snapshot_dir.is_dir()
+                or any(path.is_dir() for path in snapshot_dir.rglob("*"))):
+            raise ValueError(f"evaluation checkpoint snapshot directory is malformed: {report_path.name}")
+        snapshots = sorted(path for path in snapshot_dir.rglob("*") if path.is_file())
+        if any(path.is_symlink() for path in snapshots):
+            raise ValueError(f"evaluation checkpoint snapshot uses a symlink: {report_path.name}")
+        snapshot_rows = [{"path": str(path.resolve()), "sha256": _sha(path.read_bytes())}
+            for path in snapshots]
+        indexed_snapshots = history_row.get("checkpoint_snapshots")
+        indexed_snapshot_rows = sorted(({"path": row.get("path"), "sha256": row.get("sha256")}
+            for row in indexed_snapshots or []), key=lambda row: row["path"] or "")
+        if (len(snapshot_rows) != len(MECO_TRACKS)
+                or {Path(row["path"]).name for row in snapshot_rows} !=
+                    {f"{track}.pt" for track in MECO_TRACKS}
+                or snapshot_rows != indexed_snapshot_rows):
+            raise ValueError(f"evaluation checkpoint snapshot inventory disagrees with durable history: {report_path.name}")
+        entries.append({"path": str(report_path), "sha256": report_sha,
+            "status_path": str(status_path), "status_sha256": status_sha,
+            "snapshot_inventory": snapshot_rows,
             "evaluation_id": report.get("evaluation_id"), "report": report})
-    inventory_digest = _sha(_canonical([{key: value for key, value in row.items() if key != "report"}
-                                       for row in entries]))
+    inventory_digest = _sha(_canonical({"history_sha256": _sha(history_bytes),
+        "entries": [{key: value for key, value in row.items() if key != "report"}
+                    for row in entries]}))
     return root, entries, inventory_digest
 
 
@@ -466,7 +529,8 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
             "actor_state_sha256": _state_digest(model_state),
             "actor_keys": sorted(model_state)}
 
-    evaluation_root, inventory_entries, inventory_sha = _evaluation_inventory(evaluation_root)
+    evaluation_root, inventory_entries, inventory_sha = _evaluation_inventory(
+        evaluation_root, root / "queue-status.json")
     # queue-status is the durable evaluation state; supervisor-status may only
     # contain the dispatch snapshot from its final loop.
     queue_status = _json(root / "queue-status.json")
@@ -507,6 +571,7 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
             "evaluation_id": report.get("evaluation_id"),
             "protocol_id": report.get("protocol_id"),
             "cycle": evaluation_cycle, "checkpoint_snapshots": evaluation_checkpoints,
+            "snapshot_inventory": entry["snapshot_inventory"],
             "source_identity_sha256": report["source_identity_sha256"]})
 
     return {"schema_version": 1, "audit_status": "consistent_historical_segment",
@@ -555,7 +620,8 @@ def _export_transition_locked(audit_path: Path, output_path: Path, audit: dict) 
             audit.get("scheduler_history_sha256")):
         raise ValueError("supervisor or scheduler state changed since audit")
     evaluation_root, current_evaluations, inventory_sha = _evaluation_inventory(
-        Path(audit.get("evaluation_inventory_root", "")))
+        Path(audit.get("evaluation_inventory_root", "")),
+        segment_root / "queue-status.json")
     if (str(evaluation_root) != audit.get("evaluation_inventory_root")
             or inventory_sha != audit.get("evaluation_inventory_sha256")):
         raise ValueError("evaluation inventory changed since audit")
@@ -563,8 +629,14 @@ def _export_transition_locked(audit_path: Path, output_path: Path, audit: dict) 
     for evaluation in current_evaluations:
         prior = indexed_evaluations.get(evaluation["path"])
         if (prior is None or prior.get("sha256") != evaluation["sha256"]
-                or prior.get("status_sha256") != evaluation["status_sha256"]):
-            raise ValueError("evaluation report/status changed or was omitted since audit")
+                or prior.get("status_sha256") != evaluation["status_sha256"]
+                or prior.get("snapshot_inventory") != evaluation["snapshot_inventory"]):
+            raise ValueError("evaluation report/status/snapshot inventory changed or was omitted since audit")
+        for snapshot in prior.get("checkpoint_snapshots", {}).values():
+            snapshot_path = Path(snapshot.get("path", ""))
+            if (not snapshot_path.is_file()
+                    or _sha(snapshot_path.read_bytes()) != snapshot.get("sha256")):
+                raise ValueError("evaluation checkpoint snapshot changed since audit")
     if set(indexed_evaluations) != {row["path"] for row in current_evaluations}:
         raise ValueError("evaluation inventory differs from audited report set")
     actors = {}

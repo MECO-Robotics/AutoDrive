@@ -2,6 +2,7 @@ import hashlib
 import fcntl
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from torch import nn
 
 from frc_defense.meco_qualification import MIN_EPISODES, TRAIN_SEED_POOL_SIZE, protocol_cases
 from frc_defense.meco_tracks import MECO_TRACKS
+from frc_defense.meco_supervisor import _append_evaluation_history
 from scripts import meco_protocol_transition as transition
 
 
@@ -72,6 +74,7 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
     (root / "supervisor-status.json").write_text(json.dumps({"status": "complete",
         "lanes": [{"track": track, "pid": None} for track in MECO_TRACKS]}))
     (root / "queue-status.json").write_text(json.dumps({"phase": "complete",
+        "evaluation_history": {"count": 0, "head_sha256": None},
         "evaluation": {"active": False, "pending": 0, "status": "idle",
             "output_file": None, "evaluation_id": None}}))
     for track in MECO_TRACKS:
@@ -141,6 +144,11 @@ def _segment(root, protocol, *, pending=None, seed=TRAIN_SEED, missing_track=Non
         report_path = eval_root / f"{eval_stem}.json"
         _write_evaluation(report_path, report)
         _mark_supervisor_evaluation(root, report_path)
+        _append_evaluation_history(eval_root, cycle=1, output=report_path,
+            completion={"status": "complete", "evaluation_id": report["evaluation_id"],
+                "protocol_id": report["protocol_id"], "return_code": 0},
+            checkpoints={track: snapshot_dir / f"{track}.pt" for track in MECO_TRACKS})
+        _mark_history_anchor(root, eval_root)
     return assignment
 
 
@@ -169,6 +177,30 @@ def _mark_supervisor_evaluation(segment, path):
     queue["evaluation"] = {"active": False, "pending": 0, "status": "complete",
         "output_file": path.name, "evaluation_id": report["evaluation_id"]}
     queue_path.write_text(json.dumps(queue))
+
+
+def _mark_history_anchor(segment, evaluation_root):
+    history = json.loads((evaluation_root / "evaluation-history.json").read_text())["entries"]
+    queue_path = segment / "queue-status.json"
+    queue = json.loads(queue_path.read_text())
+    queue["evaluation_history"] = {"count": len(history),
+        "head_sha256": history[-1]["entry_sha256"] if history else None}
+    queue_path.write_text(json.dumps(queue))
+
+
+def _refresh_history_report(segment, report_path):
+    history_path = report_path.parent / "evaluation-history.json"
+    history = json.loads(history_path.read_text())
+    row = next(item for item in history["entries"] if item["output_file"] == report_path.name)
+    row["evaluation_id"] = json.loads(report_path.read_text())["evaluation_id"]
+    row["report_sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    status_path = report_path.with_suffix(report_path.suffix + ".status.json")
+    row["status_sha256"] = hashlib.sha256(status_path.read_bytes()).hexdigest()
+    body = {key: value for key, value in row.items() if key != "entry_sha256"}
+    row["entry_sha256"] = hashlib.sha256(json.dumps(body, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    history_path.write_text(json.dumps(history))
+    _mark_history_anchor(segment, report_path.parent)
 
 
 class _Tiny(nn.Module):
@@ -223,6 +255,7 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             for record in report["records"]:
                 record["qualification_protocol_id"] = None
             _write_evaluation(evaluation_path, report)
+            _refresh_history_report(root / "segment", evaluation_path)
             with self.assertRaisesRegex(ValueError, "unbound supervisor evaluation"):
                 transition.audit_segment(root / "segment", protocol_path, evaluation_root)
 
@@ -309,6 +342,7 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             report["records"][0]["seed"] = 9
             _write_evaluation(report_path, report)
             _mark_supervisor_evaluation(segment, report_path)
+            _refresh_history_report(segment, report_path)
             with self.assertRaisesRegex(ValueError, "category/seed|unknown stratum"):
                 transition.audit_segment(segment, protocol_path, evaluation_root)
 
@@ -325,6 +359,64 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             checkpoint.write_bytes(checkpoint.read_bytes() + b"tamper")
             with self.assertRaisesRegex(ValueError, "changed since audit"):
                 transition.export_transition(audit_path, root / "transition.pt")
+
+    def test_snapshot_tamper_after_audit_blocks_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            _segment(root / "segment", protocol)
+            audit = _audit(root / "segment", protocol_path)
+            audit_path = root / "audit.json"
+            audit_path.write_text(json.dumps(audit))
+            snapshot = root / "evaluations" / "checkpoint-snapshots" / "cycle-000001-1234abcd" / "A1.pt"
+            snapshot.write_bytes(snapshot.read_bytes() + b"tamper")
+            with self.assertRaisesRegex(ValueError, "history|snapshot"):
+                transition.export_transition(audit_path, root / "transition.pt")
+
+    def test_durable_history_detects_deleted_older_evaluation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, protocol)
+            evaluation_root = root / "evaluations"
+            first_report = evaluation_root / "cycle-000001-1234abcd.json"
+            second_report = evaluation_root / "cycle-000001-5678abcd.json"
+            second_snapshots = evaluation_root / "checkpoint-snapshots" / second_report.stem
+            shutil.copytree(evaluation_root / "checkpoint-snapshots" / first_report.stem,
+                second_snapshots)
+            report = json.loads(first_report.read_text())
+            report["evaluation_id"] = "eval-2"
+            _write_evaluation(second_report, report)
+            _mark_supervisor_evaluation(segment, second_report)
+            _append_evaluation_history(evaluation_root, cycle=1, output=second_report,
+                completion={"status": "complete", "evaluation_id": report["evaluation_id"],
+                    "protocol_id": report["protocol_id"], "return_code": 0},
+                checkpoints={track: second_snapshots / f"{track}.pt" for track in MECO_TRACKS})
+            _mark_history_anchor(segment, evaluation_root)
+            audit = transition.audit_segment(segment, protocol_path, evaluation_root)
+            audit_path = root / "audit.json"
+            audit_path.write_text(json.dumps(audit))
+            first_report.unlink()
+            first_report.with_suffix(first_report.suffix + ".status.json").unlink()
+            shutil.rmtree(evaluation_root / "checkpoint-snapshots" / first_report.stem)
+            with self.assertRaisesRegex(ValueError, "complete report inventory"):
+                transition.export_transition(audit_path, root / "transition.pt")
+            with self.assertRaisesRegex(ValueError, "complete report inventory"):
+                transition.audit_segment(segment, protocol_path, evaluation_root)
+
+    def test_legacy_evaluation_root_without_history_is_not_claimed_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, protocol)
+            (root / "evaluations" / "evaluation-history.json").unlink()
+            with self.assertRaisesRegex(ValueError, "legacy evaluation root"):
+                _audit(segment, protocol_path)
 
     def test_export_and_consumer_load_actor_only_and_reset_run_state(self):
         with tempfile.TemporaryDirectory() as tmp:

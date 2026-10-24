@@ -11,7 +11,12 @@ in the supplied frozen protocol's exact train case, all five run manifests and
 checkpoints agree on full source identity/configuration/protocol/run IDs, and
 per-update history assignment IDs agree with the scheduler. The complete
 evaluation root is mandatory: every direct report JSON must have a completed
-matching status sidecar, and the root inventory is bound by hash. Reports with
+matching status sidecar, and a supervisor-written append-only,
+hash-chained `evaluation-history.json` must enumerate every terminal evaluation.
+Queue status anchors the history count and chain head. Each entry binds report
+and status hashes plus the complete five-checkpoint snapshot inventory. Missing
+history in a legacy run makes completeness unverifiable, so audit rejects it
+instead of claiming the remaining files are complete. Reports with
 absent qualification provenance, unknown cases, train-split evaluations, or
 validation/test seed leakage fail closed. Existing automatic evaluations
 without a qualification protocol ID are rejected for transition; they cannot
@@ -30,7 +35,9 @@ python3 scripts/meco_protocol_transition.py export \
   --output /path/to/weights-only-transition.pt
 ```
 
-Export rechecks checkpoint byte hashes and actor-state hashes, constructs each
+Export rechecks checkpoint byte hashes and actor-state hashes, the history chain,
+every report/status hash, and every checkpoint snapshot path/hash and complete
+snapshot directory inventory. It constructs each
 registered track model on CPU, and strictly validates its actor state dict.
 The artifact and JSON sidecar bind all five checkpoint identities, model
 shapes/dtypes, source lineage, checked protocol identity, evaluation hashes,
