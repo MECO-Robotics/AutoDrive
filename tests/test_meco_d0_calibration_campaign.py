@@ -1,5 +1,8 @@
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -112,6 +115,69 @@ def test_merge_is_restartable_after_partial_write_and_rejects_conflicts(tmp_path
     conflict.write_text('{"conflict":true}')
     with pytest.raises(ValueError, match="different content"):
         campaign.merge_campaign(value, root, reports)
+
+
+def test_atomic_writer_concurrent_identical_publication_is_idempotent(tmp_path, monkeypatch):
+    destination = tmp_path / "same-report.json"
+    payload = {"schema": 1, "rows": list(range(100))}
+    barrier = threading.Barrier(2)
+    original = campaign._write_and_sync_temp
+
+    def synchronized_write(path, encoded):
+        original(path, encoded)
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(campaign, "_write_and_sync_temp", synchronized_write)
+    results = []
+    failures = []
+
+    def publish():
+        try:
+            results.append(campaign._write_immutable_or_verify_stable(destination, payload))
+        except BaseException as exc:  # propagate worker-thread failures into the assertion
+            failures.append(exc)
+
+    workers = [threading.Thread(target=publish) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+    assert not any(worker.is_alive() for worker in workers)
+    assert failures == []
+    assert results == [results[0], results[0]]
+    assert json.loads(destination.read_text()) == payload
+    assert list(tmp_path.glob(".*.tmp")) == []
+    expected = hashlib.sha256(json.dumps(payload, sort_keys=True, indent=2,
+        allow_nan=False).encode()).hexdigest()
+    assert results[0] == expected
+
+
+def test_atomic_writer_cleans_interrupted_temp_and_can_retry(tmp_path, monkeypatch):
+    destination = tmp_path / "interrupted-report.json"
+    payload = {"schema": 1, "records": ["complete", "payload"]}
+    original = campaign._write_and_sync_temp
+
+    def interrupted_write(path, encoded):
+        with open(path, "wb") as stream:
+            stream.write(encoded[:8])
+            stream.flush()
+        raise OSError("simulated interruption during temporary write")
+
+    monkeypatch.setattr(campaign, "_write_and_sync_temp", interrupted_write)
+    with pytest.raises(OSError, match="simulated interruption"):
+        campaign._write_immutable_or_verify_stable(destination, payload)
+    assert not destination.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+    # A process kill can leave a uniquely named temporary file behind. It is
+    # never used as the final destination and must not prevent a fresh publish.
+    orphan = tmp_path / ".interrupted-report.json.orphan.tmp"
+    orphan.write_bytes(b"partial")
+    monkeypatch.setattr(campaign, "_write_and_sync_temp", original)
+    digest = campaign._write_immutable_or_verify_stable(destination, payload)
+    assert json.loads(destination.read_text()) == payload
+    assert campaign._write_immutable_or_verify_stable(destination, payload) == digest
+    assert list(tmp_path.glob(".*.tmp")) == [orphan]
 
 
 def test_calibration_variance_summary_matches_population_variance():

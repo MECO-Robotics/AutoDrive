@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,8 +29,15 @@ def _sha(value):
     return q._canonical_sha256(value)
 
 
+def _write_and_sync_temp(path, encoded):
+    with open(path, "wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _write_immutable_or_verify_stable(path, payload):
-    """Write once or accept identical content, returning the same digest either way."""
+    """Atomically publish once or accept identical content, with a stable digest."""
     destination = Path(path)
     encoded = json.dumps(payload, sort_keys=True, indent=2, allow_nan=False).encode()
     digest = hashlib.sha256(encoded).hexdigest()
@@ -36,15 +45,27 @@ def _write_immutable_or_verify_stable(path, payload):
         if q._load_json(destination) != payload:
             raise ValueError(f"immutable artifact already exists with different content: {destination}")
         return digest
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.",
+        suffix=".tmp", dir=destination.parent)
+    temp_path = Path(temp_name)
     try:
-        written_digest = q.write_immutable_report(destination, payload)
-    except FileExistsError:
-        # Another identical merge may have won the exclusive create race.
-        if q._load_json(destination) != payload:
-            raise ValueError(f"immutable artifact already exists with different content: {destination}")
-        return digest
-    if written_digest != digest:
-        raise RuntimeError("immutable report writer returned an unexpected content digest")
+        os.close(descriptor)
+        _write_and_sync_temp(temp_path, encoded)
+        try:
+            os.link(temp_path, destination)
+        except FileExistsError:
+            if q._load_json(destination) != payload:
+                raise ValueError(
+                    f"immutable artifact already exists with different content: {destination}")
+            return digest
+        directory_fd = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return digest
 
 
