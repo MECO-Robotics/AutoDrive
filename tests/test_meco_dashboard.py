@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from frc_defense.meco_dashboard import (
-    ABLATIONS, CONTROLS, TRACKS, _collect_status, _queue_state,
+    ABLATIONS, CONTROLS, TRACKS, _collect_status, _queue_attempt_projection, _queue_state,
     _training_curriculum_projection, meco_status_payload,
 )
 from frc_defense.meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
@@ -377,3 +377,20 @@ def test_live_assignment_projection_requires_matching_scheduler_snapshot(tmp_pat
     assert projected["state"] == "fresh"
     assert projected["assignment"]["scenario_id"] == scenario
     assert projected["assignment"]["category"] == category
+
+    scheduler["pending_assignment"] = {**assignment, "scenario_id": "pickup_simple"}
+    (root / "task-scheduler-state.json").write_text(json.dumps(scheduler))
+    mismatch = _training_curriculum_projection(root, queue_payload, "fresh", tmp_path)
+    assert mismatch["state"] == "unavailable"
+    assert mismatch["assignment"] is None
+
+
+def test_deferred_queue_attempt_is_queued_and_not_started():
+    attempt = _queue_attempt_projection("A1", {
+        "status": "deferred_for_evaluation", "run_id": "deferred-run",
+        "run_directory": "A1", "device": "cuda:0", "completed_updates": 0,
+    }, queue_fresh=True)
+
+    assert attempt["training_state"] == "queued"
+    assert attempt["heartbeat"]["state"] == "not_started"
+    assert attempt["queue_process_probe"]["confirmed"] is False

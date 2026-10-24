@@ -54,7 +54,7 @@ def test_live_meco_assignment_overrides_run_config_on_active_tracks():
             "config": {"scenario_id": "config_scenario"}, "device": "cuda:0"}}
         for track in ("A1", "A2", "A3", "C1", "C2")]
     lanes = {track: {"status": "running"} for track in ("A1", "A2", "A3", "C1", "C2")}
-    status = {"policies": policies, "queue": {"lanes": lanes, "curriculum": {
+    status = {"policies": policies, "queue": {"state": "fresh", "lanes": lanes, "curriculum": {
         "state": "fresh", "assignment": {"scenario_id": "live_scenario",
             "category": "live_category"}}}}
 
@@ -63,6 +63,42 @@ def test_live_meco_assignment_overrides_run_config_on_active_tracks():
     assert all(track["current"] == "live_scenario" for track in merged["tracks"])
     assert all(track["current_category"] == "live_category" for track in merged["tracks"])
     assert all(track["current_source"] == "live_assignment" for track in merged["tracks"])
+
+
+def test_deferred_lane_does_not_inherit_sibling_live_assignment():
+    payload = {"tracks": [{"track": track} for track in ("A1", "A2")]}
+    policies = [
+        {"policy_id": "A1", "training_state": "unconfirmed",
+         "run": {"config": {"scenario_id": "configured-a1"}}},
+        {"policy_id": "A2", "training_state": "running",
+         "run": {"config": {"scenario_id": "configured-a2"}}},
+    ]
+    status = {"policies": policies, "queue": {"state": "fresh", "lanes": {
+        "A1": {"status": "deferred_for_evaluation"},
+        "A2": {"status": "running"}}, "curriculum": {
+            "state": "fresh", "assignment": {"scenario_id": "live-scenario",
+                "category": "live-category"}}}}
+
+    merged = json.loads(_merge_meco_track_status(json.dumps(payload).encode(), status))
+
+    assert merged["tracks"][0]["current"] == "configured-a1"
+    assert merged["tracks"][0]["current_source"] == "run_config_fallback"
+    assert merged["tracks"][1]["current"] == "live-scenario"
+    assert merged["tracks"][1]["current_category"] == "live-category"
+
+
+def test_stale_queue_suppresses_live_assignment_even_if_payload_has_one():
+    payload = {"tracks": [{"track": "A1"}]}
+    status = {"policies": [{"policy_id": "A1", "training_state": "running",
+        "run": {"config": {"scenario_id": "configured"}}}],
+        "queue": {"state": "stale", "lanes": {"A1": {"status": "running"}},
+            "curriculum": {"state": "fresh", "assignment": {
+                "scenario_id": "stale-scenario", "category": "old"}}}}
+
+    merged = json.loads(_merge_meco_track_status(json.dumps(payload).encode(), status))
+
+    assert merged["tracks"][0]["current"] == "configured"
+    assert merged["tracks"][0]["current_source"] == "run_config_fallback"
 
 
 def test_run_config_current_is_labeled_fallback_when_assignment_is_unavailable():
@@ -76,6 +112,28 @@ def test_run_config_current_is_labeled_fallback_when_assignment_is_unavailable()
     assert merged["tracks"][0]["current"] == "config_scenario"
     assert merged["tracks"][0]["current_category"] is None
     assert merged["tracks"][0]["current_source"] == "run_config_fallback"
+
+
+def test_curriculum_api_merge_preserves_saved_evaluation_evidence(tmp_path, monkeypatch):
+    saved = {"tracks": [{"track": "A1", "status": "saved-status",
+        "evaluation": "saved-evaluation", "runs": [{"run_id": "evidence-run"}]}],
+        "scenarios": {"pickup_simple": {"qualified": True}}}
+    live = {"policies": [{"policy_id": "A1", "training_state": "running",
+        "run": {"config": {"scenario_id": "configured"}}}],
+        "queue": {"state": "fresh", "lanes": {"A1": {"status": "running"}},
+            "curriculum": {"state": "fresh", "assignment": {
+                "scenario_id": "live-scenario", "category": "live-category"}}}}
+    monkeypatch.setattr("frc_defense.dashboard.curriculum_status_payload",
+        lambda *args, **kwargs: json.dumps(saved).encode())
+    monkeypatch.setattr("frc_defense.dashboard.meco_status_payload",
+        lambda *args, **kwargs: json.dumps(live).encode())
+
+    response = _http_payload(tmp_path)
+
+    assert response["tracks"][0]["status"] == "running"
+    assert response["tracks"][0]["current"] == "live-scenario"
+    assert response["tracks"][0]["runs"] == [{"run_id": "evidence-run"}]
+    assert response["scenarios"] == saved["scenarios"]
 
 
 def _http_payload(run_dir, *, curriculum_root=None, meco_data_root=None):

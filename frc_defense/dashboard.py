@@ -86,8 +86,8 @@ def _merge_meco_track_status(curriculum_body: bytes, meco_status: dict | None) -
         config = run.get("config") if isinstance(run.get("config"), dict) else {}
         lane = lanes.get(track["track"]) if isinstance(lanes, dict) else {}
         lane = lane if isinstance(lane, dict) else {}
-        active = (lane.get("status") in ("running", "stalled")
-                  or source.get("training_state") in ("running", "stalled", "unconfirmed"))
+        active = (queue.get("state") == "fresh"
+                  and lane.get("status") in ("running", "stalled"))
         live_assignment = assignment if active else None
         updates = run.get("completed_updates")
         if type(updates) is not int:

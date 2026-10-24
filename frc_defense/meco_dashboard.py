@@ -513,7 +513,8 @@ def _worker_stalled(*, manifest, heartbeat, stats, latest, lane, queue, now):
 def _queue_attempt_projection(track, lane, *, queue_fresh, previous_run=None):
     """Project a queue-only attempt without borrowing evidence from an older run."""
     lane_state = lane.get("status")
-    worker_state = ("queued" if queue_fresh and lane_state == "queued"
+    worker_state = ("queued" if queue_fresh and lane_state in
+                    ("queued", "deferred_for_evaluation")
         else "unconfirmed")
     queue_process_confirmed = (queue_fresh
         and lane_state in ("running", "stalled")
@@ -524,7 +525,7 @@ def _queue_attempt_projection(track, lane, *, queue_fresh, previous_run=None):
         "manifest_state": "missing", "queue_status": lane_state,
         "training_state": worker_state,
         "heartbeat": {"state": "not_started"
-            if queue_fresh and lane_state == "queued" else "missing",
+            if queue_fresh and lane_state in ("queued", "deferred_for_evaluation") else "missing",
             "fresh": False, "process_alive": False, "process_confirmed": False,
             "pid": None},
         "queue_process_probe": {"confirmed": queue_process_confirmed,
