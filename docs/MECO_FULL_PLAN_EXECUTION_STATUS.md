@@ -1,5 +1,27 @@
 # MECO learning tracks plan: execution status
 
+## Phase 4 legal full-team start profiles — 2026-10-24
+
+Reviewed implementation commit `28f906961115adffb11a3e7e11e4188e4660dcd9`
+connects registry-backed `start.legal_team_poses` assignments to protocol-bound
+paired validation dispatch and curriculum resets. Paired arms and per-policy
+records are checked against the same checkpoint hashes, source identity, and
+execution device. Curriculum construction defers its first perception until
+the profile assignment is attached; reset validates six-robot pose clearance
+and applies the assigned start state before final observation. Five focused CPU
+contracts passed, followed by a separate rerun of the strengthened
+reset-order contract (one passed); Python compilation and `git diff --check`
+passed. Provenance tranche #37 pins the scoped summary at manifest SHA-256
+`ed3781ae5307811989f156938fc594341ca5bab854245bd415d5d069038ee4e2`.
+
+The contracts are reviewed, but simulator behavior and legal-start validation
+rate remain unverified. `outcome_by_start_state` remains null/unavailable and
+qualification eligibility remains false. No simulator, GPU/HIP, training,
+campaign, replay, or dashboard-service validation/restart was performed for
+this tranche.
+See [`phase4-legal-team-start-profiles.md`](implementation-provenance/phase4-legal-team-start-profiles.md)
+and tranche #37 in [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
 ## Phase 4 reactive opponent validation wiring — 2026-10-24
 
 The helper-only deterministic opponent pool is now connected to a protocol-

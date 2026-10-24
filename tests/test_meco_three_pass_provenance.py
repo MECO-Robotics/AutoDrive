@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 36
+    assert len(result["tranches"]) == 37
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -177,6 +177,34 @@ def test_current_manifest_is_validated_as_summary_only():
     reactive_summary = (REPO / reactive["planner"]["artifact"]["path"]).read_text()
     assert "helper-only API was not connected" in reactive_summary
     assert "Family-specific outcomes, including interception rate" in reactive_summary
+    start_profiles = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-legal-team-start-profiles")
+    assert start_profiles["implementer"]["commit"] == (
+        "28f906961115adffb11a3e7e11e4188e4660dcd9")
+    assert start_profiles["reviewer"]["approved_commit"] == (
+        start_profiles["implementer"]["commit"])
+    assert start_profiles["implementer"]["paths"] == [
+        "frc_defense/architecture_scenarios.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/meco_ablation_matrix.py",
+        "frc_defense/meco_phase4_campaign_plan.py",
+        "frc_defense/meco_phase4_context.py",
+        "frc_defense/meco_phase4_runtime_adapter.py",
+        "frc_defense/meco_track_training.py",
+        "frc_defense/meco_validation_campaign_runner.py",
+        "frc_defense/tensor_3v3.py",
+        "scripts/run_meco_ablation_matrix.py",
+        "tests/test_meco_phase4_campaign_plan.py",
+        "tests/test_meco_phase4_context.py",
+        "tests/test_meco_phase4_runtime_adapter_contract.py"]
+    assert start_profiles["planner"]["artifact"]["sha256"] == (
+        start_profiles["reviewer"]["artifact"]["sha256"])
+    assert start_profiles["limits"].count("No simulator") == 1
+    assert "outcome_by_start_state is null/unavailable" in start_profiles["limits"]
+    assert "qualification eligibility remains false" in start_profiles["limits"]
+    profile_summary = (REPO / start_profiles["planner"]["artifact"]["path"]).read_text()
+    assert "defers its initial perception" in profile_summary
+    assert "legal-start rate and outcome-by-start-state" in profile_summary
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
