@@ -1,5 +1,16 @@
 # MECO learning tracks plan: execution status
 
+> **Dashboard verified on reviewed Phase 4 candidate — 2026-10-24 09:52 UTC.**
+> User unit `frc-defense-dashboard.service` restarted with PID `1745889`; its
+> working directory is this candidate checkout and its data root remains live
+> `main`. `/meco`, `/api/meco-status`, `/api/curriculum-status`, and
+> `/assets/meco.js` returned HTTP 200. Served JavaScript SHA-256 equals the
+> checkout asset (`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`).
+> The curriculum API reports `validated_summary_only` with 25 provenance
+> entries; latest is `phase4-context-runtime`. It still reports
+> `Could not read saved curriculum status.` No replay was generated because
+> the Phase 4 APIs remain unwired to the evaluator.
+
 > **Phase 4 contract and runtime APIs reviewed — 2026-10-24.** The contract
 > scope correction `4033acc8a2a67f0d206247363e6c98ca21ce7a97`, opponent API
 > `8a31ae2acaba9b0cb5ab842373f2796c271e65bc`, and context API
