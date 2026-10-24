@@ -1,0 +1,194 @@
+{
+  "campaign": {
+    "completed_cycles": 0,
+    "completed_training_chunks": 0,
+    "cycle": 1,
+    "evaluation": null,
+    "evaluation_protocol_id": null,
+    "evaluation_split": "diagnostic",
+    "heartbeat_utc": "2026-10-24T04:28:13.535987+00:00",
+    "lanes": [
+      {
+        "chunk_updates": 100,
+        "completed_updates": 2,
+        "device": "cuda:0",
+        "pid": 1400340,
+        "pid_alive": true,
+        "run_json_sha256": "d83b1da1687e0bdbd0a7db030e6b529f5cb9aeb36ef599a5849c8ab7d572e1eb",
+        "run_source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+        "status": "running",
+        "track": "A1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 2,
+        "device": "cuda:1",
+        "pid": 1400357,
+        "pid_alive": true,
+        "run_json_sha256": "e6219ca65cc8722946632a15597d6076498f021b598921e063d55940356f7303",
+        "run_source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+        "status": "running",
+        "track": "A2"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "pid_alive": false,
+        "run_json_sha256": null,
+        "run_source_identity_sha256": null,
+        "status": "queued",
+        "track": "A3"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:1",
+        "pid": null,
+        "pid_alive": false,
+        "run_json_sha256": null,
+        "run_source_identity_sha256": null,
+        "status": "queued",
+        "track": "C1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "pid_alive": false,
+        "run_json_sha256": null,
+        "run_source_identity_sha256": null,
+        "status": "queued",
+        "track": "C2"
+      }
+    ],
+    "qualification_protocol_id": "dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "status": "training",
+    "status_file_sha256": "2520fde5bc4288ede39259f05706cdc3f64ccb314f7a17a8a024fe0019b3f1e5",
+    "status_path": "checkpoints/meco-five/supervisor-status.json",
+    "supervisor_id": "5e8f956474594bf8b69417b39b4692fa"
+  },
+  "captured_utc": "2026-10-24T04:28:14.465226+00:00",
+  "checkout": {
+    "branch": "main",
+    "head": "2ecc067b780a693088ec0992df70560806485628",
+    "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "source_identity_sha256_from_live_run_manifests": [
+      "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350"
+    ],
+    "worktree_dirty": true
+  },
+  "dashboard": {
+    "active_enter_timestamp": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m frc_defense.dashboard --run-dir /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/evaluations/meco-five --host 127.0.0.1 --also-host 127.0.1.1 --also-host 100.121.248.52 --port 8765 --meco-data-root /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive ; ignore_errors=no ; start_time=[Sat 2026-10-24 04:25:30 UTC] ; stop_time=[n/a] ; pid=1403399 ; code=(null) ; status=0/0 }",
+    "active_state": "active",
+    "api_cycle": 1,
+    "api_endpoint": "http://127.0.0.1:8765/api/meco-status",
+    "api_http_status": 200,
+    "api_lanes": {
+      "A1": {
+        "completed_updates": 2,
+        "device": "cuda:0",
+        "pid": 1400340,
+        "status": "running"
+      },
+      "A2": {
+        "completed_updates": 2,
+        "device": "cuda:1",
+        "pid": 1400357,
+        "status": "running"
+      },
+      "A3": {
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "status": "queued"
+      },
+      "C1": {
+        "completed_updates": 0,
+        "device": "cuda:1",
+        "pid": null,
+        "status": "queued"
+      },
+      "C2": {
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "status": "queued"
+      }
+    },
+    "api_phase": "training",
+    "api_queue_state": "fresh",
+    "api_response_sha256": "80445b9aed05315acc5033494509417e4fd840715d3d816bef1c68f2e4bc9b35",
+    "assets": {
+      "dashboard.js": {
+        "checkout_sha256": "1da87bf6d83d82a330282bda4fd006a03b9781a43dccc66ab71f4b3900235a1b",
+        "http_status": 200,
+        "matches_checkout": true,
+        "served_sha256": "1da87bf6d83d82a330282bda4fd006a03b9781a43dccc66ab71f4b3900235a1b"
+      },
+      "meco.js": {
+        "checkout_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+        "http_status": 200,
+        "matches_checkout": true,
+        "served_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+      }
+    },
+    "checkpoint_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/checkpoints/meco-five",
+    "data_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "evaluation_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/evaluations/meco-five",
+    "exec_start": "1403399",
+    "main_pid": "Sat 2026-10-24 04:25:30 UTC",
+    "meco_page_http_status": 200,
+    "meco_page_response_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f",
+    "override_sha256": "b68bf7771fc353d7c1dfe352540837296c51c9e0d7adeb47466c7afa3d28ef26",
+    "unit": "frc-defense-dashboard.service"
+  },
+  "notes": [
+    "Current campaign source identity is pinned from A1/A2 run.json manifests and matches supervisor status. A later fresh source_identity() call may differ because native HIP extension initialization state is included in source identity.",
+    "Current status is an observation only: A1/A2 are executing one-at-a-time optimizer updates while A3/C1/C2 remain queued. Diagnostic evaluation has not completed; this is not a qualification result.",
+    "The prior 03:53 snapshot captured C2 at 1/100 before the same prior campaign later failed at update 20; the failure artifacts and terminal supervisor status are hash-pinned here."
+  ],
+  "prior_failed_campaign": {
+    "c2_failure_json": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/ppo-logprob-replay-failure-C2-update-00000020-row-0021.json",
+    "c2_failure_json_sha256": "4e97d0951bb9256c77e3621f47bbbbd4abbfbf7290fbde51c3543ae8b631322e",
+    "c2_failure_record": {
+      "absolute_logprob_delta": 0.0001220703125,
+      "actual_replay_logprob": -0.6930251121520996,
+      "expected_logprob": -0.6931471824645996,
+      "row_index": 21,
+      "track": "C2",
+      "update": 20
+    },
+    "c2_failure_tensor_sha256": "185f051b3308a6c9d393cc785d16a4caa83cc8f852c6d884a49660ea011d679d",
+    "checkout": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated",
+    "error": "RuntimeError: training workers failed: {'C2': 1}",
+    "heartbeat_utc": "2026-10-24T04:02:50.564193+00:00",
+    "lanes": {
+      "A1": {
+        "completed_updates": 100,
+        "status": "complete"
+      },
+      "A2": {
+        "completed_updates": 100,
+        "status": "complete"
+      },
+      "A3": {
+        "completed_updates": 100,
+        "status": "complete"
+      },
+      "C1": {
+        "completed_updates": 100,
+        "status": "complete"
+      },
+      "C2": {
+        "completed_updates": 20,
+        "status": "failed"
+      }
+    },
+    "status": "failed"
+  },
+  "schema_version": 1
+}
