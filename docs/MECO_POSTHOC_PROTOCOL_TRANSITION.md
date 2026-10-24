@@ -9,15 +9,20 @@ The audit checks that there is no pending scheduler assignment, scheduler
 cycles and lane outcomes reach one common update frontier, every task seed is
 in the supplied frozen protocol's exact train case, all five run manifests and
 checkpoints agree on full source identity/configuration/protocol/run IDs, and
-per-update history assignment IDs agree with the scheduler. Optional evaluation
-reports are checked against the full source identity and exact five checkpoint
-hashes. The report stores hashes of the scheduler, checkpoints, and evaluations.
+per-update history assignment IDs agree with the scheduler. The complete
+evaluation root is mandatory: every direct report JSON must have a completed
+matching status sidecar, and the root inventory is bound by hash. Reports with
+absent qualification provenance, unknown cases, train-split evaluations, or
+validation/test seed leakage fail closed. Existing automatic evaluations
+without a qualification protocol ID are rejected for transition; they cannot
+be omitted by passing a selected subset. The report stores hashes of the
+scheduler, checkpoints, evaluation reports, status sidecars, and root inventory.
 
 ```bash
 python3 scripts/meco_protocol_transition.py audit \
   --segment-dir /path/to/old-supervisor-output \
   --qualification-protocol /path/to/frozen-qualification-protocol.json \
-  --evaluation /path/to/matched-evaluation.json \
+  --evaluation-root /path/to/supervisor-evaluation-output \
   --output /path/to/segment-audit.json
 
 python3 scripts/meco_protocol_transition.py export \
@@ -31,8 +36,19 @@ The artifact and JSON sidecar bind all five checkpoint identities, model
 shapes/dtypes, source lineage, checked protocol identity, evaluation hashes,
 and the audit hash. The export is not a trainer resume checkpoint.
 
+The audit holds the supervisor output lock for its full read and requires a
+terminal supervisor and drained queue/evaluator status, no worker PIDs, and no
+live MECO process referencing the segment. The durable queue status anchors the
+latest report in the complete evaluation inventory. This prevents checkpoint
+snapshots from racing a restart or an evaluation from being silently omitted.
+
 For a later explicit initialization path, Python callers may use
-`consume_transition(path, seed=...)`. It loads only the five actors, creates
+`consume_transition(path, seed=..., target_qualification_protocol=...)`. The
+consumer computes current `source_identity()` itself and requires an exact
+match with the source that produced the actors. It verifies the target
+qualification protocol ID and file SHA against the audited transition and
+checks keys, shapes, and dtypes against each current model, including when
+models are supplied by the caller. It loads only the five actors, creates
 new value heads and empty Adam optimizers, seeds Python and PyTorch from the
 required fresh seed, issues a new run ID, and returns update/episode zero with
 empty history. No old critic, optimizer, random state, run ID, or counters are
