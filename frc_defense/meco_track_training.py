@@ -1799,7 +1799,7 @@ _EVALUATION_CASE_FIELDS = frozenset(("layout_id", "defender_family",
     "start_condition", "sensor_profile"))
 
 
-def _load_evaluation_protocol(value):
+def load_evaluation_protocol(value, *, scenario_id=None):
     if isinstance(value, dict):
         protocol = value
         raw = json.dumps(protocol, sort_keys=True, separators=(",", ":"),
@@ -1821,6 +1821,15 @@ def _load_evaluation_protocol(value):
     if protocol.get("protocol_version") not in ("meco-qualification-v1",
                                                   "meco-qualification-v2"):
         raise ValueError("unsupported evaluation protocol version")
+    if protocol.get("protocol_version") == "meco-qualification-v1" and not isinstance(value, dict):
+        from .meco_supervised import _load_protocol
+        checked, checked_id, checked_sha, checked_path = _load_protocol(Path(value))
+        return checked, checked_id, checked_sha, checked_path.name
+    if protocol.get("protocol_version") == "meco-qualification-v2":
+        if not isinstance(scenario_id, str) or not scenario_id:
+            raise ValueError("calibrated v2 evaluation protocol requires an explicit scenario")
+        from .meco_qualification import _validate_v2_protocol
+        _validate_v2_protocol(protocol, scenario_id)
     cases = protocol.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ValueError("evaluation protocol has no frozen cases")
@@ -1848,7 +1857,8 @@ def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
         raise ValueError("evaluation protocol binding is only valid for validation or test")
     if path is None:
         raise ValueError("held-out evaluation requires an explicit evaluation protocol")
-    protocol, protocol_id, protocol_sha256, protocol_file = _load_evaluation_protocol(path)
+    protocol, protocol_id, protocol_sha256, protocol_file = load_evaluation_protocol(
+        path, scenario_id=scenario_id)
     if not isinstance(qualification_case, dict) or set(qualification_case) != _EVALUATION_CASE_FIELDS:
         raise ValueError("held-out evaluation requires an exact four-field case stratum")
     if not categories or len(set(categories)) != len(categories):
@@ -1887,7 +1897,7 @@ def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
 def resolve_evaluation_case(path, *, scenario_id, categories, split,
                             qualification_case=None):
     """Resolve one shared stratum, refusing implicit selection when ambiguous."""
-    protocol, _, _, _ = _load_evaluation_protocol(path)
+    protocol, _, _, _ = load_evaluation_protocol(path, scenario_id=scenario_id)
     if qualification_case is not None:
         if not isinstance(qualification_case, dict) or set(qualification_case) != _EVALUATION_CASE_FIELDS:
             raise ValueError("evaluation case must contain exactly the four frozen stratum identifiers")

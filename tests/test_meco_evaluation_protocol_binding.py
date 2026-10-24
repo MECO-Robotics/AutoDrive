@@ -86,7 +86,7 @@ def test_seed_membership_and_split_leakage_are_rejected(tmp_path):
             scenario_id="pickup_simple", categories=CATEGORIES, split="validation",
             episode_seeds=[102], qualification_case=STRATUM)
     _write_protocol(path, leak=True)
-    with pytest.raises(ValueError, match="split seed pools overlap"):
+    with pytest.raises(ValueError, match="overlap"):
         meco_track_training.resolve_evaluation_protocol(path,
             scenario_id="pickup_simple", categories=CATEGORIES, split="validation",
             episode_seeds=[1, 102], qualification_case=STRATUM)
@@ -193,3 +193,81 @@ def test_supervisor_status_keeps_training_and_evaluation_protocols_separate(
         assert payload["evaluation_protocol_id"] == "heldout-evaluation"
         assert payload["evaluation_protocol_sha256"] == "evaluation-sha"
         assert payload["evaluation_split"] == "validation"
+
+
+def test_matrix_accepts_and_binds_canonical_v2_protocol(tmp_path, monkeypatch):
+    from frc_defense import curriculum_training, fuel_physics_hip
+    from frc_defense import meco_ablation_matrix as matrix
+    from frc_defense import meco_qualification as qualification
+    from frc_defense.meco_ablation_matrix import MatrixCondition
+    from frc_defense.meco_tracks import MECO_TRACKS
+
+    scenario = "pickup_simple"
+    categories = ("single", "cluster")
+    calibration = {"scenario_id": scenario}
+    calibration_ids = {scenario: "c" * 64}
+    calibration_pools = {scenario: {"master_seed": 77, "episodes": 100,
+        "repetitions": 2, "cases": [{"category": case.category,
+            "layout_id": case.layout_id, "defender_family": case.defender_family,
+            "start_condition": case.start_condition, "sensor_profile": case.sensor_profile,
+            "seeds": list(case.seeds)} for case in
+            qualification.protocol_cases(scenario, "calibration", episodes=100,
+                master_seed=77)]}}
+    monkeypatch.setattr(qualification, "_calibration_report_index",
+        lambda _reports, scenarios: (
+            {name: calibration_ids[name] for name in scenarios},
+            {name: calibration_pools[name] for name in scenarios}, "a" * 64,
+            {name: "b" * 64 for name in scenarios}))
+    def derive_margins(_reports, target, _configured):
+        return ({category: .1 for category in categories}, {
+            "schema_version": 1,
+            "method": "declared_operational_threshold_plus_multiplier_times_max_stratum_standard_error",
+            "calibration_id": calibration_ids[target],
+            "operational_gain_threshold": {category: .1 for category in categories},
+            "uncertainty_by_category": {category: {
+                "maximum_stratum_standard_error": 0.0} for category in categories},
+            "uncertainty_multiplier": 0.0})
+    monkeypatch.setattr(qualification, "derive_useful_gain_margins", derive_margins)
+    protocol = qualification.protocol_document(scenario, episodes=100,
+        master_seed=77, calibration_report=calibration,
+        safety_noninferiority_margins={name: .1
+            for name in qualification.SAFETY_METRIC_NAMES})
+    protocol_path = tmp_path / "canonical-v2.json"
+    protocol_path.write_text(json.dumps(protocol, indent=2))
+    case_row = next(row for row in protocol["cases"]
+        if row["scenario_id"] == scenario and row["category"] == "single"
+        and row["split"] == "validation")
+    case = {key: case_row[key] for key in STRATUM}
+    seeds = tuple(case_row["seeds"])
+    cluster_case = next(row for row in protocol["cases"]
+        if row["scenario_id"] == scenario and row["category"] == "cluster"
+        and row["split"] == "validation" and all(row[key] == case[key] for key in STRATUM))
+    assert tuple(cluster_case["seeds"]) == seeds
+    condition = MatrixCondition("architecture_matched_cv_k16", "cv", None, 16,
+        qualification_case=case)
+    monkeypatch.setattr(fuel_physics_hip, "prepare_native_fuel_extension", lambda _device: None)
+    monkeypatch.setattr(matrix, "normalized_device_info", lambda _device: {
+        "device": "cuda:0", "backend": "hip", "device_name": "test"})
+    monkeypatch.setattr(matrix, "_checkpoint_hashes", lambda _checkpoints: {
+        track: f"{index + 1:064x}" for index, track in enumerate(MECO_TRACKS)})
+    monkeypatch.setattr(matrix, "_checkpoint_configuration_provenance", lambda _checkpoints: (
+        {track: "config" for track in MECO_TRACKS},
+        {track: "training-protocol" for track in MECO_TRACKS}, {"shared": True}))
+    monkeypatch.setattr(curriculum_training, "source_identity", lambda: {"source": "test"})
+    monkeypatch.setattr(matrix, "default_conditions", lambda *_args, **_kwargs: [condition])
+    observed = {}
+
+    def stop_at_evaluator(*_args, **kwargs):
+        observed.update(kwargs)
+        raise RuntimeError("evaluator handoff reached")
+
+    monkeypatch.setattr(meco_track_training, "evaluate_meco", stop_at_evaluator)
+    with pytest.raises(RuntimeError, match="evaluator handoff reached"):
+        matrix.run_matrix(checkpoints={track: f"{track}.pt" for track in MECO_TRACKS},
+            scenario_id=scenario, categories=categories, seeds=seeds,
+            device="cuda:0", output_dir=tmp_path / "matrix",
+            qualification_protocol=protocol_path, qualification_case=case)
+    assert observed["split"] == "validation"
+    assert observed["evaluation_protocol"] == protocol_path
+    assert observed["qualification_protocol_id"] == protocol["protocol_id"]
+    assert observed["evaluation_case"] == case

@@ -402,7 +402,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                qualification_case: dict | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
-    from .meco_track_training import evaluate_meco
+    from .meco_track_training import evaluate_meco, load_evaluation_protocol
 
     if set(checkpoints) != set(MECO_TRACKS):
         raise ValueError(f"checkpoint keys must be exactly {MECO_TRACKS}")
@@ -422,9 +422,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         evaluation_design = "diagnostic_only_unbound_seeds"
         evaluation_split = "diagnostic"
     else:
-        from .meco_supervised import _load_protocol
-        protocol, protocol_id, protocol_sha256, protocol_path = _load_protocol(
-            Path(qualification_protocol))
+        protocol, protocol_id, protocol_sha256, protocol_file = load_evaluation_protocol(
+            Path(qualification_protocol), scenario_id=scenario_id)
         seed_split_assignments = _held_out_seed_assignments(
             protocol, scenario_id, categories, seeds)
         splits = {split for assignments in seed_split_assignments.values()
@@ -437,7 +436,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         evaluation_design = "frozen_protocol_held_out"
         qualification_provenance = {"protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
-            "protocol_file": protocol_path.name}
+            "protocol_file": protocol_file}
     output_root = Path(output_dir)
     execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)

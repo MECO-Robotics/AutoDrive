@@ -452,7 +452,10 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         separators=(",", ":")).encode()).hexdigest()
     if protocol.get("calibration_id") != combined_id:
         raise ValueError("calibration bundle identity mismatch")
-    calibration_seeds = set()
+    # Categories sharing a qualification stratum intentionally share seeds so
+    # their outcomes can be paired. Reuse across distinct strata/scenarios is
+    # still forbidden.
+    calibration_seed_strata = {}
     for name in scenarios:
         pool = pools[name]
         if (not isinstance(pool, dict) or type(pool.get("master_seed")) is not int
@@ -469,9 +472,12 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             raise ValueError(f"calibration seed pool case table is invalid for {name}")
         for case in expected_pool:
             for seed in case["seeds"]:
-                if seed % 4 != 3 or seed in calibration_seeds:
+                stratum = (name, case["layout_id"], case["defender_family"],
+                    case["start_condition"], case["sensor_profile"])
+                if seed % 4 != 3 or (seed in calibration_seed_strata
+                        and calibration_seed_strata[seed] != stratum):
                     raise ValueError("calibration seed pools overlap or use a non-calibration partition")
-                calibration_seeds.add(seed)
+                calibration_seed_strata[seed] = stratum
     categories = set(SCENARIOS[target].required_categories)
     gain_margins = protocol.get("minimum_useful_gain")
     safety_margins = protocol.get("safety_noninferiority_margins")
@@ -515,7 +521,7 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
     if protocol.get("cases") != expected_cases:
         raise ValueError("calibrated protocol case table or exact seed lists are invalid")
     protocol_seeds = {seed for row in expected_cases for seed in row["seeds"]}
-    if calibration_seeds & protocol_seeds:
+    if set(calibration_seed_strata) & protocol_seeds:
         raise ValueError("calibration seed pools overlap train/validation/test seeds")
 
 
