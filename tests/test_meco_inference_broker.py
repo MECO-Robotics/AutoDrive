@@ -79,7 +79,7 @@ def test_newest_pending_request_replaces_older_queued_request():
         published = next(row for row in broker.counters()["recent_outcomes"]
                          if row["request_sequence"] == 3)
         assert published["status"] == "consumed"
-        assert published["events"] == ["queued", "started", "published", "consumed"]
+        assert published["events"] == ["queued", "started", "completed", "published", "consumed"]
         assert published["durations_s"]["inference"] >= 0
     finally:
         release.set()
@@ -130,6 +130,9 @@ def test_poll_before_completion_consumes_handle_and_prevents_late_reuse():
         handle = broker.submit(request, {"x": torch.tensor([1.0])})
         assert handle is not None and started.wait(1)
         assert broker.poll(request, handle) is None
+        snapshot = broker.counters()
+        snapshot["recent_outcomes"][-1]["events"].append("caller_mutation")
+        assert "caller_mutation" not in broker.counters()["recent_outcomes"][-1]["events"]
         release.set()
         broker.pending.join()
         assert handle["response"] is None
@@ -137,7 +140,12 @@ def test_poll_before_completion_consumes_handle_and_prevents_late_reuse():
         assert broker.counters()["late_responses"] == 1
         outcome = broker.counters()["recent_outcomes"][-1]
         assert outcome["status"] == "consumed_before_completion"
-        assert outcome["events"] == ["queued", "started", "consumed"]
+        assert outcome["events"] == ["queued", "started", "consumed", "completed"]
+        assert outcome["durations_s"]["inference"] is not None
+        old_outcome = next(row for row in snapshot["recent_outcomes"]
+                           if row["request_sequence"] == request.request_sequence)
+        assert old_outcome["status"] == "consumed_before_completion"
+        assert "completed" not in old_outcome["events"]
     finally:
         release.set()
         broker.close()
@@ -172,7 +180,10 @@ def test_expired_none_and_raised_inference_faults_are_isolated():
         broker.pending.join()
         assert broker.poll(missing, missing_handle) is None
         assert broker.counters()["inference_faults"] == 1
-        assert broker.counters()["recent_outcomes"][-1]["status"] == "model_none"
+        missing_outcome = broker.counters()["recent_outcomes"][-1]
+        assert missing_outcome["status"] == "model_none"
+        assert missing_outcome["durations_s"]["inference"] is not None
+        assert "completed" in missing_outcome["events"]
 
         raised = adapter.request()
         raised_handle = broker.submit(raised, {"x": torch.tensor([0.0])})
@@ -180,7 +191,10 @@ def test_expired_none_and_raised_inference_faults_are_isolated():
         broker.pending.join()
         assert broker.poll(raised, raised_handle) is None
         assert broker.counters()["inference_faults"] == 2
-        assert broker.counters()["recent_outcomes"][-1]["status"] == "model_exception"
+        raised_outcome = broker.counters()["recent_outcomes"][-1]
+        assert raised_outcome["status"] == "model_exception"
+        assert raised_outcome["durations_s"]["inference"] is not None
+        assert "completed" in raised_outcome["events"]
 
         subsequent = adapter.request()
         subsequent_handle = broker.submit(subsequent, {"x": torch.tensor([1.0])})
@@ -205,14 +219,57 @@ def test_close_is_idempotent_joins_worker_and_rejects_new_requests():
     request = adapter.request()
     handle = broker.submit(request, {"x": torch.tensor([1.0])})
     assert handle is not None and started.wait(1)
+    pending_request = adapter.request()
+    pending_handle = broker.submit(pending_request, {"x": torch.tensor([2.0])})
+    assert pending_handle is not None
     closer = threading.Thread(target=lambda: (closing.set(), broker.close()))
     closer.start()
     assert closing.wait(1)
+    deadline = time.monotonic() + 1
+    while not broker.counters()["closed"] and time.monotonic() < deadline:
+        time.sleep(.001)
+    assert broker.counters()["closed"]
+    # The active request is not terminalized while inference is still running.
+    assert all(row["request_sequence"] != request.request_sequence
+               for row in broker.counters()["recent_outcomes"])
+    pending_outcome = next(row for row in broker.counters()["recent_outcomes"]
+        if row["request_sequence"] == pending_request.request_sequence)
+    assert pending_outcome["status"] == "close"
+    assert pending_outcome["durations_s"]["inference"] is None
     release.set()
     closer.join(timeout=2)
     assert not closer.is_alive()
     assert not broker.thread.is_alive()
     broker.close()
     assert broker.counters()["closed"]
+    active_outcome = next(row for row in broker.counters()["recent_outcomes"]
+        if row["request_sequence"] == request.request_sequence)
+    assert active_outcome["status"] == "close"
+    assert active_outcome["durations_s"]["inference"] is not None
     rejected = adapter.request()
     assert broker.submit(rejected, {"x": torch.tensor([2.0])}) is None
+
+
+def test_published_handle_becomes_superseded_when_newer_request_is_submitted():
+    adapter = FakeAdapter(lambda req, _inputs, now: response_for(req))
+    broker = _AsyncInferenceBroker(adapter)
+    try:
+        older = adapter.request()
+        older_handle = broker.submit(older, {"x": torch.tensor([1.0])})
+        broker.pending.join()
+        assert older_handle["response"] is not None
+        newer = adapter.request()
+        newer_handle = broker.submit(newer, {"x": torch.tensor([2.0])})
+        assert newer_handle is not None
+        assert broker.poll(older, older_handle) is None
+        late_after_first_poll = broker.counters()["late_responses"]
+        assert broker.poll(older, older_handle) is None
+        assert broker.counters()["late_responses"] == late_after_first_poll == 1
+        older_outcomes = [row for row in broker.counters()["recent_outcomes"]
+                          if row["request_sequence"] == older.request_sequence]
+        assert len(older_outcomes) == 1
+        assert older_outcomes[0]["status"] == "superseded"
+        broker.pending.join()
+        assert broker.poll(newer, newer_handle) is not None
+    finally:
+        broker.close()

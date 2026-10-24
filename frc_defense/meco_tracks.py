@@ -400,14 +400,16 @@ class _AsyncInferenceBroker:
 
     def _finish_locked(self, item, status, *, now=None):
         if item.get("terminal"):
-            if item.get("status") == "published" and status == "consumed":
+            if item.get("status") == "published" and status in (
+                    "consumed", "superseded", "identity_mismatch", "expired_completion"):
                 terminal_time = time.monotonic() if now is None else now
-                item.setdefault("times", {})["consumed"] = terminal_time
-                item.setdefault("events", []).append("consumed")
-                item["status"] = "consumed"
+                item.setdefault("times", {})[status] = terminal_time
+                if status == "consumed":
+                    item.setdefault("events", []).append("consumed")
+                item["status"] = status
                 outcome = item.get("outcome")
                 if outcome is not None:
-                    outcome["status"] = "consumed"
+                    outcome["status"] = status
                     outcome["times_monotonic"] = dict(item["times"])
                     outcome["events"] = list(item["events"])
                     outcome["durations_s"]["request_age_at_terminal"] = max(0.,
@@ -424,13 +426,25 @@ class _AsyncInferenceBroker:
             "times_monotonic": times,
             "durations_s": ({"queue_wait": max(0., times["started"] - queued)
                 if queued is not None and times.get("started") is not None else None,
-                "inference": max(0., times["published"] - times["started"])
-                if times.get("published") is not None and times.get("started") is not None else None,
+                "inference": max(0., times["completed"] - times["started"])
+                if times.get("completed") is not None and times.get("started") is not None else None,
                 "request_age_at_terminal": max(0., times[status] - getattr(
                     item["request"], "capture_monotonic", times[status]))}),
             "events": list(item.get("events", ()))}
         item["outcome"] = outcome
         self.recent_outcomes.append(outcome)
+
+    def _record_completion_locked(self, item, completed_at):
+        item.setdefault("times", {})["completed"] = completed_at
+        if "completed" not in item.setdefault("events", []):
+            item["events"].append("completed")
+        outcome = item.get("outcome")
+        if outcome is not None:
+            outcome["times_monotonic"] = dict(item["times"])
+            outcome["events"] = list(item["events"])
+            started = item["times"].get("started")
+            outcome["durations_s"]["inference"] = (max(0., completed_at - started)
+                if started is not None else None)
 
     def _reject_locked(self, request, status):
         item = {"request": request, "times": {}, "events": [], "terminal": False}
@@ -496,8 +510,6 @@ class _AsyncInferenceBroker:
         with self.lock:
             if not self.closed:
                 self.closed = True
-                if self.active_item is not None:
-                    self._finish_locked(self.active_item, "close")
                 while True:
                     try:
                         item = self.pending.get_nowait()
@@ -522,9 +534,18 @@ class _AsyncInferenceBroker:
                 return None
             if item["consumed"] or item["discarded"]:
                 return None
-            if (request.request_sequence != self.latest_submitted_sequence
-                    or request.generation_id != self.adapter._generation_id):
+            if request.generation_id != self.adapter._generation_id:
+                item["discarded"] = True
+                item["consumed"] = True
                 self._mark_late_locked(item)
+                self._finish_locked(item, "identity_mismatch")
+                return None
+            if request.request_sequence != self.latest_submitted_sequence:
+                item["discarded"] = True
+                item["consumed"] = True
+                self._mark_late_locked(item)
+                self._finish_locked(item, "superseded" if
+                    request.request_sequence < self.latest_submitted_sequence else "identity_mismatch")
                 return None
             if not item["done"]:
                 # This poll is the action boundary. Closing the handle prevents
@@ -574,6 +595,9 @@ class _AsyncInferenceBroker:
                         self._finish_locked(item, "expiry_before_start" if time.monotonic() > request.expires_monotonic else "identity_mismatch")
                     continue
                 with self.lock:
+                    if self.closed:
+                        self._finish_locked(item, "close")
+                        continue
                     self.active_item = item
                     item["times"]["started"] = time.monotonic()
                     item["events"].append("started")
@@ -582,8 +606,11 @@ class _AsyncInferenceBroker:
                         self.adapter._last_inference_exception_type = None
                     response = self.adapter._infer_sync(request, item["inputs"],
                                                         now=time.monotonic())
+                completed_at = (getattr(response, "completed_monotonic", None)
+                    if response is not None else None) or time.monotonic()
                 late_response = False
                 with self.lock:
+                    self._record_completion_locked(item, completed_at)
                     if (self.closed or response is None or time.monotonic() > request.expires_monotonic
                             or request.request_sequence != self.latest_submitted_sequence
                             or request.request_sequence <= self.latest_published_sequence
@@ -618,9 +645,10 @@ class _AsyncInferenceBroker:
                 # Adapter faults are isolated to this request; keep the broker
                 # worker alive for subsequent snapshots.
                 with self.lock:
+                    self._record_completion_locked(item, time.monotonic())
                     self.faults += 1
                     item["response"] = None
-                    self._finish_locked(item, "model_exception")
+                    self._finish_locked(item, "close" if self.closed else "model_exception")
             finally:
                 with self.lock:
                     item["done"] = True
