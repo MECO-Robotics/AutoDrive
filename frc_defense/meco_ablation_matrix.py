@@ -812,7 +812,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             phase4_opponent_schedule, scenario_id=scenario_id,
             categories=categories, qualification_case=qualification_case,
             seeds=seeds, split=evaluation_split,
-            factor_id=phase4_opponent_schedule.get("factor_id"))
+            factor_id=phase4_opponent_schedule.get("factor_id"),
+            protocol_id=(qualification_provenance["protocol_id"]
+                         if qualification_provenance is not None else None))
     start_profile_assignment = None
     if start_profile_registry_id is not None:
         if qualification_provenance is None:

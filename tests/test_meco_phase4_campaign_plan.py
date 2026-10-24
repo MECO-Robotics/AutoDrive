@@ -160,14 +160,48 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
     assert "final_test" not in set(_walk_keys(plan))
 
 
-def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_path):
+@pytest.mark.parametrize("trench_interception", [False, True])
+def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
+        tmp_path, trench_interception):
     plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
     requirement = next(r for r in plan["requirements"]
                        if r["requirement_id"] == "reactive_defenders_and_opponent_pools")
     cell = next(cell for cell in requirement["cells"]
         if cell["design_axes"].get("policy_pool") == "reactive_defender_a"
         and cell["case_axes"]["scenario_id"] == "offense_vs_scripted_pressure"
-        and "level_4" in cell["case_axes"]["category"])
+        and (cell["case_axes"]["category"] == "active/trench/level_4_reactive"
+             if trench_interception else
+             "level_4" in cell["case_axes"]["category"]
+             and "/trench/" not in cell["case_axes"]["category"]))
+    selected_policy = "reactive_defender_a"
+    selected_factor = cell["factor_id"]
+    if trench_interception:
+        from frc_defense.meco_phase4_opponents import (
+            POLICY_FACTOR_IDS, policy_pool_identity)
+        selected_policy = "trench_interceptor"
+        selected_factor = "opponent.trench_interception"
+        cell["factor_id"] = selected_factor
+        assignment = cell["opponent_schedule_assignment"]
+        assignment["policy_id"] = selected_policy
+        assignment["policy_family"] = POLICY_FACTOR_IDS[selected_policy]
+        assignment["policy_config_sha256"] = policy_pool_identity()["config_sha256"]
+        protocol_payload = json.loads(PROTOCOL.read_text())
+        protocol_case = next(row for row in protocol_payload["cases"]
+            if all(row.get(key) == value for key, value in cell["case_axes"].items()))
+        from frc_defense.meco_phase4_opponents import compile_opponent_policy_schedule
+        bound_schedule = compile_opponent_policy_schedule(
+            policy_id=selected_policy,
+            scenario_id=cell["case_axes"]["scenario_id"],
+            categories=(cell["case_axes"]["category"],),
+            qualification_case={key: cell["case_axes"][key] for key in (
+                "layout_id", "defender_family", "start_condition", "sensor_profile")},
+            seeds=protocol_case["seeds"], split="validation",
+            factor_id=selected_factor,
+            protocol_id=protocol_payload["protocol_id"])
+        assignment["factor_treatment_seeded_assignment_sha256"] = (
+            bound_schedule["per_episode_assignment_sha256"])
+        plan["plan_id"] = campaign_runner._sha(
+            {key: value for key, value in plan.items() if key != "plan_id"})
     checkpoints = {}
     for track in MECO_TRACKS:
         path = tmp_path / f"{track}.pt"
@@ -183,10 +217,13 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_
         if "--phase4-opponent-schedule-json" in argv:
             schedule_path = Path(argv[argv.index("--phase4-opponent-schedule-json") + 1])
             schedule = json.loads(schedule_path.read_text())
-            assert schedule["policy_id"] == "reactive_defender_a"
+            assert schedule["policy_id"] == selected_policy
             assert schedule["scenario_id"] == cell["case_axes"]["scenario_id"]
             assert schedule["categories"] == [cell["case_axes"]["category"]]
             assert schedule["split"] == "validation"
+            if trench_interception:
+                from frc_defense.meco_phase4_opponents import TRENCH_INTERCEPTION_CATEGORIES
+                assert schedule["category_domain"] == list(TRENCH_INTERCEPTION_CATEGORIES)
             assert schedule["qualification_eligible"] is False
             assert schedule["configured_pressure_slots"] == {
                 cell["case_axes"]["category"]: [0]}
@@ -203,7 +240,7 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_
                 for seed in manifest["seed_list"]:
                     rows.append({"policy": policy, "category": category, "seed": seed,
                         "phase4_opponent_policy": (None if arm == "no_factor" else {
-                            "policy_id": "reactive_defender_a",
+                            "policy_id": selected_policy,
                             "factor_id": schedule["factor_id"],
                             "policy_family": schedule["policy_family"],
                             "schedule_sha256": schedule["schedule_sha256"],
@@ -238,6 +275,19 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_
         "paired_outcome_by_family": None}
     assert result["paired_coverage"]["exact_policy_category_seed_pair_coverage"] is True
     assert result["paired_coverage"]["qualification_eligible"] is False
+    if trench_interception:
+        schedule = json.loads((tmp_path / "dispatch" / "opponent-schedule.json").read_text())
+        from frc_defense.meco_track_training import evaluate_meco
+        protocol_payload = json.loads(PROTOCOL.read_text())
+        case = {key: cell["case_axes"][key] for key in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}
+        with pytest.raises(RuntimeError, match="explicit available CUDA/HIP device"):
+            evaluate_meco({}, scenario_id=cell["case_axes"]["scenario_id"],
+                categories=(cell["case_axes"]["category"],), episodes=len(protocol_case["seeds"]),
+                master_seed=protocol_case["seeds"][0], device="cpu",
+                episode_seeds=tuple(protocol_case["seeds"]), split="validation",
+                evaluation_protocol=PROTOCOL, evaluation_case=case,
+                phase4_opponent_schedule=schedule)
 
 
 def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_path, monkeypatch):
