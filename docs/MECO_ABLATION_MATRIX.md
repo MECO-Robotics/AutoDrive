@@ -151,3 +151,51 @@ noisy or shifted layouts cover these distinct conditions.
   Phase 4.
 - Use the project qualification protocol for promotion; these diagnostic
   records alone do not establish a win or simulator qualification.
+
+## Post-hoc paired confidence intervals
+
+Use `scripts/summarize_meco_ablation_matrix.py` to compute diagnostic paired
+95% cluster-bootstrap intervals from one or more already completed matrix
+reports. Pass each matrix separately with repeatable `--input-matrix` options:
+
+```bash
+python3 scripts/summarize_meco_ablation_matrix.py \
+  --input-matrix results/validation_case_v1.matrix.json \
+  --input-matrix results/validation_case_v2.matrix.json \
+  --bootstrap-seed 20261024 --replicates 10000 \
+  --output results/validation_paired_ci.json
+```
+
+The analyzer accepts matrix schema 4 and verifies its content digest,
+evaluation report mapping, checkpoint/source/configuration/training protocol
+provenance, condition and policy mapping, held-out split, seed coverage, and
+each row's frozen qualification stratum. For held-out matrices it checks the
+evaluator's protocol-v2 ID and raw-file SHA-256, exact split, scenario,
+categories, case stratum, case IDs, and exact episode seed list against the
+matrix binding. Diagnostic reports must carry no held-out binding. It records
+raw SHA-256 values for every input matrix and referenced evaluation report.
+Missing reports or rows, duplicate samples, and bundle or protocol identity
+mismatches are rejected. Multiple matrices may be pooled only when
+scenario, frozen qualification protocol ID and provenance, checkpoint bundle,
+source, training configuration/protocol, device, evaluation design, and split
+match. Qualification cases may differ so matched held-out strata can form
+distinct bootstrap clusters. Duplicate category/seed/full-stratum samples are
+rejected.
+
+Ordinary contrasts use candidate-minus-reference paired metric differences.
+The matched prediction contrast uses `cv_metrics - current_metrics`. Candidate
+recall is summarized separately per track, category, and K against its declared
+bounded reference pool; no recall difference or simulator-optimality claim is
+inferred. The bootstrap resamples `(layout_id, defender_family)` clusters,
+then paired episode rows within each selected cluster, using the qualification
+analyzer's deterministic PRNG and percentile interval method. The seed and
+replicate count are recorded in the output.
+
+These intervals are diagnostic summaries. They do not establish
+qualification, promotion, causal attribution, or a winning controller. The
+qualification gate and its acceptance rules remain authoritative.
+
+For Phase 4, every registered factor must have a paired treatment/no-factor row
+for each expected policy and requested category/seed. The analyzer verifies
+the factor identity and digest against both the condition manifest and
+evaluation report. These intervals remain diagnostic for the evaluated strata.
