@@ -73,9 +73,42 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
             # all other actions remain those selected by the active policy.
             actions = replace_contact_opponent_action(actions,
                 contact_exposure_actions(self))
+        teammate_assignment = getattr(self, 'phase4_teammate_behavior_episode', None)
+        teammate_details = None
+        policy_action_override = None
+        if teammate_assignment is not None:
+            from .meco_phase4_context import teammate_behavior_action_details
+            teammate_details = teammate_behavior_action_details(self, teammate_assignment)
+            override_mask = torch.zeros((self.n, 6), device=self.device,
+                                        dtype=torch.bool)
+            for slot in teammate_assignment:
+                override_mask[:, slot] = active_requested
+            policy_action_override = (teammate_details['actions'], override_mask)
         route_seen_before = (self.curriculum_metrics.route_seen.clone()
             if geometry is not None and hasattr(self, 'curriculum_metrics') else None)
-        observation, reward, done, truncated, info = super().step(actions, active_requested, **kwargs)
+        observation, reward, done, truncated, info = super().step(
+            actions, active_requested, policy_action_override=policy_action_override,
+            **kwargs)
+        if teammate_details is not None:
+            runtime = self.phase4_teammate_behavior_runtime
+            actual = self.last_actions.detach().cpu()
+            requested = teammate_details['actions'].detach().cpu()
+            desired = teammate_details['requested_actions'].detach().cpu()
+            legal = teammate_details['requested_legal'].detach().cpu()
+            helper_fallback = teammate_details['helper_fallback'].detach().cpu()
+            rows = []
+            for slot in teammate_assignment:
+                rows.append({"slot": slot,
+                    "requested_behavior_action": int(desired[0, slot]),
+                    "helper_selected_action": int(requested[0, slot]),
+                    "actually_applied_action": int(actual[0, slot]),
+                    "requested_legal": bool(legal[0, slot]),
+                    "helper_fallback": bool(helper_fallback[0, slot]),
+                    "environment_remask_fallback": bool(
+                        actual[0, slot] != requested[0, slot]),
+                    "active": bool(active_requested[0])})
+            runtime['events'].append({"tick": len(runtime['events']),
+                                     "slots": rows})
         if route_seen_before is not None:
             self.contact_geometry_runtime['approach_action_ticks'] += active_requested.long()
             crossed = self.curriculum_metrics.route_seen & ~route_seen_before
@@ -224,7 +257,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         contact_geometry_id=None, contact_geometry_config=None,
                         phase4_opponent_policy_id=None,
                         phase4_start_profile_assignment=None,
-                        phase4_focal_pose_assignment=None):
+                        phase4_focal_pose_assignment=None,
+                        phase4_teammate_behavior_assignment=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -330,6 +364,27 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                 int(seed) not in focal_pose_assignment['seeds']):
             raise ValueError('focal pose assignment does not bind this validation episode')
     env.phase4_focal_pose_assignment = focal_pose_assignment
+    env.phase4_teammate_behavior_episode = None
+    env.phase4_teammate_behavior_runtime = None
+    if phase4_teammate_behavior_assignment is not None:
+        from .meco_phase4_context import validate_phase4_teammate_behavior_assignment
+        assignment = validate_phase4_teammate_behavior_assignment(
+            phase4_teammate_behavior_assignment)
+        if (scenario_id != 'full_match_offense' or assignment['split'] != 'validation'
+                or assignment['scenario_id'] != scenario_id or int(seed) not in assignment['seeds']
+                or category not in assignment['categories']):
+            raise ValueError('teammate behavior override requires its exact full-match validation assignment')
+        env.phase4_teammate_behavior_assignment = assignment
+        if assignment['arm'] == 'behavior_pool':
+            episode_index = assignment['seeds'].index(int(seed))
+            env.phase4_teammate_behavior_episode = assignment['behavior_schedule'][episode_index]['assignments']
+        env.phase4_teammate_behavior_runtime = {"schema": "phase4-teammate-behavior-runtime-v1",
+            "arm": assignment['arm'],
+            "assignments": ({str(slot): behavior for slot, behavior in
+                            env.phase4_teammate_behavior_episode.items()}
+                            if env.phase4_teammate_behavior_episode is not None else None),
+            "assignment_applied": env.phase4_teammate_behavior_episode is not None,
+            "events": [], "qualification_eligible": False}
     env.phase4_start_profile_identity = (None if start_profile_assignment is None else
         phase4_context_identity('legal_team_pose_sets',
             start_profile_assignment['registry_profile_id']))

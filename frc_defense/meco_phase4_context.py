@@ -1,16 +1,15 @@
 """Phase 4 runtime context fixtures, bound to the design registry axes.
 
-The helpers are opt-in and do not alter curriculum/protocol wiring. They build
-checked full-team reset poses, sensed behavior actions, policy-consistent pose
-perturbations, and physical contact/bump approaches. Simulator truth is only
-changed by the explicit start-profile reset helper; pose-error factors edit an
-observation clone and its dependent features.
+The helpers are opt-in and build checked reset poses, paired teammate action
+assignments, policy-consistent pose perturbations, and physical contact/bump
+approaches. Simulator truth is only changed by explicit reset helpers.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 
 import torch
@@ -638,6 +637,11 @@ class TeammateBehaviorPool:
 
 def teammate_behavior_actions(env, assignments: dict[int, str]) -> torch.Tensor:
     """Build legal macro actions from sensed candidates and current masks."""
+    return teammate_behavior_action_details(env, assignments)["actions"]
+
+
+def teammate_behavior_action_details(env, assignments: dict[int, str]) -> dict:
+    """Return requested legal actions and explicit helper fallback diagnostics."""
     if not isinstance(assignments, dict):
         raise TypeError("assignments must map robot slot to behavior name")
     if any(type(robot) is not int or robot not in range(6) for robot in assignments):
@@ -645,23 +649,141 @@ def teammate_behavior_actions(env, assignments: dict[int, str]) -> torch.Tensor:
     if any(name not in TEAMMATE_BEHAVIORS for name in assignments.values()):
         raise ValueError("unknown teammate behavior")
     indices, valid, _ = env._candidates()
-    legal, _ = env._action_mask(indices, valid)
+    action_legal, _ = env._action_mask(indices, valid)
     actions = torch.full((env.n, 6), 7, dtype=torch.long, device=env.device)
-    requested = {"score": 4, "defend": 5, "ferry": 6, "hold_position": 7}
+    requested_actions = {"score": 4, "defend": 5, "ferry": 6, "hold_position": 7}
+    desired = torch.full((env.n, 6), 7, dtype=torch.long, device=env.device)
+    requested_legal = torch.zeros((env.n, 6), dtype=torch.bool, device=env.device)
+    helper_fallback = torch.zeros((env.n, 6), dtype=torch.bool, device=env.device)
     for robot, behavior in assignments.items():
         if behavior == "collect":
-            candidates = legal[:, robot, :4] & valid[:, robot]
+            candidates = action_legal[:, robot, :4] & valid[:, robot]
             chosen = candidates.to(torch.int64).argmax(-1)
-            chosen = torch.where(candidates.any(-1), chosen, torch.full_like(chosen, 7))
+            has_candidate = candidates.any(-1)
+            chosen = torch.where(has_candidate, chosen, torch.full_like(chosen, 7))
+            desired[:, robot] = torch.where(has_candidate, chosen,
+                                             torch.full_like(chosen, 0))
         else:
-            chosen = torch.full((env.n,), requested[behavior],
+            chosen = torch.full((env.n,), requested_actions[behavior],
                                 dtype=torch.long, device=env.device)
-        in_range = chosen < legal.shape[-1]
-        allowed = in_range & legal[:, robot].gather(1, chosen.clamp_max(7)[:, None]).squeeze(1)
-        fallback = torch.where(legal[:, robot, 7], torch.full_like(chosen, 7),
-                               legal[:, robot].to(torch.int64).argmax(-1))
+            desired[:, robot] = chosen
+        in_range = chosen < action_legal.shape[-1]
+        allowed = in_range & action_legal[:, robot].gather(1, chosen.clamp_max(7)[:, None]).squeeze(1)
+        fallback = torch.where(action_legal[:, robot, 7], torch.full_like(chosen, 7),
+                               action_legal[:, robot].to(torch.int64).argmax(-1))
         actions[:, robot] = torch.where(allowed, chosen, fallback)
-    return actions
+        intended = desired[:, robot]
+        requested_in_range = intended < action_legal.shape[-1]
+        requested_legal[:, robot] = (requested_in_range &
+            action_legal[:, robot].gather(1, intended.clamp(0, 7)[:, None]).squeeze(1))
+        helper_fallback[:, robot] = actions[:, robot] != intended
+    return {"actions": actions, "requested_actions": desired,
+            "requested_legal": requested_legal, "helper_fallback": helper_fallback}
+
+
+def phase4_teammate_behavior_assignment(*, arm: str, scenario_id: str,
+        split: str, protocol_id: str, protocol_sha256: str,
+        qualification_case: dict, categories, seeds, pool_seed: int = 0) -> dict:
+    """Build a paired, exact validation assignment for full-match slots 4/5."""
+    import hashlib, json
+    if arm not in ("no_factor", "behavior_pool"):
+        raise ValueError("teammate behavior arm must be no_factor or behavior_pool")
+    if scenario_id != "full_match_offense" or split != "validation":
+        raise ValueError("teammate behavior assignments are validation-only full-match lanes")
+    if (not isinstance(protocol_id, str) or not protocol_id or
+            not isinstance(protocol_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", protocol_sha256) is None):
+        raise ValueError("teammate behavior assignment requires exact protocol identity")
+    case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
+    if (not isinstance(qualification_case, dict) or
+            set(qualification_case) != case_fields or
+            any(not isinstance(value, str) or not value
+                for value in qualification_case.values())):
+        raise ValueError("teammate behavior assignment requires the exact frozen case strata")
+    categories = tuple(categories); seeds = tuple(seeds)
+    if (not categories or len(set(categories)) != len(categories) or
+            any(not isinstance(category, str) or not category for category in categories)):
+        raise ValueError("teammate behavior categories must be nonempty and unique")
+    if (not seeds or len(set(seeds)) != len(seeds) or
+            any(type(seed) is not int or not 0 <= seed < 2**63 for seed in seeds)):
+        raise ValueError("teammate behavior seeds must be exact unique non-negative integers")
+    if type(pool_seed) is not int or pool_seed < 0:
+        raise ValueError("teammate behavior pool seed must be non-negative")
+    pool = TeammateBehaviorPool(pool_seed, (4, 5))
+    schedule = [{"seed": seed, "assignments": pool.for_episode(index)}
+                for index, seed in enumerate(seeds)]
+    identity = {"scenario_id": scenario_id, "split": split,
+        "protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+        "qualification_case": qualification_case, "categories": list(categories),
+        "seeds": list(seeds), "slots": [4, 5], "pool_seed": pool_seed,
+        "pool_seed_schedule": [entry["assignments"] for entry in schedule]}
+    pair_sha = hashlib.sha256(json.dumps(identity, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    return {"schema": "phase4-teammate-behavior-assignment-v1",
+        **identity, "arm": arm, "pair_sha256": pair_sha,
+        "behavior_schedule": schedule if arm == "behavior_pool" else None,
+        "assignment_runtime_event": "phase4_teammate_behavior",
+        "assignment_path_supported": True,
+        "outcome_by_teammate_behavior": None, "teammate_collision_rate": None,
+        "score_contribution": None, "qualification_eligible": False}
+
+
+def validate_phase4_teammate_behavior_assignment(assignment: dict) -> dict:
+    if not isinstance(assignment, dict):
+        raise ValueError("teammate behavior assignment must be a mapping")
+    arm = assignment.get("arm")
+    expected = phase4_teammate_behavior_assignment(arm=arm,
+        scenario_id=assignment.get("scenario_id"), split=assignment.get("split"),
+        protocol_id=assignment.get("protocol_id"),
+        protocol_sha256=assignment.get("protocol_sha256"),
+        qualification_case=assignment.get("qualification_case"),
+        categories=assignment.get("categories", ()), seeds=assignment.get("seeds", ()),
+        pool_seed=assignment.get("pool_seed"))
+    if assignment != expected:
+        raise ValueError("teammate behavior assignment differs from its exact paired protocol binding")
+    return expected
+
+
+def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
+        episode_id: str, scenario_id: str, category: str, seed: int,
+        policy_id: str, condition_id: str | None,
+        source_identity_sha256: str) -> dict:
+    """Bind evaluator action trace to its exact assignment and provenance."""
+    assignment = validate_phase4_teammate_behavior_assignment(assignment)
+    if (not isinstance(runtime, dict) or
+            runtime.get("schema") != "phase4-teammate-behavior-runtime-v1" or
+            runtime.get("arm") != assignment["arm"] or
+            not isinstance(runtime.get("events"), list)):
+        raise ValueError("teammate behavior runtime record is missing or mismatched")
+    if (not isinstance(episode_id, str) or not episode_id or
+            scenario_id != assignment["scenario_id"] or
+            category not in assignment["categories"] or seed not in assignment["seeds"] or
+            not isinstance(policy_id, str) or not policy_id or
+            not isinstance(source_identity_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", source_identity_sha256) is None):
+        raise ValueError("teammate behavior record provenance is not assignment-bound")
+    expected_assignments = (None if assignment["arm"] == "no_factor" else
+        {str(slot): behavior for slot, behavior in
+         assignment["behavior_schedule"][assignment["seeds"].index(seed)]["assignments"].items()})
+    if (runtime.get("assignments") != expected_assignments or
+            runtime.get("assignment_applied") != (expected_assignments is not None)):
+        raise ValueError("teammate behavior runtime does not match its assigned seed/arm")
+    return {"schema": "phase4-teammate-behavior-runtime-v1",
+        "assignments": runtime["assignments"],
+        "assignment_applied": runtime["assignment_applied"],
+        "events": runtime["events"],
+        "assignment_pair_sha256": assignment["pair_sha256"],
+        "episode_id": episode_id, "scenario_id": scenario_id,
+        "category": category, "seed": seed, "policy_id": policy_id,
+        "condition_id": condition_id,
+        "source_identity_sha256": source_identity_sha256,
+        "protocol_id": assignment["protocol_id"],
+        "protocol_sha256": assignment["protocol_sha256"],
+        "qualification_case": assignment["qualification_case"],
+        "arm": assignment["arm"],
+        "outcome_by_teammate_behavior": None,
+        "teammate_collision_rate": None, "score_contribution": None,
+        "qualification_eligible": False}
 
 
 def apply_focal_pose_offset(observation: torch.Tensor, offset_name: str, *,

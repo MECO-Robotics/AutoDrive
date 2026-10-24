@@ -634,15 +634,18 @@ class TensorThreeVsThreeEnv(
         self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
         return self._last_obs
 
-    def _target_for_actions_step(self, actions, active, full_batch):
+    def _target_for_actions_step(self, actions, active, full_batch,
+                                 policy_action_override=None):
         """Replay the static target-selection tensor workload on HIP batches."""
-        if (not self._target_action_graph_enabled or
+        if (policy_action_override is not None or
+                not self._target_action_graph_enabled or
                 self._target_action_graph_disabled or not full_batch or
                 self.device.type != "cuda" or
                 not torch.is_tensor(actions) or not actions.is_cuda or
                 actions.dtype != torch.long or
                 torch.cuda.is_current_stream_capturing()):
-            return self._target_for_actions(actions, active)
+            return self._target_for_actions(actions, active,
+                policy_action_override=policy_action_override)
 
         signature = (self.n, self.control_modes, self.robot_roles,
                      self.robot_types, self.sweeping_enabled,
@@ -718,7 +721,8 @@ class TensorThreeVsThreeEnv(
              planner_traversal_cost_override=None,
              planner_traversal_cost_override_action=None,
              planner_traversal_cost_override_scale=1.0,
-             planner_force_goal_replan=False):
+             planner_force_goal_replan=False,
+             policy_action_override=None):
         full_batch=active_mask is None
         if full_batch and self._full_batch_step_scalar is not None:
             self._full_batch_step_scalar+=1
@@ -756,7 +760,8 @@ class TensorThreeVsThreeEnv(
             raise ValueError("planner collection target XY requires its sensor-track index")
         self._prepare_raster_cursor(active)
         targets,action,carrying,fuel_delta=self._target_for_actions_step(
-            actions,active,full_batch)
+            actions,active,full_batch,
+            policy_action_override=policy_action_override)
         self._last_planner_collection_target_valid = None
         self._last_planner_collection_action_match = None
         self._last_planner_collection_goal_heading = None

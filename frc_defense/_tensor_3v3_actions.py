@@ -138,11 +138,13 @@ class TensorThreeVsThreeActionMixin:
         self._score_grid_points=points
         self._score_grid_clear=~overlap.any(-1)
 
-    def _target_for_actions(self, actions, active):
+    def _target_for_actions(self, actions, active, policy_action_override=None):
         p = self.policy_pose
-        defer_initial_candidates=(self._has_deterministic_offense and
-                                  all(mode=="deterministic"
-                                      for mode in self.control_modes))
+        preserve_deterministic_actions=(self._has_deterministic_offense and
+                                        all(mode=="deterministic"
+                                            for mode in self.control_modes))
+        defer_initial_candidates=(policy_action_override is None and
+                                  preserve_deterministic_actions)
         if defer_initial_candidates:
             indices=valid=None
             if (_pickup_grid_hip.integrated_available(self.device) and
@@ -357,16 +359,34 @@ class TensorThreeVsThreeActionMixin:
             # With no deterministic offense controller, all deterministic
             # controllers in this batch are defenders and use action 5.
             deterministic=defense_action
-        if defer_initial_candidates:
+        if preserve_deterministic_actions:
             # This branch constructs only legal deterministic actions: pickup
             # requires an eligible intake track, score requires possession,
             # and defense is restricted to defensive robot slots.
             action=deterministic
+            if policy_action_override is not None:
+                override_actions, override_mask = policy_action_override
+                override_actions = torch.as_tensor(
+                    override_actions, device=self.device, dtype=torch.long).reshape(self.n, 6)
+                override_mask = torch.as_tensor(
+                    override_mask, device=self.device, dtype=torch.bool).reshape(self.n, 6)
+                requested = override_actions.clamp(0, 7)
+                legal_requested = masks.gather(-1, requested[..., None]).squeeze(-1)
+                fallback = masks.to(torch.int64).argmax(-1)
+                action = torch.where(override_mask,
+                    torch.where(legal_requested, requested, fallback), action)
         else:
             action = torch.as_tensor(actions, device=self.device, dtype=torch.long).reshape(self.n, 6)
             action = torch.where(self._nn_mode_mask[None], action, torch.where(
                 self._deterministic_mode_mask[None],deterministic,torch.full_like(action,7)))
             action = action.clamp(0, 7)
+            if policy_action_override is not None:
+                override_actions, override_mask = policy_action_override
+                override_actions = torch.as_tensor(
+                    override_actions, device=self.device, dtype=torch.long).reshape(self.n, 6)
+                override_mask = torch.as_tensor(
+                    override_mask, device=self.device, dtype=torch.bool).reshape(self.n, 6)
+                action = torch.where(override_mask, override_actions.clamp(0, 7), action)
             action = torch.where(masks.gather(-1, action[...,None]).squeeze(-1), action,
                                  masks.to(torch.int64).argmax(-1))
         deterministic_offense_mode=(self._deterministic_mode_mask &

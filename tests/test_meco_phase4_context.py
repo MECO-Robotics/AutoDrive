@@ -12,6 +12,10 @@ from frc_defense.meco_phase4_context import (
     contact_exposure_actions, contact_exposure_profile,
     full_team_start_profile, phase4_context_identity,
     phase4_start_profile_assignment, teammate_behavior_actions,
+    phase4_teammate_behavior_assignment,
+    validate_phase4_teammate_behavior_assignment,
+    teammate_behavior_action_details,
+    phase4_teammate_behavior_record,
     validate_full_team_start_profile, validate_phase4_start_profile_assignment,
     start_profile_identity,
 )
@@ -208,8 +212,58 @@ def test_behavior_actions_respect_existing_sensed_action_masks():
     actions = teammate_behavior_actions(FakeActionEnv(), {
         0: "collect", 1: "score", 2: "ferry", 3: "defend", 4: "hold_position"})
     assert actions.tolist() == [[0, 4, 6, 5, 7, 7]]
+    details = teammate_behavior_action_details(FakeActionEnv(), {4: "hold_position", 5: "score"})
+    assert details["actions"].tolist() == [[7, 7, 7, 7, 7, 4]]
+    assert details["requested_actions"].tolist() == [[7, 7, 7, 7, 7, 4]]
+    assert not details["helper_fallback"].any()
     with pytest.raises(ValueError, match="unknown teammate behavior"):
         teammate_behavior_actions(FakeActionEnv(), {4: "idle"})
+
+
+def test_teammate_behavior_assignment_is_exact_validation_pair_and_fails_closed():
+    case = {"layout_id": "2026_rebuilt", "defender_family": "category_scripted",
+        "start_condition": "scenario_defined", "sensor_profile": "standard"}
+    common = dict(scenario_id="full_match_offense", split="validation",
+        protocol_id="heldout-v1", protocol_sha256="a" * 64,
+        qualification_case=case, categories=("level_1",), seeds=(11, 12), pool_seed=3)
+    control = phase4_teammate_behavior_assignment(arm="no_factor", **common)
+    treatment = phase4_teammate_behavior_assignment(arm="behavior_pool", **common)
+    assert control["pair_sha256"] == treatment["pair_sha256"]
+    assert control["behavior_schedule"] is None
+    assert [row["seed"] for row in treatment["behavior_schedule"]] == [11, 12]
+    assert all(set(row["assignments"]) == {4, 5}
+               for row in treatment["behavior_schedule"])
+    assert validate_phase4_teammate_behavior_assignment(treatment) == treatment
+    assert treatment["qualification_eligible"] is False
+    assert treatment["outcome_by_teammate_behavior"] is None
+    assert treatment["teammate_collision_rate"] is None
+    assert treatment["score_contribution"] is None
+    changed = dict(treatment, protocol_sha256="b" * 64)
+    with pytest.raises(ValueError, match="exact paired protocol binding"):
+        validate_phase4_teammate_behavior_assignment(changed)
+    with pytest.raises(ValueError, match="validation-only"):
+        phase4_teammate_behavior_assignment(arm="behavior_pool",
+            **{**common, "split": "test"})
+    runtime = {"schema": "phase4-teammate-behavior-runtime-v1",
+        "arm": "behavior_pool", "assignments": {
+            str(slot): behavior for slot, behavior in
+            treatment["behavior_schedule"][0]["assignments"].items()},
+        "assignment_applied": True, "events": []}
+    record = phase4_teammate_behavior_record(treatment, runtime,
+        episode_id="episode-11", scenario_id="full_match_offense",
+        category="level_1", seed=11, policy_id="D0", condition_id="condition-a",
+        source_identity_sha256="c" * 64)
+    assert record["source_identity_sha256"] == "c" * 64
+    assert record["protocol_sha256"] == "a" * 64
+    assert record["assignment_pair_sha256"] == treatment["pair_sha256"]
+    assert record["outcome_by_teammate_behavior"] is None
+    assert record["teammate_collision_rate"] is None
+    assert record["score_contribution"] is None
+    with pytest.raises(ValueError, match="provenance"):
+        phase4_teammate_behavior_record(treatment, runtime,
+            episode_id="episode-11", scenario_id="full_match_offense",
+            category="level_1", seed=99, policy_id="D0", condition_id="condition-a",
+            source_identity_sha256="c" * 64)
 
 
 def _observation():

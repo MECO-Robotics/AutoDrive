@@ -2286,6 +2286,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   contact_geometry_config: dict | None = None,
                   phase4_start_profile_assignment: dict | None = None,
                   phase4_focal_pose_assignment: dict | None = None,
+                  phase4_teammate_behavior_assignment: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2418,6 +2419,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             seeds=scored_seeds)
         if captured_focal_assignment != expected_focal_assignment:
             raise ValueError("focal pose assignment differs from exact evaluation protocol/case/seeds")
+    if phase4_teammate_behavior_assignment is not None:
+        from .meco_phase4_context import (
+            phase4_teammate_behavior_assignment as build_teammate_assignment,
+            validate_phase4_teammate_behavior_assignment,
+            phase4_teammate_behavior_record)
+        captured_teammate_assignment = validate_phase4_teammate_behavior_assignment(
+            phase4_teammate_behavior_assignment)
+        if evaluation_binding is None or qualification_case is None:
+            raise ValueError("teammate behavior pool requires an exact validation protocol case")
+        expected_teammate_assignment = build_teammate_assignment(
+            arm=captured_teammate_assignment["arm"], scenario_id=scenario_id,
+            split=split, protocol_id=evaluation_binding["protocol_id"],
+            protocol_sha256=evaluation_binding["protocol_sha256"],
+            qualification_case=qualification_case, categories=categories,
+            seeds=scored_seeds, pool_seed=captured_teammate_assignment["pool_seed"])
+        if captured_teammate_assignment != expected_teammate_assignment:
+            raise ValueError("teammate behavior assignment differs from exact protocol/case/seeds")
     if qualification_protocol_id is not None and (
             split not in ("validation", "test") or
             not isinstance(qualification_protocol_id, str) or
@@ -2710,6 +2728,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         contact_geometry_config=contact_geometry_config,
                         phase4_start_profile_assignment=phase4_start_profile_assignment,
                         phase4_focal_pose_assignment=phase4_focal_pose_assignment,
+                        phase4_teammate_behavior_assignment=phase4_teammate_behavior_assignment,
                         **(qualification_case or {}))
                     phase4_focal_pose_record = None
                     if phase4_focal_pose_assignment is not None:
@@ -3423,6 +3442,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "qualification_eligible": False,
                             } if phase4_start_profile_assignment is not None else None),
                             "phase4_focal_pose": phase4_focal_pose_record,
+                            "phase4_teammate_behavior": (
+                                phase4_teammate_behavior_record(
+                                    phase4_teammate_behavior_assignment,
+                                    env.phase4_teammate_behavior_runtime,
+                                    episode_id=episode_id, scenario_id=scenario_id,
+                                    category=category, seed=seed,
+                                    policy_id=record_policy, condition_id=condition_id,
+                                    source_identity_sha256=source_hash)
+                                if phase4_teammate_behavior_assignment is not None else None),
                             "phase4_opponent_policy": ({
                                 "policy_id": phase4_opponent_policy_id,
                                 "factor_id": phase4_opponent_schedule["factor_id"],
@@ -3718,6 +3746,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "contact_geometry_config": contact_geometry_config,
             "phase4_start_profile_assignment": phase4_start_profile_assignment,
             "phase4_focal_pose_assignment": phase4_focal_pose_assignment,
+            "phase4_teammate_behavior_assignment": phase4_teammate_behavior_assignment,
             "qualification_eligible": False,
             "episode_metric_ledger_schema": {
                 "schema_version": 4,
