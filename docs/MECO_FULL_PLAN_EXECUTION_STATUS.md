@@ -1,5 +1,16 @@
 # MECO learning tracks plan: execution status
 
+> **D0 offline schedule compiler integrated — 2026-10-24.** Reviewed commit
+> `b4dbaf4cc75e76fa5dc62471e96eda0373d8961b` adds an offline `describe`
+> command that reports the default full calibration schedule as 12 scenarios,
+> 466 case strata, 96 shards, and 139,800 records without GPU discovery or
+> seed disclosure. Run and merge continue to require execution-bound manifests
+> and reject descriptive-only output. Ten focused tests, compile, CLI count,
+> and diff checks passed. No simulator, GPU, dashboard, training, or D0 shard
+> was run. The three-pass manifest contains 20 scoped tranches; dashboard
+> restart and endpoint verification after this change are pending. No replay
+> is present, and the full calibration remains unrun.
+
 > **Validation campaign planner integrated — 2026-10-24 09:02 UTC.** The
 > reviewed planner is in candidate code commit
 > `9cba0a9af8312de28c39a3e2a842364f185165e0` and produces 28 deterministic,

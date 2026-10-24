@@ -715,6 +715,41 @@
         "status": "approved-summary"
       },
       "limits": "Six focused tests passed; Python compilation, diff check, and validation-only CLI dry run passed. No matrix, simulator, GPU, dashboard, final-test ledger, evaluation outcome, replay, qualification, campaign runner, or cross-scenario aggregation."
+    },
+    {
+      "requirement_id": "d0-offline-schedule-compiler",
+      "title": "Offline deterministic D0 calibration schedule description",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/d0-offline-schedule-compiler.md",
+          "sha256": "b128c7ca546919ba806417660da3d4d5d8ab833997a71a6d15eaf61139349941",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "b4dbaf4cc75e76fa5dc62471e96eda0373d8961b",
+        "candidate_integration_commit": "92404af632e49340a7603493cc544db50840f3a6",
+        "paths": [
+          "scripts/meco_d0_calibration_campaign.py",
+          "tests/test_meco_d0_calibration_campaign.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/d0-offline-schedule-compiler.md",
+          "sha256": "b128c7ca546919ba806417660da3d4d5d8ab833997a71a6d15eaf61139349941",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "b4dbaf4cc75e76fa5dc62471e96eda0373d8961b",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved exact implementer HEAD; confirmed deterministic offline counts, no GPU/source/native initialization, no final-test seed disclosure, and rejection by run/merge.",
+        "status": "approved-summary"
+      },
+      "limits": "Ten focused D0 tests, compile, CLI, and diff checks passed. No simulator/GPU/dashboard/training/shards were run. The 139,800-record calibration remains unrun."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -725,6 +760,7 @@
     "The combined branch is a review-only integration candidate; it has no simulator/GPU qualification, captured production parity run, or deployment qualification.",
     "The evaluation-device lease tranche has focused implementation and review evidence only; simulator, hardware, fresh dashboard replay, active-campaign, and qualification evidence are absent.",
     "The inference observability and decision-trace tranche has focused implementation/review evidence only; simulator, fresh replay, dashboard review, and qualification gates remain open.",
-    "The D0 campaign orchestration tranche provides implementation and eight-test review evidence only; 139,800 planned D0 records remain unrun, with no GPU/simulator results, CI, or qualification claim."
+    "The D0 campaign orchestration tranche provides implementation and eight-test review evidence only; 139,800 planned D0 records remain unrun, with no GPU/simulator results, CI, or qualification claim.",
+    "The D0 offline schedule compiler reports work counts only; all 139,800 calibration records remain unrun."
   ]
 }
