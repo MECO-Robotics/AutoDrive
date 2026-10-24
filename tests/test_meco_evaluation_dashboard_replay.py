@@ -158,12 +158,14 @@ def test_frame_capture_reads_renderer_fields_without_advancing_sim_state():
             last_path=torch.zeros((6, 3, 2)), last_goal=torch.zeros((6, 2))),
         sim=SimpleNamespace(pose=torch.zeros((1, 6, 3)),
             length=torch.ones((1, 6)), width=torch.ones((1, 6))),
+        policy_pose=torch.zeros((1, 6, 3)),
         team_ids=torch.tensor([0, 0, 0, 1, 1, 1]), control_modes=("nn",) * 6,
         robot_roles=("offense",) * 6, last_actions=torch.full((1, 6), 7),
         perception_fov_degrees=90., perception_range=8.,
         hub_centers=torch.zeros((2, 2)), hub_active=torch.ones((1, 2), dtype=torch.bool),
         fuel_score_count=torch.zeros((1, 2)), fuel_acquisition_count=torch.zeros((1, 6)),
         match_elapsed=torch.zeros(1), match_remaining=torch.ones(1),
+        _last_action_audit_valid=torch.ones((1,), dtype=torch.bool),
         _last_audit_targets=torch.zeros((1, 6, 2)),
         _last_audit_fuel_targets=torch.zeros((1, 6, 2)),
         _target_collecting=torch.zeros((1, 6), dtype=torch.bool),
@@ -176,6 +178,49 @@ def test_frame_capture_reads_renderer_fields_without_advancing_sim_state():
     assert frame["robot_detected_fuel"][0] == [[0., 1.], [2., 3.]]
     assert frame["meco_policy_decision"] == {"policy": "C1"}
     assert torch.equal(env.sim.pose, before)
+
+
+def test_initial_frame_marks_action_audit_unavailable_without_fabricating_targets():
+    env = SimpleNamespace(
+        n=1, piece_active=torch.zeros((1, 1), dtype=torch.bool),
+        piece_pos=torch.zeros((1, 1, 2)), piece_owner=torch.zeros((1, 1), dtype=torch.long),
+        _current_fuel_visibility=torch.zeros((1, 6, 1), dtype=torch.bool),
+        track_mask=torch.zeros((1, 6, 1), dtype=torch.bool),
+        track_pos=torch.zeros((1, 6, 1, 2)), track_age=torch.zeros((1, 6, 1)),
+        opponent_valid=torch.zeros((1, 6), dtype=torch.bool),
+        opponent_pose=torch.zeros((1, 6, 3)), opponent_age=torch.zeros((1, 6)),
+        planner=SimpleNamespace(last_lengths=torch.zeros(6, dtype=torch.long),
+            last_path=torch.zeros((6, 1, 2)), last_goal=torch.zeros((6, 2))),
+        sim=SimpleNamespace(pose=torch.zeros((1, 6, 3)),
+            length=torch.ones((1, 6)), width=torch.ones((1, 6))),
+        policy_pose=torch.zeros((1, 6, 3)),
+        team_ids=torch.tensor([0, 0, 0, 1, 1, 1]), control_modes=("nn",) * 6,
+        robot_roles=("offense",) * 6, last_actions=torch.full((1, 6), 7),
+        perception_fov_degrees=90., perception_range=8., hub_centers=torch.zeros((2, 2)),
+        hub_active=torch.ones((1, 2), dtype=torch.bool), fuel_score_count=torch.zeros((1, 2)),
+        fuel_acquisition_count=torch.zeros((1, 6)), match_elapsed=torch.zeros(1),
+        match_remaining=torch.ones(1), _target_collecting=torch.zeros((1, 6), dtype=torch.bool),
+        # Deliberately stale storage: validity must prevent it appearing in tick zero.
+        _last_action_audit_valid=torch.zeros((1,), dtype=torch.bool),
+        _last_audit_targets=torch.full((1, 6, 2), 99.),
+        _last_audit_fuel_targets=torch.full((1, 6, 2), 99.),
+        _last_audit_cluster_count=torch.full((1, 6), 99, dtype=torch.long))
+    frame = _capture_meco_replay_frame(env, 0, None)
+    assert frame["robot_action_audit_available"] is False
+    assert frame["robot_targets"] is None
+    assert frame["robot_fuel_targets"] is None
+    assert frame["robot_cluster_counts"] is None
+
+
+def test_reset_audit_invalidation_clears_only_reset_worlds():
+    from frc_defense.tensor_3v3 import TensorThreeVsThreeEnv
+
+    env = SimpleNamespace(n=3, device=torch.device("cpu"),
+        _last_action_audit_valid=torch.ones((3,), dtype=torch.bool))
+    TensorThreeVsThreeEnv._invalidate_last_action_audit(env, torch.tensor([False, True, False]))
+    assert env._last_action_audit_valid.tolist() == [True, False, True]
+    TensorThreeVsThreeEnv._invalidate_last_action_audit(env)
+    assert env._last_action_audit_valid.tolist() == [False, False, False]
 
 
 def test_dashboard_bundle_contains_compact_decisions_and_staleness_metadata(tmp_path):

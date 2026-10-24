@@ -468,6 +468,12 @@ def _validate_replay_seed_selection(output_dir, replay_seeds, scored_seeds) -> s
 
 def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
     """Capture renderer state from the evaluated environment without stepping it."""
+    audit_valid = getattr(env, "_last_action_audit_valid", None)
+    action_audit_available = (audit_valid is not None and bool(audit_valid[0].item()))
+    def action_audit(name):
+        value = getattr(env, name, None)
+        return value[0].tolist() if action_audit_available and value is not None else None
+
     active = env.piece_active[0].bool()
     pieces = torch.cat((env.piece_pos[0], env.piece_owner[0, :, None]), -1)[active]
     visible = env._current_fuel_visibility[0].bool()
@@ -521,11 +527,12 @@ def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
         "fuel_acquisition_count": env.fuel_acquisition_count[0].tolist(),
         "match_elapsed": float(env.match_elapsed[0].item()),
         "match_remaining": float(env.match_remaining[0].item()),
-        "robot_targets": env._last_audit_targets[0].tolist(),
-        "robot_fuel_targets": env._last_audit_fuel_targets[0].tolist(),
+        "robot_action_audit_available": action_audit_available,
+        "robot_targets": action_audit("_last_audit_targets"),
+        "robot_fuel_targets": action_audit("_last_audit_fuel_targets"),
         "robot_route_goals": env.planner.last_goal.reshape(env.n, 6, 2)[0].tolist(),
         "robot_collecting": env._target_collecting[0].tolist(),
-        "robot_cluster_counts": env._last_audit_cluster_count[0].tolist(),
+        "robot_cluster_counts": action_audit("_last_audit_cluster_count"),
         "meco_policy_decision": decision,
     }
     progress_observer = getattr(env, "_phase4_first_route_progress_observer", None)

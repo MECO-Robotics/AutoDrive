@@ -894,6 +894,7 @@ class TensorThreeVsThreeActionMixin:
         # full tensor copies per tick (CUDA graph replays update in place).
         self._last_audit_targets=target.detach()
         self._last_audit_fuel_targets=fuel_target.detach()
+        self._last_action_audit_valid.logical_or_(active)
         return target, action, possession_now, fuel_delta
 
     def _avoid_robot_contention(self, command, targets, active=None):

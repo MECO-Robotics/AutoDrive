@@ -94,6 +94,10 @@ class TensorThreeVsThreeEnv(
         self._target_action_graph_actions = None
         self._target_action_graph_active = None
         self._target_action_graph_disabled = False
+        # Audit goals are valid only after a policy action in this episode.
+        # Keep validity separate from the CUDA graph's output buffers.
+        self._last_action_audit_valid = torch.zeros(
+            self.n, device=self.device, dtype=torch.bool)
         self._world_indices=torch.arange(self.n,device=self.device)
         self._robot_owner_ids=torch.arange(NUM_ROBOTS,device=self.device,dtype=torch.long)
         self.obs_dim, self.action_dim, self.action_kind = OBS_DIM, ACTION_DIM, "categorical"
@@ -501,9 +505,18 @@ class TensorThreeVsThreeEnv(
         self.policy_pose.copy_(torch.where(update[..., None], self.estimated_pose,
                                            self.policy_pose))
 
+    def _invalidate_last_action_audit(self, mask=None):
+        """Invalidate action-derived audit data for reset worlds."""
+        if mask is None:
+            self._last_action_audit_valid.zero_()
+            return
+        mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
+        self._last_action_audit_valid.masked_fill_(mask, False)
+
     def reset(self, seed=None, *, defer_perception=False):
         if type(defer_perception) is not bool:
             raise ValueError("defer_perception must be boolean")
+        self._invalidate_last_action_audit()
         if seed is not None:
             self.generator.manual_seed(int(seed))
             self._perception_rng_seed = int(seed) & 0xffffffff
@@ -569,6 +582,7 @@ class TensorThreeVsThreeEnv(
 
     def reset_done(self, mask):
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
+        self._invalidate_last_action_audit(mask)
         self.sim.reset_done(mask)
         if self.n == 1 and bool(mask[0]):
             self._planner_traversal_request_signature=None
