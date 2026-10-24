@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign": "MECO five-track evaluation plan \u2014 active implementation batches",
+  "campaign": "MECO five-track evaluation plan — active implementation batches",
   "pass_status_is_agent_liveness": false,
   "passes": [
     {
@@ -9,7 +9,7 @@
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
-        "Plan A full feasible pose \u00d7 behavior PPO support design; isolated worktree codex/meco-plan-a",
+        "Plan A full feasible pose × behavior PPO support design; isolated worktree codex/meco-plan-a",
         "Plan C commitment and independent-oracle candidate semantics plan; implementation batch approved",
         "Formal qualification and promotion protocol plan; implementation batch now active",
         "Current completion audit: Phase 2 supervised warm start, Phase 0 D0 variance calibration, complete simulator/replay validation, qualification reports, and Phase 5 integration remain open",
@@ -26,12 +26,13 @@
         "Plan A P-route independent-cost oracle v3 implementation in codex/meco-p-route-oracle-v3: additive collector archives/replays base bump plus effective P grids and scores actually executed paths with an independent pure-Python grid integrator; labels are sampled path preferences only, ties omitted. Static checks only; runtime oracle qualification remains pending.",
         "Section 6 collection-action-bout planner contract: contiguous focal executed action IDs 0..3; acquire iff focal acquired-event quantity rises during the bout; close on action transition/finalization/error; missing required signal is unavailable; HUB denial stays distinct and abandoned fuel remains null without a producer.",
         "Sibling failure handling planner scope approved: a nonzero lane exit writes an invocation-scoped abort marker for active siblings; workers observe it at a safe update boundary after atomic checkpoint; manifests distinguish aborted_due_to_sibling_failure; supervisor uses bounded process-group TERM/KILL fallback; the pending matched-cycle assignment remains available for catch-up.",
-        "Plan A legal-node Phase 2 tranche contract: strict full-support replay; deterministic heading-bin \u00d7 graph-region node sample including feasible root; behavior-marginal U and feasible within-node B preferences; 2 paired repeats; explicit 512/prefix and 12,000/dataset rollout caps; sampled coverage only.",
+        "Plan A legal-node Phase 2 tranche contract: strict full-support replay; deterministic heading-bin × graph-region node sample including feasible root; behavior-marginal U and feasible within-node B preferences; 2 paired repeats; explicit 512/prefix and 12,000/dataset rollout caps; sampled coverage only.",
         "Plan A joint U+B+P warm-start contract: one shared model/encoder and optimizer over legal-node U/B plus independent oracle-v3 P; exact trajectory-v3 data+manifest cross-binding; learned P requires exact scale; old artifacts unchanged.",
         "D0 calibration sharding planner contract: deterministically partition exact repeat/category/layout/defender/start/sensor/seed work units; immutable source/protocol/case/runtime manifests; resumable exact groups; strict complete merge to existing v2 report and protocol intake rejection of shards; ordinal-only GPU differences allowed only under identical normalized backend/model/runtime.",
-        "Phase 4 domain expansion planner pass approved: extend the frozen factor-vs-baseline matrix over registered pressure levels 1\u20135, preserve other scripted slots, report level-0 unsupported coverage explicitly, and bind exact category/seed/family/layout/start/sensor strata.",
+        "Phase 4 domain expansion planner pass approved: extend the frozen factor-vs-baseline matrix over registered pressure levels 1–5, preserve other scripted slots, report level-0 unsupported coverage explicitly, and bind exact category/seed/family/layout/start/sensor strata.",
         "Section 6 regret planner pass: current reports did not measure regret against the simulation oracle. Add a strict offline analyzer over replay-bound v2 Plan C branches; score exact archived candidate tables with C1/C2, replay returns, report sampled bounded-set regret and chosen-outcome coverage, and never imply full-action-space optimality. Source carries one mode-specific risk tensor, so D1/D2 contrasts are unavailable unless independently reconstructed.",
-        "Section 6 unsuccessful-collection planner contract: expose the count of finalized focal collection-action bouts whose authoritative acquired quantity is known zero; missing event evidence remains unavailable; do not claim causal physical intake failure."
+        "Section 6 unsuccessful-collection planner contract: expose the count of finalized focal collection-action bouts whose authoritative acquired quantity is known zero; missing event evidence remains unavailable; do not claim causal physical intake failure.",
+        "Fresh integration plan completed: reconciled reviewed staging 5dcf48ce6 with the reviewed C1 replay-integrity chain, identified the execution-ledger conflict and `meco_track_training.py` merge interaction, and ordered validation before a fresh campaign. Candidate: codex/meco-c1-replay-integrated."
       ]
     },
     {
@@ -138,9 +139,10 @@
         "Plan A legal-node tranche v1 implemented in isolated worktree codex/meco-plan-a-legal-node-supervision: distinct replay-bound dataset/fitter/weights schema; source/protocol/train/device and full support bindings; stratified sampled node support with uniform hash-ranked descriptors, inclusion weights, 2 paired repeats, U plus centered B losses, null P; static compilation and diff checks passed; scoped review approved at f91d76237; runtime validation pending.",
         "Joint Plan A U+B+P warm-start implemented and committed as `15d5ef218595513700ef889d7ef923109a339615` in isolated worktree codex/meco-plan-a-joint-ubp-warmstart; strict shared-source/protocol/device binding, all-row epochs, joint U/B/P loss and learned-P scale gate are in place. Static checks only; runtime fitting/evaluation remain pending.",
         "Deterministic resumable D0 calibration sharding implemented in isolated worktree codex/meco-d0-calibration-shards: commits 8d18502c5 and source-hash correction 7c1ba15fa; exact work-unit assignment, immutable manifests/progress, full-coverage merge and recomputed v2 summaries; static checks only, no calibration runtime.",
-        "Phase 4 pressure-domain implementation integrated as ea70ec35d/eb77f2a62 from isolated reviewed HEAD 562560ca32daa39bd3434c8321f60cfeecee19d1: factors cover registered levels 1\u20135 with explicit unsupported categories; exact category/seed and qualification strata are frozen, passed to evaluation, and validated on reports and paired episodes. Static checks only; integrated-tree review and seeded simulator/replay remain pending.",
+        "Phase 4 pressure-domain implementation integrated as ea70ec35d/eb77f2a62 from isolated reviewed HEAD 562560ca32daa39bd3434c8321f60cfeecee19d1: factors cover registered levels 1–5 with explicit unsupported categories; exact category/seed and qualification strata are frozen, passed to evaluation, and validated on reports and paired episodes. Static checks only; integrated-tree review and seeded simulator/replay remain pending.",
         "Sampled counterfactual regret analyzer implemented in isolated `scripts/meco_counterfactual_regret.py` and docs; feature commit 53ff9f995, corrected at ba7b65b0. It reconstructs C1/C2 GRU state through the verified teacher prefix, strictly replays each sampled descriptor and compares return/discount/continuation outcomes, and reports regret only for exact chosen IDs with available sampled outcomes. D1/D2 unavailable; claims restricted to sampled bounded-set regret. Static checks only; no GPU/simulator analysis run.",
-        "Unsuccessful collection action bout metric implemented in isolated commit 2d1e6638 and schema-compatibility follow-up ee7174d3: ledger v4 adds the exact count, dashboard keeps v3 non-count metrics while reporting the new count null, and known-record coverage is visible. Static checks only; runtime records/replay remain pending."
+        "Unsuccessful collection action bout metric implemented in isolated commit 2d1e6638 and schema-compatibility follow-up ee7174d3: ledger v4 adds the exact count, dashboard keeps v3 non-count metrics while reporting the new count null, and known-record coverage is visible. Static checks only; runtime records/replay remain pending.",
+        "Integrated reviewed staging and C1 chain at 006dade5a; followed with f0871458a, which hashes C1/C2 model state once per PPO update while preserving per-row input/candidate/route/risk fingerprints. The candidate remains an active implementation branch; this entry records only the scoped integration."
       ]
     },
     {
@@ -230,12 +232,13 @@
         "Scoped reviewer approved Plan A legal-node tranche v1 commit f91d762377c4ee22de0fd969c8e3c62f4add9c29: replay binding, censored-feasible-behavior U handling, independent valid B labels, missing-target optimizer skip, rollout caps, and CUDA-only artifact loading. Static review only; no tests or simulator evaluation.",
         "Scoped review approved the joint Plan A U+B+P implementation at exact integrated full-plan HEAD `05338ce727c9886cca1b81f00ce58699ae61f930`; its tree matches approved scoped commit 15d5ef218. Shared encoder, strict dual-dataset replay/provenance, learned-P scale and all-row epoch semantics were reviewed. Static only; no tests, collection, fitting, GPU or simulator execution; runtime evidence remains pending.",
         "Scoped reviewer approved calibration sharding at exact integrated full-plan HEAD `997a04aaad14f103d6c8b4b6284950fa8d6660ba`, preserving reviewed feature HEAD 7c1ba15fa and its evaluator-matching source hash. Static only; no tests/GPU calibration/simulation; runtime report intake and protocol creation remain pending.",
-        "Scoped reviewer approved isolated Phase 4 pressure-domain HEAD 562560ca32daa39bd3434c8321f60cfeecee19d1: level 1\u20135 slot-0 coverage, level-0 unsupported reporting, other-slot preservation, exact category/seed/family/layout/start/sensor pairing and report provenance all passed static review. No tests/simulation; integrated-tree review and simulator evaluation remain pending.",
+        "Scoped reviewer approved isolated Phase 4 pressure-domain HEAD 562560ca32daa39bd3434c8321f60cfeecee19d1: level 1–5 slot-0 coverage, level-0 unsupported reporting, other-slot preservation, exact category/seed/family/layout/start/sensor pairing and report provenance all passed static review. No tests/simulation; integrated-tree review and simulator evaluation remain pending.",
         "Integrated Phase 4 pressure-domain review approved at exact candidate HEAD 24a7b9169fb2be42185b6f9f4292e10376887601; follow-up docs-only commit 7f02b52f5fa26071435af539d23f570b28312620 now names all four qualification_case strata in condition-ID bindings and was separately approved. Static only; seeded simulator/replay evaluation remains pending.",
         "Scoped reviewer approved exact sampled-regret feature HEAD ba7b65b0ff9a104844bc926a1ec61637199ab08e: strict data/replay provenance, exact IDs, recurrent prefix reconstruction, every sampled C outcome replay comparison, stable tie handling, missing-outcome coverage, sampled-only claims, and D1/D2 unavailability were reviewed. No tests/simulator/GPU run; integrated-tree review and runtime analysis remain pending.",
         "Integrated read-only review approved exact candidate HEAD c5dc562c9ae1aa0989db9f96bbd7a3b3151425d4: analyzer and focused docs match approved feature HEAD ba7b65b0, ledger/status claims are accurate, source_identity remains unaffected, and no merge conflicts exist. Static only; runtime replay/scoring and simulator evaluation remain pending.",
         "Scoped reviewer approved exact isolated collection-bout metric commit ee7174d317fad2fe1de664d3eaffec0f2dc81c56: only finalized known-zero acquired bouts count; v3 legacy aggregates remain available with new metric null; v4 consistency checks and known/total coverage, non-causal UI wording, and docs are correct. No tests or simulator; integrated-tree review and runtime validation remain pending.",
-        "Integrated read-only review approved collection-action bout metric at exact candidate HEAD cc08989b8a3f47da1ecf065d55341c963dac04a9: metric/dashboard/docs match isolated v4 review, v3 aggregates are retained with the new field null, v4 coverage is explicit, and prior Phase 4/regret approvals remain ancestors. Static only; simulator-record validation remains pending."
+        "Integrated read-only review approved collection-action bout metric at exact candidate HEAD cc08989b8a3f47da1ecf065d55341c963dac04a9: metric/dashboard/docs match isolated v4 review, v3 aggregates are retained with the new field null, v4 coverage is explicit, and prior Phase 4/regret approvals remain ancestors. Static only; simulator-record validation remains pending.",
+        "Independent scoped review approved 006dade5a and re-approved f0871458a. Nine focused files passed 89 tests with one accelerator-only skip under system Python; the equivalent ROCm accelerator check passed on WX9100 GPU 1. Follow-up C1 replay tests passed 2 with one accelerator-only skip; diff check clean. The original failed campaign remains terminal; this is not a whole-plan approval."
       ]
     }
   ],
@@ -250,7 +253,7 @@
         "implementation_status": "complete",
         "review_status": "complete",
         "evaluation_status": "pending",
-        "summary": "Slot 0 telegraphs then reverses at physics tick 360; paired against the matched same-category, same-seed, same-stratum baseline across registered pressure levels 1\u20135."
+        "summary": "Slot 0 telegraphs then reverses at physics tick 360; paired against the matched same-category, same-seed, same-stratum baseline across registered pressure levels 1–5."
       },
       {
         "factor_id": "observation_delay",
