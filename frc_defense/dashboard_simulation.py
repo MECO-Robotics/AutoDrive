@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import datetime
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -98,6 +99,7 @@ _PLAYBACK_FRAME_KEYS = frozenset({
     "adstar_paths", "fuel_pieces", "hub_centers", "hub_active", "fuel_score_count",
     "fuel_acquisition_count", "match_elapsed", "match_remaining", "predicted_intercept",
     "predicted_intercept_time",
+    "meco_policy_decision",
 })
 
 
@@ -105,7 +107,14 @@ def scenario_playback_view(record: dict, *, max_frames: int = 240) -> dict:
     """Return the renderer data without duplicated frames or excess samples."""
     top_level_keys=("task", "matchup", "architecture", "behavior_mode", "seed",
         "scenario_seed", "field", "robot_types", "simulation_constraints", "robot_teams",
-        "robot_count", "robots_per_alliance", "simulated_seconds", "simulation_ticks", "dt")
+        "robot_count", "robots_per_alliance", "simulated_seconds", "simulation_ticks", "dt",
+        "evaluation_id", "condition_id", "evaluation_record_digest",
+        "evaluation_report_path", "evaluation_record_index",
+        "checkpoint_sha256", "checkpoint_source_outdated", "replay_source_sha256",
+        "source_identity_sha256", "protocol_id", "qualification_protocol_id",
+        "training_protocol_id", "training_configuration_sha256", "candidate_k",
+        "prediction_mode", "p_mode", "split", "category", "policy",
+        "qualification_case", "replay_provenance")
     view={key:record[key] for key in top_level_keys if key in record}
     scenarios=[]
     for scenario in record.get("scenarios",[]) or []:
@@ -121,6 +130,178 @@ def scenario_playback_view(record: dict, *, max_frames: int = 240) -> dict:
                           if key in scenario} | {"frames":compact_frames})
     view["scenarios"]=scenarios
     return view
+
+
+def _replay_publication_checkpoint(_stage: str) -> None:
+    """Failure-injection seam for replay publication contract tests."""
+
+
+def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
+                                        record: dict) -> dict:
+    """Publish immutable replay assets, then atomically switch the ready pointer."""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
+        raise ValueError("invalid replay simulation_id")
+    progress_dir = Path(progress_dir)
+    generations = progress_dir / f"{simulation_id}.generations"
+    generations.mkdir(parents=True, exist_ok=True)
+    generation_id = uuid.uuid4().hex
+    staging = generations / f".{generation_id}.tmp"
+    generation = generations / generation_id
+    serialized = json.dumps(record, separators=(",", ":"), allow_nan=False).encode()
+    metadata = {key: record.get(key) for key in (
+        "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state",
+        "evaluation_id", "condition_id", "evaluation_record_digest",
+        "evaluation_report_path", "evaluation_record_index", "replay_source_sha256",
+        "checkpoint_sha256", "checkpoint_source_outdated", "scenario_id", "category",
+        "split", "policy")}
+    scenarios = record.get("scenarios") or []
+    metadata["label"] = (scenarios[0].get("label") if scenarios else simulation_id)
+    view = json.dumps(scenario_playback_view(record), separators=(",", ":"),
+                      allow_nan=False).encode()
+    status = {"status": "ready", "tick": int(record.get("simulation_ticks", 0)),
+        "total_ticks": int(record.get("simulation_ticks", 0)), "percent": 100,
+        "simulated_seconds": record.get("simulated_seconds", 0),
+        "updated_at": time.time()}
+    assets = {
+        "result.json": serialized,
+        "result.json.gz": gzip.compress(serialized, compresslevel=6, mtime=0),
+        "result.meta.json": json.dumps(metadata, separators=(",", ":"),
+                                        allow_nan=False).encode(),
+        "result.view.json.gz": gzip.compress(view, compresslevel=1, mtime=0),
+    }
+    pointer_published = False
+    temporary = None
+    staging.mkdir()
+    try:
+        for name, content in assets.items():
+            path = staging / name
+            with path.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _replay_publication_checkpoint(f"asset:{name}")
+        manifest = {"schema": "dashboard-replay-generation-v1",
+            "simulation_id": simulation_id, "generation_id": generation_id,
+            "ready_status": status,
+            "assets": {name: {"size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest()}
+                for name, content in assets.items()}}
+        manifest_bytes = json.dumps(manifest, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()
+        with (staging / "manifest.json").open("xb") as stream:
+            stream.write(manifest_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replay_publication_checkpoint("manifest")
+        directory_fd = os.open(staging, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.replace(staging, generation)
+        _replay_publication_checkpoint("generation")
+        generations_fd = os.open(generations, os.O_RDONLY)
+        try:
+            os.fsync(generations_fd)
+        finally:
+            os.close(generations_fd)
+        _replay_publication_checkpoint("generation_parent_synced")
+        pointer = {"schema": "dashboard-replay-ready-v1",
+            "simulation_id": simulation_id, "generation_id": generation_id,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}
+        pointer_bytes = json.dumps(pointer, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()
+        ready_path = progress_dir / f"{simulation_id}.ready.json"
+        temporary = progress_dir / f".{simulation_id}.{generation_id}.ready.tmp"
+        with temporary.open("xb") as stream:
+            stream.write(pointer_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replay_publication_checkpoint("ready_temp_written")
+        _replay_publication_checkpoint("before_pointer")
+        # This atomic pointer replacement is the publication point: all assets
+        # and generation-bound readiness metadata are durable before dashboard
+        # discovery sees it. The progress sidecar is not the readiness authority.
+        os.replace(temporary, ready_path)
+        pointer_published = True
+        directory_fd = os.open(progress_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return pointer
+    except Exception:
+        # Clean temporary and renamed-but-unpublished material. Never remove a
+        # generation after its ready pointer has become visible.
+        if not pointer_published:
+            try:
+                current_pointer = json.loads(ready_path.read_text())
+                pointer_published = current_pointer.get("generation_id") == generation_id
+            except (OSError, ValueError, UnboundLocalError):
+                pass
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if staging.exists():
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+        if generation.exists() and not pointer_published:
+            import shutil
+            shutil.rmtree(generation, ignore_errors=True)
+        raise
+
+
+def resolve_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
+                                        *, verify: bool = True) -> tuple[Path, dict]:
+    """Resolve and optionally verify the immutable generation named by ready."""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", simulation_id):
+        raise ValueError("invalid replay simulation_id")
+    ready_path = Path(progress_dir) / f"{simulation_id}.ready.json"
+    pointer = json.loads(ready_path.read_text())
+    if (pointer.get("schema") != "dashboard-replay-ready-v1" or
+            pointer.get("simulation_id") != simulation_id or
+            not re.fullmatch(r"[a-f0-9]{32}", str(pointer.get("generation_id", "")))):
+        raise ValueError("invalid replay ready pointer")
+    root = Path(progress_dir) / f"{simulation_id}.generations"
+    generation = root / pointer["generation_id"]
+    manifest_bytes = (generation / "manifest.json").read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != pointer.get("manifest_sha256"):
+        raise ValueError("replay manifest hash mismatch")
+    manifest = json.loads(manifest_bytes)
+    if (manifest.get("schema") != "dashboard-replay-generation-v1" or
+            manifest.get("simulation_id") != simulation_id or
+            manifest.get("generation_id") != pointer["generation_id"]):
+        raise ValueError("replay generation manifest identity mismatch")
+    status = manifest.get("ready_status")
+    if (not isinstance(status, dict) or status.get("status") != "ready" or
+            type(status.get("tick")) is not int or
+            type(status.get("total_ticks")) is not int or
+            status["tick"] != status["total_ticks"]):
+        raise ValueError("replay generation readiness status is invalid")
+    if verify:
+        assets = manifest.get("assets")
+        if not isinstance(assets, dict) or set(assets) != {
+                "result.json", "result.json.gz", "result.meta.json", "result.view.json.gz"}:
+            raise ValueError("replay generation manifest asset inventory mismatch")
+        for name, evidence in assets.items():
+            if Path(name).name != name or not isinstance(evidence, dict):
+                raise ValueError("invalid replay generation asset entry")
+            content = (generation / name).read_bytes()
+            if (len(content) != evidence.get("size_bytes") or
+                    hashlib.sha256(content).hexdigest() != evidence.get("sha256")):
+                raise ValueError(f"replay generation asset verification failed: {name}")
+    return generation, manifest
+
+
+def write_dashboard_replay_bundle(result_path: Path, record: dict) -> None:
+    """Publish an immutable dashboard replay generation with ready pointer last."""
+    result_path = Path(result_path)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    simulation_id = str(record.get("simulation_id") or
+                        result_path.name.removesuffix(".result.json"))
+    publish_dashboard_replay_generation(result_path.parent, simulation_id, record)
 
 
 def replay_commit_age(saved_commit: str | None, current_commit: str | None,
@@ -361,29 +542,7 @@ def _run_zone_playback_job(run_dir: Path, run_name: str, start_zone: str,
         record["code_state"]=replay_code_state()
         record["compute_scheduling"]="reserved" if training_paused else "shared"
         record["simulation_device"]=f"cuda:{device_index}"
-        result_path=progress_path.with_name(progress_path.stem+".result.json")
-        temporary=result_path.with_suffix(".tmp")
-        serialized=json.dumps(record,separators=(",",":" )).encode()
-        temporary.write_bytes(serialized)
-        os.replace(temporary,result_path)
-        metadata={key:record.get(key) for key in (
-            "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state")}
-        scenarios=record.get("scenarios") or []
-        metadata["label"]=(scenarios[0].get("label") if scenarios and isinstance(scenarios[0],dict)
-                            else simulation_id)
-        metadata_path=result_path.with_suffix(".meta.json")
-        metadata_temporary=metadata_path.with_suffix(".tmp")
-        metadata_temporary.write_text(json.dumps(metadata,separators=(",",":")))
-        os.replace(metadata_temporary,metadata_path)
-        compressed_path=result_path.with_suffix(result_path.suffix+".gz")
-        compressed_temporary=compressed_path.with_suffix(compressed_path.suffix+".tmp")
-        compressed_temporary.write_bytes(gzip.compress(serialized,compresslevel=6,mtime=0))
-        os.replace(compressed_temporary,compressed_path)
-        view_path=result_path.with_suffix(".view.json.gz")
-        view_serialized=json.dumps(scenario_playback_view(record),separators=(",",":" )).encode()
-        view_temporary=view_path.with_suffix(".tmp")
-        view_temporary.write_bytes(gzip.compress(view_serialized,compresslevel=1,mtime=0))
-        os.replace(view_temporary,view_path)
+        publish_dashboard_replay_generation(progress_path.parent, simulation_id, record)
         progress=json.loads(_json_or_default(progress_path,{}))
         write_fn(progress_path,progress.get("total_ticks",ZONE_PLAYBACK_TICKS),
             progress.get("total_ticks",ZONE_PLAYBACK_TICKS),"ready")
@@ -416,7 +575,6 @@ def _ensure_zone_playback_job(run_dir: Path, run_name: str, simulation_id: str,
                               _job_ids=None, _job_lock=None) -> dict:
     """Idempotently start or reattach to the durable job identified by its ID."""
     progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
-    result_path=progress_path.with_name(progress_path.stem+".result.json")
     job_lock = _job_lock or _SCENARIO_JOB_LOCK
     job_ids = _job_ids if _job_ids is not None else _SCENARIO_JOB_IDS
     write_fn = _write_fn or _write_scenario_progress
@@ -425,7 +583,12 @@ def _ensure_zone_playback_job(run_dir: Path, run_name: str, simulation_id: str,
         current=json.loads(_json_or_default(progress_path,{}))
         if current.get("status") in ("error","cancelled"):
             return current
-        if simulation_id not in job_ids and not result_path.is_file():
+        try:
+            resolve_dashboard_replay_generation(progress_path.parent, simulation_id)
+            has_ready_generation = True
+        except (OSError, ValueError, json.JSONDecodeError):
+            has_ready_generation = False
+        if simulation_id not in job_ids and not has_ready_generation:
             initial_tick=(current.get("tick",0) if current.get("status")=="waiting" else 0)
             requested_ticks=int(request.get("total_ticks",ZONE_SCENARIO_TICKS))
             write_fn(progress_path,initial_tick,
@@ -1075,9 +1238,11 @@ def prepare_focused_playbacks(run_dir: Path) -> None:
             for robot_type,capacity,scoring_bps in (("dumper",60,25.),("turret",40,15.)):
                 simulation_id=focused_playback_simulation_id(mode,robot_type)
                 progress_path=progress_dir / f"{simulation_id}.json"
-                result_path=progress_dir / f"{simulation_id}.result.json"
-                if result_path.is_file():
+                try:
+                    resolve_dashboard_replay_generation(progress_dir, simulation_id)
                     continue
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
                 request={"start_zone":"red","goal_zone":"blue","seed":0,
                     "task":"3v3","control_modes":["offense_deterministic"]+["none"]*5,
                     "behavior_mode":mode,"total_ticks":BEHAVIOR_PROBE_TICKS,

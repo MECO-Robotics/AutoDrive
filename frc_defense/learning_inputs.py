@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import torch
 
@@ -68,6 +69,7 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     requires confirming an equivalent localization feed. Simulator truth is
     used neither to fill FUEL cells nor to locate opponents.
     """
+    capture_monotonic = time.monotonic()
     if not 0 <= world < env.n or not 0 <= slot < 6:
         raise ValueError("world/slot is outside the curriculum environment")
     height = math.ceil(float(env.sim.field_width) / RASTER_CELL_METERS)
@@ -120,6 +122,7 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
         episode_id=episode,
         sequence=step,
         timestamp=float(env.match_elapsed[world].item()),
+        capture_monotonic=capture_monotonic,
         raster_shape=(6, height, width),
         raster=tuple(raster[0].reshape(-1).cpu().tolist()),
         globals=globals_,

@@ -1,34 +1,45 @@
 {
-  "schema": "meco-three-pass-provenance-v1",
+  "schema": "meco-three-pass-provenance-v2",
   "status": "scoped-transcript-summaries",
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23 from their planner, implementation, and independent review records.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
       "title": "Phase 4 pressure domain",
       "planner": {
-        "status": "transcript-summary",
-        "artifact": "docs/implementation-provenance/pressure-domain.md",
-        "artifact_sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c"
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/pressure-domain.md",
+          "sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
       },
       "implementer": {
-        "commit": "562560ca3",
-        "feature_commit": "5b470da9a",
+        "commit": "562560ca32daa39bd3434c8321f60cfeecee19d1",
+        "feature_commit": "5b470da9a1b3ba970e9535d5d746f3a622a4943e",
         "paths": [
           "docs/MECO_ABLATION_MATRIX.md",
           "docs/MECO_PHASE4_FACTORS.md",
           "frc_defense/curriculum_scenarios.py",
           "frc_defense/meco_ablation_matrix.py"
-        ]
+        ],
+        "status": "implemented"
       },
       "reviewer": {
-        "artifact": "docs/implementation-provenance/pressure-domain.md",
-        "approved_commit": "eb77f2a62",
+        "artifact": {
+          "path": "docs/implementation-provenance/pressure-domain.md",
+          "sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "eb77f2a6242362721c4aa72c6d08dd06069e19c5",
         "verdict": "approved",
-        "artifact_sha256": "96c54f284ca6dd8d6f48705b4c7a074ba7b961ccb34bb482eaab6061a44ea35c"
+        "verdict_detail": "approved",
+        "status": "approved-summary"
       },
       "limits": "Static checks only; simulator evaluation pending."
     },
@@ -36,26 +47,37 @@
       "requirement_id": "section6-sampled-bounded-set-regret",
       "title": "Sampled bounded-set regret analyzer",
       "planner": {
-        "status": "transcript-summary",
-        "artifact": "docs/implementation-provenance/sampled-regret.md",
-        "artifact_sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c"
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/sampled-regret.md",
+          "sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
       },
       "implementer": {
-        "commit": "c5dc562c9",
-        "feature_commit": "53ff9f995",
-        "correction_commit": "ba7b65b0f",
+        "commit": "c5dc562c9ae1aa0989db9f96bbd7a3b3151425d4",
+        "feature_commit": "53ff9f995873c1e58e904dc62fa3a7539ec9b9fc",
+        "correction_commit": "ba7b65b0ff9a104844bc926a1ec61637199ab08e",
         "paths": [
           "docs/MECO_SAMPLED_COUNTERFACTUAL_REGRET.md",
           "scripts/meco_counterfactual_regret.py",
           "docs/MECO_CAMPAIGN_PASSES.json",
           "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
-        ]
+        ],
+        "status": "implemented"
       },
       "reviewer": {
-        "artifact": "docs/implementation-provenance/sampled-regret.md",
-        "approved_commit": "c5dc562c9",
+        "artifact": {
+          "path": "docs/implementation-provenance/sampled-regret.md",
+          "sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "c5dc562c9ae1aa0989db9f96bbd7a3b3151425d4",
         "verdict": "approved",
-        "artifact_sha256": "40dc6b551b93c70fc9f738b4a4e5e918cd1db91223546ab7b68560a4cf94bc4c"
+        "verdict_detail": "approved",
+        "status": "approved-summary"
       },
       "limits": "Runtime replay and scoring pending; D1/D2 coverage unavailable."
     },
@@ -63,29 +85,40 @@
       "requirement_id": "unsuccessful-collection-bouts",
       "title": "Unsuccessful collection action bouts",
       "planner": {
-        "status": "transcript-summary",
-        "artifact": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
-        "artifact_sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2"
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
+          "sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
       },
       "implementer": {
-        "commit": "a0f0aa515",
-        "feature_commit": "2d1e66386",
-        "compatibility_commit": "ee7174d31",
-        "integrated_feature_commit": "5f73211d4",
-        "ledger_commit": "cc08989b8",
+        "commit": "a0f0aa515cd0c6ebc90ed77491a6e992c3590283",
+        "feature_commit": "2d1e663865a4173b683b0316147bc709e764f680",
+        "compatibility_commit": "ee7174d317fad2fe1de664d3eaffec0f2dc81c56",
+        "integrated_feature_commit": "5f73211d44fd70f00487a40a3ee01efc8d8d58eb",
+        "ledger_commit": "cc08989b8a3f47da1ecf065d55341c963dac04a9",
         "paths": [
           "frc_defense/meco_track_training.py",
           "frc_defense/meco_metric_ledger.py",
           "frc_defense/meco_dashboard.py",
           "frc_defense/dashboard_static/meco.js",
           "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
-        ]
+        ],
+        "status": "implemented"
       },
       "reviewer": {
-        "artifact": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
-        "approved_commit": "cc08989b8",
+        "artifact": {
+          "path": "docs/implementation-provenance/unsuccessful-collection-bouts.md",
+          "sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "cc08989b8a3f47da1ecf065d55341c963dac04a9",
         "verdict": "approved",
-        "artifact_sha256": "7c06616df4cf32e16c43a939ae9f2c6cedf0b84639577de0ce2a8906e653b2d2"
+        "verdict_detail": "approved",
+        "status": "approved-summary"
       },
       "limits": "Simulator-record validation pending."
     },
@@ -93,26 +126,37 @@
       "requirement_id": "plan-a-expert-goal-annotation-intake",
       "title": "Plan A expert goal annotation intake",
       "planner": {
-        "status": "transcript-summary",
-        "artifact": "docs/implementation-provenance/plan-a-goal-annotations.md",
-        "artifact_sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431"
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-goal-annotations.md",
+          "sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
       },
       "implementer": {
-        "commit": "71fe03fe5",
-        "feature_commit": "7ae3b3098",
-        "strictness_commit": "267956890",
-        "integration_commit": "c030ea924",
+        "commit": "71fe03fe5d924b8725bce53fdffaaec2058a3826",
+        "feature_commit": "7ae3b3098fd308dc85bf11e0437aa43c9cbd54ca",
+        "strictness_commit": "267956890958c72a6fa655a2d0a41abf3a12852c",
+        "integration_commit": "c030ea924d3d572be54dd95790dee76ae481fe47",
         "paths": [
           "frc_defense/meco_supervised.py",
           "docs/MECO_SUPERVISED_WARMSTART.md",
           "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
-        ]
+        ],
+        "status": "implemented"
       },
       "reviewer": {
-        "artifact": "docs/implementation-provenance/plan-a-goal-annotations.md",
-        "approved_commit": "71fe03fe5",
-        "verdict": "approved after constants restoration; c030ea924 was blocked",
-        "artifact_sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431"
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-goal-annotations.md",
+          "sha256": "d637a5c4f76ac831d8fdf3d0542ba26d622051c4b604bb6b7bc8e0d5da633431",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "71fe03fe5d924b8725bce53fdffaaec2058a3826",
+        "verdict": "approved",
+        "verdict_detail": "approved after constants restoration; c030ea924 was blocked",
+        "status": "approved-summary"
       },
       "limits": "Loader only; no producer, annotated source dataset, fitting, or runtime validation."
     },
@@ -120,24 +164,109 @@
       "requirement_id": "c1-logprob-diagnostics",
       "title": "C1 rollout log-probability diagnostics",
       "planner": {
-        "status": "transcript-summary",
-        "artifact": "docs/implementation-provenance/c1-logprob-diagnostics.md",
-        "artifact_sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74"
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/c1-logprob-diagnostics.md",
+          "sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
       },
       "implementer": {
-        "commit": "d7dc22266",
-        "diagnostic_commit": "ac6681e3b",
+        "commit": "d7dc22266519c2007654bd19903155f8a23360dc",
+        "diagnostic_commit": "ac6681e3bc3b6926611935aad34ca4ce84ee3d64",
         "paths": [
           "frc_defense/meco_track_training.py"
-        ]
+        ],
+        "status": "implemented"
       },
       "reviewer": {
-        "artifact": "docs/implementation-provenance/c1-logprob-diagnostics.md",
-        "approved_commit": "d7dc22266",
-        "verdict": "approved after initial scalar-hash/write-mask block",
-        "artifact_sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74"
+        "artifact": {
+          "path": "docs/implementation-provenance/c1-logprob-diagnostics.md",
+          "sha256": "6d213b8996393dfd1602df46250dcde8732499735551a5ac918012f43b1cdc74",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "d7dc22266519c2007654bd19903155f8a23360dc",
+        "verdict": "approved",
+        "verdict_detail": "approved after initial scalar-hash/write-mask block",
+        "status": "approved-summary"
       },
       "limits": "Training reproduction pending; no claim of a repaired five-track run."
+    },
+    {
+      "requirement_id": "phase2-plan-a-expert-goal-warm-start",
+      "title": "Plan A expert-goal annotation intake and fitter",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-expert-goal-warm-start.md",
+          "sha256": "bebb95d3a6ee912358e604a217d8cd1c23bc97caf8263b1193fe71487612b7e5",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "15fa367fd5975a0fc7af641090a46a9ca89284bd",
+        "paths": [
+          "frc_defense/meco_supervised.py",
+          "frc_defense/meco_counterfactual.py",
+          "docs/MECO_SUPERVISED_WARMSTART.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-expert-goal-warm-start.md",
+          "sha256": "bebb95d3a6ee912358e604a217d8cd1c23bc97caf8263b1193fe71487612b7e5",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "15fa367fd5975a0fc7af641090a46a9ca89284bd",
+        "verdict": "approved",
+        "verdict_detail": "approved as annotation intake and fitter; external annotations and independent U oracle remain unavailable",
+        "status": "approved-summary"
+      },
+      "limits": "No annotation producer, annotation dataset, fitted expert-goal artifact, or simulator validation; this does not complete expert-goal Phase 2 evidence."
+    },
+    {
+      "requirement_id": "c1-centered-categorical-replay",
+      "title": "C1 centered categorical log-probability replay",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/c1-centered-categorical.md",
+          "sha256": "d37d0e158e6c548163d8d90f95df0b940f25bc31d3b3f181ce08186620d875bd",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "8587f1f3c11863384df655b7783d0b928ddf89ac",
+        "paths": [
+          "frc_defense/meco_tracks.py",
+          "frc_defense/meco_track_training.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/c1-centered-categorical.md",
+          "sha256": "d37d0e158e6c548163d8d90f95df0b940f25bc31d3b3f181ce08186620d875bd",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "8587f1f3c11863384df655b7783d0b928ddf89ac",
+        "verdict": "approved",
+        "verdict_detail": "approved after independent static review",
+        "status": "approved-summary"
+      },
+      "limits": "Post-fix training diagnostic and broad seeded simulator evaluation/replay are pending."
     }
+  ],
+  "evidence_class": "scoped_transcript_summary",
+  "limits": [
+    "Original planner and reviewer transcripts were not persisted for earlier tranches.",
+    "This ledger does not claim whole-plan approval, track-wide completion, runtime validation, or agent liveness."
   ]
 }

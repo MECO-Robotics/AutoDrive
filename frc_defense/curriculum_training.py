@@ -309,14 +309,35 @@ class TrainingConfig:
 
 
 def source_identity():
+    # Runtime hipify creates these ignored files from the maintained CUDA
+    # sources above. Exclude them so the first HIP extension import cannot
+    # invalidate a training run's source snapshot.
+    generated_sources = {
+        'frc_defense/csrc/fuel_physics_hip_kernel.hip',
+        'frc_defense/csrc/fuel_sleep_hip_kernel.hip',
+    }
     files = sorted(p for p in (ROOT/'frc_defense').rglob('*')
-                   if p.suffix in ('.py','.cpp','.cu','.h','.cuh','.json','.hip','.hpp','.cc'))
+                   if p.suffix in ('.py','.cpp','.cu','.h','.cuh','.json','.hip','.hpp','.cc')
+                   and p.relative_to(ROOT).as_posix() not in generated_sources)
     identity = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     identity['_runtime_environment'] = {k:v for k,v in sorted(os.environ.items())
         if k.startswith(('AUTODRIVE_', 'FRC_', 'PYTORCH_'))}
     config_path=os.environ.get('FRC_DRIVETRAIN_CONFIG')
     if config_path: identity['_drivetrain_config_sha256']=hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+    identity['_native_fuel_extension'] = _native_fuel_extension_source_identity()
     return identity
+
+
+def _native_fuel_extension_source_identity():
+    """Identify the active/default HIP binary without importing or building it."""
+    from . import fuel_physics_hip
+    return fuel_physics_hip.native_extension_identity()
+
+
+def _prepare_native_gpu_runtime(device):
+    if str(device).startswith('cuda'):
+        from .fuel_physics_hip import prepare_native_fuel_extension
+        prepare_native_fuel_extension(device)
 
 
 def _hash(data):
@@ -626,6 +647,7 @@ def evaluate_curriculum(policy_or_checkpoint, scenario_ids, *, episodes, split='
         raise ValueError('episodes and action_ticks must be positive integers')
     if split not in ('train','validation','test'): raise ValueError('invalid split')
     if isinstance(scenario_ids,str): scenario_ids=(scenario_ids,)
+    _prepare_native_gpu_runtime(device)
     sources=source_identity()
     checkpoint_hash=None
     if isinstance(policy_or_checkpoint,(str,Path)) and str(policy_or_checkpoint) == 'd1':
@@ -709,6 +731,7 @@ def _decode_result(data):
 def train_curriculum(config: TrainingConfig, *, resume=None):
     config.validate();torch.set_num_threads(1)
     if config.disable_miopen: torch.backends.cudnn.enabled=False
+    _prepare_native_gpu_runtime(config.device)
     sources=source_identity()
     output=Path(config.output);output.mkdir(parents=True,exist_ok=True)
     if resume is None and (output/'latest.pt').exists():
@@ -834,6 +857,7 @@ def export_teacher(scenario_id, category, *, episodes=1, master_seed=0, device='
     torch.set_num_threads(1)
     if type(episodes) is not int or episodes<1: raise ValueError('episodes must be positive')
     output=Path(output or ROOT/'evaluations/curriculum-offense/teacher.jsonl');output.parent.mkdir(parents=True,exist_ok=True)
+    _prepare_native_gpu_runtime(device)
     provenance=source_identity();count=0
     with tempfile.NamedTemporaryFile(mode='w',dir=output.parent,delete=False) as stream:
         temp=Path(stream.name)

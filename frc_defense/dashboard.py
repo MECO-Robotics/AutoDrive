@@ -13,6 +13,7 @@ import threading
 import math
 from contextlib import contextmanager
 from .dashboard_api import field_layout_payload, curriculum_status_payload
+from .meco_dashboard import meco_status_payload
 
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
@@ -23,6 +24,7 @@ from .dashboard_simulation import (
     focused_playback_simulation_id,
     replay_code_state,
     prune_scenario_replays,
+    resolve_dashboard_replay_generation,
     ZONE_PLAYBACK_TICKS,
     _SCENARIO_JOB_IDS,
     _SCENARIO_JOB_LOCK,
@@ -65,7 +67,16 @@ def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False):
         yield slot
 
 
-def create_handler(run_dir: Path, curriculum_root: Path | None = None):
+def create_handler(run_dir: Path, curriculum_root: Path | None = None, *,
+                   meco_data_root: Path | None = None):
+    # MECO's campaign ledger remains paired with this checkout; only live run
+    # and evaluation evidence may be read from the explicitly selected root.
+    selected_meco_data_root = (Path(meco_data_root).resolve()
+                               if meco_data_root is not None else None)
+    if (selected_meco_data_root is not None
+            and not selected_meco_data_root.is_dir()):
+        raise ValueError("--meco-data-root must name an existing directory")
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             content_encoding=None
@@ -79,6 +90,18 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                 body = (STATIC_DIR / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path in ("/meco", "/meco.html"):
+                body = (STATIC_DIR / "meco.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path == "/assets/meco.css":
+                body = (STATIC_DIR / "meco.css").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/css; charset=utf-8")
+            elif parsed.path == "/assets/meco.js":
+                body = (STATIC_DIR / "meco.js").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
             elif parsed.path == "/info":
                 body = (STATIC_DIR / "field-guide.html").read_bytes()
                 self.send_response(200)
@@ -156,6 +179,17 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                     body=json.dumps({"status":"waiting","algorithm":"generational",
                                      "campaign":campaign}).encode()
                 self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif parsed.path == "/api/meco-status":
+                try:
+                    body = meco_status_payload(
+                        Path(__file__).resolve().parents[1],
+                        data_root=selected_meco_data_root)
+                    self.send_response(200)
+                except (OSError, ValueError):
+                    body = json.dumps({"schema_version": 1, "policies": [],
+                        "comparison_groups": [], "errors": [{"error": "MECO status unavailable"}]}).encode()
+                    self.send_response(503)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/curriculum-status":
                 body = curriculum_status_payload(run_dir, curriculum_root=curriculum_root)
@@ -346,8 +380,12 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                     return
                 simulation_id=focused_playback_simulation_id(mode,robot_type)
                 path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
-                compressed=path.with_suffix(path.suffix+".gz")
-                if not path.is_file():
+                try:
+                    generation, _manifest=resolve_dashboard_replay_generation(
+                        path.parent,simulation_id)
+                except (OSError,ValueError,json.JSONDecodeError):
+                    generation=None
+                if generation is None:
                     progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                     request={"start_zone":"red","goal_zone":"blue","seed":0,
                         "task":"3v3","control_modes":["offense_deterministic"]+["none"]*5,
@@ -376,8 +414,9 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                     self.wfile.write(body)
                 else:
                     try:
-                        use_gzip="gzip" in self.headers.get("Accept-Encoding","") and compressed.is_file()
-                        body=compressed.read_bytes() if use_gzip else path.read_bytes()
+                        use_gzip="gzip" in self.headers.get("Accept-Encoding","")
+                        body=((generation/"result.json.gz").read_bytes() if use_gzip else
+                              (generation/"result.json").read_bytes())
                     except OSError:
                         self.send_error(500,"could not read focused replay")
                         return
@@ -444,30 +483,43 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                     return
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 progress=json.loads(_json_or_default(progress_path,{}))
-                if progress.get("status")=="error":
+                result_path=progress_path.with_name(progress_path.stem+".result.json")
+                generation=None
+                manifest=None
+                try:
+                    generation,manifest=resolve_dashboard_replay_generation(
+                        result_path.parent,simulation_id)
+                except (OSError,ValueError,json.JSONDecodeError):
+                    pass
+                if manifest is not None:
+                    progress=manifest["ready_status"]
+                if progress.get("status")=="error" and manifest is None:
                     body=json.dumps({"error":progress.get("error","scenario failed")}).encode()
                     self.send_response(500)
                     self.send_header("Content-Type","application/json")
-                elif progress.get("status")!="ready":
+                elif manifest is None and (progress.get("status")=="ready" or
+                        result_path.with_name(f"{simulation_id}.ready.json").exists()):
+                    body=json.dumps({"error":"scenario replay failed integrity verification"}).encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type","application/json")
+                elif manifest is None:
                     body=json.dumps({"error":"scenario playback is not ready"}).encode()
                     self.send_response(409)
                     self.send_header("Content-Type","application/json")
                 else:
-                    result_path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
                     try:
                         playback_view=params.get("view",["0"])[0]=="1"
-                        view_path=result_path.with_suffix(".view.json.gz")
-                        compressed_path=(view_path if playback_view and view_path.is_file()
-                            else result_path.with_suffix(result_path.suffix+".gz"))
-                        if ("gzip" in self.headers.get("Accept-Encoding","") and
-                                compressed_path.is_file()):
+                        view_path=generation/"result.view.json.gz"
+                        compressed_path=(view_path if playback_view else
+                                         generation/"result.json.gz")
+                        if "gzip" in self.headers.get("Accept-Encoding",""):
                             body=compressed_path.read_bytes()
                             content_encoding="gzip"
-                            if playback_view and compressed_path == view_path and len(body) >= 4:
+                            if playback_view and len(body) >= 4:
                                 playback_decoded_size=int.from_bytes(body[-4:],"little")
                         else:
-                            body=result_path.read_bytes()
-                    except OSError:
+                            body=(generation/"result.json").read_bytes()
+                    except (OSError,ValueError,json.JSONDecodeError):
                         body=json.dumps({"error":"scenario result is unavailable"}).encode()
                         self.send_response(500)
                         self.send_header("Content-Type","application/json")
@@ -482,6 +534,27 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 body=_json_or_default(progress_path,{"status":"waiting","tick":0,"total_ticks":ZONE_PLAYBACK_TICKS,"percent":0})
                 progress=json.loads(body)
+                ready_path=progress_path.with_name(f"{simulation_id}.ready.json")
+                try:
+                    _generation,manifest=resolve_dashboard_replay_generation(
+                        progress_path.parent,simulation_id)
+                    progress=manifest["ready_status"]
+                except (OSError,ValueError,json.JSONDecodeError):
+                    if ready_path.exists():
+                        body=json.dumps({"status":"failed",
+                            "error":"scenario replay failed integrity verification"},
+                            separators=(",", ":")).encode()
+                        self.send_response(500)
+                        self.send_header("Content-Type","application/json")
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    # A progress sidecar is advisory. It cannot publish readiness
+                    # without the immutable generation pointer.
+                    if progress.get("status") == "ready":
+                        progress={"status":"waiting","tick":0,
+                            "total_ticks":ZONE_PLAYBACK_TICKS,"percent":0}
+                body=json.dumps(progress,separators=(",", ":")).encode()
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if progress.get("status") in ("waiting","running") and request_path.is_file():
                     try:
@@ -502,6 +575,12 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                         progress=json.loads(progress_path.read_text())
                     except (OSError,json.JSONDecodeError):
                         continue
+                    try:
+                        _generation,manifest=resolve_dashboard_replay_generation(
+                            progress_dir,simulation_id,verify=False)
+                        progress=manifest["ready_status"]
+                    except (OSError,ValueError,json.JSONDecodeError):
+                        pass
                     if progress.get("status") in ("waiting","running","ready"):
                         jobs.append((request_path.stat().st_mtime,{**request,
                             "simulation_id":simulation_id,"progress":progress}))
@@ -515,56 +594,41 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None):
                 prune_scenario_replays(progress_dir,current_state=current)
                 replays=[]
                 if progress_dir.is_dir():
-                    for metadata_path in progress_dir.glob("*.result.meta.json"):
+                    for pointer_path in progress_dir.glob("*.ready.json"):
                         try:
-                            record=json.loads(metadata_path.read_text())
-                        except (OSError,json.JSONDecodeError):
+                            simulation_id=pointer_path.name.removesuffix(".ready.json")
+                            generation, _manifest=resolve_dashboard_replay_generation(
+                                progress_dir,simulation_id)
+                            record=json.loads((generation/"result.meta.json").read_text())
+                        except (OSError,ValueError,json.JSONDecodeError):
                             continue
                         if not isinstance(record,dict):
                             continue
-                        simulation_id=record.get("simulation_id") or metadata_path.name.removesuffix(".result.meta.json")
+                        simulation_id=record.get("simulation_id") or pointer_path.name.removesuffix(".ready.json")
                         if not str(simulation_id).startswith(("scenario-", "focused-")):
                             continue
                         saved=record.get("code_state") or {}
                         saved_dirty=sorted(path for path in saved.get("dirty_files",[])
                             if Path(path).suffix in {".py", ".cpp", ".cu", ".hip", ".json"}
                             or path == "pyproject.toml")
-                        outdated=(bool(record.get("outdated")) or
+                        source_outdated=(bool(record.get("outdated")) or
                             saved.get("commit") != current.get("commit") or
                             saved_dirty != current.get("dirty_files",[]))
-                        view_path=progress_dir/f"{simulation_id}.result.view.json.gz"
+                        checkpoint_source_outdated=bool(
+                            record.get("checkpoint_source_outdated", False))
+                        outdated=(source_outdated or checkpoint_source_outdated)
+                        view_path=generation/"result.view.json.gz"
                         replays.append({"simulation_id":simulation_id,
                             "label":record.get("label") or simulation_id,
                             "seed":record.get("seed"),"behavior_mode":record.get("behavior_mode","match"),
                             "robot_types":record.get("robot_types",[]),"code_state":saved,
-                            "outdated":outdated,
+                            "outdated":outdated,"source_outdated":source_outdated,
+                            "checkpoint_source_outdated":checkpoint_source_outdated,
                             "playback_size_bytes":(view_path.stat().st_size if view_path.is_file()
-                                else (progress_dir/f"{simulation_id}.result.json.gz").stat().st_size
-                                if (progress_dir/f"{simulation_id}.result.json.gz").is_file() else 0),
-                            "updated_at":metadata_path.stat().st_mtime})
+                                else (generation/"result.json.gz").stat().st_size),
+                            "updated_at":pointer_path.stat().st_mtime})
                     # Legacy replay results can be large; only open a bounded
                     # header window to extract the scalar fields we need.
-                    for result_path in progress_dir.glob("*.result.json"):
-                        if result_path.with_suffix(".meta.json").exists():
-                            continue
-                        simulation_id=result_path.name.removesuffix(".result.json")
-                        if not simulation_id.startswith(("scenario-", "focused-")):
-                            continue
-                        try:
-                            with result_path.open("rb") as replay_file:
-                                header=replay_file.read(16384).decode("utf-8",errors="ignore")
-                            seed_match=re.search(r'"seed"\s*:\s*(-?\d+)',header)
-                            behavior_match=re.search(r'"behavior_mode"\s*:\s*"([^"]+)"',header)
-                            types_match=re.search(r'"robot_types"\s*:\s*(\[[^]]*\])',header)
-                            types=json.loads(types_match.group(1)) if types_match else []
-                        except (OSError,json.JSONDecodeError):
-                            seed_match=behavior_match=None
-                            types=[]
-                        replays.append({"simulation_id":simulation_id,"label":simulation_id,
-                            "seed":int(seed_match.group(1)) if seed_match else None,
-                            "behavior_mode":behavior_match.group(1) if behavior_match else "match",
-                            "robot_types":types,"code_state":{},"outdated":True,
-                            "updated_at":result_path.stat().st_mtime})
                 replays.sort(key=lambda item:item["updated_at"],reverse=True)
                 body=json.dumps({"current_code_state":current,"replays":replays},separators=(",",":")).encode()
                 self.send_response(200)
@@ -823,10 +887,16 @@ def main():
     parser.add_argument("--also-host", action="append", default=[],
                         help="Bind an additional address on the same port")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--meco-data-root", type=Path, default=None,
+                        help="Read MECO checkpoints/evaluations from this project root; workflow ledger stays in this dashboard checkout")
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), create_handler(Path(args.run_dir), args.curriculum_root))
+    server = ThreadingHTTPServer((args.host, args.port), create_handler(
+        Path(args.run_dir), meco_data_root=args.meco_data_root,
+        curriculum_root=args.curriculum_root))
     for host in args.also_host:
-        extra = ThreadingHTTPServer((host, args.port), create_handler(Path(args.run_dir), args.curriculum_root))
+        extra = ThreadingHTTPServer((host, args.port), create_handler(
+            Path(args.run_dir), meco_data_root=args.meco_data_root,
+            curriculum_root=args.curriculum_root))
         threading.Thread(target=extra.serve_forever, daemon=True).start()
     hosts = [args.host, *args.also_host]
     print("FRC training dashboard: " + ", ".join(

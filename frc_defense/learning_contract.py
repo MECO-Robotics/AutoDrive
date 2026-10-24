@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Sequence
 
 
@@ -21,7 +22,11 @@ def _finite_tuple(values: Sequence[float], name: str) -> tuple[float, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ObservationSnapshot:
-    """Versioned pose-graph observation; raster is channel-major and flattened."""
+    """Versioned pose-graph observation with simulation and monotonic times.
+
+    ``timestamp`` is simulation time. ``capture_monotonic`` is host monotonic
+    time recorded as this immutable snapshot is constructed.
+    """
 
     snapshot_id: str
     episode_id: str
@@ -31,13 +36,16 @@ class ObservationSnapshot:
     raster: tuple[float, ...]
     globals: tuple[float, ...]
     schema_version: int = 1
+    capture_monotonic: float | None = None
 
     def __post_init__(self) -> None:
         if not self.snapshot_id or not self.episode_id:
             raise ValueError("snapshot_id and episode_id must be nonempty")
         if self.schema_version != 1:
             raise ValueError("unsupported observation schema_version")
-        if self.sequence < 0 or not math.isfinite(self.timestamp):
+        capture = time.monotonic() if self.capture_monotonic is None else float(self.capture_monotonic)
+        if (self.sequence < 0 or not math.isfinite(self.timestamp)
+                or not math.isfinite(capture) or capture < 0):
             raise ValueError("sequence and timestamp must be nonnegative/finite")
         if len(self.raster_shape) != 3 or any(size <= 0 for size in self.raster_shape):
             raise ValueError("raster_shape must contain three positive dimensions")
@@ -51,6 +59,7 @@ class ObservationSnapshot:
         object.__setattr__(self, "raster", raster)
         object.__setattr__(self, "globals", globals_)
         object.__setattr__(self, "raster_shape", tuple(self.raster_shape))
+        object.__setattr__(self, "capture_monotonic", capture)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,10 +73,14 @@ class CandidateTable:
     feature_names: tuple[str, ...]
     route_costs: tuple[float | None, ...] | None = None
     schema_version: int = 2
+    context_digest: str = ""
 
     def __post_init__(self) -> None:
         if self.schema_version != 2 or not self.snapshot_id:
             raise ValueError("unsupported schema or empty snapshot_id")
+        if self.context_digest and (len(self.context_digest) != 64 or any(
+                char not in "0123456789abcdef" for char in self.context_digest)):
+            raise ValueError("context_digest must be an empty string or lowercase SHA-256")
         ids = tuple(self.candidate_ids)
         names = tuple(self.feature_names)
         features = tuple(tuple(None if value is None else _finite_tuple((value,), "candidate feature")[0]
@@ -111,12 +124,22 @@ class ScorerSnapshot:
     scores: tuple[float, ...]
     timestamp: float
     schema_version: int = 1
+    observation_digest: str = ""
+    candidate_digest: str = ""
 
     def __post_init__(self) -> None:
         ids = tuple(self.candidate_ids)
         scores = _finite_tuple(self.scores, "scores")
-        if self.schema_version != 1 or not self.model_id or not self.snapshot_id:
+        if self.schema_version not in (1, 2) or not self.model_id or not self.snapshot_id:
             raise ValueError("unsupported schema or empty scorer identity")
+        digests = (self.observation_digest, self.candidate_digest)
+        if self.schema_version == 2:
+            if any(not isinstance(digest, str) or len(digest) != 64
+                   or any(char not in "0123456789abcdef" for char in digest)
+                   for digest in digests):
+                raise ValueError("schema v2 scorer requires SHA-256 input digests")
+        elif any(digests):
+            raise ValueError("input digests require scorer schema v2")
         if not math.isfinite(self.timestamp) or self.timestamp < 0:
             raise ValueError("scorer timestamp must be finite and nonnegative")
         if not ids or len(ids) != len(scores):

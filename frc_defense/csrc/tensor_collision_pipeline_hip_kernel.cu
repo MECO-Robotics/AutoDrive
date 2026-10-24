@@ -64,7 +64,8 @@ __device__ __forceinline__ void static_impulse(
 __device__ __forceinline__ void robot_collision(
     float* p, float* v, const float* length, const float* width,
     const float* mass, const float* yaw_inertia_multiplier, float mu,
-    bool& robot_contact, bool& opponent_contact) {
+    bool& robot_contact, bool& opponent_contact,
+    bool* robot_contact_by_robot) {
   const float theta0 = p[2], theta1 = p[5];
   const float c0 = cosf(theta0), s0 = sinf(theta0);
   const float c1 = cosf(theta1), s1 = sinf(theta1);
@@ -156,6 +157,8 @@ __device__ __forceinline__ void robot_collision(
   v[2] -= jt * rt0 / i0; v[5] += jt * rt1 / i1;
   robot_contact = robot_contact || valid;
   opponent_contact = opponent_contact || valid;
+  robot_contact_by_robot[0] = robot_contact_by_robot[0] || valid;
+  robot_contact_by_robot[1] = robot_contact_by_robot[1] || valid;
 }
 
 __device__ __forceinline__ void wall_contacts(
@@ -358,26 +361,28 @@ __global__ void contact_pipeline_kernel(
     float* pose, float* velocity, const float* length, const float* width,
     const float* mass, const float* yaw_inertia_multiplier, const float* mu,
     const float* wall_mu, const bool* active, bool* robot_contact,
-    bool* opponent_contact, bool* field_contact, bool* wall_contact,
+    bool* opponent_contact, bool* field_contact,
+    bool* robot_contact_by_robot, bool* wall_contact,
     const float* obstacles, int obstacle_count, const float* boxes,
     int box_count, int worlds, float field_length, float field_width,
     int iterations, int stage) {
   const int world = blockIdx.x * blockDim.x + threadIdx.x;
   if (world >= worlds || !active[world]) return;
   float p[6], v[6], len[2], wid[2], m[2], inertia_mul[2];
-  bool wc[4], fc[2];
+  bool wc[4], fc[2], rbc[2];
   for (int i = 0; i < 6; ++i) { p[i] = pose[world * 6 + i]; v[i] = velocity[world * 6 + i]; }
   for (int r = 0; r < 2; ++r) {
     len[r] = length[world * 2 + r]; wid[r] = width[world * 2 + r];
     m[r] = mass[world * 2 + r]; inertia_mul[r] = yaw_inertia_multiplier[world * 2 + r];
     for (int a = 0; a < 2; ++a) wc[r * 2 + a] = wall_contact[world * 4 + r * 2 + a];
     fc[r] = field_contact[world * 2 + r];
+    rbc[r] = robot_contact_by_robot[world * 2 + r];
   }
   bool rc = robot_contact[world];
   bool oc = opponent_contact[world];
   for (int it = 0; it < iterations; ++it) {
     if (stage == -1 || stage == 0)
-      robot_collision(p, v, len, wid, m, inertia_mul, mu[world], rc, oc);
+      robot_collision(p, v, len, wid, m, inertia_mul, mu[world], rc, oc, rbc);
     if (stage == -1 || stage == 1)
       wall_contacts(p, v, len, wid, m, inertia_mul, wall_mu[world], wc,
                     field_length, field_width);
@@ -393,6 +398,7 @@ __global__ void contact_pipeline_kernel(
   opponent_contact[world] = oc;
   for (int r = 0; r < 2; ++r) {
     field_contact[world * 2 + r] = fc[r];
+    robot_contact_by_robot[world * 2 + r] = rbc[r];
     for (int a = 0; a < 2; ++a) wall_contact[world * 4 + r * 2 + a] = wc[r * 2 + a];
   }
 }
@@ -400,7 +406,8 @@ __global__ void contact_pipeline_kernel(
 void contact_pipeline_launch(float* pose, float* velocity, const float* length,
     const float* width, const float* mass, const float* yaw_inertia_multiplier,
     const float* mu, const float* wall_mu, const bool* active, bool* robot_contact,
-    bool* opponent_contact, bool* field_contact, bool* wall_contact,
+    bool* opponent_contact, bool* field_contact,
+    bool* robot_contact_by_robot, bool* wall_contact,
     const float* obstacles, int obstacle_count, const float* boxes, int box_count,
     int worlds, float field_length, float field_width, int iterations, int stage,
     hipStream_t stream) {
@@ -408,7 +415,8 @@ void contact_pipeline_launch(float* pose, float* velocity, const float* length,
   const int blocks = (worlds + threads - 1) / threads;
   hipLaunchKernelGGL(contact_pipeline_kernel, dim3(blocks), dim3(threads), 0, stream,
       pose, velocity, length, width, mass, yaw_inertia_multiplier, mu, wall_mu,
-      active, robot_contact, opponent_contact, field_contact, wall_contact,
+      active, robot_contact, opponent_contact, field_contact,
+      robot_contact_by_robot, wall_contact,
       obstacles, obstacle_count, boxes, box_count, worlds, field_length,
       field_width, iterations, stage);
 }

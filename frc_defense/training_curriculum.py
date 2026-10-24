@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 import math
 
-CURRICULUM_VERSION = '1'
-_SPLITS = {'train': 0, 'validation': 1, 'test': 2}
+CURRICULUM_VERSION = '2'
+_SPLITS = {'train': 0, 'validation': 1, 'test': 2, 'calibration': 3}
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ def seed_partition(scenario_id: str, split: str, count: int, *, master_seed: int
     """
     get_scenario(scenario_id)
     if split not in _SPLITS:
-        raise ValueError('split must be train, validation, or test')
+        raise ValueError('split must be train, validation, test, or calibration')
     if type(count) is not int or not 0 <= count < 2**21:
         raise ValueError('count must be an integer in [0, 2**21)')
     if type(master_seed) is not int or master_seed < 0:
@@ -151,6 +151,7 @@ class CurriculumState:
     seen_evaluation_ids: set[str] = field(default_factory=set)
     qualified_protocol: dict[str, str] = field(default_factory=dict)
     consecutive_protocol: dict[str, str] = field(default_factory=dict)
+    consecutive_checkpoint: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {'curriculum_version': CURRICULUM_VERSION, 'qualified': sorted(self.qualified),
@@ -159,7 +160,8 @@ class CurriculumState:
                 'qualified_throughput': {s: dict(c) for s, c in self.qualified_throughput.items()},
                 'seen_evaluation_ids': sorted(self.seen_evaluation_ids),
                 'qualified_protocol': dict(self.qualified_protocol),
-                'consecutive_protocol': dict(self.consecutive_protocol)}
+                'consecutive_protocol': dict(self.consecutive_protocol),
+                'consecutive_checkpoint': dict(self.consecutive_checkpoint)}
 
     @classmethod
     def from_dict(cls, data: dict) -> CurriculumState:
@@ -170,7 +172,7 @@ class CurriculumState:
             values = data[key]
             if not isinstance(values, list) or any(not isinstance(x, str) or not x for x in values) or len(set(values)) != len(values):
                 raise ValueError(f'invalid {key}')
-        for key in ('consecutive_passes', 'last_qualified_checkpoint', 'qualified_throughput', 'qualified_protocol', 'consecutive_protocol'):
+        for key in ('consecutive_passes', 'last_qualified_checkpoint', 'qualified_throughput', 'qualified_protocol', 'consecutive_protocol', 'consecutive_checkpoint'):
             if not isinstance(data[key], dict) or any(s not in SCENARIOS for s in data[key]):
                 raise ValueError(f'invalid {key}')
         qualified = set(data['qualified'])
@@ -179,8 +181,10 @@ class CurriculumState:
         if any(type(n) is not int or not 0 <= n <= 3 for n in data['consecutive_passes'].values()):
             raise ValueError('invalid pass count')
         streaks = {s for s, n in data['consecutive_passes'].items() if n > 0}
-        if set(data['consecutive_protocol']) != streaks or any(not isinstance(v, str) or not v for v in data['consecutive_protocol'].values()):
-            raise ValueError('positive streaks require protocol identity')
+        if (set(data['consecutive_protocol']) != streaks
+                or set(data['consecutive_checkpoint']) != streaks
+                or any(not isinstance(v, str) or not v for key in ('consecutive_protocol', 'consecutive_checkpoint') for v in data[key].values())):
+            raise ValueError('positive streaks require protocol and checkpoint identity')
         if set(data['last_qualified_checkpoint']) != qualified or set(data['qualified_throughput']) != qualified or set(data['qualified_protocol']) != qualified:
             raise ValueError('qualified scenarios require checkpoint and category baselines')
         if any(n == 3 and scenario not in qualified for scenario, n in data['consecutive_passes'].items()):
@@ -194,7 +198,7 @@ class CurriculumState:
             if not isinstance(categories, dict) or set(categories) != set(SCENARIOS[s].required_categories) or any(not _number(v) for v in categories.values()):
                 raise ValueError('invalid throughput baselines')
         return cls(qualified, dict(data['consecutive_passes']), dict(data['last_qualified_checkpoint']),
-                   {s: dict(c) for s, c in data['qualified_throughput'].items()}, set(data['seen_evaluation_ids']), dict(data['qualified_protocol']), dict(data['consecutive_protocol']))
+                   {s: dict(c) for s, c in data['qualified_throughput'].items()}, set(data['seen_evaluation_ids']), dict(data['qualified_protocol']), dict(data['consecutive_protocol']), dict(data['consecutive_checkpoint']))
 
 
 @dataclass(frozen=True)
@@ -263,7 +267,7 @@ def _failures(result):
     return failures
 
 
-def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, retention_results=()) -> PromotionDecision:
+def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, retention_results=(), additional_failures=()) -> PromotionDecision:
     """Consume one validation round, mutating only progression state.
 
     Retention results share the primary evaluation ID, checkpoint, and protocol.
@@ -272,8 +276,11 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
     historical qualification and checkpoints for callers to schedule recovery.
     """
     scenario = get_scenario(result.scenario_id)
-    failures = _failures(result)
+    failures = _failures(result) + [str(item) for item in additional_failures]
     if result.evaluation_id in state.seen_evaluation_ids:
+        state.consecutive_passes[result.scenario_id] = 0
+        state.consecutive_protocol.pop(result.scenario_id, None)
+        state.consecutive_checkpoint.pop(result.scenario_id, None)
         return PromotionDecision(False, False, ('duplicate evaluation ID',))
     if result.split != 'validation':
         return PromotionDecision(False, False, tuple(failures))
@@ -302,12 +309,15 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
     if failures:
         state.consecutive_passes[result.scenario_id] = 0
         state.consecutive_protocol.pop(result.scenario_id, None)
+        state.consecutive_checkpoint.pop(result.scenario_id, None)
         return PromotionDecision(False, False, tuple(failures))
     previous = state.consecutive_passes.get(result.scenario_id, 0)
-    if state.consecutive_protocol.get(result.scenario_id) != result.protocol_id:
+    if (state.consecutive_protocol.get(result.scenario_id) != result.protocol_id
+            or state.consecutive_checkpoint.get(result.scenario_id) != result.checkpoint_id):
         previous = 0
     streak = min(scenario.gate.consecutive_evaluations, previous + 1)
     state.consecutive_protocol[result.scenario_id] = result.protocol_id
+    state.consecutive_checkpoint[result.scenario_id] = result.checkpoint_id
     state.consecutive_passes[result.scenario_id] = streak
     promoted = result.scenario_id not in state.qualified and streak >= scenario.gate.consecutive_evaluations
     if promoted:

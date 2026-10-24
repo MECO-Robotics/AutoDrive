@@ -938,7 +938,8 @@ class TensorADStar:
     def plan(self, start, goal, heading, length, width, speed=None,
              defender=None, defender_velocity=None, dynamic_defender=False,
              lateral_friction=None, acceleration=None, active_mask=None,
-             robot_obstacles=None, static_active_mask=False):
+             robot_obstacles=None, static_active_mask=False,
+             learned_traversal_cost=None, learned_cost_scale: float = 1.0):
         """Plan selected worlds and return the persistent batched route state."""
         full_batch = active_mask is None
         selected = None
@@ -959,6 +960,52 @@ class TensorADStar:
                 batch_n = selected.numel()
         if batch_n == 0:
             return self.last_path,self.last_lengths,self.last_intercept,self.last_intercept_time
+
+        # Values are dimensionless additive traversal penalties per cardinal
+        # grid step (the base cardinal edge cost is 1; diagonal is sqrt(2)).
+        # The map is shared across selected worlds and must match this planner's
+        # grid. Keeping this absent preserves the historical kernel and cost
+        # path exactly; learned penalties are never interpreted as occupancy.
+        try:
+            learned_cost_scale = float(learned_cost_scale)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "learned_cost_scale must be finite and nonnegative") from exc
+        if not math.isfinite(learned_cost_scale) or learned_cost_scale < 0:
+            raise ValueError("learned_cost_scale must be finite and nonnegative")
+        if learned_traversal_cost is None:
+            learned_cost = None
+        else:
+            source_cost = torch.as_tensor(learned_traversal_cost)
+            learned_cost = torch.as_tensor(learned_traversal_cost,
+                                           device=self.device, dtype=self.dtype)
+            if learned_cost.shape != (self.nx, self.ny):
+                raise ValueError(
+                    f"learned_traversal_cost must have shape {(self.nx, self.ny)}")
+            try:
+                source_version = source_cost._version
+            except RuntimeError:
+                # Inference tensors have no version counter; keep validating
+                # those inputs rather than caching a potentially stale map.
+                source_version = None
+            validated_cost = getattr(
+                self, "_validated_learned_traversal_cost", None)
+            if not (source_version is not None and validated_cost is not None and
+                    validated_cost[0] is source_cost and
+                    validated_cost[1] == source_version and
+                    validated_cost[2] == learned_cost_scale):
+                if not bool(torch.isfinite(learned_cost).all().item()) or \
+                        bool((learned_cost < 0).any().item()):
+                    raise ValueError(
+                        "learned_traversal_cost must be finite and nonnegative")
+                if not bool(torch.isfinite(
+                        learned_cost * float(learned_cost_scale)).all().item()):
+                    raise ValueError(
+                        "scaled learned_traversal_cost must remain finite")
+                if source_version is not None:
+                    self._validated_learned_traversal_cost = (
+                        source_cost, source_version, learned_cost_scale)
+            learned_cost = learned_cost * float(learned_cost_scale)
         def select_rows(value):
             if value is None:
                 return None
@@ -1045,6 +1092,7 @@ class TensorADStar:
             shared_memory_limit = 0
         fused_route_supported = (
             hip_extension is not None and self.dtype == torch.float32 and
+            learned_cost is None and
             self.max_points == 72 and self.nx * self.ny <= 4096 and
             shared_memory_limit >= route_shared_bytes and blocked.is_contiguous()
         )
@@ -1092,6 +1140,10 @@ class TensorADStar:
         # Both the HIP kernels and the Torch fallback broadcast this one
         # field-static grid across worlds without constructing [B, nx, ny].
         bump_cost = self._bump_cost
+        if learned_cost is not None:
+            # Existing bump penalty remains active. A learned map adds cost
+            # without changing the hard safety/occupancy mask.
+            bump_cost = bump_cost + learned_cost
         if not fused_route_supported:
             inf = torch.full((batch_n, self.nx, self.ny), 1.e6,
                              device=self.device, dtype=self.dtype)
@@ -1216,8 +1268,17 @@ class TensorADStar:
             if k % 16 == 0 and not bool(active.any().item()):
                 break
         write_rows(self.potential, value)
-        path,lengths=self._shortcut_path(
-            path,lengths,blocked,start_heading,length,width,speed,acceleration)
+        if learned_cost is None:
+            path,lengths=self._shortcut_path(
+                path,lengths,blocked,start_heading,length,width,speed,acceleration)
+        else:
+            # The legacy LOS/Bézier shortcut knows only occupancy. It could
+            # cross a high-cost learned cell after the weighted search chose a
+            # detour, so retain the searched grid path for learned-cost routes.
+            tail = torch.arange(self.max_points, device=self.device)[None, :] >= lengths[:, None]
+            endpoint = path.gather(
+                1, (lengths - 1).clamp_min(0)[:, None, None].expand(-1, 1, 2))
+            path = torch.where(tail[:, :, None], endpoint, path)
         write_rows(self.last_path, path)
         write_rows(self.last_progress, torch.zeros_like(self.last_progress[:batch_n]))
         write_rows(self.last_lengths, lengths)
