@@ -87,19 +87,23 @@ def opponent_velocity_command(policy_id: str, sensed_state: Mapping[str, torch.T
     own = _read(sensed_state, "own_xy")
     target = _read(sensed_state, "target_xy")
     velocity = _read(sensed_state, "target_velocity_xy")
-    valid = _read(sensed_state, "target_valid").bool()
+    raw_valid = _read(sensed_state, "target_valid")
+    valid_metadata = (torch.isfinite(raw_valid) &
+                      ((raw_valid == 0) | (raw_valid == 1)))
+    valid = raw_valid.bool()
     anchor = _read(sensed_state, "anchor_xy")
     objective = _read(sensed_state, "objective_xy")
     if own.shape[-1:] != (2,) or target.shape != own.shape or velocity.shape != own.shape:
         raise ValueError("own/target positions and sensed target velocity must share [...,2] shape")
-    if anchor.shape != own.shape or objective.shape != own.shape or valid.shape != own.shape[:-1]:
+    if (anchor.shape != own.shape or objective.shape != own.shape or
+            valid.shape != own.shape[:-1]):
         raise ValueError("anchor/objective/valid tensors must match the policy batch shape")
     # Sanitize before arithmetic so a corrupt sensor/metadata value cannot
     # escape as a NaN command. Keep validity masks on-device; bad rows fail
     # closed to a zero velocity request without a host synchronization.
     finite_state = (torch.isfinite(own).all(-1) & torch.isfinite(target).all(-1) &
                     torch.isfinite(velocity).all(-1) & torch.isfinite(anchor).all(-1) &
-                    torch.isfinite(objective).all(-1))
+                    torch.isfinite(objective).all(-1) & valid_metadata)
     own = torch.nan_to_num(own, nan=0., posinf=0., neginf=0.)
     target = torch.nan_to_num(target, nan=0., posinf=0., neginf=0.)
     velocity = torch.nan_to_num(velocity, nan=0., posinf=0., neginf=0.)

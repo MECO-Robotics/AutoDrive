@@ -103,3 +103,13 @@ def test_nonfinite_batch_speed_fails_closed_only_for_corrupt_rows():
     assert torch.isfinite(command).all()
     torch.testing.assert_close(command[0], torch.zeros(2))
     torch.testing.assert_close(command[1], torch.zeros(2))
+
+
+def test_nonfinite_or_nonbinary_validity_metadata_fails_closed():
+    state = _state()
+    state["target_valid"] = torch.tensor([float("nan"), 2.])
+    for policy in ("direct_pursuit", "trench_interceptor", "reactive_defender_b",
+                   "orbit_to_pursuit_switch"):
+        command = opponent_velocity_command(policy, state, tick=400)
+        assert torch.isfinite(command).all()
+        torch.testing.assert_close(command, torch.zeros_like(command))
