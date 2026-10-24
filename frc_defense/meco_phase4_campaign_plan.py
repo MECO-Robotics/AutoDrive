@@ -22,6 +22,10 @@ from .meco_phase4_design import (
     compile_phase4_design_overlay,
 )
 from .meco_phase4_runtime_adapter import phase4_requirement_binding
+from .meco_phase4_opponents import (POLICY_CONFIG, POLICY_FACTOR_IDS,
+                                    opponent_policy_runtime_domain_supported,
+                                    opponent_policy_runtime_slots, policy_assignment_identity,
+                                    policy_pool_identity)
 
 
 PLAN_SCHEMA = "meco-phase4-validation-campaign-plan-v1"
@@ -58,7 +62,8 @@ def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, 
         if key in result:
             raise ValueError("duplicate validation case axis identity")
         result[key] = {"case": {axis: row[axis] for axis in CASE_AXES},
-                       "seed_count": len(seeds), "seed_sha256": _seed_digest(seeds)}
+                       "seed_count": len(seeds), "seed_sha256": _seed_digest(seeds),
+                       "_seed_values_internal": tuple(seeds)}
     return result
 
 
@@ -139,6 +144,67 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
             for case, seed_info in applicable:
                 for product in design_products:
                     design_axes = dict(zip(names, product))
+                    reactive_assignment = None
+                    if req_id == "reactive_defenders_and_opponent_pools":
+                        policy_id = design_axes.get("policy_pool")
+                        if policy_id not in POLICY_CONFIG["policies"]:
+                            raise ValueError("reactive policy cell has an unknown policy assignment")
+                        config_sha256 = policy_pool_identity()["config_sha256"]
+                        case_payload = {"scenario_id": case["scenario_id"],
+                            "category": case["category"],
+                            "qualification_case": {axis: case[axis] for axis in (
+                                "layout_id", "defender_family", "start_condition",
+                                "sensor_profile")},
+                            "split": "validation",
+                            "validation_seed_assignment_sha256": seed_info["seed_sha256"]}
+                        reactive_assignment = {
+                            "schema": "meco-phase4-opponent-schedule-assignment-v1",
+                            "policy_id": policy_id,
+                            "policy_family": POLICY_FACTOR_IDS[policy_id],
+                            "configured_pressure_slots": (list(opponent_policy_runtime_slots(
+                                case["category"])) if opponent_policy_runtime_domain_supported(
+                                    case["scenario_id"], case["category"]) else []),
+                            "policy_config_sha256": config_sha256,
+                            "protocol_bound_evaluation_case": case_payload,
+                            "stimulus_identity_sha256": _sha256(_canonical_bytes({
+                                "case": case_payload, "factor_id": factor,
+                                "policy_id": policy_id,
+                                "policy_config_sha256": config_sha256})),
+                            "factor_treatment_seeded_assignment_sha256": _sha256(
+                                _canonical_bytes([
+                                    policy_assignment_identity(policy_id=policy_id,
+                                        scenario_id=case["scenario_id"],
+                                        category=case["category"],
+                                        qualification_case=case_payload["qualification_case"],
+                                        seed=seed, condition="factor_treatment",
+                                        factor_id=factor)
+                                    for seed in seed_info["_seed_values_internal"]])),
+                            "per_seed_identity_derivation": (
+                                "sha256(canonical validation case, exact seed, factor, policy ID, config hash)"),
+                            "policy_inputs": POLICY_CONFIG["sensing_boundary"],
+                            "runtime_domain_supported": opponent_policy_runtime_domain_supported(
+                                case["scenario_id"], case["category"]),
+                            "planned_policy_rows_per_control_per_category": seed_info["seed_count"],
+                            "control_policy_ids": list(POLICIES),
+                            "pair_conditions": list(CONDITIONS),
+                            "paired_condition_semantics": {
+                                "no_factor": "registered category scripted opponent",
+                                "factor_treatment": policy_id},
+                            "paired_control_category_seed_coverage_sha256": _sha256(
+                                _canonical_bytes([[control, case["category"], seed, condition]
+                                    for control in POLICIES
+                                    for seed in seed_info["_seed_values_internal"]
+                                    for condition in CONDITIONS])),
+                            "paired_control_category_seed_row_count": (
+                                len(POLICIES) * seed_info["seed_count"] * len(CONDITIONS)),
+                            "exact_pair_coverage": True,
+                            "executed": False,
+                            "qualification_eligible": False,
+                        }
+                    status = ("protocol_bound_policy_assignment_planned_not_executed"
+                              if reactive_assignment is not None else
+                              "design_only_unassigned_to_protocol_case" if design_axes else
+                              "planned_validation_not_executed")
                     cell = {
                         "requirement_id": req_id,
                         "factor_id": factor,
@@ -147,8 +213,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "seed_count": seed_info["seed_count"],
                         "validation_seed_assignment_sha256": seed_info["seed_sha256"],
                         "planned_pair_rows_per_policy": 2 * seed_info["seed_count"],
-                        "status": ("design_only_unassigned_to_protocol_case" if design_axes
-                                   else "planned_validation_not_executed"),
+                        "status": status,
                         "schedulable": True,
                         "runtime_factor_kind": runtime_binding[
                             "runtime_factor_by_factor_id"].get(factor),
@@ -157,6 +222,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "runtime_stimulus_supported": (
                             factor in runtime_binding["runtime_factor_by_factor_id"]
                             and runtime_binding["stimulus_supported"]),
+                        "scheduler_assignment_supported": reactive_assignment is not None,
+                        "opponent_schedule_assignment": reactive_assignment,
                         "required_outcome_signals_complete": set(
                             runtime_binding["required_signals"]).issubset(
                                 runtime_binding["authoritative_signals"]),

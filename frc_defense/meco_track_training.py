@@ -2242,6 +2242,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   control_prediction_mode: str | None = None,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None,
+                  phase4_opponent_schedule: dict | None = None,
                   phase4_contact_factor_id: str | None = None,
                   contact_geometry_id: str | None = None,
                   contact_geometry_config: dict | None = None,
@@ -2292,6 +2293,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         qualification_case = evaluation_case
     elif evaluation_protocol is not None or evaluation_case is not None:
         raise ValueError("evaluation protocol/case cannot bind diagnostic or training evaluation")
+    phase4_opponent_policy_id = None
+    if phase4_opponent_schedule is not None:
+        from .meco_phase4_opponents import validate_opponent_policy_schedule
+        validated_schedule = validate_opponent_policy_schedule(
+            phase4_opponent_schedule, scenario_id=scenario_id,
+            categories=categories, qualification_case=qualification_case or {},
+            seeds=scored_seeds, split=split,
+            factor_id=phase4_opponent_schedule.get("factor_id"))
+        phase4_opponent_policy_id = validated_schedule["policy_id"]
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
@@ -2618,6 +2628,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
                         phase4_factor=phase4_factor,
+                        phase4_opponent_policy_id=phase4_opponent_policy_id,
                         contact_geometry_id=contact_geometry_id,
                         contact_geometry_config=contact_geometry_config,
                         **(qualification_case or {}))
@@ -3264,6 +3275,19 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "tracking_loss_reset_count": tracking_loss_reset_count,
                             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
                             "phase4_factor": phase4_factor,
+                            "phase4_opponent_policy": ({
+                                "policy_id": phase4_opponent_policy_id,
+                                "factor_id": phase4_opponent_schedule["factor_id"],
+                                "policy_family": phase4_opponent_schedule["policy_family"],
+                                "schedule_sha256": phase4_opponent_schedule[
+                                    "schedule_sha256"],
+                                "policy_config_sha256": phase4_opponent_schedule[
+                                    "policy_config_sha256"],
+                                "inputs": "own policy_pose plus validity-masked sensed opponent_pose/opponent_velocity and static scenario configuration",
+                                "interception_rate": None,
+                                "paired_outcome_by_family": None,
+                                "qualification_eligible": False,
+                            } if phase4_opponent_schedule is not None else None),
                             "phase4_pair_contact_event": (
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
@@ -3571,6 +3595,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "paired_normal_and_fault_records": True}
                 if inference_disable_tick is not None else None),
             "phase4_factor": phase4_factor,
+            "phase4_opponent_schedule": phase4_opponent_schedule,
+            "phase4_opponent_outcomes": ({
+                "interception_rate": None,
+                "policy_family_coverage": None,
+                "paired_outcome_by_family": None,
+                "qualification_eligible": False,
+            } if phase4_opponent_schedule is not None else None),
             "plan_a_candidate_k_used": False,
             "plan_a_support_order": SUPPORT_ORDER,
             "plan_a_support_contract": "fixed node-major eight-descriptor tensor per legal graph node; masked by one model-independent graph shortest-path pass and vectorized native behavior endpoint/target and heading constraints; carrying dumper ferry pairs are masked because native release may preempt their selected endpoint",

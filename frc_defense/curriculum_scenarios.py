@@ -11,6 +11,7 @@ from .architecture_scenarios import reset_scenario
 from .curriculum_metrics import CurriculumMetrics
 from .fuel_physics_runtime import reset_fuel_physics
 from .meco_phase4 import validate_phase4_factor
+from .meco_phase4_opponents import POLICY_POOL, opponent_velocity_command
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     contact_exposure_actions, contact_exposure_profile,
     phase4_context_identity)
@@ -115,6 +116,27 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         # these scripts; their strategic action is hold.
         for slot in pressure['slots']:
             commands[:, slot] = 0.
+            policy_id = getattr(self, 'phase4_opponent_policy_id', None)
+            if policy_id is not None:
+                # The policy sees its own controller pose and only its noisy,
+                # validity-masked opponent track. Static anchor/objective data
+                # are scenario configuration, not simulator truth state.
+                own_xy = self.policy_pose[:, slot, :2]
+                sensed = {
+                    'own_xy': own_xy,
+                    'target_xy': self.opponent_pose[:, slot, :2],
+                    'target_velocity_xy': self.opponent_velocity[:, slot, :2],
+                    'target_valid': self.opponent_valid[:, slot],
+                    'anchor_xy': self.phase4_defender_anchor[:, slot, :2],
+                    'objective_xy': torch.stack((
+                        torch.full_like(own_xy[:, 0], self.field_length),
+                        torch.full_like(own_xy[:, 1], self.field_width * .5)), dim=-1),
+                    'phase': self.match_elapsed + float(pressure['phase']) / 1.2,
+                }
+                commands[:, slot, :2] = opponent_velocity_command(
+                    policy_id, sensed, tick=self.steps,
+                    max_speed_mps=self.sim.speed[:, slot])
+                continue
             level = pressure['level']
             factor = getattr(self, 'phase4_factor_config', None)
             if factor and slot == 0 and factor['kind'] in (
@@ -180,7 +202,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         production_d0=False, layout_id='2026_rebuilt',
                         defender_family='category_scripted', start_condition='scenario_defined',
                         sensor_profile='standard', phase4_factor=None,
-                        contact_geometry_id=None, contact_geometry_config=None):
+                        contact_geometry_id=None, contact_geometry_config=None,
+                        phase4_opponent_policy_id=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -200,6 +223,12 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     if category not in definition.required_categories:
         raise ValueError(f'unknown category for {scenario_id}: {category}')
     phase4_factor = validate_phase4_factor(phase4_factor)
+    if phase4_opponent_policy_id is not None:
+        if phase4_opponent_policy_id not in POLICY_POOL:
+            raise ValueError('unknown Phase 4 opponent policy ID')
+        if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
+                or _pressure_level(category) not in (1, 2, 3, 4, 5)):
+            raise ValueError('Phase 4 opponent policy requires a registered pressure category')
     if contact_geometry_id is None:
         if contact_geometry_config is not None:
             raise ValueError('contact geometry config requires a registered geometry ID')
@@ -251,6 +280,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         field_layout=layout_id,
         replan_interval=10)
     env.phase4_factor_config = phase4_factor
+    env.phase4_opponent_policy_id = phase4_opponent_policy_id
     env.contact_geometry_id = contact_geometry_id
     env.contact_geometry_config = contact_geometry_config
     env.contact_geometry_runtime = {

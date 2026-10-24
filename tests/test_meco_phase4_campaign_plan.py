@@ -10,6 +10,9 @@ from frc_defense.meco_phase4_campaign_plan import (
     compile_phase4_campaign_plan,
 )
 from frc_defense.meco_phase4_design import compile_phase4_design_overlay
+from frc_defense.meco_phase4_opponents import POLICY_POOL, compile_opponent_policy_schedule
+from frc_defense.meco_validation_campaign_runner import run_phase4_opponent_cell
+from frc_defense.meco_tracks import MECO_TRACKS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,14 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
     trench_categories = {cell["case_axes"]["category"] for cell in trench["cells"]}
     assert len(trench_categories) == 14
     assert all(category.split("/")[1] == "trench" for category in trench_categories)
+    reactive = next(r for r in plan["requirements"]
+                   if r["requirement_id"] == "reactive_defenders_and_opponent_pools")
+    assert len(reactive["cells"]) == (
+        len(reactive["design_axis_domains"]["policy_pool"])
+        * reactive["applicable_protocol_case_count"])
+    assert {cell["opponent_schedule_assignment"]["policy_id"]
+            for cell in reactive["cells"]} == set(
+                reactive["design_axis_domains"]["policy_pool"])
     for requirement in plan["requirements"]:
         assert requirement["pairing_grid"] == [
             {"policy_id": policy, "condition": condition}
@@ -64,7 +75,19 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
             assert cell["runtime_stimulus_supported"] == bool(expected_runtime_factor)
             assert cell["case_cell_key"]
             if cell["design_axes"]:
-                assert cell["status"] == "design_only_unassigned_to_protocol_case"
+                if requirement["requirement_id"] == "reactive_defenders_and_opponent_pools":
+                    assignment = cell["opponent_schedule_assignment"]
+                    assert cell["scheduler_assignment_supported"] is True
+                    assert cell["status"] == "protocol_bound_policy_assignment_planned_not_executed"
+                    assert assignment["protocol_bound_evaluation_case"]["split"] == "validation"
+                    assert assignment["policy_config_sha256"]
+                    assert assignment["stimulus_identity_sha256"]
+                    assert assignment["paired_control_category_seed_row_count"] == 1600
+                    assert len(assignment["paired_control_category_seed_coverage_sha256"]) == 64
+                    assert assignment["executed"] is False
+                    assert assignment["qualification_eligible"] is False
+                else:
+                    assert cell["status"] == "design_only_unassigned_to_protocol_case"
                 assert cell["executable"] is False
             else:
                 # Protocol assignment alone does not make a cell executable:
@@ -73,6 +96,121 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
                 assert cell["executable"] is False
     assert "seeds" not in set(_walk_keys(plan))
     assert "final_test" not in set(_walk_keys(plan))
+
+
+def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_path):
+    plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
+    requirement = next(r for r in plan["requirements"]
+                       if r["requirement_id"] == "reactive_defenders_and_opponent_pools")
+    cell = next(cell for cell in requirement["cells"]
+        if cell["design_axes"].get("policy_pool") == "reactive_defender_a"
+        and cell["case_axes"]["scenario_id"] == "offense_vs_scripted_pressure"
+        and "level_4" in cell["case_axes"]["category"])
+    checkpoints = {}
+    for track in MECO_TRACKS:
+        path = tmp_path / f"{track}.pt"
+        path.write_bytes(track.encode())
+        checkpoints[track] = str(path)
+    observed = []
+
+    def fake_runner(argv):
+        output_dir = Path(argv[argv.index("--output-dir") + 1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest = json.loads(Path(argv[argv.index("--seed-manifest") + 1]).read_text())
+        case_binding = json.loads(Path(argv[argv.index("--qualification-case-json") + 1]).read_text())
+        if "--phase4-opponent-schedule-json" in argv:
+            schedule_path = Path(argv[argv.index("--phase4-opponent-schedule-json") + 1])
+            schedule = json.loads(schedule_path.read_text())
+            assert schedule["policy_id"] == "reactive_defender_a"
+            assert schedule["scenario_id"] == cell["case_axes"]["scenario_id"]
+            assert schedule["categories"] == [cell["case_axes"]["category"]]
+            assert schedule["split"] == "validation"
+            assert schedule["qualification_eligible"] is False
+            assert schedule["configured_pressure_slots"] == {
+                cell["case_axes"]["category"]: [0]}
+            arm = "factor_treatment"
+        else:
+            arm = "no_factor"
+        assert output_dir.name == arm
+        assert argv[argv.index("--conditions") + 1] == "architecture_matched_cv_k16"
+        assert argv[argv.index("--seed-manifest") + 1]
+        policies = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+        rows = []
+        for policy in policies:
+            for category in manifest["categories"]:
+                for seed in manifest["seed_list"]:
+                    rows.append({"policy": policy, "category": category, "seed": seed,
+                        "phase4_opponent_policy": (None if arm == "no_factor" else {
+                            "policy_id": "reactive_defender_a",
+                            "factor_id": schedule["factor_id"],
+                            "policy_family": schedule["policy_family"],
+                            "schedule_sha256": schedule["schedule_sha256"],
+                            "interception_rate": None,
+                            "paired_outcome_by_family": None})})
+        report_path = output_dir / "condition.json"
+        report_path.write_text(json.dumps({"qualification_eligible": False,
+            "records": rows}))
+        matrix_path = output_dir / "mock.matrix.json"
+        matrix_path.write_text(json.dumps({"protocol": {
+            "qualification_case": case_binding,
+            "categories": manifest["categories"], "seed_list": manifest["seed_list"],
+            "condition_selection": ["architecture_matched_cv_k16"],
+            "conditions": [{"condition_name": "architecture_matched_cv_k16"}],
+            "phase4_opponent_schedule": (schedule if arm == "factor_treatment" else None)},
+            "conditions": {"architecture_matched_cv_k16": {"report_path": str(report_path)}}}))
+        observed.append(argv)
+        return 0
+
+    result = run_phase4_opponent_cell(plan, cell["case_cell_key"],
+        protocol_path=PROTOCOL, checkpoint_paths=checkpoints,
+        matrix_script=tmp_path / "matrix.py", output_dir=tmp_path / "dispatch",
+        device="cuda:1", runner=fake_runner)
+    assert result["executed"] is True
+    assert result["simulator_behavior_validated"] is False
+    assert result["outcome_signals_complete"] is False
+    assert result["dispatch_return_codes"] == {
+        "no_factor": 0, "factor_treatment": 0}
+    assert result["qualification_eligible"] is False
+    assert result["required_family_outcomes"] == {
+        "interception_rate": None, "policy_family_coverage": None,
+        "paired_outcome_by_family": None}
+    assert result["paired_coverage"]["exact_policy_category_seed_pair_coverage"] is True
+    assert result["paired_coverage"]["qualification_eligible"] is False
+    assert result["paired_coverage"]["paired_outcome_by_family"] is None
+    assert result["paired_coverage"]["condition_names"] == ["architecture_matched_cv_k16"]
+    assert result["paired_coverage"]["paired_rows_per_condition"][
+        "architecture_matched_cv_k16"] == (
+        11 * cell["seed_count"])
+    assert len(observed) == 2
+
+
+def test_all_policy_ids_match_plan_to_runtime_schedule_identity():
+    plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
+    requirement = next(r for r in plan["requirements"]
+                       if r["requirement_id"] == "reactive_defenders_and_opponent_pools")
+    case = next(cell for cell in requirement["cells"]
+        if cell["design_axes"].get("policy_pool") == POLICY_POOL[0]
+        and "level_4" in cell["case_axes"]["category"])
+    protocol = json.loads(PROTOCOL.read_text())
+    case_axes = case["case_axes"]
+    protocol_row = next(row for row in protocol["cases"]
+        if all(row.get(axis) == case_axes[axis] for axis in case_axes))
+    qualification_case = {axis: case_axes[axis] for axis in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    for policy_id in POLICY_POOL:
+        planned = next(cell for cell in requirement["cells"]
+            if cell["case_axes"] == case_axes
+            and cell["design_axes"].get("policy_pool") == policy_id)
+        assignment = planned["opponent_schedule_assignment"]
+        schedule = compile_opponent_policy_schedule(policy_id=policy_id,
+            scenario_id=case_axes["scenario_id"], categories=(case_axes["category"],),
+            qualification_case=qualification_case, seeds=protocol_row["seeds"],
+            split="validation", factor_id=planned["factor_id"])
+        assert schedule["factor_id"] == planned["factor_id"] == "defender.reactive_pool"
+        assert schedule["policy_family"] == assignment["policy_family"]
+        assert schedule["per_episode_assignment_sha256"] == assignment[
+            "factor_treatment_seeded_assignment_sha256"]
+        assert schedule["configured_pressure_slots"][case_axes["category"]] == [0]
 
 
 def test_rejects_protocol_registry_or_overlay_digest_mismatch(tmp_path):

@@ -44,11 +44,136 @@ POLICY_CONFIG = {
 }
 
 
+def opponent_policy_runtime_domain_supported(scenario_id: str, category: str) -> bool:
+    if scenario_id not in ("offense_vs_scripted_pressure", "full_match_offense"):
+        return False
+    for part in category.split("/"):
+        if part.startswith("level_"):
+            try:
+                return int(part.split("_")[1]) in (1, 2, 3, 4, 5)
+            except ValueError:
+                return False
+    return False
+
+
+def opponent_policy_runtime_slots(category: str) -> tuple[int, ...]:
+    """Configured pressure slots: levels 1–4 use slot 0; level 5 uses 0/1."""
+    level = next((part for part in category.split("/") if part.startswith("level_")), None)
+    digits = None if level is None else level.removeprefix("level_").split("_", 1)[0]
+    if digits is None or not digits.isdigit():
+        raise ValueError("opponent slot scope requires a registered pressure category")
+    value = int(digits)
+    if value in (1, 2, 3, 4):
+        return (0,)
+    if value == 5:
+        return (0, 1)
+    raise ValueError("opponent slot scope supports pressure levels 1 through 5 only")
+
+
 def policy_pool_identity() -> dict[str, str]:
     raw = json.dumps(POLICY_CONFIG, sort_keys=True, separators=(",", ":"),
                      allow_nan=False).encode()
     return {"schema": POLICY_CONFIG["schema"],
             "config_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def policy_assignment_identity(*, policy_id: str, scenario_id: str,
+                               category: str, qualification_case: Mapping[str, str],
+                               seed: int, condition: str,
+                               factor_id: str = "defender.reactive_pool") -> dict[str, str]:
+    """Bind one scheduled policy episode to its validation case and seed.
+
+    This is a scheduling identity only. It does not claim that the simulator
+    applied the policy or produced family-specific outcome signals.
+    """
+    if policy_id not in POLICY_POOL:
+        raise ValueError(f"unknown Phase 4 opponent policy: {policy_id}")
+    if (not isinstance(scenario_id, str) or not scenario_id or
+            not isinstance(category, str) or not category):
+        raise ValueError("opponent assignment requires scenario and category IDs")
+    case_fields = ("layout_id", "defender_family", "start_condition", "sensor_profile")
+    if (not isinstance(qualification_case, Mapping) or
+            set(qualification_case) != set(case_fields) or
+            any(not isinstance(qualification_case[key], str) or
+                not qualification_case[key] for key in case_fields)):
+        raise ValueError("opponent assignment requires a complete validation case")
+    if type(seed) is not int or not 0 <= seed < 2**63:
+        raise ValueError("opponent assignment seed must be a signed-63-bit non-negative integer")
+    if condition not in ("no_factor", "factor_treatment"):
+        raise ValueError("opponent assignment condition is invalid")
+    if not isinstance(factor_id, str) or not factor_id:
+        raise ValueError("opponent assignment factor ID must be nonempty")
+    pool_identity = policy_pool_identity()
+    evaluation_case = {"scenario_id": scenario_id, "category": category,
+                       "qualification_case": dict(qualification_case),
+                       "split": "validation", "seed": seed,
+                       "condition": condition, "policy_id": policy_id}
+    stimulus = {"assignment_schema": "meco-phase4-opponent-assignment-v1",
+                "evaluation_case": evaluation_case,
+                "factor_id": factor_id,
+                "policy_config_sha256": pool_identity["config_sha256"],
+                "sensing_boundary": POLICY_CONFIG["sensing_boundary"]}
+    stimulus_sha256 = hashlib.sha256(json.dumps(stimulus, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return {"policy_id": policy_id,
+            "policy_family": POLICY_FACTOR_IDS[policy_id],
+            "policy_config_sha256": pool_identity["config_sha256"],
+            "stimulus_identity_sha256": stimulus_sha256}
+
+
+def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
+        categories: list[str] | tuple[str, ...], qualification_case: Mapping[str, str],
+        seeds: list[int] | tuple[int, ...], split: str,
+        factor_id: str = "defender.reactive_pool") -> dict:
+    """Build the evaluator input binding for one exact validation policy run."""
+    if split != "validation":
+        raise ValueError("Phase 4 opponent policy schedules are validation-only")
+    if (not isinstance(categories, (list, tuple)) or not categories or
+            any(not isinstance(category, str) or not category for category in categories) or
+            len(set(categories)) != len(categories)):
+        raise ValueError("opponent schedule requires unique nonempty categories")
+    if (not isinstance(seeds, (list, tuple)) or not seeds or
+            any(type(seed) is not int or not 0 <= seed < 2**63 for seed in seeds) or
+            len(set(seeds)) != len(seeds)):
+        raise ValueError("opponent schedule requires unique signed-63-bit validation seeds")
+    # Reuse the exact case validation and policy/domain checks for every row.
+    identities = [policy_assignment_identity(policy_id=policy_id,
+        scenario_id=scenario_id, category=category,
+        qualification_case=qualification_case, seed=seed,
+        condition="factor_treatment", factor_id=factor_id)
+        for category in categories for seed in seeds]
+    payload = {"schema": "meco-phase4-opponent-evaluator-schedule-v1",
+        "policy_id": policy_id, "scenario_id": scenario_id,
+        "categories": list(categories), "qualification_case": dict(qualification_case),
+        "factor_id": factor_id,
+        "policy_family": POLICY_FACTOR_IDS[policy_id],
+        "configured_pressure_slots": {category: list(opponent_policy_runtime_slots(category))
+                                      for category in categories},
+        "split": split, "seed_list": list(seeds),
+        "policy_config_sha256": policy_pool_identity()["config_sha256"],
+        "per_episode_assignment_sha256": hashlib.sha256(json.dumps(identities,
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+        "policy_inputs": POLICY_CONFIG["sensing_boundary"],
+        "runtime_status": "scheduled_not_simulator_validated",
+        "executable": True, "qualification_eligible": False}
+    payload["schedule_sha256"] = hashlib.sha256(json.dumps(payload,
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return payload
+
+
+def validate_opponent_policy_schedule(schedule: dict, *, scenario_id: str,
+        categories: list[str] | tuple[str, ...], qualification_case: Mapping[str, str],
+        seeds: list[int] | tuple[int, ...], split: str,
+        factor_id: str = "defender.reactive_pool") -> dict:
+    if not isinstance(schedule, dict) or schedule.get("schema") != "meco-phase4-opponent-evaluator-schedule-v1":
+        raise ValueError("invalid Phase 4 opponent evaluator schedule")
+    expected = compile_opponent_policy_schedule(policy_id=schedule.get("policy_id"),
+        scenario_id=scenario_id, categories=categories,
+        qualification_case=qualification_case, seeds=seeds, split=split,
+        factor_id=factor_id)
+    if schedule != expected:
+        raise ValueError("opponent evaluator schedule differs from exact protocol case/seed/config")
+    return expected
 
 
 def _unit(vector: torch.Tensor) -> torch.Tensor:

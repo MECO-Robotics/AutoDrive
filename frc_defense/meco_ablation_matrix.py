@@ -656,7 +656,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                replay_seeds: tuple[int, ...] | None = None,
                seed_manifest: str | Path | None = None,
                replay_selection: dict | None = None,
-               contact_geometries: tuple[str, ...] = ()) -> dict:
+               contact_geometries: tuple[str, ...] = (),
+               phase4_opponent_schedule: dict | None = None,
+               condition_names: tuple[str, ...] | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco, load_evaluation_protocol
@@ -724,6 +726,13 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         qualification_provenance = {"protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
             "protocol_file": protocol_file}
+    if phase4_opponent_schedule is not None:
+        from .meco_phase4_opponents import validate_opponent_policy_schedule
+        phase4_opponent_schedule = validate_opponent_policy_schedule(
+            phase4_opponent_schedule, scenario_id=scenario_id,
+            categories=categories, qualification_case=qualification_case,
+            seeds=seeds, split=evaluation_split,
+            factor_id=phase4_opponent_schedule.get("factor_id"))
     output_root = Path(output_dir)
     sealed_test_ledger = (final_test_ledger_path(qualification_protocol,
         qualification_provenance["protocol_id"])
@@ -744,6 +753,14 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         inference_disable_tick=inference_disable_tick,
         qualification_case=qualification_case,
         contact_geometries=contact_geometries)
+    if condition_names is not None:
+        if (not condition_names or len(set(condition_names)) != len(condition_names)
+                or any(not isinstance(name, str) or not name for name in condition_names)):
+            raise ValueError("condition_names must be a nonempty unique condition selection")
+        available = {condition.condition_name: condition for condition in conditions}
+        if any(name not in available for name in condition_names):
+            raise ValueError("condition_names contains an unknown matrix condition")
+        conditions = tuple(available[name] for name in condition_names)
     if replay_seeds is not None:
         # Backward compatible seed-only requests now capture once, for the
         # primary architecture condition, instead of duplicating every replay.
@@ -780,10 +797,12 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
         "qualification_case": qualification_case,
+        "phase4_opponent_schedule": phase4_opponent_schedule,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
         "conditions": condition_specs,
+        "condition_selection": (None if condition_names is None else list(condition_names)),
         "contact_geometry_ids": [condition.contact_geometry_id
             for condition in conditions if condition.contact_geometry_id is not None],
         "phase4_factor_schema": ("meco-phase4-five-level-pressure-v2" if phase4_enabled else None),
@@ -838,6 +857,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
+            phase4_opponent_schedule=phase4_opponent_schedule,
             phase4_contact_factor_id=("contact.robot_bump"
                 if condition.contact_geometry_id is not None else None),
             contact_geometry_id=condition.contact_geometry_id,
@@ -928,134 +948,148 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "report": report, "records": condition_records,
             "condition_id": condition_id}
 
-    contrasts = []
     architecture_name = "architecture_matched_cv_k16"
-    architecture = evaluation_reports[architecture_name]
-    for contrast_name, pairs in POLICY_CONTRASTS.items():
-        condition_name = ("controls_default_d1_current_d2_cv_k16"
-                          if contrast_name == "D1_vs_D2"
-                          else architecture_name)
-        selected_report = evaluation_reports[condition_name]
-        for candidate, reference in pairs:
-            contrasts.append(_contrast_pair(name=contrast_name,
-                condition_id=selected_report["condition_id"],
-                report=selected_report["report"],
-                records=selected_report["records"],
-                candidate_policy=candidate, reference_policy=reference))
-    # Architecture-condition outcomes: all five learned tracks against D0 on
-    # exact common category/seed records. D0 keeps its production behavior.
-    for track in MECO_TRACKS:
-        contrasts.append(_architecture_track_vs_d0(
-            track=track, condition_id=architecture["condition_id"],
-            report=architecture["report"], records=architecture["records"],
-            categories=categories, seeds=seeds))
-    # Matched forecast mode is an episode-paired cross-condition contrast.
-    current = evaluation_reports["matched_prediction_current_k16"]
-    cv = architecture
-    current_records, cv_records = current["records"], cv["records"]
-    for track in MECO_TRACKS:
-        for category in categories:
-            for seed in seeds:
-                current_row = current_records.get((track, category, seed))
-                cv_row = cv_records.get((track, category, seed))
-                if current_row is None or cv_row is None:
-                    raise ValueError(f"matched prediction contrast lacks {track}/{category}/{seed}")
-                contrasts.append({"contrast": "matched_prediction_current_vs_cv",
-                    "candidate_policy": f"{track}@cv",
-                    "reference_policy": f"{track}@current", "paired": True,
-                    "condition_ids": {"current": current["condition_id"],
-                                      "cv": cv["condition_id"]},
-                    "report_provenance": {
-                        "current": {"evaluation_id": current["report"]["evaluation_id"],
-                                    "protocol_id": current["report"]["protocol_id"]},
-                        "cv": {"evaluation_id": cv["report"]["evaluation_id"],
-                               "protocol_id": cv["report"]["protocol_id"]}},
-                    "category": category, "seed": seed,
-                    "current_metrics": _record_metrics(current_row),
-                    "cv_metrics": _record_metrics(cv_row)})
-    # Same-checkpoint P=0 inference ablation; both rows share exact seeds.
-    for track in ("A1", "A2", "A3"):
-        contrasts.append(_contrast_pair(name=f"{track}_P0",
-            condition_id=architecture["condition_id"],
-            report=architecture["report"], records=architecture["records"],
-            candidate_policy=f"{track}_P0", reference_policy=track))
-    # Candidate K sweep: report row-level recall at each common K, without
-    # treating the bounded expanded-goal set as a simulator-optimal oracle.
-    for track in ("C1", "C2"):
-        for name in ("candidate_recall_k8_cv", "architecture_matched_cv_k16",
-                     "candidate_recall_k32_cv"):
-            item = evaluation_reports[name]
+    if architecture_name not in evaluation_reports:
+        raise ValueError("matrix condition selection must include architecture_matched_cv_k16")
+    if condition_names is not None:
+        if tuple(condition_names) != (architecture_name,):
+            raise ValueError("diagnostic condition selection currently supports architecture_matched_cv_k16 only")
+        contrasts = []
+        architecture = evaluation_reports[architecture_name]
+        for track in MECO_TRACKS:
+            contrasts.append(_architecture_track_vs_d0(
+                track=track, condition_id=architecture["condition_id"],
+                report=architecture["report"], records=architecture["records"],
+                categories=categories, seeds=seeds))
+    else:
+        contrasts = []
+        architecture_name = "architecture_matched_cv_k16"
+        architecture = evaluation_reports[architecture_name]
+        for contrast_name, pairs in POLICY_CONTRASTS.items():
+            condition_name = ("controls_default_d1_current_d2_cv_k16"
+                              if contrast_name == "D1_vs_D2"
+                              else architecture_name)
+            selected_report = evaluation_reports[condition_name]
+            for candidate, reference in pairs:
+                contrasts.append(_contrast_pair(name=contrast_name,
+                    condition_id=selected_report["condition_id"],
+                    report=selected_report["report"],
+                    records=selected_report["records"],
+                    candidate_policy=candidate, reference_policy=reference))
+        # Architecture-condition outcomes: all five learned tracks against D0 on
+        # exact common category/seed records. D0 keeps its production behavior.
+        for track in MECO_TRACKS:
+            contrasts.append(_architecture_track_vs_d0(
+                track=track, condition_id=architecture["condition_id"],
+                report=architecture["report"], records=architecture["records"],
+                categories=categories, seeds=seeds))
+        # Matched forecast mode is an episode-paired cross-condition contrast.
+        current = evaluation_reports["matched_prediction_current_k16"]
+        cv = architecture
+        current_records, cv_records = current["records"], cv["records"]
+        for track in MECO_TRACKS:
             for category in categories:
                 for seed in seeds:
-                    row = item["records"].get((track, category, seed))
-                    if row is None:
-                        raise ValueError(f"candidate recall contrast lacks {track}/{category}/{seed}")
-                    contrasts.append({"contrast": "candidate_recall_K_sweep",
-                        "candidate_policy": f"{track}@K={item['report']['candidate_k']}",
-                        "reference_policy": "expanded_route_qualified_candidate_pool",
-                        "paired": True, "condition_id": item["condition_id"],
-                        "report_provenance": {"evaluation_id": item["report"]["evaluation_id"],
-                            "protocol_id": item["report"]["protocol_id"],
-                            "source_identity_sha256": source_hash,
-                            "checkpoint_sha256": bundle_hashes},
+                    current_row = current_records.get((track, category, seed))
+                    cv_row = cv_records.get((track, category, seed))
+                    if current_row is None or cv_row is None:
+                        raise ValueError(f"matched prediction contrast lacks {track}/{category}/{seed}")
+                    contrasts.append({"contrast": "matched_prediction_current_vs_cv",
+                        "candidate_policy": f"{track}@cv",
+                        "reference_policy": f"{track}@current", "paired": True,
+                        "condition_ids": {"current": current["condition_id"],
+                                          "cv": cv["condition_id"]},
+                        "report_provenance": {
+                            "current": {"evaluation_id": current["report"]["evaluation_id"],
+                                        "protocol_id": current["report"]["protocol_id"]},
+                            "cv": {"evaluation_id": cv["report"]["evaluation_id"],
+                                   "protocol_id": cv["report"]["protocol_id"]}},
                         "category": category, "seed": seed,
-                        "candidate_recall": row.get("candidate_recall")})
-    # Fault report contains both normal and disabled-inference episodes.
-    fault = evaluation_reports["inference_disabled_fallback_current_k16"]
-    fault_report = fault["report"]
-    fault_records = fault["records"]
-    for track in MECO_TRACKS:
-        candidate_policy = f"{track}__INFERENCE_DISABLED_TO_D1"
-        contrasts.append(_contrast_pair(name="inference_disable_to_D1",
-            condition_id=fault["condition_id"], report=fault_report,
-            records=fault_records, candidate_policy=candidate_policy,
-            reference_policy=track))
-
-    # Each Phase 4 treatment is paired against the same-checkpoint, same-seed
-    # no-factor scenario condition. Every row covers all five learned tracks
-    # and D0/D1/D2 controls; the factor is the only condition-level difference.
-    if phase4_enabled:
-        baseline = evaluation_reports[architecture_name]
-        factor_policies = (*MECO_TRACKS, "D0", "D1", "D2")
-        for name in PHASE4_FACTORS:
-            treatment_name = f"phase4_{name}"
-            if treatment_name not in evaluation_reports:
-                continue
-            treatment = evaluation_reports[treatment_name]
-            treatment_categories = treatment["report"]["categories"]
-            for policy in factor_policies:
-                for category in treatment_categories:
+                        "current_metrics": _record_metrics(current_row),
+                        "cv_metrics": _record_metrics(cv_row)})
+        # Same-checkpoint P=0 inference ablation; both rows share exact seeds.
+        for track in ("A1", "A2", "A3"):
+            contrasts.append(_contrast_pair(name=f"{track}_P0",
+                condition_id=architecture["condition_id"],
+                report=architecture["report"], records=architecture["records"],
+                candidate_policy=f"{track}_P0", reference_policy=track))
+        # Candidate K sweep: report row-level recall at each common K, without
+        # treating the bounded expanded-goal set as a simulator-optimal oracle.
+        for track in ("C1", "C2"):
+            for name in ("candidate_recall_k8_cv", "architecture_matched_cv_k16",
+                         "candidate_recall_k32_cv"):
+                item = evaluation_reports[name]
+                for category in categories:
                     for seed in seeds:
-                        treated = treatment["records"].get((policy, category, seed))
-                        control = baseline["records"].get((policy, category, seed))
-                        if treated is None or control is None:
-                            raise ValueError(
-                                f"Phase 4 paired contrast lacks {policy}/{category}/{seed}")
-                        expected_stratum = qualification_case
-                        treated_stratum = {key: treated.get(key)
-                            for key in DEFAULT_EVALUATION_STRATUM}
-                        control_stratum = {key: control.get(key)
-                            for key in DEFAULT_EVALUATION_STRATUM}
-                        if (treated_stratum != expected_stratum or
-                                control_stratum != expected_stratum or
-                                treated_stratum != control_stratum):
-                            raise ValueError(
-                                f"Phase 4 pair has mismatched evaluation strata for {policy}/{category}/{seed}")
-                        contrasts.append({"contrast": "phase4_factor_vs_no_factor",
-                            "factor": name,
-                            "factor_sha256": phase4_factor_digest(
-                                treatment["report"].get("phase4_factor")),
-                            "candidate_policy": policy, "reference_policy": policy,
-                            "paired": True,
-                            "condition_ids": {"factor": treatment["condition_id"],
-                                "baseline": baseline["condition_id"]},
-                            "qualification_case": expected_stratum,
+                        row = item["records"].get((track, category, seed))
+                        if row is None:
+                            raise ValueError(f"candidate recall contrast lacks {track}/{category}/{seed}")
+                        contrasts.append({"contrast": "candidate_recall_K_sweep",
+                            "candidate_policy": f"{track}@K={item['report']['candidate_k']}",
+                            "reference_policy": "expanded_route_qualified_candidate_pool",
+                            "paired": True, "condition_id": item["condition_id"],
+                            "report_provenance": {"evaluation_id": item["report"]["evaluation_id"],
+                                "protocol_id": item["report"]["protocol_id"],
+                                "source_identity_sha256": source_hash,
+                                "checkpoint_sha256": bundle_hashes},
                             "category": category, "seed": seed,
-                            "factor_metrics": _record_metrics(treated),
-                            "baseline_metrics": _record_metrics(control),
-                            "factor_runtime": treated.get("phase4_factor_runtime")})
-                        contrasts[-1]["realization_capture"] = treated.get(
-                            "phase4_realization_capture")
+                            "candidate_recall": row.get("candidate_recall")})
+        # Fault report contains both normal and disabled-inference episodes.
+        fault = evaluation_reports["inference_disabled_fallback_current_k16"]
+        fault_report = fault["report"]
+        fault_records = fault["records"]
+        for track in MECO_TRACKS:
+            candidate_policy = f"{track}__INFERENCE_DISABLED_TO_D1"
+            contrasts.append(_contrast_pair(name="inference_disable_to_D1",
+                condition_id=fault["condition_id"], report=fault_report,
+                records=fault_records, candidate_policy=candidate_policy,
+                reference_policy=track))
+
+        # Each Phase 4 treatment is paired against the same-checkpoint, same-seed
+        # no-factor scenario condition. Every row covers all five learned tracks
+        # and D0/D1/D2 controls; the factor is the only condition-level difference.
+        if phase4_enabled:
+            baseline = evaluation_reports[architecture_name]
+            factor_policies = (*MECO_TRACKS, "D0", "D1", "D2")
+            for name in PHASE4_FACTORS:
+                treatment_name = f"phase4_{name}"
+                if treatment_name not in evaluation_reports:
+                    continue
+                treatment = evaluation_reports[treatment_name]
+                treatment_categories = treatment["report"]["categories"]
+                for policy in factor_policies:
+                    for category in treatment_categories:
+                        for seed in seeds:
+                            treated = treatment["records"].get((policy, category, seed))
+                            control = baseline["records"].get((policy, category, seed))
+                            if treated is None or control is None:
+                                raise ValueError(
+                                    f"Phase 4 paired contrast lacks {policy}/{category}/{seed}")
+                            expected_stratum = qualification_case
+                            treated_stratum = {key: treated.get(key)
+                                for key in DEFAULT_EVALUATION_STRATUM}
+                            control_stratum = {key: control.get(key)
+                                for key in DEFAULT_EVALUATION_STRATUM}
+                            if (treated_stratum != expected_stratum or
+                                    control_stratum != expected_stratum or
+                                    treated_stratum != control_stratum):
+                                raise ValueError(
+                                    f"Phase 4 pair has mismatched evaluation strata for {policy}/{category}/{seed}")
+                            contrasts.append({"contrast": "phase4_factor_vs_no_factor",
+                                "factor": name,
+                                "factor_sha256": phase4_factor_digest(
+                                    treatment["report"].get("phase4_factor")),
+                                "candidate_policy": policy, "reference_policy": policy,
+                                "paired": True,
+                                "condition_ids": {"factor": treatment["condition_id"],
+                                    "baseline": baseline["condition_id"]},
+                                "qualification_case": expected_stratum,
+                                "category": category, "seed": seed,
+                                "factor_metrics": _record_metrics(treated),
+                                "baseline_metrics": _record_metrics(control),
+                                "factor_runtime": treated.get("phase4_factor_runtime")})
+                            contrasts[-1]["realization_capture"] = treated.get(
+                                "phase4_realization_capture")
 
     # Repeat the frozen bundle identity on every contrast so a contrast row
     # remains auditable when copied out of the matrix-level report.

@@ -1,7 +1,10 @@
 import torch
+import pytest
 
 from frc_defense.meco_phase4_opponents import (
-    POLICY_FACTOR_IDS, POLICY_POOL, opponent_velocity_command, policy_pool_identity,
+    POLICY_FACTOR_IDS, POLICY_POOL, compile_opponent_policy_schedule,
+    opponent_velocity_command, policy_pool_identity,
+    validate_opponent_policy_schedule,
 )
 
 
@@ -25,6 +28,31 @@ def test_pool_covers_frozen_design_axis_and_has_stable_identity():
     assert set(POLICY_FACTOR_IDS) == set(POLICY_POOL)
     assert policy_pool_identity() == policy_pool_identity()
     assert len(policy_pool_identity()["config_sha256"]) == 64
+
+
+def test_validation_schedule_binds_policy_case_seeds_and_sensor_boundary():
+    case = {"layout_id": "layout-a", "defender_family": "held-family",
+            "start_condition": "start-a", "sensor_profile": "noisy"}
+    schedule = compile_opponent_policy_schedule(policy_id="reactive_defender_a",
+        scenario_id="offense_vs_scripted_pressure", categories=("active/trench/level_4_reactive",),
+        qualification_case=case, seeds=(10, 20), split="validation")
+    assert schedule["executable"] is True
+    assert schedule["qualification_eligible"] is False
+    assert "sensed" in schedule["policy_inputs"]
+    assert schedule["policy_config_sha256"] == policy_pool_identity()["config_sha256"]
+    assert validate_opponent_policy_schedule(schedule,
+        scenario_id="offense_vs_scripted_pressure",
+        categories=("active/trench/level_4_reactive",),
+        qualification_case=case, seeds=(10, 20), split="validation") == schedule
+    with pytest.raises(ValueError, match="exact protocol case/seed/config"):
+        validate_opponent_policy_schedule(schedule,
+            scenario_id="offense_vs_scripted_pressure",
+            categories=("active/trench/level_4_reactive",),
+            qualification_case=case, seeds=(10, 21), split="validation")
+    with pytest.raises(ValueError, match="validation-only"):
+        compile_opponent_policy_schedule(policy_id="reactive_defender_a",
+            scenario_id="offense_vs_scripted_pressure", categories=("active/trench/level_4_reactive",),
+            qualification_case=case, seeds=(10, 20), split="test")
 
 
 def test_commands_are_deterministic_bounded_and_track_masked():

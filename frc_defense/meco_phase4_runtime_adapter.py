@@ -62,7 +62,7 @@ PHASE4_REQUIREMENT_BINDINGS = {
         "factor_ids": ("defender.reactive_pool",),
         "runtime_event": None,
         "required_signals": ("interception_rate", "policy_family_coverage", "paired_outcome_by_family"),
-        "limitations": ("seven-policy helper is not wired into validation episode scheduling", "policy-family outcome signals unavailable")},
+        "limitations": ("deterministic policy IDs and sensed-track command hook are bound to validation schedules, but no representative simulator run has validated slot application", "interception and paired policy-family outcome signals unavailable")},
     "multiple_legal_team_start_states": {**_COMMON,
         "factor_ids": ("start.legal_team_poses",),
         "runtime_event": None,

@@ -37,6 +37,10 @@ def _parser() -> argparse.ArgumentParser:
                         help="frozen protocol whose validation/test seeds the matrix must use")
     parser.add_argument("--qualification-case-json", type=Path,
                         help="JSON object with layout_id, defender_family, start_condition, sensor_profile")
+    parser.add_argument("--phase4-opponent-schedule-json", type=Path,
+                        help="protocol-bound validation opponent policy assignment")
+    parser.add_argument("--conditions",
+                        help="comma-separated exact condition names; diagnostic subset mode")
     parser.add_argument("--replay-output-dir", type=Path,
                         help="opt-in dashboard replay directory, typically <run>/.scenario-progress")
     parser.add_argument("--replay-seeds", type=int, nargs="+",
@@ -88,7 +92,11 @@ def main(argv=None) -> int:
         replay_output_dir=args.replay_output_dir,
         replay_seeds=(None if args.replay_seeds is None else tuple(args.replay_seeds)),
         seed_manifest=args.seed_manifest,
-        replay_selection=replay_selection)
+        replay_selection=replay_selection,
+        phase4_opponent_schedule=(json.loads(args.phase4_opponent_schedule_json.read_text(
+            encoding="utf-8")) if args.phase4_opponent_schedule_json else None),
+        condition_names=(None if args.conditions is None else tuple(
+            part for part in args.conditions.split(",") if part)))
     print(json.dumps({"matrix_id": report["matrix_id"],
         "conditions": len(report["conditions"]),
         "contrasts": len(report["contrasts"]),

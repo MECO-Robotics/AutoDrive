@@ -23,6 +23,123 @@ JOB_INPUT_SCHEMA = "meco-validation-campaign-job-input-v1"
 JOB_COMPLETE_SCHEMA = "meco-validation-campaign-job-complete-v1"
 
 
+def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
+        protocol_path: str | Path, checkpoint_paths: dict[str, str],
+        matrix_script: str | Path, output_dir: str | Path, device: str,
+        runner: Callable[[list[str]], int] | None = None) -> dict:
+    """Dispatch one protocol-bound reactive-opponent diagnostic cell.
+
+    The normal campaign runner groups categories. This narrow path keeps the
+    Phase 4 category/policy/seed assignment atomic and passes it through the
+    same matrix CLI into ``evaluate_meco``. It makes no qualification claim.
+    """
+    if (not isinstance(plan, dict) or plan.get("schema") !=
+            "meco-phase4-validation-campaign-plan-v1"):
+        raise ValueError("invalid Phase 4 validation campaign plan")
+    if plan.get("plan_id") != _sha({key: value for key, value in plan.items()
+                                    if key != "plan_id"}):
+        raise ValueError("Phase 4 campaign plan digest mismatch")
+    requirement = next((row for row in plan.get("requirements", [])
+        if row.get("requirement_id") == "reactive_defenders_and_opponent_pools"), None)
+    if requirement is None:
+        raise ValueError("Phase 4 plan lacks the reactive opponent requirement")
+    matches = [cell for cell in requirement.get("cells", [])
+               if cell.get("case_cell_key") == cell_key]
+    if len(matches) != 1:
+        raise ValueError("Phase 4 reactive cell key is missing or duplicated")
+    cell = matches[0]
+    assignment = cell.get("opponent_schedule_assignment")
+    if (not isinstance(assignment, dict) or
+            cell.get("scheduler_assignment_supported") is not True or
+            assignment.get("qualification_eligible") is not False):
+        raise ValueError("Phase 4 reactive cell lacks a diagnostic schedule assignment")
+    if (not isinstance(checkpoint_paths, dict) or
+            set(checkpoint_paths) != set(MECO_TRACKS)):
+        raise ValueError("Phase 4 matrix dispatch requires all five checkpoints")
+
+    from .meco_phase4_design import CASE_AXES, _read_protocol_validation
+    from .meco_phase4_opponents import (compile_opponent_policy_schedule,
+        opponent_policy_runtime_domain_supported)
+    protocol, raw = _read_protocol_validation(protocol_path)
+    if hashlib.sha256(raw).hexdigest() != plan.get("protocol_binding", {}).get(
+            "protocol_raw_file_sha256"):
+        raise ValueError("Phase 4 dispatch protocol differs from the frozen plan")
+    case_axes = cell.get("case_axes")
+    if not isinstance(case_axes, dict) or set(case_axes) != set(CASE_AXES):
+        raise ValueError("Phase 4 dispatch cell has an invalid protocol case")
+    if not opponent_policy_runtime_domain_supported(
+            case_axes["scenario_id"], case_axes["category"]):
+        raise ValueError("Phase 4 opponent dispatch is outside pressure-category runtime domain")
+    protocol_rows = [row for row in protocol["cases"]
+        if all(row.get(axis) == case_axes[axis] for axis in CASE_AXES)]
+    if len(protocol_rows) != 1:
+        raise ValueError("Phase 4 dispatch case is not unique in validation protocol")
+    seeds = protocol_rows[0].get("seeds")
+    if (_sha(seeds) != cell.get(
+            "validation_seed_assignment_sha256") or len(seeds) != cell.get("seed_count")):
+        raise ValueError("Phase 4 dispatch seeds differ from the protocol-bound cell")
+    qualification_case = {axis: case_axes[axis] for axis in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    schedule = compile_opponent_policy_schedule(
+        policy_id=assignment["policy_id"], scenario_id=case_axes["scenario_id"],
+        categories=(case_axes["category"],), qualification_case=qualification_case,
+        seeds=seeds, split="validation", factor_id=cell["factor_id"])
+    if (schedule["policy_config_sha256"] != assignment.get("policy_config_sha256")
+            or schedule["factor_id"] != cell.get("factor_id")
+            or schedule["policy_family"] != assignment.get("policy_family")
+            or schedule["per_episode_assignment_sha256"] !=
+                assignment.get("factor_treatment_seeded_assignment_sha256")
+            or schedule["configured_pressure_slots"].get(case_axes["category"])
+                != assignment.get("configured_pressure_slots")):
+        raise ValueError("runtime schedule differs from the planner's exact policy/config/seed assignment")
+    case_dir = Path(output_dir).resolve()
+    case_dir.mkdir(parents=True, exist_ok=True)
+    seed_manifest = {"schema": "meco-exact-seed-manifest-v1",
+        "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": hashlib.sha256(raw).hexdigest(),
+        "scenario_id": case_axes["scenario_id"],
+        "categories": [case_axes["category"]], "split": "validation",
+        "qualification_case": qualification_case, "seed_list": seeds}
+    seed_path = case_dir / "seed-manifest.json"
+    schedule_path = case_dir / "opponent-schedule.json"
+    case_path = case_dir / "qualification-case.json"
+    _write_immutable(seed_path, seed_manifest)
+    _write_immutable(schedule_path, schedule)
+    _write_immutable(case_path, qualification_case)
+    base_argv = [sys.executable, str(Path(matrix_script).resolve()),
+        "--scenario", case_axes["scenario_id"], "--categories", case_axes["category"],
+        "--seed-manifest", str(seed_path), "--qualification-protocol",
+        str(Path(protocol_path).resolve()), "--qualification-case-json", str(case_path),
+        "--device", device, "--conditions", "architecture_matched_cv_k16"]
+    for track in MECO_TRACKS:
+        base_argv += [f"--{track.lower()}-checkpoint",
+                      str(Path(checkpoint_paths[track]).resolve())]
+    execute = runner or (lambda command: subprocess.run(command, check=False).returncode)
+    pair_results = {}
+    for condition in ("no_factor", "factor_treatment"):
+        argv = [*base_argv, "--output-dir", str(case_dir / condition)]
+        if condition == "factor_treatment":
+            argv += ["--phase4-opponent-schedule-json", str(schedule_path)]
+        pair_results[condition] = execute(argv)
+    pairing = None
+    if all(result == 0 for result in pair_results.values()):
+        pairing = _validate_phase4_opponent_pair(case_dir, schedule,
+            categories=[case_axes["category"]], seeds=seeds,
+            qualification_case=qualification_case)
+    return {"case_cell_key": cell_key,
+        "policy_id": assignment["policy_id"],
+        "schedule_sha256": schedule["schedule_sha256"],
+        "runtime_status": "scheduled_not_simulator_validated",
+        "simulator_behavior_validated": False,
+        "outcome_signals_complete": False,
+        "qualification_eligible": False,
+        "required_family_outcomes": {"interception_rate": None,
+            "policy_family_coverage": None, "paired_outcome_by_family": None},
+        "paired_coverage": pairing,
+        "dispatch_return_codes": pair_results,
+        "executed": all(result == 0 for result in pair_results.values())}
+
+
 def _read_json(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -32,6 +149,102 @@ def _read_json(path: Path) -> dict:
 
 def _file_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
+        *, categories: list[str], seeds: list[int], qualification_case: dict) -> dict:
+    """Require exact paired controls/category/seeds across both matrix arms."""
+    from .meco_tracks import MECO_TRACKS
+    policy_names = set((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
+    matrix_files = {}
+    reports_by_arm = {}
+    paired_matrix_binding = None
+    expected_keys = {(policy, category, seed) for policy in policy_names
+                     for category in categories for seed in seeds}
+    for arm in ("no_factor", "factor_treatment"):
+        paths = sorted((case_dir / arm).glob("*.matrix.json"))
+        if len(paths) != 1:
+            raise ValueError(f"Phase 4 {arm} arm lacks exactly one matrix report")
+        matrix = _read_json(paths[0])
+        protocol = matrix.get("protocol", {})
+        expected_schedule = schedule if arm == "factor_treatment" else None
+        if (protocol.get("qualification_case") != qualification_case
+                or protocol.get("categories") != categories
+                or protocol.get("seed_list") != seeds
+                or protocol.get("condition_selection") != ["architecture_matched_cv_k16"]
+                or [condition.get("condition_name") for condition in protocol.get("conditions", [])]
+                    != ["architecture_matched_cv_k16"]
+                or protocol.get("phase4_opponent_schedule") != expected_schedule):
+            raise ValueError(f"Phase 4 {arm} matrix differs from its frozen paired assignment")
+        binding = {key: protocol.get(key) for key in (
+            "scenario_id", "qualification_protocol_id", "qualification_protocol",
+            "checkpoint_sha256", "source_identity_sha256",
+            "training_configuration_sha256", "execution_device",
+            "qualification_case", "categories", "seed_list")}
+        if paired_matrix_binding is None:
+            paired_matrix_binding = binding
+        elif binding != paired_matrix_binding:
+            raise ValueError("Phase 4 pair arms differ in protocol/checkpoint/source/device binding")
+        condition_map = matrix.get("conditions")
+        if (not isinstance(condition_map, dict)
+                or set(condition_map) != {"architecture_matched_cv_k16"}):
+            raise ValueError(f"Phase 4 {arm} matrix has no condition reports")
+        arm_reports = {}
+        for condition_name, entry in condition_map.items():
+            report = _read_json(Path(entry["report_path"]).resolve())
+            rows = _records_by_key(report)
+            if set(rows) != expected_keys:
+                raise ValueError(f"Phase 4 {arm}/{condition_name} has incomplete policy/category/seed coverage")
+            if report.get("qualification_eligible") is not False:
+                raise ValueError("Phase 4 opponent outputs cannot be qualification eligible")
+            for key, row in rows.items():
+                captured = row.get("phase4_opponent_policy")
+                if arm == "no_factor" and captured is not None:
+                    raise ValueError("no-factor control unexpectedly applied a reactive policy")
+                if arm == "factor_treatment":
+                    if (not isinstance(captured, dict)
+                            or captured.get("policy_id") != schedule["policy_id"]
+                            or captured.get("factor_id") != schedule["factor_id"]
+                            or captured.get("policy_family") != schedule["policy_family"]
+                            or captured.get("schedule_sha256") != schedule["schedule_sha256"]
+                            or captured.get("interception_rate") is not None
+                            or captured.get("paired_outcome_by_family") is not None):
+                        raise ValueError(f"Phase 4 treatment row lacks policy provenance/null outcomes: {key}")
+            arm_reports[condition_name] = rows
+        arm_reports_by_name = arm_reports
+        if arm == "no_factor":
+            condition_names = set(arm_reports_by_name)
+        elif set(arm_reports_by_name) != condition_names:
+            raise ValueError("Phase 4 matrix arms have different condition coverage")
+        reports_by_arm[arm] = arm_reports_by_name
+        matrix_files[arm] = paths[0]
+    pair_counts = {}
+    for condition_name in sorted(condition_names):
+        control = reports_by_arm["no_factor"][condition_name]
+        treatment = reports_by_arm["factor_treatment"][condition_name]
+        if set(control) != set(treatment):
+            raise ValueError(f"Phase 4 pair key coverage differs for {condition_name}")
+        pair_counts[condition_name] = len(control)
+    pairing = {"schema": "meco-phase4-reactive-opponent-pair-coverage-v1",
+        "policy_id": schedule["policy_id"],
+        "schedule_sha256": schedule["schedule_sha256"],
+        "condition_names": sorted(condition_names),
+        "control_policy_ids": sorted(policy_names),
+        "categories": categories,
+        "validation_seed_assignment_sha256": _sha(seeds),
+        "paired_rows_per_condition": pair_counts,
+        "exact_policy_category_seed_pair_coverage": True,
+        "runtime_status": "scheduled_not_simulator_validated",
+        "simulator_behavior_validated": False,
+        "outcome_signals_complete": False,
+        "paired_outcome_by_family": None,
+        "interception_rate": None,
+        "qualification_eligible": False,
+        "matrix_sha256": {arm: _file_sha(path) for arm, path in matrix_files.items()}}
+    pairing["pairing_sha256"] = _sha(pairing)
+    artifact_path = case_dir / "paired-coverage.json"
+    _write_immutable(artifact_path, pairing)
+    return pairing
 
 
 def _write_immutable(path: Path, value: dict) -> str:
