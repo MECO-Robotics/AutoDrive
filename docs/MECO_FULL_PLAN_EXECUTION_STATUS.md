@@ -1,6 +1,6 @@
 # MECO learning tracks plan: execution status
 
-> **Latest integrated and runtime snapshot — 2026-10-24 23:14 UTC.** The
+> **Snapshot — 2026-10-24 23:14 UTC.** The
 > implementation candidate was fast-forwarded into `main` at
 > `08b93828032ca6561552358142bb6b1781bc5071`; the evidence and dashboard-pin
 > update is committed at `e852a0770da9fc014746e4fcd53255b210849ff4`. The
@@ -16,12 +16,13 @@
 > seconds. Replay `scenario-meco-1e00f4361b661a9d7dc18096` has 59 frames; its
 > initial frame marks action audits unavailable and the next frame contains
 > action-derived values. The report and replay are under
-> `evaluations/meco-five/`; final replay
-> `scenario-meco-78afe74b3281fb35512778bf` was generated after the dashboard
-> restart and reports source commit `e852a0770`, no dirty files, and
-> `outdated=false`. The dashboard ran from the current `main` checkout; its
-> status, curriculum, replay, page, and asset endpoints returned HTTP 200, and
-> the API validated 51 provenance tranches.
+> `evaluations/meco-five/`; replay `scenario-meco-78afe74b3281fb35512778bf`
+> was generated after the dashboard restart and reports source commit
+> `e852a0770` with no dirty files. A later docs-only status commit advances
+> `main` to `6bf225e1c`; the replay is now correctly marked outdated by commit
+> provenance and must be regenerated on that checkout. At the prior check,
+> the dashboard ran from `main`; status, curriculum, replay, page, and asset
+> endpoints returned HTTP 200 and the API validated 51 provenance tranches.
 >
 > This runtime check is diagnostic evidence only. The five-track supervisor
 > remains stopped; the prior run's A1/A2/A3/C1/C2 counts (525/526/500/500/500)
