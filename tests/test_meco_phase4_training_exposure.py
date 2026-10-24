@@ -139,9 +139,15 @@ def test_train_command_carries_bound_factor_assignment_to_worker(monkeypatch):
     command = _train_command(config=config, output=Path("/tmp/A1"),
         run_id="run", stop_file=Path("/tmp/STOP"),
         abort_file=Path("/tmp/ABORT"), invocation_id="invocation",
-        resume=None, protocol_id="protocol", task_assignment=assignment)
+        resume=None, protocol_id="protocol", task_assignment=assignment,
+        source_hash="source-hash",
+        native_extension_attestation={"schema": 1, "identity": {},
+            "identity_sha256": "attestation-hash"})
     payload = json.loads(command[command.index("--task-assignment-json") + 1])
     assert payload == assignment
+    assert command[command.index("--expected-source-sha256") + 1] == "source-hash"
+    assert json.loads(command[command.index(
+        "--native-extension-attestation-json") + 1])["schema"] == 1
     args = train_parser().parse_args(command[command.index("train"):])
     assert json.loads(args.task_assignment_json)["phase4_training_assignment_id"] == (
         assignment["phase4_training_assignment_id"])

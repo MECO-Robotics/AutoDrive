@@ -1475,7 +1475,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                invocation_id: str | None = None,
                run_id_override: str | None = None,
                protocol_id: str | None = None,
-               task_assignment: dict | None = None):
+               task_assignment: dict | None = None,
+               expected_source_sha256: str | None = None,
+               native_extension_attestation: dict | None = None):
     config.validate()
     if (abort_file is None) != (invocation_id is None):
         raise ValueError("--abort-file and --invocation-id must be supplied together")
@@ -1517,9 +1519,18 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         torch.cuda.set_device(torch.device(config.device))
     from .fuel_physics_hip import prepare_native_fuel_extension
     prepare_native_fuel_extension(config.device)
+    from .fuel_physics_hip import native_extension_identity
+    loaded_native_identity = native_extension_identity()
+    if (expected_source_sha256 is None) != (native_extension_attestation is None):
+        raise ValueError("expected source hash and native extension attestation must be supplied together")
+    sources = source_identity()
+    source_sha256 = hashlib.sha256(json.dumps(sources, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    if expected_source_sha256 is not None:
+        _validate_supervisor_training_binding(sources, loaded_native_identity,
+            expected_source_sha256, native_extension_attestation)
     run_id = run_id_override or uuid.uuid4().hex
     output = Path(config.output or ROOT / "checkpoints" / "meco-five" / config.track)
-    sources = source_identity()
     if qualification_protocol_data is not None:
         from .meco_final_test_ledger import assert_training_not_released_after_final_test
         source_hash = hashlib.sha256(json.dumps(
@@ -1629,8 +1640,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             {key: value for key, value in asdict(config).items() if key != "updates"},
             sort_keys=True, allow_nan=False).encode()).hexdigest(),
         "sources": sources,
-        "source_identity_sha256": hashlib.sha256(json.dumps(
-            sources, sort_keys=True, allow_nan=False).encode()).hexdigest(),
+        "source_identity_sha256": source_sha256,
+        "supervisor_source_identity_sha256": expected_source_sha256,
+        "supervisor_native_extension_attestation": native_extension_attestation,
         "graph": {"nodes": graph.node_count, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
@@ -2060,6 +2072,22 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             close()
     return {"track": config.track, "update": update, "checkpoint": str(output / "latest.pt"),
             "run_id": run_id, "status": run_manifest["status"]}
+
+
+def _validate_supervisor_training_binding(sources, loaded_native_identity,
+                                          expected_source_sha256, attestation):
+    source_digest = hashlib.sha256(json.dumps(sources, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    attested_identity = attestation.get("identity") if isinstance(attestation, dict) else None
+    attestation_digest = (hashlib.sha256(json.dumps(attested_identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest() if isinstance(attested_identity, dict) else None)
+    if (not isinstance(attestation, dict) or attestation.get("schema") != 1
+            or attestation.get("identity_sha256") != attestation_digest
+            or attested_identity != loaded_native_identity
+            or not isinstance(sources, dict)
+            or sources.get("_native_fuel_extension") != loaded_native_identity
+            or source_digest != expected_source_sha256):
+        raise RuntimeError("worker source/native identity differs from supervisor binding")
 
 
 def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
@@ -3941,6 +3969,10 @@ def _parser():
     train.add_argument("--run-id")
     train.add_argument("--protocol-id")
     train.add_argument("--task-assignment-json")
+    train.add_argument("--expected-source-sha256",
+        help="supervisor source identity digest required for supervised campaign workers")
+    train.add_argument("--native-extension-attestation-json",
+        help="supervisor-pinned loaded HIP binary identity required for campaign workers")
     ev = commands.add_parser("evaluate")
     ev.add_argument("--scenario", default="pickup_simple")
     ev.add_argument("--categories", default="single,cluster")
@@ -3999,7 +4031,11 @@ def main(argv=None):
                             abort_file=args.abort_file,
                             invocation_id=args.invocation_id,
                             run_id_override=args.run_id, protocol_id=args.protocol_id,
-                            task_assignment=assignment)
+                            task_assignment=assignment,
+                            expected_source_sha256=args.expected_source_sha256,
+                            native_extension_attestation=(json.loads(
+                                args.native_extension_attestation_json)
+                                if args.native_extension_attestation_json else None))
         print(json.dumps(result, indent=2))
         return
     checkpoints = {track: getattr(args, f"{track.lower()}_checkpoint") for track in MECO_TRACKS}

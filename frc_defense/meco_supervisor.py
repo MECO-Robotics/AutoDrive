@@ -201,7 +201,9 @@ def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
 def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
                    stop_file: Path, abort_file: Path, invocation_id: str,
                    resume: Path | None, protocol_id: str,
-                   task_assignment: dict, warm_start: Path | None = None,
+                   task_assignment: dict, source_hash: str,
+                   native_extension_attestation: dict,
+                   warm_start: Path | None = None,
                    qualification_protocol: Path | None = None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "train",
         "--track", config.track, "--scenario", config.scenario_id,
@@ -221,7 +223,10 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
         "--output", str(output), "--stop-file", str(stop_file),
         "--abort-file", str(abort_file), "--invocation-id", invocation_id,
         "--run-id", run_id,
-        "--protocol-id", protocol_id]
+        "--protocol-id", protocol_id,
+        "--expected-source-sha256", source_hash,
+        "--native-extension-attestation-json", json.dumps(
+            native_extension_attestation, sort_keys=True, allow_nan=False)]
     command.extend(("--task-assignment-json", json.dumps(
         task_assignment, sort_keys=True, allow_nan=False)))
     if resume is not None:
@@ -726,9 +731,39 @@ class MecoSupervisor:
             self.request_stop = True
         return self.request_stop
 
+    def _verify_worker_provenance(self, track, target_update, assignment,
+                                  worker_manifest, *, checkpoint=None,
+                                  require_complete=True):
+        if checkpoint is None:
+            checkpoint = _checkpoint_info(self.track_dirs[track] / "latest.pt")
+        if worker_manifest is None:
+            try:
+                worker_manifest = json.loads((self.track_dirs[track] / "run.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                worker_manifest = None
+        expected_attestation = self.native_extension_attestation
+        if not isinstance(worker_manifest, dict) or worker_manifest.get("sources") != self.sources:
+            raise RuntimeError(f"{track} worker run record has mismatched source provenance")
+        if (worker_manifest.get("source_identity_sha256") != self.source_hash
+                or worker_manifest.get("supervisor_source_identity_sha256") != self.source_hash
+                or worker_manifest.get("supervisor_native_extension_attestation") != expected_attestation
+                or worker_manifest.get("run_id") != self.run_ids[track]
+                or worker_manifest.get("protocol_id") != self.protocol_id
+                or (require_complete and worker_manifest.get("status") != "complete")):
+            raise RuntimeError(f"{track} worker run record does not match supervisor binding")
+        if (not isinstance(checkpoint, dict) or checkpoint.get("sources") != self.sources
+                or checkpoint.get("run_id") != self.run_ids[track]
+                or checkpoint.get("protocol_id") != self.protocol_id
+                or checkpoint.get("update") != target_update
+                or _hash(checkpoint.get("sources")) != self.source_hash
+                or checkpoint.get("task_assignment") != assignment):
+            raise RuntimeError(f"{track} final checkpoint provenance differs from supervisor binding")
+
     def _recover_task_outcome(self, track, assignment):
         checkpoint_path = self.track_dirs[track] / "latest.pt"
         checkpoint = _checkpoint_info(checkpoint_path)
+        self._verify_worker_provenance(track, assignment.get("target_update"),
+            assignment, None, checkpoint=checkpoint, require_complete=False)
         target_update = assignment.get("target_update")
         progress = checkpoint.get("task_progress") if isinstance(checkpoint, dict) else None
         checkpoint_assignment = checkpoint.get("task_assignment", {}) if isinstance(
@@ -847,6 +882,8 @@ class MecoSupervisor:
                 abort_file=abort_file, invocation_id=self.supervisor_id,
                 resume=latest if latest.is_file() else None,
                 protocol_id=self.protocol_id, task_assignment=task_assignment,
+                source_hash=self.source_hash,
+                native_extension_attestation=self.native_extension_attestation,
                 warm_start=warm_artifact,
                 qualification_protocol=self.qualification_protocol_path)
             # Persist the exact loaded binary binding before any subprocess can
@@ -1002,6 +1039,8 @@ class MecoSupervisor:
                                     failed_utc=worker_manifest.get("failed_utc") or _utc())
                                 _atomic_json(self.track_dirs[track] / "run.json", worker_manifest)
                             else:
+                                self._verify_worker_provenance(track, target_update,
+                                    task_assignment, worker_manifest)
                                 statuses[track] = "complete"
                                 self.completed_chunks += 1
                     self._publish(cycle=cycle,

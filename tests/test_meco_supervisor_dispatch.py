@@ -7,6 +7,7 @@ from frc_defense import meco_supervisor as module
 from frc_defense.meco_supervisor import MecoSupervisor
 from frc_defense.meco_track_training import MecoTrainConfig
 from frc_defense.meco_tracks import MECO_TRACKS
+from frc_defense.meco_track_training import _validate_supervisor_training_binding
 
 
 class FakeProcess:
@@ -73,6 +74,9 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
                 "status": "queued", "native_extension_attestation":
                     supervisor.native_extension_attestation}))
     supervisor._write_queued_manifests = write_queued
+    # Dispatch fakes do not create real checkpoints; provenance enforcement is
+    # exercised directly in the dedicated verifier tests below.
+    supervisor._verify_worker_provenance = lambda *args, **kwargs: None
     supervisor._poll_evaluator = lambda cycle, statuses, **kwargs: None
     supervisor.published = []
     supervisor._publish = lambda **kwargs: supervisor.published.append(
@@ -206,6 +210,56 @@ def test_runtime_warm_start_validation_receives_full_attested_source(monkeypatch
             expected_sources=sources, prediction_mode="cv",
             native_attestation=module._native_extension_attestation(
                 {**identity, "sha256": "f" * 64}))
+
+
+def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
+    supervisor = MecoSupervisor.__new__(MecoSupervisor)
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    sources = {"code.py": "c" * 64, "_native_fuel_extension": identity}
+    supervisor.sources = sources
+    supervisor.source_hash = module._hash(sources)
+    supervisor.native_extension_attestation = module._native_extension_attestation(identity)
+    supervisor.run_ids = {"A1": "run"}
+    supervisor.protocol_id = "protocol"
+    supervisor.track_dirs = {"A1": tmp_path}
+    assignment = {"assignment_id": "assignment", "target_update": 10}
+    run_record = {"sources": sources, "source_identity_sha256": supervisor.source_hash,
+        "supervisor_source_identity_sha256": supervisor.source_hash,
+        "supervisor_native_extension_attestation": supervisor.native_extension_attestation,
+        "run_id": "run", "protocol_id": "protocol", "status": "complete"}
+    checkpoint = {"sources": sources, "run_id": "run", "protocol_id": "protocol",
+        "update": 10, "task_assignment": assignment}
+    supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
+        checkpoint=checkpoint)
+
+    changed = {**run_record, "supervisor_native_extension_attestation": None}
+    with pytest.raises(RuntimeError, match="run record does not match"):
+        supervisor._verify_worker_provenance("A1", 10, assignment, changed,
+            checkpoint=checkpoint)
+    changed_checkpoint = {**checkpoint, "sources": {**sources, "code.py": "d" * 64}}
+    with pytest.raises(RuntimeError, match="final checkpoint provenance"):
+        supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
+            checkpoint=changed_checkpoint)
+
+
+def test_worker_binding_rejects_native_or_source_mismatch():
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    sources = {"code.py": "c" * 64, "_native_fuel_extension": identity}
+    attestation = module._native_extension_attestation(identity)
+    source_hash = module._hash(sources)
+    _validate_supervisor_training_binding(sources, identity, source_hash, attestation)
+    with pytest.raises(RuntimeError, match="differs from supervisor binding"):
+        _validate_supervisor_training_binding(sources,
+            {**identity, "sha256": "d" * 64}, source_hash, attestation)
+    with pytest.raises(RuntimeError, match="differs from supervisor binding"):
+        _validate_supervisor_training_binding({**sources, "code.py": "e" * 64},
+            identity, source_hash, attestation)
 
 
 def test_dispatch_fills_freed_devices_without_waiting_for_other_tracks(
