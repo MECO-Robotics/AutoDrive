@@ -1,0 +1,93 @@
+{
+  "diagnostic_id": "c2-wx9100-numeric-replay-20261024",
+  "inputs": {
+    "failure_report": {
+      "copied_into_report": false,
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/ppo-logprob-replay-failure-C2-update-00000020-row-0021.json",
+      "sha256": "4e97d0951bb9256c77e3621f47bbbbd4abbfbf7290fbde51c3543ae8b631322e"
+    },
+    "failure_tensor_artifact": {
+      "copied_into_report": false,
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/ppo-logprob-replay-failure-C2-update-00000020-row-0021.pt",
+      "sha256": "185f051b3308a6c9d393cc785d16a4caa83cc8f852c6d884a49660ea011d679d"
+    },
+    "latest_checkpoint": {
+      "copied_into_report": false,
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/latest.pt",
+      "sha256": "a47441be8c1e762b9a954da44ac26c123b12a812f65ba9cc2e645288a13db063"
+    },
+    "run_manifest": {
+      "copied_into_report": false,
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/run.json",
+      "sha256": "ba999b28a89d68205b91bc53baa284fe530c5a9a7a21927f1ddf12493a1206ea"
+    }
+  },
+  "limitations": [
+    "No simulator behavior or replay was evaluated.",
+    "This report demonstrates numeric determinism on the saved row and WX9100 runtime only; it does not establish model quality or campaign completion."
+  ],
+  "numeric_findings": {
+    "default_algorithm_exact_row_replay_count": 10,
+    "default_algorithm_logprob_max": -0.6930861473083496,
+    "default_algorithm_logprob_min": -0.6932082176208496,
+    "default_algorithm_logprob_range": 0.0001220703125,
+    "default_algorithm_unique_valid_logit_rows": 6,
+    "fixed_order_elementwise_sum_same_input_max_delta": 0.0,
+    "fixed_order_patched_global_determinism_flags_changed": false,
+    "fixed_order_patched_logprob": -0.6931471824645996,
+    "fixed_order_patched_matches_saved_rollout_logprob": true,
+    "fixed_order_patched_replay_count": 10,
+    "fixed_order_patched_unique_logprobs": 1,
+    "fixed_order_patched_unique_valid_logit_rows": 1,
+    "original_failure_logprob_tolerance_atol_rtol": [
+      5e-05,
+      5e-05
+    ],
+    "original_failure_valid_logit_max_delta": 0.000244140625,
+    "scorer_first_linear_input_max_delta": 0.0,
+    "scorer_first_linear_same_input_f_linear_output_max_delta": 0.0001220703125
+  },
+  "row": {
+    "candidate_digest": "77dcb6a4523177d6ac3b31cbc752741a535963accfbc0592eeacc34d3906ff06",
+    "candidate_replay_digest": "434ab61987fa725d2a340d1758c9d742e632f6bf7e8c44346702ea465d37ed0a",
+    "episode_id": "0b5c5aef4a884fe2b31b40988adf50bb:a3605e21a1bc44308c75162e77e4f6b1-episode-00000040",
+    "model_parameters_sha256": "be5ef848ffb181910f32bf26ca4c4991269ba6e2dddc4c5d1e16e6f618e11e80",
+    "original_abs_logprob_delta": 0.0001220703125,
+    "original_failed_replay_logprob": -0.6930251121520996,
+    "rollout_logprob": -0.6931471824645996,
+    "row_index": 21,
+    "track": "C2",
+    "update": 20
+  },
+  "runtime": {
+    "device_arch": "gfx900:xnack-",
+    "device_index": 0,
+    "device_name": "AMD Radeon Pro WX 9100",
+    "device_total_memory_bytes": 17163091968,
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "python": "3.12.14",
+    "rocm_hip": "7.17.26385",
+    "runtime_mode_before_and_after": {
+      "deterministic_algorithms": false,
+      "warn_only": false
+    },
+    "torch": "2.14.0+rocm10.2.0a20260927"
+  },
+  "schema_version": 1,
+  "scope": "read-only model-forward replay of one preserved PPO row; no simulator, optimizer, checkpoint write, training, or campaign restart",
+  "source": {
+    "checkpoint_meco_tracks_py_sha256": "6c6eb2a03a2c23b0c1a1f226198999e4f0ee0bd21aac58fc364ee84a806ae4ac",
+    "checkpoint_payload_source_identity_sha256": "c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2",
+    "failed_run_source_commit": "d7b8dd4b1c1814c2a368ded7604b3c887571fdcc",
+    "failed_run_source_identity_sha256": "c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2",
+    "repair_commit": "49fcac798facd4426afe48520c4f79b6cc1ac003",
+    "repaired_meco_tracks_py_sha256": "5c097170700e6f26887838e0ac309b83fa57c4d46c4d705fd27d285f1bc51c4c",
+    "resume_compatibility": "incompatible; repaired source differs from checkpoint-bound source, so strict resume must fail closed"
+  },
+  "validation": {
+    "command": "PYTHONPATH=. <AutoDrive .venv>/bin/python -m pytest -q tests/test_meco_c1_ppo_replay.py",
+    "git_diff_check": "passed",
+    "py_compile": "passed",
+    "result": "4 passed on WX9100/ROCm"
+  }
+}

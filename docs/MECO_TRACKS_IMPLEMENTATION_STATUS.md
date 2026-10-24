@@ -621,4 +621,8 @@ This source change invalidates checkpoints created under the prior source
 identity. The failed C2 checkpoint is bound to source identity
 `c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2`; resume
 must fail closed after this patch. Do not resume or restart from that artifact
-until a new run is explicitly scheduled with the updated source identity.
+until a new run is explicitly scheduled with the updated source identity. The
+read-only WX9100 replay measurements and SHA-256 bindings for the run manifest,
+checkpoint, failure report, and tensor artifact are recorded in
+`docs/implementation-provenance/c2-wx9100-replay-diagnostic-20261024.json`
+(SHA-256 `fe3dbb8bf63d298cce1d647e4070552b7dec9fb942dce06691f0bcbfe28c6335`).
