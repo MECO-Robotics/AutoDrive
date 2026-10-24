@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 37
+    assert len(result["tranches"]) == 39
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -205,6 +205,22 @@ def test_current_manifest_is_validated_as_summary_only():
     profile_summary = (REPO / start_profiles["planner"]["artifact"]["path"]).read_text()
     assert "defers its initial perception" in profile_summary
     assert "legal-start rate and outcome-by-start-state" in profile_summary
+    action7 = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-action7-remask-taxonomy")
+    assert action7["implementer"]["commit"] == (
+        "accce779be3d1a9e87092e22ac45ae7a6543d01d")
+    assert action7["implementer"]["candidate_integration_commit"] == (
+        "4d040f5e2238e652e90c745300394e07aa1a575f")
+    assert action7["reviewer"]["approved_commit"] == action7["implementer"]["commit"]
+    assert "not shown to be a learned policy choice" in action7["limits"]
+    root_fix = next(t for t in result["tranches"]
+        if t["requirement_id"] == "dashboard-curriculum-external-data-root")
+    assert root_fix["implementer"]["commit"] == (
+        "819836eba213eb4ae1141044f0d2a9993d062b56")
+    assert root_fix["implementer"]["candidate_integration_commit"] == (
+        "9597d16e33d18d6dea5ea4f2ee6d6e0715191428")
+    assert root_fix["reviewer"]["approved_commit"] == root_fix["implementer"]["commit"]
+    assert "No simulator evaluation or replay was run" in root_fix["limits"]
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):

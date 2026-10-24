@@ -1,3 +1,25 @@
+## Phase 4 action-7 remask taxonomy and dashboard curriculum data root — 2026-10-24
+
+The action-7 diagnostic taxonomy correction is integrated at
+`4d040f5e2238e652e90c745300394e07aa1a575f`; the independent reviewer approved
+its exact implementation head `accce779be3d1a9e87092e22ac45ae7a6543d01d`.
+Nine focused tests and static checks passed. This corrects fallback-only
+records being labeled as remasked; it does not show action 7 was a learned
+choice. The dashboard curriculum external-root fix is integrated at
+`9597d16e33d18d6dea5ea4f2ee6d6e0715191428`; the exact implementation was
+independently reviewed and 16 focused tests plus static checks passed. After
+integration, the dashboard service was observed active on this candidate and
+its relevant status/API and frontend asset endpoints returned HTTP 200 with
+candidate-matching backend/assets. The external root points at live main
+campaign data; the generic curriculum endpoint reports zero runs, while
+five-track status is separate.
+
+Summary-only provenance tranches #38 and #39 are recorded in
+[`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json); the
+manifest and dashboard digest pin are updated together. Neither tranche has
+simulator/replay evidence or establishes policy qualification. No GPU,
+training, or replay work was performed for these integrations.
+
 # MECO learning tracks plan: execution status
 
 ## Phase 4 legal full-team start profiles — 2026-10-24
