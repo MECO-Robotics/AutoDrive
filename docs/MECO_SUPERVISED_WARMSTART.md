@@ -280,10 +280,30 @@ until the independent P-v3 oracle supplies them. Fresh deterministic
 recollection must byte-match the dataset before fitting; the dedicated
 weights-only consumer rejects CPU and nonmatching track/device/P contracts.
 
+The offline audit command checks exact legal-node/source dataset and manifest
+bytes, their train-split and protocol binding, source identity, row identities,
+and recorded replay-state/support digests, then summarizes sampled heading and
+region coverage, feasible behaviors, U censoring/repeats/variance, B pair
+statuses, and sampling weights/effective sample size:
+
+```bash
+python -m frc_defense.meco_plan_a_oracle_audit \
+  --dataset evaluations/meco-supervised/legal-nodes.jsonl \
+  --source-dataset evaluations/meco-supervised/source.jsonl \
+  --qualification-protocol configs/meco-qualification.json \
+  --output evaluations/meco-supervised/legal-node-audit.json
+```
+
+This CPU-safe report analyzes stored bytes only. It does not perform fresh
+replay validation, establish an empirical oracle, or produce a warm-start
+artifact; those report flags remain false until those separate actions have
+actually occurred. The audit never treats collected route-cost choices as
+optimal.
+
 Planner and implementation are complete; scoped static review approved commit
 `f91d76237`. Static compilation, diff and JSON checks only; runtime collection,
-fitting and simulator evidence remain pending. No tests or simulator runs were
-performed.
+fitting and simulator evidence remained pending at that review point; no tests
+or simulator runs were then performed.
 
 #### Joint Plan A U+B+P warm start v1
 
