@@ -6,7 +6,7 @@ void robot_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const bool*, const int64_t*,
     bool*, bool*, bool*, int64_t*, int64_t*, int64_t*, double*, int64_t*,
     double*, float*,
-    const int64_t*, const double*, int, bool, hipStream_t);
+    const int64_t*, const double*, double, int, bool, hipStream_t);
 void field_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const bool*,
     bool*, int, int, hipStream_t);
@@ -69,6 +69,7 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
     torch::Tensor pair_contact_impulse_sum,
     torch::Tensor physics_substep_index,
     torch::Tensor physics_time_s,
+    double step_dt,
     bool parallel_single_world) {
   const auto n = pose.size(0);
   TORCH_CHECK(pose.is_cuda() && pose.scalar_type() == at::kFloat &&
@@ -103,7 +104,7 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
               physics_substep_index.sizes() == torch::IntArrayRef({n}) &&
               physics_substep_index.scalar_type() == at::kLong &&
               physics_time_s.sizes() == torch::IntArrayRef({n}) &&
-              physics_time_s.scalar_type() == at::kDouble,
+              physics_time_s.scalar_type() == at::kDouble && step_dt > 0.0,
               "six-robot collision shape or dtype mismatch");
   for (const auto& t : {pose, velocity, length, width, mass, yaw_inertia_multiplier,
                         mu, active, team_ids, robot_contact, opponent_contact,
@@ -129,7 +130,7 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
       pair_contact_last_time_s.data_ptr<double>(),
       pair_contact_impulse_sum.data_ptr<float>(),
       physics_substep_index.data_ptr<int64_t>(), physics_time_s.data_ptr<double>(),
-      static_cast<int>(n), parallel_single_world,
+      step_dt, static_cast<int>(n), parallel_single_world,
       c10::cuda::getCurrentCUDAStream(pose.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

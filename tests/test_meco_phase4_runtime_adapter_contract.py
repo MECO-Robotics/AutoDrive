@@ -15,6 +15,7 @@ from frc_defense.meco_phase4_runtime_adapter import (
     phase4_requirement_binding,
     validate_phase4_capture,
 )
+from frc_defense.tensor_physics_collision import pair_contact_substep_endpoint
 from frc_defense.meco_ablation_matrix import _validate_phase4_condition_records
 
 
@@ -181,10 +182,10 @@ def test_pair_contact_reader_binds_simulator_event_summary_to_contact_factor():
     pair_slot = 9  # Lexicographic pair slot (2, 3).
     fixture.pair_contact_event_count[0, pair_slot] = 2
     fixture.pair_contact_solver_report_count[0, pair_slot] = 6
-    fixture.pair_contact_first_substep[0, pair_slot] = 8
-    fixture.pair_contact_last_substep[0, pair_slot] = 10
-    fixture.pair_contact_first_time_s[0, pair_slot] = .16
-    fixture.pair_contact_last_time_s[0, pair_slot] = .20
+    fixture.pair_contact_first_substep[0, pair_slot] = 1
+    fixture.pair_contact_last_substep[0, pair_slot] = 2
+    fixture.pair_contact_first_time_s[0, pair_slot] = .02
+    fixture.pair_contact_last_time_s[0, pair_slot] = .04
     fixture.pair_contact_impulse_sum[0, pair_slot] = torch.tensor([3., -1., 2., 4.])
     record = phase4_pair_contact_event_record(fixture)
     assert record["factor_id"] == "contact.robot_bump"
@@ -192,8 +193,9 @@ def test_pair_contact_reader_binds_simulator_event_summary_to_contact_factor():
     assert record["event_realized_by_world"] == [True]
     assert record["distinct_contact_substeps_by_world"] == [2]
     assert record["contact_solver_reports_by_world"] == [6]
-    assert record["first_contact_physics_substep_by_world"] == [8]
-    assert record["last_contact_physics_substep_by_world"] == [10]
+    assert record["first_contact_physics_substep_by_world"] == [1]
+    assert record["first_contact_physics_time_s_by_world"] == [.02]
+    assert record["last_contact_physics_substep_by_world"] == [2]
     assert record["accumulated_impulse_by_world"] == [{
         "normal_n_s": 3., "tangential_n_s": -1.,
         "net_on_second_robot_n_s": [2., 4.]}]
@@ -202,3 +204,21 @@ def test_pair_contact_reader_binds_simulator_event_summary_to_contact_factor():
     assert record["route_completion_rate"] is None
     with pytest.raises(ValueError, match="requires contact.robot_bump"):
         phase4_pair_contact_event_record(fixture, factor_id="contact.other")
+
+
+def test_first_contact_clock_uses_completed_substep_endpoint():
+    dt = .02
+    assert pair_contact_substep_endpoint(0, 0.0, dt) == (1, dt)
+    next_substep, next_time = pair_contact_substep_endpoint(9, .18, dt)
+    assert next_substep == 10
+    assert next_time == pytest.approx(.20)
+    substep, time_s = pair_contact_substep_endpoint(
+        torch.tensor([0]), torch.tensor([0.], dtype=torch.float64), dt)
+    assert substep.tolist() == [1]
+    assert time_s.tolist() == pytest.approx([dt])
+
+    hip_source = (ROOT / "frc_defense/csrc/tensor_collision_multi_hip_kernel.hip").read_text()
+    assert "physics_substep_index[world] + 1" in hip_source
+    assert "physics_time_s[world] + step_dt" in hip_source
+    assert "physics_substep_index[0] + 1" in hip_source
+    assert "physics_time_s[0] + step_dt" in hip_source

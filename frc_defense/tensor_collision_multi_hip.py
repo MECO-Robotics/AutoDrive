@@ -103,7 +103,7 @@ def robot_contacts(sim, active_mask):
                        sim.pair_contact_last_time_s,
                        sim.pair_contact_impulse_sum,
                        sim.physics_substep_index, sim.physics_time_s,
-                       PARALLEL_SINGLE_WORLD)
+                       float(sim.dt), PARALLEL_SINGLE_WORLD)
     return True
 
 

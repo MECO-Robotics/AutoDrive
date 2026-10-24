@@ -23,6 +23,11 @@ else:
     _contact_pipeline_hip = None
 
 
+def pair_contact_substep_endpoint(substep_index, time_s, dt):
+    """Return the completed-step index and timestamp for an in-step contact."""
+    return substep_index + 1, time_s + float(dt)
+
+
 class TensorPhysicsCollisionMixin:
     """Contact solvers shared by the vectorized simulator."""
     def _robot_collision(self,active_mask=None):
@@ -172,10 +177,10 @@ class TensorPhysicsCollisionMixin:
         if self.num_robots != 6:
             return
         first = valid & (self.pair_contact_event_count == 0)
-        substeps = self.physics_substep_index[:, None].expand_as(
-            self.pair_contact_event_count)
-        times = self.physics_time_s[:, None].expand_as(
-            self.pair_contact_first_time_s)
+        substep_end, time_end = pair_contact_substep_endpoint(
+            self.physics_substep_index, self.physics_time_s, self.dt)
+        substeps = substep_end[:, None].expand_as(self.pair_contact_event_count)
+        times = time_end[:, None].expand_as(self.pair_contact_first_time_s)
         new_substep = valid & (self.pair_contact_last_substep != substeps)
         self.pair_contact_first_substep.copy_(torch.where(
             first, substeps, self.pair_contact_first_substep))

@@ -18,7 +18,7 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
     double* pair_first_time_s, int64_t* pair_last_substep,
     double* pair_last_time_s, float* pair_impulse_sum,
     const int64_t* physics_substep_index,
-    const double* physics_time_s, int n) {
+    const double* physics_time_s, double step_dt, int n) {
   const int world = blockIdx.x * blockDim.x + threadIdx.x;
   if (world >= n || !active[world]) return;
 
@@ -126,13 +126,13 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
       if (valid) {
         const int event = world * 15 + pair_slot;
         if (pair_event_count[event] == 0) {
-          pair_first_substep[event] = physics_substep_index[world];
-          pair_first_time_s[event] = physics_time_s[world];
+          pair_first_substep[event] = physics_substep_index[world] + 1;
+          pair_first_time_s[event] = physics_time_s[world] + step_dt;
         }
-        if (pair_last_substep[event] != physics_substep_index[world]) {
+        if (pair_last_substep[event] != physics_substep_index[world] + 1) {
           pair_event_count[event] += 1;
-          pair_last_substep[event] = physics_substep_index[world];
-          pair_last_time_s[event] = physics_time_s[world];
+          pair_last_substep[event] = physics_substep_index[world] + 1;
+          pair_last_time_s[event] = physics_time_s[world] + step_dt;
         }
         pair_solver_report_count[event] += 1;
         pair_impulse_sum[event * 4] += jn;
@@ -173,7 +173,8 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     int64_t* pair_first_substep, double* pair_first_time_s,
     int64_t* pair_last_substep, double* pair_last_time_s,
     float* pair_impulse_sum,
-    const int64_t* physics_substep_index, const double* physics_time_s) {
+    const int64_t* physics_substep_index, const double* physics_time_s,
+    double step_dt) {
   const int lane = threadIdx.x;
   if (!active[0]) return;
   __shared__ float pair_delta[15][10];
@@ -251,13 +252,13 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     const float ix=jn*nx+jt*tx, iy=jn*ny+jt*ty;
     if (valid) {
       if (pair_event_count[event] == 0) {
-        pair_first_substep[event] = physics_substep_index[0];
-        pair_first_time_s[event] = physics_time_s[0];
+        pair_first_substep[event] = physics_substep_index[0] + 1;
+        pair_first_time_s[event] = physics_time_s[0] + step_dt;
       }
-      if (pair_last_substep[event] != physics_substep_index[0]) {
+      if (pair_last_substep[event] != physics_substep_index[0] + 1) {
         pair_event_count[event] += 1;
-        pair_last_substep[event] = physics_substep_index[0];
-        pair_last_time_s[event] = physics_time_s[0];
+        pair_last_substep[event] = physics_substep_index[0] + 1;
+        pair_last_time_s[event] = physics_time_s[0] + step_dt;
       }
       pair_solver_report_count[event] += 1;
       pair_impulse_sum[event*4] += jn;
@@ -309,7 +310,8 @@ void robot_contacts_launch(float* pose, float* velocity, const float* length,
     double* pair_first_time_s, int64_t* pair_last_substep,
     double* pair_last_time_s, float* pair_impulse_sum,
     const int64_t* physics_substep_index,
-    const double* physics_time_s, int n, bool parallel_single_world,
+    const double* physics_time_s, double step_dt, int n,
+    bool parallel_single_world,
     hipStream_t stream) {
   if (n == 1 && parallel_single_world) {
     hipLaunchKernelGGL(robot_contacts_single_world_parallel_kernel,
@@ -317,7 +319,8 @@ void robot_contacts_launch(float* pose, float* velocity, const float* length,
         yaw_mult, friction, active, team_ids, robot_contact, opponent_contact,
         robot_contact_by_robot, pair_event_count, pair_solver_report_count,
         pair_first_substep, pair_first_time_s, pair_last_substep,
-        pair_last_time_s, pair_impulse_sum, physics_substep_index, physics_time_s);
+        pair_last_time_s, pair_impulse_sum, physics_substep_index, physics_time_s,
+        step_dt);
   } else {
     constexpr int threads = 128;
     const int blocks = (n + threads - 1) / threads;
@@ -326,7 +329,7 @@ void robot_contacts_launch(float* pose, float* velocity, const float* length,
         robot_contact, opponent_contact, robot_contact_by_robot, pair_event_count,
         pair_solver_report_count, pair_first_substep, pair_first_time_s,
         pair_last_substep, pair_last_time_s, pair_impulse_sum,
-        physics_substep_index, physics_time_s, n);
+        physics_substep_index, physics_time_s, step_dt, n);
   }
 }
 
