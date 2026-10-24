@@ -22,6 +22,8 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from frc_defense.meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
+from frc_defense.meco_ablation_matrix import POLICY_CONTRASTS as NAMED_CONTRAST_PAIRS
+from frc_defense.meco_tracks import MECO_TRACKS
 
 
 STRATUM_FIELDS = ("layout_id", "defender_family", "start_condition", "sensor_profile")
@@ -60,13 +62,22 @@ def _finite_number(value: Any, where: str) -> float:
     return float(value)
 
 
+def _paired_finite_values(candidate: Any, reference: Any, metric: str,
+                          where: str) -> tuple[float, float]:
+    if candidate is None and reference is None:
+        raise ValueError(f"{where} metric {metric} unavailable: both paired values are null")
+    if candidate is None or reference is None:
+        raise ValueError(f"{where} metric {metric} unavailable: one paired value is null")
+    return (_finite_number(candidate, metric), _finite_number(reference, metric))
+
+
 def _cluster_bootstrap_ci(groups: dict[tuple[str, str], list[float]], *,
                           seed: int, replicates: int) -> list[float]:
     """Match qualification's deterministic cluster-then-row bootstrap."""
     keys = sorted(groups)
     if not keys or any(not groups[key] for key in keys):
         raise ValueError("cluster bootstrap requires populated strata")
-    state = seed & ((1 << 64) - 1)
+    state = seed & ((1 << 64) - 1) or 0x9E3779B97F4A7C15
 
     def randbelow(limit: int) -> int:
         nonlocal state
@@ -92,7 +103,7 @@ def _paired_quantile_bootstrap(groups: dict[tuple[str, str], list[tuple[float, f
                                seed: int, replicates: int) -> dict[str, dict]:
     """Bootstrap paired candidate/reference latency quantile differences."""
     keys = sorted(groups)
-    state = seed & ((1 << 64) - 1)
+    state = seed & ((1 << 64) - 1) or 0x9E3779B97F4A7C15
 
     def randbelow(limit: int) -> int:
         nonlocal state
@@ -126,6 +137,131 @@ def _paired_quantile_bootstrap(groups: dict[tuple[str, str], list[tuple[float, f
             "ci_95": [differences[int(.025 * (replicates - 1))],
                       differences[int(.975 * (replicates - 1))]]}
     return result
+
+
+def _content_bound_seed(seed: int, input_sha256: str) -> int:
+    """Make resampling deterministic for both the requested seed and frozen inputs."""
+    return (seed ^ int(input_sha256[:16], 16)) & ((1 << 64) - 1)
+
+
+def _stratified_paired_ci(values_by_category: dict[str, list[float]], *,
+                          seed: int, replicates: int) -> list[float]:
+    """Percentile CI from within-category paired episode resampling.
+
+    Each category contributes equally to every replicate, regardless of its
+    episode count. Pair differences are formed before resampling.
+    """
+    categories = sorted(values_by_category)
+    if not categories or any(not values_by_category[c] for c in categories):
+        raise ValueError("stratified bootstrap requires populated categories")
+    state = seed & ((1 << 64) - 1) or 0x9E3779B97F4A7C15
+
+    def randbelow(limit: int) -> int:
+        nonlocal state
+        state ^= (state << 13) & ((1 << 64) - 1)
+        state ^= state >> 7
+        state ^= (state << 17) & ((1 << 64) - 1)
+        return state % limit
+
+    samples = []
+    for _ in range(replicates):
+        category_means = []
+        for category in categories:
+            values = values_by_category[category]
+            category_means.append(sum(values[randbelow(len(values))]
+                                      for _ in values) / len(values))
+        samples.append(sum(category_means) / len(category_means))
+    samples.sort()
+    return [samples[int(.025 * (replicates - 1))],
+            samples[int(.975 * (replicates - 1))]]
+
+
+def _equal_category_summaries(summaries: list[dict], *, bootstrap_seed: int,
+                              replicates: int) -> list[dict]:
+    """Add an explicitly equal-category weighted paired estimate per contrast/metric."""
+    keys = ("contrast", "factor", "candidate_policy", "reference_policy",
+            "policy", "metric", "candidate_k", "difference_direction")
+    groups: dict[tuple, dict[str, list[float]]] = {}
+    seen: dict[tuple, set[tuple]] = {}
+    for summary in summaries:
+        if (summary.get("difference_direction") not in
+                ("candidate_minus_reference", "cv_minus_current")):
+            continue
+        signature = tuple(summary.get(field) for field in keys)
+        category = summary.get("category")
+        if not isinstance(category, str) or not category:
+            continue
+        for observation in summary.get("_observations", []):
+            seed = observation.get("seed")
+            if type(seed) is not int:
+                raise ValueError("paired observation has invalid seed")
+            sample_key = (category, seed,
+                          tuple(observation.get("full_stratum", {}).get(field)
+                                for field in STRATUM_FIELDS))
+            if sample_key in seen.setdefault(signature, set()):
+                raise ValueError("duplicate paired category/seed/policy observation")
+            seen[signature].add(sample_key)
+            value = _finite_number(observation.get("difference"), "paired difference")
+            groups.setdefault(signature, {}).setdefault(category, []).append(value)
+    output = []
+    for signature, values_by_category in sorted(groups.items(), key=lambda item: repr(item[0])):
+        categories = sorted(values_by_category)
+        weights = {category: 1.0 / len(categories) for category in categories}
+        category_means = {category: sum(values) / len(values)
+                          for category, values in values_by_category.items()}
+        mean = sum(weights[c] * category_means[c] for c in categories)
+        seed_material = _canonical_hash({"bootstrap_seed": bootstrap_seed,
+            "signature": signature, "categories": categories,
+            "paired_differences": values_by_category})
+        effective_seed = _content_bound_seed(bootstrap_seed, seed_material)
+        row = dict(zip(keys, signature))
+        row.update({"category": "ALL_EQUAL_CATEGORY_WEIGHTED",
+            "category_weights": weights,
+            "category_means": category_means,
+            "n_categories": len(categories),
+            "n_pairs": sum(len(values) for values in values_by_category.values()),
+            "mean_difference": mean,
+            "ci_95": _stratified_paired_ci(values_by_category,
+                seed=effective_seed, replicates=replicates),
+            "bootstrap": {"method": "within_category_paired_episode_resampling",
+                "seed": effective_seed, "user_seed": bootstrap_seed,
+                "input_sha256": seed_material, "replicates": replicates,
+                "interval": "percentile_95"}})
+        output.append(row)
+    return output
+
+
+def _validate_required_contrasts(contrasts: list[dict]) -> None:
+    """Reject rehashed matrix reports that omit required generated comparisons."""
+    expected_named = {(name, candidate, reference)
+        for name, pairs in NAMED_CONTRAST_PAIRS.items()
+        for candidate, reference in pairs}
+    expected_d0 = {(f"{track}_vs_D0_architecture_condition", track, "D0")
+                   for track in MECO_TRACKS}
+    expected_standard = expected_named | expected_d0
+    allowed_other = {"candidate_recall_K_sweep", "matched_prediction_current_vs_cv",
+                     "phase4_factor_vs_no_factor"}
+    observed_named, observed_d0 = set(), set()
+    for contrast in contrasts:
+        if not isinstance(contrast, dict):
+            continue
+        entry = (contrast.get("contrast"), contrast.get("candidate_policy"),
+                 contrast.get("reference_policy"))
+        if entry[0] in {row[0] for row in expected_standard} and entry not in expected_standard:
+            raise ValueError(f"matrix contains unsupported named contrast pair: {entry}")
+        if (entry[0] not in allowed_other and entry[0] not in
+                {row[0] for row in expected_standard} and
+                isinstance(contrast.get("paired_episode_rows"), list)):
+            raise ValueError(f"matrix contains unsupported named contrast: {entry[0]}")
+        if entry in expected_named:
+            observed_named.add(entry)
+        if entry in expected_d0:
+            observed_d0.add(entry)
+    missing_named = expected_named - observed_named
+    missing_d0 = expected_d0 - observed_d0
+    if missing_named or missing_d0:
+        raise ValueError("matrix is missing required contrast pairs: "
+            f"named={sorted(missing_named)}, learned_track_vs_D0={sorted(missing_d0)}")
 
 
 def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
@@ -453,10 +589,8 @@ def _diagnostic_performance_summaries(matrix: dict, loaded: dict, *,
                         csummary.get(percentile), rsummary.get(percentile))
             cluster = _stratum(cr)
             for metric, (candidate_value, reference_value) in metrics.items():
-                if candidate_value is None or reference_value is None:
-                    continue
-                cvalue = _finite_number(candidate_value, metric)
-                rvalue = _finite_number(reference_value, metric)
+                cvalue, rvalue = _paired_finite_values(candidate_value,
+                    reference_value, metric, "diagnostic performance")
                 key = (contrast_index, contrast.get("contrast"), category,
                        candidate_policy, reference_policy, metric)
                 groups.setdefault(key, []).append({"seed": seed,
@@ -507,10 +641,16 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
     matrix = _load_json(path)
     if not isinstance(matrix.get("contrasts"), list) or not matrix["contrasts"]:
         raise ValueError("matrix report has no contrast rows")
+    _validate_required_contrasts(matrix["contrasts"])
     loaded = _resolve_conditions(matrix, path)
+    input_sha256 = _canonical_hash({"matrix_sha256": _file_sha256(path),
+        "evaluation_reports": {key: value["sha256"]
+                               for key, value in sorted(loaded["files"].items())}})
+    effective_bootstrap_seed = _content_bound_seed(bootstrap_seed, input_sha256)
     summaries = []
     seen_rows: set[tuple] = set()
     matched_coverage: dict[tuple[str, str], set[tuple[str, str, int]]] = {}
+    matched_metric_fields: dict[tuple[str, str, str], set[str]] = {}
     recall_groups: dict[tuple[str, str, int], list[dict]] = {}
     phase4_groups: dict[tuple[str, str, str, str], list[dict]] = {}
     phase4_seen: set[tuple[str, str, str, int]] = set()
@@ -575,17 +715,26 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
             if _stratum(current_row) != _stratum(cv_row):
                 raise ValueError("matched prediction rows have mismatched strata")
             current_metrics, cv_metrics = current_row.get("metrics", {}), cv_row.get("metrics", {})
-            common_metrics = sorted(key for key in set(current_metrics) & set(cv_metrics)
-                if type(current_metrics[key]) in (int, float) and math.isfinite(current_metrics[key])
-                and type(cv_metrics[key]) in (int, float) and math.isfinite(cv_metrics[key]))
+            if (not isinstance(current_metrics, dict) or not isinstance(cv_metrics, dict) or
+                    not current_metrics or set(current_metrics) != set(cv_metrics)):
+                raise ValueError("matched prediction rows have missing or unpaired metric fields")
+            metric_scope = (ids["current"], ids["cv"], track)
+            fields = set(current_metrics)
+            previous_fields = matched_metric_fields.setdefault(metric_scope, fields)
+            if fields != previous_fields:
+                raise ValueError("matched prediction rows have missing metric fields across episodes")
+            common_metrics = sorted(fields)
             for metric in common_metrics:
                 pair_key = (kind, track, category, seed, metric)
                 if pair_key in seen_rows:
                     raise ValueError("duplicate matched prediction category/seed row")
                 # Each individual contrast is one paired observation, so combine below by key.
                 seen_rows.add(pair_key)
-                diff = (_finite_number(cv_row["metrics"].get(metric), metric) -
-                        _finite_number(current_row["metrics"].get(metric), metric))
+                if cv_metrics[metric] is None or current_metrics[metric] is None:
+                    raise ValueError(
+                        f"matched prediction metric {metric} unavailable: a paired value is null")
+                diff = (_finite_number(cv_metrics[metric], metric) -
+                        _finite_number(current_metrics[metric], metric))
                 summaries.append({"contrast": kind, "category": category,
                     "policy": track, "seed": seed, "metric": metric,
                     "candidate_policy": policy_cv, "reference_policy": policy_current,
@@ -652,16 +801,11 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
             phase4_coverage.setdefault(coverage_key, set()).add((category, seed))
             for metric in sorted(candidate_metrics):
                 candidate_value, baseline_value = candidate_metrics[metric], baseline_metrics[metric]
-                if candidate_value is None and baseline_value is None:
-                    continue
-                if (type(candidate_value) not in (int, float) or
-                        not math.isfinite(candidate_value) or
-                        type(baseline_value) not in (int, float) or
-                        not math.isfinite(baseline_value)):
-                    raise ValueError(f"Phase 4 paired metric {metric} is missing or non-finite")
+                candidate_value, baseline_value = _paired_finite_values(
+                    candidate_value, baseline_value, metric, "Phase 4 paired")
                 phase4_groups.setdefault((factor, policy, category, metric), []).append({
                     "seed": seed, "cluster": list(_stratum(candidate_row)),
-                    "difference": float(candidate_value) - float(baseline_value)})
+                    "difference": candidate_value - baseline_value})
             continue
 
         # Standard within-report and cross-condition paired metric contrasts.
@@ -710,16 +854,32 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
             observed = [item[0].get("seed") for item in data["pairs"]]
             if len(observed) != len(set(observed)) or set(observed) != set(requested):
                 raise ValueError(f"paired contrast has missing/duplicate seed rows for {category}")
-            numeric_metrics = set.intersection(*[
-                {key for key, value in pair[0].get("metrics", {}).items()
-                 if type(value) in (int, float) and math.isfinite(value)} &
-                {key for key, value in pair[1].get("metrics", {}).items()
-                 if type(value) in (int, float) and math.isfinite(value)}
-                for pair in data["pairs"]])
+            metric_sets = []
+            for candidate_row, reference_row, _ in data["pairs"]:
+                candidate_metrics = candidate_row.get("metrics")
+                reference_metrics = reference_row.get("metrics")
+                if (not isinstance(candidate_metrics, dict) or
+                        not isinstance(reference_metrics, dict) or
+                        set(candidate_metrics) != set(reference_metrics)):
+                    raise ValueError("paired rows have missing or unpaired metric fields")
+                if not candidate_metrics:
+                    raise ValueError("paired evaluation records have no metrics")
+                metric_sets.append(set(candidate_metrics))
+            numeric_metrics = set.union(*metric_sets)
+            if any(metric_set != numeric_metrics for metric_set in metric_sets):
+                raise ValueError("paired rows have missing metric fields across episodes")
+            for candidate_row, reference_row, _ in data["pairs"]:
+                for metric in numeric_metrics:
+                    if (candidate_row["metrics"][metric] is None or
+                            reference_row["metrics"][metric] is None):
+                        raise ValueError(
+                            f"paired metric {metric} unavailable: candidate/reference value is null")
+                    _finite_number(candidate_row["metrics"][metric], metric)
+                    _finite_number(reference_row["metrics"][metric], metric)
             for metric in sorted(numeric_metrics):
                 _add_metric_difference(summaries, contrast_name=kind, category=category,
                     metric=metric, paired=data["pairs"], candidate_policy=candidate_policy,
-                    reference_policy=reference_policy, bootstrap_seed=bootstrap_seed,
+                    reference_policy=reference_policy, bootstrap_seed=effective_bootstrap_seed,
                     replicates=replicates)
 
     for (current_id, cv_id), observed in matched_coverage.items():
@@ -743,7 +903,7 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
         summaries.append({"contrast": "candidate_recall_K_sweep", "category": category,
             "policy": track, "candidate_k": k, "n_episodes": len(values),
             "mean_candidate_recall": sum(values) / len(values),
-            "ci_95": _cluster_bootstrap_ci(groups, seed=bootstrap_seed ^ k,
+            "ci_95": _cluster_bootstrap_ci(groups, seed=effective_bootstrap_seed ^ k,
                                             replicates=replicates),
             "cluster_count": len(groups), "cluster_fields": list(STRATUM_FIELDS[:2]),
             "_observations": observations})
@@ -780,14 +940,16 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
             summaries.append({"contrast": "phase4_factor_vs_no_factor", "factor": factor,
                 "category": category, "candidate_policy": policy, "reference_policy": policy,
                 "metric": metric, "n_pairs": len(values), "mean_difference": sum(values) / len(values),
-                "ci_95": _cluster_bootstrap_ci(clusters, seed=bootstrap_seed,
+                "ci_95": _cluster_bootstrap_ci(clusters, seed=effective_bootstrap_seed,
                                                 replicates=replicates),
                 "cluster_count": len(clusters), "cluster_fields": list(STRATUM_FIELDS[:2]),
                 "difference_direction": "candidate_minus_reference",
                 "_observations": observations})
 
     diagnostic_performance = _diagnostic_performance_summaries(
-        matrix, loaded, bootstrap_seed=bootstrap_seed, replicates=replicates)
+        matrix, loaded, bootstrap_seed=effective_bootstrap_seed, replicates=replicates)
+    equal_category = _equal_category_summaries(summaries,
+        bootstrap_seed=effective_bootstrap_seed, replicates=replicates)
     return {"schema": "meco-ablation-bootstrap-summary-v1",
         "diagnostic_only": True,
         "promotion_inference": False,
@@ -798,8 +960,10 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
         "provenance": loaded["common"],
         "bootstrap": {"method": "cluster_then_paired_episode_resampling",
             "cluster_fields": ["layout_id", "defender_family"],
-            "seed": bootstrap_seed, "replicates": replicates,
+            "seed": effective_bootstrap_seed, "user_seed": bootstrap_seed,
+            "input_sha256": input_sha256, "replicates": replicates,
             "interval": "percentile_95", "percentiles": [2.5, 97.5]},
+        "equal_category_paired_effects": equal_category,
         "diagnostic_performance": {"scope": "diagnostic_only_not_qualification_primary_gates",
             "summaries": diagnostic_performance},
         "summaries": summaries,
@@ -835,6 +999,14 @@ def summarize_matrices(matrix_paths: list[str | Path], *,
                 raise ValueError(f"input matrices have incompatible {field}")
         if protocol_identity(result["provenance"].get("qualification_protocol")) != common_protocol:
             raise ValueError("input matrices have incompatible qualification protocol ID/SHA-256")
+    pooled_input_sha256 = _canonical_hash({
+        "matrices": sorted(result["matrix"]["file_sha256"] for result in results),
+        "evaluation_reports": sorted(({
+            "matrix_id": result["matrix"].get("matrix_id"),
+            "condition_id": key, "sha256": value["sha256"]}
+            for result in results for key, value in result["evaluation_reports"].items()),
+            key=lambda row: (str(row["matrix_id"]), str(row["condition_id"]), row["sha256"]))})
+    pooled_bootstrap_seed = _content_bound_seed(bootstrap_seed, pooled_input_sha256)
     seen_samples = set()
     groups: dict[tuple, list[dict]] = {}
     for result in results:
@@ -871,7 +1043,7 @@ def summarize_matrices(matrix_paths: list[str | Path], *,
             "n_episodes": len(values), "cluster_count": len(clusters),
             "cluster_fields": list(STRATUM_FIELDS[:2]),
             "ci_95": _cluster_bootstrap_ci(clusters,
-                seed=bootstrap_seed ^ (k or 0), replicates=replicates)}
+                seed=pooled_bootstrap_seed ^ (k or 0), replicates=replicates)}
         if contrast == "candidate_recall_K_sweep":
             row.update({"policy": policy, "candidate_k": k,
                         "mean_candidate_recall": sum(values) / len(values)})
@@ -887,11 +1059,23 @@ def summarize_matrices(matrix_paths: list[str | Path], *,
                             "matched_prediction_current_vs_cv" else "candidate_minus_reference")})
             if policy:
                 row["policy"] = policy
+        if contrast != "candidate_recall_K_sweep":
+            row["_observations"] = [{"seed": observation["seed"],
+                "difference": _finite_number(observation["difference"], "difference"),
+                "full_stratum": observation["full_stratum"]}
+                for observation in observations]
         summaries.append(row)
+    equal_category = _equal_category_summaries(summaries,
+        bootstrap_seed=pooled_bootstrap_seed, replicates=replicates)
     matrix_info = [result["matrix"] for result in results]
     report_info = {}
     for result in results:
-        report_info.update(result["evaluation_reports"])
+        matrix_id = result["matrix"].get("matrix_id")
+        matrix_sha256 = result["matrix"]["file_sha256"]
+        for condition_id, value in result["evaluation_reports"].items():
+            identity = f"{matrix_id}/{matrix_sha256}/{condition_id}/{value['sha256']}"
+            report_info[identity] = {"matrix_id": matrix_id,
+                "matrix_sha256": matrix_sha256, "condition_id": condition_id, **value}
     return {"schema": "meco-ablation-bootstrap-summary-v1",
         "diagnostic_only": True, "promotion_inference": False,
         "matrices": matrix_info, "evaluation_reports": report_info,
@@ -905,8 +1089,10 @@ def summarize_matrices(matrix_paths: list[str | Path], *,
         "strata": [result["provenance"]["qualification_case"] for result in results],
         "bootstrap": {"method": "cluster_then_paired_episode_resampling",
             "cluster_fields": ["layout_id", "defender_family"],
-            "seed": bootstrap_seed, "replicates": replicates,
+            "seed": pooled_bootstrap_seed, "user_seed": bootstrap_seed,
+            "input_sha256": pooled_input_sha256, "replicates": replicates,
             "interval": "percentile_95", "percentiles": [2.5, 97.5]},
+        "equal_category_paired_effects": equal_category,
         "summaries": summaries,
         "interpretation": "Diagnostic paired intervals only; no promotion or qualification conclusion."}
 

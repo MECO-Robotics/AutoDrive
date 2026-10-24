@@ -6,10 +6,14 @@ import sys
 
 import pytest
 from frc_defense.meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
+from frc_defense.meco_ablation_matrix import POLICY_CONTRASTS
+from frc_defense.meco_tracks import MECO_TRACKS
 
 from scripts.summarize_meco_ablation_matrix import (
-    PHASE4_POLICIES, _canonical_hash, _cluster_bootstrap_ci, summarize_matrix,
-    summarize_matrices,
+    PHASE4_POLICIES, _canonical_hash, _cluster_bootstrap_ci,
+    _content_bound_seed, _equal_category_summaries, _paired_finite_values,
+    _stratified_paired_ci, summarize_matrix,
+    _validate_required_contrasts, summarize_matrices,
 )
 
 
@@ -17,16 +21,87 @@ def _write_json(path, value):
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
 
+def _standard_contrasts(common, records, condition_id):
+    provenance = {**common, "scenario_id": "pickup_simple"}
+    rows = []
+    pairs = [(name, candidate, reference)
+        for name, policy_pairs in POLICY_CONTRASTS.items()
+        for candidate, reference in policy_pairs]
+    pairs.extend((f"{track}_vs_D0_architecture_condition", track, "D0")
+                 for track in MECO_TRACKS)
+    for name, candidate_policy, reference_policy in pairs:
+        contrast = {"contrast": name, "paired": True,
+            "condition_id": condition_id, "candidate_policy": candidate_policy,
+            "reference_policy": reference_policy,
+            "common_bundle_provenance": dict(provenance), "paired_episode_rows": []}
+        for category, seed in (("single", seed) for seed in (10, 11, 12, 13)):
+            pair = {(row["policy"], row["category"], row["seed"]): row
+                    for row in records}
+            candidate = pair.get((candidate_policy, category, seed))
+            reference = pair.get((reference_policy, category, seed))
+            if candidate is None or reference is None:
+                continue
+            contrast["paired_episode_rows"].append({"category": category, "seed": seed,
+                "candidate_policy": candidate_policy, "reference_policy": reference_policy,
+                "candidate_record_policy_id": candidate["policy_id"],
+                "reference_record_policy_id": reference["policy_id"],
+                "candidate_metrics": candidate["metrics"],
+                "reference_metrics": reference["metrics"]})
+        rows.append(contrast)
+    return rows
+
+
+def _contrast_catalog_rows():
+    rows = [{"contrast": name, "candidate_policy": candidate,
+             "reference_policy": reference}
+        for name, pairs in POLICY_CONTRASTS.items()
+        for candidate, reference in pairs]
+    rows.extend({"contrast": f"{track}_vs_D0_architecture_condition",
+                 "candidate_policy": track, "reference_policy": "D0"}
+                for track in MECO_TRACKS)
+    return rows
+
+
+@pytest.mark.parametrize("omitted_name", [*POLICY_CONTRASTS,
+    *(f"{track}_vs_D0_architecture_condition" for track in MECO_TRACKS)])
+def test_rejects_rehashed_matrix_missing_whole_required_contrast(tmp_path, omitted_name):
+    path = _fixture(tmp_path)
+    matrix = json.loads(path.read_text())
+    matrix["contrasts"] = [row for row in matrix["contrasts"]
+                           if row["contrast"] != omitted_name]
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    with pytest.raises(ValueError, match="missing required contrast pairs"):
+        summarize_matrix(path, replicates=100)
+
+
+def test_rejects_matrix_missing_one_a_track_pairwise_contrast():
+    rows = [row for row in _contrast_catalog_rows()
+            if (row["contrast"], row["candidate_policy"], row["reference_policy"])
+            != ("A1_A2_A3", "A2", "A3")]
+    with pytest.raises(ValueError, match="missing required contrast pairs"):
+        _validate_required_contrasts(rows)
+
+
+def test_rejects_unsupported_pair_for_named_contrast():
+    rows = _contrast_catalog_rows()
+    rows.append({"contrast": "A1_A2_A3", "candidate_policy": "A1",
+                 "reference_policy": "D1"})
+    with pytest.raises(ValueError, match="unsupported named contrast pair"):
+        _validate_required_contrasts(rows)
+
+
 def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
              schema_version=4):
     case = {"layout_id": "layout-x", "defender_family": "family-x",
             "start_condition": "start-x", "sensor_profile": "sensor-x"}
     seeds = [10, 11, 12, 13]
-    policies = ("A1", "C2")
-    hashes = {policy: hashlib.sha256(policy.encode()).hexdigest() for policy in policies}
+    policies = (*MECO_TRACKS, "D0", "D1", "D2")
+    hashes = {policy: hashlib.sha256(policy.encode()).hexdigest() for policy in MECO_TRACKS}
     configs = {policy: hashlib.sha256((policy + "config").encode()).hexdigest()
-               for policy in policies}
-    protocols = {policy: "train-protocol" for policy in policies}
+               for policy in MECO_TRACKS}
+    protocols = {policy: "train-protocol" for policy in MECO_TRACKS}
     spec = {"condition_name": "architecture_matched_cv_k16"}
     qualification_protocol = {"protocol_id": "qual-protocol",
         "protocol_sha256": "qual-protocol-sha", "protocol_file": "synthetic-v2.json"}
@@ -34,11 +109,12 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
     for seed, offset in zip(seeds, (1.0, 2.0, 3.0, 4.0)):
         cluster = "layout-x"
         for policy in policies:
+            score_delta = {"A1": .5, "A2": .4, "A3": .3, "C1": .2}.get(policy, 0.0)
             records.append({"policy": policy, "policy_id": f"id-{policy}",
                 "category": "single", "seed": seed,
                 "layout_id": cluster, "defender_family": "family-x",
                 "start_condition": "start-x", "sensor_profile": "sensor-x",
-                "metrics": {"score": offset + (0.5 if policy == "A1" else 0.0),
+                "metrics": {"score": offset + score_delta,
                             "fuel": 5.0}, "candidate_recall": offset / 10})
     if duplicate:
         records.append(dict(records[0]))
@@ -48,7 +124,9 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
         "checkpoint_sha256": hashes[policy],
         "training_configuration_sha256": configs[policy],
         "training_protocol_id": protocols[policy],
-        "source_identity_sha256": "source-hash"} for policy in policies}
+        "source_identity_sha256": "source-hash"} for policy in MECO_TRACKS}
+    manifest.update({policy: {"policy_id": f"id-{policy}"}
+                     for policy in ("D0", "D1", "D2")})
     report = {"schema_version": 1, "evaluation_id": "eval-one", "protocol_id": "eval-protocol",
         "qualification_protocol_id": "qual-protocol",
         "evaluation_protocol_id": "qual-protocol",
@@ -87,20 +165,7 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
         "qualification_protocol_id": "qual-protocol", "qualification_protocol": qualification_protocol,
         "qualification_case": case,
         "seed_split_assignments": {"single": {str(seed): "test" for seed in seeds}}}
-    contrast = {"contrast": "A1_vs_C2", "paired": True,
-        "condition_id": "condition-id", "candidate_policy": "A1",
-        "reference_policy": "C2", "common_bundle_provenance": dict(common),
-        "paired_episode_rows": []}
-    for seed in seeds:
-        pair = {r["policy"]: r for r in records if r["seed"] == seed}
-        candidate = pair.get("A1", {"policy_id": "id-A1", "metrics": {"score": 1, "fuel": 5}})
-        reference = pair.get("C2", {"policy_id": "id-C2", "metrics": {"score": 0.5, "fuel": 5}})
-        contrast["paired_episode_rows"].append({"category": "single", "seed": seed,
-            "candidate_policy": "A1", "reference_policy": "C2",
-            "candidate_record_policy_id": candidate["policy_id"],
-            "reference_record_policy_id": reference["policy_id"],
-            "candidate_metrics": candidate["metrics"],
-            "reference_metrics": reference["metrics"]})
+    contrasts = _standard_contrasts(common, records, "condition-id")
     if schema_version >= 5:
         condition["evaluation_report_sha256"] = hashlib.sha256(
             report_path.read_bytes()).hexdigest()
@@ -109,7 +174,7 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
         "conditions": [spec], **common}
     matrix = {"schema_version": schema_version, "matrix_id": "matrix-id", "protocol": matrix_protocol,
         "conditions": {"architecture_matched_cv_k16": condition},
-        "contrasts": [contrast], **common}
+        "contrasts": contrasts, **common}
     recall = {"contrast": "candidate_recall_K_sweep", "paired": True,
         "candidate_policy": "A1@K=16", "reference_policy": "expanded_route_qualified_candidate_pool",
         "condition_id": "condition-id", "common_bundle_provenance": dict(common)}
@@ -120,7 +185,6 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
         for seed in seeds)
     if bad_provenance:
         matrix["contrasts"][0]["common_bundle_provenance"]["source_identity_sha256"] = "other-source"
-    matrix["contrasts"][0]["common_bundle_provenance"]["scenario_id"] = "pickup_simple"
     matrix.pop("report_sha256", None)
     matrix.pop("report_sha256", None)
     matrix["report_sha256"] = _canonical_hash(matrix)
@@ -167,6 +231,23 @@ def _second_stratum(path, *, layout="layout-y"):
     return output
 
 
+def _reuse_condition_id(path, condition_id="condition-id"):
+    matrix = json.loads(path.read_text())
+    name, condition = next(iter(matrix["conditions"].items()))
+    report_path = Path(condition["report_path"])
+    report = json.loads(report_path.read_text())
+    old_id = condition["condition_id"]
+    condition["condition_id"] = condition_id
+    report["experiment_matrix"]["condition_id"] = condition_id
+    _write_json(report_path, report)
+    for contrast in matrix["contrasts"]:
+        if contrast.get("condition_id") == old_id:
+            contrast["condition_id"] = condition_id
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+
+
 def _matched_prediction_fixture(tmp_path):
     path = _fixture(tmp_path)
     matrix = json.loads(path.read_text())
@@ -197,27 +278,27 @@ def _matched_prediction_fixture(tmp_path):
     matrix["matrix_id"] = matrix_id
     matrix["protocol"].update({"matrix_id": matrix_id, "conditions": specs})
     matrix["conditions"] = conditions
-    matrix["contrasts"] = []
-    common = matrix["contrasts"]
-    for policy in ("A1", "C2"):
+    provenance = {key: matrix.get(key) for key in (
+        "checkpoint_sha256", "training_configuration_sha256", "training_protocol_ids",
+        "source_identity_sha256", "execution_device", "evaluation_design",
+        "evaluation_split", "qualification_case", "qualification_protocol_id",
+        "qualification_protocol", "seed_split_assignments")}
+    matrix["contrasts"] = _standard_contrasts(provenance,
+        reports[specs[1]["condition_name"]]["records"], "cv-id")
+    for policy in MECO_TRACKS:
         for seed in [10, 11, 12, 13]:
             current = next(row for row in reports[specs[0]["condition_name"]]["records"]
                            if row["policy"] == policy and row["seed"] == seed)
             cv = next(row for row in reports[specs[1]["condition_name"]]["records"]
                       if row["policy"] == policy and row["seed"] == seed)
-            provenance = {key: matrix.get(key) for key in (
-                "checkpoint_sha256", "training_configuration_sha256", "training_protocol_ids",
-                "source_identity_sha256", "execution_device", "evaluation_design",
-                "evaluation_split", "qualification_case", "qualification_protocol_id",
-                "qualification_protocol", "seed_split_assignments")}
-            provenance["scenario_id"] = "pickup_simple"
+            matched_provenance = {**provenance, "scenario_id": "pickup_simple"}
             matrix["contrasts"].append({"contrast": "matched_prediction_current_vs_cv",
                 "paired": True, "candidate_policy": f"{policy}@cv",
                 "reference_policy": f"{policy}@current",
                 "condition_ids": {"current": "current-id", "cv": "cv-id"},
                 "category": "single", "seed": seed,
                 "current_metrics": current["metrics"], "cv_metrics": cv["metrics"],
-                "common_bundle_provenance": provenance})
+                "common_bundle_provenance": matched_provenance})
     matrix.pop("report_sha256", None)
     matrix["report_sha256"] = _canonical_hash(matrix)
     output = tmp_path / "matched-matrix.json"
@@ -431,6 +512,102 @@ def test_pools_compatible_disjoint_qualification_strata(tmp_path):
     assert score["n_episodes"] == 8
     assert score["cluster_count"] == 2
     assert score["mean_difference"] == pytest.approx(0.5)
+
+
+def test_pooled_hash_retains_reports_with_duplicate_condition_ids(tmp_path):
+    first = _fixture(tmp_path)
+    second = _second_stratum(first)
+    _reuse_condition_id(second)
+    result = summarize_matrices([first, second], bootstrap_seed=17, replicates=100)
+    assert len(result["evaluation_reports"]) == 2
+    assert {row["condition_id"] for row in result["evaluation_reports"].values()} == {
+        "condition-id"}
+    expected_hash = _canonical_hash({
+        "matrices": sorted(row["file_sha256"] for row in result["matrices"]),
+        "evaluation_reports": sorted(({
+            "matrix_id": row["matrix_id"], "condition_id": row["condition_id"],
+            "sha256": row["sha256"]} for row in result["evaluation_reports"].values()),
+            key=lambda row: (str(row["matrix_id"]), str(row["condition_id"]), row["sha256"]))})
+    assert result["bootstrap"]["input_sha256"] == expected_hash
+
+
+def test_equal_category_paired_effects_use_explicit_equal_weights_and_content_seed():
+    summaries = []
+    pairs = [(track, "D0") for track in ("A1", "A2", "A3", "C1", "C2")]
+    pairs.extend([("C1", "D1"), ("D1", "D2"), ("A1", "C2"),
+                  ("C1", "C2"), ("A1", "A2"), ("A1", "A3"),
+                  ("A2", "A3")])
+    for candidate, reference in pairs:
+        for category, difference in (("cluster", 1.0), ("trench", 3.0)):
+            summaries.append({"contrast": f"{candidate}_vs_{reference}",
+                "candidate_policy": candidate, "reference_policy": reference,
+                "metric": "score", "difference_direction": "candidate_minus_reference",
+                "category": category, "_observations": [
+                    {"seed": seed, "difference": difference} for seed in (11, 19)]})
+    result = _equal_category_summaries(summaries, bootstrap_seed=17, replicates=500)
+    assert len(result) == len(pairs)
+    by_pair = {(row["candidate_policy"], row["reference_policy"]): row for row in result}
+    assert set(by_pair) == set(pairs)
+    row = by_pair[("A1", "D0")]
+    assert row["category_weights"] == {"cluster": 0.5, "trench": 0.5}
+    assert row["mean_difference"] == pytest.approx(2.0)
+    assert row["ci_95"] == [2.0, 2.0]
+    assert row["bootstrap"]["method"] == "within_category_paired_episode_resampling"
+    assert row["bootstrap"]["seed"] == _content_bound_seed(
+        17, row["bootstrap"]["input_sha256"])
+    assert row["n_pairs"] == 4
+    cv_summary = {**summaries[0], "difference_direction": "cv_minus_current"}
+    cv_row = _equal_category_summaries([cv_summary], bootstrap_seed=17,
+        replicates=100)[0]
+    assert cv_row["difference_direction"] == "cv_minus_current"
+
+
+def test_stratified_bootstrap_zero_seed_uses_nonzero_prng_state():
+    interval = _stratified_paired_ci({"cluster": [0.0, 1.0]}, seed=0,
+        replicates=1000)
+    assert interval == [0.0, 1.0]
+
+
+def test_equal_category_paired_effects_reject_duplicate_exact_pair_key():
+    item = {"contrast": "A1_vs_D0", "candidate_policy": "A1",
+        "reference_policy": "D0", "metric": "score",
+        "difference_direction": "candidate_minus_reference", "category": "cluster",
+        "_observations": [{"seed": 11, "difference": 1.0},
+                          {"seed": 11, "difference": 2.0}]}
+    with pytest.raises(ValueError, match="duplicate paired category/seed/policy"):
+        _equal_category_summaries([item], bootstrap_seed=3, replicates=100)
+
+
+def test_equal_category_paired_effects_reject_nonfinite_difference():
+    item = {"contrast": "A1_vs_D0", "candidate_policy": "A1",
+        "reference_policy": "D0", "metric": "score",
+        "difference_direction": "candidate_minus_reference", "category": "cluster",
+        "_observations": [{"seed": 11, "difference": float("inf")}]}
+    with pytest.raises(ValueError, match="finite number"):
+        _equal_category_summaries([item], bootstrap_seed=3, replicates=100)
+
+
+def test_both_null_paired_values_fail_with_explicit_unavailable_reason():
+    with pytest.raises(ValueError, match="metric score unavailable: both paired values are null"):
+        _paired_finite_values(None, None, "score", "Phase 4 paired")
+
+
+def test_matrix_summary_rejects_metric_missing_from_one_paired_policy(tmp_path):
+    path = _fixture(tmp_path, schema_version=4)
+    matrix = json.loads(path.read_text())
+    report_path = Path(matrix["conditions"]["architecture_matched_cv_k16"]["report_path"])
+    report = json.loads(report_path.read_text())
+    for record in report["records"]:
+        if record["policy"] == "A1":
+            record["metrics"].pop("fuel")
+    _write_json(report_path, report)
+    for pair in matrix["contrasts"][0]["paired_episode_rows"]:
+        pair["candidate_metrics"].pop("fuel")
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    with pytest.raises(ValueError, match="missing or unpaired metric fields"):
+        summarize_matrix(path, replicates=100)
 
 
 def test_rejects_overlapping_category_seed_stratum_across_matrices(tmp_path):
