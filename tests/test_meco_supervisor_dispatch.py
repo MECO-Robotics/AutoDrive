@@ -44,6 +44,11 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
     supervisor.protocol_id = "protocol-test"
     supervisor.source_hash = "source-hash"
     supervisor.sources = {"source": "same"}
+    native_identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    supervisor.native_extension_attestation = module._native_extension_attestation(native_identity)
     supervisor.run_ids = {track: track for track in MECO_TRACKS}
     supervisor.configs = {track: MecoTrainConfig(track=track,
         device="cuda:0" if index % 2 == 0 else "cuda:1")
@@ -58,7 +63,16 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
     completed = dict(completed or {track: 0 for track in MECO_TRACKS})
     supervisor._completed_updates = lambda track: completed[track]
     supervisor._refresh_progress = lambda track: None
-    supervisor._write_queued_manifests = lambda statuses: None
+    supervisor.manifest_writes = []
+    def write_queued(statuses):
+        supervisor.manifest_writes.append(dict(statuses))
+        for track, status in statuses.items():
+            if status != "queued":
+                continue
+            (supervisor.track_dirs[track] / "run.json").write_text(json.dumps({
+                "status": "queued", "native_extension_attestation":
+                    supervisor.native_extension_attestation}))
+    supervisor._write_queued_manifests = write_queued
     supervisor._poll_evaluator = lambda cycle, statuses, **kwargs: None
     supervisor.published = []
     supervisor._publish = lambda **kwargs: supervisor.published.append(
@@ -78,8 +92,16 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
         if result == 0:
             completed[track] = 10
 
+    monkeypatch.setattr("frc_defense.fuel_physics_hip.prepare_native_fuel_extension",
+                        lambda _device: native_identity)
+    monkeypatch.setattr("frc_defense.fuel_physics_hip.native_extension_identity",
+                        lambda: native_identity)
+
     def popen(command, **kwargs):
         track = command[command.index("--track") + 1]
+        assert supervisor.manifest_writes
+        run_record = json.loads((supervisor.track_dirs[track] / "run.json").read_text())
+        assert run_record["native_extension_attestation"] == supervisor.native_extension_attestation
         device = supervisor.configs[track].device
         assert device not in active_devices, f"two workers active on {device}"
         assert (supervisor.evaluator is None or
@@ -114,6 +136,76 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
 
         monkeypatch.setattr(module.subprocess, "Popen", stop_popen)
     return supervisor, completed, started, process_by_track, events
+
+
+def test_missing_or_changed_loaded_native_attestation_fails_before_worker_launch(
+        tmp_path, monkeypatch):
+    supervisor, _, started, _, _ = make_supervisor(tmp_path, monkeypatch)
+    supervisor.native_extension_attestation = None
+    with pytest.raises(RuntimeError, match="attestation is missing or malformed"):
+        supervisor._run_training_batch(list(MECO_TRACKS), 1,
+            {track: "queued" for track in MECO_TRACKS}, 10, {})
+    assert started == []
+
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    attestation = module._native_extension_attestation(identity)
+    changed = {**identity, "sha256": "c" * 64}
+    with pytest.raises(RuntimeError, match="differs from its pinned attestation"):
+        module._validate_native_extension_attestation(attestation, changed)
+
+
+def test_runtime_source_projection_binds_loaded_binary_and_manifest_projection():
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    source = {"module.py": "c" * 64, "_runtime_environment": {"FRC_MODE": "test"},
+        "_drivetrain_config_sha256": "d" * 64,
+        "_native_fuel_extension": identity}
+    attestation = module._native_extension_attestation(identity)
+    projection = {key: value for key, value in source.items()
+                  if key != "_native_fuel_extension"}
+    assert module._validate_runtime_source_binding(source, identity, attestation,
+        expected_source_projection=projection)
+    with pytest.raises(RuntimeError, match="source/config identity differs"):
+        module._validate_runtime_source_binding(source, identity, attestation,
+            expected_source_projection={**projection, "module.py": "e" * 64})
+    with pytest.raises(RuntimeError, match="source identity does not bind"):
+        module._validate_runtime_source_binding({**source,
+            "_native_fuel_extension": {**identity, "sha256": "f" * 64}},
+            identity, attestation, expected_source_projection=projection)
+
+
+def test_runtime_warm_start_validation_receives_full_attested_source(monkeypatch, tmp_path):
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    sources = {"module.py": "c" * 64, "_native_fuel_extension": identity}
+    attestation = module._native_extension_attestation(identity)
+    seen = {}
+    monkeypatch.setattr("frc_defense.meco_supervised.validate_warm_start_artifact",
+        lambda track, artifact, **kwargs: seen.update(track=track,
+            artifact=artifact, **kwargs))
+    artifact = tmp_path / "weights.pt"
+    artifact.write_bytes(b"weights")
+    module._validate_runtime_warm_start("A1", artifact,
+        qualification_protocol=tmp_path / "protocol.json",
+        expected_sources=sources, prediction_mode="cv",
+        native_attestation=attestation)
+    assert seen["expected_sources"] == sources
+    assert seen["expected_sources"]["_native_fuel_extension"] == identity
+    assert seen["expected_prediction_mode"] == "cv"
+
+    with pytest.raises(RuntimeError, match="differs from its pinned attestation"):
+        module._validate_runtime_warm_start("A1", artifact,
+            qualification_protocol=tmp_path / "protocol.json",
+            expected_sources=sources, prediction_mode="cv",
+            native_attestation=module._native_extension_attestation(
+                {**identity, "sha256": "f" * 64}))
 
 
 def test_dispatch_fills_freed_devices_without_waiting_for_other_tracks(

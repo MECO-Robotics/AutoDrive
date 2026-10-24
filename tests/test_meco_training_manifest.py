@@ -294,3 +294,74 @@ def test_validate_rehashes_warm_start_bytes(campaign, monkeypatch):
     artifact.write_bytes(b"mutated-artifact")
     with pytest.raises(ValueError, match="warm-start bytes"):
         manifest_api.validate_campaign_manifest(base, source_root=tmp_path)
+
+
+def test_source_projection_excludes_only_native_state_and_accepts_prepare_transition(
+        campaign, monkeypatch):
+    tmp_path, config = campaign
+    unprepared = {"source": "fixture", "_runtime_environment": {"FRC_MODE": "test"},
+        "_drivetrain_config_sha256": "d" * 64,
+        "_native_fuel_extension": {"status": "unprepared"}}
+    monkeypatch.setattr(manifest_api, "source_identity", lambda: unprepared)
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    projection = {key: value for key, value in unprepared.items()
+                  if key != "_native_fuel_extension"}
+    assert manifest["source"]["identity"] == projection
+    assert manifest["source"]["identity_sha256"] == manifest_api._sha(projection)
+    assert manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)["valid"]
+
+    loaded = {**unprepared, "_native_fuel_extension": {
+        "status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}}
+    monkeypatch.setattr(manifest_api, "source_identity", lambda: loaded)
+    assert manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)["valid"]
+
+
+@pytest.mark.parametrize("change", ["code", "environment", "drivetrain"])
+def test_source_projection_still_rejects_code_environment_and_drivetrain_drift(
+        campaign, monkeypatch, change):
+    tmp_path, config = campaign
+    source = {"module.py": "a" * 64, "_runtime_environment": {"FRC_MODE": "test"},
+        "_drivetrain_config_sha256": "d" * 64,
+        "_native_fuel_extension": {"status": "unprepared"}}
+    monkeypatch.setattr(manifest_api, "source_identity", lambda: source)
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    drifted = copy.deepcopy(source)
+    if change == "code":
+        drifted["module.py"] = "c" * 64
+    elif change == "environment":
+        drifted["_runtime_environment"]["FRC_MODE"] = "changed"
+    else:
+        drifted["_drivetrain_config_sha256"] = "e" * 64
+    monkeypatch.setattr(manifest_api, "source_identity", lambda: drifted)
+    with pytest.raises(ValueError, match="source binding"):
+        manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)
+
+
+def test_warm_start_metadata_binds_source_projection_and_defers_loaded_binary_parity(
+        tmp_path, monkeypatch):
+    native = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    sources = {"module.py": "c" * 64, "_runtime_environment": {"FRC_MODE": "test"},
+        "_native_fuel_extension": native}
+    checkpoint = tmp_path / "artifact.pt"
+    checkpoint.write_bytes(b"artifact")
+    payload = {"sources": sources,
+        "source_identity_sha256": manifest_api._source_artifact_hash(sources),
+        "track": "A1", "protocol_id": "protocol",
+        "protocol_sha256": "p" * 64}
+    import torch
+    monkeypatch.setattr(torch, "load", lambda *args, **kwargs: payload)
+    projection = {key: value for key, value in sources.items()
+                  if key != "_native_fuel_extension"}
+    result = manifest_api._warm_start(checkpoint, "A1", projection,
+        tmp_path / "protocol.json", "protocol", "p" * 64)
+    assert result["binding_valid"] is True
+    assert result["native_extension_identity"] == native
+    assert result["native_extension_identity_sha256"] == manifest_api._sha(native)
+    assert result["native_runtime_attested"] is False
+    assert result["reason"] == "loaded HIP parity is required at runtime"

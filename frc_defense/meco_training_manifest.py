@@ -22,7 +22,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
 from .meco_track_training import CHUNK_RESET_POLICY, MecoTrainConfig
 from .training_curriculum import get_scenario
 
-SCHEMA = "meco-five-track-campaign-manifest-v1"
+SCHEMA = "meco-five-track-campaign-manifest-v2"
 ROOT = Path(__file__).resolve().parents[1]
 LEASE_CONTRACT = {"owner_limit_per_index": 1,
     "training_policy": "sequential_round_robin_tracks",
@@ -32,6 +32,9 @@ PINNED_LIVE_ROOTS = ((ROOT / "checkpoints" / "meco-five").resolve(),
 EXPECTED_WX9100_BDFS = {"cuda:0": "0000:19:00.0", "cuda:1": "0000:67:00.0"}
 HOST_GPU_INVENTORY = ROOT / "qualifications" / "meco" / "host-gpu-inventory-20261024.json"
 HOST_GPU_INVENTORY_SHA256 = "5f7518b9c0a25687947a5375eb01a10e67a7a9089f7264eb44625bab52b543af"
+NATIVE_SOURCE_FIELD = "_native_fuel_extension"
+SOURCE_IDENTITY_POLICY = {"projection": "all source_identity fields except _native_fuel_extension",
+    "native_runtime_attestation": "required after HIP preparation and before worker launch"}
 
 
 def _canonical_bytes(value):
@@ -41,6 +44,34 @@ def _canonical_bytes(value):
 
 def _sha(value):
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def source_identity_projection(identity):
+    """Return the stable code/config identity while preserving all other inputs."""
+    if not isinstance(identity, dict) or not identity:
+        raise ValueError("source identity must be a nonempty object")
+    return {key: value for key, value in identity.items() if key != NATIVE_SOURCE_FIELD}
+
+
+def _source_artifact_hash(identity):
+    # Matches meco_supervised._canonical_hash for artifact metadata.
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()).hexdigest()
+
+
+def _valid_native_identity(identity):
+    if not isinstance(identity, dict) or identity.get("status") != "present":
+        return False
+    if (not isinstance(identity.get("module"), str) or not identity["module"] or
+            not isinstance(identity.get("path"), str) or not Path(identity["path"]).is_absolute()):
+        return False
+    for key in ("sha256", "build_fingerprint"):
+        value = identity.get(key)
+        if (not isinstance(value, str) or len(value) != 64 or
+                any(char not in "0123456789abcdef" for char in value)):
+            return False
+    return all(type(identity.get(key)) is int and identity[key] >= 0
+               for key in ("device", "inode", "size", "mtime_ns")) and identity["size"] > 0
 
 
 def _file_sha(path):
@@ -255,7 +286,6 @@ def _atomic_write_json(path, value):
 
 
 def _warm_start(path, track, expected_sources, protocol_path, protocol_id, protocol_sha):
-    expected_source_hash = _sha(expected_sources)
     required_targets = (("U", "P", "behavior") if track.startswith("A") else
                         ("gross_reward", "pairwise_preference"))
     unverified_targets = {name: {"valid": False,
@@ -263,6 +293,8 @@ def _warm_start(path, track, expected_sources, protocol_path, protocol_id, proto
         for name in required_targets}
     if path is None:
         return {"present": False, "path": None, "sha256": None,
+                "native_extension_identity": None, "native_extension_identity_sha256": None,
+                "native_runtime_attested": False,
                 "binding_valid": False, "targets": unverified_targets, "phase2_covered": False,
                 "reason": "artifact not supplied"}
     path = Path(path).expanduser().resolve()
@@ -272,38 +304,40 @@ def _warm_start(path, track, expected_sources, protocol_path, protocol_id, proto
     except Exception as exc:
         return {"present": path.is_file(), "path": str(path),
                 "sha256": _file_sha(path) if path.is_file() else None,
+                "native_extension_identity": None, "native_extension_identity_sha256": None,
+                "native_runtime_attested": False,
                 "binding_valid": False, "targets": unverified_targets, "phase2_covered": False,
                 "reason": f"artifact unreadable: {type(exc).__name__}"}
     if not isinstance(payload, dict):
         payload = {}
-    source = payload.get("source_identity_sha256")
+    payload_sources = payload.get("sources")
+    native_identity = (payload_sources.get(NATIVE_SOURCE_FIELD)
+                       if isinstance(payload_sources, dict) else None)
+    native_valid = _valid_native_identity(native_identity)
+    source_binding = (isinstance(payload_sources, dict) and
+        source_identity_projection(payload_sources) == expected_sources and native_valid and
+        payload.get("source_identity_sha256") == _source_artifact_hash(payload_sources))
     protocol_binding = (payload.get("protocol_id") == protocol_id and
         payload.get("protocol_sha256", payload.get("qualification_protocol_sha256")) == protocol_sha)
-    source_binding = source == expected_source_hash
     track_binding = payload.get("track") == track
-    validator_error = None
-    try:
-        from .meco_supervised import validate_warm_start_artifact
-        validate_warm_start_artifact(track, path,
-            qualification_protocol=Path(protocol_path), expected_sources=expected_sources)
-        artifact_valid = True
-    except Exception as exc:
-        artifact_valid = False
-        validator_error = f"artifact validator rejected metadata ({type(exc).__name__})"
-    # Weight validators establish source/protocol compatibility, but do not
-    # prove all requested label datasets' target coverage. Never accept a
-    # caller-authored coverage dictionary as a substitute for dataset audits.
+    # This offline inspection binds artifact metadata only. The supervisor
+    # revalidates the complete artifact against the loaded binary before launch.
     targets = unverified_targets
     return {"present": True, "path": str(path), "sha256": _file_sha(path),
         "artifact_schema": payload.get("schema"), "track": payload.get("track"),
-        "source_identity_sha256": source, "protocol_id": payload.get("protocol_id"),
+        "source_identity_sha256": payload.get("source_identity_sha256"),
+        "native_extension_identity": native_identity,
+        "native_extension_identity_sha256": (_sha(native_identity) if native_valid else None),
+        "native_runtime_attested": False,
+        "protocol_id": payload.get("protocol_id"),
         "protocol_sha256": payload.get("protocol_sha256",
             payload.get("qualification_protocol_sha256")),
-        "binding_valid": bool(source_binding and protocol_binding and track_binding and artifact_valid),
+        "binding_valid": bool(source_binding and protocol_binding and track_binding),
         "targets": targets,
         "phase2_covered": False,
-        "reason": (None if source_binding and protocol_binding and track_binding and artifact_valid
-            else validator_error or "source, protocol, or track binding mismatch")}
+        "reason": ("loaded HIP parity is required at runtime" if
+            source_binding and protocol_binding and track_binding else
+            "source projection, native identity, protocol, or track binding mismatch")}
 
 
 def describe_campaign(config, *, source_root=ROOT, output=None):
@@ -362,7 +396,7 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("device lease contract must enforce sequential exclusive ownership")
     leases = {"pool": device_pool, "training_by_track": devices,
         "evaluation": eval_device, "contract": LEASE_CONTRACT}
-    source = source_identity()
+    source = source_identity_projection(source_identity())
     source_hash = _sha(source)
     git = _git_binding(source_root)
     warm = {track: _warm_start(config.get("warm_start_artifacts", {}).get(track), track,
@@ -401,7 +435,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("evaluation episode seeds are outside the bound protocol split/case")
     if evaluation.get("protocol_id") not in (None, evaluation_protocol["protocol_id"]):
         raise ValueError("evaluation protocol ID does not match protocol file")
-    manifest = {"schema": SCHEMA, "source": {"commit": git["commit"],
+    manifest = {"schema": SCHEMA, "source_identity_policy": SOURCE_IDENTITY_POLICY,
+        "source": {"commit": git["commit"],
             "clean": git["clean"], "status_sha256": git["status_sha256"],
             "identity_sha256": source_hash, "identity": source},
         "qualification_protocol": {"path": str(protocol_path),
@@ -458,10 +493,13 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
         raise ValueError("campaign manifest canonical digest mismatch")
     expected = _git_binding(Path(source_root).resolve())
     src = manifest.get("source", {})
-    current_identity = source_identity()
+    current_identity = source_identity_projection(source_identity())
     if (not expected["clean"] or not src.get("clean") or
             src.get("commit") != expected["commit"] or
             src.get("status_sha256") != expected["status_sha256"] or
+            manifest.get("source_identity_policy") != SOURCE_IDENTITY_POLICY or
+            not isinstance(src.get("identity"), dict) or
+            NATIVE_SOURCE_FIELD in src["identity"] or
             src.get("identity") != current_identity or
             src.get("identity_sha256") != _sha(src.get("identity")) or
             src.get("identity_sha256") != _sha(current_identity)):

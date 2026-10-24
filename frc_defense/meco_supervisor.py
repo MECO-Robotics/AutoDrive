@@ -45,6 +45,50 @@ def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def _native_extension_attestation(identity):
+    from .meco_training_manifest import _valid_native_identity
+    if not _valid_native_identity(identity):
+        raise RuntimeError("loaded native HIP extension identity is missing or malformed")
+    return {"schema": 1, "identity": dict(identity),
+        "identity_sha256": _hash(identity)}
+
+
+def _validate_native_extension_attestation(attestation, expected_identity):
+    if (not isinstance(attestation, dict) or attestation.get("schema") != 1 or
+            not isinstance(attestation.get("identity"), dict) or
+            attestation.get("identity_sha256") != _hash(attestation["identity"])):
+        raise RuntimeError("native HIP extension attestation is missing or malformed")
+    expected = _native_extension_attestation(expected_identity)
+    if attestation != expected:
+        raise RuntimeError("loaded native HIP extension differs from its pinned attestation")
+    return attestation
+
+
+def _validate_runtime_source_binding(sources, loaded_identity, attestation,
+                                    expected_source_projection=None):
+    _validate_native_extension_attestation(attestation, loaded_identity)
+    if not isinstance(sources, dict) or sources.get("_native_fuel_extension") != loaded_identity:
+        raise RuntimeError("runtime source identity does not bind the attested loaded HIP binary")
+    if expected_source_projection is not None:
+        from .meco_training_manifest import source_identity_projection
+        if source_identity_projection(sources) != expected_source_projection:
+            raise RuntimeError("prepared runtime source/config identity differs from campaign manifest")
+    return _hash(sources)
+
+
+def _validate_runtime_warm_start(track, artifact, *, qualification_protocol,
+                                 expected_sources, prediction_mode,
+                                 native_attestation):
+    loaded_identity = (expected_sources.get("_native_fuel_extension")
+                       if isinstance(expected_sources, dict) else None)
+    _validate_native_extension_attestation(native_attestation, loaded_identity)
+    from .meco_supervised import validate_warm_start_artifact
+    return validate_warm_start_artifact(track, artifact,
+        qualification_protocol=qualification_protocol,
+        expected_sources=expected_sources,
+        expected_prediction_mode=prediction_mode)
+
+
 def _atomic_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, indent=2, allow_nan=False)
@@ -295,8 +339,23 @@ class MecoSupervisor:
             raise ValueError("supervisor roots must match the dashboard's pinned MECO roots")
         self.devices = devices
         from .fuel_physics_hip import prepare_native_fuel_extension
+        from .fuel_physics_hip import native_extension_identity
+        loaded_native_identities = []
         for device in sorted(set(devices) | {evaluation_device}):
             prepare_native_fuel_extension(device)
+            identity = native_extension_identity()
+            self.native_extension_attestation = _native_extension_attestation(identity)
+            loaded_native_identities.append(identity)
+        if any(identity != loaded_native_identities[0]
+               for identity in loaded_native_identities[1:]):
+            raise RuntimeError("indexed devices loaded different native HIP binary identities")
+        self.native_extension_attestation = _native_extension_attestation(
+            loaded_native_identities[0])
+        self.sources = source_identity()
+        self.source_hash = _validate_runtime_source_binding(self.sources,
+            loaded_native_identities[0], self.native_extension_attestation,
+            expected_source_projection=(self.manifest["source"]["identity"]
+                if self.manifest is not None else None))
         self.warm_start_paths = {}
         self.warm_start_hashes = {}
         self.qualification_protocol_path = (Path(qualification_protocol).expanduser().resolve()
@@ -392,16 +451,15 @@ class MecoSupervisor:
             self.configs[track] = config
         self.track_dirs = {track: Path(self.configs[track].output).expanduser().resolve()
             for track in MECO_TRACKS}
-        self.sources = source_identity()
         self.source_hash = _hash(self.sources)
         if warm_start_artifacts:
-            from .meco_supervised import validate_warm_start_artifact
             for track in MECO_TRACKS:
                 artifact = Path(warm_start_artifacts[track]).expanduser().resolve()
-                validate_warm_start_artifact(track, artifact,
+                _validate_runtime_warm_start(track, artifact,
                     qualification_protocol=self.qualification_protocol_path,
                     expected_sources=self.sources,
-                    expected_prediction_mode=self.prediction_mode)
+                    expected_prediction_mode=self.prediction_mode,
+                    native_attestation=self.native_extension_attestation)
                 self.warm_start_paths[track] = artifact
                 self.warm_start_hashes[track] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         self.hyperparameters = asdict(next(iter(self.configs.values())))
@@ -485,6 +543,7 @@ class MecoSupervisor:
             "prediction_mode": self.prediction_mode,
             "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
+            "native_extension_attestation": self.native_extension_attestation,
             "qualification_protocol_id": self.qualification_protocol_id,
             "qualification_protocol_sha256": self.qualification_protocol_sha256,
             "evaluation_split": self.evaluation_split,
@@ -513,6 +572,7 @@ class MecoSupervisor:
             "prediction_mode": self.prediction_mode,
             "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
+            "native_extension_attestation": self.native_extension_attestation,
             "qualification_protocol_id": self.qualification_protocol_id,
             "qualification_protocol_sha256": self.qualification_protocol_sha256,
             "evaluation_split": self.evaluation_split,
@@ -543,6 +603,7 @@ class MecoSupervisor:
             "campaign_root": str(self.output),
             "evaluation_output": str(self.evaluation_output),
             "source": manifest["source"],
+            "native_extension_attestation": self.native_extension_attestation,
             "track_config_sha256": {t: manifest["tracks"][t]["config_sha256"]
                 for t in MECO_TRACKS},
             "qualification_protocol": manifest["qualification_protocol"],
@@ -730,18 +791,18 @@ class MecoSupervisor:
                 continue
             run_dir = self.track_dirs[track]
             manifest_path = run_dir / "run.json"
-            if (run_dir / "latest.pt").is_file():
-                try:
-                    manifest = json.loads(manifest_path.read_text())
-                except (OSError, json.JSONDecodeError):
-                    manifest = {}
-                manifest.update(schema_version=1, run_id=self.run_ids[track], track=track,
-                    config=asdict(self.configs[track]), sources=self.sources,
-                    source_identity_sha256=self.source_hash, status="queued",
-                    updates_semantics="updates per invocation chunk",
-                    chunk_reset_policy=CHUNK_RESET_POLICY,
-                    candidate_boundary=CANDIDATE_BOUNDARY, protocol_id=self.protocol_id)
-                _atomic_json(manifest_path, manifest)
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                manifest = {}
+            manifest.update(schema_version=1, run_id=self.run_ids[track], track=track,
+                config=asdict(self.configs[track]), sources=self.sources,
+                source_identity_sha256=self.source_hash,
+                native_extension_attestation=self.native_extension_attestation,
+                status="queued", updates_semantics="updates per invocation chunk",
+                chunk_reset_policy=CHUNK_RESET_POLICY,
+                candidate_boundary=CANDIDATE_BOUNDARY, protocol_id=self.protocol_id)
+            _atomic_json(manifest_path, manifest)
 
     def _run_training_batch(self, tracks, cycle, statuses, target_update,
                             task_assignment):
@@ -767,6 +828,14 @@ class MecoSupervisor:
             base_config = self.configs[track]
             config = MecoTrainConfig(**{**asdict(base_config),
                 "updates": min(self.chunk_updates, remaining_updates)})
+            from .fuel_physics_hip import (prepare_native_fuel_extension,
+                native_extension_identity)
+            prepare_native_fuel_extension(config.device)
+            loaded_identity = native_extension_identity()
+            _validate_native_extension_attestation(
+                self.native_extension_attestation, loaded_identity)
+            if source_identity() != self.sources:
+                raise RuntimeError("source identity changed after native HIP attestation")
             latest = self.track_dirs[track] / "latest.pt"
             warm_artifact = (self.warm_start_paths.get(track)
                 if not latest.is_file() else None)
@@ -780,6 +849,9 @@ class MecoSupervisor:
                 protocol_id=self.protocol_id, task_assignment=task_assignment,
                 warm_start=warm_artifact,
                 qualification_protocol=self.qualification_protocol_path)
+            # Persist the exact loaded binary binding before any subprocess can
+            # inherit the GPU runtime or begin training.
+            self._write_queued_manifests(statuses)
             log_path = self.track_dirs[track] / "supervisor.log"
             logs[track] = log_path.open("ab")
             try:
@@ -793,7 +865,6 @@ class MecoSupervisor:
             processes[track] = process
             self.worker_pids[track] = process.pid
             statuses[track] = "running"
-            self._write_queued_manifests(statuses)
             self._publish(cycle=cycle, phase="training", statuses=statuses)
 
         try:
