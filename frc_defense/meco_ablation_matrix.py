@@ -26,7 +26,9 @@ from .meco_phase4_runtime_adapter import (
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     phase4_start_profile_assignment as build_start_profile_assignment,
     phase4_context_identity, validate_contact_geometry_split,
-    validate_phase4_start_profile_assignment)
+    validate_phase4_start_profile_assignment,
+    phase4_focal_pose_assignment as build_focal_pose_assignment,
+    validate_phase4_focal_pose_assignment)
 from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
@@ -59,6 +61,8 @@ class MatrixCondition:
     qualification_case: dict | None = None
     contact_geometry_id: str | None = None
     contact_geometry_config: dict | None = None
+    focal_pose_pair_offset: str | None = None
+    focal_pose_offset: str | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -84,6 +88,13 @@ class MatrixCondition:
               self.contact_geometry_config != phase4_context_identity(
                   "robot_contact_geometry", self.contact_geometry_id)):
             raise ValueError("contact geometry differs from its frozen registry identity")
+        if self.focal_pose_pair_offset is None:
+            if self.focal_pose_offset is not None:
+                raise ValueError("focal pose treatment requires its registered pair identity")
+        else:
+            phase4_context_identity("focal_pose_offsets", self.focal_pose_pair_offset)
+            if self.focal_pose_offset not in (None, self.focal_pose_pair_offset):
+                raise ValueError("focal pose treatment must match its registered pair identity")
         if self.qualification_case is not None:
             if (not isinstance(self.qualification_case, dict) or
                     set(self.qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
@@ -324,7 +335,8 @@ def final_test_ledger_path(protocol_path: str | Path, protocol_id: str) -> Path:
 def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None = None,
                        inference_disable_tick: int | None = None,
                        qualification_case: dict | None = None,
-                       contact_geometries: tuple[str, ...] = ()
+                       contact_geometries: tuple[str, ...] = (),
+                       focal_pose_offsets: tuple[str, ...] = ()
                        ) -> tuple[MatrixCondition, ...]:
     """Return the plan's architecture/prediction/K/fault cases and eligible Phase 4 factors."""
     horizon = math.ceil(get_scenario(scenario_id).time_budget_s / .02)
@@ -371,6 +383,18 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
             contact_geometry_config=phase4_context_identity(
                 "robot_contact_geometry", geometry_id))
             for geometry_id in contact_geometries)
+    if focal_pose_offsets:
+        if (scenario_id != "full_match_offense" or
+                not isinstance(focal_pose_offsets, (tuple, list)) or
+                len(set(focal_pose_offsets)) != len(focal_pose_offsets)):
+            raise ValueError("focal pose pairs require unique offsets in full-match validation")
+        for offset_name in focal_pose_offsets:
+            phase4_context_identity("focal_pose_offsets", offset_name)
+            for arm, treatment in (("no_offset", None), ("offset", offset_name)):
+                conditions += (MatrixCondition(
+                    f"phase4_focal_pose_{offset_name}_{arm}", "cv", "cv", 16,
+                    categories=categories, qualification_case=qualification_case,
+                    focal_pose_pair_offset=offset_name, focal_pose_offset=treatment),)
     for condition in conditions:
         condition.validate()
     return conditions
@@ -383,6 +407,17 @@ def _registered_pressure_level(category: str) -> int:
         return int(marker.split("_")[1])
     except (IndexError, ValueError):
         return 0
+
+
+def _validate_focal_pose_condition_selection(conditions, focal_pose_offsets):
+    selected = {}
+    for condition in conditions:
+        if condition.focal_pose_pair_offset is not None:
+            selected.setdefault(condition.focal_pose_pair_offset, set()).add(
+                condition.focal_pose_offset)
+    if (set(selected) != set(focal_pose_offsets) or
+            any(arms != {None, name} for name, arms in selected.items())):
+        raise ValueError("condition selection must include both arms of every focal-pose pair")
 
 
 def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
@@ -664,6 +699,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                contact_geometries: tuple[str, ...] = (),
                phase4_opponent_schedule: dict | None = None,
                start_profile_registry_id: str | None = None,
+               focal_pose_offsets: tuple[str, ...] = (),
                condition_names: tuple[str, ...] | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
@@ -732,6 +768,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         qualification_provenance = {"protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
             "protocol_file": protocol_file}
+    if focal_pose_offsets and (qualification_provenance is None or evaluation_split != "validation"):
+        raise ValueError("focal pose pairs require a frozen full-match validation protocol")
     if phase4_opponent_schedule is not None:
         from .meco_phase4_opponents import validate_opponent_policy_schedule
         phase4_opponent_schedule = validate_opponent_policy_schedule(
@@ -772,7 +810,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     conditions = default_conditions(scenario_id, categories=categories,
         inference_disable_tick=inference_disable_tick,
         qualification_case=qualification_case,
-        contact_geometries=contact_geometries)
+        contact_geometries=contact_geometries,
+        focal_pose_offsets=focal_pose_offsets)
     if condition_names is not None:
         if (not condition_names or len(set(condition_names)) != len(condition_names)
                 or any(not isinstance(name, str) or not name for name in condition_names)):
@@ -781,6 +820,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         if any(name not in available for name in condition_names):
             raise ValueError("condition_names contains an unknown matrix condition")
         conditions = tuple(available[name] for name in condition_names)
+        _validate_focal_pose_condition_selection(conditions, focal_pose_offsets)
     if replay_seeds is not None:
         # Backward compatible seed-only requests now capture once, for the
         # primary architecture condition, instead of duplicating every replay.
@@ -868,6 +908,17 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 protocol_sha256=qualification_provenance["protocol_sha256"],
                 qualification_case=(condition.qualification_case or qualification_case),
                 categories=condition_categories, seeds=seeds))
+        if condition.focal_pose_pair_offset is not None and (
+                qualification_provenance is None or evaluation_split != "validation"):
+            raise ValueError("focal pose pairs require a frozen validation protocol")
+        condition_focal_pose_assignment = (None if condition.focal_pose_pair_offset is None else
+            build_focal_pose_assignment(condition.focal_pose_offset,
+                paired_offset_name=condition.focal_pose_pair_offset,
+                scenario_id=scenario_id, split=evaluation_split,
+                protocol_id=qualification_provenance["protocol_id"],
+                protocol_sha256=qualification_provenance["protocol_sha256"],
+                qualification_case=(condition.qualification_case or qualification_case),
+                categories=condition_categories, seeds=seeds))
         condition_replay_selection = (replay_selection or {}).get(
             condition.condition_name)
         route_factor_id_by_kind = {
@@ -910,6 +961,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             contact_geometry_id=condition.contact_geometry_id,
             contact_geometry_config=condition.contact_geometry_config,
             phase4_start_profile_assignment=condition_start_assignment,
+            phase4_focal_pose_assignment=condition_focal_pose_assignment,
             replay_output_dir=(replay_output_dir if condition_replay_selection else None),
             replay_seeds=None,
             replay_selection=condition_replay_selection,
@@ -919,6 +971,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         if report.get("phase4_start_profile_assignment") != condition_start_assignment:
             raise ValueError("evaluation report start profile differs from the frozen matrix assignment")
+        if report.get("phase4_focal_pose_assignment") != condition_focal_pose_assignment:
+            raise ValueError("evaluation report focal pose differs from the frozen matrix assignment")
         if (report.get("contact_geometry_id") != condition.contact_geometry_id or
                 report.get("contact_geometry_config") != condition.contact_geometry_config):
             raise ValueError("evaluation report contact geometry differs from frozen condition")
@@ -990,6 +1044,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "prediction": report["prediction"],
             "phase4_factor": condition.phase4_factor,
             "phase4_start_profile_assignment": condition_start_assignment,
+            "phase4_focal_pose_assignment": condition_focal_pose_assignment,
             "contact_geometry_id": condition.contact_geometry_id,
             "contact_geometry_config": condition.contact_geometry_config,
             "contact_exposure_pairing": contact_pairing,

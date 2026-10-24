@@ -15,7 +15,8 @@ from .meco_phase4_opponents import POLICY_POOL, opponent_velocity_command
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     contact_exposure_actions, contact_exposure_profile,
     apply_full_team_start_profile, phase4_context_identity,
-    validate_phase4_start_profile_assignment)
+    validate_phase4_start_profile_assignment,
+    validate_phase4_focal_pose_assignment, apply_phase4_focal_pose_assignment)
 from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
@@ -222,7 +223,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         sensor_profile='standard', phase4_factor=None,
                         contact_geometry_id=None, contact_geometry_config=None,
                         phase4_opponent_policy_id=None,
-                        phase4_start_profile_assignment=None):
+                        phase4_start_profile_assignment=None,
+                        phase4_focal_pose_assignment=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -317,6 +319,17 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     env.contact_geometry_id = contact_geometry_id
     env.contact_geometry_config = contact_geometry_config
     env.phase4_start_profile_assignment = start_profile_assignment
+    if phase4_focal_pose_assignment is None:
+        focal_pose_assignment = None
+    else:
+        focal_pose_assignment = validate_phase4_focal_pose_assignment(
+            phase4_focal_pose_assignment)
+        if (focal_pose_assignment['scenario_id'] != scenario_id or
+                focal_pose_assignment['split'] != 'validation' or
+                category not in focal_pose_assignment['categories'] or
+                int(seed) not in focal_pose_assignment['seeds']):
+            raise ValueError('focal pose assignment does not bind this validation episode')
+    env.phase4_focal_pose_assignment = focal_pose_assignment
     env.phase4_start_profile_identity = (None if start_profile_assignment is None else
         phase4_context_identity('legal_team_pose_sets',
             start_profile_assignment['registry_profile_id']))
@@ -400,6 +413,9 @@ def _pressure_level(category):
 
 def _refresh(env):
     env.synchronize_policy_pose()
+    focal_pose_assignment = getattr(env, 'phase4_focal_pose_assignment', None)
+    if focal_pose_assignment is not None:
+        apply_phase4_focal_pose_assignment(env, focal_pose_assignment)
     env.sim.velocity.zero_()
     env._target_collect_heading.copy_(env.policy_pose[:, :, 2])
     env._target_turn_anchor.copy_(env.policy_pose[:, :, :2])

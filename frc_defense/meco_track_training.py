@@ -2285,6 +2285,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   contact_geometry_id: str | None = None,
                   contact_geometry_config: dict | None = None,
                   phase4_start_profile_assignment: dict | None = None,
+                  phase4_focal_pose_assignment: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2399,6 +2400,24 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             seeds=scored_seeds)
         if captured_start_assignment != expected_start_assignment:
             raise ValueError("full-team start profile differs from the exact evaluation protocol/seeds")
+    if phase4_focal_pose_assignment is not None:
+        from .meco_phase4_context import (
+            phase4_focal_pose_assignment as build_focal_pose_assignment,
+            validate_phase4_focal_pose_assignment)
+        captured_focal_assignment = validate_phase4_focal_pose_assignment(
+            phase4_focal_pose_assignment)
+        if evaluation_binding is None or qualification_case is None:
+            raise ValueError("focal pose validation requires an exact frozen protocol case")
+        expected_focal_assignment = build_focal_pose_assignment(
+            captured_focal_assignment["requested_offset_name"],
+            paired_offset_name=captured_focal_assignment["paired_offset_name"],
+            scenario_id=scenario_id, split=split,
+            protocol_id=evaluation_binding["protocol_id"],
+            protocol_sha256=evaluation_binding["protocol_sha256"],
+            qualification_case=qualification_case, categories=categories,
+            seeds=scored_seeds)
+        if captured_focal_assignment != expected_focal_assignment:
+            raise ValueError("focal pose assignment differs from exact evaluation protocol/case/seeds")
     if qualification_protocol_id is not None and (
             split not in ("validation", "test") or
             not isinstance(qualification_protocol_id, str) or
@@ -2690,7 +2709,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         contact_geometry_id=contact_geometry_id,
                         contact_geometry_config=contact_geometry_config,
                         phase4_start_profile_assignment=phase4_start_profile_assignment,
+                        phase4_focal_pose_assignment=phase4_focal_pose_assignment,
                         **(qualification_case or {}))
+                    phase4_focal_pose_record = None
+                    if phase4_focal_pose_assignment is not None:
+                        from .meco_phase4_context import phase4_focal_pose_evaluator_diagnostics
+                        phase4_focal_pose_record = phase4_focal_pose_evaluator_diagnostics(
+                            env, env.phase4_focal_pose_runtime)
                     episode_metric_ledger = None
                     replay_frames = []
                     try:
@@ -3397,6 +3422,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "outcome_by_start_state": None,
                                 "qualification_eligible": False,
                             } if phase4_start_profile_assignment is not None else None),
+                            "phase4_focal_pose": phase4_focal_pose_record,
                             "phase4_opponent_policy": ({
                                 "policy_id": phase4_opponent_policy_id,
                                 "factor_id": phase4_opponent_schedule["factor_id"],
@@ -3691,6 +3717,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "contact_geometry_id": contact_geometry_id,
             "contact_geometry_config": contact_geometry_config,
             "phase4_start_profile_assignment": phase4_start_profile_assignment,
+            "phase4_focal_pose_assignment": phase4_focal_pose_assignment,
             "qualification_eligible": False,
             "episode_metric_ledger_schema": {
                 "schema_version": 4,

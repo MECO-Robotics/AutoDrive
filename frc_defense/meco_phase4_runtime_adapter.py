@@ -146,10 +146,13 @@ PHASE4_REQUIREMENT_BINDINGS = {
         "limitations": ("registered contact geometry and sensed slot-2 approach are wired, but no representative simulator replay has validated contact geometry; pair-contact event summary is source-bound; recovery and route completion outcomes remain unavailable; qualification remains disabled")},
     "observation_only_focal_pose_mislocalization": {**_COMMON,
         "factor_ids": ("observation.focal_pose_offset",),
-        "runtime_event": None,
+        "assignment_runtime_event": "phase4_focal_pose_assignment",
+        "assignment_applied_event": "records[].phase4_focal_pose.applied_before_policy_observation",
+        "assignment_path_supported": True,
         "required_signals": ("relocalization_time_s", "pose_error_recovery_rate", "safety_contact_rate"),
         "authoritative_signals": (),
-        "limitations": ("pose offset helper is not applied at validation observation boundary", "relocalization and pose-error recovery signals unavailable")},
+        "qualification_eligible": False,
+        "limitations": ("focal pose uses a separate protocol-bound assignment/report path and is not supported by generic PHASE4_FACTORS capture", "registered paired no-offset/offset assignment is applied after final scenario reset before perception and the first policy observation; physical simulator state is unchanged", "truth-versus-estimate diagnostics are initial-only evaluator records; no representative simulator validation, estimator correction, or later relocalization event exists", "relocalization, pose-error recovery, and safety contact outcomes are unavailable; qualification remains disabled")},
 }
 
 

@@ -213,6 +213,119 @@ def validate_phase4_start_profile_assignment(assignment: dict) -> dict:
     return dict(assignment)
 
 
+def phase4_focal_pose_assignment(offset_name: str | None, *,
+        paired_offset_name: str, scenario_id: str, split: str,
+        protocol_id: str, protocol_sha256: str, qualification_case: dict,
+        categories: tuple[str, ...] | list[str], seeds: tuple[int, ...] | list[int]) -> dict:
+    """Bind a no-offset control or registered pose offset to one validation cell."""
+    if scenario_id != "full_match_offense" or split != "validation":
+        raise ValueError("focal pose offsets are restricted to full-match validation")
+    pair_identity = phase4_context_identity("focal_pose_offsets", paired_offset_name)
+    if offset_name is not None and offset_name != paired_offset_name:
+        raise ValueError("focal pose arm must match its registered paired offset")
+    if (not isinstance(protocol_id, str) or not protocol_id or
+            not isinstance(protocol_sha256, str) or len(protocol_sha256) != 64 or
+            any(c not in "0123456789abcdef" for c in protocol_sha256)):
+        raise ValueError("focal pose assignment requires frozen protocol identity")
+    case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
+    if (not isinstance(qualification_case, dict) or set(qualification_case) != case_fields or
+            any(not isinstance(v, str) or not v for v in qualification_case.values())):
+        raise ValueError("focal pose assignment requires the exact frozen case")
+    if (not isinstance(categories, (tuple, list)) or not categories or
+            any(not isinstance(v, str) or not v for v in categories) or
+            len(set(categories)) != len(categories)):
+        raise ValueError("focal pose categories must be unique nonempty strings")
+    if (not isinstance(seeds, (tuple, list)) or not seeds or
+            any(type(v) is not int or v < 0 or v >= 2**63 for v in seeds) or
+            len(set(seeds)) != len(seeds)):
+        raise ValueError("focal pose seeds must be unique signed-63-bit integers")
+    payload = {"schema": "meco-phase4-focal-pose-assignment-v1",
+        "factor_id": "observation.focal_pose_offset",
+        "paired_offset_name": paired_offset_name,
+        "paired_offset_config_sha256": pair_identity["config_sha256"],
+        "arm": "no_offset" if offset_name is None else "offset",
+        "requested_offset_name": offset_name,
+        "requested_offset_config_sha256": (None if offset_name is None else pair_identity["config_sha256"]),
+        "scenario_id": scenario_id, "split": split,
+        "protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+        "qualification_case": dict(qualification_case),
+        "categories": list(categories), "seeds": list(seeds),
+        "relocalization_time_s": None, "pose_error_recovery_rate": None,
+        "safety_contact_rate": None, "qualification_eligible": False}
+    pair_payload = {k: v for k, v in payload.items()
+                    if k not in ("arm", "requested_offset_name", "requested_offset_config_sha256")}
+    payload["pair_assignment_sha256"] = hashlib.sha256(json.dumps(
+        pair_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    payload["assignment_sha256"] = hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return payload
+
+
+def validate_phase4_focal_pose_assignment(assignment: dict) -> dict:
+    if not isinstance(assignment, dict):
+        raise ValueError("focal pose assignment must be an object")
+    expected = phase4_focal_pose_assignment(
+        assignment.get("requested_offset_name"),
+        paired_offset_name=assignment.get("paired_offset_name"),
+        scenario_id=assignment.get("scenario_id"), split=assignment.get("split"),
+        protocol_id=assignment.get("protocol_id"), protocol_sha256=assignment.get("protocol_sha256"),
+        qualification_case=assignment.get("qualification_case"),
+        categories=assignment.get("categories"), seeds=assignment.get("seeds"))
+    if expected != assignment:
+        raise ValueError("focal pose assignment differs from its frozen pair/protocol contract")
+    return assignment
+
+
+@torch.no_grad()
+def apply_phase4_focal_pose_assignment(env, assignment: dict) -> dict:
+    """Apply a registered estimate offset after reset without changing simulator truth."""
+    validate_phase4_focal_pose_assignment(assignment)
+    if not hasattr(env, "sim") or not hasattr(env, "estimated_pose") or not hasattr(env, "policy_pose"):
+        raise ValueError("environment lacks physical and policy pose state")
+    if (env.estimated_pose.data_ptr() == env.sim.pose.data_ptr() or
+            env.policy_pose.data_ptr() == env.sim.pose.data_ptr()):
+        raise ValueError("policy pose state aliases simulator truth")
+    if (env.estimated_pose.shape != env.sim.pose.shape or
+            env.policy_pose.shape != env.sim.pose.shape or env.sim.pose.ndim != 3 or
+            env.sim.pose.shape[1] <= 3 or env.sim.pose.shape[2] != 3):
+        raise ValueError("environment pose tensors do not satisfy the six-robot pose contract")
+    truth = env.sim.pose[:, 3].clone()
+    if assignment["requested_offset_name"] is not None:
+        config = FOCAL_POSE_OFFSETS[assignment["requested_offset_name"]]
+        dx, dy = config["offset_xy_m"]
+        env.estimated_pose[:, 3, 0] += dx
+        env.estimated_pose[:, 3, 1] += dy
+        env.estimated_pose[:, 3, 2] += config["heading_offset_rad"]
+        env.estimated_pose[:, 3, 2] = torch.atan2(
+            torch.sin(env.estimated_pose[:, 3, 2]), torch.cos(env.estimated_pose[:, 3, 2]))
+    env.policy_pose.copy_(env.estimated_pose)
+    event = {"assignment_sha256": assignment["assignment_sha256"],
+        "pair_assignment_sha256": assignment["pair_assignment_sha256"],
+        "arm": assignment["arm"], "requested_offset_name": assignment["requested_offset_name"],
+        "requested_offset_config_sha256": assignment["requested_offset_config_sha256"],
+        "applied_before_policy_observation": True,
+        "physical_truth_unchanged": bool(torch.equal(truth, env.sim.pose[:, 3])),
+        "relocalization_time_s": None, "pose_error_recovery_rate": None,
+        "safety_contact_rate": None, "qualification_eligible": False}
+    env.phase4_focal_pose_runtime = event
+    return event
+
+
+@torch.no_grad()
+def phase4_focal_pose_evaluator_diagnostics(env, runtime_event: dict) -> dict:
+    """Create truth/estimate diagnostics for evaluator serialization only."""
+    truth = env.sim.pose[:, 3].clone()
+    estimate = env.policy_pose[:, 3].clone()
+    error_xy = torch.linalg.vector_norm(estimate[:, :2] - truth[:, :2], dim=-1)
+    error_heading = torch.atan2(torch.sin(estimate[:, 2] - truth[:, 2]),
+                                torch.cos(estimate[:, 2] - truth[:, 2]))
+    return {**runtime_event,
+        "sim_truth_pose_m_rad": truth.detach().cpu().tolist(),
+        "policy_pose_estimate_m_rad": estimate.detach().cpu().tolist(),
+        "pose_error_xy_m": error_xy.detach().cpu().tolist(),
+        "pose_error_heading_rad": error_heading.detach().cpu().tolist()}
+
+
 def _context_config(axis_name: str, value_name: str) -> dict:
     if axis_name == "legal_team_pose_sets":
         runtime_name = next((name for name, registry_id in

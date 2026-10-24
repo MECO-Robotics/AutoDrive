@@ -17,6 +17,7 @@ from frc_defense.meco_phase4_runtime_adapter import (
     phase4_pair_contact_event_record,
     route_remaining_distance_m,
     phase4_requirement_binding,
+    requirement_ids_for_factor,
     validate_phase4_capture,
 )
 from frc_defense.meco_track_training import _observe_phase4_contact_route_progress
@@ -89,6 +90,20 @@ def test_runtime_binding_covers_exact_registry_requirements_and_fails_closed():
         "start.legal_team_poses":
             "phase4_start_profile.profile_applied_before_observation"}
     assert starts["authoritative_signals"] == []
+    focal = phase4_requirement_binding("observation_only_focal_pose_mislocalization")
+    assert focal["runtime_factor_kind"] is None
+    assert focal["runtime_factor_by_factor_id"] == {}
+    assert focal["runtime_event"] is None
+    assert focal["runtime_event_by_factor_id"] == {}
+    assert focal["stimulus_supported"] is False
+    assert focal["assignment_runtime_event"] == "phase4_focal_pose_assignment"
+    assert focal["assignment_applied_event"] == (
+        "records[].phase4_focal_pose.applied_before_policy_observation")
+    assert focal["assignment_path_supported"] is True
+    assert not requirement_ids_for_factor({"kind": "focal_pose_offset"})
+    assert focal["authoritative_signals"] == []
+    assert focal["qualification_eligible"] is False
+    assert any("initial-only" in limitation for limitation in focal["limitations"])
 
 
 @pytest.mark.parametrize("kind,event_field,event_value", [
