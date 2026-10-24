@@ -38,7 +38,7 @@ def _row_and_model():
         "inference_provenance": {"status": "local_model"}}
     row["candidate_replay_digest"] = _candidate_replay_digest(table,
         row["route_cost"], row["risk_cost"])
-    replay = _policy_inputs_for_row("C1", model, row, None, None)
+    replay = _policy_inputs_for_row(track, model, row, None, None)
     row["rollout_logits"] = replay["logits"].detach().clone()
     row["logprob"] = categorical_from_candidate_logits(
         replay["logits"]).log_prob(row["action"]).reshape(()).detach()
@@ -123,7 +123,7 @@ def test_c1_replay_hashes_model_once_per_update_and_checks_each_row(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ROCm/CUDA device required")
-def test_c1_accelerator_forward_restores_determinism_and_keeps_gradients():
+def test_c1_accelerator_scoring_preserves_determinism_mode_and_gradients():
     device = torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0")
     model = make_meco_track("C1", candidate_features=2).to(device).train()
     row, _ = _row_and_model()
@@ -132,20 +132,62 @@ def test_c1_accelerator_forward_restores_determinism_and_keeps_gradients():
     globals_ = row["globals"].to(device)
 
     previous = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    observed_modes = []
+    hook = model.register_forward_pre_hook(
+        lambda _module, _inputs: observed_modes.append((
+            torch.are_deterministic_algorithms_enabled(),
+            torch.is_deterministic_algorithms_warn_only_enabled())))
     try:
-        torch.use_deterministic_algorithms(False)
-        scored = score_candidates("C1", model, raster=raster,
-            globals_=globals_, table=table)
-        assert not torch.are_deterministic_algorithms_enabled()
-        scored["logits"][0, 0].backward()
+        for enabled, warn_only in ((False, False), (True, False), (True, True)):
+            torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+            scored = score_candidates("C1", model, raster=raster,
+                globals_=globals_, table=table)
+            assert (torch.are_deterministic_algorithms_enabled(),
+                    torch.is_deterministic_algorithms_warn_only_enabled()) == (
+                        enabled, warn_only)
+            scored["logits"][0, 0].backward()
+        assert observed_modes == [(False, False), (True, False), (True, True)]
         assert any(parameter.grad is not None and
                    bool(torch.isfinite(parameter.grad).all()) and
                    bool(parameter.grad.abs().sum() > 0)
                    for parameter in model.parameters())
-
-        torch.use_deterministic_algorithms(True)
-        score_candidates("C1", model, raster=raster,
-            globals_=globals_, table=table)
-        assert torch.are_deterministic_algorithms_enabled()
     finally:
-        torch.use_deterministic_algorithms(previous)
+        hook.remove()
+        torch.use_deterministic_algorithms(previous, warn_only=previous_warn_only)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ROCm/CUDA device required")
+def test_c2_accelerator_replay_is_exact_without_changing_global_mode():
+    device = torch.device("cuda:0")
+    row, model = _row_and_model("C2")
+    model = model.to(device).train()
+    for name in ("raster", "globals", "route_cost", "risk_cost", "action"):
+        row[name] = row[name].to(device)
+
+    previous = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    observed_modes = []
+    hook = model.register_forward_pre_hook(
+        lambda _module, _inputs: observed_modes.append((
+            torch.are_deterministic_algorithms_enabled(),
+            torch.is_deterministic_algorithms_warn_only_enabled())))
+    config = MecoTrainConfig(track="C2", device="cuda:0")
+    try:
+        for enabled, warn_only in ((False, False), (True, False), (True, True)):
+            torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+            with torch.no_grad():
+                outputs = [_policy_inputs_for_row("C2", model, row, None,
+                    config)["logits"] for _ in range(8)]
+                logprobs = [categorical_from_candidate_logits(output).log_prob(
+                    row["action"]).reshape(()) for output in outputs]
+            assert all(torch.equal(outputs[0], current) for current in outputs[1:])
+            assert all(torch.equal(logprobs[0], current) for current in logprobs[1:])
+            assert torch.equal(logprobs[0].cpu(), row["logprob"])
+            assert (torch.are_deterministic_algorithms_enabled(),
+                    torch.is_deterministic_algorithms_warn_only_enabled()) == (
+                        enabled, warn_only)
+        assert observed_modes == [(False, False)] * 8 + [(True, False)] * 8 + [(True, True)] * 8
+    finally:
+        hook.remove()
+        torch.use_deterministic_algorithms(previous, warn_only=previous_warn_only)

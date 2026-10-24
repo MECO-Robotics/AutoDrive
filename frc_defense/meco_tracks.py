@@ -616,6 +616,19 @@ class RecurrentTrack(nn.Module):
         return self.gru(features, hidden)
 
 
+def _fixed_order_candidate_linear(features, layer):
+    """Evaluate a small candidate projection with a fixed reduction order.
+
+    ROCm may select a split-K GEMM for these candidate-by-hidden projections;
+    its accumulation order can vary between identical calls. The elementwise
+    product plus fixed-axis reduction is stable on the accelerator and keeps
+    the same linear parameters and gradients without changing Torch's global
+    deterministic-algorithm mode.
+    """
+    projected = (features.unsqueeze(-2) * layer.weight).sum(dim=-1)
+    return projected if layer.bias is None else projected + layer.bias
+
+
 class A1MultiscaleUNetGRU(nn.Module):
     """A1: multiscale raster U-Net with dense U/P and five behavior values."""
     track_id = "A1"
@@ -798,7 +811,9 @@ class CandidateMLPGRU(nn.Module):
         candidates = self.candidate_encoder(candidate_features)
         fused = torch.cat((candidates, state[:, None].expand(-1, candidates.shape[1], -1),
                            self.global_encoder(globals_)[:, None].expand(-1, candidates.shape[1], -1)), -1)
-        return {"candidate_utility": self.scorer(fused).squeeze(-1),
+        scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
+        utility = _fixed_order_candidate_linear(scored, self.scorer[2]).squeeze(-1)
+        return {"candidate_utility": utility,
                 "uncertainty": F.softplus(self.uncertainty(fused).squeeze(-1)), "hidden": state}
 
 
@@ -829,7 +844,9 @@ class C2MapCrossAttentionGRU(nn.Module):
         queried, _ = self.cross_attention(candidate, map_tokens, map_tokens, need_weights=False)
         state = self.context(global_state + queried.mean(1), hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
-        return {"candidate_utility": self.scorer(fused).squeeze(-1),
+        scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
+        utility = _fixed_order_candidate_linear(scored, self.scorer[2]).squeeze(-1)
+        return {"candidate_utility": utility,
                 "uncertainty": F.softplus(self.uncertainty(fused).squeeze(-1)), "hidden": state,
                 "map_token_count": map_tokens.shape[1]}
 
@@ -1089,23 +1106,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                     "inference_provenance": provenance}
         output = response.outputs
     else:
-        # C1 scores candidates with nearly tied utility logits. On ROCm, the
-        # default parallel reduction path can produce a few ULPs of forward
-        # variation for identical inputs; categorical log-prob replay then
-        # crosses the strict PPO integrity tolerance. Keep that model forward
-        # deterministic and restore the process setting immediately after it.
-        # The trainer and evaluator both use this adapter, so rollout and replay
-        # share the same backend algorithm without changing the guard tolerance.
-        deterministic_before = None
-        if track == "C1" and raster.device.type == "cuda":
-            deterministic_before = torch.are_deterministic_algorithms_enabled()
-            if not deterministic_before:
-                torch.use_deterministic_algorithms(True)
-        try:
-            output = model(**inputs)
-        finally:
-            if deterministic_before is False:
-                torch.use_deterministic_algorithms(False)
+        output = model(**inputs)
     if track in ("C1", "C2"):
         utility = output["candidate_utility"][0]
     elif track == "A1":

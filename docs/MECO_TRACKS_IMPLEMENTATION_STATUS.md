@@ -603,3 +603,22 @@ unavailable without an independent expert oracle and uncensored support. The
 annotation manifest binds the new source bytes separately while legal-node
 support remains bound to its original v3 source. Static checks only; no
 collection, replay, or simulator evaluation has been run.
+
+### C2 deterministic PPO replay on ROCm
+
+The preserved C2 update-20 replay failure had identical model, observation,
+candidate, route-cost, and risk-cost fingerprints. On a WX9100, repeated
+replays with default ROCm algorithms varied the two tied maximum logits by one
+fp32 ULP and changed the action log-probability by up to `1.22e-4`, exceeding
+the existing `5e-5` replay guard. The varying operation was C2's first
+candidate scorer GEMM: its input tensor was identical across repeats, but its
+output varied. C1/C2 candidate scorer projections now use elementwise products
+and a fixed-axis sum, which yielded identical output on the saved WX9100 row.
+This leaves PyTorch's process-wide deterministic and warn-only flags untouched;
+the PPO guard tolerance is unchanged.
+
+This source change invalidates checkpoints created under the prior source
+identity. The failed C2 checkpoint is bound to source identity
+`c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2`; resume
+must fail closed after this patch. Do not resume or restart from that artifact
+until a new run is explicitly scheduled with the updated source identity.
