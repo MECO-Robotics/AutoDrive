@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any
 
@@ -22,7 +23,7 @@ from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 4
+MATRIX_SCHEMA_VERSION = 5
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -120,13 +121,16 @@ def _checkpoint_configuration_provenance(checkpoints: dict[str, str]):
 
 def _held_out_seed_assignments(protocol: dict, scenario_id: str,
                                categories: tuple[str, ...],
-                               seeds: tuple[int, ...]) -> dict[str, dict[str, str]]:
+                               seeds: tuple[int, ...],
+                               qualification_case: dict) -> dict[str, dict[str, str]]:
     """Require each requested case seed to belong to its frozen validation/test split."""
     assignments = {}
     for category in categories:
         cases = [case for case in protocol.get("cases", [])
                  if case.get("scenario_id") == scenario_id
                  and case.get("category") == category]
+        cases = [case for case in cases if all(
+            case.get(field) == value for field, value in qualification_case.items())]
         category_assignments = {}
         for seed in seeds:
             matches = [case for case in cases if seed in case.get("seeds", [])]
@@ -138,6 +142,50 @@ def _held_out_seed_assignments(protocol: dict, scenario_id: str,
             category_assignments[str(seed)] = matches[0]["split"]
         assignments[category] = category_assignments
     return assignments
+
+
+def _load_seed_manifest(path: str | Path, *, protocol_id: str,
+                        protocol_sha256: str, scenario_id: str,
+                        categories: tuple[str, ...], split: str,
+                        qualification_case: dict) -> tuple[int, ...]:
+    """Load an exact seed list whose protocol, split, and stratum are explicit."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    required = {"schema", "protocol_id", "protocol_sha256", "scenario_id",
+                "categories", "split", "qualification_case", "seed_list"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("seed manifest must contain exactly the frozen binding fields")
+    expected = {"schema": "meco-exact-seed-manifest-v1",
+        "protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+        "scenario_id": scenario_id, "categories": list(categories),
+        "split": split, "qualification_case": qualification_case}
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise ValueError("seed manifest protocol, scenario, category, split, or stratum mismatch")
+    seeds = payload.get("seed_list")
+    if (not isinstance(seeds, list) or not seeds or
+            any(type(seed) is not int or seed < 0 or seed >= 2**63 for seed in seeds) or
+            len(seeds) != len(set(seeds))):
+        raise ValueError("seed manifest must contain a nonempty unique signed-63-bit seed list")
+    return tuple(seeds)
+
+
+def _validate_replay_selection(selection, conditions, categories, seeds):
+    if not isinstance(selection, dict) or not selection:
+        raise ValueError("replay selection must map conditions to policy seed lists")
+    names = {condition.condition_name for condition in conditions}
+    allowed_policies = set(MECO_TRACKS) | {f"{track}_P0" for track in ("A1", "A2", "A3")} | {"D0", "D1", "D2"} | {
+        f"{track}__INFERENCE_DISABLED_TO_D1" for track in MECO_TRACKS}
+    normalized = {}
+    for condition_name, policy_seeds in selection.items():
+        if condition_name not in names or not isinstance(policy_seeds, dict) or not policy_seeds:
+            raise ValueError("replay selection references an unknown or empty condition")
+        normalized[condition_name] = {}
+        for policy, selected_seeds in policy_seeds.items():
+            if (policy not in allowed_policies or not isinstance(selected_seeds, list) or
+                    not selected_seeds or len(selected_seeds) != len(set(selected_seeds)) or
+                    any(type(seed) is not int or seed not in seeds for seed in selected_seeds)):
+                raise ValueError("replay selection has an unknown policy or invalid matrix seed")
+            normalized[condition_name][policy] = list(selected_seeds)
+    return normalized
 
 
 def _validate_condition_manifest(report: dict, *,
@@ -212,6 +260,48 @@ def _atomic_json(path: Path, payload: dict) -> None:
         os.replace(temp_name, path)
     finally:
         Path(temp_name).unlink(missing_ok=True)
+
+
+def _seal_final_test_consumption(path: Path, *, matrix_id: str,
+                                 protocol: dict, checkpoint_hashes: dict,
+                                 source_hash: str, seed_list: tuple[int, ...],
+                                 scenario_id: str, categories: tuple[str, ...],
+                                 qualification_case: dict) -> None:
+    """Reserve the single final-test event before simulator execution begins."""
+    payload = {"schema": "meco-sealed-final-test-consumption-v1",
+        "state": "consumed_before_execution",
+        "matrix_id": matrix_id,
+        "matrix_sha256": matrix_id,
+        "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": protocol["protocol_sha256"],
+        "scenario_id": scenario_id, "categories": list(categories),
+        "split": "test", "qualification_case": qualification_case,
+        "seed_list": list(seed_list),
+        "checkpoint_sha256": checkpoint_hashes,
+        "source_identity_sha256": source_hash,
+        "consumed_utc": datetime.now(timezone.utc).isoformat(),
+        "retraining_or_repeat_test_forbidden": True}
+    encoded = json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ValueError("sealed final test was already consumed for this output campaign") from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        # Keep a partial reservation if anything may have started; it must not
+        # be silently retried with exposed final-test seeds.
+        raise
+
+
+def final_test_ledger_path(protocol_path: str | Path, protocol_id: str) -> Path:
+    """Stable protocol-scoped release ledger shared by evaluators and trainers."""
+    return Path(protocol_path).resolve().with_name(
+        f"{protocol_id}.sealed-final-test-consumption.json")
 
 
 def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None = None,
@@ -395,23 +485,43 @@ def _architecture_track_vs_d0(*, track: str, condition_id: str,
 
 
 def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
-               categories: tuple[str, ...], seeds: tuple[int, ...],
+               categories: tuple[str, ...], seeds: tuple[int, ...] | None,
                device: str, output_dir: str | Path,
                inference_disable_tick: int | None = None,
                qualification_protocol: str | Path | None = None,
                qualification_case: dict | None = None,
                replay_output_dir: str | Path | None = None,
-               replay_seeds: tuple[int, ...] | None = None) -> dict:
+               replay_seeds: tuple[int, ...] | None = None,
+               seed_manifest: str | Path | None = None,
+               replay_selection: dict | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco, load_evaluation_protocol
 
     if set(checkpoints) != set(MECO_TRACKS):
         raise ValueError(f"checkpoint keys must be exactly {MECO_TRACKS}")
+    if not isinstance(device, str) or re.fullmatch(r"cuda:(?:0|[1-9][0-9]*)", device) is None:
+        raise ValueError("matched MECO evaluation requires an explicit indexed CUDA/HIP device; CPU is unsupported")
+    seed_manifest_payload = None
+    if seed_manifest is not None:
+        seed_manifest_payload = json.loads(Path(seed_manifest).read_text(encoding="utf-8"))
+        manifest_seeds = seed_manifest_payload.get("seed_list") if isinstance(seed_manifest_payload, dict) else None
+        if seeds is None:
+            seeds = tuple(manifest_seeds or ())
+        elif tuple(manifest_seeds or ()) != tuple(seeds):
+            raise ValueError("explicit matrix seeds differ from seed manifest")
     if not seeds or len(set(seeds)) != len(seeds) or any(
             type(seed) is not int or seed < 0 or seed >= 2**63 for seed in seeds):
         raise ValueError("seeds must be a nonempty unique list of signed-63-bit integers")
-    if (replay_output_dir is None) != (replay_seeds is None):
+    qualification_case = dict(DEFAULT_EVALUATION_STRATUM if qualification_case is None
+                              else qualification_case)
+    if (set(qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
+            any(not isinstance(value, str) or not value for value in qualification_case.values())):
+        raise ValueError("qualification_case must contain nonempty layout, defender, start, and sensor identifiers")
+    if replay_selection is not None and replay_seeds is not None:
+        raise ValueError("use condition/policy replay_selection or legacy replay_seeds, not both")
+    has_replay_selector = replay_seeds is not None or replay_selection is not None
+    if (replay_output_dir is None) != (not has_replay_selector):
         raise ValueError("replay_output_dir and explicit replay_seeds must be supplied together")
     if replay_seeds is not None and (not replay_seeds or len(set(replay_seeds)) != len(replay_seeds)
             or any(type(seed) is not int or seed not in seeds for seed in replay_seeds)):
@@ -421,10 +531,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     definition = get_scenario(scenario_id)
     if any(category not in definition.required_categories for category in categories):
         raise ValueError("category does not belong to the selected scenario")
-    from .fuel_physics_hip import prepare_native_fuel_extension
-    prepare_native_fuel_extension(device)
     qualification_provenance = None
     if qualification_protocol is None:
+        if seed_manifest_payload is not None:
+            raise ValueError("a seed manifest requires its frozen qualification protocol")
         seed_split_assignments = None
         evaluation_design = "diagnostic_only_unbound_seeds"
         evaluation_split = "diagnostic"
@@ -432,7 +542,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         protocol, protocol_id, protocol_sha256, protocol_file = load_evaluation_protocol(
             Path(qualification_protocol), scenario_id=scenario_id)
         seed_split_assignments = _held_out_seed_assignments(
-            protocol, scenario_id, categories, seeds)
+            protocol, scenario_id, categories, seeds, qualification_case)
         splits = {split for assignments in seed_split_assignments.values()
                   for split in assignments.values()}
         if len(splits) != 1:
@@ -440,25 +550,45 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 "one matrix invocation must use a single frozen split; run validation "
                 "and test seeds in separate matrices")
         evaluation_split = next(iter(splits))
+        if seed_manifest_payload is not None:
+            bound_seeds = _load_seed_manifest(seed_manifest,
+                protocol_id=protocol_id, protocol_sha256=protocol_sha256,
+                scenario_id=scenario_id, categories=categories,
+                split=evaluation_split, qualification_case=qualification_case)
+            if bound_seeds != tuple(seeds):
+                raise ValueError("seed manifest exact seeds differ from matrix seed list")
         evaluation_design = "frozen_protocol_held_out"
         qualification_provenance = {"protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
             "protocol_file": protocol_file}
     output_root = Path(output_dir)
+    sealed_test_ledger = (final_test_ledger_path(qualification_protocol,
+        qualification_provenance["protocol_id"])
+        if qualification_provenance is not None else
+        output_root / "sealed-final-test-consumption.json")
+    if sealed_test_ledger.exists():
+        raise ValueError("this matrix/protocol is sealed after final-test consumption")
+    # HIP preparation changes the native-extension component of source_identity;
+    # capture source provenance only after preparing the exact evaluation runtime.
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    prepare_native_fuel_extension(device)
     execution_device = normalized_device_info(device)
     bundle_hashes = _checkpoint_hashes(checkpoints)
     source_hash = _source_identity_hash(source_identity())
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
-    qualification_case = dict(DEFAULT_EVALUATION_STRATUM if qualification_case is None
-                              else qualification_case)
-    if (set(qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
-            any(not isinstance(value, str) or not value
-                for value in qualification_case.values())):
-        raise ValueError("qualification_case must contain nonempty layout, defender, start, and sensor identifiers")
     conditions = default_conditions(scenario_id, categories=categories,
         inference_disable_tick=inference_disable_tick,
         qualification_case=qualification_case)
+    if replay_seeds is not None:
+        # Backward compatible seed-only requests now capture once, for the
+        # primary architecture condition, instead of duplicating every replay.
+        replay_selection = {"architecture_matched_cv_k16": {
+            policy: list(replay_seeds) for policy in (*MECO_TRACKS, "D0", "D1", "D2")}}
+    if replay_selection is not None:
+        replay_selection = _validate_replay_selection(
+            replay_selection, conditions, categories, seeds)
+    qualification_case = dict(qualification_case)
     phase4_enabled = any(condition.phase4_factor is not None for condition in conditions)
     pressure_domain = scenario_id in ("offense_vs_scripted_pressure", "full_match_offense")
     unsupported_phase4 = ([{"category": category,
@@ -471,6 +601,11 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     matrix_protocol = {"schema_version": MATRIX_SCHEMA_VERSION,
         "scenario_id": scenario_id, "categories": list(categories),
         "seed_list": list(seeds), "checkpoint_sha256": bundle_hashes,
+        "seed_manifest": (None if seed_manifest_payload is None else {
+            "path": str(Path(seed_manifest).resolve()),
+            "sha256": hashlib.sha256(Path(seed_manifest).read_bytes()).hexdigest(),
+            "schema": seed_manifest_payload.get("schema")}),
+        "replay_selection": replay_selection or {},
         "evaluation_design": evaluation_design,
         "evaluation_split": evaluation_split,
         "qualification_protocol_id": (None if qualification_provenance is None else
@@ -491,6 +626,15 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "separate_low_confidence_profile", "abrupt_opponent_policy_change"])}
     matrix_id = _canonical_hash(matrix_protocol)
     matrix_protocol["matrix_id"] = matrix_id
+    if sealed_test_ledger.exists():
+        raise ValueError("this matrix/protocol is sealed after final-test consumption")
+    if evaluation_split == "test":
+        if qualification_provenance is None:
+            raise ValueError("final test requires frozen qualification protocol provenance")
+        _seal_final_test_consumption(sealed_test_ledger, matrix_id=matrix_id,
+            protocol=qualification_provenance, checkpoint_hashes=bundle_hashes,
+            source_hash=source_hash, seed_list=seeds, scenario_id=scenario_id,
+            categories=categories, qualification_case=qualification_case)
     results: dict[str, dict] = {}
     evaluation_reports: dict[str, dict] = {}
     expected_configs = config_hashes
@@ -508,6 +652,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "execution_device": execution_device})
         report_path = output_root / f"{condition_id}.evaluation.json"
         condition_categories = condition.categories or categories
+        condition_replay_selection = (replay_selection or {}).get(
+            condition.condition_name)
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=condition_categories, episodes=len(seeds), master_seed=seeds[0],
             episode_seeds=seeds, device=device, split=evaluation_split,
@@ -523,8 +669,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
-            replay_output_dir=replay_output_dir,
-            replay_seeds=replay_seeds,
+            replay_output_dir=(replay_output_dir if condition_replay_selection else None),
+            replay_seeds=None,
+            replay_selection=condition_replay_selection,
             condition_id=condition_id,
             output=str(report_path))
         if report.get("phase4_factor") != condition.phase4_factor:
@@ -551,11 +698,14 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 qualification_provenance["protocol_id"]),
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments}
+        report["experiment_matrix"]["replay_selection"] = condition_replay_selection or {}
         _atomic_json(report_path, report)
+        report_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
         condition_records = _records_by_key(report)
         results[condition.condition_name] = {"condition_id": condition_id,
             "evaluation_id": report["evaluation_id"],
             "dashboard_replay_count": len(report.get("dashboard_replays", [])),
+            "replay_selection": condition_replay_selection or {},
             "protocol_id": report["protocol_id"],
             "qualification_protocol_id": report["qualification_protocol_id"],
             "evaluation_design": evaluation_design,
@@ -563,6 +713,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments,
             "report_path": str(report_path),
+            "evaluation_report_sha256": report_sha256,
             "checkpoint_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
             "execution_device": execution_device,
@@ -741,7 +892,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "execution_device": execution_device,
         "dashboard_replay_capture": ({"enabled": replay_output_dir is not None,
             "output_dir": str(Path(replay_output_dir).resolve()),
-            "seed_list": list(replay_seeds or ())}
+            "selection": replay_selection or {}}
             if replay_output_dir is not None else {"enabled": False}),
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {

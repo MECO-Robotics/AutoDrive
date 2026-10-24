@@ -57,11 +57,37 @@ python3 scripts/run_meco_ablation_matrix.py \
   --c1-checkpoint PATH --c2-checkpoint PATH
 ```
 
-The runner uses the explicit contiguous seed list beginning at `--seed` and
-writes one evaluation JSON per condition plus a matrix JSON. When
-`--qualification-protocol` is supplied, every category/seed must be assigned
-by that frozen protocol to exactly one validation or test split; training or
-unassigned seeds are rejected. Each invocation must resolve entirely to one
+The runner uses the explicit contiguous seed list beginning at `--seed`, or
+accepts `--seed-list 11,12,13` for an exact list. For held-out runs, an exact
+seed manifest can bind that list to the protocol file hash, scenario,
+categories, split, and four-field qualification stratum. Its JSON schema is:
+
+```json
+{
+  "schema": "meco-exact-seed-manifest-v1",
+  "protocol_id": "<protocol id>",
+  "protocol_sha256": "<sha256 of frozen protocol file>",
+  "scenario_id": "<scenario>",
+  "categories": ["<category>"],
+  "split": "validation",
+  "qualification_case": {
+    "layout_id": "<layout>",
+    "defender_family": "<family>",
+    "start_condition": "<start>",
+    "sensor_profile": "<sensor>"
+  },
+  "seed_list": [11, 12, 13]
+}
+```
+
+Pass it with `--seed-manifest` and `--qualification-protocol`; every binding
+must match and each seed must belong to that exact protocol case. The default
+evaluation device is `cuda:0`; CPU is rejected on this accelerator evaluation
+path. The runner writes one evaluation JSON per condition plus a matrix JSON.
+When `--qualification-protocol` is supplied, every category/seed must be
+assigned by that frozen protocol and stratum to exactly one validation or test
+split; training, other-stratum, or unassigned seeds are rejected. Each
+invocation must resolve entirely to one
 split; run validation and test seeds in separate matrices. The matrix passes
 the resolved split and protocol ID to every evaluator and records the protocol
 ID/hash plus each category/seed assignment. Without that option, the matrix is
@@ -74,7 +100,12 @@ confidence intervals.
 
 Replay capture is opt-in and uses the same environment instance and decision
 loop that produced each scored evaluation record. Supply both
-`--replay-output-dir` and an explicit `--replay-seeds` subset of matrix seeds.
+`--replay-output-dir` and an explicit selection. Legacy `--replay-seeds`
+captures those seeds only for the architecture condition. For exact
+condition/policy selection, use `--replay-selection-json` with a mapping such
+as `{"architecture_matched_cv_k16":{"A1":[11],"D0":[12]}}`; each selected
+seed must be in the frozen matrix and only the named policy/condition emits a
+replay. This selection is included in the matrix digest.
 Point the output directory at a dashboard run's `.scenario-progress`
 directory to publish `scenario-meco-*` result, metadata, gzip, compact view,
 and ready files. Each captured bundle includes initialization, policy macro
@@ -84,13 +115,13 @@ condition/evaluation IDs, checkpoint/source/protocol/config provenance,
 device/backend, qualification stratum, and checkout state. The evaluation
 JSON records a pointer and digest for each replay bundle.
 
-For example, capture only seed 20261024 from a matrix:
+For example, capture only A1 on seed 20261024 in the architecture condition:
 
 ```bash
 python3 scripts/run_meco_ablation_matrix.py \
   --scenario SCENARIO_ID --categories CATEGORY_A,CATEGORY_B \
   --episodes 20 --seed 20261024 \
-  --replay-seeds 20261024 \
+  --replay-selection-json replay-selection.json \
   --replay-output-dir /path/to/dashboard-run/.scenario-progress \
   --qualification-protocol qualifications/meco/protocol.json \
   --a1-checkpoint PATH --a2-checkpoint PATH --a3-checkpoint PATH \
@@ -104,11 +135,29 @@ does not match the evaluation source. This implementation adds capture support;
 it does not establish simulator behavior or current dashboard service
 verification. Those remain runtime gates after review.
 
-The matrix and each condition ID bind a normalized execution device and
-backend. For example, an unindexed `cuda` request resolves to its active CUDA
-ordinal before the protocol is frozen. Each evaluator protocol and report
-records the same identity, and matrix validation rejects a report with a
-different device or backend.
+Every final-test matrix invocation reserves one protocol-scoped
+`<protocol-id>.sealed-final-test-consumption.json` ledger using exclusive file
+creation before simulation starts. It records the exact matrix digest,
+protocol ID/hash, source identity, checkpoint hashes, stratum, categories, and
+seeds. The same frozen protocol cannot consume a second final-test matrix.
+`MecoSupervisor` checks this ledger before starting or resuming training and
+rejects training after final-test consumption; a source mismatch is called out
+explicitly. Treat a reservation as consumed even if the evaluator crashes,
+since the final-test seeds may already have been exposed.
+
+Evaluation records carry per-record wall-time and fallback diagnostics. The
+paired summary reports bootstrap differences for end-to-end p50/p95/p99,
+route/policy decision pipeline p50/p95/p99, accepted inference p50/p95/p99,
+simulator macro p50/p95/p99, and fallback counts/rates. These are explicitly
+diagnostic and separate from qualification primary gates. The route/policy
+pipeline includes candidate, observation, feature, inference orchestration,
+and scoring work; it is not a route-only kernel measurement.
+
+The CLI requires an indexed CUDA/HIP device (default `cuda:0`); CPU and
+unindexed `cuda` are rejected. The matrix and each condition ID bind the
+normalized accelerator and backend. Each evaluator protocol and report records
+the same identity, and matrix validation rejects a report with a different
+device or backend.
 
 ## Open conditions
 
@@ -166,7 +215,7 @@ python3 scripts/summarize_meco_ablation_matrix.py \
   --output results/validation_paired_ci.json
 ```
 
-The analyzer accepts matrix schema 4 and verifies its content digest,
+The analyzer accepts matrix schema 4 and 5 (new matrices use schema 5) and verifies its content digest,
 evaluation report mapping, checkpoint/source/configuration/training protocol
 provenance, condition and policy mapping, held-out split, seed coverage, and
 each row's frozen qualification stratum. For held-out matrices it checks the

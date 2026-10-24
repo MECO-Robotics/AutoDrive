@@ -254,7 +254,15 @@ def test_matrix_accepts_and_binds_canonical_v2_protocol(tmp_path, monkeypatch):
     monkeypatch.setattr(matrix, "_checkpoint_configuration_provenance", lambda _checkpoints: (
         {track: "config" for track in MECO_TRACKS},
         {track: "training-protocol" for track in MECO_TRACKS}, {"shared": True}))
-    monkeypatch.setattr(curriculum_training, "source_identity", lambda: {"source": "test"})
+    runtime = {"hip_prepared": False}
+    monkeypatch.setattr(fuel_physics_hip, "prepare_native_fuel_extension",
+        lambda _device: runtime.update(hip_prepared=True))
+    monkeypatch.setattr(curriculum_training, "source_identity",
+        lambda: {"source": "test", "hip_prepared": runtime["hip_prepared"]})
+    source_snapshots = []
+    original_source_hash = matrix._source_identity_hash
+    monkeypatch.setattr(matrix, "_source_identity_hash", lambda source: (
+        source_snapshots.append(dict(source)), original_source_hash(source))[1])
     monkeypatch.setattr(matrix, "default_conditions", lambda *_args, **_kwargs: [condition])
     observed = {}
 
@@ -267,8 +275,14 @@ def test_matrix_accepts_and_binds_canonical_v2_protocol(tmp_path, monkeypatch):
         matrix.run_matrix(checkpoints={track: f"{track}.pt" for track in MECO_TRACKS},
             scenario_id=scenario, categories=categories, seeds=seeds,
             device="cuda:0", output_dir=tmp_path / "matrix",
-            qualification_protocol=protocol_path, qualification_case=case)
+            qualification_protocol=protocol_path, qualification_case=case,
+            replay_output_dir=tmp_path / "replays",
+            replay_selection={"architecture_matched_cv_k16": {"A1": [seeds[0]]}})
     assert observed["split"] == "validation"
     assert observed["evaluation_protocol"] == protocol_path
     assert observed["qualification_protocol_id"] == protocol["protocol_id"]
     assert observed["evaluation_case"] == case
+    assert observed["replay_selection"] == {"A1": [seeds[0]]}
+    assert observed["replay_output_dir"] == tmp_path / "replays"
+    assert observed["replay_seeds"] is None
+    assert source_snapshots and all(snapshot["hip_prepared"] for snapshot in source_snapshots)

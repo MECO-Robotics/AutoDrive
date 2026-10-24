@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,17 +24,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20261024,
                         help="first seed; the matrix uses a contiguous explicit seed list")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--seed-list", help="comma-separated exact seed list; overrides --episodes/--seed")
+    parser.add_argument("--seed-manifest", type=Path,
+                        help="exact seed manifest bound to the frozen protocol, split, scenario, categories, and stratum")
+    parser.add_argument("--device", default="cuda:0",
+                        help="indexed CUDA/HIP accelerator; CPU evaluation is unsupported")
     parser.add_argument("--output-dir", type=Path,
                         default=ROOT / "evaluations" / "meco-ablation-matrix")
     parser.add_argument("--inference-disable-tick", type=int,
                         help="requested physics tick for the paired D1 fallback condition")
     parser.add_argument("--qualification-protocol", type=Path,
                         help="frozen protocol whose validation/test seeds the matrix must use")
+    parser.add_argument("--qualification-case-json", type=Path,
+                        help="JSON object with layout_id, defender_family, start_condition, sensor_profile")
     parser.add_argument("--replay-output-dir", type=Path,
                         help="opt-in dashboard replay directory, typically <run>/.scenario-progress")
     parser.add_argument("--replay-seeds", type=int, nargs="+",
-                        help="exact subset of matrix seeds whose evaluated records get replay bundles")
+                        help="legacy seed selector; captures only the architecture condition")
+    parser.add_argument("--replay-selection-json", type=Path,
+                        help="condition-to-policy-to-exact-seeds mapping; controls replay exports")
     for track in MECO_TRACKS:
         parser.add_argument(f"--{track.lower()}-checkpoint", required=True, type=Path)
     return parser
@@ -41,21 +50,45 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
-    if args.episodes < 1 or args.seed < 0 or args.seed + args.episodes > 2**63:
+    if re.fullmatch(r"cuda:(?:0|[1-9][0-9]*)", args.device) is None:
+        raise SystemExit("--device must name an indexed CUDA/HIP accelerator such as cuda:0; CPU is unsupported")
+    if args.seed_manifest and (args.seed_list or args.replay_seeds):
+        raise SystemExit("--seed-manifest cannot be combined with --seed-list or legacy --replay-seeds")
+    if args.replay_selection_json and args.replay_seeds:
+        raise SystemExit("use --replay-selection-json or --replay-seeds, not both")
+    if args.seed_list:
+        try:
+            seeds = tuple(int(value) for value in args.seed_list.split(","))
+        except ValueError as exc:
+            raise SystemExit("--seed-list must contain comma-separated integers") from exc
+        if not seeds or len(set(seeds)) != len(seeds) or any(seed < 0 or seed >= 2**63 for seed in seeds):
+            raise SystemExit("--seed-list must contain unique signed-63-bit seeds")
+    elif args.seed_manifest:
+        seeds = None
+    elif args.episodes >= 1 and args.seed >= 0 and args.seed + args.episodes <= 2**63:
+        seeds = tuple(args.seed + index for index in range(args.episodes))
+    else:
         raise SystemExit("episodes and seed must define a valid signed-63-bit seed list")
-    if (args.replay_output_dir is None) != (args.replay_seeds is None):
+    replay_selection = (json.loads(args.replay_selection_json.read_text(encoding="utf-8"))
+                        if args.replay_selection_json else None)
+    has_replay_selector = args.replay_seeds is not None or replay_selection is not None
+    if (args.replay_output_dir is None) != (not has_replay_selector):
         raise SystemExit("--replay-output-dir and explicit --replay-seeds must be supplied together")
     categories = tuple(part for part in args.categories.split(",") if part)
     checkpoints = {track: str(getattr(args, f"{track.lower()}_checkpoint"))
                    for track in MECO_TRACKS}
     report = run_matrix(checkpoints=checkpoints, scenario_id=args.scenario,
         categories=categories,
-        seeds=tuple(args.seed + index for index in range(args.episodes)),
+        seeds=seeds,
         device=args.device, output_dir=args.output_dir,
         inference_disable_tick=args.inference_disable_tick,
         qualification_protocol=args.qualification_protocol,
+        qualification_case=(json.loads(args.qualification_case_json.read_text(encoding="utf-8"))
+            if args.qualification_case_json else None),
         replay_output_dir=args.replay_output_dir,
-        replay_seeds=(None if args.replay_seeds is None else tuple(args.replay_seeds)))
+        replay_seeds=(None if args.replay_seeds is None else tuple(args.replay_seeds)),
+        seed_manifest=args.seed_manifest,
+        replay_selection=replay_selection)
     print(json.dumps({"matrix_id": report["matrix_id"],
         "conditions": len(report["conditions"]),
         "contrasts": len(report["contrasts"]),

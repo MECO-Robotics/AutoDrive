@@ -2157,6 +2157,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_factor: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
+                  replay_selection: dict[str, list[int]] | None = None,
                   condition_id: str | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
@@ -2170,8 +2171,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             raise ValueError("episode_seeds must be a unique exact seed list matching episodes")
     scored_seeds = (tuple(episode_seeds) if episode_seeds is not None else
                     tuple(master_seed + index for index in range(episodes)))
-    replay_seed_set = _validate_replay_seed_selection(
-        replay_output_dir, replay_seeds, scored_seeds)
+    if replay_selection is None:
+        replay_seed_set = _validate_replay_seed_selection(
+            replay_output_dir, replay_seeds, scored_seeds)
+        replay_policy_seeds = None
+    else:
+        if replay_output_dir is None or replay_seeds is not None:
+            raise ValueError("replay_selection requires replay_output_dir and excludes replay_seeds")
+        if (not isinstance(replay_selection, dict) or not replay_selection or
+                any(not isinstance(policy, str) or not policy or
+                    not isinstance(selected, list) or not selected or
+                    len(selected) != len(set(selected)) or
+                    any(type(seed) is not int or seed not in scored_seeds for seed in selected)
+                    for policy, selected in replay_selection.items())):
+            raise ValueError("replay_selection must bind policies to unique scored seed lists")
+        replay_policy_seeds = {policy: set(selected)
+                               for policy, selected in replay_selection.items()}
+        replay_seed_set = set().union(*replay_policy_seeds.values())
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     evaluation_binding = None
@@ -2488,6 +2504,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                      if inference_fault_run else policy)
                     episode_id = _episode_id(f"eval-{eval_id}-{category}-{record_policy}",
                                              episode_index)
+                    episode_wall_started = time.perf_counter()
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
@@ -2518,7 +2535,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             env, route_tracking_available=not is_production_d0,
                             goal_tracking_available=not is_production_d0)
                         capture_replay = (replay_output_dir is not None and
-                                          seed in replay_seed_set)
+                            seed in replay_seed_set and
+                            (replay_policy_seeds is None or
+                             seed in replay_policy_seeds.get(record_policy, set())))
                         if capture_replay:
                             replay_frames.append(_capture_meco_replay_frame(
                                 env, int(env.steps[0].item()), None))
@@ -2544,6 +2563,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "wall_contact_ticks": 0, "metrics_available": True}
                         post_fault_metrics_start = None
                         fault_fallback_count = 0
+                        decision_latency_samples = []
+                        inference_latency_samples = []
+                        simulator_macro_latency_samples = []
+                        policy_decision_count = 0
+                        policy_fallback_count = 0
                         decision_prediction_mode = (
                             effective_prediction_mode
                             if policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")
@@ -2611,8 +2635,20 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     commitment=commitment,
                                     tracking_was_available=tracking_was_available)
                                 _timing_sync(env)
-                                component_timing_ms["policy_decision_pipeline"].append(
-                                    (time.perf_counter() - decision_started) * 1000.)
+                                decision_latency = (time.perf_counter() - decision_started) * 1000.
+                                component_timing_ms["policy_decision_pipeline"].append(decision_latency)
+                                decision_latency_samples.append(decision_latency)
+                                policy_decision_count += 1
+                                provenance = prepared.get("inference_provenance")
+                                if isinstance(provenance, dict):
+                                    dispatch = provenance.get("dispatch_monotonic")
+                                    completed = provenance.get("completed_monotonic")
+                                    if (provenance.get("status") == "accepted" and
+                                            isinstance(dispatch, (int, float)) and
+                                            isinstance(completed, (int, float)) and
+                                            completed >= dispatch):
+                                        inference_latency_samples.append((completed - dispatch) * 1000.)
+                                policy_fallback_count += int(bool(prepared.get("fallback_used")))
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
@@ -2638,12 +2674,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     route_cost_points_per_second=route_weight)
                                 choice = int(logits.argmax(-1).item())
                                 _timing_sync(env)
+                                decision_latency = (time.perf_counter() - fallback_started) * 1000.
                                 component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
-                                    else "policy_decision_pipeline"].append(
-                                        (time.perf_counter() - fallback_started) * 1000.)
+                                    else "policy_decision_pipeline"].append(decision_latency)
+                                decision_latency_samples.append(decision_latency)
+                                policy_decision_count += 1
                                 action_source = "d1_inference_disable_fallback" if use_d1_fallback else policy.lower()
                                 if use_d1_fallback:
                                     fault_fallback_count += 1
+                                    policy_fallback_count += 1
                             selected_candidate_id = _selected_policy_candidate_id(
                                 prepared, candidate_set, choice)
                             routes_before_choice = len(routes_seen)
@@ -2839,6 +2878,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             _timing_sync(env)
                             macro_elapsed_ms = (time.perf_counter() - macro_started) * 1000.
                             component_timing_ms["simulator_macro_step"].append(macro_elapsed_ms)
+                            simulator_macro_latency_samples.append(macro_elapsed_ms)
                             goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                              (heading_error is None or heading_error <= .1))
                             remasked = any(item != action for item in actual_trace)
@@ -2945,6 +2985,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "episode_finalization")
                         metric_ledger_record = episode_metric_ledger.to_record()
                         metrics.update(metric_ledger_record["safety_metrics"])
+                        diagnostic_performance = {
+                            "scope": "diagnostic_only_not_qualification_primary_gates",
+                            "end_to_end_wall_ms": (time.perf_counter() - episode_wall_started) * 1000.,
+                            "route_policy_pipeline_ms": _timing_summary(decision_latency_samples),
+                            "inference_ms": _timing_summary(inference_latency_samples),
+                            "simulator_macro_ms": _timing_summary(simulator_macro_latency_samples),
+                            "decision_count": policy_decision_count,
+                            "fallback_count": policy_fallback_count,
+                            "fallback_rate": (policy_fallback_count / policy_decision_count
+                                if policy_decision_count else None),
+                            "component_semantics": {
+                                "route_policy_pipeline_ms": "synchronized wall time for candidate, observation, feature, inference orchestration, and scoring work; not a route-only kernel measurement",
+                                "inference_ms": "accepted asynchronous model dispatch-to-completion time; excludes deterministic fallback requests",
+                                "simulator_macro_ms": "synchronized wall time to execute one 12-physics-step macro",
+                                "end_to_end_wall_ms": "wall time from environment construction through final per-record metric collection"},
+                            "fallback_semantics": "deterministic inference fallback or explicitly injected inference-disable handoff per policy decision"}
                         post_fault_metrics = None
                         if inference_fault_run and inference_fault_reached:
                             progress_fields = ("scores", "acquisitions", "deliveries",
@@ -2969,6 +3025,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             if inference_disable_tick is not None and policy in selected
                             else None)
                         record = {"scenario_id": scenario_id, "category": category,
+                            "diagnostic_performance": diagnostic_performance,
                             "input_contract_sha256": input_contract_digest(),
                             "seed": seed, "policy": record_policy,
                             "paired_baseline_policy": policy if inference_fault_run else None,
@@ -3358,6 +3415,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "source_identity_sha256": source_hash,
             "dashboard_verified": False, "records": records,
             "dashboard_replays": replay_exports,
+            "replay_selection": (None if replay_policy_seeds is None else {
+                policy: sorted(seeds) for policy, seeds in replay_policy_seeds.items()}),
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
             _atomic_json(Path(output), report)

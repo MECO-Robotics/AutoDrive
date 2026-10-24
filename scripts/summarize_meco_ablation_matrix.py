@@ -28,7 +28,8 @@ STRATUM_FIELDS = ("layout_id", "defender_family", "start_condition", "sensor_pro
 DEFAULT_REPLICATES = 10_000
 DEFAULT_SEED = 20261024
 PHASE4_POLICIES = ("A1", "A2", "A3", "C1", "C2", "D0", "D1", "D2")
-MATRIX_SCHEMA_VERSION = 4
+MATRIX_SCHEMA_VERSION = 5
+SUPPORTED_MATRIX_SCHEMA_VERSIONS = (4, MATRIX_SCHEMA_VERSION)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -87,14 +88,54 @@ def _cluster_bootstrap_ci(groups: dict[tuple[str, str], list[float]], *,
             means[int(.975 * (replicates - 1))]]
 
 
+def _paired_quantile_bootstrap(groups: dict[tuple[str, str], list[tuple[float, float]]], *,
+                               seed: int, replicates: int) -> dict[str, dict]:
+    """Bootstrap paired candidate/reference latency quantile differences."""
+    keys = sorted(groups)
+    state = seed & ((1 << 64) - 1)
+
+    def randbelow(limit: int) -> int:
+        nonlocal state
+        state ^= (state << 13) & ((1 << 64) - 1)
+        state ^= state >> 7
+        state ^= (state << 17) & ((1 << 64) - 1)
+        return state % limit
+
+    def quantile(values, p):
+        ordered = sorted(values)
+        return ordered[max(0, math.ceil(p * len(ordered)) - 1)]
+
+    samples = {p: [] for p in (.50, .95, .99)}
+    for _ in range(replicates):
+        candidates, references = [], []
+        for _ in keys:
+            rows = groups[keys[randbelow(len(keys))]]
+            for _ in rows:
+                candidate, reference = rows[randbelow(len(rows))]
+                candidates.append(candidate)
+                references.append(reference)
+        for p in samples:
+            samples[p].append(quantile(candidates, p) - quantile(references, p))
+    result = {}
+    for p, differences in samples.items():
+        differences.sort()
+        name = f"p{int(p * 100)}_ms"
+        result[name] = {"difference": quantile(
+            [row[0] for rows in groups.values() for row in rows], p) - quantile(
+            [row[1] for rows in groups.values() for row in rows], p),
+            "ci_95": [differences[int(.025 * (replicates - 1))],
+                      differences[int(.975 * (replicates - 1))]]}
+    return result
+
+
 def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
     protocol = matrix.get("protocol")
     conditions = matrix.get("conditions")
     if not isinstance(protocol, dict) or not isinstance(conditions, dict):
         raise ValueError("matrix report lacks protocol or condition mapping")
-    if (matrix.get("schema_version") != MATRIX_SCHEMA_VERSION or
-            protocol.get("schema_version") != MATRIX_SCHEMA_VERSION):
-        raise ValueError("matrix report/protocol must use schema version 4")
+    if (matrix.get("schema_version") not in SUPPORTED_MATRIX_SCHEMA_VERSIONS or
+            protocol.get("schema_version") != matrix.get("schema_version")):
+        raise ValueError("matrix report/protocol must use matching schema version 4 or 5")
     expected_matrix_hash = matrix.get("report_sha256")
     unhashed = dict(matrix)
     unhashed.pop("report_sha256", None)
@@ -173,6 +214,9 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
             report_path = base / report_path
         report_path = report_path.resolve()
         digest = _file_sha256(report_path)
+        if (matrix.get("schema_version") >= 5 and
+                condition.get("evaluation_report_sha256") != digest):
+            raise ValueError(f"evaluation report SHA-256 differs from frozen matrix: {name}")
         report = _load_json(report_path)
         if report.get("schema_version") != 1:
             raise ValueError(f"evaluation report schema version is unsupported: {name}")
@@ -366,6 +410,91 @@ def _add_metric_difference(output: list, *, contrast_name: str, category: str,
                 _finite_number(pair[0]["metrics"][metric], metric) -
                 _finite_number(pair[1]["metrics"][metric], metric)}
             for pair in [(item[0], item[1]) for item in paired]]})
+
+
+def _diagnostic_performance_summaries(matrix: dict, loaded: dict, *,
+                                      bootstrap_seed: int, replicates: int) -> list[dict]:
+    """Paired bootstrap intervals for runtime/fallback diagnostics only."""
+    groups: dict[tuple, list[dict]] = {}
+    percentile_names = ("p50_ms", "p95_ms", "p99_ms")
+    for contrast_index, contrast in enumerate(matrix.get("contrasts", [])):
+        rows = contrast.get("paired_episode_rows")
+        if not isinstance(rows, list) or not rows:
+            continue
+        condition_id = contrast.get("condition_id")
+        ids = contrast.get("condition_ids") or {}
+        candidate_id = ids.get("factor", ids.get("cv", condition_id))
+        reference_id = ids.get("baseline", ids.get("current", condition_id))
+        if candidate_id not in loaded["reports"] or reference_id not in loaded["reports"]:
+            continue
+        _, candidate_records = loaded["reports"][candidate_id]
+        _, reference_records = loaded["reports"][reference_id]
+        candidate_policy, reference_policy = (contrast.get("candidate_policy"),
+                                              contrast.get("reference_policy"))
+        for item in rows:
+            category, seed = item.get("category"), item.get("seed")
+            cr = candidate_records.get((candidate_policy, category, seed))
+            rr = reference_records.get((reference_policy, category, seed))
+            if cr is None or rr is None:
+                continue
+            cp, rp = cr.get("diagnostic_performance"), rr.get("diagnostic_performance")
+            if not isinstance(cp, dict) or not isinstance(rp, dict):
+                continue
+            metrics = {"end_to_end_wall_ms": (cp.get("end_to_end_wall_ms"),
+                                               rp.get("end_to_end_wall_ms")),
+                "fallback_count": (cp.get("fallback_count"), rp.get("fallback_count")),
+                "fallback_rate": (cp.get("fallback_rate"), rp.get("fallback_rate"))}
+            for component in ("route_policy_pipeline_ms", "inference_ms", "simulator_macro_ms"):
+                csummary, rsummary = cp.get(component), rp.get(component)
+                if not isinstance(csummary, dict) or not isinstance(rsummary, dict):
+                    continue
+                for percentile in percentile_names:
+                    metrics[f"{component}_{percentile}"] = (
+                        csummary.get(percentile), rsummary.get(percentile))
+            cluster = _stratum(cr)
+            for metric, (candidate_value, reference_value) in metrics.items():
+                if candidate_value is None or reference_value is None:
+                    continue
+                cvalue = _finite_number(candidate_value, metric)
+                rvalue = _finite_number(reference_value, metric)
+                key = (contrast_index, contrast.get("contrast"), category,
+                       candidate_policy, reference_policy, metric)
+                groups.setdefault(key, []).append({"seed": seed,
+                    "cluster": list(cluster), "candidate_value": cvalue,
+                    "reference_value": rvalue, "difference": cvalue - rvalue})
+    output = []
+    for (contrast_index, name, category, candidate, reference, metric), observations in sorted(
+            groups.items(), key=lambda item: repr(item[0])):
+        clusters: dict[tuple[str, str], list[float]] = {}
+        values = []
+        for observation in observations:
+            value = observation["difference"]
+            clusters.setdefault(tuple(observation["cluster"]), []).append(value)
+            values.append(value)
+        output.append({"contrast": name, "category": category,
+            "candidate_policy": candidate, "reference_policy": reference,
+            "metric": metric, "n_pairs": len(values),
+            "mean_difference": sum(values) / len(values),
+            "ci_95": _cluster_bootstrap_ci(clusters,
+                seed=bootstrap_seed ^ contrast_index, replicates=replicates),
+            "cluster_count": len(clusters),
+            "difference_direction": "candidate_minus_reference",
+            "_observations": observations})
+        if metric == "end_to_end_wall_ms":
+            paired = {}
+            for observation in observations:
+                paired.setdefault(tuple(observation["cluster"]), []).append((
+                    observation["candidate_value"], observation["reference_value"]))
+            quantiles = _paired_quantile_bootstrap(paired,
+                seed=bootstrap_seed ^ contrast_index, replicates=replicates)
+            output.append({"contrast": name, "category": category,
+                "candidate_policy": candidate, "reference_policy": reference,
+                "metric": "end_to_end_wall_latency_quantiles",
+                "n_pairs": len(observations), "quantile_differences": quantiles,
+                "cluster_count": len(paired),
+                "difference_direction": "candidate_minus_reference",
+                "_observations": observations})
+    return output
 
 
 def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_SEED,
@@ -657,6 +786,8 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
                 "difference_direction": "candidate_minus_reference",
                 "_observations": observations})
 
+    diagnostic_performance = _diagnostic_performance_summaries(
+        matrix, loaded, bootstrap_seed=bootstrap_seed, replicates=replicates)
     return {"schema": "meco-ablation-bootstrap-summary-v1",
         "diagnostic_only": True,
         "promotion_inference": False,
@@ -669,6 +800,8 @@ def summarize_matrix(matrix_path: str | Path, *, bootstrap_seed: int = DEFAULT_S
             "cluster_fields": ["layout_id", "defender_family"],
             "seed": bootstrap_seed, "replicates": replicates,
             "interval": "percentile_95", "percentiles": [2.5, 97.5]},
+        "diagnostic_performance": {"scope": "diagnostic_only_not_qualification_primary_gates",
+            "summaries": diagnostic_performance},
         "summaries": summaries,
         "interpretation": "Diagnostic paired intervals only; no promotion or qualification conclusion."}
 
@@ -762,6 +895,11 @@ def summarize_matrices(matrix_paths: list[str | Path], *,
     return {"schema": "meco-ablation-bootstrap-summary-v1",
         "diagnostic_only": True, "promotion_inference": False,
         "matrices": matrix_info, "evaluation_reports": report_info,
+        "diagnostic_performance": {"scope": "diagnostic_only_not_qualification_primary_gates",
+            "per_matrix_paired_bootstrap": [
+                {"matrix_id": result["matrix"].get("matrix_id"),
+                 "summaries": result.get("diagnostic_performance", {}).get("summaries", [])}
+                for result in results]},
         "provenance": {key: common.get(key) for key in compatible_fields},
         "qualification_protocol": common.get("qualification_protocol"),
         "strata": [result["provenance"]["qualification_case"] for result in results],

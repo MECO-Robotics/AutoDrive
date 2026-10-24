@@ -44,6 +44,21 @@ def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def _assert_training_not_released_after_final_test(protocol_path: Path,
+        protocol_id: str, protocol_sha256: str, source_hash: str) -> None:
+    ledger_path = Path(protocol_path).with_name(
+        f"{protocol_id}.sealed-final-test-consumption.json")
+    if not ledger_path.is_file():
+        return
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    if (ledger.get("protocol_id") != protocol_id or
+            ledger.get("protocol_sha256") != protocol_sha256):
+        raise ValueError("sealed final-test ledger protocol identity differs from supervisor protocol")
+    if ledger.get("source_identity_sha256") != source_hash:
+        raise ValueError("source identity changed after sealed final-test consumption")
+    raise ValueError("training is forbidden after final-test seeds have been consumed")
+
+
 def _atomic_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, indent=2, allow_nan=False)
@@ -287,6 +302,9 @@ class MecoSupervisor:
                 self.qualification_protocol_path)
             if self.qualification_protocol.get("master_seed") != seed:
                 raise ValueError("supervisor seed must match the frozen qualification protocol master seed")
+            _assert_training_not_released_after_final_test(
+                self.qualification_protocol_path, self.qualification_protocol_id,
+                self.qualification_protocol_sha256, _hash(source_identity()))
         self.scenario = scenario
         self.category = category
         self.seed = seed

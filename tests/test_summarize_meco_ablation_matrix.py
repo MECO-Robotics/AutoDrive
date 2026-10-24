@@ -17,7 +17,8 @@ def _write_json(path, value):
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
 
-def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False):
+def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False,
+             schema_version=4):
     case = {"layout_id": "layout-x", "defender_family": "family-x",
             "start_condition": "start-x", "sensor_profile": "sensor-x"}
     seeds = [10, 11, 12, 13]
@@ -100,10 +101,13 @@ def _fixture(tmp_path, *, duplicate=False, missing=False, bad_provenance=False):
             "reference_record_policy_id": reference["policy_id"],
             "candidate_metrics": candidate["metrics"],
             "reference_metrics": reference["metrics"]})
-    matrix_protocol = {"schema_version": 4, "matrix_id": "matrix-id", "scenario_id": "pickup_simple",
+    if schema_version >= 5:
+        condition["evaluation_report_sha256"] = hashlib.sha256(
+            report_path.read_bytes()).hexdigest()
+    matrix_protocol = {"schema_version": schema_version, "matrix_id": "matrix-id", "scenario_id": "pickup_simple",
         "categories": ["single"], "seed_list": seeds,
         "conditions": [spec], **common}
-    matrix = {"schema_version": 4, "matrix_id": "matrix-id", "protocol": matrix_protocol,
+    matrix = {"schema_version": schema_version, "matrix_id": "matrix-id", "protocol": matrix_protocol,
         "conditions": {"architecture_matched_cv_k16": condition},
         "contrasts": [contrast], **common}
     recall = {"contrast": "candidate_recall_K_sweep", "paired": True,
@@ -302,6 +306,17 @@ def test_known_paired_interval_is_deterministic_and_clustered(tmp_path):
     assert one == two
     assert one["diagnostic_only"] is True
     assert one["promotion_inference"] is False
+
+
+def test_schema5_freezes_condition_report_bytes(tmp_path):
+    path = _fixture(tmp_path, schema_version=5)
+    summarize_matrix(path, replicates=100)
+    report_path = tmp_path / "condition.json"
+    report = json.loads(report_path.read_text())
+    report["records"][0]["metrics"]["score"] += 1
+    _write_json(report_path, report)
+    with pytest.raises(ValueError, match="evaluation report SHA-256"):
+        summarize_matrix(path, replicates=100)
 
 
 def test_cluster_bootstrap_resamples_clusters_then_rows():
