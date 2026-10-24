@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -595,6 +595,43 @@
         "status": "approved-summary"
       },
       "limits": "35 focused tests reported passing. No simulator evaluation, fresh dashboard replay, dashboard service/replay review, or qualification evaluation. Those gates remain open."
+    },
+    {
+      "requirement_id": "d0-campaign-orchestration",
+      "title": "D0 full registered-scenario calibration campaign orchestration",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/d0-campaign-orchestration.md",
+          "sha256": "110a30918397a3a4328080a487aecdd0a685e39123b128c1277596dba84626f4",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "dbd84d8e67a92db7bacef46043cae4a2bd316e8b",
+        "initial_commit": "91f24a1ffe4feef37d70f2cba414676412811be2",
+        "restartability_commit": "e696257d73cfc4518307f5b1a33f4a9b1504b98e",
+        "candidate_integration_commit": "08159fa4d9aab1b58db1197afb650f2ba651ef62",
+        "paths": [
+          "scripts/meco_d0_calibration_campaign.py",
+          "tests/test_meco_d0_calibration_campaign.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/d0-campaign-orchestration.md",
+          "sha256": "110a30918397a3a4328080a487aecdd0a685e39123b128c1277596dba84626f4",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "dbd84d8e67a92db7bacef46043cae4a2bd316e8b",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved the exact final implementer head after 8 focused tests; approval concerns orchestration contracts only.",
+        "status": "approved-summary"
+      },
+      "limits": "139,800 D0 records are planned and unrun. No GPU/simulator results, CI result, or qualification evidence is claimed."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -604,6 +641,7 @@
     "The preference-v2 and A/C input-provenance approval evidence is a scoped summary of parent messages; original planner/reviewer transcripts are not stored.",
     "The combined branch is a review-only integration candidate; it has no simulator/GPU qualification, captured production parity run, or deployment qualification.",
     "The evaluation-device lease tranche has focused implementation and review evidence only; simulator, hardware, fresh dashboard replay, active-campaign, and qualification evidence are absent.",
-    "The inference observability and decision-trace tranche has focused implementation/review evidence only; simulator, fresh replay, dashboard review, and qualification gates remain open."
+    "The inference observability and decision-trace tranche has focused implementation/review evidence only; simulator, fresh replay, dashboard review, and qualification gates remain open.",
+    "The D0 campaign orchestration tranche provides implementation and eight-test review evidence only; 139,800 planned D0 records remain unrun, with no GPU/simulator results, CI, or qualification claim."
   ]
 }
