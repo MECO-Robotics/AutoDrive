@@ -117,14 +117,18 @@ class PerceptionInputs:
         fuel_confidence = torch.nan_to_num(fuel_confidence, nan=0.).clamp(0., 1.)
         fuel_extent = torch.nan_to_num(fuel_extent, nan=0., posinf=0., neginf=0.)
 
-        own_pos = self._selected(env.sim.pose)[..., :2]
+        # policy_pose is the learner localization frame. In CurriculumEnv it
+        # is restored together with the delayed observation/sensor frame, so
+        # this encoder cannot bypass Phase 4 delay by consulting world pose.
+        policy_pose = env.policy_pose
+        own_pos = self._selected(policy_pose)[..., :2]
         own_vel = self._selected(env.sim.velocity)[..., :2]
         own_extent = torch.stack((self._selected(env.sim.length),
                                   self._selected(env.sim.width)), dim=-1)
         speed = self._selected(env.sim.speed).clamp_min(.1)[:, None, None]
         # Index only the two same-team slots. Enemy simulator poses and
         # velocities never enter this representation.
-        ally_pos = env.sim.pose[:, self.teammates, :2].reshape(batch, 2, 2)
+        ally_pos = policy_pose[:, self.teammates, :2].reshape(batch, 2, 2)
         ally_vel = env.sim.velocity[:, self.teammates, :2].reshape(batch, 2, 2)
         ally_extent = torch.stack((env.sim.length[:, self.teammates],
                                    env.sim.width[:, self.teammates]), -1).reshape(batch, 2, 2)

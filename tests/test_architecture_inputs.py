@@ -26,6 +26,7 @@ def _fake_env():
     positions[..., 0, :] = torch.tensor([8., 4.])
     env = SimpleNamespace(
         n=n, device=torch.device("cpu"), sim=sim,
+        policy_pose=pose.clone(),
         team_ids=torch.tensor([0, 0, 0, 1, 1, 1]),
         hub_centers=torch.tensor([[2., 4.], [14., 4.]]),
         perception_track_timeout=1., track_mask=mask, track_pos=positions,

@@ -12,10 +12,10 @@ TRACKS = ("A1", "A2", "A3", "C1", "C2")
 _INPUTS = {
     "raster": {"shape": "[B,6,H,W]", "tracks": ["A1", "C2"],
         "origin": "six-channel observation snapshot", "observed": True,
-        "boundary": "fuel/opponent channels are sensor tracks; ally channel is the shared team-telemetry feed; no full simulator state is rasterized"},
+        "boundary": "fuel/opponent channels are sensor tracks; ally channel is the shared policy-localization feed; no physical sim.pose is rasterized"},
     "globals_": {"shape": "[B,7]", "tracks": list(TRACKS),
         "origin": "observation snapshot global scalars", "observed": False,
-        "boundary": "mixed: own pose is shared localization telemetry; load uses simulator piece ownership; hub timer and remaining match time use simulator match state; only pose is treated as a telemetry feed"},
+        "boundary": "mixed: own pose is the policy localization estimate (integrated from idealized sim.velocity odometry); load uses simulator piece ownership; hub timer and remaining match time use simulator match state; pose is not physical sim.pose"},
     "hidden": {"shape": "[B,64]", "tracks": list(TRACKS),
         "origin": "recurrent model state from prior decisions", "observed": False,
         "boundary": "internal model state; reset/continued by episode and tracking availability rules"},

@@ -480,7 +480,13 @@ class TensorThreeVsThreeEnv(
 
     @torch.no_grad()
     def _advance_policy_pose_odometry(self, prior_velocity, active):
-        """Advance estimates from wheel/gyro motion, never from world pose."""
+        """Integrate the simulator's idealized onboard wheel/gyro odometry feed.
+
+        ``sim.velocity`` is used here as the modeled body-motion sensor input;
+        it is noiseless and simulator-produced, but this estimator does not
+        read ``sim.pose`` after reset. Hardware use requires replacing this
+        feed with actual wheel/gyro measurements.
+        """
         active = torch.as_tensor(active, device=self.device, dtype=torch.bool).reshape(self.n)
         estimate = self.estimated_pose.clone()
         linear_delta = .5 * (prior_velocity[..., :2] + self.sim.velocity[..., :2]) * self.dt

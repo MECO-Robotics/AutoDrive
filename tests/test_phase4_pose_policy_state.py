@@ -13,6 +13,7 @@ from frc_defense.meco_candidates import (_candidate_target,
                                          build_safe_action_candidates)
 from frc_defense.meco_plan_a_policy import build_plan_a_support
 from frc_defense.curriculum_scenarios import make_curriculum_env
+from frc_defense.architecture_inputs import PerceptionInputs
 
 
 def _env():
@@ -66,6 +67,7 @@ def _decision_snapshot(env, graph):
         candidate_id="route", snapshot_id="pose-contract:0", world=0,
         slot=3, goal_xy=(10.8, 4.)),))[0]
     snapshot = build_observation_snapshot(env, episode_id="pose-contract")
+    perception = PerceptionInputs(env, (3,))(observation)
     return {
         "observation": observation.clone(),
         "candidate_indices": candidates.clone(),
@@ -87,6 +89,8 @@ def _decision_snapshot(env, graph):
         "route_start": env.policy_pose[0, 3].clone(),
         "meco_globals": snapshot.globals,
         "meco_raster": snapshot.raster,
+        "perception_field": perception["field"].clone(),
+        "perception_entities": perception["entities"].clone(),
     }
 
 
@@ -121,6 +125,8 @@ def test_policy_inputs_are_invariant_to_physical_pose_when_estimate_and_sensors_
     assert torch.equal(first["route_start"], second["route_start"])
     assert first["meco_globals"] == second["meco_globals"]
     assert first["meco_raster"] == second["meco_raster"]
+    assert torch.equal(first["perception_field"], second["perception_field"])
+    assert torch.equal(first["perception_entities"], second["perception_entities"])
 
     # Truth remains available for evaluator/physics output and did change.
     assert not torch.equal(truth[0, 3], env.sim.pose[0, 3])
@@ -139,6 +145,8 @@ def test_changing_estimated_pose_changes_policy_geometry_without_moving_truth():
     assert not torch.equal(before["observation"], after["observation"])
     assert not torch.equal(before["controller_target"], after["controller_target"])
     assert before["safe_table"] != after["safe_table"]
+    assert not torch.equal(before["perception_field"], after["perception_field"])
+    assert not torch.equal(before["perception_entities"], after["perception_entities"])
     assert before["plan_a_root"] != after["plan_a_root"]
     assert not torch.equal(before["target"], after["target"])
     assert not torch.equal(before["route_start"], after["route_start"])
@@ -181,3 +189,34 @@ def test_plan_c_eta_uses_estimated_heading_not_physical_heading(monkeypatch):
         env, env.observe(), graph, episode_id="pose-contract", candidate_k=8)
     assert torch.equal(env.sim.pose, truth)
     assert third.table.features[0][13] > first_eta
+
+
+def test_perception_inputs_follow_restored_delayed_sensor_and_pose_frame():
+    env = _env()
+    builder = PerceptionInputs(env, (3,))
+    env.policy_pose[0, 3] = torch.tensor((9.5, 3.5, 0.))
+    env.policy_pose[0, 4] = torch.tensor((8.5, 3.5, 0.))
+    env.policy_pose[0, 5] = torch.tensor((8.5, 3.5, 0.))
+    env.track_pos[0, 3, 0] = torch.tensor((10.25, 3.5))
+    env._last_obs = env.observe()
+    delayed = env._phase4_capture_sensor_frame(env._last_obs)
+
+    env.policy_pose[0, 3] = torch.tensor((12.5, 5.5, 1.))
+    env.policy_pose[0, 4] = torch.tensor((13.5, 5.5, 1.))
+    env.policy_pose[0, 5] = torch.tensor((13.5, 5.5, 1.))
+    env.track_pos[0, 3, 0] = torch.tensor((12.75, 5.5))
+    env._last_obs = env.observe()
+    env._phase4_restore_sensor_frame(delayed)
+    inputs = builder(env._last_obs)
+    torch.testing.assert_close(inputs["scalars"], env._last_obs[:, 3])
+
+    # Entities are fuel slots, focal robot, two teammates, opponent. Locations
+    # are relative to the focal estimate and the retained fuel track frame.
+    entities = inputs["entities"][0]
+    fuel_count = entities.shape[0] - 4
+    torch.testing.assert_close(entities[0, :2], torch.tensor((
+        .75 / float(builder.scales[0]), 0.)))
+    torch.testing.assert_close(entities[fuel_count, :2], torch.zeros(2))
+    expected_ally_delta = torch.tensor((-1. / float(builder.scales[0]), 0.))
+    torch.testing.assert_close(entities[fuel_count + 1, :2], expected_ally_delta)
+    torch.testing.assert_close(entities[fuel_count + 2, :2], expected_ally_delta)

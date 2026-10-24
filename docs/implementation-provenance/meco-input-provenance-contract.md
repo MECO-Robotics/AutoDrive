@@ -16,13 +16,15 @@ C1 and C2 use identical candidate feature columns and order: 20 named values, fo
 
 ## Source and observation boundaries
 
-The six raster channels are sensed fuel confidence/age, ally position confidence/age from the explicit shared team-telemetry channel, and sensed opponent confidence/age. The observation adapter explicitly avoids filling fuel or opponent locations from simulator truth. The ally feed currently comes from `sim.pose` for own-team slots and must be matched by an equivalent localization feed for hardware qualification.
+The six raster channels are sensed fuel confidence/age, ally position confidence/age from policy localization, and sensed opponent confidence/age. The observation adapter explicitly avoids filling fuel or opponent locations from simulator truth. In curriculum training, focal and teammate locations come from `policy_pose`, which is restored with the Phase 4 delayed sensor frame. Its runtime estimate integrates the simulator's idealized, noiseless `sim.velocity` wheel/gyro odometry feed; it does not reread `sim.pose` after initialization. Hardware qualification must replace that modeled feed with actual onboard odometry/localization telemetry.
 
-The seven global values include own pose, current load, hub timing, and remaining match time. Their sources are mixed: pose is shared team telemetry, while load ownership and match/hub timing are simulator state. The registry marks the globals as not directly observed and describes this boundary. These simulator-derived scalars must not be described as sensed observations.
+The seven global values include own pose, current load, hub timing, and remaining match time. Their sources are mixed: pose is the policy localization estimate, while load ownership and match/hub timing are simulator state. The registry marks the globals as not directly observed and describes this boundary. These simulator-derived scalars must not be described as sensed observations.
+
+The full-field `PerceptionInputs` encoder follows the same pose authority: focal and teammate entity positions and their raster cells use delayed `policy_pose`; its scalar tensor is the same delayed observation passed by curriculum training/inference. Entity velocities and chassis extents remain simulator telemetry, so the representation is not yet a hardware-qualified sensor package.
 
 A2/A3 node features combine raster samples at legal poses with normalized pose coordinates and heading. Legal nodes, directed edges, regions, and coarse transitions are planner-derived from the active grid and footprint-clearance checks; they are not sensor observations.
 
-The C1/C2 candidate builder combines safe action slots, sensor-track identities and confidence/age, field dimensions, own pose telemetry, sensed opponent tracks, planner-derived routes/ETA, and prior controller commitment. The 20 ordered candidate values are:
+The C1/C2 candidate builder combines safe action slots, sensor-track identities and confidence/age, field dimensions, own policy localization estimate, sensed opponent tracks, planner-derived routes/ETA, and prior controller commitment. The 20 ordered candidate values are:
 
 `action_index`, `sensor_track_buffer_index`, `goal_x_m`, `goal_y_m`, `heading_bin`, `behavior_index`, `field_length_m`, `field_width_m`, `target_distance_m`, `nearby_sensed_track_count`, `track_confidence`, `track_age_s`, `opponent_distance_m`, `route_time_s`, `legal_node_index`, `route_distance_m`, `risk_penalty_points`, `target_heading_rad`, `is_continue`, `commitment_switch_cost`.
 
