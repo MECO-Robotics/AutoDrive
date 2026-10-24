@@ -10,7 +10,7 @@ This ledger separates code that exists from evidence that demonstrates runtime b
 
 ## Live training campaign
 
-The continuous campaign is isolated in its own checkout and remains running. Its supervisor is PID `1178932`, invocation `3ccef8583e0843bc92e2dbddbde6569c`, configured with `--devices cuda:0,cuda:1 --evaluation-device cuda:1 --cycles 0 --seed 20261024 --prediction-mode cv --evaluation-prediction-mode cv --phase4-train-exposure`. It writes to `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five` and `.../evaluations/meco-five`.
+The continuous campaign is isolated in its own checkout. The supervisor process was observed active at PID `1178932` at the snapshot, invocation `3ccef8583e0843bc92e2dbddbde6569c`, configured with `--devices cuda:0,cuda:1 --evaluation-device cuda:1 --cycles 0 --seed 20261024 --prediction-mode cv --evaluation-prediction-mode cv --phase4-train-exposure`. It writes to `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five` and `.../evaluations/meco-five`. A compact immutable observation is recorded in [`MECO_CAMPAIGN_SNAPSHOT_20261024T034340Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T034340Z.json), SHA-256 `51b005a9839ef595910bdde112da07ee1475688378fb943530d5aa0c292b3b73`. It is a point-in-time record, not a live status feed.
 
 At the status heartbeat `2026-10-24T03:43:40Z`:
 
