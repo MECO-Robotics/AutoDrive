@@ -93,6 +93,14 @@
 > matched the checkout. Reads were non-atomic; see pinned files and response
 > digests in the snapshot.
 
+> **Hardware availability check — 2026-10-24 06:32 UTC.** `lspci` reports the
+> two AMD/ATI Vega 10 XT WX9100 devices used for training. Neither `hailortcli`
+> nor a `/dev/hailo*` device is available on this host, so Hailo compilation,
+> accelerator execution, latency, and memory evidence remain unavailable here.
+> At the 06:33 supervisor heartbeat the campaign was healthy: A1/A2/C1 were at
+> 100 updates, A3 at 65, and C2 queued behind A3 on `cuda:0`. The paired
+> diagnostic evaluation had not started; these updates are not qualification.
+
 > **Phase 5 production-input parity tranche — 2026-10-24.** Isolated branch
 > `codex/meco-production-input-parity`, commit
 > `b098d725b7c2c2da90ddd6b228989bfc27d949ac`, passed scoped reviewer re-review.
