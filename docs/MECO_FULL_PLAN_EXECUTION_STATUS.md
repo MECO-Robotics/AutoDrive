@@ -22,6 +22,19 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+## Dashboard currentness after manifest-supervisor integration — 2026-10-24
+
+After candidate commit `8e8117bd02a609dc5bb4ddb71de2827380759083`, user
+service `frc-defense-dashboard.service` restarted with PID `2062204` and this
+candidate worktree as its working directory. `/meco`, `/api/meco-status`,
+`/api/curriculum-status`, and `/assets/meco.js` returned HTTP 200. The served
+JavaScript SHA-256 matched the checkout asset
+(`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`). The
+curriculum API validates the three-pass ledger as `validated_summary_only`
+with 46 entries and `meco-supervisor-manifest-device-lease` latest. The
+dashboard data root remains the live main checkout. No replay was generated;
+this verifies dashboard currentness and provenance only.
+
 ## Manifest-driven supervisor and cross-process device leases — 2026-10-24
 
 Reviewed implementation commit `5d81713310e9400b12fead981f118913f83222f0`
