@@ -146,7 +146,11 @@ def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
             "D1": "current", "D2": "multi_model_v1"}
 
 
-@pytest.mark.parametrize("row_provenance_tamper", [None, "missing", "tampered"])
+@pytest.mark.parametrize("row_provenance_tamper", [
+    None, "missing", "tampered",
+    "categories_missing", "categories_empty", "categories_truncated",
+    "seeds_missing", "seeds_empty", "seeds_truncated",
+])
 def test_matrix_runner_executes_and_records_per_control_condition(
         monkeypatch, tmp_path, row_provenance_tamper):
     import hashlib
@@ -218,6 +222,22 @@ def test_matrix_runner_executes_and_records_per_control_condition(
                     target.pop("prediction_mode")
                 else:
                     target["prediction_contract"] = prediction_contract("cv")
+        report_categories = list(kwargs["categories"])
+        report_seeds = list(kwargs["episode_seeds"])
+        if row_provenance_tamper and row_provenance_tamper.startswith("categories_"):
+            if row_provenance_tamper == "categories_missing":
+                report_categories = None
+            elif row_provenance_tamper == "categories_empty":
+                report_categories = []
+            else:
+                report_categories = report_categories[:-1]
+        if row_provenance_tamper and row_provenance_tamper.startswith("seeds_"):
+            if row_provenance_tamper == "seeds_missing":
+                report_seeds = None
+            elif row_provenance_tamper == "seeds_empty":
+                report_seeds = []
+            else:
+                report_seeds = report_seeds[:-1]
         device_info = {"device": "cpu", "accelerator_backend": "cpu"}
         return {"evaluation_id": f"eval-{len(calls)}", "protocol_id": f"proto-{len(calls)}",
             "qualification_protocol_id": None, "source_identity_sha256": source_hash,
@@ -227,8 +247,8 @@ def test_matrix_runner_executes_and_records_per_control_condition(
             "phase4_factor": kwargs["phase4_factor"],
             "prediction": {"control_modes": modes},
             "candidate_k": kwargs["candidate_k_override"],
-            "inference_disable_fault": None, "categories": list(kwargs["categories"]),
-            "seeds": list(kwargs["episode_seeds"]), "records": records}
+            "inference_disable_fault": None, "categories": report_categories,
+            "seeds": report_seeds, "records": records}
 
     from pathlib import Path
     monkeypatch.setattr(track_training, "evaluate_meco", fake_evaluate)
@@ -239,11 +259,12 @@ def test_matrix_runner_executes_and_records_per_control_condition(
         checkpoints[track] = str(path)
     if row_provenance_tamper is None:
         report = matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
-            categories=("single",), seeds=(27,), device="cpu", output_dir=tmp_path / "matrix")
+            categories=("single", "cluster"), seeds=(27, 28), device="cpu",
+            output_dir=tmp_path / "matrix")
     else:
-        with pytest.raises(ValueError, match="row prediction provenance"):
+        with pytest.raises(ValueError, match="evaluation report|row prediction provenance"):
             matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
-                categories=("single",), seeds=(27,), device="cpu",
+                categories=("single", "cluster"), seeds=(27, 28), device="cpu",
                 output_dir=tmp_path / "matrix")
         return
 

@@ -270,6 +270,24 @@ def _expected_control_prediction_modes(condition: MatrixCondition) -> dict[str, 
     return modes
 
 
+def _validate_report_category_seed_provenance(report: dict,
+                                              categories: tuple[str, ...],
+                                              seeds: tuple[int, ...]) -> None:
+    """Require evaluator declarations to match the matrix's frozen inputs."""
+    declared_categories = report.get("categories")
+    declared_seeds = report.get("seeds")
+    if (not isinstance(declared_categories, (list, tuple))
+            or not declared_categories
+            or tuple(declared_categories) != categories):
+        raise ValueError(
+            "evaluation report categories are missing, empty, or differ from frozen matrix categories")
+    if (not isinstance(declared_seeds, (list, tuple))
+            or not declared_seeds
+            or tuple(declared_seeds) != seeds):
+        raise ValueError(
+            "evaluation report seeds are missing, empty, or differ from frozen matrix seeds")
+
+
 def _validate_control_prediction_rows(report: dict,
                                      expected_modes: dict[str, str]) -> None:
     """Bind each D1/D2 episode row to the frozen mode and its full contract."""
@@ -436,6 +454,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
             output=str(report_path))
+        _validate_report_category_seed_provenance(report, categories, seeds)
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         expected_control_modes = _expected_control_prediction_modes(condition)
