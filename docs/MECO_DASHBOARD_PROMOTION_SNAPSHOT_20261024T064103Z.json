@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "captured_utc": "2026-10-24T06:41:03.818611+00:00",
+  "capture_finished_utc": "2026-10-24T06:41:04.040603+00:00",
+  "reads_non_atomic": true,
+  "dashboard_promotion": {
+    "service_pid": 1537750,
+    "process": "1537750       1 Sat Oct 24 06:39:49 2026       01:13 Ssl  python3",
+    "cwd": "/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-production-parity-integration",
+    "command": "/usr/bin/python3 -m frc_defense.dashboard --run-dir /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/evaluations/meco-five --curriculum-root /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive --host 127.0.0.1 --also-host 127.0.1.1 --also-host 100.121.248.52 --port 8765 --meco-data-root /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "listeners": [
+      "LISTEN 0      5                                   127.0.1.1:8765       0.0.0.0:*    users:((\"python3\",pid=1537750,fd=7))",
+      "LISTEN 0      5                              100.121.248.52:8765       0.0.0.0:*    users:((\"python3\",pid=1537750,fd=8))",
+      "LISTEN 0      5                                   127.0.0.1:8765       0.0.0.0:*    users:((\"python3\",pid=1537750,fd=6))"
+    ],
+    "serving_checkout_is_candidate": true,
+    "candidate_code_checkout": {
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-production-parity-integration",
+      "branch": "codex/meco-production-input-parity-integration",
+      "head": "e449eb1c2edbdd510d133b63d271c4cb6ccf2996",
+      "git_status": "## codex/meco-production-input-parity-integration",
+      "dashboard_api_sha256": "b7248375d5b38022e283fc732bdc0f1e984cacc12ab29d174ca889466dabb4da",
+      "local_asset_path": "frc_defense/dashboard_static/meco.js",
+      "local_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+    },
+    "training_data_checkout": {
+      "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+      "branch": "main",
+      "head": "84a894961af833f580dad8316a69af02492ff0b7",
+      "git_status": "## main...origin/main [ahead 447]\n M docs/MECO_FULL_PLAN_EXECUTION_STATUS.md\n?? docs/MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T063658Z.json",
+      "data_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive"
+    },
+    "checkout_resolution_basis": "Process cwd is the candidate checkout and the process was launched with python -m frc_defense.dashboard; the command binds --meco-data-root and --run-dir to main."
+  },
+  "endpoints": {
+    "/meco": {
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "bytes": 2025,
+      "body_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f"
+    },
+    "/api/meco-status": {
+      "status": 200,
+      "content_type": "application/json",
+      "bytes": 187565,
+      "body_sha256": "b35692a72c4c81f03f85a5de3820f5cf4ad648e7d1938500ce35f23cdd670ee1"
+    },
+    "/api/curriculum-status": {
+      "status": 200,
+      "content_type": "application/json",
+      "bytes": 23741,
+      "body_sha256": "4cfabc11d3e71732ac871671a10bce5cccb7ff7a36c394f5fc5ac32941230211"
+    },
+    "/assets/meco.js": {
+      "status": 200,
+      "content_type": "text/javascript; charset=utf-8",
+      "bytes": 13859,
+      "body_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+    }
+  },
+  "assets": {
+    "served_javascript_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "candidate_local_javascript_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "served_matches_candidate_local": true
+  },
+  "three_pass_provenance": {
+    "status": "scoped-transcript-summaries",
+    "validation_status": "validated_summary_only",
+    "evidence_class": "scoped_transcript_summary",
+    "tranche_count": 10,
+    "latest_requirement_id": "phase5-production-input-onnx-parity",
+    "manifest_path": "docs/MECO_THREE_PASS_PROVENANCE.json",
+    "manifest_sha256": "4113750d1cbda6e6f513cfe033091d37fcacd7024aeb3e94ef59406898e9c33d",
+    "dashboard_pinned_manifest_sha256": "4113750d1cbda6e6f513cfe033091d37fcacd7024aeb3e94ef59406898e9c33d"
+  },
+  "training": {
+    "data_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "main_head": "84a894961af833f580dad8316a69af02492ff0b7",
+    "supervisor_pid": 1523650,
+    "supervisor_id": "739273d92714420e833dc24c678d7fed",
+    "heartbeat_utc": "2026-10-24T06:41:01.549952+00:00",
+    "status": "training",
+    "cycle": 1,
+    "completed_cycles": 1,
+    "completed_training_chunks": 1,
+    "error": null,
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "run_manifest_source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "source_identity_matches_run_manifest": true,
+    "source_file_count": 138,
+    "source_file_mismatches": [],
+    "evaluation_split": "diagnostic",
+    "evaluation_protocol_id": null,
+    "evaluation": null,
+    "lanes": {
+      "A1": {
+        "run_id": "f526bc6603974e1c95efbf52824b860c",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:0",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_run_id": "f526bc6603974e1c95efbf52824b860c",
+        "run_manifest_status": "complete",
+        "run_manifest_error": null,
+        "worker_heartbeat_utc": "2026-10-24T05:38:21.891328+00:00",
+        "worker_heartbeat_updates": 100
+      },
+      "A2": {
+        "run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:1",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "run_manifest_status": "complete",
+        "run_manifest_error": null,
+        "worker_heartbeat_utc": "2026-10-24T05:44:08.089975+00:00",
+        "worker_heartbeat_updates": 100
+      },
+      "A3": {
+        "run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "status": "running",
+        "pid": 1523754,
+        "device": "cuda:0",
+        "completed_updates": 74,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "run_manifest_status": "running",
+        "run_manifest_error": null,
+        "worker_heartbeat_utc": "2026-10-24T06:41:01.772285+00:00",
+        "worker_heartbeat_updates": 75
+      },
+      "C1": {
+        "run_id": "9417015ce2a14c55927b5aacb1262075",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:1",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_run_id": "9417015ce2a14c55927b5aacb1262075",
+        "run_manifest_status": "complete",
+        "run_manifest_error": null,
+        "worker_heartbeat_utc": "2026-10-24T06:31:22.318541+00:00",
+        "worker_heartbeat_updates": 100
+      },
+      "C2": {
+        "run_id": "a809ade578a848279b6e88e5342446d9",
+        "status": "queued",
+        "pid": null,
+        "device": "cuda:0",
+        "completed_updates": 0,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_run_id": "d4b03e1a0595420b91122c9389b24d74",
+        "run_manifest_status": "aborted_due_to_sibling_failure",
+        "run_manifest_error": null
+      }
+    }
+  },
+  "runtime_file_sha256": {
+    "checkpoints/meco-five/supervisor-status.json": "b7f4717aaee8f57106c0caf490faaf8a0f188d26071eac4ffd687e00078bbb12",
+    "checkpoints/meco-five/queue-status.json": "aacdbf3701506617d934b88e926cff50b53ade9d939c94fb44093f1b3744ff14",
+    "checkpoints/meco-five/A1/run.json": "163583a6d4bae645751b4fd5594791b0461d059d35b15164dca7d9a1f8ba61f2",
+    "checkpoints/meco-five/A1/heartbeat.json": "1c5babdbe06bc19f3121ab1e23736c5ca1de8f54104f8a78e668a1be8d74afc0",
+    "checkpoints/meco-five/A1/latest.pt": "e12924e5c31c1362113f4fd6a5fb9aa5df74b66a8804564f4b918b47ae6a5538",
+    "checkpoints/meco-five/A2/run.json": "2dc37b60ddc06599a5ffc98c6917d1ccdf27ce3baaac2206b5d6387832e3c5c7",
+    "checkpoints/meco-five/A2/heartbeat.json": "bdb75adba20a157c761615f99762e42a80e419047fe71174f8ce3a5edb11a082",
+    "checkpoints/meco-five/A2/latest.pt": "cc5291dbdb3e65e8bfb623feae363572a8f5d5e04ba9106ca8f23c02e5762fbc",
+    "checkpoints/meco-five/A3/run.json": "51bb2506f95e33ab23ecf7aaeb3191c5ab9f9cdd7336fbe4071e6290d8e6e31f",
+    "checkpoints/meco-five/A3/heartbeat.json": "7f22cfc6338cc33cc5d4ec8a8f86b332ff47a886c99b12ee0eb86a4ccc2fcc52",
+    "checkpoints/meco-five/A3/latest.pt": "139b77a93323ca54c85cf7cd759f42347d5d00f2da6fe9ffae5055cd8600a5f3",
+    "checkpoints/meco-five/C1/run.json": "ae558f43478bdcdc0458225fc82d0ff0f96920f48f996173f05197de6164b2d7",
+    "checkpoints/meco-five/C1/heartbeat.json": "192ad9921028033f6dd8fb212429b5867497b8cb2aceb14eb8e781aa2ce01fb2",
+    "checkpoints/meco-five/C1/latest.pt": "02fd46069ff84ed9cc1d4147376014304ffc117b77774def5b50c1b98d20d235",
+    "checkpoints/meco-five/C2/run.json": "fd09dc013a5060e91bec140b6ac71236d985665f7e12e434005e723c73538c8a"
+  },
+  "interpretation": [
+    "The dashboard service runs candidate code from the reviewed integration checkout while reading live training/evaluation data from main. This does not mean candidate source code has been integrated into main.",
+    "Reads were non-atomic; the snapshot pins files and response bodies observed during the capture.",
+    "No tests, simulator evaluation, replay generation, or training changes were made for this capture."
+  ]
+}

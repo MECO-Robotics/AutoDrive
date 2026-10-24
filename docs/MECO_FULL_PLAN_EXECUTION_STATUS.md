@@ -1,5 +1,44 @@
 # MECO learning tracks plan: execution status
 
+> **Dashboard promotion capture — 2026-10-24 06:41:03 UTC.** Snapshot
+> [`MECO_DASHBOARD_PROMOTION_SNAPSHOT_20261024T064103Z.json`](MECO_DASHBOARD_PROMOTION_SNAPSHOT_20261024T064103Z.json),
+> SHA-256 `9bee3debbd535f973cd79d430d23737f12ab8d34b8b55a39b86b6140a71f8660`.
+> PID 1537750 serves the dashboard from the candidate checkout, branch
+> `codex/meco-production-input-parity-integration` at
+> `e449eb1c2edbdd510d133b63d271c4cb6ccf2996`; its command binds both
+> `--run-dir` and `--meco-data-root` to live `main` at
+> `84a894961af833f580dad8316a69af02492ff0b7`. All four documented endpoints
+> returned HTTP 200, and the served JavaScript matched the candidate-local
+> asset. The API reports `validated_summary_only` for the three-pass manifest,
+> with 10 tranches and `phase5-production-input-onnx-parity` latest. This is a
+> candidate dashboard reading main training data; it does not mean candidate
+> source has been integrated into main. At capture, main's supervisor was
+> training with no reported error; A1/A2/C1 were at 100/100 and A3 at 74/100
+> (its worker heartbeat read 75 during the non-atomic capture). The current
+> supervisor lane reported C2 queued at 0/100 while `C2/run.json` still
+> described the earlier run ID as `aborted_due_to_sibling_failure`; those are
+> recorded as separate states. Evaluation remained diagnostic and unbound to a
+> held-out protocol. Reads were non-atomic. No tests, simulator evaluation,
+> replay generation, or training changes were made for this capture.
+
+> **Live status refresh — 2026-10-24 06:36:58 UTC.** Snapshot
+> [`MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T063658Z.json`](MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T063658Z.json),
+> SHA-256 `f0cd1e4509859d73fa0d93972a024cecdd2d00870bf844e53035e4b9025cb16c`.
+> The active supervisor is healthy at cycle 1 with no reported error and source
+> identity `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`.
+> A1, A2, and C1 are at 100/100 updates; A3 is running at 70/100 on `cuda:0`;
+> the current supervisor lane reports C2 queued on `cuda:0` at 0/100. The C2
+> `run.json` still describes a different, earlier run ID in
+> `aborted_due_to_sibling_failure`; it has no error string. This earlier
+> manifest status is not the current queued lane and is retained as a distinct
+> observation. The evaluation split remains diagnostic with no evaluation or
+> held-out protocol binding. Dashboard PID 1403399 owns port 8765 from this
+> checkout; `/meco`, both status APIs, and `/assets/meco.js` returned HTTP 200.
+> The served JavaScript SHA-256 matches the local asset. Runtime source files
+> match the supervisor-bound source identity, with no source-file mismatches.
+> Reads were non-atomic; snapshot file pins record the observed runtime state.
+> No tests or simulator evaluation were run for this refresh.
+
 > **Current campaign update — 2026-10-24 04:49:02 UTC.** A fresh continuous
 > run was launched from `main` at `2ecc067b780a693088ec0992df70560806485628`; current HEAD
 > `45ec06796` follows documentation and calibration-manifest commits only,
@@ -42,6 +81,7 @@
 > HIP/WX9100 runtime, and 1,200 records across four strata (100 unique seeds ×
 > repetitions 0, 1, 2), with required safety metrics and source binding verified.
 > This is D0 baseline calibration only; it does not qualify a learned policy.
+> Independent D0 calibration coverage and variance audit: [`implementation-provenance/d0-pickup-simple-calibration-audit.md`](implementation-provenance/d0-pickup-simple-calibration-audit.md).
 > This milestone does not record live training progress; consult the active
 > campaign runtime for current status. Target v2 still needs explicit
 > operational margins and review; learned-policy held-out report, CI, and primary

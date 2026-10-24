@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "captured_utc": "2026-10-24T06:36:58.532652+00:00",
+  "capture_finished_utc": "2026-10-24T06:36:58.769318+00:00",
+  "reads_non_atomic": true,
+  "checkout": {
+    "path": "project root",
+    "branch": "main",
+    "head": "84a894961af833f580dad8316a69af02492ff0b7",
+    "git_status": "## main...origin/main [ahead 447]",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "run_manifest_source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "source_identity_matches_supervisor": true,
+    "source_file_count": 138,
+    "source_file_mismatches": []
+  },
+  "dashboard": {
+    "pid": 1403399,
+    "process": "1403399    2907 Sat Oct 24 04:25:29 2026    02:11:28 Ssl  python3",
+    "cmdline": "/usr/bin/python3 -m frc_defense.dashboard --run-dir /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/evaluations/meco-five --host 127.0.0.1 --also-host 127.0.1.1 --also-host 100.121.248.52 --port 8765 --meco-data-root /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "cwd": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "expected_checkout_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "serves_current_checkout": true,
+    "listener_port": 8765,
+    "listeners": [
+      "LISTEN 0      5                                   127.0.1.1:8765       0.0.0.0:*    users:((\"python3\",pid=1403399,fd=7))",
+      "LISTEN 0      5                              100.121.248.52:8765       0.0.0.0:*    users:((\"python3\",pid=1403399,fd=8))",
+      "LISTEN 0      5                                   127.0.0.1:8765       0.0.0.0:*    users:((\"python3\",pid=1403399,fd=6))"
+    ],
+    "responses": {
+      "/meco": {
+        "status": 200,
+        "content_type": "text/html; charset=utf-8",
+        "bytes": 2025,
+        "body_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f"
+      },
+      "/api/meco-status": {
+        "status": 200,
+        "content_type": "application/json",
+        "bytes": 187521,
+        "body_sha256": "9b92405365ff8f5ad13080ecc63024c9834578fe5ecd3e5032c2fc0fc6a9dbe0"
+      },
+      "/api/curriculum-status": {
+        "status": 200,
+        "content_type": "application/json",
+        "bytes": 21968,
+        "body_sha256": "9427bdef5d261fbe22670ca2e387a12cb119a1258aab881d78711f9ea70cb3f0"
+      },
+      "/assets/meco.js": {
+        "status": 200,
+        "content_type": "text/javascript; charset=utf-8",
+        "bytes": 13859,
+        "body_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+      }
+    },
+    "local_asset_path": "frc_defense/dashboard_static/meco.js",
+    "local_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "served_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "served_asset_matches_local": true,
+    "dashboard_api_sha256": "2688abe2e0ac50f2ba3165d34b65482d713dfc9a117d8b3d965838f88285f1b9"
+  },
+  "training": {
+    "supervisor_pid": 1523650,
+    "supervisor_id": "739273d92714420e833dc24c678d7fed",
+    "heartbeat_utc": "2026-10-24T06:36:58.455754+00:00",
+    "status": "training",
+    "cycle": 1,
+    "completed_cycles": 1,
+    "completed_training_chunks": 1,
+    "error": null,
+    "evaluation_split": "diagnostic",
+    "evaluation_protocol_id": null,
+    "evaluation": null,
+    "lanes": {
+      "A1": {
+        "run_id": "f526bc6603974e1c95efbf52824b860c",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:0",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_status": "complete",
+        "run_manifest_run_id": "f526bc6603974e1c95efbf52824b860c",
+        "run_manifest_error": null,
+        "heartbeat_utc": "2026-10-24T05:38:21.891328+00:00",
+        "heartbeat_completed_updates": 100
+      },
+      "A2": {
+        "run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:1",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_status": "complete",
+        "run_manifest_run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "run_manifest_error": null,
+        "heartbeat_utc": "2026-10-24T05:44:08.089975+00:00",
+        "heartbeat_completed_updates": 100
+      },
+      "A3": {
+        "run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "status": "running",
+        "pid": 1523754,
+        "device": "cuda:0",
+        "completed_updates": 70,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_status": "running",
+        "run_manifest_run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "run_manifest_error": null,
+        "heartbeat_utc": "2026-10-24T06:36:58.485600+00:00",
+        "heartbeat_completed_updates": 70
+      },
+      "C1": {
+        "run_id": "9417015ce2a14c55927b5aacb1262075",
+        "status": "complete",
+        "pid": null,
+        "device": "cuda:1",
+        "completed_updates": 100,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_status": "complete",
+        "run_manifest_run_id": "9417015ce2a14c55927b5aacb1262075",
+        "run_manifest_error": null,
+        "heartbeat_utc": "2026-10-24T06:31:22.318541+00:00",
+        "heartbeat_completed_updates": 100
+      },
+      "C2": {
+        "run_id": "a809ade578a848279b6e88e5342446d9",
+        "status": "queued",
+        "pid": null,
+        "device": "cuda:0",
+        "completed_updates": 0,
+        "chunk_updates": 100,
+        "error": null,
+        "run_manifest_status": "aborted_due_to_sibling_failure",
+        "run_manifest_run_id": "d4b03e1a0595420b91122c9389b24d74",
+        "run_manifest_error": null
+      }
+    },
+    "c2_transition": {
+      "supervisor_lane_status": "queued",
+      "supervisor_lane_run_id": "a809ade578a848279b6e88e5342446d9",
+      "run_manifest_status": "aborted_due_to_sibling_failure",
+      "run_manifest_run_id": "d4b03e1a0595420b91122c9389b24d74",
+      "run_manifest_error": null,
+      "note": "Current supervisor reports C2 queued. Its run.json still describes the earlier run_id and status; it must not be presented as the current queued run."
+    }
+  },
+  "runtime_file_sha256": {
+    "checkpoints/meco-five/supervisor-status.json": "fc495e1bd7c8be2b54646cdc425d2e0b3f489ebc763964809063202974963d3e",
+    "checkpoints/meco-five/queue-status.json": "c62f704156672b5dea923e36b2c9ffe6eb7948092d3af2c38f561ee49884b4e8",
+    "checkpoints/meco-five/A1/run.json": "163583a6d4bae645751b4fd5594791b0461d059d35b15164dca7d9a1f8ba61f2",
+    "checkpoints/meco-five/A1/heartbeat.json": "1c5babdbe06bc19f3121ab1e23736c5ca1de8f54104f8a78e668a1be8d74afc0",
+    "checkpoints/meco-five/A1/latest.pt": "e12924e5c31c1362113f4fd6a5fb9aa5df74b66a8804564f4b918b47ae6a5538",
+    "checkpoints/meco-five/A2/run.json": "2dc37b60ddc06599a5ffc98c6917d1ccdf27ce3baaac2206b5d6387832e3c5c7",
+    "checkpoints/meco-five/A2/heartbeat.json": "bdb75adba20a157c761615f99762e42a80e419047fe71174f8ce3a5edb11a082",
+    "checkpoints/meco-five/A2/latest.pt": "cc5291dbdb3e65e8bfb623feae363572a8f5d5e04ba9106ca8f23c02e5762fbc",
+    "checkpoints/meco-five/A3/run.json": "51bb2506f95e33ab23ecf7aaeb3191c5ab9f9cdd7336fbe4071e6290d8e6e31f",
+    "checkpoints/meco-five/A3/heartbeat.json": "5bf346b58779621444989465bce219b45a59c3beb9a567063a8949b3b9412de5",
+    "checkpoints/meco-five/A3/latest.pt": "14eef6f5a590aae0240c5307364c019c928473d5f3fa3dae93795ab8b7255a96",
+    "checkpoints/meco-five/C1/run.json": "ae558f43478bdcdc0458225fc82d0ff0f96920f48f996173f05197de6164b2d7",
+    "checkpoints/meco-five/C1/heartbeat.json": "192ad9921028033f6dd8fb212429b5867497b8cb2aceb14eb8e781aa2ce01fb2",
+    "checkpoints/meco-five/C1/latest.pt": "02fd46069ff84ed9cc1d4147376014304ffc117b77774def5b50c1b98d20d235",
+    "checkpoints/meco-five/C2/run.json": "fd09dc013a5060e91bec140b6ac71236d985665f7e12e434005e723c73538c8a"
+  },
+  "limits": [
+    "Point-in-time, non-atomic reads.",
+    "No tests or simulator evaluation were run for this status capture.",
+    "Training evaluation split is diagnostic; no held-out qualification is shown."
+  ]
+}
