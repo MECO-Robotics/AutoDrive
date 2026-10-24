@@ -46,6 +46,12 @@
 > campaign runtime for current status. Target v2 still needs explicit
 > operational margins and review; learned-policy held-out report, CI, and primary
 > gate are absent. No margin approval or held-out result is asserted.
+>
+> **Dashboard/training point-in-time capture — 2026-10-24 05:19:49 UTC.** Snapshot
+> [`MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T051949Z.json`](MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T051949Z.json),
+> SHA-256 `cd2f0426be04b8cbab0379abe6561b554e29ff8a8a18d43fe4bdd53e8ab12cdf`. It records the serving checkout, dashboard/API responses and asset
+> equality, plus two active training tracks and three queued. Reads were not atomic;
+> this is historical evidence, and current status must be read from runtime.
 
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)

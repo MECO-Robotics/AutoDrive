@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "captured_utc": "2026-10-24T05:19:49.820690Z",
+  "checkout": {
+    "path": "AutoDrive project checkout",
+    "head": "2797ec385d315e6ce3dd44a7946b5ff7469ee5d3"
+  },
+  "dashboard": {
+    "pid": 1403399,
+    "argv": [
+      "/usr/bin/python3",
+      "-m",
+      "frc_defense.dashboard",
+      "--run-dir",
+      "<project-root>/evaluations/meco-five",
+      "--host",
+      "127.0.0.1",
+      "--also-host",
+      "127.0.1.1",
+      "--also-host",
+      "<additional-host>",
+      "--port",
+      "8765",
+      "--meco-data-root",
+      "<project-root>"
+    ],
+    "data_root": "<project-root>",
+    "listener_port": 8765,
+    "listeners": [
+      [
+        "LISTEN",
+        "0",
+        "5",
+        "127.0.1.1:8765",
+        "0.0.0.0:*"
+      ],
+      [
+        "LISTEN",
+        "0",
+        "5",
+        "<additional-host>:8765",
+        "0.0.0.0:*"
+      ],
+      [
+        "LISTEN",
+        "0",
+        "5",
+        "127.0.0.1:8765",
+        "0.0.0.0:*"
+      ]
+    ],
+    "responses": {
+      "/meco": {
+        "status": 200,
+        "content_type": "text/html; charset=utf-8",
+        "body_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f"
+      },
+      "/api/meco-status": {
+        "status": 200,
+        "content_type": "application/json",
+        "body_sha256": "9d4b3b948e8f09c610ff507938085f3ad92972d46e436b5984e70b719c55de71"
+      },
+      "/api/curriculum-status": {
+        "status": 200,
+        "content_type": "application/json",
+        "body_sha256": "9427bdef5d261fbe22670ca2e387a12cb119a1258aab881d78711f9ea70cb3f0"
+      },
+      "/assets/meco.js": {
+        "status": 200,
+        "content_type": "text/javascript; charset=utf-8",
+        "body_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+      }
+    },
+    "served_asset_path": "/assets/meco.js",
+    "served_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "local_asset_path": "frc_defense/dashboard_static/meco.js",
+    "local_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "served_asset_matches_local": true
+  },
+  "api_generated_times": {
+    "meco_status": "2026-10-24T05:19:49.737951+00:00",
+    "curriculum_status": {
+      "field": "generated_at",
+      "value": null,
+      "note": "API response did not provide a timestamp"
+    }
+  },
+  "training": {
+    "supervisor_pid": 1400209,
+    "supervisor_argv": [
+      "<project-root>/.venv/bin/python",
+      "-m",
+      "frc_defense.meco_supervisor",
+      "--output",
+      "<project-root>/checkpoints/meco-five",
+      "--evaluation-output",
+      "<project-root>/evaluations/meco-five",
+      "--devices",
+      "cuda:0,cuda:1",
+      "--scenario",
+      "pickup_simple",
+      "--category",
+      "cluster",
+      "--seed",
+      "20261024",
+      "--chunk-updates",
+      "100",
+      "--stage-exposure-chunks",
+      "10",
+      "--phase4-train-exposure",
+      "--rollout-steps",
+      "32",
+      "--epochs",
+      "4",
+      "--action-ticks",
+      "12",
+      "--candidate-k",
+      "16",
+      "--prediction-mode",
+      "cv",
+      "--evaluation-categories",
+      "single,cluster",
+      "--evaluation-episodes",
+      "1",
+      "--evaluation-seed",
+      "20261024",
+      "--evaluation-device",
+      "cuda:1",
+      "--qualification-protocol",
+      "qualifications/meco/protocol.json",
+      "--cycles",
+      "0"
+    ],
+    "run_id": "5e8f956474594bf8b69417b39b4692fa",
+    "protocol_id": "5c97828e98a95d4b4de3c93d0981aafbe5c8b1d699bab61d38ef4fac09ac8f51",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "heartbeat_utc": "2026-10-24T05:19:49.618593+00:00",
+    "status": "training",
+    "error": null,
+    "update_target_per_track": 100,
+    "active_tracks": {
+      "A1": {
+        "pid": 1400340,
+        "device": "cuda:0",
+        "completed_updates": 73,
+        "target_updates": 100,
+        "run_id": "f526bc6603974e1c95efbf52824b860c",
+        "heartbeat_utc": "2026-10-24T05:19:49.532113+00:00",
+        "process_confirmed": true
+      },
+      "A2": {
+        "pid": 1400357,
+        "device": "cuda:1",
+        "completed_updates": 67,
+        "target_updates": 100,
+        "run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "heartbeat_utc": "2026-10-24T05:19:49.597265+00:00",
+        "process_confirmed": true
+      }
+    },
+    "queued_tracks": {
+      "A3": {
+        "state": "queued",
+        "device": "cuda:0",
+        "completed_updates": 0,
+        "target_updates": 100
+      },
+      "C1": {
+        "state": "queued",
+        "device": "cuda:1",
+        "completed_updates": 0,
+        "target_updates": 100
+      },
+      "C2": {
+        "state": "queued",
+        "device": "cuda:0",
+        "completed_updates": 0,
+        "target_updates": 100
+      }
+    },
+    "active_count": 2,
+    "track_count": 5,
+    "evaluation_split": "diagnostic",
+    "evaluation_protocol_id": null,
+    "file_sha256_pins": {
+      "supervisor-status.json": {
+        "path": "checkpoints/meco-five/supervisor-status.json",
+        "sha256": "159c506bd276ac785deababb5e108830bd97f5997ca214a60552119155685995"
+      },
+      "queue-status.json": {
+        "path": "checkpoints/meco-five/queue-status.json",
+        "sha256": "7e0e8490b9883c5c76f474f090e3dee47a1cbaa0880e0209cadd8dacec44e92f"
+      },
+      "A1/run.json": {
+        "path": "checkpoints/meco-five/A1/run.json",
+        "sha256": "d83b1da1687e0bdbd0a7db030e6b529f5cb9aeb36ef599a5849c8ab7d572e1eb"
+      },
+      "A1/heartbeat.json": {
+        "path": "checkpoints/meco-five/A1/heartbeat.json",
+        "sha256": "36b07bdf44518f071e01a5179c201ab7856dfa4b7fd5b8335d8d53dc32943a6e"
+      },
+      "A2/run.json": {
+        "path": "checkpoints/meco-five/A2/run.json",
+        "sha256": "e6219ca65cc8722946632a15597d6076498f021b598921e063d55940356f7303"
+      },
+      "A2/heartbeat.json": {
+        "path": "checkpoints/meco-five/A2/heartbeat.json",
+        "sha256": "6303371de11a6de1c277b7ea0b98cd1a441e13d9c102592684f14e59441f5d63"
+      }
+    }
+  },
+  "curriculum": {
+    "runs": [],
+    "workflow_passes": [
+      {
+        "pass": "planner",
+        "status": "in_progress"
+      },
+      {
+        "pass": "implementer",
+        "status": "in_progress"
+      },
+      {
+        "pass": "reviewer",
+        "status": "in_progress"
+      }
+    ],
+    "workflow_status_is_agent_liveness": false
+  },
+  "interpretation": [
+    "2/5 tracks active; A3/C1/C2 queued.",
+    "Evaluation split is diagnostic only; this is not held-out qualification evidence.",
+    "Curriculum API runs=[]; workflow pass status reports work state, not agent liveness.",
+    "Filesystem reads, API responses and process observations were not atomic; file digests pin the exact byte buffers read."
+  ],
+  "pin_check_after_capture": {
+    "verified_unchanged": [
+      "A1/run.json",
+      "A2/run.json"
+    ],
+    "changed_by_live_training_after_capture": [
+      "supervisor-status.json",
+      "queue-status.json",
+      "A1/heartbeat.json",
+      "A2/heartbeat.json"
+    ],
+    "note": "Each recorded digest was computed from the exact bytes read during capture. Later changes to volatile files are expected while training continues."
+  }
+}
