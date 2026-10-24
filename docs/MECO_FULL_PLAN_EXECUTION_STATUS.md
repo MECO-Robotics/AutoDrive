@@ -1,3 +1,35 @@
+# MECO learning tracks plan: execution status
+
+> **Latest integrated and runtime snapshot — 2026-10-24 23:00 UTC.** The
+> implementation candidate was fast-forwarded into `main` at
+> `08b93828032ca6561552358142bb6b1781bc5071`; the previously untracked GPU
+> inventory was preserved and verified byte-identical to the integrated file.
+> Two startup/replay defects were fixed and reviewed: deferred initial
+> observation, then D0 replay cadence when no learned-policy cadence exists.
+> The focused replay module passed 33 tests, plus compilation and diff checks.
+>
+> A fresh representative GPU diagnostic completed on this checkout: D0,
+> `pickup_simple/cluster`, seed `61720261024`, `cuda:0` (AMD Radeon Pro
+> WX 9100). The scenario completed after six acquisitions at 1.16 simulated
+> seconds. Replay `scenario-meco-1e00f4361b661a9d7dc18096` has 59 frames; its
+> initial frame marks action audits unavailable and the next frame contains
+> action-derived values. The report and replay are under
+> `evaluations/meco-five/`; the dashboard discovered and served the replay with
+> current source commit `08b938280`, no dirty files, and `outdated=false`.
+> After restart, the dashboard ran from the current `main` checkout and its
+> status, curriculum, replay, page, and asset endpoints returned HTTP 200.
+>
+> This runtime check is diagnostic evidence only. The five-track supervisor
+> remains stopped; the prior run's A1/A2/A3/C1/C2 counts (525/526/500/500/500)
+> are not qualification results. The checked-in qualification protocol is
+> still provisional v1; full D0 and matched D1/D2 calibration, reviewed v4
+> operational margins, held-out five-track comparisons, Phase 4 outcome
+> evidence, Hailo profiling, and a qualification decision remain outstanding.
+
+## Prior status snapshot — 2026-10-24 21:51 UTC
+
+This was the state before the final integration and diagnostic replay below.
+
 ## Phase 4 action-7 remask taxonomy and dashboard curriculum data root — 2026-10-24
 
 The action-7 diagnostic taxonomy correction is integrated at
@@ -20,9 +52,7 @@ manifest and dashboard digest pin are updated together. Neither tranche has
 simulator/replay evidence or establishes policy qualification. No GPU,
 training, or replay work was performed for these integrations.
 
-# MECO learning tracks plan: execution status
-
-> **Latest integrated-candidate and training status — 2026-10-24 21:51 UTC.**
+> **Historical integrated-candidate and training status — 2026-10-24 21:51 UTC.**
 > The integrated implementation candidate is
 > `codex/meco-full-plan-final-integration` at
 > `68997963a76226c1f1dad0a1021d3a4432b98696`, based directly on current
