@@ -1,5 +1,17 @@
 # MECO learning tracks plan: execution status
 
+> **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
+> three-pass tranche was added, `frc-defense-dashboard.service` was restarted
+> and is active as PID `1713013`, with this candidate worktree as its working
+> directory and live `main` as the training-data root. `/meco`,
+> `/api/meco-status`, `/api/curriculum-status`, and `/assets/meco.js` returned
+> HTTP 200. The served MECO JavaScript SHA-256 matches the local asset
+> (`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`); the
+> curriculum API validated the provenance manifest as `validated_summary_only`
+> with 22 entries and `validation-campaign-runner` latest. The curriculum API
+> also reports `Could not read saved curriculum status`; its summary/evaluation
+> data remains unavailable from the live data root. No replay was generated.
+
 > **Resumable validation campaign runner integrated — 2026-10-24.** Reviewed
 > runner `6c1d5eb04acb39b192f1b491f753ca68d338096c` now executes and seals
 > the exact 28 validation-only jobs with protocol/source/checkpoint/config and
