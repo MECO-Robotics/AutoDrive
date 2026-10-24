@@ -1,5 +1,7 @@
 import json
 import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
 from frc_defense.meco_dashboard import (
@@ -66,6 +68,10 @@ def test_three_pass_dashboard_reports_campaign_workflow_without_inventing_review
     assert "Campaign pass status" in source
     assert "does not report agent liveness" in source
     assert "Scoped implementation evidence" in source
+    node = shutil.which("node")
+    if node:
+        subprocess.run([node, "--check", str(project / "frc_defense/dashboard_static/meco.js")],
+                       check=True, capture_output=True, text=True)
 
 
 def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_path):

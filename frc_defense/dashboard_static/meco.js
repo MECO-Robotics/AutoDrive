@@ -73,7 +73,7 @@
     const provenanceStatus = provenance?.status === "no_scoped_evidence"
       ? `<p class='muted'>${esc(provenance.message)} ${(provenance.limits || []).map(esc).join(" ")}</p>`
       : provenance?.status === "validated_summary_only"
-        ? `<p class='muted'>Validated scoped summaries. This is not whole-plan approval or agent-liveness evidence.</p>`+
+        ? `<p class='muted'>Validated scoped summaries. This is not whole-plan approval or agent-liveness evidence.</p>`
         : `<p class='muted'>Scoped three-pass evidence unavailable: ${esc(provenance?.untrusted_reason || "not recorded")}.</p>`;
     document.querySelector("#passes").innerHTML = `<h3>Campaign pass status</h3>${passStatus}`+
       `<h3>Scoped implementation evidence</h3>${provenanceStatus}`;
