@@ -1,0 +1,34 @@
+{
+  "schema": "meco-host-gpu-inventory-v1",
+  "captured_at_utc": "2026-10-24T14:01:30Z",
+  "verification": "The HIP runtime device index and PCI bus address were read from torch device properties and cross-checked against lspci vendor/device IDs; the listed two devices are Radeon PRO WX 9100 adapters. A Quadro P600 is present at a separate PCI address and is excluded.",
+  "hip_runtime_version": "7.17.26385",
+  "devices": [
+    {
+      "device": "cuda:0",
+      "name": "AMD Radeon Pro WX 9100",
+      "pci_address": "0000:19:00.0",
+      "pci_vendor_device": "1002:6861",
+      "hip_uuid": "30323133-6632-6261-3734-313632316134"
+    },
+    {
+      "device": "cuda:1",
+      "name": "AMD Radeon Pro WX 9100",
+      "pci_address": "0000:67:00.0",
+      "pci_vendor_device": "1002:6861",
+      "hip_uuid": "30323133-6661-3836-3737-346334386134"
+    }
+  ],
+  "excluded_devices": [
+    {
+      "name": "NVIDIA Quadro P600",
+      "pci_address": "0000:b3:00.0",
+      "pci_vendor_device": "10de:1cb2"
+    }
+  ],
+  "capture_commands": [
+    "rocm-smi --showproductname --json",
+    "lspci -Dnn",
+    "torch.version.hip, torch.cuda.device_count(), torch.cuda.get_device_properties(index)"
+  ]
+}
