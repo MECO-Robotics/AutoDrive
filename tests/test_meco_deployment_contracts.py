@@ -3,7 +3,6 @@ import json
 
 import pytest
 import torch
-from torch import nn
 
 from frc_defense import meco_deployment
 from frc_defense.meco_tracks import MECO_TRACKS
@@ -99,20 +98,19 @@ def test_deployment_export_records_checkpoint_and_tensor_contract(tmp_path, monk
     assert report["graph"] == {"inspected": False}
 
 
-class _SyntheticScorer(nn.Module):
-    def forward(self, *inputs):
-        del inputs
-        return (torch.zeros((1, 8, 64, 64)), torch.zeros((1, 8, 64, 64)),
-                torch.zeros((1, 5)), torch.zeros((1, 64)))
-
-
-def test_synthetic_profile_keeps_timing_and_exclusion_labels_explicit(monkeypatch,
-                                                                      tmp_path):
-    monkeypatch.setattr(meco_deployment, "load_track_model",
-                        lambda *_args, **_kwargs: (_SyntheticScorer(), {"sha256": "test"}))
-    result = meco_deployment.benchmark("A1", tmp_path / "unused.pt", "cpu",
+def test_synthetic_profile_keeps_timing_labels_and_checkpoint_provenance(tmp_path):
+    checkpoint = tmp_path / "A1" / "latest.pt"
+    checkpoint_digest = _write_valid_a1_checkpoint(checkpoint)
+    result = meco_deployment.benchmark("A1", checkpoint, "cpu",
                                        iterations=1, warmup=0)
 
+    provenance = result["checkpoint_provenance"]
+    assert provenance["sha256"] == checkpoint_digest
+    assert provenance["run_id"] == "run-1"
+    assert provenance["update"] == 1
+    assert provenance["sources"] == {"trainer": "a" * 64}
+    assert provenance["training_status"] == "complete"
+    assert provenance["manifest_completed_updates"] == 1
     assert result["synthetic_diagnostic_only"] is True
     assert result["deployment_evidence"] is False
     assert result["feature_route_feasibility_action_pipeline_measured"] is False
