@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 
 from frc_defense.meco_dashboard import (
-    CONTROLS, TRACKS, _collect_status, meco_status_payload,
+    CONTROLS, TRACKS, _collect_status, _three_pass_provenance, meco_status_payload,
 )
 
 
@@ -53,6 +53,19 @@ def test_fixed_checkout_roots_and_all_policy_rows(tmp_path):
     assert [row["policy_id"] for row in payload["policies"]] == list(TRACKS + CONTROLS)
     assert payload["policies"][0]["training_state"] == "not_started"
     assert payload["policies"][-1]["training_state"] == "not_applicable"
+
+
+def test_three_pass_dashboard_reports_campaign_workflow_without_inventing_review_evidence():
+    project = Path(__file__).resolve().parents[1]
+    provenance = _three_pass_provenance(project)
+    assert provenance["status"] == "no_scoped_evidence"
+    assert provenance["tranches"] == []
+    assert "does not contain persisted" in provenance["message"]
+    assert "No scoped transcript summary" in " ".join(provenance["limits"])
+    source = (project / "frc_defense/dashboard_static/meco.js").read_text()
+    assert "Campaign pass status" in source
+    assert "does not report agent liveness" in source
+    assert "Scoped implementation evidence" in source
 
 
 def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_path):

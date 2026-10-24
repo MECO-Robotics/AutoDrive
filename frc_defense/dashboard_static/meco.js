@@ -65,10 +65,18 @@
       `<small>Heartbeat ${esc(run.heartbeat_state)} · ${esc(run.heartbeat_age_seconds ?? "?")}s · process ${run.process_alive ? "alive" : "not confirmed"}</small>`+
       `<p>Protocol ${esc(run.protocol_id)} · split ${esc(run.split)} · output ${esc(run.output_file)}</p></article>`).join("") : "<p class='muted'>No evaluator status manifest is available.</p>";
     const workflow = data.implementation_passes;
-    document.querySelector("#passes").innerHTML = workflow?.passes?.length ? workflow.passes.map(pass =>
+    const passStatus = workflow?.passes?.length ? workflow.passes.map(pass =>
       `<article class="group"><h3>${esc(pass.pass)} · ${esc(pass.status)}</h3>`+
-      `<small>Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
-      "<p class='muted'>No three-pass workflow evidence is available.</p>";
+      `<small>Workflow status only; this does not report agent liveness. Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
+      "<p class='muted'>No campaign pass-status records are available.</p>";
+    const provenance = data.three_pass_provenance;
+    const provenanceStatus = provenance?.status === "no_scoped_evidence"
+      ? `<p class='muted'>${esc(provenance.message)} ${(provenance.limits || []).map(esc).join(" ")}</p>`
+      : provenance?.status === "validated_summary_only"
+        ? `<p class='muted'>Validated scoped summaries. This is not whole-plan approval or agent-liveness evidence.</p>`+
+        : `<p class='muted'>Scoped three-pass evidence unavailable: ${esc(provenance?.untrusted_reason || "not recorded")}.</p>`;
+    document.querySelector("#passes").innerHTML = `<h3>Campaign pass status</h3>${passStatus}`+
+      `<h3>Scoped implementation evidence</h3>${provenanceStatus}`;
     document.querySelector("#phase4-factors").innerHTML = workflow?.phase4_factors?.length
       ? workflow.phase4_factors.map(factor =>
         `<article class="group"><h3>${esc(factor.factor_id)} · ${esc(factor.status)}</h3>`+

@@ -1,0 +1,14 @@
+{
+  "schema": "meco-three-pass-provenance-v1",
+  "status": "no-scoped-transcript-records",
+  "scope": "The dashboard reads the candidate's planner, implementer, and reviewer workflow status from MECO_CAMPAIGN_PASSES.json. This candidate does not contain persisted scoped planner/reviewer transcript summaries, so no tranche-level three-pass approval evidence is asserted.",
+  "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
+  "plan_sha256": "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47",
+  "artifact_origin": "Candidate-specific availability record. No transcript evidence was carried forward from unrelated branches.",
+  "tranches": [],
+  "limits": [
+    "Campaign pass status is workflow metadata and does not prove agent liveness.",
+    "No scoped transcript summary or reviewer approval is asserted in this candidate.",
+    "This record does not claim whole-plan completion or approval."
+  ]
+}

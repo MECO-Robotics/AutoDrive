@@ -940,8 +940,42 @@ def meco_status_payload(project_root: Path | str, *, data_root: Path | str | Non
             valid_passes["phase4_planner_status"] = factor_status["planner_status"]
             valid_passes["phase4_factors"] = factor_status["factors"]
     payload["implementation_passes"] = valid_passes
+    payload["three_pass_provenance"] = _three_pass_provenance(project)
     payload["campaign_ledger_path"] = str(pass_path)
     if valid_passes is None:
         payload["errors"].append({"source": str(pass_path.relative_to(project)),
             "error": pass_error or "invalid implementation pass status manifest"})
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+
+
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "ea5e6edb691d062d6ea9a0e58edc17fa1fc564552174c8ed9ab57cb9694ad867"
+_EXPECTED_PLAN_SHA256 = "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47"
+
+
+def _three_pass_provenance(project: Path) -> dict:
+    """Report candidate-local provenance availability without inferring transcripts."""
+    import hashlib
+
+    manifest_path = project / "docs" / "MECO_THREE_PASS_PROVENANCE.json"
+    plan_path = project / "docs" / "MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md"
+    try:
+        if (manifest_path.is_symlink() or plan_path.is_symlink()
+                or not manifest_path.is_file() or not plan_path.is_file()):
+            raise ValueError("manifest or plan is missing or symlinked")
+        manifest_bytes = manifest_path.read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != _EXPECTED_THREE_PASS_PROVENANCE_SHA256:
+            raise ValueError("manifest hash does not match the dashboard-pinned digest")
+        data = json.loads(manifest_bytes)
+        if (not isinstance(data, dict)
+                or data.get("schema") != "meco-three-pass-provenance-v1"
+                or data.get("status") != "no-scoped-transcript-records"
+                or data.get("tranches") != []
+                or data.get("plan_path") != "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md"
+                or data.get("plan_sha256") != _EXPECTED_PLAN_SHA256
+                or hashlib.sha256(plan_path.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256):
+            raise ValueError("manifest schema or plan binding is invalid")
+        return {"status": "no_scoped_evidence", "evidence_class": "unavailable",
+                "tranches": [], "message": data["scope"], "limits": data["limits"]}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return {"status": "untrusted", "evidence_class": "unavailable", "tranches": [],
+                "untrusted_reason": str(exc)}
