@@ -125,6 +125,22 @@ def test_final_test_seed_sentinel_is_never_decoded_or_serialized(tmp_path, monke
     assert sentinel not in json.dumps(overlay, sort_keys=True)
 
 
+@pytest.mark.parametrize("split_edit", ["unknown", "missing"])
+def test_protocol_reader_rejects_unknown_or_missing_case_split(tmp_path, split_edit):
+    protocol_path, registry_path = _write_fixture(tmp_path)
+    protocol = json.loads(protocol_path.read_text())
+    row = next(case for case in protocol["cases"] if case["split"] == "train")
+    if split_edit == "unknown":
+        row["split"] = "holdout"
+    else:
+        del row["split"]
+    protocol_path.write_text(json.dumps(protocol, indent=2) + "\n")
+    expected_message = ("unsupported split metadata" if split_edit == "unknown"
+                        else "missing split metadata")
+    with pytest.raises(ValueError, match=expected_message):
+        compile_phase4_design_overlay(protocol_path, registry_path)
+
+
 def test_design_overlay_rejects_any_train_validation_family_overlap(tmp_path):
     protocol_path, registry_path = _write_fixture(tmp_path, overlap=True)
     with pytest.raises(ValueError, match="whole defender families overlap"):

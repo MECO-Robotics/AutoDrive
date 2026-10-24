@@ -217,6 +217,7 @@ def _parse_validation_cases(text: str, position: int) -> tuple[list[dict], int]:
         position += 1
         fields: dict[str, tuple[int, int]] = {}
         split_value = None
+        split_seen = False
         while True:
             while position < len(text) and (text[position].isspace() or text[position] == ","):
                 position += 1
@@ -240,11 +241,19 @@ def _parse_validation_cases(text: str, position: int) -> tuple[list[dict], int]:
             value_end = _skip_json_value(text, position)
             if key == "split":
                 # Classification is lexical so even a test row's split value
-                # is never decoded as part of its row.
+                # is not decoded as part of its row. The split metadata itself
+                # must still match the frozen protocol schema exactly.
                 token = text[value_start:value_end]
-                split_value = "validation" if token == '"validation"' else None
+                if split_seen:
+                    raise ValueError("protocol case row has duplicate split metadata")
+                split_seen = True
+                if token not in ('"train"', '"validation"', '"test"'):
+                    raise ValueError("protocol case row has unsupported split metadata")
+                split_value = token[1:-1]
             fields[key] = (value_start, value_end)
             position = value_end
+        if not split_seen:
+            raise ValueError("protocol case row is missing split metadata")
         if split_value == "validation":
             selected.append({key: json.loads(text[start:end])
                              for key, (start, end) in fields.items()})

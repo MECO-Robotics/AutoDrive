@@ -130,3 +130,28 @@ def test_campaign_reader_never_decodes_or_serializes_final_test_sentinel(tmp_pat
     assert all(sentinel not in (value.decode("utf-8") if isinstance(value, bytes) else value)
                for value in decoded_inputs)
     assert sentinel not in json.dumps(plan, sort_keys=True)
+
+
+@pytest.mark.parametrize("split_edit", ["unknown", "missing"])
+def test_campaign_rejects_malformed_split_after_overlay_regeneration_attempt(tmp_path, split_edit):
+    protocol_value = json.loads(PROTOCOL.read_text())
+    train_case = next(row for row in protocol_value["cases"] if row["split"] == "train")
+    if split_edit == "unknown":
+        train_case["split"] = "holdout"
+    else:
+        del train_case["split"]
+    protocol_path = tmp_path / "protocol.json"
+    registry_path = tmp_path / "registry.json"
+    protocol_path.write_text(json.dumps(protocol_value))
+    registry_path.write_bytes(REGISTRY.read_bytes())
+
+    expected_message = ("unsupported split metadata" if split_edit == "unknown"
+                        else "missing split metadata")
+    # A malformed protocol cannot produce a fresh overlay; verify that the
+    # overlay generation step itself fails closed, then exercise the campaign
+    # entry point with the previous overlay to ensure it independently fails
+    # before accepting mismatched coverage.
+    with pytest.raises(ValueError, match=expected_message):
+        compile_phase4_design_overlay(protocol_path, registry_path)
+    with pytest.raises(ValueError, match=expected_message):
+        compile_phase4_campaign_plan(protocol_path, registry_path, OVERLAY)
