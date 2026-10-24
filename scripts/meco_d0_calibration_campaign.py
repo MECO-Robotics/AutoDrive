@@ -23,6 +23,7 @@ from frc_defense import meco_qualification as q
 from frc_defense.training_curriculum import SCENARIOS
 
 CAMPAIGN_TYPE = "meco-d0-calibration-campaign-v1"
+OFFLINE_SCHEDULE_TYPE = "meco-d0-calibration-offline-schedule-v1"
 
 
 def _sha(value):
@@ -114,6 +115,67 @@ def plan_campaign(*, episodes=100, repetitions=3, master_seed=20261024,
     }
     identity["campaign_id"] = _sha(identity)
     return identity
+
+
+def describe_campaign(*, episodes=100, repetitions=3, shard_count=8):
+    """Describe exact D0 calibration work counts without runtime or seed data.
+
+    The returned schedule is deliberately not an execution manifest: it has no
+    source/runtime identity, work-unit assignments, or serialized seed values.
+    `run_campaign` and `merge_campaign` continue to accept only the separate,
+    source- and GPU-bound campaign manifest.
+    """
+    scenarios = _closure()
+    if type(episodes) is not int or episodes < q.MIN_EPISODES:
+        raise ValueError(f"D0 calibration requires at least {q.MIN_EPISODES} episodes per stratum")
+    if type(repetitions) is not int or repetitions < 2:
+        raise ValueError("D0 calibration requires at least two repetitions")
+    if type(shard_count) is not int or shard_count < 1:
+        raise ValueError("calibration shard count must be a positive integer")
+
+    scenario_plans = []
+    for scenario in scenarios:
+        cases = q.protocol_cases(scenario, "calibration", episodes=episodes)
+        case_rows = [{
+            "category": case.category,
+            "layout_id": case.layout_id,
+            "defender_family": case.defender_family,
+            "start_condition": case.start_condition,
+            "sensor_profile": case.sensor_profile,
+            "record_count": episodes * repetitions,
+        } for case in cases]
+        record_count = len(case_rows) * episodes * repetitions
+        base, remainder = divmod(record_count, shard_count)
+        shards = [{"shard_index": index, "shard_count": shard_count,
+                   "record_count": base + (index < remainder)}
+                  for index in range(shard_count)]
+        scenario_plans.append({
+            "scenario_id": scenario,
+            "case_count": len(case_rows),
+            "record_count": record_count,
+            "shard_count": shard_count,
+            "case_counts": case_rows,
+            "shards": shards,
+        })
+
+    schedule = {
+        "schema_version": 1,
+        "artifact_type": OFFLINE_SCHEDULE_TYPE,
+        "execution_ready": False,
+        "config": {"split": "calibration",
+                   "episodes_per_category_stratum": episodes,
+                   "repetitions": repetitions,
+                   "shard_count": shard_count},
+        "scenario_ids": list(scenarios),
+        "scenario_count": len(scenario_plans),
+        "case_count": sum(plan["case_count"] for plan in scenario_plans),
+        "shard_count": sum(plan["shard_count"] for plan in scenario_plans),
+        "total_record_count": sum(plan["record_count"] for plan in scenario_plans),
+        "scenario_plans": scenario_plans,
+        "seed_disclosure": "none; seed pools and work-unit assignments are not serialized",
+    }
+    schedule["schedule_id"] = _sha(schedule)
+    return schedule
 
 
 def validate_campaign(campaign):
@@ -264,6 +326,13 @@ def main(argv=None):
     plan.add_argument("--master-seed", type=int, default=20261024)
     plan.add_argument("--shard-count", type=int, default=8)
     plan.add_argument("--output", required=True)
+    describe = sub.add_parser("describe",
+        help="compile a count-only schedule without GPU discovery or seed disclosure")
+    describe.add_argument("--episodes", type=int, default=100)
+    describe.add_argument("--repetitions", type=int, default=3)
+    describe.add_argument("--shard-count", type=int, default=8)
+    describe.add_argument("--output",
+        help="optionally write the immutable count-only schedule JSON")
     run = sub.add_parser("run")
     run.add_argument("--campaign", required=True)
     run.add_argument("--output-root", required=True)
@@ -272,7 +341,18 @@ def main(argv=None):
     merge.add_argument("--output-root", required=True)
     merge.add_argument("--report-root", required=True)
     args = parser.parse_args(argv)
-    if args.command == "plan":
+    if args.command == "describe":
+        schedule = describe_campaign(episodes=args.episodes,
+            repetitions=args.repetitions, shard_count=args.shard_count)
+        if args.output:
+            _write_immutable_or_verify_stable(args.output, schedule)
+        print(json.dumps({"schedule_id": schedule["schedule_id"],
+            "scenarios": schedule["scenario_count"],
+            "cases": schedule["case_count"],
+            "shards": schedule["shard_count"],
+            "records": schedule["total_record_count"],
+            "output": args.output}, indent=2))
+    elif args.command == "plan":
         campaign = plan_campaign(episodes=args.episodes, repetitions=args.repetitions,
             master_seed=args.master_seed, shard_count=args.shard_count, device=args.device)
         q._write_immutable_or_verify(args.output, campaign)

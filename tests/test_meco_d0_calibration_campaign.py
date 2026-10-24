@@ -22,6 +22,66 @@ def test_campaign_closure_is_full_registered_scenario_order():
     assert campaign._closure()[-1] == "full_match_offense"
 
 
+def test_offline_schedule_has_exact_deterministic_counts_without_gpu_or_seeds(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("offline description must not discover a GPU or bind source")
+
+    monkeypatch.setattr(q, "_require_calibration_gpu", forbidden)
+    monkeypatch.setattr(q, "_calibration_source_identity_sha256", forbidden)
+    first = campaign.describe_campaign()
+    second = campaign.describe_campaign()
+
+    expected = {
+        "pickup_simple": 1_200,
+        "pickup_scattered": 1_800,
+        "pickup_multi_zone": 1_800,
+        "active_carry_to_zone": 1_200,
+        "active_shoot_preloaded": 1_800,
+        "inactive_ferry_preloaded": 3_600,
+        "active_collect_carry_score": 1_800,
+        "inactive_collect_ferry": 1_800,
+        "hub_transition_cycles": 22_800,
+        "offense_vs_scripted_pressure": 45_600,
+        "team_delivery_cycles": 10_800,
+        "full_match_offense": 45_600,
+    }
+    assert first == second
+    assert first["artifact_type"] == campaign.OFFLINE_SCHEDULE_TYPE
+    assert first["execution_ready"] is False
+    assert first["scenario_count"] == 12
+    assert first["case_count"] == 466
+    assert first["shard_count"] == 96
+    assert first["total_record_count"] == 139_800
+    assert {plan["scenario_id"]: plan["record_count"]
+            for plan in first["scenario_plans"]} == expected
+    assert sum(expected.values()) == 139_800
+    for plan in first["scenario_plans"]:
+        assert sum(shard["record_count"] for shard in plan["shards"]) == plan["record_count"]
+        assert sum(case["record_count"] for case in plan["case_counts"]) == plan["record_count"]
+        assert len(plan["case_counts"]) == plan["case_count"]
+
+    final_test_seeds = {seed for scenario in SCENARIOS
+        for case in q.protocol_cases(scenario, "test", episodes=100)
+        for seed in case.seeds}
+    encoded = json.dumps(first, sort_keys=True)
+    assert not any(str(seed) in encoded for seed in final_test_seeds)
+    assert "manifests" not in encoded
+    assert "work_units" not in encoded
+    with pytest.raises(ValueError, match="unsupported D0 calibration campaign"):
+        campaign.run_campaign(first, "unused-output")
+    with pytest.raises(ValueError, match="unsupported D0 calibration campaign"):
+        campaign.merge_campaign(first, "unused-output", "unused-reports")
+
+
+def test_offline_schedule_validates_bounds_without_runtime_work():
+    with pytest.raises(ValueError, match="at least 100 episodes"):
+        campaign.describe_campaign(episodes=99)
+    with pytest.raises(ValueError, match="at least two repetitions"):
+        campaign.describe_campaign(repetitions=1)
+    with pytest.raises(ValueError, match="positive integer"):
+        campaign.describe_campaign(shard_count=0)
+
+
 def test_scenario_shard_partition_is_deterministic_and_disjoint(monkeypatch):
     monkeypatch.setattr(q, "_require_calibration_gpu", lambda device: {
         "device": device, "device_name": "test WX9100", "backend": "cuda",
