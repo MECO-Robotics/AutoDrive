@@ -231,7 +231,8 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
         "supervisor_native_extension_attestation": supervisor.native_extension_attestation,
         "run_id": "run", "track": "A1", "task_assignment": assignment,
         "completed_updates": 10, "protocol_id": "protocol", "status": "complete"}
-    checkpoint = {"sources": sources, "run_id": "run", "protocol_id": "protocol",
+    checkpoint = {"config": {"track": "A1"}, "sources": sources,
+        "run_id": "run", "protocol_id": "protocol",
         "update": 10, "task_assignment": assignment}
     supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
         checkpoint=checkpoint)
@@ -248,6 +249,10 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
             supervisor._verify_worker_provenance("A1", 10, assignment, changed,
                 checkpoint=checkpoint)
     changed_checkpoint = {**checkpoint, "sources": {**sources, "code.py": "d" * 64}}
+    with pytest.raises(RuntimeError, match="final checkpoint provenance"):
+        supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
+            checkpoint=changed_checkpoint)
+    changed_checkpoint = {**checkpoint, "config": {"track": "A2"}}
     with pytest.raises(RuntimeError, match="final checkpoint provenance"):
         supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
             checkpoint=changed_checkpoint)

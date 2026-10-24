@@ -755,6 +755,8 @@ class MecoSupervisor:
                 or (require_complete and worker_manifest.get("status") != "complete")):
             raise RuntimeError(f"{track} worker run record does not match supervisor binding")
         if (not isinstance(checkpoint, dict) or checkpoint.get("sources") != self.sources
+                or not isinstance(checkpoint.get("config"), dict)
+                or checkpoint["config"].get("track") != track
                 or checkpoint.get("run_id") != self.run_ids[track]
                 or checkpoint.get("protocol_id") != self.protocol_id
                 or checkpoint.get("update") != target_update
