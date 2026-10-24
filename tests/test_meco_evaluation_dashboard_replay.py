@@ -247,6 +247,10 @@ def test_replay_discovery_and_load_reject_corrupted_generation(tmp_path):
             urlopen(f"http://127.0.0.1:{server.server_port}/api/zone-playback-result"
                     f"?simulation_id={simulation_id}")
         assert error.value.code == 500
+        with pytest.raises(HTTPError) as error:
+            urlopen(f"http://127.0.0.1:{server.server_port}/api/zone-playback-progress"
+                    f"?simulation_id={simulation_id}")
+        assert error.value.code == 500
     finally:
         server.shutdown()
         server.server_close()
@@ -282,6 +286,39 @@ def test_replay_alignment_compares_full_no_route_macro_trace_and_allows_remask()
     frames[1]["meco_policy_decision"]["executed_actions"] = [0, 9, 1]
     with pytest.raises(ValueError, match="macro slice"):
         _validate_meco_replay_alignment(record, frames, final_tick=3)
+
+
+def test_replay_alignment_rejects_no_route_trace_with_omitted_prefix():
+    record = _row()
+    record.update({"policy": "C1", "elapsed_ticks": 3,
+        "executed_planner_route_trace": [], "executed_action_trace": [0, 2, 1],
+        "selected_action_trace": [0]})
+    frames = [{"tick": 0, "meco_policy_decision": None},
+        {"tick": 3, "meco_policy_decision": {"policy": "C1",
+         "kind": "policy_decision", "macro_start_tick": 1, "macro_end_tick": 3,
+         "action": 0, "executed_actions": [2, 1]}}]
+    with pytest.raises(ValueError, match="macro slice"):
+        _validate_meco_replay_alignment(record, frames, final_tick=3)
+
+
+def test_playback_progress_does_not_trust_ready_sidecar_without_pointer(tmp_path):
+    progress = tmp_path / ".scenario-progress"
+    progress.mkdir()
+    (progress / "scenario-stale.json").write_text(json.dumps({
+        "status": "ready", "tick": 10, "total_ticks": 10, "percent": 100}))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status = json.loads(urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/zone-playback-progress"
+            "?simulation_id=scenario-stale").read())
+        assert status["status"] == "waiting"
+        assert status["tick"] == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_matrix_capture_requires_explicit_seeds_before_gpu_setup(monkeypatch, tmp_path):

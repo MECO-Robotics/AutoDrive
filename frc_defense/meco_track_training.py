@@ -526,13 +526,20 @@ def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
         selected = record.get("selected_action_trace")
         if not isinstance(executed, list) or not executed:
             raise ValueError("evaluator tick action trace is required for replay alignment")
+        if len(executed) != final_tick:
+            raise ValueError("replay does not cover the complete evaluator action trace")
+        if len(macro_decisions) != len(frames) - 1:
+            raise ValueError("replay macro count differs from evaluator action trace")
         if isinstance(selected, list) and selected and len(selected) != len(macro_decisions):
             raise ValueError("replay macro count differs from evaluator selected action trace")
-        for index, decision in enumerate(macro_decisions):
+        for index, (decision, frame, previous_frame) in enumerate(zip(
+                macro_decisions, frames[1:], frames[:-1])):
             start_tick, end_tick = (decision.get("macro_start_tick"),
                                     decision.get("macro_end_tick"))
             trace = decision.get("executed_actions")
             if (type(start_tick) is not int or type(end_tick) is not int or
+                    start_tick != previous_frame.get("tick") or
+                    end_tick != frame.get("tick") or
                     start_tick < 0 or end_tick <= start_tick or end_tick > len(executed) or
                     not isinstance(trace, list) or trace != executed[start_tick:end_tick]):
                 raise ValueError("replay executed action trace differs from evaluator macro slice")

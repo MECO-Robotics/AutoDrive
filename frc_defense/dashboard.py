@@ -534,12 +534,26 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 body=_json_or_default(progress_path,{"status":"waiting","tick":0,"total_ticks":ZONE_PLAYBACK_TICKS,"percent":0})
                 progress=json.loads(body)
+                ready_path=progress_path.with_name(f"{simulation_id}.ready.json")
                 try:
                     _generation,manifest=resolve_dashboard_replay_generation(
-                        progress_path.parent,simulation_id,verify=False)
+                        progress_path.parent,simulation_id)
                     progress=manifest["ready_status"]
                 except (OSError,ValueError,json.JSONDecodeError):
-                    pass
+                    if ready_path.exists():
+                        body=json.dumps({"status":"failed",
+                            "error":"scenario replay failed integrity verification"},
+                            separators=(",", ":")).encode()
+                        self.send_response(500)
+                        self.send_header("Content-Type","application/json")
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    # A progress sidecar is advisory. It cannot publish readiness
+                    # without the immutable generation pointer.
+                    if progress.get("status") == "ready":
+                        progress={"status":"waiting","tick":0,
+                            "total_ticks":ZONE_PLAYBACK_TICKS,"percent":0}
                 body=json.dumps(progress,separators=(",", ":")).encode()
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if progress.get("status") in ("waiting","running") and request_path.is_file():
