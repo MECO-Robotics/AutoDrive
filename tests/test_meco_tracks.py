@@ -1,4 +1,7 @@
 import torch
+import threading
+import time
+from types import SimpleNamespace
 
 from frc_defense.learning_contract import CandidateTable, ObservationSnapshot
 from frc_defense.meco_tracks import (
@@ -12,6 +15,7 @@ from frc_defense.meco_tracks import (
     score_candidates,
     _gather_graph_candidates,
     SE2MessageBlock,
+    _AsyncInferenceBroker,
 )
 
 
@@ -80,6 +84,52 @@ def test_stale_mismatched_and_nonfinite_outputs_use_valid_fallback():
     changed_request = DecisionRequest(changed_observation, candidates, 2., .1,
                                       "fallback", "model-v1")
     assert choose_candidate(changed_request, fresh) == ("fallback", "deterministic_fallback")
+
+
+def test_inference_broker_discards_result_completed_after_expiry_and_fallback_is_safe():
+    started = threading.Event()
+    release = threading.Event()
+    adapter = SimpleNamespace(_generation_id="generation-1", _request_sequence=1,
+        checkpoint_sha256="a" * 64, protocol_id="protocol-1", track="C1")
+
+    def infer(_self, request, _inputs, *, now):
+        started.set()
+        release.wait(timeout=2)
+        return SimpleNamespace(completed_monotonic=time.monotonic(),
+                               outputs={"candidate_utility": torch.tensor([0., 5.])})
+
+    adapter._infer_sync = infer.__get__(adapter, SimpleNamespace)
+    broker = _AsyncInferenceBroker(adapter)
+    now = time.monotonic()
+    broker_request = SimpleNamespace(generation_id="generation-1", request_sequence=1,
+        checkpoint_sha256="a" * 64, protocol_id="protocol-1", model_id="meco:C1",
+        expires_monotonic=now + 0.1)
+    try:
+        handle = broker.submit(broker_request, {})
+        assert handle is not None
+        assert started.wait(timeout=1)
+        time.sleep(0.12)
+        release.set()
+        deadline = time.monotonic() + 1
+        while not handle["done"] and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert handle["done"]
+        broker_response = broker.poll(broker_request, handle)
+        assert broker_response is None
+        assert broker.counters()["late_responses"] == 1
+    finally:
+        release.set()
+        broker.close()
+
+    episode_id = new_meco_episode_id("e")
+    snapshot_id = f"{episode_id}:1"
+    observation = ObservationSnapshot(snapshot_id, episode_id, 1, 2., (1, 1, 1),
+                                      (0.,), (0.,) * 7)
+    candidates = CandidateTable(snapshot_id, ("fallback", "other"), ((0.,), (1.,)),
+                                (True, True), ("feature",), (None, None))
+    decision = DecisionRequest(observation, candidates, 2., .1, "fallback", "model-v1")
+    assert choose_candidate(decision, broker_response) == (
+        "fallback", "deterministic_fallback")
 
 
 def test_se2_heading_embedding_wraps_and_rejects_bad_bins():
