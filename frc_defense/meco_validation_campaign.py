@@ -85,11 +85,11 @@ def _load_protocol(path: str | Path, *, qualification_claim: bool):
     if protocol.get("scenario_ids") != list(scenarios):
         raise ValueError("validation campaign requires a frozen protocol covering all registered scenarios")
     if qualification_claim and (
-            protocol.get("protocol_version") not in CALIBRATED_GATE_STATUSES or
-            protocol.get("gate_calibration_status") != CALIBRATED_GATE_STATUSES.get(
-                protocol.get("protocol_version")) or
+            protocol.get("protocol_version") != CALIBRATED_PROTOCOL_VERSION or
+            protocol.get("gate_calibration_status") != CALIBRATED_GATE_STATUSES[
+                CALIBRATED_PROTOCOL_VERSION] or
             protocol.get("safety_gate_status") != "metrics_schema_verified"):
-        raise ValueError("qualification claim requires a calibrated v2/v3/v4 protocol with version-matched frozen safety gates")
+        raise ValueError("new qualification claims require a fully validated v4 protocol with reviewed matched-reference margins")
     if protocol.get("gate_calibration_status") == "provisional_pending_baseline_variance_review" and qualification_claim:
         raise ValueError("provisional protocol cannot support a qualification claim")
     expected_id = _sha({key: value for key, value in protocol.items()
@@ -264,9 +264,9 @@ def compile_validation_campaign(*, protocol_path: str | Path,
     body = {"schema": PLAN_SCHEMA,
         "qualification_claim": qualification_claim,
         "qualification_eligible": (
-            protocol.get("protocol_version") in CALIBRATED_GATE_STATUSES and
-            protocol.get("gate_calibration_status") == CALIBRATED_GATE_STATUSES.get(
-                protocol.get("protocol_version")) and
+            protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION and
+            protocol.get("gate_calibration_status") == CALIBRATED_GATE_STATUSES[
+                CALIBRATED_PROTOCOL_VERSION] and
             protocol.get("safety_gate_status") == "metrics_schema_verified"),
         "protocol": {"file": protocol_file, "protocol_id": protocol_id,
                      "protocol_sha256": protocol_sha256,

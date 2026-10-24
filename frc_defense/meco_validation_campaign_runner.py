@@ -14,7 +14,9 @@ from typing import Any, Callable
 from .meco_ablation_matrix import _records_by_key
 from .meco_tracks import MECO_TRACKS
 from .training_curriculum import SCENARIOS
-from .meco_qualification import PROTOCOL_VERSION
+from .meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+    D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+    PROTOCOL_VERSION)
 from .meco_validation_campaign import (CALIBRATED_GATE_STATUSES, _artifact_bytes,
     _canonical_bytes, _sha, compile_validation_campaign)
 from .meco_device_lease import lease_devices
@@ -823,12 +825,16 @@ def _validate_plan(plan: dict) -> None:
     protocol = plan.get("protocol", {})
     version = protocol.get("protocol_version")
     gate_status = protocol.get("gate_calibration_status")
-    calibrated = (version in CALIBRATED_GATE_STATUSES
+    version_matches_status = (version in CALIBRATED_GATE_STATUSES
         and gate_status == CALIBRATED_GATE_STATUSES[version]
         and protocol.get("safety_gate_status") == "metrics_schema_verified")
+    eligible_v4 = (version == CALIBRATED_PROTOCOL_VERSION and version_matches_status)
     provisional = (version == PROTOCOL_VERSION
         and gate_status == "provisional_pending_baseline_variance_review")
-    if (not calibrated and not provisional) or plan.get("qualification_eligible") is not calibrated:
+    legacy_diagnostic = (version in (LEGACY_CALIBRATED_PROTOCOL_VERSION,
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION) and version_matches_status)
+    if (not eligible_v4 and not legacy_diagnostic and not provisional) or (
+            plan.get("qualification_eligible") is not eligible_v4):
         raise ValueError("campaign plan calibration eligibility/status is inconsistent")
     jobs = plan.get("jobs")
     if not isinstance(jobs, list) or len(jobs) != 28 or plan.get("job_count") != 28:

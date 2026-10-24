@@ -6,6 +6,7 @@ import pytest
 from frc_defense.meco_qualification import protocol_document
 from frc_defense.meco_tracks import MECO_TRACKS
 from frc_defense.meco_validation_campaign import compile_validation_campaign
+from frc_defense.meco_validation_campaign_runner import _validate_plan
 from frc_defense.training_curriculum import SCENARIOS
 
 
@@ -54,7 +55,7 @@ def test_compiles_complete_validation_only_campaign(tmp_path):
 def test_provisional_protocol_cannot_make_qualification_claim(tmp_path):
     path = tmp_path / "protocol.json"
     _write_protocol(path, protocol_document())
-    with pytest.raises(ValueError, match="calibrated v2/v3/v4 protocol"):
+    with pytest.raises(ValueError, match="new qualification claims require"):
         compile_validation_campaign(protocol_path=path, qualification_claim=True)
 
 
@@ -72,8 +73,11 @@ def test_v4_protocol_qualifies_only_with_exact_reviewed_gate_status(tmp_path, mo
         sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     path = tmp_path / "v4.json"
     _write_protocol(path, protocol)
-    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol", lambda *_: None)
+    validation_calls = []
+    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol",
+        lambda protocol, scenario: validation_calls.append((protocol["protocol_id"], scenario)))
     plan = compile_validation_campaign(protocol_path=path, qualification_claim=True)
+    assert validation_calls
     assert plan["qualification_claim"] is True
     assert plan["qualification_eligible"] is True
     assert plan["protocol"]["protocol_version"] == meco_qualification.CALIBRATED_PROTOCOL_VERSION
@@ -83,7 +87,44 @@ def test_v4_protocol_qualifies_only_with_exact_reviewed_gate_status(tmp_path, mo
         {key: value for key, value in protocol.items() if key != "protocol_id"},
         sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     _write_protocol(path, protocol)
-    with pytest.raises(ValueError, match="version-matched frozen safety gates"):
+    with pytest.raises(ValueError, match="reviewed matched-reference margins"):
+        compile_validation_campaign(protocol_path=path, qualification_claim=True)
+
+
+@pytest.mark.parametrize("version,gate_status", [
+    ("meco-qualification-v2", "calibrated_baseline_frozen"),
+    ("meco-qualification-v3",
+     "d0_operational_margin_frozen_reference_variance_unverified"),
+])
+def test_legacy_v2_v3_are_diagnostic_only_not_qualification_inputs(
+        tmp_path, monkeypatch, version, gate_status):
+    from frc_defense import meco_qualification
+
+    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol", lambda *_: None)
+    protocol = protocol_document()
+    protocol.update({"protocol_version": version,
+        "gate_calibration_status": gate_status,
+        "safety_gate_status": "metrics_schema_verified",
+        "safety_metrics_schema": meco_qualification.SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": "a" * 64})
+    protocol["protocol_id"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in protocol.items() if key != "protocol_id"},
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    path = tmp_path / f"{version}.json"
+    _write_protocol(path, protocol)
+    checkpoint_paths, config_hashes = {}, {}
+    for track in MECO_TRACKS:
+        checkpoint = tmp_path / f"{version}-{track}.pt"
+        checkpoint.write_bytes(track.encode())
+        checkpoint_paths[track] = checkpoint
+        config_hashes[track] = hashlib.sha256((version + track).encode()).hexdigest()
+    plan = compile_validation_campaign(protocol_path=path,
+        checkpoint_paths=checkpoint_paths, source_identity={"fixture": version},
+        training_configuration_sha256=config_hashes)
+    assert plan["protocol"]["protocol_version"] == version
+    assert plan["qualification_eligible"] is False
+    _validate_plan(plan)
+    with pytest.raises(ValueError, match="new qualification claims require"):
         compile_validation_campaign(protocol_path=path, qualification_claim=True)
 
 
@@ -94,6 +135,7 @@ def test_evaluator_protocol_loader_routes_calibrated_versions_to_validator(monke
     monkeypatch.setattr(meco_qualification, "_validate_v2_protocol",
         lambda protocol, scenario: calls.append((protocol["protocol_version"], scenario)))
     for version in (meco_qualification.LEGACY_CALIBRATED_PROTOCOL_VERSION,
+                    meco_qualification.D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
                     meco_qualification.CALIBRATED_PROTOCOL_VERSION):
         protocol = protocol_document()
         protocol["protocol_version"] = version
@@ -105,6 +147,7 @@ def test_evaluator_protocol_loader_routes_calibrated_versions_to_validator(monke
         assert loaded is protocol
         assert protocol_id == protocol["protocol_id"]
     assert calls == [(meco_qualification.LEGACY_CALIBRATED_PROTOCOL_VERSION, "pickup_simple"),
+                     (meco_qualification.D0_PAIRED_REFERENCE_PROTOCOL_VERSION, "pickup_simple"),
                      (meco_qualification.CALIBRATED_PROTOCOL_VERSION, "pickup_simple")]
 
 

@@ -326,3 +326,9 @@ training and validation planning. Its calibration projection does not validate
 the required calibration artifacts, so it always reports qualification
 eligibility as false. Use the qualification protocol and report validators for
 promotion; the training manifest is not a qualification admission path.
+
+New campaign qualification claims require a v4 protocol with the exact
+`matched_reference_variance_and_reviewed_margin_frozen` status and must pass
+the full protocol validator. Legacy v2/v3 protocols remain readable and may
+support explicitly diagnostic validation plans, but those plans are never
+qualification-eligible.
