@@ -650,3 +650,29 @@ files. These intervals are diagnostic and do not make promotion, qualification,
 deployment, simulator, or whole-plan completion claims. The scoped planner,
 implementation, and reviewer summaries are recorded in
 `docs/implementation-provenance/matrix-paired-effects-confidence-intervals.md`.
+
+### Phase 5 ONNX Runtime parity follow-up
+
+The ONNX parity verifier already existed before this tranche. The follow-up
+fixed its runtime test path: the canonical recurrent-state input remains
+`hidden`, and the graph output is named `hidden_out` to prevent an ONNX value
+name collision; seeded A2 headings are legal integer bins; and the verifier
+now compares either named mappings or the production adapter's ordered output
+tuple. Synthetic tests export and execute actual ONNX graphs for A1, A2, A3,
+C1, and C2 through CPU `CPUExecutionProvider`, and exercise input-name and
+numeric-tolerance failures.
+
+The focused parity, deployment-contract, and parameter-inventory suites passed
+20 tests with ONNX 1.19.1 and ONNX Runtime 1.23.2 installed in a temporary
+worktree-local environment. Python compilation and `git diff --check` passed.
+The independently reviewed implementation is commit
+`8cc96a9270930ca86147b00efa60404e062bbe6e`, integrated in candidate commit
+`7c932da57573b6fd0b0adaaf7b2d01083f275d1b`. Scoped planner, implementation,
+and reviewer summaries are in
+`docs/implementation-provenance/phase5-onnx-runtime-parity-followup.md`.
+
+This is synthetic CPU parity using random initialized model weights. It does
+not establish parity on trained checkpoints or real production captures. No
+Hailo provider/compiler/device, robot hardware, simulator, or deployment
+qualification was exercised; the production capture/export-manifest binding
+path remains unrun.

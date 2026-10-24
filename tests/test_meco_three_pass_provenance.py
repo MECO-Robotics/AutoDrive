@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 33
+    assert len(result["tranches"]) == 34
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -102,6 +102,23 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "episode-wide" in endpoint["limits"]
     assert "D0 has no selected-goal ledger" in endpoint["limits"]
     assert "not contact-caused recovery" in endpoint["limits"]
+    onnx = next(t for t in result["tranches"]
+                if t["requirement_id"] == "phase5-onnx-runtime-parity-followup")
+    assert onnx["implementer"]["commit"] == "8cc96a9270930ca86147b00efa60404e062bbe6e"
+    assert onnx["implementer"]["candidate_integration_commit"] == (
+        "7c932da57573b6fd0b0adaaf7b2d01083f275d1b")
+    assert onnx["reviewer"]["approved_commit"] == onnx["implementer"]["commit"]
+    assert onnx["reviewer"]["integrated_approved_commit"] == (
+        onnx["implementer"]["candidate_integration_commit"])
+    assert onnx["implementer"]["paths"] == [
+        "frc_defense/meco_deployment.py",
+        "scripts/verify_meco_onnx_parity.py",
+        "tests/test_meco_deployment_contracts.py",
+        "tests/test_meco_onnx_runtime_parity.py",
+        "tests/test_meco_parameter_inventory.py",
+        "docs/implementation-provenance/production-input-onnx-parity.md"]
+    assert "synthetic inputs" in onnx["limits"]
+    assert "No real production capture" in onnx["limits"]
     matrix_ci = next(t for t in result["tranches"]
                      if t["requirement_id"] == "matrix-paired-effects-confidence-intervals")
     assert matrix_ci["implementer"]["commit"] == (
