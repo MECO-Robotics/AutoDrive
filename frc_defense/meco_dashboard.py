@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import time
 
 
@@ -1027,6 +1028,23 @@ def _three_pass_provenance(project: Path) -> dict:
                 if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
                     raise ValueError("summary record fields are invalid")
                 summary_text[role] = artifact(record["path"], record["sha256"])
+            # A syntactically valid hash is not provenance unless it resolves to
+            # an actual commit object in this checkout. Values are strictly
+            # validated above before they reach git; shell parsing is never used.
+            for commit in commits.values():
+                try:
+                    checked = subprocess.run(
+                        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                        cwd=project, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=2, check=False,
+                        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                             "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise ValueError("provenance commit object could not be checked") from exc
+                if checked.returncode != 0:
+                    raise ValueError("provenance commit is not present as a commit object in this checkout")
             validated.append({"tranche_id": tranche_id, "title": tranche.get("title"),
                 "commits": commits, "summaries": summary_text})
         return {"status": "validated_summary_only", "evidence_class": "scoped_summaries",

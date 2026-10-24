@@ -298,6 +298,25 @@ def test_three_pass_summary_manifest_rejects_unmatched_reviewer_commit(tmp_path,
     assert "must match exact commit ids" in result["untrusted_reason"]
 
 
+def test_three_pass_summary_manifest_rejects_nonexistent_commit_object(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+    project = Path(__file__).resolve().parents[1]
+    shutil.copytree(project / "docs", tmp_path / "docs")
+    manifest_path = tmp_path / "docs/MECO_THREE_PASS_PROVENANCE.json"
+    data = json.loads(manifest_path.read_text())
+    data["tranches"][0]["commits"] = {
+        "feature_commit": "0" * 40,
+        "reviewer_approved_commit": "0" * 40,
+    }
+    manifest_path.write_text(json.dumps(data, indent=2) + "\n")
+    monkeypatch.setattr(dashboard, "_EXPECTED_THREE_PASS_PROVENANCE_SHA256",
+                        hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+
+    result = dashboard._three_pass_provenance(tmp_path)
+    assert result["status"] == "untrusted"
+    assert "not present as a commit object" in result["untrusted_reason"]
+
+
 def test_three_pass_summary_manifest_rejects_symlinked_artifact(tmp_path):
     import frc_defense.meco_dashboard as dashboard
     project = Path(__file__).resolve().parents[1]
