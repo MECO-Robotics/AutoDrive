@@ -92,7 +92,7 @@ def registry():
 
 
 def canonical_bytes():
-    return json.dumps(registry(), sort_keys=True, separators=(",", ":"),
+    return json.dumps(validate_registry(), sort_keys=True, separators=(",", ":"),
         ensure_ascii=False, allow_nan=False).encode()
 
 
@@ -101,7 +101,7 @@ def input_contract_digest():
 
 
 def candidate_feature_names():
-    return tuple(registry()["candidate_model_feature_names"])
+    return tuple(validate_registry()["candidate_model_feature_names"])
 
 
 def validate_registry():

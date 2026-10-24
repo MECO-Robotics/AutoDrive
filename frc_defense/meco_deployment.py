@@ -177,13 +177,12 @@ class ExportAdapter(nn.Module):
 
 
 def input_names(track: str) -> tuple[str, ...]:
-    if track == "A1": return ("raster", "globals_", "hidden")
-    if track in ("A2", "A3"):
-        base = ("node_features", "edges", "edge_mask", "region_ids", "globals_")
-        return base + (("coarse_edges", "coarse_edge_mask") if track == "A2" else ()) + ("hidden",)
-    if track == "C1": return ("globals_", "candidate_features", "hidden")
-    if track == "C2": return ("raster", "globals_", "candidate_features", "hidden")
-    raise ValueError(f"unsupported MECO track: {track}")
+    from .meco_input_provenance import validate_registry
+    data = validate_registry()
+    names = tuple(data["serialized_inputs_by_track"].get(track, ()))
+    if not names:
+        raise ValueError(f"unsupported MECO track: {track}")
+    return names
 
 
 def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
@@ -192,7 +191,8 @@ def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
     bi = lambda *shape: torch.ones(shape, dtype=torch.bool, device=device)
     raster, globals_, hidden = f(BATCH, 6, RASTER_H, RASTER_W), f(BATCH, GLOBAL_FEATURES), f(BATCH, 64)
     candidate = f(BATCH, CANDIDATES, CANDIDATE_FEATURES)
-    if track == "A1": return raster, globals_, hidden
+    by_name = {"raster": raster, "globals_": globals_, "hidden": hidden,
+        "candidate_features": candidate}
     if track in ("A2", "A3"):
         nodes = f(BATCH, NODES, 9)
         # Normalized x/y and heading bin are valid for the production encoders.
@@ -200,14 +200,24 @@ def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
         edges = li(BATCH, NODES, DEGREE)
         edge_mask = bi(BATCH, NODES, DEGREE)
         regions = li(BATCH, NODES).remainder(REGIONS)
+        by_name.update(node_features=nodes, edges=edges, edge_mask=edge_mask,
+            region_ids=regions)
         if track == "A2":
             coarse_edges = li(BATCH, REGIONS, DEGREE)
             coarse_mask = bi(BATCH, REGIONS, DEGREE)
-            return nodes, edges, edge_mask, regions, globals_, coarse_edges, coarse_mask, hidden
-        return nodes, edges, edge_mask, regions, globals_, hidden
-    if track == "C1": return globals_, candidate, hidden
-    if track == "C2": return raster, globals_, candidate, hidden
-    raise ValueError(f"unsupported MECO track: {track}")
+            by_name.update(coarse_edges=coarse_edges, coarse_edge_mask=coarse_mask)
+    names = input_names(track)
+    return tuple(by_name[name] for name in names)
+
+
+def validate_export_input_order(track: str, names, tensors) -> tuple[str, ...]:
+    """Check export names and tensors against the canonical validated registry."""
+    from .meco_input_provenance import validate_serialized_inputs
+    canonical = input_names(track)
+    validate_serialized_inputs(track, dict.fromkeys(names))
+    if tuple(names) != canonical or len(tensors) != len(canonical):
+        raise ValueError("ONNX export inputs differ from canonical registry order")
+    return canonical
 
 
 def _running_heartbeat_status(checkpoint: Path, run_id: str, track: str,
@@ -368,16 +378,18 @@ def operator_inventory(onnx_path: Path) -> dict:
 
 def export_track(track: str, checkpoint: Path, output: Path) -> dict:
     model, provenance = load_track_model(track, checkpoint)
+    names = input_names(track)
     tensors = dummy_inputs(track)
+    validate_export_input_order(track, names, tensors)
     output.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(model, tensors, str(output), input_names=input_names(track),
+    torch.onnx.export(model, tensors, str(output), input_names=names,
         output_names=("utility", "penalty", "behavior_logits", "hidden") if track.startswith("A")
                       else ("candidate_utility", "uncertainty", "hidden"),
         opset_version=17, do_constant_folding=True, dynamo=False)
     return {"track": track, "checkpoint_provenance": provenance,
             "path": str(output), "size_bytes": output.stat().st_size,
             "inputs": [{"name": name, "shape": list(t.shape), "dtype": str(t.dtype)}
-                       for name, t in zip(input_names(track), tensors)],
+                       for name, t in zip(names, tensors)],
             "graph": operator_inventory(output)}
 
 
