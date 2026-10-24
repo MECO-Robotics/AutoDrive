@@ -117,7 +117,8 @@ def test_three_pass_dashboard_reports_campaign_workflow_without_inventing_review
     provenance = _three_pass_provenance(project)
     assert provenance["status"] == "validated_summary_only"
     assert [row["tranche_id"] for row in provenance["tranches"]] == [
-        "dashboard-three-pass-availability", "bounded-multimodel-prediction"]
+        "dashboard-three-pass-availability", "bounded-multimodel-prediction",
+        "d1-d2-multimodel-paired-matrix"]
     assert all(row["commits"]["feature_commit"] == row["commits"]["reviewer_approved_commit"]
                for row in provenance["tranches"])
     assert "not full" in " ".join(provenance["limits"])

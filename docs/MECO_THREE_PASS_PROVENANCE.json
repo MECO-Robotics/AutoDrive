@@ -1,10 +1,10 @@
 {
   "schema": "meco-three-pass-provenance-v2",
   "status": "validated-summary-only",
-  "scope": "Candidate-local summaries record scoped planner intent, implementation scope, and independent reviewer approval for two exact commits. They are concise provenance summaries, not agent transcripts and not evidence of training or evaluation outcomes.",
+  "scope": "Candidate-local summaries record scoped planner intent, implementation scope, and independent reviewer approval for three exact commits. They are concise provenance summaries, not agent transcripts and not evidence of training or evaluation outcomes.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47",
-  "artifact_origin": "Only the two independently reviewed exact commits listed below are included. No evidence is inherited from unrelated branches or worktrees.",
+  "artifact_origin": "Only the three independently reviewed exact commits listed below are included. No evidence is inherited from unrelated branches or worktrees.",
   "tranches": [
     {
       "tranche_id": "dashboard-three-pass-availability",
@@ -49,12 +49,34 @@
           "sha256": "9766c7d8fc73e974381724d7c7dd78877eda782a0ef887ece2737f58f30f1db3"
         }
       }
+    },
+    {
+      "tranche_id": "d1-d2-multimodel-paired-matrix",
+      "title": "Paired D1-current versus D2-multi-model matrix condition",
+      "commits": {
+        "feature_commit": "2df43670fe65257113c14cdfeac4523aa084ed30",
+        "reviewer_approved_commit": "2df43670fe65257113c14cdfeac4523aa084ed30"
+      },
+      "summaries": {
+        "planner": {
+          "path": "docs/implementation-provenance/d1-d2-multimodel-matrix-planner.md",
+          "sha256": "68a7cc6f408683c5e8a14bfc72caf0a9658b9bbc8b5e270c825e9b0cfdedd418"
+        },
+        "implementer": {
+          "path": "docs/implementation-provenance/d1-d2-multimodel-matrix-implementer.md",
+          "sha256": "63457702e1e303debde970e517a94410d814ec159d6d7a12cd4a723977bcb3fe"
+        },
+        "reviewer": {
+          "path": "docs/implementation-provenance/d1-d2-multimodel-matrix-reviewer.md",
+          "sha256": "251f701e12f57c87829460acfe5432b492a5b1723c6470c02f65481deffdbd92"
+        }
+      }
     }
   ],
   "limits": [
     "Summaries are not full planner, implementer, or reviewer transcripts.",
     "Reviewer approval applies only to the exact feature commit named in each tranche.",
     "This manifest does not prove agent liveness, training completion, runtime performance, held-out outcomes, simulator behavior, qualification, or whole-plan completion.",
-    "No D1/D2 matrix tranche is included."
+    "The D1/D2 matrix tranche records executable paired-condition and provenance contracts only; no matrix episode campaign, simulator replay, GPU outcome, predictive benefit, held-out result, or qualification is claimed."
   ]
 }

@@ -1,0 +1,3 @@
+# D1 versus D2 multi-model matrix: Implementer summary
+
+The implementation adds a paired D1=current/D2=multi_model_v1 condition while preserving D1=current/D2=CV. The evaluator binds each control's prediction mode and contract; the matrix verifies those values per policy row and validates frozen category, integer seed, and split declarations before constructing contrasts. Scalar overrides remain backward compatible and ambiguous or malformed provenance fails closed. This is implementation and synthetic contract evidence only; no simulator campaign, GPU run, performance result, or qualification was produced.

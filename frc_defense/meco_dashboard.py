@@ -951,7 +951,7 @@ def meco_status_payload(project_root: Path | str, *, data_root: Path | str | Non
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
 
 
-_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "fe9a0a624e1ebd194eef81a7151f536ec6855ff99d22450ac47e19874b1507bf"
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "2bbeec097895c3c33c6ba0d4b2b41eca8b96440b836d8de1acfea9aa491cbdc1"
 _EXPECTED_PLAN_SHA256 = "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47"
 
 
