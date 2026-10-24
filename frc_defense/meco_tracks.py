@@ -87,6 +87,7 @@ class MecoInferenceRequest:
     generation_id: str = ""
     candidate_mask_digest: str = ""
     legal_pose_order_digest: str = ""
+    input_contract_sha256: str = ""
     model_id: str = ""
     schema: str = MECO_INFERENCE_SCHEMA
 
@@ -121,6 +122,9 @@ class MecoInferenceRequest:
         expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
         if self.candidate_mask_digest != expected_mask_digest:
             raise ValueError("candidate IDs/mask digest does not match request ordering")
+        from .meco_input_provenance import input_contract_digest
+        if self.input_contract_sha256 != input_contract_digest():
+            raise ValueError("model input provenance digest does not match registry")
         if self.track.startswith("A") and (len(self.legal_pose_order_digest) != 64
                 or any(c not in "0123456789abcdef" for c in self.legal_pose_order_digest)):
             raise ValueError("Plan A request requires the canonical legal-pose order digest")
@@ -146,6 +150,7 @@ class MecoInferenceResponse:
     snapshot_id: str
     candidate_mask_digest: str
     legal_pose_order_digest: str
+    input_contract_sha256: str
     outputs: Mapping[str, torch.Tensor]
 
 
@@ -165,6 +170,8 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
     names = MECO_INPUT_NAMES[adapter.track]
     if tuple(inputs) != names:
         raise ValueError("inputs must be supplied in the track's canonical order")
+    from .meco_input_provenance import validate_serialized_inputs
+    contract_digest = validate_serialized_inputs(adapter.track, inputs)
     dispatch = time.monotonic()
     sequence, generation = adapter.next_request_identity()
     return MecoInferenceRequest(track=adapter.track, snapshot_id=table.snapshot_id,
@@ -178,7 +185,8 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
         fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1),
         request_sequence=sequence, generation_id=generation,
         candidate_mask_digest=ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask),
-        legal_pose_order_digest=legal_pose_order_digest, model_id=f"meco:{adapter.track}")
+        legal_pose_order_digest=legal_pose_order_digest,
+        input_contract_sha256=contract_digest, model_id=f"meco:{adapter.track}")
 
 
 class ProductionMecoAdapter:
@@ -236,12 +244,14 @@ class ProductionMecoAdapter:
 
     def _infer_sync(self, request: MecoInferenceRequest, inputs: Mapping[str, torch.Tensor], *, now: float):
         try:
+            from .meco_input_provenance import input_contract_digest
             if (request.track != self.track or request.model_id != f"meco:{self.track}"
                     or request.checkpoint_sha256 != self.checkpoint_sha256
                     or request.protocol_id != self.protocol_id or request.observation_schema != 1
                     or not math.isfinite(now) or now < request.dispatch_monotonic
                     or now - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or now > request.expires_monotonic
+                    or request.input_contract_sha256 != input_contract_digest()
                     or tuple(inputs) != request.input_names):
                 return None
             tensors = tuple(inputs[name] for name in request.input_names)
@@ -326,6 +336,7 @@ class ProductionMecoAdapter:
                 generation_id=request.generation_id, snapshot_id=request.snapshot_id,
                 candidate_mask_digest=request.candidate_mask_digest,
                 legal_pose_order_digest=request.legal_pose_order_digest,
+                input_contract_sha256=request.input_contract_sha256,
                 outputs=MappingProxyType(dict(values)))
         except Exception:
             return None
@@ -998,6 +1009,11 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         raise ValueError("expected raster [B,6,H,W] and globals [B,7]")
     if raster.shape[0] != 1:
         raise ValueError("CandidateTable adapter currently scores one decision at a time")
+    if track in ("C1", "C2"):
+        expected_features = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+        if (tuple(table.feature_names) != expected_features or
+                any(len(row) != MECO_CANDIDATE_RAW_FEATURE_COUNT for row in table.features)):
+            raise ValueError("C1/C2 candidate rows differ from the registered shared feature schema")
     candidate, unavailable = candidate_feature_tensor(table, device=raster.device, dtype=raster.dtype)
     candidate = torch.cat((candidate, unavailable), -1)[None]
     if isinstance(model, ProductionMecoAdapter) and hidden is None:
@@ -1070,6 +1086,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 or response.snapshot_id != inference_request.snapshot_id
                 or response.candidate_mask_digest != inference_request.candidate_mask_digest
                 or response.legal_pose_order_digest != inference_request.legal_pose_order_digest
+                or response.input_contract_sha256 != inference_request.input_contract_sha256
                 or response.observation_timestamp != inference_request.observation_timestamp
                 or response.capture_monotonic != inference_request.capture_monotonic
                 or response.dispatch_monotonic != inference_request.dispatch_monotonic

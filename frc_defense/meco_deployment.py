@@ -21,6 +21,7 @@ from torch import nn
 from .meco_candidates import CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_MODEL_FEATURE_COUNT
 from .meco_tracks import (HIDDEN, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     MECO_TRACKS, ProductionMecoAdapter, make_meco_track)
+from .meco_input_provenance import input_contract_digest
 
 BATCH = 1
 NODES = 256
@@ -156,7 +157,8 @@ def parameter_inventory() -> dict:
 
 
 def export_manifest(reports: list[dict]) -> dict:
-    return {"schema": "meco-onnx-export-v1", "exports": reports,
+    return {"schema": "meco-onnx-export-v1",
+        "input_contract_sha256": input_contract_digest(), "exports": reports,
         "parameter_inventory": parameter_inventory()}
 
 
@@ -307,6 +309,7 @@ def load_track_model(track: str, checkpoint: Path) -> tuple[nn.Module, dict]:
     model = make_meco_track(track, candidate_features=CANDIDATE_BASE_FEATURE_COUNT)
     model.load_state_dict(payload["model"], strict=True)
     provenance = {"checkpoint": str(checkpoint), "sha256": digest,
+                  "input_contract_sha256": payload.get("input_contract_sha256"),
                   "track": track, "update": update,
                   "run_id": run_id, "sources": sources,
                   "config": config,

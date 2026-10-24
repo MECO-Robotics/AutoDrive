@@ -49,6 +49,7 @@ from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
+from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -741,6 +742,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         if request_dispatch <= safe.observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
             try:
                 request_sequence, generation_id = model.next_request_identity()
+                input_contract_sha256 = validate_serialized_inputs(track, ordered_inputs)
                 request = MecoInferenceRequest(
                     track=track, snapshot_id=safe.observation.snapshot_id,
                     checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
@@ -759,6 +761,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     request_sequence=request_sequence, generation_id=generation_id,
                     candidate_mask_digest=ordered_candidate_mask_digest(
                         candidate_ids, candidate_mask),
+                    input_contract_sha256=input_contract_sha256,
                     legal_pose_order_digest=support.support_digest,
                     model_id=f"meco:{track}")
             except Exception:
@@ -1445,6 +1448,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "phase4_training": phase4_training,
         "updates_semantics": "updates per invocation chunk",
         "protocol_id": protocol_id,
+        "input_contract_sha256": input_contract_digest(),
         "configuration_sha256": hashlib.sha256(json.dumps(
             {key: value for key, value in asdict(config).items() if key != "updates"},
             sort_keys=True, allow_nan=False).encode()).hexdigest(),
@@ -1833,6 +1837,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "qualification_protocol_id": qualification_protocol_id,
                 "qualification_protocol_sha256": qualification_protocol_sha256,
                 "protocol_id": protocol_id,
+                "input_contract_sha256": run_manifest["input_contract_sha256"],
                 "initialization": run_manifest["initialization"],
                 "task_assignment": task_assignment,
                 "phase4_training": run_manifest["phase4_training"],
@@ -1846,7 +1851,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "history": history}
             _atomic_torch(output / "latest.pt", payload)
             _atomic_json(output / "stats.json", {"run_id": run_id, "track": config.track,
-                "update": update, "episode": episode, "history": history})
+                "update": update, "episode": episode,
+                "input_contract_sha256": run_manifest["input_contract_sha256"],
+                "history": history})
             persist_task_outcomes()
         abort_marker = sibling_abort_marker()
         worker_status = ("stopped" if stop_path and stop_path.exists() else
@@ -2268,6 +2275,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             raise ValueError("paired checkpoints have different supervisor protocols")
         policy_manifest[track] = {"policy_id": _model_id(model),
             "checkpoint_sha256": checkpoint_digest,
+            "input_contract_sha256": payload.get("input_contract_sha256"),
             "p_mode": track_p_mode if track in ("A1", "A2", "A3") else None,
             "p_cost_scale": track_p_scale if track in ("A1", "A2", "A3") else None,
             "p_points_per_grid_edge": (track_p_edge_points
@@ -2304,6 +2312,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
+            "input_contract_sha256": input_contract_digest(),
             "prediction_mode": control_prediction_modes.get(control),
             "prediction_contract": (prediction_contract(control_prediction_modes[control])
                 if control in control_prediction_modes else None),
@@ -2860,6 +2869,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             if inference_disable_tick is not None and policy in selected
                             else None)
                         record = {"scenario_id": scenario_id, "category": category,
+                            "input_contract_sha256": input_contract_digest(),
                             "seed": seed, "policy": record_policy,
                             "paired_baseline_policy": policy if inference_fault_run else None,
                             "paired_record_policy": (policy if inference_fault_run else
@@ -2988,6 +2998,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 training_source_hash != record["source_identity_sha256"])
                             code_state = replay_code_state_snapshot
                             replay_record = {
+                                "input_contract_sha256": input_contract_digest(),
                                 "simulation_id": simulation_id, "task": "3v3",
                                 "matchup": scenario_id, "scenario_id": scenario_id,
                                 "category": category, "seed": seed, "scenario_seed": seed,
@@ -3106,6 +3117,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         if callable(close):
                             close()
         report = {"schema_version": 1, "evaluation_id": eval_id,
+            "input_contract_sha256": input_contract_digest(),
             "protocol_id": protocol,
             "qualification_protocol_id": qualification_protocol_id,
             "evaluation_protocol_id": (evaluation_binding["protocol_id"]
