@@ -62,14 +62,24 @@ run_prepared_meco_cli() {
     "$gpu_device" "$@"
 }
 
-run_prepared_meco_cli "$DEVICE" plan-d0-calibration-shards \
-  --scenario "$scenario" --episodes 100 --repetitions 3 \
-  --master-seed 20261024 --shard-count 8 --device "$DEVICE" \
-  --manifest-dir "qualifications/meco/shards/${scenario}-${DEVICE//:/-}"
+# These paths identify the active 20261024 run in this checkout. For a new
+# source identity or master seed, use a new source tag and campaign root.
+source_tag=source-31e5
+scenario_slug="${scenario//_/-}"
+campaign_root="qualifications/meco/shards/${scenario_slug}-20261024/${source_tag}"
+# Generate a full, device-bound manifest set for each intended ordinal.
+devices=(cuda:0 cuda:1)
+for shard_device in "${devices[@]}"; do
+  run_prepared_meco_cli "$shard_device" plan-d0-calibration-shards \
+    --scenario "$scenario" --episodes 100 --repetitions 3 \
+    --master-seed 20261024 --shard-count 8 --device "$shard_device" \
+    --manifest-dir "$campaign_root/${shard_device//:/-}"
+done
 ```
 
-Run every manifest once, retaining its shard artifact, then merge all shard
-artifacts into the ordinary immutable v2 calibration report before bundling:
+Generate one shard artifact per assigned index from its matching device
+manifest, then merge the eight artifacts into the ordinary immutable v2
+calibration report before bundling:
 
 ```bash
 run_prepared_meco_cli() {
@@ -79,15 +89,29 @@ run_prepared_meco_cli() {
     "$gpu_device" "$@"
 }
 
-for manifest in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/*.json; do
-  shard_id=$(basename "$manifest" .json)
-  run_prepared_meco_cli "$DEVICE" calibrate-d0-shard \
-    --manifest "$manifest" --device "$DEVICE" \
-    --output "qualifications/meco/shards/${scenario}-${DEVICE//:/-}/artifacts/${shard_id}.artifact.json"
+# Assign each index exactly once, using the matching ordinal's manifest.
+# This balanced example assigns four of eight shards to each WX9100.
+declare -A shard_device=(
+  [0]=cuda:1 [1]=cuda:1 [2]=cuda:0 [3]=cuda:1
+  [4]=cuda:0 [5]=cuda:1 [6]=cuda:0 [7]=cuda:0
+)
+for shard_index in {0..7}; do
+  shard_device_for_index="${shard_device[$shard_index]}"
+  device_dir="$campaign_root/${shard_device_for_index//:/-}"
+  output_dir="evaluations/meco-five/d0-calibration-20261024/${source_tag}/${shard_device_for_index//:/-}"
+  shard_id=$(printf 'd0-calibration-%s-shard-%04d-of-0008' "$scenario" "$shard_index")
+  shard_file=$(printf 'shard-%04d.artifact.json' "$shard_index")
+  manifest="$device_dir/${shard_id}.json"
+  run_prepared_meco_cli "$shard_device_for_index" calibrate-d0-shard \
+    --manifest "$manifest" --device "$shard_device_for_index" \
+    --output "$output_dir/$shard_file"
 done
 shards=()
-for artifact in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/artifacts/*.artifact.json; do
-  shards+=(--shard "$artifact")
+for shard_index in {0..7}; do
+  shard_device_for_index="${shard_device[$shard_index]}"
+  output_dir="evaluations/meco-five/d0-calibration-20261024/${source_tag}/${shard_device_for_index//:/-}"
+  shard_file=$(printf 'shard-%04d.artifact.json' "$shard_index")
+  shards+=(--shard "$output_dir/$shard_file")
 done
 run_prepared_meco_cli "$DEVICE" merge-d0-calibration-shards \
   "${shards[@]}" --output "qualifications/meco/d0-calibration-${scenario}.json"
