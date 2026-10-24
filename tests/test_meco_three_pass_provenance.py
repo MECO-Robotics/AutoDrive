@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 35
+    assert len(result["tranches"]) == 36
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -158,6 +158,25 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "/root/phase4_next_planner" in matrix_summary
     assert "/root/phase4_pair_contact_review" in matrix_summary
     assert "185aba4b411eed9698df0e251c469dfc580bb141" in matrix_summary
+    reactive = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-reactive-opponent-validation-wiring")
+    assert reactive["implementer"]["commit"] == (
+        "49c8ba7d15c507c1208600daf3b3fa3b4312a15e")
+    assert reactive["reviewer"]["reviewed_integration_commit"] == (
+        reactive["implementer"]["commit"])
+    assert {entry["reviewer"] for entry in reactive["reviewer"]["approvals"]} == {
+        "/root/phase4_pair_contact_review", "/root/phase4_dispatch_review"}
+    assert all(entry["verdict"] == "approved"
+        and entry["reviewed_head"] ==
+        "983183665fc32fc4f8d6d501a0258ebb7e25a6a0"
+        for entry in reactive["reviewer"]["approvals"])
+    assert "19 focused CPU contract tests passed" in reactive["limits"]
+    assert "slot 2 is out of scope" in reactive["limits"]
+    assert "No simulator behavior validation or replay was run" in reactive["limits"]
+    assert "qualification eligibility remains false" in reactive["limits"]
+    reactive_summary = (REPO / reactive["planner"]["artifact"]["path"]).read_text()
+    assert "helper-only API was not connected" in reactive_summary
+    assert "Family-specific outcomes, including interception rate" in reactive_summary
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):

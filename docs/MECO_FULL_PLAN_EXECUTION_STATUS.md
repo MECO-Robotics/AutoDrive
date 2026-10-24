@@ -1,5 +1,23 @@
 # MECO learning tracks plan: execution status
 
+## Phase 4 reactive opponent validation wiring — 2026-10-24
+
+The helper-only deterministic opponent pool is now connected to a protocol-
+bound validation schedule and evaluation runner in commit
+`49c8ba7d15c507c1208600daf3b3fa3b4312a15e`. The paired dispatcher selects only
+`architecture_matched_cv_k16` in both arms. Two independent reviewers approved
+the exact pre-commit source HEAD `983183665fc32fc4f8d6d501a0258ebb7e25a6a0`.
+Nineteen focused CPU contract tests passed; Python compilation and
+`git diff --check` passed. This is summary-only implementation evidence.
+
+No simulator evaluation or replay was run, so actual policy application and
+game behavior remain unverified. The configured pressure slots are slot 0 at
+levels 1–4 and slots 0/1 at level 5; slot 2 is out of scope. Family-specific
+outcomes remain null, and qualification eligibility is false. No GPU, training,
+or dashboard service action was performed. See
+[`phase4-reactive-opponent-validation-wiring.md`](implementation-provenance/phase4-reactive-opponent-validation-wiring.md)
+and tranche #36 in [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
 > **Plan A rollout U contract integrated — 2026-10-24.** Reviewed commit
 > `88b0bb9270ad912fb0cc651c33990e57c111b9b0` versions the legal-node U
 > estimand, binds each sampled-node target to its exact paired rollout

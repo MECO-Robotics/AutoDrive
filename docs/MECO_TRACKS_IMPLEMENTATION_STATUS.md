@@ -690,3 +690,20 @@ not establish parity on trained checkpoints or real production captures. No
 Hailo provider/compiler/device, robot hardware, simulator, or deployment
 qualification was exercised; the production capture/export-manifest binding
 path remains unrun.
+
+### Phase 4 reactive opponent validation wiring — tranche #36
+
+Commit `49c8ba7d15c507c1208600daf3b3fa3b4312a15e` connects the deterministic
+opponent policy assignment through the validation campaign runner, matrix
+condition selector, and evaluation path. Both paired arms select only
+`architecture_matched_cv_k16`; the per-seed identity binds the planned factor,
+while policy family remains separately identified. Two independent reviewers
+approved exact source HEAD `983183665fc32fc4f8d6d501a0258ebb7e25a6a0` before
+the commit. Nineteen focused contract tests, Python compilation, and
+`git diff --check` passed.
+
+This is diagnostic wiring evidence, not a simulator result. Pressure levels
+1–4 configure slot 0; level 5 configures slots 0 and 1; slot 2 is outside the
+scope. Simulator behavior and replay validation were not run. Family-specific
+outcomes remain null/unavailable, and qualification eligibility remains false.
+Summary-only three-pass record: `docs/implementation-provenance/phase4-reactive-opponent-validation-wiring.md`.
