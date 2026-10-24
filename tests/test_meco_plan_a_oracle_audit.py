@@ -20,7 +20,7 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _fixture(tmp_path, *, expert=False):
+def _fixture(tmp_path, *, expert=True):
     sources = {"tracked_sources": ["source.py"], "_native_fuel_extension": {"status": "present"}}
     source_identity = _sha(json.dumps(sources, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode())
@@ -72,6 +72,7 @@ def _fixture(tmp_path, *, expert=False):
             "record_count": 1, "dataset_sha256": _sha(expert_bytes)})
         expert_path.with_suffix(".jsonl.manifest.json").write_bytes(expert_manifest_bytes)
         expert_sha, expert_manifest_sha = _sha(expert_bytes), _sha(expert_manifest_bytes)
+    selected_nodes = [0, 2] if expert else [0]
     expert_node_pi = 1. if expert else .5
     expert_node_weight = 1. if expert else 2.
     legal_row = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
@@ -80,7 +81,7 @@ def _fixture(tmp_path, *, expert=False):
         "decision_index": 3,
         "source_identity_sha256": source_identity, "snapshot_id": "snap",
         "state_sha256": "state", "support_digest": "support",
-        "feasible_node_ids": list(range(8)), "selected_node_ids": [0, 2],
+        "feasible_node_ids": list(range(8)), "selected_node_ids": selected_nodes,
         "canonical_poses": [{"node_id": i, "heading_bin": i % 2, "region_id": (i % 4) // 2}
             for i in range(8)],
         "full_pair_layout": [{"pair_index": i, "node_id": node,
@@ -97,17 +98,20 @@ def _fixture(tmp_path, *, expert=False):
                 "node_inverse_probability_weight": 1.,
                 "behavior_repeat_return_variances": {"1": 0., "2": 0.,
                     "3": 0., "4": 1.}},
-            {"node_id": 2, "status": "unavailable", "u_target": None,
+            *([{"node_id": 2, "status": "unavailable", "u_target": None,
                 "feasible_behavior_ids": [2],
                 "available_behavior_ids": [],
                 "censored_feasible_behavior_ids": [2], "node_inclusion_probability": expert_node_pi,
                 "unavailable_behavior_ids": [0, 1, 3, 4],
                 "node_inverse_probability_weight": expert_node_weight,
-                "behavior_repeat_return_variances": {}}],
+                "behavior_repeat_return_variances": {}}] if expert else []),
+        ],
         "root_node": 0, "root_node_behavior_supported": True,
-        "node_inclusion_probabilities": {"0": 1., "2": expert_node_pi},
+        "node_inclusion_probabilities": ({"0": 1., "2": expert_node_pi}
+            if expert else {"0": 1.}),
         "stratum_population_counts": {"0:0": 2, "1:0": 2, "0:1": 2, "1:1": 2},
-        "stratum_selected_counts": {"0:0": 1, "1:0": 0, "0:1": 1, "1:1": 0},
+        "stratum_selected_counts": {"0:0": 1, "1:0": 0,
+            "0:1": int(expert), "1:1": 0},
         "pairs": [], "behavior_preferences": []}
     outcome_returns = {1: [2., 2.], 2: [1., 1.], 3: [2., 2.], 4: [1., 3.]}
     for behavior, values in outcome_returns.items():
@@ -121,7 +125,8 @@ def _fixture(tmp_path, *, expert=False):
             "descriptor_inverse_probability_weight": population,
             "repeat_returns": [{"status": "available", "gross_horizon_return": value}
                 for value in values]})
-    legal_row["pairs"].append({"pair_index": 7, "node_id": 2,
+    if expert:
+        legal_row["pairs"].append({"pair_index": 7, "node_id": 2,
         "behavior_id": 2, "descriptor_id": "d-7", "status": "unavailable",
         "behavior_descriptor_support_count": 1,
         "descriptor_inclusion_probability": 1., "descriptor_inverse_probability_weight": 1.,
@@ -146,7 +151,8 @@ def _fixture(tmp_path, *, expert=False):
     legal_row["full_pair_layout_sha256"] = _hash(legal_row["full_pair_layout"])
     legal_row["selection_digest"] = _hash({"protocol_id": protocol_id,
         "key": ("pickup_simple", "single", 17, 3), "support_digest": "support",
-        "selected_node_ids": [0, 2], "selected_pair_indices": [0, 2, 3, 4, 7]})
+        "selected_node_ids": selected_nodes,
+        "selected_pair_indices": [0, 2, 3, 4, *([7] if expert else [])]})
     legal_bytes = _bytes(legal_row)
     legal_dataset = tmp_path / "legal.jsonl"
     legal_dataset.write_bytes(legal_bytes)
@@ -194,7 +200,7 @@ def test_offline_audit_summarizes_coverage_labels_and_weights_without_claiming_r
     assert report["u_summary"]["per_behavior_repeat_return_variance"]["4"]["mean"] == 1.
     assert report["b_summary"] == {"preference_count": 6, "comparable_count": 2,
         "tie_count": 1, "uncertain_count": 3}
-    assert report["sampling_weights"]["node"]["effective_sample_size"] == 1.8
+    assert report["sampling_weights"]["node"]["effective_sample_size"] == 2.
     assert report["sampling_weights"]["descriptor"]["effective_sample_size"] == 4.5
     assert report["evidence_status"] == {"replay_validated": False,
         "empirical_oracle_established": False, "warm_start_artifact_produced": False}
@@ -281,4 +287,34 @@ def test_audit_recomputes_node_inclusion_from_strata_and_certainty_units(
         row["node_inclusion_probabilities"][str(node_id)] = pi
     _rewrite_legal(args, mutate)
     with pytest.raises(ValueError, match=expected_message):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_rejects_coherently_rewritten_non_sampled_node(tmp_path):
+    args = _fixture(tmp_path, expert=False)
+    assert audit_plan_a_legal_nodes(*args)["coverage"]["sampled_legal_nodes"] == 1
+
+    def inject_node_two(row):
+        row["selected_node_ids"] = [0, 2]
+        row["node_inclusion_probabilities"]["2"] = .5
+        row["stratum_selected_counts"]["0:1"] = 1
+        row["node_u_targets"].append({"node_id": 2, "status": "unavailable",
+            "u_target": None, "feasible_behavior_ids": [2],
+            "available_behavior_ids": [], "censored_feasible_behavior_ids": [2],
+            "node_inclusion_probability": .5, "unavailable_behavior_ids": [0, 1, 3, 4],
+            "node_inverse_probability_weight": 2.,
+            "behavior_repeat_return_variances": {}})
+        row["pairs"].append({"pair_index": 7, "node_id": 2, "behavior_id": 2,
+            "descriptor_id": "d-7", "status": "unavailable",
+            "behavior_descriptor_support_count": 1,
+            "descriptor_inclusion_probability": 1.,
+            "descriptor_inverse_probability_weight": 1.,
+            "repeat_outcomes": [{"status": "unavailable"}, {"status": "unavailable"}]})
+        row["selection_digest"] = _hash({"protocol_id": json.loads(
+            args[2].read_text())["protocol_id"],
+            "key": ("pickup_simple", "single", 17, 3), "support_digest": "support",
+            "selected_node_ids": [0, 2], "selected_pair_indices": [0, 2, 3, 4, 7]})
+
+    _rewrite_legal(args, inject_node_two)
+    with pytest.raises(ValueError, match="deterministic capped round-robin sample"):
         audit_plan_a_legal_nodes(*args)

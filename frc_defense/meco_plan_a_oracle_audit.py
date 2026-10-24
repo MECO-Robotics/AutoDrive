@@ -43,6 +43,7 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
     from .meco_counterfactual import (DATASET_SCHEMA,
         TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
         PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA, PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
+        PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX, PLAN_A_LEGAL_NODE_REPEATS,
         _artifact_identity_sha256)
     from .meco_supervised import _load_protocol, _protocol_train_seeds
 
@@ -239,24 +240,6 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             mandatory_nodes.add(expert_node)
         if not mandatory_nodes <= set(selected):
             raise ValueError("mandatory root/expert certainty units are missing from the selected nodes")
-        expected_node_pi = {}
-        for node in selected:
-            cell = (pose_by_node[node].get("heading_bin"), pose_by_node[node].get("region_id"))
-            forced_in_stratum = sum(1 for mandatory in mandatory_nodes
-                if (pose_by_node[mandatory].get("heading_bin"),
-                    pose_by_node[mandatory].get("region_id")) == cell)
-            if node in mandatory_nodes:
-                expected_node_pi[node] = 1.0
-            else:
-                population = populations[cell] - forced_in_stratum
-                sample = selected_counts[cell] - forced_in_stratum
-                if population <= 0 or not 0 < sample <= population:
-                    raise ValueError("node sampling stratum has invalid residual population/count")
-                expected_node_pi[node] = sample / population
-        recorded_node_pi = legal.get("node_inclusion_probabilities")
-        if (not isinstance(recorded_node_pi, dict) or
-                set(recorded_node_pi) != {str(node) for node in selected}):
-            raise ValueError("node inclusion probability map does not cover selected nodes exactly")
         layout = legal.get("full_pair_layout")
         if not isinstance(layout, list):
             raise ValueError("full feasible legal-node behavior layout is missing")
@@ -280,6 +263,55 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             if pair["feasible"]:
                 descriptor_population[(pair["node_id"], pair["behavior_id"])] += 1
             feasible_descriptor_counts[str(pair["behavior_id"])] += 1
+        behavior_count = max(1, len({pair["behavior_id"] for pair in feasible_pairs}))
+        requested = max(1, len(feasible) // 16)
+        budget_node_limit = max(1, PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX //
+            (behavior_count * PLAN_A_LEGAL_NODE_REPEATS))
+        limit = max(min(requested, budget_node_limit), len(mandatory_nodes))
+        sampling_key = (f"legal-node-v1:{protocol_id}:{key[0]}:{key[1]}:{key[2]}:{key[3]}:"
+            f"{legal['support_digest']}")
+        strata = {}
+        for node in feasible:
+            cell = (pose_by_node[node].get("heading_bin"), pose_by_node[node].get("region_id"))
+            strata.setdefault(cell, []).append(node)
+        ordered_strata = sorted(strata, key=lambda cell: hashlib.sha256(
+            f"{sampling_key}:stratum:{cell[0]}:{cell[1]}".encode()).digest())
+        expected_selected = sorted(mandatory_nodes)
+        depth = 0
+        while len(expected_selected) < limit:
+            added = False
+            for cell in ordered_strata:
+                candidates = sorted(strata[cell], key=lambda node: hashlib.sha256(
+                    f"{sampling_key}:node:{node}".encode()).digest())
+                if depth < len(candidates) and candidates[depth] not in expected_selected:
+                    expected_selected.append(candidates[depth])
+                    added = True
+                    if len(expected_selected) >= limit:
+                        break
+            if not added:
+                break
+            depth += 1
+        expected_selected = sorted(expected_selected)
+        if selected != expected_selected:
+            raise ValueError("selected legal nodes differ from deterministic capped round-robin sample")
+        expected_node_pi = {}
+        for node in selected:
+            cell = (pose_by_node[node].get("heading_bin"), pose_by_node[node].get("region_id"))
+            forced_in_stratum = sum(1 for mandatory in mandatory_nodes
+                if (pose_by_node[mandatory].get("heading_bin"),
+                    pose_by_node[mandatory].get("region_id")) == cell)
+            if node in mandatory_nodes:
+                expected_node_pi[node] = 1.0
+            else:
+                population = populations[cell] - forced_in_stratum
+                sample = selected_counts[cell] - forced_in_stratum
+                if population <= 0 or not 0 < sample <= population:
+                    raise ValueError("node sampling stratum has invalid residual population/count")
+                expected_node_pi[node] = sample / population
+        recorded_node_pi = legal.get("node_inclusion_probabilities")
+        if (not isinstance(recorded_node_pi, dict) or
+                set(recorded_node_pi) != {str(node) for node in selected}):
+            raise ValueError("node inclusion probability map does not cover selected nodes exactly")
         feasible_node_behaviors = {(pair["node_id"], pair["behavior_id"])
             for pair in feasible_pairs}
         sampled_node_behaviors = {(node, behavior) for node, behavior in feasible_node_behaviors
