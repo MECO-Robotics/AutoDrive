@@ -192,7 +192,8 @@ def compile_validation_campaign(*, protocol_path: str | Path,
         if not isinstance(source_identity, dict) or not source_identity:
             raise ValueError("source identity must be a nonempty JSON object")
         source_binding = {"identity": source_identity,
-                          "sha256": _sha(source_identity)}
+                          "sha256": hashlib.sha256(json.dumps(source_identity,
+                              sort_keys=True, allow_nan=False).encode()).hexdigest()}
 
     jobs = []
     for group in groups:
