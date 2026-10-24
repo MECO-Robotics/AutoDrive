@@ -875,4 +875,9 @@ class TensorThreeVsThreeObservationMixin:
             om = torch.stack((self.sim.omega_limit,self.sim.omega_limit),-1).reshape(-1,2)
             normalize_tensor_observation_batch_in_place(flat,self.sim.field_length,
                                                         self.sim.field_width,sp,om)
+        if self._last_obs is None:
+            if not bool(active.all()):
+                raise RuntimeError(
+                    "cannot build a partial observation batch before every world has an observation frame")
+            return obs
         return torch.where(active[:,None,None], obs, self._last_obs)
