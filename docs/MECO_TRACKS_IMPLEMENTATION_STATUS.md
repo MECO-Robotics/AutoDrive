@@ -448,15 +448,17 @@ unvalidated.
 This initial implementer pass received static review only. Later, focused
 contract/provenance tests for calibration identity, margin provenance,
 shard-artifact manifest provenance, normalized runtime equivalence, and intake
-binding were added and reviewed on staging. The staging branch also now
-contains Phase 2 contract tests for P-oracle integration and expert-goal
-authority/U fail-closed behavior, plus a fix for the expert-goal loader's local
-helper import. All five focused CPU test files passed together (64 tests) at
-staging HEAD `62f259b6f`. These synthetic tests do not establish actual GPU
-calibration, merged-report intake from produced shards, real Phase 2 dataset
-collection or fitting, simulation behavior, or the complete report-to-protocol
-chain. No calibration run or simulator evaluation has been performed; runtime
-evidence remains pending.
+binding were added and reviewed on staging. The staging branch also contains
+Phase 2 contract tests for P-oracle integration and expert-goal authority/U
+fail-closed behavior, a fix for the expert-goal loader's local helper import,
+and an opt-in Phase 4 train-only factor assignment path with provenance. The
+six focused CPU test files passed together (75 tests) at staging HEAD
+`740294a08`. The active campaign has not enabled the Phase 4 option. These
+synthetic tests do not establish actual GPU calibration, merged-report intake
+from produced shards, real Phase 2 dataset collection or fitting, Phase 4
+factor behavior in simulation, or the complete report-to-protocol chain. No
+calibration run or fresh factor simulation evaluation has been performed;
+runtime evidence remains pending.
 
 ## D0 calibration sharding tranche v1
 
