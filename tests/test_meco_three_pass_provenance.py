@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 31
+    assert len(result["tranches"]) == 32
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -89,6 +89,19 @@ def test_current_manifest_is_validated_as_summary_only():
         "tests/test_meco_phase4_runtime_adapter_contract.py"]
     assert "recovery_time_after_bump_s" in route_progress["limits"]
     assert "qualification remains false" in route_progress["limits"]
+    endpoint = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-selected-goal-endpoint-diagnostic")
+    assert endpoint["implementer"]["commit"] == (
+        "9462bbd36756d79c1001d6b90c9c5f31d7c94f89")
+    assert endpoint["reviewer"]["approved_commit"] == endpoint["implementer"]["commit"]
+    assert endpoint["implementer"]["paths"] == [
+        "frc_defense/meco_metric_ledger.py",
+        "frc_defense/meco_phase4_runtime_adapter.py",
+        "frc_defense/meco_track_training.py",
+        "tests/test_meco_selected_goal_endpoint_contract.py"]
+    assert "episode-wide" in endpoint["limits"]
+    assert "D0 has no selected-goal ledger" in endpoint["limits"]
+    assert "not contact-caused recovery" in endpoint["limits"]
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
