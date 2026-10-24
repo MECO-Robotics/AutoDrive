@@ -30,6 +30,24 @@
 > are hash-pinned in this snapshot. Runtime JSON and process handles remain
 > authoritative for later status.
 
+> **D0 calibration milestone — 2026-10-24.** The merged `pickup_simple` D0
+> calibration report is `qualifications/meco/d0-calibration-pickup_simple.json`
+> (SHA-256 `eaf39d5df985c854b157f4abf9fc48a66517cd4864d4486006d0681dda7f76a6`,
+> calibration ID `1be58a36b643f3ed48fc661e0d7454007b8f0f5fb2eb5f9a9bf380c9c4c48030`);
+> its bundle is `qualifications/meco/d0-calibration-pickup_simple-bundle.json`
+> (SHA-256 `0ba1f570c352d7167ab94c4f84f22706865c6e5da38afdc77a160a2c85087b5a`).
+> Scoped planner, implementer, and reviewer evidence covers eight 150-entry shards,
+> exact manifest/artifact digests, source identity
+> `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`, normalized
+> HIP/WX9100 runtime, and 1,200 records across four strata (100 unique seeds ×
+> repetitions 0, 1, 2), with required safety metrics and source binding verified.
+> This is D0 baseline calibration only; it does not qualify a learned policy.
+> At the separate point-in-time training capture 2026-10-24 05:14:35 UTC, A1 was
+> 65/100 and A2 60/100 on cuda:0/1, A3/C1/C2 queued, and training error was null.
+> These are historical counters, not live status. Target v2 still needs explicit
+> operational margins and review; learned-policy held-out report, CI, and primary
+> gate are absent. No margin approval or held-out result is asserted.
+
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
 **Plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
@@ -66,7 +84,7 @@ The old campaign's checkpoints do not satisfy strict source identity for the cur
 | **3. Deterministic and predictive controls** | D0/D1/D2 evaluation paths and prediction-mode controls exist. The schema-4 paired matrix analyzer validates protocol-bound reports and can calculate deterministic paired cluster-bootstrap intervals. | No current matrix report or interval exists for the requested architecture, control, prediction, penalty, candidate-recall, and fallback comparisons. D3 is not established. |
 | **4. Shared observation and planner contract** | Shared raster/scalar inputs, candidate masks/order, stale-output fallback, legal action support, Plan A penalty provenance, evaluation-to-replay record binding, and generation-based replay publication are implemented. The async broker has deterministic fake-adapter contract coverage, including replacement, freshness, faults, and close; raised inference exceptions no longer kill its worker. No-route replay validation checks complete contiguous action coverage. | No fresh five-track learned-policy replay has been generated and inspected. Broker contract tests do not establish GPU-load freshness or simulator fallback. The new replay tooling does not prove P-shaped routes, robot behavior, collection/scoring, fallback behavior, or representative end-to-end safety. Global planning remains XY AD* with swept SE(2) checks, not full global SE(2). |
 | **5. Training strategy** | Phase 0 protocol/configuration, Phase 1 interfaces, stochastic PPO support, Phase 4 train-split exposure scheduling, and the resumable two-device supervisor exist. Phase 2 collectors/loaders/fitters exist. A human-authored Plan A goal annotation materializer now packages explicit sidecar labels with source/legal/protocol/authority hashes; it invents no labels and marks replay validation as required. | No human-authored expert annotations, independent U oracle, generated annotation dataset, or warm-start artifact is available. The current campaign does not consume warm starts. Baseline variance calibration, a matched evaluation frontier, Phase 4 factor outcome runs, and candidate-source training remain outstanding. |
-| **6. Metrics and decision gates** | Metrics, qualification protocol, confidence interval, calibration, and promotion interfaces exist. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | Qualification remains provisional pending baseline variance review. There is no completed calibration bundle, held-out report, confidence interval on match outcomes, or primary success gate. The active supervisor records a protocol ID, but its evaluation split is diagnostic and has no bound evaluation protocol. |
+| **6. Metrics and decision gates** | Metrics, qualification protocol, confidence interval, calibration, and promotion interfaces exist. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | The D0 baseline calibration report and bundle are complete for `pickup_simple` (see milestone above); this is not learned-policy qualification. Target v2 still requires explicit operational margins and review. The learned-policy held-out report, confidence interval on match outcomes, and primary success gate are absent. The active supervisor records a protocol ID, but its evaluation split is diagnostic and has no bound evaluation protocol. |
 | **7. A/B experiments** | Matrix runs record paired policy rows and bind inputs to schema-4 reports. The new summarizer enforces seed/category/stratum and policy completeness and calculates paired bootstrap intervals; Phase 4 factor completeness is checked. | The analyzer has no experiment results to summarize. The listed A/B experiments, K=8/16/32 candidate recall, P=0 ablation, matched prediction and inference-disable comparisons have not been completed as a current results bundle. |
 | **8. Implementation boundaries and order** | Candidate generation, model adapters, controls, evaluation, replay capture, provenance, deployment interfaces, and the three-pass dashboard are present in the current checkout. | A frozen baseline/fixture evidence package, complete matched five-track bundle, representative replay, qualification, and promotion evidence remain absent. |
 | **9. Unresolved design decisions** | The code exposes candidate K, prediction mode, graph support, penalty mode, profiling, and replay/provenance fields needed to measure several open questions. | Legal graph/bin adequacy, candidate recall, route evaluation cost, prediction calibration/occlusion, held-out generalization, Hailo support, latency, and simulator shortcut resistance remain measurement questions. No result should be inferred from current code or synthetic tests. |

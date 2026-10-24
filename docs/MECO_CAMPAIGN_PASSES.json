@@ -5,7 +5,7 @@
   "passes": [
     {
       "pass": "planner",
-      "status": "complete",
+      "status": "in_progress",
       "provenance": [
         "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
         "Phase 5 export/profile harness plan; isolated worktree codex/meco-plan-remaining",
@@ -32,7 +32,8 @@
         "Phase 4 domain expansion planner pass approved: extend the frozen factor-vs-baseline matrix over registered pressure levels 1–5, preserve other scripted slots, report level-0 unsupported coverage explicitly, and bind exact category/seed/family/layout/start/sensor strata.",
         "Section 6 regret planner pass: current reports did not measure regret against the simulation oracle. Add a strict offline analyzer over replay-bound v2 Plan C branches; score exact archived candidate tables with C1/C2, replay returns, report sampled bounded-set regret and chosen-outcome coverage, and never imply full-action-space optimality. Source carries one mode-specific risk tensor, so D1/D2 contrasts are unavailable unless independently reconstructed.",
         "Section 6 unsuccessful-collection planner contract: expose the count of finalized focal collection-action bouts whose authoritative acquired quantity is known zero; missing event evidence remains unavailable; do not claim causal physical intake failure.",
-        "Fresh integration plan completed: reconciled reviewed staging 5dcf48ce6 with the reviewed C1 replay-integrity chain, identified the execution-ledger conflict and `meco_track_training.py` merge interaction, and ordered validation before a fresh campaign. Candidate: codex/meco-c1-replay-integrated."
+        "Fresh integration plan completed: reconciled reviewed staging 5dcf48ce6 with the reviewed C1 replay-integrity chain, identified the execution-ledger conflict and `meco_track_training.py` merge interaction, and ordered validation before a fresh campaign. Candidate: codex/meco-c1-replay-integrated.",
+        "D0 pickup_simple calibration planning pass: pinned report `qualifications/meco/d0-calibration-pickup_simple.json` (SHA-256 eaf39d5df985c854b157f4abf9fc48a66517cd4864d4486006d0681dda7f76a6; calibration ID 1be58a36b643f3ed48fc661e0d7454007b8f0f5fb2eb5f9a9bf380c9c4c48030) and bundle `qualifications/meco/d0-calibration-pickup_simple-bundle.json` (SHA-256 0ba1f570c352d7167ab94c4f84f22706865c6e5da38afdc77a160a2c85087b5a). Scope is D0 calibration only; no target-v2 margin approval or learned-policy qualification."
       ]
     },
     {
@@ -142,7 +143,8 @@
         "Phase 4 pressure-domain implementation integrated as ea70ec35d/eb77f2a62 from isolated reviewed HEAD 562560ca32daa39bd3434c8321f60cfeecee19d1: factors cover registered levels 1–5 with explicit unsupported categories; exact category/seed and qualification strata are frozen, passed to evaluation, and validated on reports and paired episodes. Static checks only; integrated-tree review and seeded simulator/replay remain pending.",
         "Sampled counterfactual regret analyzer implemented in isolated `scripts/meco_counterfactual_regret.py` and docs; feature commit 53ff9f995, corrected at ba7b65b0. It reconstructs C1/C2 GRU state through the verified teacher prefix, strictly replays each sampled descriptor and compares return/discount/continuation outcomes, and reports regret only for exact chosen IDs with available sampled outcomes. D1/D2 unavailable; claims restricted to sampled bounded-set regret. Static checks only; no GPU/simulator analysis run.",
         "Unsuccessful collection action bout metric implemented in isolated commit 2d1e6638 and schema-compatibility follow-up ee7174d3: ledger v4 adds the exact count, dashboard keeps v3 non-count metrics while reporting the new count null, and known-record coverage is visible. Static checks only; runtime records/replay remain pending.",
-        "Integrated reviewed staging and C1 chain at 006dade5a; followed with f0871458a, which hashes C1/C2 model state once per PPO update while preserving per-row input/candidate/route/risk fingerprints. The candidate remains an active implementation branch; this entry records only the scoped integration."
+        "Integrated reviewed staging and C1 chain at 006dade5a; followed with f0871458a, which hashes C1/C2 model state once per PPO update while preserving per-row input/candidate/route/risk fingerprints. The candidate remains an active implementation branch; this entry records only the scoped integration.",
+        "Recorded D0 pickup_simple calibration milestone: eight 150-entry shards merged into 1,200 records over four strata (100 unique seeds × reps 0,1,2), with source identity 31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350 and normalized HIP/WX9100 runtime; report/bundle digests are pinned in docs/MECO_FULL_PLAN_EXECUTION_STATUS.md. Training capture 2026-10-24T05:14:35Z is explicitly point-in-time (A1 65/100, A2 60/100, three queued, error null)."
       ]
     },
     {
@@ -238,7 +240,8 @@
         "Integrated read-only review approved exact candidate HEAD c5dc562c9ae1aa0989db9f96bbd7a3b3151425d4: analyzer and focused docs match approved feature HEAD ba7b65b0, ledger/status claims are accurate, source_identity remains unaffected, and no merge conflicts exist. Static only; runtime replay/scoring and simulator evaluation remain pending.",
         "Scoped reviewer approved exact isolated collection-bout metric commit ee7174d317fad2fe1de664d3eaffec0f2dc81c56: only finalized known-zero acquired bouts count; v3 legacy aggregates remain available with new metric null; v4 consistency checks and known/total coverage, non-causal UI wording, and docs are correct. No tests or simulator; integrated-tree review and runtime validation remain pending.",
         "Integrated read-only review approved collection-action bout metric at exact candidate HEAD cc08989b8a3f47da1ecf065d55341c963dac04a9: metric/dashboard/docs match isolated v4 review, v3 aggregates are retained with the new field null, v4 coverage is explicit, and prior Phase 4/regret approvals remain ancestors. Static only; simulator-record validation remains pending.",
-        "Independent scoped review approved 006dade5a and re-approved f0871458a. Nine focused files passed 89 tests with one accelerator-only skip under system Python; the equivalent ROCm accelerator check passed on WX9100 GPU 1. Follow-up C1 replay tests passed 2 with one accelerator-only skip; diff check clean. The original failed campaign remains terminal; this is not a whole-plan approval."
+        "Independent scoped review approved 006dade5a and re-approved f0871458a. Nine focused files passed 89 tests with one accelerator-only skip under system Python; the equivalent ROCm accelerator check passed on WX9100 GPU 1. Follow-up C1 replay tests passed 2 with one accelerator-only skip; diff check clean. The original failed campaign remains terminal; this is not a whole-plan approval.",
+        "Scoped reviewer verified eight 150-entry D0 shards, exact manifest/artifact digests, source identity 31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350, normalized HIP/WX9100 runtime, all 1,200 records over four strata, required safety metrics, and source binding for pickup_simple calibration. This is calibration evidence only; target-v2 operational margins/review and learned-policy held-out report/CI/primary gate remain outstanding."
       ]
     }
   ],
