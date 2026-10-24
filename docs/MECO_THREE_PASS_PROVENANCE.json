@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence. The validation-campaign-planner tranche was added on 2026-10-24 from scoped planner notes, implementer commits, the reviewer request-changes finding, and exact-head approval; it records validation-only planning and no final-test disclosure or runtime outcomes. The Phase 4 design-overlay tranche was added on 2026-10-24 from the exact implementer commit, planner pass, and independent exact-head reviewer approval; its ledger distinguishes design coverage from runtime and executed coverage.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence. The validation-campaign-planner tranche was added on 2026-10-24 from scoped planner notes, implementer commits, the reviewer request-changes finding, and exact-head approval; it records validation-only planning and no final-test disclosure or runtime outcomes. The Phase 4 design-overlay tranche was added on 2026-10-24 from the exact implementer commit, planner pass, and independent exact-head reviewer approval; its ledger distinguishes design coverage from runtime and executed coverage. The Phase 4 design scope correction, opponent runtime API, and context runtime API were added on 2026-10-24 from scoped planner/implementer/reviewer records; all entries explicitly separate design/API evidence from wired or executed simulator behavior.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -841,14 +841,14 @@
         "status": "summary-only",
         "artifact": {
           "path": "docs/implementation-provenance/phase4-design-overlay.md",
-          "sha256": "506dd575f9f95603ee2fab49403e14764631f665e3e4f778cfedf97ea8295317",
+          "sha256": "d06053be334feabbcbb9f2fb34c2230b7dc955b4b7b2dd0bc5e9a9ef68d4984e",
           "kind": "scoped-transcript-summary",
           "status": "transcript-summary"
         }
       },
       "implementer": {
-        "commit": "69e7e79b61113e9b64e90ce8e676a60b3b25b777",
-        "candidate_integration_commit": "4375a174d1866f2c2cf6ba8d8f994f5bde082328",
+        "commit": "4033acc8a2a67f0d206247363e6c98ca21ce7a97",
+        "candidate_integration_commit": "5a37fc73c509c3c785958d279b3845cc2b6eb262",
         "paths": [
           "frc_defense/meco_phase4_design.py",
           "qualifications/meco/phase4_design_registry.json",
@@ -856,21 +856,92 @@
           "tests/test_meco_phase4_design.py",
           "docs/implementation-provenance/phase4-design-overlay.md"
         ],
-        "status": "implemented"
+        "status": "implemented",
+        "original_commit": "69e7e79b61113e9b64e90ce8e676a60b3b25b777"
       },
       "reviewer": {
         "artifact": {
           "path": "docs/implementation-provenance/phase4-design-overlay.md",
-          "sha256": "506dd575f9f95603ee2fab49403e14764631f665e3e4f778cfedf97ea8295317",
+          "sha256": "d06053be334feabbcbb9f2fb34c2230b7dc955b4b7b2dd0bc5e9a9ef68d4984e",
           "kind": "scoped-transcript-summary",
           "status": "review-summary"
         },
-        "approved_commit": "69e7e79b61113e9b64e90ce8e676a60b3b25b777",
+        "approved_commit": "4033acc8a2a67f0d206247363e6c98ca21ce7a97",
         "verdict": "approved",
-        "verdict_detail": "Approved exact implementer head after confirming concrete selector expansion, factor-specific coverage, separate design-only axes, all 11 source-plan IDs, and no test-seed disclosure.",
+        "verdict_detail": "Approved exact scope-fix head after verifying exact 14 trench-route categories, robot-contact semantics, overlay/registry digests, and absence of final-test seed values/rows.",
         "status": "approved-summary"
       },
-      "limits": "Five focused tests, compilation, protocol overlay generation, and diff checks passed in the implementer worktree. No runtime stimuli, GPU, simulator, executed campaign, fresh replay, outcome estimate, qualification, or deployment evidence."
+      "limits": "Eight focused contract tests, compile, and exact overlay regeneration passed. No simulator, GPU, or campaign execution."
+    },
+    {
+      "requirement_id": "phase4-opponent-runtime",
+      "title": "Phase 4 deterministic opponent policy pool",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-opponent-runtime.md",
+          "sha256": "ed85dd7d4bd928803ce63797d6c19eaee4b7fef97e9d562f925ecc47e4479b13",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "8a31ae2acaba9b0cb5ab842373f2796c271e65bc",
+        "candidate_integration_commit": "f2867715c08e71fd6365b8ddb5ba742e62109fba",
+        "paths": [
+          "frc_defense/meco_phase4_opponents.py",
+          "tests/test_meco_phase4_opponents.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-opponent-runtime.md",
+          "sha256": "ed85dd7d4bd928803ce63797d6c19eaee4b7fef97e9d562f925ecc47e4479b13",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "f2867715c08e71fd6365b8ddb5ba742e62109fba",
+        "verdict": "approved",
+        "verdict_detail": "Approved exact opponent module head after two fail-closed review rounds for malformed numeric inputs and target-validity metadata.",
+        "status": "approved-summary"
+      },
+      "limits": "Eight focused tests, compilation, and diff checks passed. No simulator/GPU/replay; policy pool is not wired into curriculum or evaluation."
+    },
+    {
+      "requirement_id": "phase4-context-runtime",
+      "title": "Phase 4 team context and exposure runtime APIs",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-context-runtime.md",
+          "sha256": "6e6c68252c8007ba057b45496c198c26fbd814701975d9d7a5e96ff42fe531ef",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "19737bd51429ae41346a3aa7e4435d00d6d943bb",
+        "candidate_integration_commit": "f2867715c08e71fd6365b8ddb5ba742e62109fba",
+        "paths": [
+          "frc_defense/meco_phase4_context.py",
+          "tests/test_meco_phase4_context.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-context-runtime.md",
+          "sha256": "6e6c68252c8007ba057b45496c198c26fbd814701975d9d7a5e96ff42fe531ef",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "f2867715c08e71fd6365b8ddb5ba742e62109fba",
+        "verdict": "approved",
+        "verdict_detail": "Approved exposed APIs on the exact combined candidate head after checking registry alignment, contact geometries, fresh-track gating, and explicit proxy/no-leak limitations.",
+        "status": "approved-summary"
+      },
+      "limits": "Sixteen focused tests, compilation, and diff checks passed. No simulator/GPU/replay; APIs are unwired, contact/recovery remain proxies/unavailable, and pose no-leak is incomplete."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -885,6 +956,7 @@
     "The D0 offline schedule compiler reports work counts only; all 139,800 calibration records remain unrun.",
     "The Plan A offline oracle audit validates future artifacts; no Plan A labels, collected dataset, replay, fit, or warm-start evidence exists.",
     "The validation campaign runner has not been executed; no matched matrix or scenario outcome results exist.",
-    "The Phase 4 design overlay binds exact validation axes but is not runtime implementation or executed coverage; simulator stimuli, fresh replay, and outcomes remain outstanding."
+    "The Phase 4 design overlay binds exact validation axes but is not runtime implementation or executed coverage; simulator stimuli, fresh replay, and outcomes remain outstanding.",
+    "Phase 4 opponent and context APIs are reviewed but unwired; no stimuli, outcome signals, campaign episodes, simulator replay, or qualification evidence are claimed. Pose-offset training remains explicitly no-leak incomplete."
   ]
 }

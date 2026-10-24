@@ -1,16 +1,19 @@
 # MECO learning tracks plan: execution status
 
-> **Phase 4 design contract approved and integrated — 2026-10-24.** Exact
-> implementer commit `69e7e79b61113e9b64e90ce8e676a60b3b25b777` passed
-> independent review and is integrated at `4375a174d1866f2c2cf6ba8d8f994f5bde082328`.
-> The compiler now resolves all 11 Phase 4 requirements to exact protocol axes
-> (466 unique validation case-axis rows); design-only axes remain explicitly
-> outside executed coverage. Five focused tests passed in the implementer
-> worktree. This is design/compiler evidence only: runtime stimuli, campaign
-> execution, simulator replay, and outcome signals remain unimplemented or
-> unrun. The provenance manifest now covers 23 scoped tranches. Since this
-> integration changes Python modules and dashboard provenance, dashboard
-> currentness must be reverified before any replay is generated or reviewed.
+> **Phase 4 contract and runtime APIs reviewed — 2026-10-24.** The contract
+> scope correction `4033acc8a2a67f0d206247363e6c98ca21ce7a97`, opponent API
+> `8a31ae2acaba9b0cb5ab842373f2796c271e65bc`, and context API
+> `19737bd51429ae41346a3aa7e4435d00d6d943bb` are integrated through candidate
+> `f2867715c08e71fd6365b8ddb5ba742e62109fba` and passed scoped independent
+> review. The overlay has 11 requirements and 466 exact validation axes, with
+> trench interception limited to 14 trench-route categories. Runtime modules
+> define seven opponent policies, team starts, teammate actions, contact
+> geometry, and pose-offset transforms, but they are not wired into
+> `CurriculumEnv` or campaign execution. Contact and recovery values remain
+> proxies/unavailable; pose no-leak remains explicitly incomplete. No
+> simulator/replay or GPU evaluation ran. Provenance now covers 25 scoped
+> tranches and its pin is updated; the dashboard must be restarted and verified
+> again before any replay work.
 
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
