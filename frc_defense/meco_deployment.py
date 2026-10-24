@@ -12,14 +12,15 @@ import json
 import platform
 import resource
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
 from torch import nn
 
 from .meco_candidates import CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_MODEL_FEATURE_COUNT
-from .meco_tracks import (MECO_TRACKS, ProductionMecoAdapter,
-                          make_meco_track)
+from .meco_tracks import (HIDDEN, MECO_CANDIDATE_RAW_FEATURE_COUNT,
+    MECO_TRACKS, ProductionMecoAdapter, make_meco_track)
 
 BATCH = 1
 NODES = 256
@@ -29,6 +30,134 @@ CANDIDATES = 16
 RASTER_H = RASTER_W = 64
 GLOBAL_FEATURES = 7
 CANDIDATE_FEATURES = CANDIDATE_MODEL_FEATURE_COUNT
+
+
+def _parameter_dimensions(track: str) -> dict:
+    if track == "A1":
+        return {"raster_channels": 6, "raster_height": RASTER_H,
+            "raster_width": RASTER_W, "global_features": GLOBAL_FEATURES,
+            "hidden_features": HIDDEN, "heading_bins": 8,
+            "behavior_outputs": 5}
+    if track in ("A2", "A3"):
+        return {"nodes": NODES, "node_features": 9, "edge_degree": DEGREE,
+            "regions": REGIONS, "global_features": GLOBAL_FEATURES,
+            "hidden_features": HIDDEN, "heading_bins": 8,
+            "behavior_outputs": 5}
+    if track in ("C1", "C2"):
+        return {"raster_channels": 6 if track == "C2" else None,
+            "raster_height": RASTER_H if track == "C2" else None,
+            "raster_width": RASTER_W if track == "C2" else None,
+            "global_features": GLOBAL_FEATURES, "candidates": CANDIDATES,
+            "candidate_raw_features": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+            "candidate_model_features": CANDIDATE_FEATURES,
+            "hidden_features": HIDDEN}
+    raise ValueError(f"unsupported MECO track: {track}")
+
+
+def _output_contract(track: str) -> list[dict]:
+    if track == "A1":
+        outputs = (("utility", (BATCH, 8, RASTER_H, RASTER_W)),
+            ("penalty", (BATCH, 8, RASTER_H, RASTER_W)),
+            ("behavior_logits", (BATCH, 5)), ("hidden", (BATCH, HIDDEN)))
+    elif track in ("A2", "A3"):
+        outputs = (("utility", (BATCH, NODES)),
+            ("penalty", (BATCH, NODES)),
+            ("behavior_logits", (BATCH, 5)), ("hidden", (BATCH, HIDDEN)))
+    else:
+        outputs = (("candidate_utility", (BATCH, CANDIDATES)),
+            ("uncertainty", (BATCH, CANDIDATES)),
+            ("hidden", (BATCH, HIDDEN)))
+    return [{"name": name, "shape": list(shape), "dtype": "torch.float32"}
+            for name, shape in outputs]
+
+
+def parameter_inventory() -> dict:
+    """Inventory all five model constructors on CPU without loading checkpoints."""
+    root = Path(__file__).resolve().parents[1]
+    source_paths = ("frc_defense/meco_deployment.py",
+        "frc_defense/meco_tracks.py", "frc_defense/meco_candidates.py")
+    source_files = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+                    for name in source_paths}
+    source_digest = hashlib.sha256(json.dumps(source_files, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    models = {}
+    with torch.random.fork_rng(devices=[]):
+        for track in MECO_TRACKS:
+            constructor_defaults = {
+                "A1": {}, "A2": {"region_tokens": REGIONS, "heads": 4},
+                "A3": {"region_tokens": REGIONS, "heads": 4},
+                "C1": {"width": HIDDEN},
+                "C2": {"tokens": REGIONS, "heads": 4},
+            }[track]
+            dimensions = _parameter_dimensions(track)
+            input_tensors = dummy_inputs(track, device="cpu")
+            input_contract = [{"name": name, "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype)} for name, tensor in
+                zip(input_names(track), input_tensors)]
+            output_contract = _output_contract(track)
+            config = {"factory": "frc_defense.meco_tracks.make_meco_track",
+                "track": track,
+                "candidate_features_argument": CANDIDATE_BASE_FEATURE_COUNT,
+                "resolved_constructor_defaults": constructor_defaults,
+                "dimensions": dimensions, "input_contract": input_contract,
+                "output_contract": output_contract, "device": "cpu"}
+            model = make_meco_track(track,
+                candidate_features=CANDIDATE_BASE_FEATURE_COUNT).cpu()
+            parameters = list(model.named_parameters())
+            total = sum(parameter.numel() for _, parameter in parameters)
+            trainable = sum(parameter.numel() for _, parameter in parameters
+                            if parameter.requires_grad)
+            by_dtype = defaultdict(lambda: {"tensor_count": 0, "parameters": 0,
+                                            "trainable_parameters": 0})
+            by_shape = defaultdict(lambda: {"tensor_count": 0, "parameters": 0,
+                                            "trainable_parameters": 0})
+            for _, parameter in parameters:
+                dtype = str(parameter.dtype)
+                shape = tuple(parameter.shape)
+                by_dtype[dtype]["tensor_count"] += 1
+                by_dtype[dtype]["parameters"] += parameter.numel()
+                by_dtype[dtype]["trainable_parameters"] += (
+                    parameter.numel() if parameter.requires_grad else 0)
+                shape_key = (dtype, shape)
+                by_shape[shape_key]["tensor_count"] += 1
+                by_shape[shape_key]["parameters"] += parameter.numel()
+                by_shape[shape_key]["trainable_parameters"] += (
+                    parameter.numel() if parameter.requires_grad else 0)
+            module_counts = []
+            for module_name, module in model.named_modules():
+                direct = list(module.parameters(recurse=False))
+                if not direct:
+                    continue
+                module_counts.append({"module": module_name or "<root>",
+                    "module_type": type(module).__name__,
+                    "parameters": sum(parameter.numel() for parameter in direct),
+                    "trainable_parameters": sum(parameter.numel() for parameter in direct
+                                                  if parameter.requires_grad)})
+            config_digest = hashlib.sha256(json.dumps(config, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest()
+            models[track] = {"model_class": type(model).__name__,
+                "parameter_count": total, "trainable_parameter_count": trainable,
+                "dtype_totals": [{"dtype": dtype, **counts}
+                    for dtype, counts in sorted(by_dtype.items())],
+                "dtype_shape_totals": [{"dtype": dtype, "shape": list(shape), **counts}
+                    for (dtype, shape), counts in sorted(by_shape.items())],
+                "per_module_counts": module_counts,
+                "configuration": config,
+                "configuration_sha256": config_digest,
+                "dimensions": dimensions,
+                "input_contract": input_contract,
+                "output_contract": output_contract}
+            del model
+    return {"schema": "meco-parameter-inventory-v1",
+        "basis": "fresh CPU model constructors; no checkpoint weights loaded",
+        "tracks": list(MECO_TRACKS), "source_files": source_files,
+        "source_files_sha256": source_digest, "models": models,
+        "limitations": ["Parameter counts and tensor interface metadata do not prove checkpoint/export parity, runtime latency, Hailo compiler support, or robot deployment."]}
+
+
+def export_manifest(reports: list[dict]) -> dict:
+    return {"schema": "meco-onnx-export-v1", "exports": reports,
+        "parameter_inventory": parameter_inventory()}
 
 
 class ExportAdapter(nn.Module):
@@ -322,6 +451,7 @@ def profile_report(tracks, checkpoint_root: Path, iterations=200, warmup=30):
             results.append({"track": track, **benchmark(track, checkpoint, device, iterations, warmup)})
     return {"schema": "meco-synthetic-scorer-profile-v1", "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "torch_version": torch.__version__, "platform": platform.platform(),
+        "parameter_inventory": parameter_inventory(),
         "evidence_class": "synthetic trained-scorer microbenchmark; not deployment qualification",
         "devices_tested": available, "hailo": hailo, "results": results,
         "limitations": ["Synthetic fixed-shape inputs; no simulator feature construction or AD* route search.",
