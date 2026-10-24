@@ -1,5 +1,17 @@
 # MECO learning tracks plan: execution status
 
+> **Phase 4 design contract approved and integrated — 2026-10-24.** Exact
+> implementer commit `69e7e79b61113e9b64e90ce8e676a60b3b25b777` passed
+> independent review and is integrated at `4375a174d1866f2c2cf6ba8d8f994f5bde082328`.
+> The compiler now resolves all 11 Phase 4 requirements to exact protocol axes
+> (466 unique validation case-axis rows); design-only axes remain explicitly
+> outside executed coverage. Five focused tests passed in the implementer
+> worktree. This is design/compiler evidence only: runtime stimuli, campaign
+> execution, simulator replay, and outcome signals remain unimplemented or
+> unrun. The provenance manifest now covers 23 scoped tranches. Since this
+> integration changes Python modules and dashboard provenance, dashboard
+> currentness must be reverified before any replay is generated or reviewed.
+
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
 > and is active as PID `1713013`, with this candidate worktree as its working

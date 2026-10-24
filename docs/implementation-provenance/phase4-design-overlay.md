@@ -1,43 +1,38 @@
 # Phase 4 validation design overlay
 
-This tranche compiles an explicit validation-only design for all eleven
-Phase 4 requirements in the source plan. Run it with:
+## Three-pass record
 
-```bash
-python3 -m frc_defense.meco_phase4_design \
-  --protocol qualifications/meco/protocol.json \
-  --registry qualifications/meco/phase4_design_registry.json \
-  --output qualifications/meco/phase4_design_overlay.json
-```
+- **Planner:** audited the Phase 4 requirements against the existing scenario
+  and validation protocol. The plan defines 11 requirement IDs, exact matched
+  treatment/control case axes, validation-only seed inheritance, whole-family
+  separation, and distinct design-only axes. It specifies no final-test seeds,
+  safety margins, or qualification claim.
+- **Implementer:** `69e7e79b61113e9b64e90ce8e676a60b3b25b777` compiles the
+  protocol-bound registry into an overlay. It resolves selectors to exact
+  protocol axes, enforces all 11 IDs, rejects unknown selectors, and emits
+  design-only policy/team-pose/teammate/bump/pose variants separately from
+  protocol and executed coverage. The integration candidate contains this
+  change at `4375a174d1866f2c2cf6ba8d8f994f5bde082328`.
+- **Independent reviewer:** approved exact implementer commit
+  `69e7e79b61113e9b64e90ce8e676a60b3b25b777`, specifically verifying the
+  corrected selector resolution and factor-specific coverage scopes.
 
-The output binds the qualification protocol ID and raw file SHA-256, plus the
-raw factor-registry SHA-256. It resolves each selector to exact factor-specific
-scenario, category, layout, defender-family, start, and sensor case rows. It
-reports planned matched factor/no-factor coverage, factor IDs, required outcome
-signals, and explicit availability states. Design-only axes such as opponent
-policy, team-pose, teammate, bump-geometry, and pose-offset variants are emitted
-as separate cross-product rows and are explicitly excluded from protocol and
-executed coverage counts. Unknown selectors fail closed. The compiler also
-checks the exact eleven source-plan requirement IDs.
+## Evidence and limits
 
-The compiler verifies whole defender-policy-family separation for training and
-validation; the no-defender `none` case is not treated as a policy family. The
-overlay does not serialize seed values or final-test rows.
+The checked-in overlay binds protocol
+`dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2`, its raw
+file SHA-256, and the registry digest. It contains 466 unique validation case
+axes and no serialized seed values or final-test rows. The exact coverage is
+factor-specific: pressure factors resolve to 152 case axes each; the reactive
+pool to 304; starts to 152; teammate protocol cases to 188; sensor factors to
+466; bump cases to 304; and pose mislocalization to 152. Separate design-only
+axes contain 7 opponent policies, 3 legal team-pose sets, 5 teammate profiles,
+3 bump geometries, and 3 focal-pose offsets. These design-only rows are not
+counted as protocol or executed coverage.
 
-This is a design/compiler contract only. The currently registered runtime
-factors cover feint reversal, 120 ms observation delay, independent low
-confidence, and abrupt orbit-to-pursuit switching. Other requirements are
-marked design-only. No new simulator stimuli are implemented here, and no
-factor outcomes were run. Generic score/contact telemetry is identified only
-as a proxy where applicable; factor-specific reaction, interception, crossing,
-recovery, and teammate-behavior signals remain unavailable. No safety margins
-or qualification claim are included.
-
-The checked-in overlay is bound to protocol `dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2`
-and contains an inventory of 466 unique validation case-axis rows. Factor-scoped
-protocol case counts are 152 for each pressure-category condition, 304 for the
-reactive defender pool across the two pressure scenarios, 152 for full-match
-team starts, 188 across full-match and team-delivery teammate cases, 466 for
-sensor conditions, 304 for pressure/full-match bump cases, and 152 for
-full-match pose mislocalization. These counts describe planned protocol axes,
-not executed episodes; design-only axes remain separate.
+The implementer reports five focused tests passing, plus Python compilation,
+actual protocol compilation, and `git diff --check`. No simulator or GPU was
+used. This tranche supplies a reviewed design/compiler contract only: runtime
+stimuli, full-factor campaign execution, simulator replays, realized outcome
+signals, qualification, and deployment evidence remain outstanding. The
+current training source remains separate and unchanged.
