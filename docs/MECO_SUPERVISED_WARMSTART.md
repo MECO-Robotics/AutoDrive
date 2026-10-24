@@ -38,7 +38,7 @@ Example using seeds assigned to the protocol's training partition:
 ```sh
 python -m frc_defense.meco_supervised collect \
   --output evaluations/meco-supervised/train.jsonl \
-  --scenario pickup_simple --category single --seeds 101 102 \
+  --scenario pickup_simple --category single --seeds 11518889661825024 11518889661825028 \
   --qualification-protocol qualifications/meco/protocol.json --device cuda:0
 python -m frc_defense.meco_supervised warm-start \
   --track C1 --dataset evaluations/meco-supervised/train.jsonl \
@@ -111,7 +111,7 @@ simulator rollouts):
 ```sh
 python -m frc_defense.meco_supervised collect-counterfactual-v2 \
   --output evaluations/meco-supervised/counterfactual-v2.jsonl \
-  --scenario pickup_simple --category single --seeds 101 \
+  --scenario pickup_simple --category single --seeds 11518889661825024 \
   --qualification-protocol qualifications/meco/protocol.json --device cuda:0
 ```
 
@@ -150,6 +150,36 @@ succeeds on the configured runtime/device. A successful v2 fit requires that
 replay to pass when the command is run; Phase 2 still needs a representative
 end-to-end simulator evaluation before its behavior claims are treated as
 validated.
+
+### Matched C1/C2 Phase 2 campaign descriptor
+
+`frc_defense.meco_phase2_campaign` describes the C1/C2 collection and fitting
+sequence without importing the simulator, writing campaign outputs, or taking
+a device lease. Its descriptor binds a clean source commit and source-tree
+digest, protocol file and ID digests, exact unique train-only seeds, indexed
+device, fixed collector settings (K=16, CV, 160 physics ticks, 12 ticks per
+macro, max C/A samples 8, gamma 0.993), and a fresh isolated output root.
+Descriptors are revalidated before execution. Descriptor writing is a separate
+explicit command and never creates the campaign output root.
+
+```sh
+python -m frc_defense.meco_phase2_campaign describe \
+  --protocol qualifications/meco/protocol.json \
+  --scenario pickup_simple --category single --seeds 11518889661825024 11518889661825028 \
+  --device cuda:0 --output-root "/mnt/zfs-storage/All Drives/Brian Data/Projects/MECO Outputs/C1-C2" \
+  --descriptor /tmp/meco-c1-c2-descriptor.json
+python -m frc_defense.meco_phase2_campaign validate /tmp/meco-c1-c2-descriptor.json
+python -m frc_defense.meco_phase2_campaign execute /tmp/meco-c1-c2-descriptor.json
+```
+
+Only the explicit `execute` command acquires the shared indexed-device lease,
+claims the fresh output root, collects the shared matched-prefix dataset once,
+fits C1 then C2 on the same dataset/device, and validates both weight files.
+The report binds dataset and artifact hashes, counts, stage order, and failures.
+Its `phase2_ready` and `qualification_eligible` fields remain false: executing
+collection and fitting does not independently audit replay evidence or qualify
+the learned policies. The workflow does not supply Plan A's missing P-route
+labels and does not complete the other Phase 2 tracks.
 
 ### Plan A direct value warm start (v3 artifact)
 
