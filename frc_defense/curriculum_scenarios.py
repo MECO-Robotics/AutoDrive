@@ -108,14 +108,32 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
 
     def _curriculum_commands(self, commands, active):
         if not hasattr(self, 'curriculum'):
-            return commands
+            return torch.where(active[:, None, None], commands, 0.)
+        factor = getattr(self, 'phase4_factor_config', None)
+        stationary_slot = (factor['blocker_slot']
+            if factor and factor['kind'] == 'stationary_blockage' else None)
+        if stationary_slot is not None:
+            commands[:, stationary_slot] = 0.
+            target = getattr(self, 'stationary_blockage_assigned_pose', None)
+            if target is not None:
+                pose = self.sim.pose[:, stationary_slot]
+                distance = torch.linalg.vector_norm(pose[:, :2] - target[:, :2], dim=-1)
+                angle_delta = torch.atan2(torch.sin(pose[:, 2] - target[:, 2]),
+                                          torch.cos(pose[:, 2] - target[:, 2])).abs()
+                valid = ((distance <= factor['pose_tolerance_m']) &
+                         (angle_delta <= factor['heading_tolerance_rad']))
+                prior = self.phase4_runtime_metrics['stationary_blockage_pose_valid']
+                self.phase4_runtime_metrics['stationary_blockage_pose_valid'] = prior & valid
         pressure = self.curriculum['pressure']
         if pressure['level'] == 0:
-            return commands
+            return torch.where(active[:, None, None], commands, 0.)
         # Scripted blockers still use ordinary chassis/contact physics. They
         # have NN controller slots so deterministic offense cannot overwrite
         # these scripts; their strategic action is hold.
         for slot in pressure['slots']:
+            if slot == stationary_slot:
+                commands[:, slot] = 0.
+                continue
             commands[:, slot] = 0.
             policy_id = getattr(self, 'phase4_opponent_policy_id', None)
             if policy_id is not None:
@@ -139,7 +157,6 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     max_speed_mps=self.sim.speed[:, slot])
                 continue
             level = pressure['level']
-            factor = getattr(self, 'phase4_factor_config', None)
             if factor and slot == 0 and factor['kind'] in (
                     'feinting_opponent', 'abrupt_opponent_policy_change'):
                 tick = factor['reversal_tick'] if factor['kind'] == 'feinting_opponent' else factor['switch_tick']
@@ -225,6 +242,9 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     if category not in definition.required_categories:
         raise ValueError(f'unknown category for {scenario_id}: {category}')
     phase4_factor = validate_phase4_factor(phase4_factor)
+    if (phase4_factor and phase4_factor['kind'] == 'stationary_blockage' and
+            contact_geometry_id is not None):
+        raise ValueError('stationary blockage cannot be combined with contact geometry')
     if phase4_opponent_policy_id is not None:
         if phase4_opponent_policy_id not in POLICY_POOL:
             raise ValueError('unknown Phase 4 opponent policy ID')
@@ -328,7 +348,10 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'confidence_cap_refresh_count': 0,
         'confidence_cap_sensed_track_count': 0,
         'confidence_cap_reduced_track_values': 0,
-        'confidence_cap_final_mean': None}
+        'confidence_cap_final_mean': None,
+        'stationary_blockage_assigned': False,
+        'stationary_blockage_pose_valid': torch.ones(
+            env.n, device=env.device, dtype=torch.bool)}
     if env.phase4_confidence_cap is not None:
         env.phase4_runtime_metrics['confidence_cap_applied'] = float(env.phase4_confidence_cap)
     env.curriculum = {'scenario_id': scenario_id, 'scenario_version': definition.version,
@@ -619,6 +642,16 @@ def reset_curriculum_scenario(env, seed):
             'runtime_profile_name': start_assignment['runtime_profile_name'],
             'profile_config_sha256': start_assignment['profile_config_sha256'],
             'assignment_sha256': start_assignment['assignment_sha256']}
+    if (env.phase4_factor_config is not None and
+            env.phase4_factor_config['kind'] == 'stationary_blockage'):
+        factor = env.phase4_factor_config
+        slot = factor['blocker_slot']
+        env.sim.pose[:, slot] = env.sim.pose.new_tensor((
+            factor['blocker_x_m'], pressure['anchor_y'], math.pi))
+        env.stationary_blockage_assigned_pose = env.sim.pose[:, slot].clone()
+        env.phase4_runtime_metrics['stationary_blockage_assigned'] = True
+        env.phase4_runtime_metrics['stationary_blockage_pose_valid'] = torch.ones(
+            env.n, device=env.device, dtype=torch.bool)
     config['schedule'] = schedule
     env.curriculum_schedule = schedule
     env.match_elapsed.fill_(-env.dt)

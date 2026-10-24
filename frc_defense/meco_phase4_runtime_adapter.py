@@ -17,6 +17,31 @@ from .meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
 # Keep route endpoint matching aligned with evaluate_routes' grid tolerance.
 PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR = 0.72
 
+# The full paired design includes the five tracks, three P=0 controls, and
+# three deterministic controls. Keep this list aligned with the evaluator's
+# exact comparison grid; aliases or partial policy sets are not accepted.
+PHASE4_ROUTE_OUTCOME_POLICY_IDS = (
+    "A1", "A2", "A3", "C1", "C2", "A1_P0", "A2_P0", "A3_P0",
+    "D0", "D1", "D2")
+PHASE4_ROUTE_OUTCOME_FACTOR_IDS = (
+    "blockage.stationary", "opponent.feint_reversal",
+    "opponent.abrupt_policy_change", "contact.robot_bump")
+PHASE4_ROUTE_FACTOR_ID_BY_KIND = {
+    "stationary_blockage": "blockage.stationary",
+    "feinting_opponent": "opponent.feint_reversal",
+    "abrupt_opponent_policy_change": "opponent.abrupt_policy_change",
+}
+
+
+def phase4_route_condition(factor_id: str, *, phase4_factor: dict | None,
+                           contact_factor_id: str | None) -> str:
+    """Bind paired route outcome rows to the scheduled treatment condition."""
+    active_factor_id = contact_factor_id
+    if active_factor_id is None and isinstance(phase4_factor, dict):
+        active_factor_id = PHASE4_ROUTE_FACTOR_ID_BY_KIND.get(
+            phase4_factor.get("kind"))
+    return "factor_treatment" if factor_id == active_factor_id else "no_factor"
+
 
 _COMMON = {
     "runtime_event": None,
@@ -34,9 +59,14 @@ _COMMON = {
 PHASE4_REQUIREMENT_BINDINGS = {
     "stationary_blockage": {**_COMMON,
         "factor_ids": ("blockage.stationary",),
-        "runtime_event": None,
+        "runtime_factor_kind": "stationary_blockage",
+        "runtime_factor_by_factor_id": {"blockage.stationary": "stationary_blockage"},
+        "runtime_event": "phase4_runtime_metrics.stationary_blockage_assigned",
+        "runtime_event_by_factor_id": {"blockage.stationary":
+            "phase4_runtime_metrics.stationary_blockage_assigned"},
         "required_signals": ("route_completion_rate", "time_lost_to_blockage_s", "successful_alternate_crossing_rate"),
-        "limitations": ("no validation-run stationary-blockage assignment", "all three required signals unavailable")},
+        "stimulus_supported": True,
+        "limitations": ("registered slot-0 blocker pose/action is wired, but simulator placement and blockage outcome remain unvalidated", "all three required outcome signals remain non-authoritative")},
     "direct_pursuit": {**_COMMON,
         "factor_ids": ("opponent.direct_pursuit",),
         "runtime_event": None,
@@ -287,6 +317,452 @@ def phase4_selected_goal_endpoint_completion_record(goal_attempts, *, episode_id
     }
 
 
+def phase4_route_completion_record(goal_attempts, *, binding: dict):
+    """Fold consecutive macro rows into stable route/goal lifecycles.
+
+    A lifecycle completes only on the evaluator-truth joint endpoint event.
+    Replacement, episode horizon, execution gaps, and measurement gaps censor
+    unfinished lifecycles; no failure is inferred from abandonment or timeout.
+    """
+    required_binding = ("episode_id", "policy_id", "scenario_id", "category",
+                        "case_id", "seed", "split", "factor_id", "condition",
+                        "source_identity_sha256")
+    if (not isinstance(binding, dict) or any(name not in binding for name in
+            required_binding) or any(not isinstance(binding[name], str) or
+            not binding[name] for name in required_binding if name != "seed") or
+            type(binding.get("seed")) is not int or binding["seed"] < 0 or
+            len(binding["source_identity_sha256"]) != 64 or any(
+                char not in "0123456789abcdef" for char in
+                binding["source_identity_sha256"])):
+        raise ValueError("route completion has incomplete episode binding")
+    ledger_status = ("goal_ledger_unavailable" if goal_attempts is None else
+                     "goal_ledger_available" if isinstance(goal_attempts, list) else
+                     "malformed_goal_ledger_input")
+    attempts = goal_attempts if isinstance(goal_attempts, list) else []
+    outcomes = []
+    unsupported_identity_rows = []
+    censored_reasons = {}
+    completed = observed_failure = censored = 0
+    current = None
+
+    def close(reason=None):
+        nonlocal current, completed, observed_failure, censored
+        if current is None:
+            return
+        if reason:
+            current["censor_reasons"].append(reason)
+        current["censor_reasons"] = sorted(set(current["censor_reasons"]))
+        if current["explicit_failure_event"] and not current["censor_reasons"]:
+            current["outcome"] = "observed_failure"
+            observed_failure += 1
+        elif current["completion_event"] and not current["censor_reasons"]:
+            current["outcome"] = "completed"
+            completed += 1
+        else:
+            current["outcome"] = "censored"
+            censored += 1
+            if not current["censor_reasons"]:
+                current["censor_reasons"].append("registered_objective_event_unavailable")
+            for censor_reason in current["censor_reasons"]:
+                censored_reasons[censor_reason] = censored_reasons.get(censor_reason, 0) + 1
+        current["objective_event"] = ({
+            "schema": "meco-evaluator-route-endpoint-v1",
+            "source": "evaluator_terminal_slot3_truth_after_executed_macro",
+            "macro_index": current["end_macro_index"],
+            "distance_m": current.get("terminal_goal_distance_m"),
+            "heading_required": current.get("goal_heading_required"),
+            "heading_error_rad": current.get("terminal_heading_error_rad"),
+            "goal_xy_m": current.get("goal_xy_m"),
+            "terminal_pose_xy_m": current.get("terminal_pose_xy_m"),
+            "terminal_pose_heading_rad": current.get("terminal_pose_heading_rad"),
+            "endpoint_rule": "distance <= 0.04 m and, when required, absolute heading error <= 0.1 rad",
+        } if current["completion_event"] else {
+            "schema": "meco-registered-route-objective-failure-v1",
+            "source": "registered_route_objective_failure_event",
+        } if current["explicit_failure_event"] else None)
+        current.pop("completion_event", None)
+        current.pop("explicit_failure_event", None)
+        current["binding"] = dict(binding)
+        current["source_identity_sha256"] = binding["source_identity_sha256"]
+        outcomes.append(current)
+        current = None
+
+    previous_macro_index = None
+    for index, row in enumerate(attempts):
+        row = row if isinstance(row, dict) else {}
+        macro_index = row.get("macro_index")
+        valid_macro_index = type(macro_index) is int and macro_index >= 0
+        gap = (not valid_macro_index or (previous_macro_index is not None and
+                macro_index != previous_macro_index + 1))
+        if gap:
+            close("macro_index_gap_or_invalid")
+        previous_macro_index = macro_index if valid_macro_index else None
+        goal_xy = row.get("goal_xy_m")
+        goal_heading = row.get("goal_heading_rad")
+        route_id = row.get("route_id")
+        goal_lifecycle_id = row.get("goal_lifecycle_id")
+        valid_xy = (isinstance(goal_xy, list) and len(goal_xy) == 2 and
+                    all(type(value) in (int, float) and math.isfinite(value)
+                        for value in goal_xy))
+        valid_identity = (isinstance(goal_lifecycle_id, str) and goal_lifecycle_id and
+                          isinstance(row.get("selected_goal_id"), str) and
+                          row["selected_goal_id"] and isinstance(route_id, str) and route_id and
+                          valid_xy and (goal_heading is None or
+                          (type(goal_heading) in (int, float) and math.isfinite(goal_heading))))
+        if not valid_identity:
+            close("stable_route_goal_identity_unavailable")
+            unsupported_identity_rows.append({
+                "ledger_row_index": index,
+                "macro_index": macro_index if valid_macro_index else None,
+                "selected_goal_id": row.get("selected_goal_id"),
+                "route_id": route_id,
+                "reason": "stable_route_goal_identity_unavailable",
+            })
+            continue
+        if current is not None and goal_lifecycle_id != current["goal_lifecycle_id"]:
+            close("route_replaced_before_completion")
+        if current is None:
+            lifecycle_key = {"binding": binding, "goal_lifecycle_id": goal_lifecycle_id,
+                             "start_macro_index": macro_index if valid_macro_index else index}
+            lifecycle_id = hashlib.sha256(json.dumps(lifecycle_key,
+                sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            current = {"route_attempt_id": lifecycle_id,
+                "start_macro_index": macro_index if valid_macro_index else index,
+                "end_macro_index": macro_index if valid_macro_index else index,
+                "selected_goal_id": row.get("selected_goal_id"),
+                "goal_lifecycle_id": goal_lifecycle_id,
+                "route_id": route_id,
+                "goal_xy_m": goal_xy,
+                "goal_heading_rad": goal_heading,
+                "executed_action_trace": [], "censor_reasons": [],
+                "completion_event": False, "explicit_failure_event": False,
+                "route_goal_identity": goal_lifecycle_id}
+        current["selected_goal_id"] = row.get("selected_goal_id")
+        current["goal_xy_m"] = goal_xy
+        current["goal_heading_rad"] = goal_heading
+        current["end_macro_index"] = macro_index if valid_macro_index else index
+        if not valid_macro_index:
+            current["censor_reasons"].append("macro_index_unavailable")
+        if not isinstance(row.get("episode_id"), str) or row["episode_id"] != binding["episode_id"]:
+            current["censor_reasons"].append("episode_binding_mismatch")
+        if (not isinstance(row.get("source_identity_sha256"), str) or
+                row["source_identity_sha256"] != binding["source_identity_sha256"]):
+            current["censor_reasons"].append("source_binding_mismatch")
+        current.setdefault("route_ids_observed", [])
+        if isinstance(row.get("route_id"), str) and row["route_id"]:
+            current["route_ids_observed"].append(row["route_id"])
+            current["route_id"] = row["route_id"]
+        else:
+            current["censor_reasons"].append("planner_route_record_unavailable")
+        if row.get("execution_valid") is not True:
+            current["censor_reasons"].extend(row.get("execution_exclusion_reasons") or
+                                               ["execution_validity_unavailable"])
+        elif row.get("execution_exclusion_reasons"):
+            current["censor_reasons"].append(
+                "execution_validity_conflicts_with_exclusion_reasons")
+        trace = row.get("executed_action_trace")
+        if (not isinstance(trace, list) or not trace or any(
+                type(action) is not int or action < 0 for action in trace)):
+            current["censor_reasons"].append("executed_outer_action_trace_missing_or_invalid")
+        else:
+            current["executed_action_trace"].extend(trace)
+        distance = row.get("terminal_goal_distance_m")
+        heading_required = row.get("goal_heading_required")
+        heading_error = row.get("terminal_heading_error_rad")
+        terminal_xy = row.get("terminal_pose_xy_m")
+        terminal_heading = row.get("terminal_pose_heading_rad")
+        valid_terminal_xy = (isinstance(terminal_xy, list) and len(terminal_xy) == 2 and
+            all(type(value) in (int, float) and math.isfinite(value) for value in terminal_xy))
+        computed_distance = (math.dist(terminal_xy, goal_xy) if valid_terminal_xy and valid_xy
+                             else None)
+        computed_heading_error = None
+        if (heading_required is True and valid_xy and
+                type(goal_heading) in (int, float) and
+                type(terminal_heading) in (int, float) and
+                math.isfinite(goal_heading) and math.isfinite(terminal_heading)):
+            computed_heading_error = abs(math.atan2(
+                math.sin(terminal_heading - goal_heading),
+                math.cos(terminal_heading - goal_heading)))
+        valid_endpoint = (type(distance) in (int, float) and math.isfinite(distance) and
+            type(heading_required) is bool and computed_distance is not None and
+            math.isclose(distance, computed_distance, rel_tol=0., abs_tol=1e-6) and
+            ((not heading_required and heading_error is None) or
+             (heading_required and computed_heading_error is not None and
+              type(heading_error) in (int, float) and math.isfinite(heading_error) and
+              math.isclose(heading_error, computed_heading_error, rel_tol=0., abs_tol=1e-6))))
+        if not valid_endpoint:
+            current["censor_reasons"].append("terminal_endpoint_measurement_unavailable")
+        elif computed_distance <= .04 and (not heading_required or computed_heading_error <= .1):
+            current["terminal_goal_distance_m"] = distance
+            current["goal_heading_required"] = heading_required
+            current["terminal_heading_error_rad"] = heading_error
+            current["terminal_pose_xy_m"] = terminal_xy
+            current["terminal_pose_heading_rad"] = terminal_heading
+            current["completion_event"] = True
+            close()
+        # observed_failure is only accepted from a future explicitly registered
+        # evaluator event; current runtime records do not emit one.
+        elif row.get("route_failure_event_schema") == \
+                "meco-registered-route-objective-failure-v1" and \
+                row.get("route_failure_event") is True:
+            current["explicit_failure_event"] = True
+            close()
+    close("episode_ended_before_completion")
+    denominator = len(outcomes)
+    fully_observed = denominator > 0 and censored == 0
+    return {
+        "schema": "meco-phase4-route-completion-attempts-v1",
+        "binding": dict(binding),
+        "objective": "stable selected route-goal lifecycle reaches within 0.04 m; when heading is required, absolute heading error <= 0.1 rad",
+        "attempt_denominator_semantics": "consecutive macro rows sharing the stable evaluator goal_lifecycle_id form one lifecycle even when per-macro candidate or planner route IDs advance; lifecycle replacement, actual macro-index gaps, missing goal geometry, and episode horizon censor unfinished lifecycles",
+        "unsupported_identity_row_count": len(unsupported_identity_rows),
+        "unsupported_identity_rows": unsupported_identity_rows,
+        "ledger_input_status": ledger_status,
+        "goal_attempt_coverage_available": binding.get("goal_attempt_coverage_available") is True,
+        "attempted": denominator, "completed": completed,
+        "observed_failure": observed_failure, "censored": censored,
+        "censored_reasons": censored_reasons,
+        "route_completion_rate": (completed / denominator
+            if fully_observed else None),
+        "rate_null_reason": (None if fully_observed else
+            "no_route_goal_lifecycles_or_one_or_more_censored_attempts"),
+        "attempts": outcomes,
+        "policy_support_status": (
+            "unsupported_native_d0_has_no_goal_attempt_ledger"
+            if binding["policy_id"] == "D0" and not attempts else
+            "unsupported_goal_ledger_missing_or_malformed" if not isinstance(goal_attempts, list) else
+            "unsupported_goal_attempt_coverage_incomplete" if binding.get("goal_attempt_coverage_available") is False else
+            "unsupported_goal_lifecycle_identity_missing" if unsupported_identity_rows else
+            "unsupported_no_route_goal_lifecycle_records" if not attempts else
+            "evaluator_goal_attempt_records_available"),
+        "authoritative_signal_available": False,
+        "qualification_eligible": False,
+    }
+
+
+def phase4_route_completion_campaign_record(attempt_rows, expected_assignments):
+    """Aggregate explicitly observed route outcomes without inventing labels.
+
+    Each attempt must be bound to its paired design assignment and include the
+    actual outer-action trace and planner goal identity. `outcome` is supplied
+    only by an evaluator with a registered route-completion objective event;
+    absent/invalid outcomes remain censored. A rate is emitted only when every
+    assigned attempt in that aggregate has an observed completed/failure label.
+    """
+    if not isinstance(expected_assignments, list) or not expected_assignments:
+        raise ValueError("route completion requires expected paired assignments")
+    expected = {}
+    binding_keys = ("policy_id", "factor_id", "case_id", "seed", "condition")
+    provenance_keys = ("source_identity_sha256", "episode_id", "scenario_id",
+                       "category", "execution_device", "checkpoint_sha256",
+                       "condition_id")
+    for row in expected_assignments:
+        if not isinstance(row, dict) or any(key not in row for key in binding_keys):
+            raise ValueError("expected route assignment has incomplete identity")
+        key = tuple(row[key] for key in binding_keys)
+        if (row["policy_id"] not in PHASE4_ROUTE_OUTCOME_POLICY_IDS or
+                row["factor_id"] not in PHASE4_ROUTE_OUTCOME_FACTOR_IDS or
+                row["condition"] not in ("no_factor", "factor_treatment") or
+                not isinstance(row["case_id"], str) or not row["case_id"] or
+                type(row["seed"]) is not int or row["seed"] < 0 or key in expected):
+            raise ValueError("expected route assignment is invalid or duplicated")
+        missing_provenance = []
+        for name in provenance_keys:
+            value = row.get(name)
+            if (name == "episode_id" and value is None and
+                    row.get("provenance_status") in (
+                        "treatment_not_scheduled", "record_missing")):
+                continue
+            if (name == "checkpoint_sha256" and value is None and
+                    row.get("policy_id") in ("D0", "D1", "D2")):
+                continue
+            if not isinstance(value, str) or not value:
+                missing_provenance.append(name)
+        if missing_provenance:
+            raise ValueError("expected route assignment lacks full provenance")
+        try:
+            device_binding = json.loads(row["execution_device"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("expected route assignment has unnormalized device provenance") from exc
+        if (not isinstance(device_binding, dict) or
+                json.dumps(device_binding, sort_keys=True, separators=(",", ":"),
+                           allow_nan=False) != row["execution_device"]):
+            raise ValueError("expected route assignment has unnormalized device provenance")
+        for digest_name in ("source_identity_sha256", "checkpoint_sha256"):
+            digest = row[digest_name]
+            if digest is None and row.get("policy_id") in ("D0", "D1", "D2"):
+                continue
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                raise ValueError("expected route assignment has invalid provenance digest")
+        expected[key] = 0
+    present_policy_ids = {row["policy_id"] for row in expected_assignments}
+    if present_policy_ids != set(PHASE4_ROUTE_OUTCOME_POLICY_IDS):
+        raise ValueError("route assignments do not cover all 11 registered policy IDs")
+    present_factor_ids = {row["factor_id"] for row in expected_assignments}
+    if present_factor_ids != set(PHASE4_ROUTE_OUTCOME_FACTOR_IDS):
+        raise ValueError("route assignments do not cover all four route-outcome factors")
+    paired_groups = {(row["factor_id"], row["case_id"], row["seed"])
+                     for row in expected_assignments}
+    for factor_id, case_id, seed in paired_groups:
+        observed = {(row["policy_id"], row["condition"])
+                    for row in expected_assignments
+                    if (row["factor_id"], row["case_id"], row["seed"]) ==
+                       (factor_id, case_id, seed)}
+        required = {(policy_id, condition)
+                    for policy_id in PHASE4_ROUTE_OUTCOME_POLICY_IDS
+                    for condition in ("no_factor", "factor_treatment")}
+        if observed != required:
+            raise ValueError("route assignments lack exact policy/condition paired coverage")
+    if not isinstance(attempt_rows, list):
+        raise ValueError("route attempts must be a list")
+
+    counts = {key: {"assigned": 0, "completed": 0,
+                    "observed_failure": 0, "censored": 0,
+                    "censor_reasons": {}} for key in expected}
+    seen_attempts = set()
+    malformed = 0
+    for row in attempt_rows:
+        if not isinstance(row, dict):
+            malformed += 1
+            continue
+        key = tuple(row.get(name) for name in binding_keys)
+        if key not in expected:
+            raise ValueError("route attempt is outside the expected paired design")
+        expected_row = next(item for item in expected_assignments
+                            if tuple(item[name] for name in binding_keys) == key)
+        bound = row.get("binding")
+        if (not isinstance(bound, dict) or any(
+                bound.get(name) != expected_row.get(name)
+                for name in (*binding_keys, *provenance_keys))):
+            raise ValueError("route attempt provenance does not match expected assignment")
+        attempt_id = row.get("route_attempt_id", row.get("attempt_id"))
+        if not isinstance(attempt_id, str) or not attempt_id or (key, attempt_id) in seen_attempts:
+            raise ValueError("route attempt identity is missing or duplicated")
+        seen_attempts.add((key, attempt_id))
+        expected[key] += 1
+        aggregate = counts[key]
+        aggregate["assigned"] += 1
+        # Require actual executed actions and the planner's goal record. These
+        # fields do not themselves imply that the route was completed.
+        trace = row.get("executed_action_trace")
+        reasons = []
+        if not isinstance(trace, list) or not trace or any(
+                type(action) is not int or action < 0 for action in trace):
+            reasons.append("executed_outer_action_trace_missing_or_invalid")
+        goal_id, route_id = row.get("selected_goal_id"), row.get("route_id")
+        source_hash = row.get("source_identity_sha256")
+        if (not isinstance(goal_id, str) or not goal_id or
+                not isinstance(route_id, str) or not route_id or
+                not isinstance(source_hash, str) or len(source_hash) != 64 or
+                any(char not in "0123456789abcdef" for char in source_hash)):
+            reasons.append("planner_goal_or_source_binding_missing_or_invalid")
+        outcome = row.get("outcome")
+        event = row.get("objective_event")
+        valid_objective_event = False
+        if (outcome == "completed" and isinstance(event, dict) and
+                event.get("schema") == "meco-evaluator-route-endpoint-v1" and
+                event.get("source") == "evaluator_terminal_slot3_truth_after_executed_macro"):
+            goal_xy = row.get("goal_xy_m")
+            terminal_xy = event.get("terminal_pose_xy_m")
+            distance = event.get("distance_m")
+            heading_required = event.get("heading_required")
+            heading_error = event.get("heading_error_rad")
+            terminal_heading = event.get("terminal_pose_heading_rad")
+            goal_heading = row.get("goal_heading_rad")
+            geometry_valid = (isinstance(goal_xy, list) and len(goal_xy) == 2 and
+                isinstance(terminal_xy, list) and len(terminal_xy) == 2 and
+                all(type(value) in (int, float) and math.isfinite(value)
+                    for value in (*goal_xy, *terminal_xy)) and
+                type(distance) in (int, float) and math.isfinite(distance))
+            recomputed_distance = (math.dist(goal_xy, terminal_xy)
+                if geometry_valid else None)
+            recomputed_heading_error = None
+            if (heading_required is True and type(goal_heading) in (int, float) and
+                    type(terminal_heading) in (int, float) and
+                    math.isfinite(goal_heading) and math.isfinite(terminal_heading)):
+                recomputed_heading_error = abs(math.atan2(
+                    math.sin(terminal_heading - goal_heading),
+                    math.cos(terminal_heading - goal_heading)))
+            event_rule_valid = (event.get("endpoint_rule") ==
+                "distance <= 0.04 m and, when required, absolute heading error <= 0.1 rad")
+            valid_objective_event = (geometry_valid and event_rule_valid and
+                event.get("macro_index") == row.get("end_macro_index") and
+                event.get("goal_xy_m") == goal_xy and
+                event.get("terminal_pose_xy_m") == row.get("terminal_pose_xy_m") and
+                event.get("terminal_pose_heading_rad") == row.get(
+                    "terminal_pose_heading_rad") and
+                event.get("distance_m") == row.get("terminal_goal_distance_m") and
+                heading_required is row.get("goal_heading_required") and
+                event.get("heading_error_rad") == row.get(
+                    "terminal_heading_error_rad") and
+                math.isclose(distance, recomputed_distance, rel_tol=0., abs_tol=1e-6) and
+                distance <= .04 and
+                ((heading_required is False and row.get("goal_heading_required") is False
+                  and heading_error is None) or
+                 (heading_required is True and row.get("goal_heading_required") is True and
+                  type(heading_error) in (int, float) and
+                  math.isclose(heading_error, recomputed_heading_error,
+                               rel_tol=0., abs_tol=1e-6) and heading_error <= .1)))
+        if outcome == "observed_failure":
+            valid_objective_event = (isinstance(event, dict) and
+                event.get("schema") == "meco-registered-route-objective-failure-v1")
+        if outcome not in ("completed", "observed_failure") or not valid_objective_event:
+            outcome = None
+        if outcome not in ("completed", "observed_failure"):
+            reasons.append(row.get("censor_reason") if isinstance(
+                row.get("censor_reason"), str) and row["censor_reason"] else
+                "registered_route_objective_event_unavailable")
+        if reasons:
+            aggregate["censored"] += 1
+            for reason in reasons:
+                aggregate["censor_reasons"][reason] = (
+                    aggregate["censor_reasons"].get(reason, 0) + 1)
+        else:
+            aggregate[outcome] += 1
+
+    if malformed:
+        raise ValueError("route attempt list contains malformed rows without assignment identity")
+    missing_assignments = [key for key, count in expected.items() if count == 0]
+    by_assignment = []
+    for key in sorted(counts, key=lambda value: tuple(str(v) for v in value)):
+        row = dict(zip(binding_keys, key))
+        values = counts[key]
+        fully_observed = values["censored"] == 0
+        row.update(values)
+        row["route_lifecycle_records_missing"] = values["assigned"] == 0
+        row["route_completion_rate"] = (
+            values["completed"] / (values["completed"] + values["observed_failure"])
+            if fully_observed and values["assigned"] else None)
+        row["rate_null_reason"] = (None if row["route_completion_rate"] is not None
+            else "one_or_more_attempts_censored_or_objective_event_unavailable")
+        row["authoritative_signal_available"] = False
+        row["qualification_eligible"] = False
+        by_assignment.append(row)
+    total_completed = sum(row["completed"] for row in by_assignment)
+    total_failures = sum(row["observed_failure"] for row in by_assignment)
+    total_censored = sum(row["censored"] for row in by_assignment)
+    overall_observed = (not missing_assignments and total_censored == 0 and
+                        total_completed + total_failures > 0)
+    return {
+        "schema": "meco-phase4-route-completion-campaign-diagnostic-v1",
+        "attempt_outcome_semantics": "completed_or_observed_failure_only_from_registered_route_objective_event; otherwise censored",
+        "expected_policy_ids": list(PHASE4_ROUTE_OUTCOME_POLICY_IDS),
+        "required_factor_ids": list(PHASE4_ROUTE_OUTCOME_FACTOR_IDS),
+        "expected_assignment_count": len(expected),
+        "assignments_without_route_lifecycle_records": [list(key)
+            for key in sorted(missing_assignments, key=lambda value: tuple(str(v) for v in value))],
+        "attempt_row_count": len(attempt_rows),
+        "by_assignment": by_assignment,
+        "route_completion_rate": (total_completed / (total_completed + total_failures)
+            if overall_observed else None),
+        "null_reason": ("one_or_more_assignments_lack_route_lifecycle_records_or_censoring_exists"
+            if not overall_observed
+            else "representative simulator validation is not complete"),
+        "authoritative_signal_available": False,
+        "qualification_eligible": False,
+    }
+
+
 def route_remaining_distance_m(path_xy, pose_xy, goal_xy, *, goal_tolerance_m):
     """Return route distance after nearest polyline projection, or None if invalid."""
     try:
@@ -497,6 +973,19 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         event_expected = factor["switch_tick"]
         event_field = "policy_change_tick"
         event_evidence = {}
+    elif kind == "stationary_blockage":
+        event = runtime.get("stationary_blockage_assigned")
+        event_expected = True
+        event_field = "stationary_blockage_assigned"
+        pose_valid = runtime.get("stationary_blockage_pose_valid")
+        if hasattr(pose_valid, "detach"):
+            pose_valid = bool(pose_valid.detach().all().item())
+        event_evidence = {"blocker_slot": factor["blocker_slot"],
+            "blocker_x_m": factor["blocker_x_m"],
+            "lane_binding": factor["lane_binding"],
+            "pose_valid_for_full_episode": pose_valid,
+            "pose_tolerance_m": factor["pose_tolerance_m"],
+            "heading_tolerance_rad": factor["heading_tolerance_rad"]}
     elif kind == "observation_delay":
         event = runtime.get("delayed_observation_ticks", 0)
         event_expected = ">0"
@@ -514,6 +1003,9 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         event, event_expected, event_field = None, None, None
     if kind in ("feinting_opponent", "abrupt_opponent_policy_change"):
         realized = type(event) is int and event == event_expected
+    elif kind == "stationary_blockage":
+        realized = event is True
+        realized = (realized and event_evidence["pose_valid_for_full_episode"] is True)
     elif kind == "observation_delay":
         realized = type(event) is int and event > 0
     else:
@@ -640,6 +1132,17 @@ def validate_phase4_capture(capture: dict, *,
     elif kind == "abrupt_opponent_policy_change":
         expected_field, expected_value = "policy_change_tick", factor["switch_tick"]
         valid_observed = type(event.get("observed")) is int and event["observed"] == expected_value
+    elif kind == "stationary_blockage":
+        expected_field, expected_value = "stationary_blockage_assigned", True
+        valid_observed = event.get("observed") is True
+        evidence = event.get("evidence")
+        valid_observed = (valid_observed and isinstance(evidence, dict) and
+            evidence == {"blocker_slot": factor["blocker_slot"],
+                "blocker_x_m": factor["blocker_x_m"],
+                "lane_binding": factor["lane_binding"],
+                "pose_valid_for_full_episode": True,
+                "pose_tolerance_m": factor["pose_tolerance_m"],
+                "heading_tolerance_rad": factor["heading_tolerance_rad"]})
     elif kind == "observation_delay":
         expected_field, expected_value = "delayed_observation_ticks", ">0"
         valid_observed = type(event.get("observed")) is int and event["observed"] > 0

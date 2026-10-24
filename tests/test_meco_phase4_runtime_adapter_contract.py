@@ -2,6 +2,7 @@ import json
 import copy
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +20,43 @@ from frc_defense.meco_phase4_runtime_adapter import (
     validate_phase4_capture,
 )
 from frc_defense.meco_track_training import _observe_phase4_contact_route_progress
+from frc_defense.curriculum_scenarios import CurriculumEnv
+import frc_defense.curriculum_scenarios as curriculum_scenarios
 from frc_defense.tensor_physics_collision import pair_contact_substep_endpoint
+
+
+def test_stationary_blocker_overrides_only_its_slot_and_masks_inactive_envs(monkeypatch):
+    env = object.__new__(CurriculumEnv)
+    env.curriculum = {"pressure": {"level": 1, "slots": [0, 1],
+        "family": "stationary_blocker", "phase": 0.}}
+    env.phase4_factor_config = {"kind": "stationary_blockage", "blocker_slot": 0,
+        "pose_tolerance_m": .02, "heading_tolerance_rad": .02}
+    env.stationary_blockage_assigned_pose = torch.zeros((2, 3))
+    env.phase4_runtime_metrics = {"stationary_blockage_pose_valid": torch.ones(2, dtype=torch.bool)}
+    env.sim = SimpleNamespace(pose=torch.zeros((2, 6, 3)),
+                              speed=torch.ones((2, 6)))
+    env.policy_pose = torch.zeros((2, 6, 3))
+    env.opponent_pose = torch.zeros((2, 6, 3))
+    env.opponent_velocity = torch.zeros((2, 6, 2))
+    env.opponent_valid = torch.ones((2, 6), dtype=torch.bool)
+    env.phase4_defender_anchor = torch.zeros((2, 6, 3))
+    env.field_length, env.field_width = 16., 8.
+    env.match_elapsed = torch.zeros(2)
+    env.steps = torch.zeros(2, dtype=torch.long)
+    env.phase4_opponent_policy_id = "scheduled"
+    seen_slots = []
+
+    def scheduled_opponent(_policy_id, sensed, *, tick, max_speed_mps):
+        seen_slots.append(sensed["own_xy"].shape[1] if sensed["own_xy"].ndim > 1 else tick)
+        return torch.ones((2, 2))
+
+    monkeypatch.setattr(curriculum_scenarios, "opponent_velocity_command", scheduled_opponent)
+    commands = torch.full((2, 6, 3), 9.)
+    result = env._curriculum_commands(commands, torch.tensor([True, False]))
+    assert torch.equal(result[0, 0], torch.zeros(3))
+    assert torch.equal(result[0, 1, :2], torch.ones(2))
+    assert torch.equal(result[1], torch.zeros((6, 3)))
+    assert len(seen_slots) == 1
 from frc_defense.meco_ablation_matrix import _validate_phase4_condition_records
 
 
@@ -84,6 +121,34 @@ def test_capture_binds_only_realized_existing_stimuli_and_marks_missing_outcomes
     validate_phase4_capture(capture, expected_source_identity_sha256=
         capture["source_identity_sha256"], expected_episode_seed=21,
         expected_split="validation", expected_qualification_case=capture["qualification_case"])
+
+
+def test_stationary_blockage_is_registered_and_capture_requires_reset_assignment():
+    factor = phase4_factor_config("stationary_blockage")
+    source = {"repository": "fixture", "commit": "abc123"}
+    capture = phase4_factor_exposure(factor,
+        {"stationary_blockage_assigned": True,
+         "stationary_blockage_pose_valid": True}, {}, source_identity=source,
+        split="validation", seed=21,
+        scenario_id="offense_vs_scripted_pressure",
+        category="active/trench/level_1_stationary",
+        qualification_case={"layout_id": "layout-a",
+            "defender_family": "family-a", "start_condition": "start-a",
+            "sensor_profile": "sensor-a"})
+    assert capture["runtime_event"]["realized"] is True
+    assert capture["runtime_event"]["evidence"]["blocker_slot"] == 0
+    validate_phase4_capture(capture, expected_source_identity=source)
+    drifted = phase4_factor_exposure(factor,
+        {"stationary_blockage_assigned": True,
+         "stationary_blockage_pose_valid": False}, {}, source_identity=source,
+        split="validation", seed=21,
+        scenario_id="offense_vs_scripted_pressure",
+        category="active/trench/level_1_stationary",
+        qualification_case={"layout_id": "layout-a",
+            "defender_family": "family-a", "start_condition": "start-a",
+            "sensor_profile": "sensor-a"})
+    assert drifted["status"] == "stimulus_not_realized"
+    assert drifted["qualification_eligible"] is False
 
 
 @pytest.mark.parametrize("mutation,error", [

@@ -19,7 +19,10 @@ from typing import Any
 
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
-from .meco_phase4_runtime_adapter import validate_phase4_capture
+from .meco_phase4_runtime_adapter import (
+    PHASE4_ROUTE_FACTOR_ID_BY_KIND, PHASE4_ROUTE_OUTCOME_FACTOR_IDS,
+    PHASE4_ROUTE_OUTCOME_POLICY_IDS, phase4_route_completion_campaign_record,
+    validate_phase4_capture)
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     phase4_start_profile_assignment as build_start_profile_assignment,
     phase4_context_identity, validate_contact_geometry_split,
@@ -867,6 +870,24 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 categories=condition_categories, seeds=seeds))
         condition_replay_selection = (replay_selection or {}).get(
             condition.condition_name)
+        route_factor_id_by_kind = {
+            "stationary_blockage": "blockage.stationary",
+            "feinting_opponent": "opponent.feint_reversal",
+            "abrupt_opponent_policy_change": "opponent.abrupt_policy_change",
+        }
+        if condition.phase4_factor is not None:
+            route_factor_id = route_factor_id_by_kind.get(
+                condition.phase4_factor.get("kind"))
+            route_outcome_factor_ids = ((route_factor_id,)
+                if route_factor_id is not None else None)
+        elif condition.contact_geometry_id is not None:
+            route_outcome_factor_ids = ("contact.robot_bump",)
+        elif condition.condition_name == "architecture_matched_cv_k16":
+            # The no-factor baseline is shared by the route-requiring Phase 4
+            # contrasts and must carry the same policy/case/seed bindings.
+            route_outcome_factor_ids = PHASE4_ROUTE_OUTCOME_FACTOR_IDS
+        else:
+            route_outcome_factor_ids = None
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
             categories=condition_categories, episodes=len(seeds), master_seed=seeds[0],
             episode_seeds=seeds, device=device, split=evaluation_split,
@@ -885,6 +906,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             phase4_opponent_schedule=phase4_opponent_schedule,
             phase4_contact_factor_id=("contact.robot_bump"
                 if condition.contact_geometry_id is not None else None),
+            phase4_route_outcome_factor_ids=route_outcome_factor_ids,
             contact_geometry_id=condition.contact_geometry_id,
             contact_geometry_config=condition.contact_geometry_config,
             phase4_start_profile_assignment=condition_start_assignment,
@@ -976,6 +998,186 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         evaluation_reports[condition.condition_name] = {
             "report": report, "records": condition_records,
             "condition_id": condition_id}
+
+    route_expected_by_key = {}
+    route_attempt_rows = []
+    route_records_missing = []
+    route_policy_support_statuses = []
+    route_summary_keys_seen = set()
+    # Freeze the planned route-outcome grid from the matrix design itself. This
+    # remains complete even when a report record or its nested ledger is absent.
+    for condition in conditions:
+        evaluation = evaluation_reports.get(condition.condition_name)
+        if evaluation is None:
+            continue
+        report = evaluation["report"]
+        phase4_factor = condition.phase4_factor
+        if phase4_factor is not None:
+            factor_id = PHASE4_ROUTE_FACTOR_ID_BY_KIND.get(phase4_factor.get("kind"))
+            factor_conditions = ((factor_id, "factor_treatment"),) if factor_id else ()
+        elif condition.contact_geometry_id is not None:
+            factor_conditions = (("contact.robot_bump", "factor_treatment"),)
+        elif condition.condition_name == "architecture_matched_cv_k16":
+            factor_conditions = tuple((factor_id, "no_factor")
+                for factor_id in PHASE4_ROUTE_OUTCOME_FACTOR_IDS)
+        else:
+            factor_conditions = ()
+        qual_case = report.get("qualification_case")
+        eval_case = (qual_case if evaluation_split in ("validation", "test") else None)
+        policy_manifest = report.get("policy_manifest", {})
+        device_identity = json.dumps(report.get("execution_device"),
+            sort_keys=True, separators=(",", ":"), allow_nan=False)
+        for category in report.get("categories", ()):
+            if (any(condition_label == "no_factor" for _, condition_label in factor_conditions)
+                    and _registered_pressure_level(category) not in (1, 2, 3, 4, 5)):
+                continue
+            case_id = hashlib.sha256(json.dumps({"evaluation_case": eval_case,
+                "qualification_case": qual_case, "category": category},
+                sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            for seed in report.get("seeds", ()):
+                for policy_id in PHASE4_ROUTE_OUTCOME_POLICY_IDS:
+                    manifest = policy_manifest.get(policy_id, {})
+                    for factor_id, condition_label in factor_conditions:
+                        assignment = {"policy_id": policy_id,
+                            "factor_id": factor_id, "case_id": case_id,
+                            "seed": int(seed), "condition": condition_label,
+                            "source_identity_sha256": report.get("source_identity_sha256"),
+                            "episode_id": None, "provenance_status": "record_missing",
+                            "scenario_id": report.get("scenario_id"),
+                            "category": category, "execution_device": device_identity,
+                            "checkpoint_sha256": manifest.get("checkpoint_sha256"),
+                            "condition_id": evaluation["condition_id"]}
+                        key = tuple(assignment[name] for name in (
+                            "policy_id", "factor_id", "case_id", "seed", "condition"))
+                        if key in route_expected_by_key:
+                            raise ValueError("frozen route outcome design contains duplicate assignment")
+                        route_expected_by_key[key] = assignment
+    for condition_name, evaluation in evaluation_reports.items():
+        for record in evaluation["report"].get("records", ()):
+            for planned in route_expected_by_key.values():
+                if (planned.get("condition_id") == evaluation["condition_id"] and
+                        planned.get("policy_id") == record.get("policy") and
+                        planned.get("category") == record.get("category") and
+                        planned.get("seed") == record.get("seed") and
+                        isinstance(record.get("episode_id"), str) and
+                        record["episode_id"]):
+                    planned["episode_id"] = record["episode_id"]
+                    planned.pop("provenance_status", None)
+            by_factor = record.get("phase4_route_completion_by_factor")
+            if not isinstance(by_factor, dict):
+                planned = [row for row in route_expected_by_key.values()
+                    if row.get("condition_id") == evaluation["condition_id"] and
+                    row.get("policy_id") == record.get("policy") and
+                    row.get("category") == record.get("category") and
+                    row.get("seed") == record.get("seed")]
+                for row in planned:
+                    route_records_missing.append({"condition_name": condition_name,
+                        "policy": row["policy_id"], "category": row["category"],
+                        "seed": row["seed"], "factor_id": row["factor_id"],
+                        "condition": row["condition"],
+                        "reason": "phase4_route_completion_by_factor_missing_or_malformed"})
+                continue
+            for factor_id, summary in by_factor.items():
+                if not isinstance(summary, dict) or not isinstance(summary.get("binding"), dict):
+                    route_records_missing.append({"condition_name": condition_name,
+                        "policy": record.get("policy"), "category": record.get("category"),
+                        "seed": record.get("seed"), "factor_id": factor_id,
+                        "reason": "route_lifecycle_record_or_binding_missing"})
+                    continue
+                bound = summary["binding"]
+                key = tuple(bound.get(name) for name in (
+                    "policy_id", "factor_id", "case_id", "seed", "condition"))
+                expected_assignment = route_expected_by_key.get(key)
+                if expected_assignment is None:
+                    route_records_missing.append({"condition_name": condition_name,
+                        "policy": record.get("policy"), "category": record.get("category"),
+                        "seed": record.get("seed"), "factor_id": factor_id,
+                        "reason": "observed_route_summary_outside_frozen_matrix_design"})
+                    continue
+                expected_assignment["episode_id"] = bound.get("episode_id")
+                expected_assignment.pop("provenance_status", None)
+                route_summary_keys_seen.add(key)
+                for provenance_key in ("source_identity_sha256", "scenario_id",
+                        "category", "execution_device", "checkpoint_sha256", "condition_id"):
+                    if bound.get(provenance_key) != expected_assignment.get(provenance_key):
+                        route_records_missing.append({"condition_name": condition_name,
+                            "policy": record.get("policy"), "category": record.get("category"),
+                            "seed": record.get("seed"), "factor_id": factor_id,
+                            "reason": f"route_summary_{provenance_key}_mismatch"})
+                route_policy_support_statuses.append({
+                    "policy_id": bound.get("policy_id"),
+                    "factor_id": factor_id,
+                    "condition_name": condition_name,
+                    "status": summary.get("policy_support_status"),
+                    "ledger_input_status": summary.get("ledger_input_status"),
+                    "attempted": summary.get("attempted"),
+                    "coverage_available": summary.get(
+                        "goal_attempt_coverage_available"),
+                })
+                for attempt in summary.get("attempts", ()):
+                    route_attempt_rows.append({**attempt, **bound})
+    for key, assignment in list(route_expected_by_key.items()):
+        if assignment.get("condition_id", "").startswith("missing:"):
+            route_policy_support_statuses.append({
+                "policy_id": assignment["policy_id"],
+                "factor_id": assignment["factor_id"],
+                "condition": assignment["condition"],
+                "status": "factor_treatment_not_scheduled",
+                "ledger_input_status": "not_applicable",
+                "attempted": 0, "coverage_available": False})
+            continue
+        if key not in route_summary_keys_seen:
+            route_policy_support_statuses.append({
+                "policy_id": assignment["policy_id"],
+                "factor_id": assignment["factor_id"],
+                "condition": assignment["condition"],
+                "status": "route_lifecycle_summary_missing",
+                "ledger_input_status": "missing_record",
+                "attempted": 0, "coverage_available": False})
+            route_records_missing.append({"policy": assignment["policy_id"],
+                "category": assignment["category"], "seed": assignment["seed"],
+                "factor_id": assignment["factor_id"],
+                "condition": assignment["condition"],
+                "reason": "route_lifecycle_summary_missing_from_frozen_assignment"})
+    # Missing treatment lanes remain explicit expected assignments. In
+    # particular, contact.robot_bump is opt-in; absent geometry is never
+    # mistaken for completed paired coverage.
+    for baseline in list(route_expected_by_key.values()):
+        if baseline["condition"] != "no_factor":
+            continue
+        treatment = {**baseline, "condition": "factor_treatment",
+            "condition_id": f"missing:{baseline['factor_id']}:treatment_not_scheduled",
+            "episode_id": None,
+            "provenance_status": "treatment_not_scheduled"}
+        key = tuple(treatment[name] for name in (
+            "policy_id", "factor_id", "case_id", "seed", "condition"))
+        if key not in route_expected_by_key:
+            route_expected_by_key[key] = treatment
+            route_records_missing.append({"policy": treatment["policy_id"],
+                "category": treatment["category"], "seed": treatment["seed"],
+                "factor_id": treatment["factor_id"],
+                "condition": "factor_treatment",
+                "reason": "factor_treatment_not_scheduled"})
+    route_expected_assignments = list(route_expected_by_key.values())
+    route_completion_campaign = None
+    if route_expected_assignments:
+        try:
+            route_completion_campaign = phase4_route_completion_campaign_record(
+                route_attempt_rows, route_expected_assignments)
+        except ValueError as exc:
+            route_completion_campaign = {"schema": "meco-phase4-route-completion-campaign-diagnostic-v1",
+                "route_completion_rate": None,
+                "status": "paired_design_or_provenance_incomplete",
+                "reason": str(exc),
+                "missing_route_records": route_records_missing,
+                "expected_assignment_count": len(route_expected_assignments),
+                "authoritative_signal_available": False,
+                "qualification_eligible": False}
+    else:
+        route_completion_campaign = {"schema": "meco-phase4-route-completion-campaign-diagnostic-v1",
+            "route_completion_rate": None, "status": "route_lifecycle_records_missing",
+            "missing_route_records": route_records_missing,
+            "authoritative_signal_available": False, "qualification_eligible": False}
 
     architecture_name = "architecture_matched_cv_k16"
     if architecture_name not in evaluation_reports:
@@ -1174,6 +1376,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             track: results[architecture_name]["policy_manifest"][track][
                 "training_protocol_id"] for track in MECO_TRACKS},
         "conditions": results,
+        "phase4_route_completion_campaign": route_completion_campaign,
+        "phase4_route_completion_policy_support": route_policy_support_statuses,
         "contrasts": contrasts,
         "phase4_unsupported_categories": unsupported_phase4,
         "interpretation_limits": [

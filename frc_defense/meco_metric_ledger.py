@@ -39,6 +39,7 @@ class MecoEpisodeMetricLedger:
     _active_collection_bout: dict | None = field(default=None, repr=False)
     route_ids: list[str | None] = field(default_factory=list)
     goal_attempts: list[dict] = field(default_factory=list)
+    goal_attempt_coverage_available: bool = True
     _previous_xy: torch.Tensor | None = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -133,29 +134,47 @@ class MecoEpisodeMetricLedger:
                              goal_heading: float | None,
                              terminal_goal_distance_m: float | None,
                              terminal_heading_error_rad: float | None,
+                             terminal_pose_xy: tuple[float, float] | None = None,
+                             terminal_pose_heading: float | None = None,
                              heading_alignment_opportunity: bool,
                              selected_goal_id: str | None = None,
+                             goal_lifecycle_id: str | None = None,
+                             macro_index: int | None = None,
                              episode_id: str | None = None,
                              source_identity_sha256: str | None = None,
                              geometry_id: str | None = None,
                              execution_valid: bool | None = None,
-                             execution_exclusion_reasons: tuple[str, ...] = ()) -> None:
-        if not self.goal_tracking_available or goal_xy is None:
+                             execution_exclusion_reasons: tuple[str, ...] = (),
+                             executed_action_trace: tuple[int, ...] | list[int] | None = None) -> None:
+        if not self.goal_tracking_available:
+            self.goal_attempt_coverage_available = False
             return
         self.goal_attempts.append({
+            "macro_index": macro_index,
             "action": int(action),
             "route_id": route_id,
             "selected_goal_id": selected_goal_id,
+            "goal_lifecycle_id": goal_lifecycle_id,
             "episode_id": episode_id,
             "source_identity_sha256": source_identity_sha256,
             "geometry_id": geometry_id,
             "execution_valid": execution_valid,
             "execution_exclusion_reasons": list(execution_exclusion_reasons),
-            "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
+            "executed_action_trace": (None if executed_action_trace is None else
+                [int(value) for value in executed_action_trace]),
+            "route_outcome_status": "censored",
+            "route_outcome_censor_reason":
+                "registered_route_completion_objective_event_unavailable",
+            "goal_xy_m": (None if goal_xy is None else
+                          [float(goal_xy[0]), float(goal_xy[1])]),
             "goal_heading_rad": (None if goal_heading is None else float(goal_heading)),
             "goal_heading_required": goal_heading is not None,
             "terminal_goal_distance_m": (None if terminal_goal_distance_m is None
                                           else float(terminal_goal_distance_m)),
+            "terminal_pose_xy_m": (None if terminal_pose_xy is None else
+                [float(terminal_pose_xy[0]), float(terminal_pose_xy[1])]),
+            "terminal_pose_heading_rad": (None if terminal_pose_heading is None else
+                float(terminal_pose_heading)),
             "goal_endpoint_within_0_04m": (None if terminal_goal_distance_m is None
                                            else terminal_goal_distance_m <= .04),
             "heading_alignment_opportunity": bool(heading_alignment_opportunity),
@@ -232,7 +251,8 @@ class MecoEpisodeMetricLedger:
                 sum(row["heading_joint_endpoint_within_0_04m_and_0_1rad"] is True
                     for row in goal_heading_attempts)
                 if self.goal_tracking_available else None),
-            "goal_attempts": self.goal_attempts if self.goal_tracking_available else None,
+            "goal_attempt_coverage_available": self.goal_attempt_coverage_available,
+            "goal_attempts": self.goal_attempts if self.goal_attempt_coverage_available else None,
             "fuel": {
                 "acquired": self.fuel_acquired if self.fuel_event_steps_available else None,
                 "scored": self.fuel_scored if self.fuel_event_steps_available else None,

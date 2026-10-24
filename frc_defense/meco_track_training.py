@@ -52,9 +52,12 @@ from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
     phase4_pair_contact_event_record, route_remaining_distance_m,
+    phase4_route_completion_record, phase4_route_condition,
+    phase4_route_condition,
     phase4_selected_goal_endpoint_completion_record,
     FirstRouteProgressInterval,
-    PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR)
+    PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR,
+    PHASE4_ROUTE_OUTCOME_FACTOR_IDS)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -681,6 +684,34 @@ def _selected_policy_candidate_id(prepared, candidate_set, choice):
     if candidate_set is not None and 0 <= int(choice) < len(candidate_set.table.candidate_ids):
         return str(candidate_set.table.candidate_ids[int(choice)])
     return None
+
+
+def _phase4_route_goal_lifecycle_id(*, action, plan_a_node_id=None,
+                                    behavior_id=None, descriptor_id=None,
+                                    goal_xy=None, assigned_goal_id=None):
+    """Hash a selected objective destination, excluding candidate/path IDs."""
+    if type(action) is int and action in range(4):
+        # Current sensor slots have no durable allocation generation. A slot
+        # may be reused after pickup/respawn, including during assigned-goal
+        # continuation, so target-bound attempts always fail closed.
+        return None
+    if isinstance(assigned_goal_id, str) and assigned_goal_id:
+        identity = {"kind": "assigned_goal", "id": assigned_goal_id}
+    elif type(action) is int and type(plan_a_node_id) is int and plan_a_node_id >= 0:
+        identity = {"kind": "selected_plan_a_objective", "action": action,
+            "behavior_id": behavior_id, "descriptor_id": descriptor_id,
+            "goal_node_id": plan_a_node_id}
+    elif type(action) is int and isinstance(goal_xy, (list, tuple)) and len(goal_xy) == 2:
+        values = [float(value) for value in goal_xy]
+        if not all(math.isfinite(value) for value in values):
+            return None
+        identity = {"kind": "selected_route_objective", "action": action,
+            "goal_xy_m": values}
+    else:
+        return None
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return f"phase4-goal-lifecycle-v1:{digest}"
 
 
 def _snapshot_tensors(snapshot, *, device):
@@ -2250,6 +2281,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_factor: dict | None = None,
                   phase4_opponent_schedule: dict | None = None,
                   phase4_contact_factor_id: str | None = None,
+                  phase4_route_outcome_factor_ids: tuple[str, ...] | None = None,
                   contact_geometry_id: str | None = None,
                   contact_geometry_config: dict | None = None,
                   phase4_start_profile_assignment: dict | None = None,
@@ -2854,12 +2886,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             routes_before_choice = len(routes_seen)
                             plan_a_support = (prepared is not None and
                                               "support" in prepared)
+                            behavior_index = None
+                            descriptor = None
                             selected_target_track = None
                             selected_target_xy = None
+                            selected_goal_node = None
                             if prepared is not None and "support" in prepared:
                                 support = prepared["support"]
                                 action = int(support.action_ids[choice].item())
                                 node = int(support.pair_node_ids[choice].item())
+                                selected_goal_node = node
                                 behavior_index = int(support.behavior_ids[choice].item())
                                 descriptor = int(support.descriptor_ids[choice].item())
                                 goal_xy = tuple(float(v) for v in
@@ -2909,6 +2945,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         "inference_provenance") if prepared is not None else None)})
                                 selected_target_track = candidate_set.route_records[
                                     choice].get("sensor_track_buffer_index")
+                                selected_goal_node = candidate_set.route_records[
+                                    choice].get("legal_node_index")
                                 selected_target_xy = candidate_set.route_records[
                                     choice].get("source_fuel_xy_m")
                             goal_heading = (float(support.goal_heading[node].item())
@@ -3096,6 +3134,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     json.dumps(goal_identity_payload, sort_keys=True,
                                         separators=(",", ":"), allow_nan=False
                                     ).encode()).hexdigest()
+                            goal_lifecycle_id = _phase4_route_goal_lifecycle_id(
+                                action=int(action),
+                                plan_a_node_id=(selected_goal_node if plan_a_support else None),
+                                behavior_id=(behavior_index if plan_a_support else None),
+                                descriptor_id=(descriptor if plan_a_support else None),
+                                goal_xy=goal_xy,
+                                assigned_goal_id=(pending_eval_goal.get("route_id")
+                                    if forced_eval_goal and pending_eval_goal else None))
                             goal_exclusion_reasons = []
                             if policy_fallback:
                                 goal_exclusion_reasons.append("policy_inference_fallback")
@@ -3115,13 +3161,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 goal_heading=goal_heading,
                                 terminal_goal_distance_m=goal_distance,
                                 terminal_heading_error_rad=heading_error,
+                                terminal_pose_xy=(float(env.sim.pose[0, 3, 0].item()),
+                                    float(env.sim.pose[0, 3, 1].item())),
+                                terminal_pose_heading=float(env.sim.pose[0, 3, 2].item()),
                                 heading_alignment_opportunity=heading_opportunity,
                                 selected_goal_id=selected_goal_id,
+                                goal_lifecycle_id=goal_lifecycle_id,
+                                macro_index=len(selected_action_trace) - 1,
                                 episode_id=episode_id,
                                 source_identity_sha256=source_hash,
                                 geometry_id=contact_geometry_id,
                                 execution_valid=not goal_exclusion_reasons,
-                                execution_exclusion_reasons=tuple(goal_exclusion_reasons))
+                                execution_exclusion_reasons=tuple(goal_exclusion_reasons),
+                                executed_action_trace=(actual_trace
+                                    if (phase4_route_outcome_factor_ids or
+                                        phase4_contact_factor_id is not None or
+                                        (phase4_factor or {}).get("kind") in (
+                                            "feinting_opponent",
+                                            "abrupt_opponent_policy_change"))
+                                    else None))
                             if policy_fallback or hard_failure:
                                 execution_failures.append({
                                     "selected_action": action,
@@ -3191,6 +3249,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "episode_finalization")
                         metric_ledger_record = episode_metric_ledger.to_record()
                         metrics.update(metric_ledger_record["safety_metrics"])
+                        phase4_runtime_record = dict(env.phase4_runtime_metrics)
+                        if (phase4_factor and phase4_factor.get("kind") ==
+                                "stationary_blockage"):
+                            slot = phase4_factor["blocker_slot"]
+                            target = env.stationary_blockage_assigned_pose
+                            pose = env.sim.pose[:, slot]
+                            distance = torch.linalg.vector_norm(
+                                pose[:, :2] - target[:, :2], dim=-1)
+                            angle_delta = torch.atan2(torch.sin(
+                                pose[:, 2] - target[:, 2]), torch.cos(
+                                pose[:, 2] - target[:, 2])).abs()
+                            prior = env.phase4_runtime_metrics[
+                                "stationary_blockage_pose_valid"]
+                            phase4_runtime_record["stationary_blockage_pose_valid"] = bool((
+                                prior & (distance <= phase4_factor["pose_tolerance_m"]) &
+                                (angle_delta <= phase4_factor[
+                                    "heading_tolerance_rad"])).all().item())
                         diagnostic_performance = {
                             "scope": "diagnostic_only_not_qualification_primary_gates",
                             "end_to_end_wall_ms": (time.perf_counter() - episode_wall_started) * 1000.,
@@ -3339,6 +3414,40 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
                                 if phase4_contact_factor_id is not None else None),
+                            "phase4_route_completion_by_factor": ({
+                                factor_id: phase4_route_completion_record(
+                                    metric_ledger_record.get("goal_attempts"), binding={
+                                        "episode_id": episode_id,
+                                        "policy_id": record_policy,
+                                        "checkpoint_policy_id": policy_manifest[
+                                            record_policy]["policy_id"],
+                                        "checkpoint_sha256": policy_manifest[
+                                            record_policy]["checkpoint_sha256"],
+                                        "scenario_id": scenario_id,
+                                        "category": category,
+                                        "execution_device": json.dumps(execution_device,
+                                            sort_keys=True, separators=(",", ":"),
+                                            allow_nan=False),
+                                        "condition_id": condition_id or "unpaired_evaluation",
+                                        "case_id": hashlib.sha256(json.dumps({
+                                            "evaluation_case": evaluation_case,
+                                            "qualification_case": qualification_case,
+                                            "category": category},
+                                            sort_keys=True, separators=(",", ":"),
+                                            allow_nan=False).encode()).hexdigest(),
+                                        "seed": int(seed),
+                                        "split": split,
+                                        "factor_id": factor_id,
+                                        "condition": phase4_route_condition(factor_id,
+                                            phase4_factor=phase4_factor,
+                                            contact_factor_id=phase4_contact_factor_id),
+                                        "source_identity_sha256": source_hash,
+                                        "goal_attempt_coverage_available":
+                                            metric_ledger_record.get(
+                                                "goal_attempt_coverage_available") is True,
+                                    })
+                                for factor_id in phase4_route_outcome_factor_ids
+                            } if phase4_route_outcome_factor_ids else None),
                             "phase4_contact_exposure": ({
                                 "factor_id": "contact.robot_bump",
                                 "geometry_id": contact_geometry_id,
@@ -3375,14 +3484,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 contact_progress_observer.record()
                                 if contact_progress_observer is not None else None),
                             "phase4_factor_runtime": ({
-                                **env.phase4_runtime_metrics,
+                                **phase4_runtime_record,
                                 "fuel_track_confidence_mean": float(
                                     env.track_confidence[0, 3][env.track_mask[0, 3]].mean().item())
                                     if bool(env.track_mask[0, 3].any()) else None,
                                 "confidence_semantics": "requested and applied caps are reported separately; refresh count and reduced sensed-track values prove application; final mean is over sensed learner tracks; positions, velocities, ages, masks, dropout and noise are unchanged",
                             } if phase4_factor is not None else None),
                             "phase4_realization_capture": phase4_factor_exposure(
-                                phase4_factor, env.phase4_runtime_metrics,
+                                phase4_factor, phase4_runtime_record,
                                 metrics, source_identity=sources, split=split,
                                 seed=seed, scenario_id=scenario_id,
                                 category=category,

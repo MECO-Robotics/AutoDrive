@@ -9,6 +9,15 @@ from .training_curriculum import SCENARIOS
 
 
 PHASE4_FACTORS = {
+    "stationary_blockage": {
+        "kind": "stationary_blockage",
+        "blocker_slot": 0,
+        "blocker_x_m": 10.5,
+        "lane_binding": "registered_route_lane",
+        "pose_tolerance_m": 0.02,
+        "heading_tolerance_rad": 0.02,
+        "tick_semantics": "fixed at reset and held stationary for the episode",
+    },
     "feinting_opponent": {
         "kind": "feinting_opponent",
         "reversal_tick": 360,
