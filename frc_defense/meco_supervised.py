@@ -521,8 +521,8 @@ def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
     legal_bytes = legal_node_dataset.read_bytes()
     legal_sha = hashlib.sha256(legal_bytes).hexdigest()
     annotation_source_sha = hashlib.sha256(Path(annotation_source_path).resolve().read_bytes()).hexdigest()
-    from .meco_counterfactual import (_read_counterfactual_dataset,
-        PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+    from .meco_counterfactual import (PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
         PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA, _replay_plan_a_expert_goal_source_row)
     expert_source_manifest_path = source_dataset.with_suffix(source_dataset.suffix + ".manifest.json")
     expert_source_manifest = json.loads(expert_source_manifest_path.read_text())
