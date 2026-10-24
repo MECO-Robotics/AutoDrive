@@ -42,9 +42,8 @@
 > HIP/WX9100 runtime, and 1,200 records across four strata (100 unique seeds ×
 > repetitions 0, 1, 2), with required safety metrics and source binding verified.
 > This is D0 baseline calibration only; it does not qualify a learned policy.
-> At the separate point-in-time training capture 2026-10-24 05:14:35 UTC, A1 was
-> 65/100 and A2 60/100 on cuda:0/1, A3/C1/C2 queued, and training error was null.
-> These are historical counters, not live status. Target v2 still needs explicit
+> This milestone does not record live training progress; consult the active
+> campaign runtime for current status. Target v2 still needs explicit
 > operational margins and review; learned-policy held-out report, CI, and primary
 > gate are absent. No margin approval or held-out result is asserted.
 
