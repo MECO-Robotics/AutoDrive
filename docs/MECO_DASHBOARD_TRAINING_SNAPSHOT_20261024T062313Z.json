@@ -1,0 +1,124 @@
+{
+  "captured_utc": "2026-10-24T06:23:13+00:00",
+  "checkout": {
+    "branch": "main",
+    "head": "8d511397b8140207c83fb13469ec318893539217",
+    "path": "project root",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350"
+  },
+  "dashboard": {
+    "data_root": "project root",
+    "listener_port": 8765,
+    "local_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "pid": 1403399,
+    "responses": {
+      "/api/curriculum-status": {
+        "body_sha256": "9427bdef5d261fbe22670ca2e387a12cb119a1258aab881d78711f9ea70cb3f0",
+        "bytes": 21968,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "/api/meco-status": {
+        "body_sha256": "3bf2e87c6b59ab94b8a1cb464bde8a089fca63eda20c477105ae8629fa3d18a0",
+        "bytes": 171051,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "/assets/meco.js": {
+        "body_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+        "bytes": 13859,
+        "content_type": "text/javascript; charset=utf-8",
+        "status": 200
+      },
+      "/meco": {
+        "body_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f",
+        "bytes": 2025,
+        "content_type": "text/html; charset=utf-8",
+        "status": 200
+      }
+    },
+    "served_asset_matches_local": true
+  },
+  "file_sha256_pins": {
+    "checkpoints/meco-five/A1/heartbeat.json": "1c5babdbe06bc19f3121ab1e23736c5ca1de8f54104f8a78e668a1be8d74afc0",
+    "checkpoints/meco-five/A1/run.json": "163583a6d4bae645751b4fd5594791b0461d059d35b15164dca7d9a1f8ba61f2",
+    "checkpoints/meco-five/A2/heartbeat.json": "bdb75adba20a157c761615f99762e42a80e419047fe71174f8ce3a5edb11a082",
+    "checkpoints/meco-five/A2/run.json": "2dc37b60ddc06599a5ffc98c6917d1ccdf27ce3baaac2206b5d6387832e3c5c7",
+    "checkpoints/meco-five/A3/heartbeat.json": "c35e117d2584f7cbd5219c8e3daf80e0d0b867fb0f113ec3d696d34dd1fa09ad",
+    "checkpoints/meco-five/A3/run.json": "5e795bc07b3b1f43228d3b25142d938aa8d69f93e39cc0c82c062c025671ad7c",
+    "checkpoints/meco-five/C1/heartbeat.json": "822b12009444eb22e9a302502455fc78b680a96c93be5e36ccfce83154f33a6b",
+    "checkpoints/meco-five/C1/run.json": "21ef818bbebbc2285e77889630902804d23db58c5ff8c16ecbb35bedff273ddf",
+    "checkpoints/meco-five/queue-status.json": "d90c5ca85bca760dc2382a02fd44b1ab854e594f0e488215d8fa095b72768194",
+    "checkpoints/meco-five/supervisor-status.json": "89ec6f23cb0a719d656ce6eca431ab86e9303ef67ce5dc22653c41839d4bf27d"
+  },
+  "reads_non_atomic": true,
+  "reviewed_worktree": {
+    "branch": "codex/meco-production-input-parity",
+    "head": "b098d725b7c2c2da90ddd6b228989bfc27d949ac",
+    "integration": "deferred while pinned-source training remains active",
+    "path": "/home/brian/Projects/.worktrees/autodrive-meco-production-parity",
+    "review": "APPROVED"
+  },
+  "schema_version": 1,
+  "training": {
+    "completed_training_chunks": 2,
+    "cycle": 1,
+    "error": null,
+    "evaluation_protocol_id": null,
+    "evaluation_split": "diagnostic",
+    "heartbeat_utc": "2026-10-24T06:23:13.498522+00:00",
+    "lanes": [
+      {
+        "chunk_updates": 100,
+        "completed_updates": 100,
+        "device": "cuda:0",
+        "error": null,
+        "pid": null,
+        "status": "complete",
+        "track": "A1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 100,
+        "device": "cuda:1",
+        "error": null,
+        "pid": null,
+        "status": "complete",
+        "track": "A2"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 54,
+        "device": "cuda:0",
+        "error": null,
+        "pid": 1476741,
+        "status": "running",
+        "track": "A3"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 85,
+        "device": "cuda:1",
+        "error": null,
+        "pid": 1482130,
+        "status": "running",
+        "track": "C1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "error": null,
+        "pid": null,
+        "status": "queued",
+        "track": "C2"
+      }
+    ],
+    "queue": {
+      "cycle": 1,
+      "updated_utc": "2026-10-24T06:23:13.498522+00:00"
+    },
+    "run_id": "5e8f956474594bf8b69417b39b4692fa",
+    "status": "training"
+  }
+}

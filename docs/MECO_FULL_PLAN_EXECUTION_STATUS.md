@@ -65,6 +65,31 @@
 > these are training updates, not qualification results. Reads were
 > non-atomic; the snapshot pins each captured runtime file.
 
+> **Live status refresh — 2026-10-24 06:23:13 UTC.** Snapshot
+> [`MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T062313Z.json`](MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T062313Z.json),
+> SHA-256 `f4f2b4e30faa315333ca1d1783834a50bfb6fb0f6b5283eb186854506ab54b82`.
+> The pinned supervisor is still training from `main` at source identity
+> `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`:
+> A1 and A2 completed 100/100 updates, A3 is 54/100, C1 is 85/100, and C2 is
+> queued. The active run reports two completed training chunks and no error.
+> Dashboard page, MECO API, curriculum API, and JavaScript asset all returned
+> HTTP 200; the served JavaScript hash matches this checkout. Evaluation remains
+> diagnostic with no bound held-out protocol, so update counts are not scores
+> or passes. Reads were non-atomic; the snapshot pins the captured runtime
+> files and response bodies.
+
+> **Phase 5 production-input parity tranche — 2026-10-24.** Isolated branch
+> `codex/meco-production-input-parity`, commit
+> `b098d725b7c2c2da90ddd6b228989bfc27d949ac`, passed scoped reviewer re-review.
+> It adds opt-in bounded production-request capture and binds the exact captured
+> tensors, checkpoint/protocol/source provenance, ONNX graph, and parity report;
+> capture loading preflights size limits and validates request metadata. No tests,
+> simulator, or model workloads were run for this tranche. Integration is
+> deferred while the active supervisor checks the pinned main-source identity;
+> after training is manually stopped, this branch still needs integration review
+> and a representative seeded simulator capture/replay with the dashboard
+> restarted and verified current.
+
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
 **Plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
