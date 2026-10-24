@@ -22,6 +22,19 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+## Dashboard currentness after C1/C2 campaign integration — 2026-10-24
+
+After candidate commit `7d16d49dfe57c7f426ec2c28714a6d038692f7a9`,
+`frc-defense-dashboard.service` restarted with PID `2072539` and this
+candidate worktree as its working directory. `/meco`, `/api/meco-status`,
+`/api/curriculum-status`, and `/assets/meco.js` returned HTTP 200. The served
+JavaScript SHA-256 matched the checkout asset
+(`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`). The
+curriculum API validates the three-pass ledger as `validated_summary_only`
+with 47 entries and `meco-c1-c2-phase2-campaign` latest. The data root remains
+live `main`. No replay was generated; this verifies currentness and provenance
+only.
+
 ## Dashboard currentness after manifest-supervisor integration — 2026-10-24
 
 After candidate commit `8e8117bd02a609dc5bb4ddb71de2827380759083`, user
