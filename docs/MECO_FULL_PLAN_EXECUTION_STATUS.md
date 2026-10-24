@@ -1,6 +1,6 @@
 # MECO learning tracks plan: execution status
 
-**Snapshot:** 2026-10-24 03:51 UTC
+**Snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
 **Plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
 **Implementation candidate:** `codex/meco-full-plan-integration` at `0e133780a0fadfb9015b84719e75291be89370e0`
@@ -11,19 +11,19 @@ This ledger separates code that exists from evidence that demonstrates runtime b
 
 ## Live training campaign
 
-The continuous campaign is isolated in its own checkout. The supervisor process was observed active at PID `1178932` at the snapshot, invocation `3ccef8583e0843bc92e2dbddbde6569c`, configured with `--devices cuda:0,cuda:1 --evaluation-device cuda:1 --cycles 0 --seed 20261024 --prediction-mode cv --evaluation-prediction-mode cv --phase4-train-exposure`. It writes to `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five` and `.../evaluations/meco-five`. At heartbeat `2026-10-24T03:51:04Z`, A3 had 98/100 updates and C2 remained queued; A1, A2, and C1 had each completed 100/100. An immutable compact observation is recorded in [`MECO_CAMPAIGN_SNAPSHOT_20261024T035104Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T035104Z.json), SHA-256 `921a4919aaf24fae61c7138d695a9fb4077242db64c6bdc9bb0d41bfe3e88efa`. It is a point-in-time record, not a live status feed.
+The continuous campaign is isolated in its own checkout. The supervisor process was observed active at PID `1178932` at the snapshot, invocation `3ccef8583e0843bc92e2dbddbde6569c`, configured with `--devices cuda:0,cuda:1 --evaluation-device cuda:1 --cycles 0 --seed 20261024 --prediction-mode cv --evaluation-prediction-mode cv --phase4-train-exposure`. It writes to `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five` and `.../evaluations/meco-five`. At heartbeat `2026-10-24T03:53:45Z`, A1, A2, A3, and C1 had each completed 100/100 updates, and C2 had started on `cuda:0` at 1/100. An immutable compact observation is recorded in [`MECO_CAMPAIGN_SNAPSHOT_20261024T035345Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T035345Z.json), SHA-256 `b13df6632b64ba5cf8f872c7c5b8fec45141762e9445ed49265ee7aed17ad524`. It is a point-in-time record, not a live status feed.
 
-At the status heartbeat `2026-10-24T03:51:04Z`:
+At the status heartbeat `2026-10-24T03:53:45Z`:
 
 | Track | Device | Training updates | State |
 |---|---|---:|---|
 | A1 | `cuda:0` | 100/100 | First chunk complete |
 | A2 | `cuda:1` | 100/100 | First chunk complete |
-| A3 | `cuda:0` | 98/100 | Running |
+| A3 | `cuda:0` | 100/100 | First chunk complete |
 | C1 | `cuda:1` | 100/100 | First chunk complete |
-| C2 | `cuda:0` | 0/100 | Queued |
+| C2 | `cuda:0` | 1/100 | Running |
 
-The supervisor reports `completed_cycles: 0`, `completed_training_chunks: 3`, and `qualification_protocol_id: null`. No held-out evaluation has completed. These update counts are optimizer progress, not a 100-case evaluation or a pass. The campaign has no warm-start artifacts (`warm_start_artifact_sha256: {}`); it began from scratch. Training currently runs against source identity `c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2`, while the integrated candidate has source identity `8f3d68c00e2beb52d0d188feaf40785bd79a91f04c5ac4c652a05379aa3d045a`.
+The supervisor reports `completed_cycles: 0`, `completed_training_chunks: 4`, and `qualification_protocol_id: null`. No held-out evaluation has completed. These update counts are optimizer progress, not a 100-case evaluation or a pass. The campaign has no warm-start artifacts (`warm_start_artifact_sha256: {}`); it began from scratch. Training currently runs against source identity `c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2`, while the integrated candidate has source identity `8f3d68c00e2beb52d0d188feaf40785bd79a91f04c5ac4c652a05379aa3d045a`.
 
 The implementation candidate is a separate checkout and changes source-hashed Python files. Checkpoints from the live `d7b8dd4b1` campaign therefore do not satisfy strict source identity for the candidate. Do not evaluate or promote those checkpoints as candidate-source artifacts. No candidate-source evaluation or replay ID is available; `20261024` is the active training seed, not an evaluation seed. The candidate dashboard service has not been restarted or verified against its current backend and frontend after these code changes, and no fresh learned-policy replay has been generated or inspected.
 
