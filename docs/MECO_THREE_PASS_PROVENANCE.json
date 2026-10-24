@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -332,11 +332,203 @@
         "status": "approved-summary"
       },
       "limits": "74 focused contract tests passed; no simulator evaluation or dashboard replay is claimed because this tranche changes qualification bookkeeping, not simulated gameplay."
+    },
+    {
+      "requirement_id": "phase5-production-input-onnx-parity",
+      "title": "Phase 5 production-input ONNX parity",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/production-input-onnx-parity.md",
+          "sha256": "2347148b8b715ce5284f1a201148756979488a71e7584b2c5f6c39ecd23359d8",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "eebd4ae57b9f226dade8bac99a6734596381759e",
+        "feature_commit": "77e12b37ea8702221401b66ab0fe8586c81cd00e",
+        "capture_validation_commit": "e09f31d022c8d59dc0ab41da0e361ca711e1fd7b",
+        "exact_input_binding_commit": "b098d725b7c2c2da90ddd6b228989bfc27d949ac",
+        "paths": [
+          "docs/MECO_DEPLOYMENT_PROFILE.md",
+          "frc_defense/meco_deployment.py",
+          "frc_defense/meco_request_capture.py",
+          "frc_defense/meco_tracks.py",
+          "scripts/export_meco_onnx.py",
+          "scripts/verify_meco_onnx_parity.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/production-input-onnx-parity.md",
+          "sha256": "2347148b8b715ce5284f1a201148756979488a71e7584b2c5f6c39ecd23359d8",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "d10764da3ee426c2524f56d85a806725b307e994",
+        "feature_approved_commit": "b098d725b7c2c2da90ddd6b228989bfc27d949ac",
+        "verdict": "approved",
+        "verdict_detail": "Integrated candidate approved after confirming the parity feature commits and merge are unchanged; exact captured tensor content is bound before export.",
+        "status": "approved-summary"
+      },
+      "limits": "No real production capture or captured parity run; no tests or simulator run; no Hailo compiler/device, robot hardware, or deployment qualification evidence."
+    },
+    {
+      "requirement_id": "phase5-wx9100-queue-balancing",
+      "title": "Phase 5 WX9100 queue balancing",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/wx9100-queue-balance.md",
+          "sha256": "48bfa2eb2c610159421e117505879ec57759b809c5310c90bdb98a22bd6e83c5",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "ca27bc443c93f5a2656789b39ab954910a853e69",
+        "initial_commit": "bb5afa4b0c6fea4580ae58dec7fb3d657fd2cf58",
+        "restart_binding_commit": "a13029762c4b97347436493b5255056236eb086b",
+        "manifest_order_commit": "c3ecf482486432c90f1ce99f73e17215d8e464f5",
+        "final_hardening_commit": "ca27bc443c93f5a2656789b39ab954910a853e69",
+        "paths": [
+          "frc_defense/meco_supervisor.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/wx9100-queue-balance.md",
+          "sha256": "48bfa2eb2c610159421e117505879ec57759b809c5310c90bdb98a22bd6e83c5",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "ca27bc443c93f5a2656789b39ab954910a853e69",
+        "verdict": "approved",
+        "verdict_detail": "The isolated queue-balancing implementation and its restart, manifest-ordering, and fail-closed fixes were approved for future integration. No integration commit or runtime evidence is claimed.",
+        "status": "approved-summary"
+      },
+      "limits": "Isolated branch only; not integrated into live main. Static compilation and diff checks only; no tests, runtime throughput measurement, training, simulator, Hailo, or deployment qualification. The source change alters the hashed Python source identity, so existing checkpoints cannot resume without resolving source continuity."
+    },
+    {
+      "requirement_id": "phase5-dashboard-queue-reconciliation",
+      "title": "Phase 5 dashboard queue reconciliation",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/dashboard-queue-reconciliation.md",
+          "sha256": "cb6c0228d89c61e8bc971c4190ee77af30d3543fbcaffeab00be09fbda6931f6",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "00cdd083bc7437ab95e413d48f36f51ea50b2470",
+        "initial_commit": "f191cb07e66ba421ba427925586a10ac7baafd51",
+        "first_hardening_commit": "0416c4d547798ad193c40b49871927003a86c76d",
+        "second_hardening_commit": "94e8d928e86fff218297ad71e27980212afb9176",
+        "paths": [
+          "frc_defense/meco_dashboard.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/dashboard-queue-reconciliation.md",
+          "sha256": "cb6c0228d89c61e8bc971c4190ee77af30d3543fbcaffeab00be09fbda6931f6",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "00cdd083bc7437ab95e413d48f36f51ea50b2470",
+        "verdict": "approved",
+        "verdict_detail": "Approved after successive fail-closed revisions: fresh queue identity, missing manifests, terminal states, PID evidence, and previous-run evidence are kept separate.",
+        "status": "approved-summary"
+      },
+      "limits": "Isolated dashboard candidate only; not integrated into live main. No tests, simulator, training, qualification, source/protocol binding for queue-only rows, or hardware checks. Changes dashboard status projection only and do not resolve training/evaluation gaps."
+    },
+    {
+      "requirement_id": "phase2-plan-a-preference-v2",
+      "title": "Phase 2 Plan A pairwise human preference v2",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-preference-v2-summary.md",
+          "sha256": "c93901127c7974ac7ee5b0e4813a8d63f0f66582c1dc4c097cda56fc82d5db7d",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "278db5f88593049c181c8a68acd41d0c3c2aacc9",
+        "paths": [
+          "frc_defense/meco_plan_a_preferences_v2.py",
+          "frc_defense/meco_supervised.py",
+          "tests/test_plan_a_preferences_v2_contract.py",
+          "docs/implementation-provenance/phase2-plan-a-preference-v2.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-preference-v2-summary.md",
+          "sha256": "c93901127c7974ac7ee5b0e4813a8d63f0f66582c1dc4c097cda56fc82d5db7d",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "278db5f88593049c181c8a68acd41d0c3c2aacc9",
+        "verdict": "approved",
+        "verdict_detail": "Parent orchestrator confirmed this exact scoped implementation commit approved for integration; original approval message is summarized, not stored verbatim.",
+        "status": "approved-summary"
+      },
+      "limits": "Focused CPU contract tests only; no simulator evaluation, GPU fitting, learned-policy qualification, or deployment evidence. Original planner/reviewer messages were not persisted verbatim."
+    },
+    {
+      "requirement_id": "meco-ac-input-provenance",
+      "title": "MECO A/C model input provenance contract",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/input-provenance-contract-summary.md",
+          "sha256": "84c09702e45838cb83f28bac3abf8c56b7e1aa55e1bd71e022b1be10d3f7769c",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "00e586c5fd2cecaeaba34a5489a16e348a3531c4",
+        "paths": [
+          "frc_defense/meco_input_provenance.py",
+          "frc_defense/meco_tracks.py",
+          "frc_defense/meco_track_training.py",
+          "frc_defense/meco_deployment.py",
+          "tests/test_meco_input_provenance.py",
+          "docs/implementation-provenance/meco-input-provenance-contract.md"
+        ],
+        "status": "implemented",
+        "supporting_feature_commit": "155c1e5d8dd7dca30f17ae7fca7747302e51238e"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/input-provenance-contract-summary.md",
+          "sha256": "84c09702e45838cb83f28bac3abf8c56b7e1aa55e1bd71e022b1be10d3f7769c",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "00e586c5fd2cecaeaba34a5489a16e348a3531c4",
+        "verdict": "approved",
+        "verdict_detail": "Parent orchestrator confirmed the final scoped implementation commit approved for integration; original approval message is summarized, not stored verbatim.",
+        "status": "approved-summary"
+      },
+      "limits": "Ten focused CPU contract tests only; no simulator/GPU run, hardware-equivalence, model-quality, fairness, learned-policy qualification, or deployment evidence. Original planner/reviewer messages were not persisted verbatim."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
   "limits": [
     "Original planner and reviewer transcripts were not persisted for earlier tranches.",
-    "This ledger does not claim whole-plan approval, track-wide completion, runtime validation, or agent liveness."
+    "This ledger does not claim whole-plan approval, track-wide completion, runtime validation, or agent liveness.",
+    "The preference-v2 and A/C input-provenance approval evidence is a scoped summary of parent messages; original planner/reviewer transcripts are not stored.",
+    "The combined branch is a review-only integration candidate; it has no simulator/GPU qualification, captured production parity run, or deployment qualification."
   ]
 }

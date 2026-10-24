@@ -16,6 +16,7 @@ import torch
 from frc_defense import curriculum_training
 from frc_defense.meco_deployment import dummy_inputs, input_names, load_track_model
 from frc_defense.meco_tracks import MECO_TRACKS
+from frc_defense.meco_request_capture import load_capture
 
 
 OUTPUT_NAMES = {
@@ -118,7 +119,9 @@ def _compare_outputs(track, torch_outputs, onnx_outputs, atol, rtol):
 
 
 def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
-           provider: str, atol: float, rtol: float) -> dict:
+           provider: str, atol: float, rtol: float,
+           production_capture_dir: Path | None = None,
+           export_manifest_path: Path | None = None) -> dict:
     current_sources = curriculum_training.source_identity()
     report = {
         "schema": "meco-onnx-numerical-parity-v1",
@@ -127,7 +130,12 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
         "scope": {"required_tracks": list(MECO_TRACKS), "tracks_requested": list(MECO_TRACKS)},
         "checkpoint_root": str(checkpoint_root.resolve()),
         "onnx_root": str(onnx_root.resolve()),
-        "input_seed": seed,
+        "input_seed": None if production_capture_dir else seed,
+        "input_mode": "production_capture" if production_capture_dir else "synthetic_seeded",
+        "production_capture_dir": (str(production_capture_dir.resolve())
+                                    if production_capture_dir else None),
+        "export_manifest": (str(export_manifest_path.resolve())
+                            if export_manifest_path else None),
         "requested_provider": provider,
         "provider": None,
         "tolerance": {"atol": atol, "rtol": rtol},
@@ -151,6 +159,32 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
         report["unavailable_reason"] = f"requested provider {provider!r} is not available"
         return report
 
+    export_records = None
+    if production_capture_dir:
+        manifest_path = export_manifest_path or (onnx_root / "export-manifest.json")
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+            export_manifest = json.loads(manifest_bytes)
+        except (OSError, json.JSONDecodeError) as exc:
+            report["status"] = "failed"
+            report["error"] = f"production-capture export manifest unavailable or invalid: {exc}"
+            return report
+        report["export_manifest"] = str(manifest_path.resolve())
+        report["export_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+        if (not isinstance(export_manifest, dict)
+                or export_manifest.get("schema") != "meco-onnx-export-v1"
+                or not isinstance(export_manifest.get("exports"), list)):
+            report["status"] = "failed"
+            report["error"] = "unsupported ONNX export manifest schema"
+            return report
+        from frc_defense.meco_input_provenance import input_contract_digest
+        if export_manifest.get("input_contract_sha256") != input_contract_digest():
+            report["status"] = "failed"
+            report["error"] = "ONNX export manifest input contract digest differs from current registry"
+            return report
+        export_records = {row.get("track"): row for row in export_manifest.get("exports", [])
+                          if isinstance(row, dict)}
+
     for track in MECO_TRACKS:
         checkpoint = checkpoint_root / track / "latest.pt"
         graph = onnx_root / f"{track}.onnx"
@@ -169,11 +203,49 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             if not graph.is_file() or graph.stat().st_size == 0:
                 raise FileNotFoundError(f"ONNX graph missing or empty: {graph}")
             item["onnx_sha256"] = _sha256(graph)
-            inputs = _seeded_inputs(track, seed)
+            capture_metadata = None
+            if production_capture_dir:
+                captures = sorted(production_capture_dir.glob(f"{track}-*.npz"))
+                if len(captures) != 1:
+                    raise ValueError(f"expected exactly one {track} production capture, found {len(captures)}")
+                capture_metadata, inputs = load_capture(captures[0], expected_track=track)
+                if (capture_metadata["checkpoint_sha256"] != provenance["sha256"]
+                        or capture_metadata["protocol_id"] != provenance["protocol_id"]
+                        or capture_metadata["source_snapshot_sha256"] !=
+                           _canonical_sha256(provenance["sources"])):
+                    raise ValueError("production capture checkpoint/protocol/source provenance mismatch")
+                export_record = export_records.get(track) if export_records else None
+                if (not export_record or export_record.get("input_mode") != "production_capture"
+                        or export_record.get("onnx_sha256") != item["onnx_sha256"]):
+                    raise ValueError("ONNX graph is not the capture-bound export recorded in its manifest")
+                binding_keys = ("track", "checkpoint_sha256", "protocol_id",
+                    "source_snapshot_sha256", "input_contract_sha256",
+                    "content_sha256", "metadata_sha256",
+                    "request_sequence", "generation_id", "snapshot_id",
+                    "candidate_mask_digest", "legal_pose_order_digest")
+                expected_binding = {key: capture_metadata.get(key) for key in binding_keys}
+                if export_record.get("capture_binding") != expected_binding:
+                    raise ValueError("production capture content or provenance differs from export manifest")
+                expected_export_inputs = [{"name": name, "shape": list(tensor.shape),
+                                           "dtype": str(tensor.dtype)}
+                                          for name, tensor in zip(input_names(track), inputs)]
+                if export_record.get("inputs") != expected_export_inputs:
+                    raise ValueError("export manifest input shapes/dtypes do not match captured tensors")
+                if (export_record.get("checkpoint_provenance", {}).get("sha256") != provenance["sha256"]
+                        or export_record.get("checkpoint_provenance", {}).get("protocol_id") != provenance["protocol_id"]
+                        or _canonical_sha256(export_record.get("checkpoint_provenance", {}).get("sources"))
+                           != _canonical_sha256(provenance["sources"])):
+                    raise ValueError("export manifest checkpoint provenance mismatch")
+                item["capture_provenance"] = capture_metadata
+                item["capture_binding"] = expected_binding
+                item["export_manifest_track"] = export_record
+            else:
+                inputs = _seeded_inputs(track, seed)
             names = input_names(track)
             if not all(bool(torch.isfinite(tensor).all()) for tensor in inputs):
                 raise ValueError("seeded verifier input contains nonfinite values")
             item["input_sha256"] = _input_digest(names, inputs)
+            item["input_mode"] = "production_capture" if capture_metadata else "synthetic_seeded"
             item["inputs"] = [{"name": name, "shape": list(tensor.shape),
                                 "dtype": str(tensor.dtype)}
                                for name, tensor in zip(names, inputs)]
@@ -238,6 +310,10 @@ def main() -> int:
     parser.add_argument("--onnx-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261024)
+    parser.add_argument("--production-capture-dir", type=Path,
+                        help="compare exact captured production inputs; requires one capture per track")
+    parser.add_argument("--export-manifest", type=Path,
+                        help="capture-bound ONNX export manifest (default: ONNX_ROOT/export-manifest.json)")
     parser.add_argument("--provider", default="CPUExecutionProvider")
     parser.add_argument("--atol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-4)
@@ -247,7 +323,8 @@ def main() -> int:
         parser.error("seed and tolerances must be finite and nonnegative")
     try:
         report = verify(args.checkpoint_root, args.onnx_root, args.seed,
-                        args.provider, args.atol, args.rtol)
+                        args.provider, args.atol, args.rtol,
+                        args.production_capture_dir, args.export_manifest)
     except Exception as exc:
         # Preserve a machine-readable failure record even if setup fails before
         # the per-track evidence loop (for example source inventory or ORT API).

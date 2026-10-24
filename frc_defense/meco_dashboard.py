@@ -160,10 +160,15 @@ def _queue_state(root: Path, now: float, data_root: Path):
              and age <= QUEUE_STALE_SECONDS and stamp <= now + 5.)
     lanes = {}
     raw_lanes = payload.get("lanes")
+    valid_lane_statuses = {"queued", "running", "stalled", "complete", "stopped",
+                           "failed", "aborted_due_to_sibling_failure"}
     if isinstance(raw_lanes, list):
         for lane in raw_lanes:
             if (not isinstance(lane, dict) or lane.get("track") not in TRACKS
-                    or not isinstance(lane.get("run_id"), str)):
+                    or not isinstance(lane.get("run_id"), str)
+                    or not lane["run_id"].strip()
+                    or not isinstance(lane.get("status"), str)
+                    or lane.get("status") not in valid_lane_statuses):
                 continue
             pid = lane.get("pid") if type(lane.get("pid")) is int else None
             process = _process_evidence(pid, expected_run_id=lane["run_id"])
@@ -245,6 +250,36 @@ def _worker_stalled(*, manifest, heartbeat, stats, latest, lane, queue, now):
             or unchanged_seconds < WORKER_STALL_SECONDS):
         return False, unchanged_seconds
     return True, unchanged_seconds
+
+
+def _queue_attempt_projection(track, lane, *, queue_fresh, previous_run=None):
+    """Project a queue-only attempt without borrowing evidence from an older run."""
+    lane_state = lane.get("status")
+    worker_state = ("queued" if queue_fresh and lane_state == "queued"
+        else "unconfirmed")
+    queue_process_confirmed = (queue_fresh
+        and lane_state in ("running", "stalled")
+        and lane.get("process_confirmed") is True)
+    worker_pid = lane.get("pid") if queue_process_confirmed else None
+    projected = {"run_id": lane.get("run_id"), "track": track,
+        "run_directory": lane.get("run_directory"),
+        "manifest_state": "missing", "queue_status": lane_state,
+        "training_state": worker_state,
+        "heartbeat": {"state": "not_started"
+            if queue_fresh and lane_state == "queued" else "missing",
+            "fresh": False, "process_alive": False, "process_confirmed": False,
+            "pid": None},
+        "queue_process_probe": {"confirmed": queue_process_confirmed,
+            "pid": worker_pid},
+        "worker_pid": worker_pid, "device": lane.get("device"),
+        "sources": {}, "config": {}, "latest_checkpoint": None,
+        "completed_updates": (lane.get("completed_updates")
+            if type(lane.get("completed_updates")) is int else 0),
+        "latest_training_metrics": None}
+    if previous_run is not None:
+        projected["previous_run"] = {key: previous_run.get(key) for key in (
+            "run_id", "run_directory", "manifest_state", "training_state")}
+    return projected
 
 
 def _safe_metrics(record):
@@ -877,24 +912,27 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
     policies = []
     for policy in POLICIES:
         runs = run_by_track.get(policy, [])
-        runs.sort(key=lambda row: (
-            row.get("training_state") in ("running", "queued", "unconfirmed", "stalled"),
-            row.get("heartbeat", {}).get("fresh", False),
-            row.get("manifest_state") == "queued",
-            row.get("completed_updates", 0), row["run_id"] or ""))
-        latest_run = runs[-1] if runs else None
         lane = queue.get("lanes", {}).get(policy) if policy in TRACKS else None
+        current_queue_attempt = (queue.get("state") == "fresh" and lane is not None
+            and not any(run.get("run_id") == lane.get("run_id") for run in runs))
+        if current_queue_attempt:
+            history = sorted(runs, key=lambda row: (
+                row.get("training_state") in ("running", "queued", "unconfirmed", "stalled"),
+                row.get("heartbeat", {}).get("fresh", False),
+                row.get("manifest_state") == "queued",
+                row.get("completed_updates", 0), row["run_id"] or ""))
+            latest_run = _queue_attempt_projection(policy, lane, queue_fresh=True,
+                previous_run=history[-1] if history else None)
+        else:
+            runs.sort(key=lambda row: (
+                row.get("training_state") in ("running", "queued", "unconfirmed", "stalled"),
+                row.get("heartbeat", {}).get("fresh", False),
+                row.get("manifest_state") == "queued",
+                row.get("completed_updates", 0), row["run_id"] or ""))
+            latest_run = runs[-1] if runs else None
         if latest_run is None and lane:
-            lane_state = lane.get("status")
-            latest_run = {"run_id": lane.get("run_id"), "track": policy,
-                "manifest_state": lane_state,
-                "training_state": "queued" if queue["state"] == "fresh" and lane_state == "queued" else "unconfirmed",
-                "heartbeat": {"state": "not_started", "fresh": False,
-                              "pid": lane.get("pid")}, "config": {},
-                "worker_pid": lane.get("pid"), "device": lane.get("device"),
-                "sources": {}, "latest_checkpoint": None,
-                "completed_updates": lane.get("completed_updates") or 0,
-                "latest_training_metrics": None}
+            latest_run = _queue_attempt_projection(policy, lane,
+                queue_fresh=False)
         evidence = latest_by_policy.get(policy)
         policies.append({"policy_id": policy,
             "kind": ("learned_track" if policy in TRACKS else

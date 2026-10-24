@@ -30,10 +30,41 @@ status. Extreme finite error summaries that cannot be represented safely in the
 JSON numeric format are recorded as null with an overflow marker and fail the
 track. Only all five complete track comparisons can produce `pass`.
 
-Parity checks tensor numerics for synthetic scorer inputs only. They do not
-validate simulator behavior, route construction, action arbitration, physical
-actuation, Hailo compilation, or robot hardware. A parity pass is not a
-deployment qualification or promotion decision.
+The default export and parity commands use synthetic inputs. To capture bounded
+real requests at the production adapter boundary, set both
+`MECO_REQUEST_CAPTURE_DIR` and `MECO_REQUEST_CAPTURE_MAX` in the process that
+runs checkpoint-backed production inference. The maximum must be between 1 and
+100 requests per process; capture copies tensors to host and should be enabled
+only for a deliberate diagnostic run. Each request is limited to 64 MiB of
+tensor payload. Each atomic `.npz` contains canonical
+input names/order, dtype/shape and per-tensor plus aggregate content digests,
+the validated model-input contract digest, checkpoint/protocol/source snapshot,
+snapshot and request/generation identity,
+candidate IDs/mask and digest, legal-pose-order digest where applicable, and
+capture/dispatch/expiry provenance. `load_capture` rejects malformed metadata,
+noncanonical order, digest mismatch, and incomplete request provenance.
+
+With exactly one capture for each requested track, export graph shapes from
+the captured tensors and run parity on those exact captured values:
+
+```bash
+python scripts/export_meco_onnx.py --checkpoint-root checkpoints/meco-five --output artifacts/meco-onnx-captured --production-capture-dir evaluations/meco-production-captures
+python scripts/verify_meco_onnx_parity.py --checkpoint-root checkpoints/meco-five --onnx-root artifacts/meco-onnx-captured --output evaluations/meco-deployment/onnx-captured-parity.json --production-capture-dir evaluations/meco-production-captures --provider CPUExecutionProvider --atol 1e-5 --rtol 1e-4
+```
+
+Export rejects a capture whose checkpoint, protocol, or source snapshot does
+not match the selected checkpoint. The export manifest pins the capture's
+aggregate tensor-content and metadata digests plus request provenance and the
+ONNX graph digest. The verifier requires those bindings to match the current
+capture byte content and export manifest, so a replaced or edited capture is
+rejected. It also checks capture checkpoint, protocol, and source-snapshot
+identity against the checkpoint being compared. Its report labels the input
+mode as `production_capture`; the existing seeded mode remains
+`synthetic_seeded`. Capture parity checks scorer tensor numerics on one
+recorded request per track. It does not establish request freshness under
+load, simulator behavior, route construction correctness, action arbitration,
+physical actuation, Hailo compilation, or robot hardware. Neither parity mode
+is a deployment qualification or promotion decision.
 
 Export requires PyTorch's ONNX exporter and the `onnx` package for graph
 inspection. Profiling benchmarks CPU and each visible ROCm/CUDA device. It

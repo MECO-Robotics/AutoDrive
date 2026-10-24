@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 import queue
 import sys
 import threading
@@ -18,6 +19,7 @@ from types import MappingProxyType
 import time
 from typing import Mapping
 import uuid
+import warnings
 
 import torch
 from torch import nn
@@ -196,7 +198,7 @@ class ProductionMecoAdapter:
     must use its already-feasible deterministic fallback.
     """
     def __init__(self, track: str, model: nn.Module, *, checkpoint_sha256: str,
-                 protocol_id: str):
+                 protocol_id: str, source_snapshot_sha256: str = ""):
         if track not in MECO_TRACKS:
             raise ValueError(f"unsupported MECO track: {track}")
         if (len(checkpoint_sha256) != 64 or any(c not in "0123456789abcdef" for c in checkpoint_sha256)
@@ -214,6 +216,7 @@ class ProductionMecoAdapter:
         self.track, self.model = track, model
         self.device = next(iter(devices))
         self.checkpoint_sha256, self.protocol_id = checkpoint_sha256, protocol_id
+        self.source_snapshot_sha256 = source_snapshot_sha256
         self._request_lock = threading.Lock()
         self._request_sequence = 0
         self._generation_id = uuid.uuid4().hex
@@ -233,6 +236,16 @@ class ProductionMecoAdapter:
 
     def submit_inference(self, request: MecoInferenceRequest,
                          inputs: Mapping[str, torch.Tensor]):
+        # Diagnostic capture is strictly opt-in and bounded by an explicit
+        # request count. Capture failures are visible but never alter scoring.
+        if "MECO_REQUEST_CAPTURE_DIR" in os.environ or "MECO_REQUEST_CAPTURE_MAX" in os.environ:
+            try:
+                from .meco_request_capture import capture_request
+                capture_request(request, inputs,
+                    source_snapshot_sha256=self.source_snapshot_sha256)
+            except Exception as exc:
+                warnings.warn(f"MECO production request capture failed: {type(exc).__name__}: {exc}",
+                              RuntimeWarning, stacklevel=2)
         return self._broker.submit(request, inputs)
 
     def poll_inference(self, request: MecoInferenceRequest, handle):

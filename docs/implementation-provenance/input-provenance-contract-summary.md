@@ -1,0 +1,7 @@
+# A/C input provenance contract scoped summary
+
+This summary records the approved scoped work for the versioned A1/A2/A3/C1/C2 model-input provenance registry. The registry enumerates serialized input order, candidate feature origins and boundaries, track visibility, and an explicit prohibition against labeling simulator truth/state as observed. Runtime validation checks registered order and C1/C2 candidate-schema parity; the digest is bound into supported training, inference, evaluation, and deployment records.
+
+The implementation commits are `155c1e5d8dd7dca30f17ae7fca7747302e51238e` and follow-up `00e586c5fd2cecaeaba34a5489a16e348a3531c4`; the latter is the final reviewed implementation. Changed paths are `frc_defense/meco_input_provenance.py`, `frc_defense/meco_tracks.py`, `frc_defense/meco_track_training.py`, `frc_defense/meco_deployment.py`, `tests/test_meco_input_provenance.py`, and `docs/implementation-provenance/meco-input-provenance-contract.md`. The parent orchestrator confirmed the final commit was approved for integration. The approval is summarized here; original planner/reviewer messages were not persisted verbatim.
+
+Ten focused CPU contract tests passed on the final branch. No simulator/GPU run, hardware-equivalence claim, model-quality claim, fairness result, or learned-policy qualification is made. Provenance boundaries and representation limitations are documented in the linked contract note.

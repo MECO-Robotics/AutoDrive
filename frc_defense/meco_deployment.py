@@ -355,7 +355,10 @@ def load_production_adapter(track: str, checkpoint: Path, *, device: str) -> tup
         raise RuntimeError("production MECO checkpoint did not load on the selected accelerator")
     return ProductionMecoAdapter(track, export_adapter.model,
         checkpoint_sha256=provenance["sha256"],
-        protocol_id=provenance["protocol_id"]), provenance
+        protocol_id=provenance["protocol_id"],
+        source_snapshot_sha256=hashlib.sha256(json.dumps(
+            provenance["sources"], sort_keys=True, allow_nan=False,
+            separators=(",", ":")).encode()).hexdigest()), provenance
 
 
 def operator_inventory(onnx_path: Path) -> dict:
@@ -376,11 +379,38 @@ def operator_inventory(onnx_path: Path) -> dict:
             "node_count": len(model.graph.node)}
 
 
-def export_track(track: str, checkpoint: Path, output: Path) -> dict:
+def export_track(track: str, checkpoint: Path, output: Path,
+                 input_tensors: tuple[torch.Tensor, ...] | None = None,
+                 capture_provenance: dict | None = None) -> dict:
     model, provenance = load_track_model(track, checkpoint)
     names = input_names(track)
-    tensors = dummy_inputs(track)
+    if capture_provenance is not None and input_tensors is None:
+        raise ValueError("production capture provenance requires its captured input tensors")
+    capture_binding = None
+    if capture_provenance is not None:
+        from .meco_request_capture import validate_capture_inputs
+        validate_capture_inputs(capture_provenance, input_tensors,
+                               expected_track=track)
+        source_digest = hashlib.sha256(json.dumps(
+            provenance["sources"], sort_keys=True, allow_nan=False,
+            separators=(",", ":")).encode()).hexdigest()
+        if (capture_provenance.get("track") != track
+                or capture_provenance.get("checkpoint_sha256") != provenance["sha256"]
+                or capture_provenance.get("protocol_id") != provenance["protocol_id"]
+                or capture_provenance.get("source_snapshot_sha256") != source_digest):
+            raise ValueError("production capture checkpoint/protocol/source provenance mismatch")
+        capture_binding = {key: capture_provenance.get(key) for key in (
+            "track", "checkpoint_sha256", "protocol_id", "source_snapshot_sha256",
+            "input_contract_sha256",
+            "content_sha256", "metadata_sha256", "request_sequence",
+            "generation_id", "snapshot_id", "candidate_mask_digest",
+            "legal_pose_order_digest")}
+    tensors = dummy_inputs(track) if input_tensors is None else tuple(input_tensors)
     validate_export_input_order(track, names, tensors)
+    if any(not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu"
+           or not tensor.is_contiguous() or not torch.isfinite(tensor).all()
+           for tensor in tensors):
+        raise ValueError("ONNX export inputs must be finite, contiguous CPU tensors")
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(model, tensors, str(output), input_names=names,
         output_names=("utility", "penalty", "behavior_logits", "hidden") if track.startswith("A")
@@ -388,6 +418,10 @@ def export_track(track: str, checkpoint: Path, output: Path) -> dict:
         opset_version=17, do_constant_folding=True, dynamo=False)
     return {"track": track, "checkpoint_provenance": provenance,
             "path": str(output), "size_bytes": output.stat().st_size,
+            "onnx_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+            "input_mode": "production_capture" if capture_provenance else "synthetic",
+            "capture_binding": capture_binding,
+            "capture_provenance": capture_provenance,
             "inputs": [{"name": name, "shape": list(t.shape), "dtype": str(t.dtype)}
                        for name, t in zip(names, tensors)],
             "graph": operator_inventory(output)}

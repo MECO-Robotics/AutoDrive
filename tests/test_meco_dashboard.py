@@ -131,7 +131,7 @@ def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_
     assert result["queue"]["state"] == "fresh"
     assert policy["training_state"] == "queued"
     assert policy["run"]["heartbeat"]["state"] == "not_started"
-    assert policy["run"]["worker_pid"] == 99
+    assert policy["run"]["worker_pid"] is None
     assert policy["run"]["completed_updates"] == 12
     assert result["queue"]["lanes"]["A1"]["device"] == "cuda:0"
     assert result["queue"]["evaluation"]["pid"] == 101
