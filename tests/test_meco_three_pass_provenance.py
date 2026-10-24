@@ -40,11 +40,15 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 15
+    assert len(result["tranches"]) == 16
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
     assert lease["reviewer"]["approved_commit"] == lease["implementer"]["commit"]
+    trace = next(t for t in result["tranches"]
+                 if t["requirement_id"] == "meco-inference-observability-decision-trace")
+    assert trace["implementer"]["commit"] == "7cfe3d07696167d931ced416780435c4f13ddfc1"
+    assert trace["reviewer"]["approved_commit"] == trace["implementer"]["commit"]
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
