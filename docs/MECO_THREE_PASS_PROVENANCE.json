@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts on 2026-10-23; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23 from their planner, implementation, and independent review records.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -262,6 +262,41 @@
         "status": "approved-summary"
       },
       "limits": "Post-fix training diagnostic and broad seeded simulator evaluation/replay are pending."
+    },
+    {
+      "requirement_id": "async-inference-broker-contract",
+      "title": "Async inference broker lifecycle and fault contract",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/async-inference-broker-contract.md",
+          "sha256": "4ea89776ed27bbbfffed57acd37e2596ea270348e26b4b4df0c4d9ab3d54b26c",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "52d2c8314de23249129bda037dadc07bc36cdafa",
+        "paths": [
+          "frc_defense/meco_tracks.py",
+          "tests/test_meco_inference_broker.py",
+          "docs/MECO_DEPLOYMENT_PROFILE.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/async-inference-broker-contract.md",
+          "sha256": "4ea89776ed27bbbfffed57acd37e2596ea270348e26b4b4df0c4d9ab3d54b26c",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "52d2c8314de23249129bda037dadc07bc36cdafa",
+        "verdict": "approved",
+        "verdict_detail": "approved; fake-adapter contract evidence only, with accelerator and simulator validation still pending",
+        "status": "approved-summary"
+      },
+      "limits": "Fake CPU adapter contract checks only; GPU-load freshness, simulator fallback, replay, and deployment profiling pending."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

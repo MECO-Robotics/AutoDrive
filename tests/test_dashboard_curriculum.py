@@ -7,7 +7,7 @@ from urllib.request import urlopen
 
 from frc_defense.dashboard import create_handler
 from frc_defense.dashboard_api import curriculum_status_payload, _category_passes, _curriculum_report_root
-from frc_defense.training_curriculum import SCENARIOS
+from frc_defense.training_curriculum import CURRICULUM_VERSION, SCENARIOS
 
 
 def _run(root, *, qualified=(), diagnostic=False, sources=None):
@@ -34,7 +34,7 @@ def _run(root, *, qualified=(), diagnostic=False, sources=None):
     (run / "stats.json").write_text(json.dumps(stats))
     for update in (5, 6, 7):
         report = {"protocol_id": "fixture-v1", "sources": stats["sources"],
-                  "curriculum_version": "1", "evaluation_id": f"eval-{update}", "policy_id": "policy",
+                  "curriculum_version": CURRICULUM_VERSION, "evaluation_id": f"eval-{update}", "policy_id": "policy",
                   "split": "validation", "diagnostic": diagnostic,
                   "evaluation_results": [{"scenario_id": "pickup_simple", "scenario_version": "1",
                                           "protocol_id": "fixture-v1", "categories": categories}],
@@ -132,16 +132,16 @@ def test_reported_state_cannot_bypass_scenario_gate_or_versions(tmp_path):
 def test_nonprimitive_registry_gate_checks_success_and_throughput():
     scenario = SCENARIOS["active_collect_carry_score"]
     row = {"scenario": scenario.scenario_id, "category": scenario.required_categories[0],
-           "scenario_version": scenario.version, "curriculum_version": "1",
+           "scenario_version": scenario.version, "curriculum_version": CURRICULUM_VERSION,
            "split": "validation", "diagnostic": False, "paired": True,
            "reference_qualified": True, "episodes": 100, "successes": 95,
            "success_rate": .95, "useful_throughput": 1.0, "throughput_ratio": .81}
-    assert _category_passes(row, scenario, scenario.required_categories[0], "1")
+    assert _category_passes(row, scenario, scenario.required_categories[0], CURRICULUM_VERSION)
     row["throughput_ratio"] = .79
-    assert not _category_passes(row, scenario, scenario.required_categories[0], "1")
+    assert not _category_passes(row, scenario, scenario.required_categories[0], CURRICULUM_VERSION)
     row["throughput_ratio"] = .81
     row["success_rate"] = .89
-    assert not _category_passes(row, scenario, scenario.required_categories[0], "1")
+    assert not _category_passes(row, scenario, scenario.required_categories[0], CURRICULUM_VERSION)
 
 
 def test_qualified_stage_requires_matching_checkpoint_and_protocol(tmp_path):

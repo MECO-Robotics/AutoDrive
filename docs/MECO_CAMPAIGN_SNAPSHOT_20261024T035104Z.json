@@ -1,0 +1,28 @@
+{
+  "observed_at_utc": "2026-10-24T03:51:04Z",
+  "heartbeat_utc": "2026-10-24T03:51:04.127492+00:00",
+  "supervisor_pid": 1178932,
+  "supervisor_process_state": "Ssl",
+  "supervisor_id": "3ccef8583e0843bc92e2dbddbde6569c",
+  "campaign_source_branch": "codex/meco-c1-replay-integrated",
+  "campaign_source_commit": "d7b8dd4b1c1814c2a368ded7604b3c887571fdcc",
+  "campaign_source_identity_sha256": "c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2",
+  "output_directory": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five",
+  "devices": ["cuda:0", "cuda:1"],
+  "evaluation_device": "cuda:1",
+  "cycles": 0,
+  "seed": 20261024,
+  "status": "training",
+  "completed_cycles": 0,
+  "completed_training_chunks": 3,
+  "qualification_protocol_id": null,
+  "evaluation": null,
+  "warm_start_artifact_sha256": {},
+  "tracks": [
+    {"track": "A1", "device": "cuda:0", "status": "complete", "completed_updates": 100, "chunk_updates": 100},
+    {"track": "A2", "device": "cuda:1", "status": "complete", "completed_updates": 100, "chunk_updates": 100},
+    {"track": "A3", "device": "cuda:0", "status": "running", "completed_updates": 98, "chunk_updates": 100},
+    {"track": "C1", "device": "cuda:1", "status": "complete", "completed_updates": 100, "chunk_updates": 100},
+    {"track": "C2", "device": "cuda:0", "status": "queued", "completed_updates": 0, "chunk_updates": 100}
+  ]
+}

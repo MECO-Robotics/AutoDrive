@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 7
+    assert len(result["tranches"]) == 8
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
