@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence. The validation-campaign-planner tranche was added on 2026-10-24 from scoped planner notes, implementer commits, the reviewer request-changes finding, and exact-head approval; it records validation-only planning and no final-test disclosure or runtime outcomes.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -676,6 +676,45 @@
         "status": "approved-summary"
       },
       "limits": "78 focused tests, py_compile, and diff check reported passing. Reviewer spot verification passed 10 matched-control tests and 9 supervisor-dispatch tests. No GPU, simulator, dashboard, active training, final-test consumption, held-out outcome, qualification, or deployment evidence."
+    },
+    {
+      "requirement_id": "validation-campaign-planner",
+      "title": "Deterministic validation-only planner for all protocol scenario and stratum jobs",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/validation-campaign-planner.md",
+          "sha256": "cb1563f55997e255cb1fd408cef48c5bcd02a8a149316f8039e10a8994038c2f",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "4a5ef0d71b4a5db218deb6f7b85ca90cd86c6ad0",
+        "initial_commit": "cb4fe69cd4c025a8adfc46e3e290d73e277d70c6",
+        "candidate_integration_commit": "a1d615dea2465cadad8fcdc8ada63890691cf80f",
+        "case_completeness_commit": "9cba0a9af8312de28c39a3e2a842364f185165e0",
+        "paths": [
+          "frc_defense/meco_validation_campaign.py",
+          "scripts/plan_meco_validation_campaign.py",
+          "docs/MECO_VALIDATION_CAMPAIGN_PLANNER.md",
+          "tests/test_meco_validation_campaign.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/validation-campaign-planner.md",
+          "sha256": "cb1563f55997e255cb1fd408cef48c5bcd02a8a149316f8039e10a8994038c2f",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "4a5ef0d71b4a5db218deb6f7b85ca90cd86c6ad0",
+        "verdict": "approved",
+        "verdict_detail": "Independent reviewer rejected incomplete-stratum acceptance, then approved exact case-table validation; confirmed 28 validation jobs and no final-test seed disclosure. Approval covers planner contracts only.",
+        "status": "approved-summary"
+      },
+      "limits": "Six focused tests passed; Python compilation, diff check, and validation-only CLI dry run passed. No matrix, simulator, GPU, dashboard, final-test ledger, evaluation outcome, replay, qualification, campaign runner, or cross-scenario aggregation."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

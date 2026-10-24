@@ -1,5 +1,18 @@
 # MECO learning tracks plan: execution status
 
+> **Validation campaign planner integrated — 2026-10-24 09:02 UTC.** The
+> reviewed planner is in candidate code commit
+> `9cba0a9af8312de28c39a3e2a842364f185165e0` and produces 28 deterministic,
+> validation-only scenario/stratum jobs from the exact frozen protocol case
+> table. It binds exact seeds and expected policy/category/seed coverage,
+> refuses qualification claims against the current provisional protocol, and
+> does not serialize final-test seeds. Six focused tests, compilation, a CLI
+> dry run, and diff checks passed; independent review rejected a missing-
+> stratum case before approving the complete case-table validation. No matrix,
+> simulator, GPU, or final-test operation was run. Three-pass provenance is
+> now 19 scoped tranches. Dashboard restart/current-checkout verification for
+> this new code and manifest update is pending.
+
 > **Matched-evaluation controls integrated — 2026-10-24 08:49 UTC.** The
 > planner → implementer → independent reviewer tranche is integrated into
 > candidate HEAD `2e610f88d284680f71857a00e0d8f05d0d00fe87` (code integration

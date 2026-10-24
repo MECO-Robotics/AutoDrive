@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 18
+    assert len(result["tranches"]) == 19
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -58,6 +58,10 @@ def test_current_manifest_is_validated_as_summary_only():
                    if t["requirement_id"] == "matched-evaluation-controls")
     assert matched["implementer"]["commit"] == "0db1e6436fbd753d82e49fbab02850d81fce1f07"
     assert matched["reviewer"]["approved_commit"] == matched["implementer"]["commit"]
+    planner = next(t for t in result["tranches"]
+                   if t["requirement_id"] == "validation-campaign-planner")
+    assert planner["implementer"]["commit"] == "4a5ef0d71b4a5db218deb6f7b85ca90cd86c6ad0"
+    assert planner["reviewer"]["approved_commit"] == planner["implementer"]["commit"]
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
