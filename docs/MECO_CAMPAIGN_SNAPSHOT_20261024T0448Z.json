@@ -1,0 +1,304 @@
+{
+  "campaign": {
+    "completed_cycles": 0,
+    "completed_training_chunks": 0,
+    "cycle": 1,
+    "evaluation": null,
+    "evaluation_split": "diagnostic",
+    "heartbeat_utc": "2026-10-24T04:49:01.727277+00:00",
+    "lanes": [
+      {
+        "chunk_updates": 100,
+        "completed_updates": 30,
+        "device": "cuda:0",
+        "pid": 1400340,
+        "pid_alive": true,
+        "run_directory": "A1",
+        "run_id": "f526bc6603974e1c95efbf52824b860c",
+        "run_json_sha256": "d83b1da1687e0bdbd0a7db030e6b529f5cb9aeb36ef599a5849c8ab7d572e1eb",
+        "status": "running",
+        "track": "A1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 27,
+        "device": "cuda:1",
+        "pid": 1400357,
+        "pid_alive": true,
+        "run_directory": "A2",
+        "run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "run_json_sha256": "e6219ca65cc8722946632a15597d6076498f021b598921e063d55940356f7303",
+        "status": "running",
+        "track": "A2"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "pid_alive": false,
+        "run_directory": "A3",
+        "run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "status": "queued",
+        "track": "A3"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:1",
+        "pid": null,
+        "pid_alive": false,
+        "run_directory": "C1",
+        "run_id": "9417015ce2a14c55927b5aacb1262075",
+        "status": "queued",
+        "track": "C1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "pid_alive": false,
+        "run_directory": "C2",
+        "run_id": "d4b03e1a0595420b91122c9389b24d74",
+        "status": "queued",
+        "track": "C2"
+      }
+    ],
+    "qualification_protocol_id": "dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2",
+    "queue_path": "checkpoints/meco-five/queue-status.json",
+    "queue_sha256": "23251c89aadf1993793c3c2c20f26be727caa678697b401ceb0420fa2d51c983",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "status": "training",
+    "status_path": "checkpoints/meco-five/supervisor-status.json",
+    "status_sha256": "eee686ab1cc6c14e8f08932a971c8eb6c32a1a246c7844415e54775f53596c3e",
+    "supervisor_id": "5e8f956474594bf8b69417b39b4692fa"
+  },
+  "captured_utc": "2026-10-24T04:49:02.125791+00:00",
+  "checkout": {
+    "branch": "main",
+    "dirty": false,
+    "head": "45ec06796e9eb41375305385b2e007cd409fbb8b",
+    "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive"
+  },
+  "d0_calibration": {
+    "active_jobs": [
+      {
+        "alive": true,
+        "device": "cuda:0",
+        "pid": 1418597,
+        "shard_index": 2
+      },
+      {
+        "alive": true,
+        "device": "cuda:1",
+        "pid": 1426284,
+        "shard_index": 3
+      }
+    ],
+    "assignment": {
+      "0": "cuda-1",
+      "1": "cuda-1",
+      "2": "cuda-0",
+      "3": "cuda-1",
+      "4": "cuda-0",
+      "5": "cuda-1",
+      "6": "cuda-0",
+      "7": "cuda-0"
+    },
+    "master_seed": 20261024,
+    "scenario": "pickup_simple",
+    "shard_count": 8,
+    "shards": [
+      {
+        "artifact_path": "evaluations/meco-five/d0-calibration-20261024/source-31e5/cuda-1/shard-0000.artifact.json",
+        "artifact_sha256": "d29325f599c3e10b01a8f46cd719c7dc508cd4471b19af7a5802a85292ebaa48",
+        "device": "cuda-1",
+        "entry_count": 150,
+        "index": 0,
+        "manifest_id": "89f82cccba362adc7d15ee0fe15d9fc5ffa064595c127322cfa64bea6b78a9e0",
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-1/d0-calibration-pickup_simple-shard-0000-of-0008.json",
+        "manifest_sha256": "0afa093aba7987c570316506b833fe0b4bdc233122edc648a89f3c8b1ec19a9a",
+        "state": "complete"
+      },
+      {
+        "artifact_path": "evaluations/meco-five/d0-calibration-20261024/source-31e5/cuda-1/shard-0001.artifact.json",
+        "artifact_sha256": "c62bc05b2b63d1fe84a27fc8692991ad30e457f497422d2565568ace86c39328",
+        "device": "cuda-1",
+        "entry_count": 150,
+        "index": 1,
+        "manifest_id": "29d3822724688de16caa501d8026f032bc932341ec73cddb5db825d33e7f96af",
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-1/d0-calibration-pickup_simple-shard-0001-of-0008.json",
+        "manifest_sha256": "4f7ad1814ab1a0846ad44afafd0b722a4db0111c741ecd338afc8ba9e481abbc",
+        "state": "complete"
+      },
+      {
+        "device": "cuda-0",
+        "entry_count": 139,
+        "index": 2,
+        "manifest_id": "45a8b285a6a58f077328c358a4b1e8734b218549f0c0c55b2ff7e19e18b1be22",
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-0/d0-calibration-pickup_simple-shard-0002-of-0008.json",
+        "manifest_sha256": "e4ff8fb6749b3f2ca3bb681fcf797cab146583ea6bf1e483d0935da883df8baa",
+        "partial_path": "evaluations/meco-five/d0-calibration-20261024/source-31e5/cuda-0/shard-0002.artifact.json.partial",
+        "partial_sha256": "90d714041b595a4951c866e0be5e58ab26fd382f3b437fa3ff31dde6c2060cdc",
+        "state": "partial"
+      },
+      {
+        "device": "cuda-1",
+        "index": 3,
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-1/d0-calibration-pickup_simple-shard-0003-of-0008.json",
+        "manifest_sha256": "4d59f80f0c99fbfe8a51f9a9a77eeba31af28a521be568545c5bf8aabcb944ea",
+        "process_alive": true,
+        "process_pid": 1426284,
+        "state": "preparing"
+      },
+      {
+        "device": "cuda-0",
+        "index": 4,
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-0/d0-calibration-pickup_simple-shard-0004-of-0008.json",
+        "manifest_sha256": "ef6116c99b2f43c4989bdab1c2635e56d11fec1e9457039e867a2ca8fea5b444",
+        "state": "not_started"
+      },
+      {
+        "device": "cuda-1",
+        "index": 5,
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-1/d0-calibration-pickup_simple-shard-0005-of-0008.json",
+        "manifest_sha256": "7b8aee6699aa4e6fd03bb8d54a9034edec5e15c8a8ac41e21324ea0605d18f77",
+        "state": "not_started"
+      },
+      {
+        "device": "cuda-0",
+        "index": 6,
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-0/d0-calibration-pickup_simple-shard-0006-of-0008.json",
+        "manifest_sha256": "c98695c90c699560187c270475c606bf9559f685b1a3b7075d1ecf1dae6d5465",
+        "state": "not_started"
+      },
+      {
+        "device": "cuda-0",
+        "index": 7,
+        "manifest_path": "qualifications/meco/shards/pickup-simple-20261024/source-31e5/cuda-0/d0-calibration-pickup_simple-shard-0007-of-0008.json",
+        "manifest_sha256": "97170cef879f812c2f0754a13af9d957171876258c352033f93a5153ff47a0ab",
+        "state": "not_started"
+      }
+    ],
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350",
+    "source_tag": "source-31e5",
+    "work_unit_count": 1200
+  },
+  "dashboard": {
+    "api_http_status": 200,
+    "api_lanes": {
+      "A1": {
+        "chunk_updates": 100,
+        "completed_updates": 30,
+        "device": "cuda:0",
+        "pid": 1400340,
+        "process_confirmed": true,
+        "process_error": null,
+        "process_state": "R",
+        "run_directory": "A1",
+        "run_id": "f526bc6603974e1c95efbf52824b860c",
+        "status": "running",
+        "worker_state": "running"
+      },
+      "A2": {
+        "chunk_updates": 100,
+        "completed_updates": 27,
+        "device": "cuda:1",
+        "pid": 1400357,
+        "process_confirmed": true,
+        "process_error": null,
+        "process_state": "R",
+        "run_directory": "A2",
+        "run_id": "d79bd30d5e6f4e9eb99eb31594c80cb5",
+        "status": "running",
+        "worker_state": "running"
+      },
+      "A3": {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "process_confirmed": false,
+        "process_error": "invalid PID",
+        "process_state": null,
+        "run_directory": "A3",
+        "run_id": "33cfd4fe8e6742a2ad118f3e146b177c",
+        "status": "queued",
+        "worker_state": "queued"
+      },
+      "C1": {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:1",
+        "pid": null,
+        "process_confirmed": false,
+        "process_error": "invalid PID",
+        "process_state": null,
+        "run_directory": "C1",
+        "run_id": "9417015ce2a14c55927b5aacb1262075",
+        "status": "queued",
+        "worker_state": "queued"
+      },
+      "C2": {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "pid": null,
+        "process_confirmed": false,
+        "process_error": "invalid PID",
+        "process_state": null,
+        "run_directory": "C2",
+        "run_id": "d4b03e1a0595420b91122c9389b24d74",
+        "status": "queued",
+        "worker_state": "queued"
+      }
+    },
+    "api_queue_state": "fresh",
+    "api_sha256": "1513d051de5d3e4fa18148bb56dee600429fbd07c4362205a5096b3145e22b14",
+    "api_url": "http://127.0.0.1:8765/api/meco-status",
+    "assets": {
+      "dashboard.js": {
+        "checkout_sha256": "1da87bf6d83d82a330282bda4fd006a03b9781a43dccc66ab71f4b3900235a1b",
+        "http_status": 200,
+        "matches_checkout": true,
+        "served_sha256": "1da87bf6d83d82a330282bda4fd006a03b9781a43dccc66ab71f4b3900235a1b"
+      },
+      "meco.js": {
+        "checkout_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+        "http_status": 200,
+        "matches_checkout": true,
+        "served_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c"
+      }
+    },
+    "checkpoint_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/checkpoints/meco-five",
+    "data_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive",
+    "evaluation_root": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/evaluations/meco-five",
+    "meco_page_http_status": 200,
+    "meco_page_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f",
+    "process": {
+      "argv": "/usr/bin/python3 -m frc_defense.dashboard --run-dir <checkout>/evaluations/meco-five --host 127.0.0.1 --also-host 127.0.1.1 --also-host 100.121.248.52 --port 8765 --meco-data-root <checkout>",
+      "listeners": [
+        "127.0.0.1:8765",
+        "127.0.1.1:8765",
+        "100.121.248.52:8765"
+      ],
+      "pid": 1403399,
+      "pid_alive": true
+    },
+    "service": {
+      "ActiveEnterTimestamp": "",
+      "ActiveState": "inactive",
+      "MainPID": "0"
+    },
+    "systemd_unit_lookup": "frc-defense-dashboard.service: unit not found; direct process/listener and HTTP endpoints were verified"
+  },
+  "notes": [
+    "Point-in-time observation; runtime files and PIDs may change after capture.",
+    "The two training workers and two calibration shards share the two WX9100s; training is live and not paused.",
+    "Completed calibration shards are partial baseline evidence only; no merged report, bundle, calibrated v2 protocol, or qualification is claimed.",
+    "Automatic training evaluation is diagnostic; no held-out matched result or fresh learned-policy replay is present.",
+    "The named systemd unit was not present at capture time; the directly inspected dashboard process owned all three port 8765 listeners and the API/page/assets responded as recorded."
+  ],
+  "schema_version": 1
+}

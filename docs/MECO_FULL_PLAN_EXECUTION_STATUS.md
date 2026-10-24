@@ -1,26 +1,28 @@
 # MECO learning tracks plan: execution status
 
-> **Current campaign update — 2026-10-24 04:36:58 UTC.** A fresh continuous
+> **Current campaign update — 2026-10-24 04:49:02 UTC.** A fresh continuous
 > run was launched from `main` at `2ecc067b780a693088ec0992df70560806485628`; current HEAD
-> `6982596e978654a577c4d025ee02f985de7ae682` adds only status documentation,
+> `45ec06796` follows documentation and calibration-manifest commits only,
 > source identity `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`.
 > Supervisor `5e8f956474594bf8b69417b39b4692fa` writes to this checkout's
 > `checkpoints/meco-five` and `evaluations/meco-five`, uses `cuda:0,cuda:1`,
 > evaluation device `cuda:1`, `--cycles 0`, and protocol
 > `dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2`.
-> At the recorded heartbeat, A1 and A2 were alive at 14/100 and 13/100 updates
+> At the recorded heartbeat, A1 and A2 were alive at 30/100 and 27/100 updates
 > on the two WX9100s; A3, C1, and C2 were queued; no chunk or evaluation had
-> completed. D0 baseline calibration shard `shard-0000` was live with 88
-> complete entries out of 150, on `cuda:1`, sharing that device with A2. This
-> is calibration progress, not a completed calibration bundle.
+> completed. D0 shard indices 0 and 1 each completed 150 entries on `cuda:1`;
+> index 2 had 139/150 entries on `cuda:0`, and index 3 had just been launched
+> on `cuda:1`. The two-shard result is partial calibration progress, not a
+> merged calibration report or qualification.
 > This confirms launch only, not completed optimizer progress, evaluation, or
 > qualification. The evaluation split is diagnostic, so this run does not by
-> itself produce held-out qualification evidence. The current service on port
-> 8765 was restarted and verified against this checkout: `/meco`, the status
-> API, and both dashboard JavaScript assets returned HTTP 200; served asset
-> hashes matched the checkout. Its data root now points to this checkout.
-> The point-in-time evidence is [`MECO_CAMPAIGN_SNAPSHOT_20261024T0436Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T0436Z.json),
-> SHA-256 `0890f80bb3985dd0200f94432822c8d231772d5535d830f79cf4f1db134e12b4`.
+> itself produce held-out qualification evidence. At capture, the dashboard
+> process on port 8765 served this checkout's data root; `/meco`, the status
+> API, and both JavaScript assets returned HTTP 200, and served asset hashes
+> matched the checkout. The named systemd unit was absent, so process ownership
+> and listeners were verified directly. The point-in-time evidence is
+> [`MECO_CAMPAIGN_SNAPSHOT_20261024T0448Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T0448Z.json),
+> SHA-256 `02247f858a2276750cf2c4352f703de33b8827f96b719d87847b08a6a10bbe78`.
 > The source identity is recomputed from both live workers' `run.json` source
 > manifests and matches the supervisor record; the native HIP extension's
 > initialization state changes the result of a later fresh identity call.
