@@ -451,14 +451,16 @@ shard-artifact manifest provenance, normalized runtime equivalence, and intake
 binding were added and reviewed on staging. The staging branch also contains
 Phase 2 contract tests for P-oracle integration and expert-goal authority/U
 fail-closed behavior, a fix for the expert-goal loader's local helper import,
-and an opt-in Phase 4 train-only factor assignment path with provenance. The
-six focused CPU test files passed together (75 tests) at staging HEAD
-`740294a08`. The active campaign has not enabled the Phase 4 option. These
-synthetic tests do not establish actual GPU calibration, merged-report intake
-from produced shards, real Phase 2 dataset collection or fitting, Phase 4
-factor behavior in simulation, or the complete report-to-protocol chain. No
-calibration run or fresh factor simulation evaluation has been performed;
-runtime evidence remains pending.
+an opt-in Phase 4 train-only factor assignment path with provenance, and an
+all-five CPU constructor inventory in export/profile manifests. Exact
+constructor parameter totals are A1 171,717; A2 122,311; A3 118,215; C1
+49,026; C2 124,162. Seven focused CPU test files passed together (82 tests)
+at staging HEAD `0f7cfe36e`. The active campaign has not enabled the Phase 4
+option. These synthetic tests do not establish actual GPU calibration,
+merged-report intake from produced shards, real Phase 2 dataset collection or
+fitting, checkpoint-specific export parity, Phase 4 factor behavior in
+simulation, or hardware latency. No calibration run or fresh factor
+simulation evaluation has been performed; runtime evidence remains pending.
 
 ## D0 calibration sharding tranche v1
 
