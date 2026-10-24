@@ -748,6 +748,9 @@ class MecoSupervisor:
                 or worker_manifest.get("supervisor_source_identity_sha256") != self.source_hash
                 or worker_manifest.get("supervisor_native_extension_attestation") != expected_attestation
                 or worker_manifest.get("run_id") != self.run_ids[track]
+                or worker_manifest.get("track") != track
+                or worker_manifest.get("task_assignment") != assignment
+                or worker_manifest.get("completed_updates") != target_update
                 or worker_manifest.get("protocol_id") != self.protocol_id
                 or (require_complete and worker_manifest.get("status") != "complete")):
             raise RuntimeError(f"{track} worker run record does not match supervisor binding")

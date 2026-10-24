@@ -229,7 +229,8 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
     run_record = {"sources": sources, "source_identity_sha256": supervisor.source_hash,
         "supervisor_source_identity_sha256": supervisor.source_hash,
         "supervisor_native_extension_attestation": supervisor.native_extension_attestation,
-        "run_id": "run", "protocol_id": "protocol", "status": "complete"}
+        "run_id": "run", "track": "A1", "task_assignment": assignment,
+        "completed_updates": 10, "protocol_id": "protocol", "status": "complete"}
     checkpoint = {"sources": sources, "run_id": "run", "protocol_id": "protocol",
         "update": 10, "task_assignment": assignment}
     supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
@@ -239,6 +240,13 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
     with pytest.raises(RuntimeError, match="run record does not match"):
         supervisor._verify_worker_provenance("A1", 10, assignment, changed,
             checkpoint=checkpoint)
+    for field, value in (("track", "A2"),
+                         ("task_assignment", {**assignment, "assignment_id": "other"}),
+                         ("completed_updates", 9)):
+        changed = {**run_record, field: value}
+        with pytest.raises(RuntimeError, match="run record does not match"):
+            supervisor._verify_worker_provenance("A1", 10, assignment, changed,
+                checkpoint=checkpoint)
     changed_checkpoint = {**checkpoint, "sources": {**sources, "code.py": "d" * 64}}
     with pytest.raises(RuntimeError, match="final checkpoint provenance"):
         supervisor._verify_worker_provenance("A1", 10, assignment, run_record,
