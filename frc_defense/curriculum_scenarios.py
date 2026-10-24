@@ -164,6 +164,11 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         # Scripted blockers still use ordinary chassis/contact physics. They
         # have NN controller slots so deterministic offense cannot overwrite
         # these scripts; their strategic action is hold.
+        opponent_runtime = getattr(self, 'phase4_opponent_runtime', None)
+        opponent_slots = (set(opponent_runtime['configured_slots'])
+                          if opponent_runtime is not None else set())
+        if opponent_runtime is not None and set(pressure['slots']) != opponent_slots:
+            raise RuntimeError('runtime pressure slots differ from validation-bound opponent assignment')
         for slot in pressure['slots']:
             if slot == stationary_slot:
                 commands[:, slot] = 0.
@@ -189,6 +194,10 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                 commands[:, slot, :2] = opponent_velocity_command(
                     policy_id, sensed, tick=self.steps,
                     max_speed_mps=self.sim.speed[:, slot])
+                if opponent_runtime is not None:
+                    opponent_runtime['applied_slots'] = sorted(set(
+                        opponent_runtime['applied_slots']) | {int(slot)})
+                    opponent_runtime['applied_command_calls'] += 1
                 continue
             level = pressure['level']
             if factor and slot == 0 and factor['kind'] in (
@@ -256,6 +265,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         sensor_profile='standard', phase4_factor=None,
                         contact_geometry_id=None, contact_geometry_config=None,
                         phase4_opponent_policy_id=None,
+                        phase4_opponent_schedule=None, phase4_opponent_seed=None,
                         phase4_start_profile_assignment=None,
                         phase4_focal_pose_assignment=None,
                         phase4_teammate_behavior_assignment=None):
@@ -284,9 +294,37 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     if phase4_opponent_policy_id is not None:
         if phase4_opponent_policy_id not in POLICY_POOL:
             raise ValueError('unknown Phase 4 opponent policy ID')
+        supported_levels = ((0, 1, 2, 3, 4, 5)
+            if phase4_opponent_policy_id == 'trench_interceptor' else (1, 2, 3, 4, 5))
         if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
-                or _pressure_level(category) not in (1, 2, 3, 4, 5)):
+                or _pressure_level(category) not in supported_levels):
             raise ValueError('Phase 4 opponent policy requires a registered pressure category')
+        if phase4_opponent_policy_id == 'trench_interceptor' and phase4_opponent_schedule is None:
+            raise ValueError('trench interceptor requires its protocol-bound validation schedule')
+    elif phase4_opponent_schedule is not None:
+        raise ValueError('opponent validation schedule requires its assigned policy ID')
+    trench_schedule = None
+    if phase4_opponent_schedule is not None:
+        from .meco_phase4_opponents import validate_opponent_policy_schedule
+        if phase4_opponent_seed is None:
+            raise ValueError('scheduled opponent policy requires its validation seed')
+        trench_schedule = validate_opponent_policy_schedule(
+            phase4_opponent_schedule, scenario_id=scenario_id,
+            categories=phase4_opponent_schedule.get('categories', ()),
+            qualification_case=phase4_opponent_schedule.get('qualification_case', {}),
+            seeds=phase4_opponent_schedule.get('seed_list', ()), split='validation',
+            factor_id=phase4_opponent_schedule.get('factor_id'),
+            protocol_id=phase4_opponent_schedule.get('protocol_id'))
+        if (scenario_id != trench_schedule['scenario_id'] or
+                category not in trench_schedule['categories'] or
+                phase4_opponent_seed not in trench_schedule['seed_list'] or
+                phase4_opponent_policy_id != trench_schedule['policy_id'] or
+                {'layout_id': layout_id,
+                    'defender_family': defender_family,
+                    'start_condition': start_condition,
+                    'sensor_profile': sensor_profile} !=
+                    trench_schedule['qualification_case']):
+            raise ValueError('opponent schedule does not bind this exact validation episode')
     if contact_geometry_id is None:
         if contact_geometry_config is not None:
             raise ValueError('contact geometry config requires a registered geometry ID')
@@ -350,6 +388,16 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         replan_interval=10)
     env.phase4_factor_config = phase4_factor
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
+    env.phase4_opponent_schedule = trench_schedule
+    env.phase4_opponent_runtime = (None if trench_schedule is None else {
+        'schema': 'meco-phase4-opponent-runtime-v1',
+        'policy_id': trench_schedule['policy_id'],
+        'factor_id': trench_schedule['factor_id'],
+        'category': category, 'seed': int(phase4_opponent_seed),
+        'configured_slots': trench_schedule['configured_pressure_slots'][category],
+        'applied_slots': [], 'applied_command_calls': 0,
+        'interception_rate': None, 'alternate_crossing_success_rate': None,
+        'trench_crossing_time_s': None, 'qualification_eligible': False})
     env.contact_geometry_id = contact_geometry_id
     env.contact_geometry_config = contact_geometry_config
     env.phase4_start_profile_assignment = start_profile_assignment

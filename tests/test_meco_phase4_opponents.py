@@ -1,10 +1,12 @@
 import torch
 import pytest
+from types import SimpleNamespace
 
 from frc_defense.meco_phase4_opponents import (
     POLICY_FACTOR_IDS, POLICY_POOL, compile_opponent_policy_schedule,
     opponent_velocity_command, policy_pool_identity,
-    validate_opponent_policy_schedule,
+    opponent_policy_runtime_slots, validate_opponent_policy_schedule,
+    TRENCH_INTERCEPTION_CATEGORIES,
 )
 
 
@@ -141,3 +143,61 @@ def test_nonfinite_or_nonbinary_validity_metadata_fails_closed():
         command = opponent_velocity_command(policy, state, tick=400)
         assert torch.isfinite(command).all()
         torch.testing.assert_close(command, torch.zeros_like(command))
+
+
+def test_trench_interceptor_requires_exact_registered_validation_domain():
+    case = {"layout_id": "layout-a", "defender_family": "held-family",
+            "start_condition": "start-a", "sensor_profile": "noisy"}
+    assert len(TRENCH_INTERCEPTION_CATEGORIES) == 14
+    schedule = compile_opponent_policy_schedule(
+        policy_id="trench_interceptor",
+        scenario_id="offense_vs_scripted_pressure",
+        categories=("active/trench/level_4_reactive",), qualification_case=case,
+        seeds=(10, 20), split="validation",
+        factor_id="opponent.trench_interception", protocol_id="held-validation-v1")
+    assert schedule["protocol_id"] == "held-validation-v1"
+    assert schedule["category_domain"] == list(TRENCH_INTERCEPTION_CATEGORIES)
+    assert schedule["configured_pressure_slots"] == {
+        "active/trench/level_4_reactive": [0]}
+    assert opponent_policy_runtime_slots(
+        "active/trench/level_0", allow_level_zero=True) == ()
+    with pytest.raises(ValueError, match="pressure levels 1 through 5"):
+        opponent_policy_runtime_slots("active/trench/level_0")
+    with pytest.raises(ValueError, match="category subset"):
+        compile_opponent_policy_schedule(
+            policy_id="trench_interceptor",
+            scenario_id="offense_vs_scripted_pressure",
+            categories=("active/open/level_4_reactive",),
+            qualification_case=case, seeds=(10,), split="validation",
+            factor_id="opponent.trench_interception", protocol_id="held-validation-v1")
+
+
+@pytest.mark.parametrize("slots", [(0,), (0, 1)])
+def test_trench_schedule_reaches_runtime_command_for_bound_slots(slots):
+    from frc_defense.curriculum_scenarios import CurriculumEnv
+
+    category = ("active/trench/level_5_mixed" if len(slots) == 2
+                else "active/trench/level_4_reactive")
+    commands = torch.full((1, 6, 3), -7.)
+    env = SimpleNamespace(
+        curriculum={"pressure": {"level": 5 if len(slots) == 2 else 4,
+                                  "slots": list(slots), "phase": 0.}},
+        phase4_factor_config=None, phase4_opponent_policy_id="trench_interceptor",
+        phase4_opponent_runtime={"configured_slots": list(slots),
+                                 "applied_slots": [], "applied_command_calls": 0},
+        steps=4, match_elapsed=torch.tensor([0.]), field_length=16., field_width=8.,
+        policy_pose=torch.tensor([[[1., 1., 0.]] * 6]),
+        opponent_pose=torch.tensor([[[4., 1., 0.]] * 6]),
+        opponent_velocity=torch.tensor([[[0., 1., 0.]] * 6]),
+        opponent_valid=torch.ones((1, 6), dtype=torch.bool),
+        phase4_defender_anchor=torch.tensor([[[2., 2., 0.]] * 6]),
+        sim=SimpleNamespace(speed=torch.ones((1, 6))),
+    )
+    output = CurriculumEnv._curriculum_commands(
+        env, commands, torch.ones((1,), dtype=torch.bool))
+    assert env.phase4_opponent_runtime["applied_slots"] == list(slots)
+    assert env.phase4_opponent_runtime["applied_command_calls"] == len(slots)
+    for slot in slots:
+        assert not torch.equal(output[0, slot, :2], torch.tensor([-7., -7.]))
+    for slot in set(range(6)) - set(slots):
+        torch.testing.assert_close(output[0, slot], torch.tensor([-7., -7., -7.]))

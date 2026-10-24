@@ -43,6 +43,14 @@ POLICY_CONFIG = {
     "sensing_boundary": "policy inputs may contain only controller-visible sensed state",
 }
 
+# Frozen category domain from the registry's exact route-segment selector.
+TRENCH_INTERCEPTION_CATEGORIES = tuple(
+    f"{activity}/trench/{pressure}" for activity in ("active", "inactive")
+    for pressure in (
+        "level_0", "level_1_stationary", "level_2_patrol",
+        "level_3_seeded_choice", "level_3_trench", "level_4_reactive",
+        "level_5_mixed"))
+
 
 def opponent_policy_runtime_domain_supported(scenario_id: str, category: str) -> bool:
     if scenario_id not in ("offense_vs_scripted_pressure", "full_match_offense"):
@@ -56,13 +64,22 @@ def opponent_policy_runtime_domain_supported(scenario_id: str, category: str) ->
     return False
 
 
-def opponent_policy_runtime_slots(category: str) -> tuple[int, ...]:
+def trench_interception_runtime_domain_supported(scenario_id: str,
+                                                  category: str) -> bool:
+    """Whether a category is in the frozen trench-interception domain."""
+    return (scenario_id == "offense_vs_scripted_pressure" and
+            category in TRENCH_INTERCEPTION_CATEGORIES)
+
+
+def opponent_policy_runtime_slots(category: str, *, allow_level_zero: bool = False) -> tuple[int, ...]:
     """Configured pressure slots: levels 1–4 use slot 0; level 5 uses 0/1."""
     level = next((part for part in category.split("/") if part.startswith("level_")), None)
     digits = None if level is None else level.removeprefix("level_").split("_", 1)[0]
     if digits is None or not digits.isdigit():
         raise ValueError("opponent slot scope requires a registered pressure category")
     value = int(digits)
+    if value == 0 and allow_level_zero:
+        return ()
     if value in (1, 2, 3, 4):
         return (0,)
     if value == 5:
@@ -124,10 +141,19 @@ def policy_assignment_identity(*, policy_id: str, scenario_id: str,
 def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         categories: list[str] | tuple[str, ...], qualification_case: Mapping[str, str],
         seeds: list[int] | tuple[int, ...], split: str,
-        factor_id: str = "defender.reactive_pool") -> dict:
+        factor_id: str = "defender.reactive_pool",
+        protocol_id: str | None = None) -> dict:
     """Build the evaluator input binding for one exact validation policy run."""
     if split != "validation":
         raise ValueError("Phase 4 opponent policy schedules are validation-only")
+    if factor_id == "opponent.trench_interception":
+        if (policy_id != "trench_interceptor" or
+                scenario_id != "offense_vs_scripted_pressure" or
+                not isinstance(protocol_id, str) or not protocol_id or
+                not categories or
+                any(category not in TRENCH_INTERCEPTION_CATEGORIES
+                    for category in categories)):
+            raise ValueError("trench interception requires a category subset of its exact 14-category validation domain, scenario, factor, protocol, and policy")
     if (not isinstance(categories, (list, tuple)) or not categories or
             any(not isinstance(category, str) or not category for category in categories) or
             len(set(categories)) != len(categories)):
@@ -146,8 +172,13 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         "policy_id": policy_id, "scenario_id": scenario_id,
         "categories": list(categories), "qualification_case": dict(qualification_case),
         "factor_id": factor_id,
+        "protocol_id": protocol_id,
+        "category_domain": (list(TRENCH_INTERCEPTION_CATEGORIES)
+            if factor_id == "opponent.trench_interception" else None),
         "policy_family": POLICY_FACTOR_IDS[policy_id],
-        "configured_pressure_slots": {category: list(opponent_policy_runtime_slots(category))
+        "configured_pressure_slots": {category: list(opponent_policy_runtime_slots(
+                                      category, allow_level_zero=(
+                                          factor_id == "opponent.trench_interception")))
                                       for category in categories},
         "split": split, "seed_list": list(seeds),
         "policy_config_sha256": policy_pool_identity()["config_sha256"],
@@ -164,13 +195,14 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
 def validate_opponent_policy_schedule(schedule: dict, *, scenario_id: str,
         categories: list[str] | tuple[str, ...], qualification_case: Mapping[str, str],
         seeds: list[int] | tuple[int, ...], split: str,
-        factor_id: str = "defender.reactive_pool") -> dict:
+        factor_id: str = "defender.reactive_pool",
+        protocol_id: str | None = None) -> dict:
     if not isinstance(schedule, dict) or schedule.get("schema") != "meco-phase4-opponent-evaluator-schedule-v1":
         raise ValueError("invalid Phase 4 opponent evaluator schedule")
     expected = compile_opponent_policy_schedule(policy_id=schedule.get("policy_id"),
         scenario_id=scenario_id, categories=categories,
         qualification_case=qualification_case, seeds=seeds, split=split,
-        factor_id=factor_id)
+        factor_id=factor_id, protocol_id=protocol_id)
     if schedule != expected:
         raise ValueError("opponent evaluator schedule differs from exact protocol case/seed/config")
     return expected

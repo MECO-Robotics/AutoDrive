@@ -59,7 +59,8 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
 
     from .meco_phase4_design import CASE_AXES, _read_protocol_validation
     from .meco_phase4_opponents import (compile_opponent_policy_schedule,
-        opponent_policy_runtime_domain_supported)
+        opponent_policy_runtime_domain_supported,
+        trench_interception_runtime_domain_supported)
     protocol, raw = _read_protocol_validation(protocol_path)
     if hashlib.sha256(raw).hexdigest() != plan.get("protocol_binding", {}).get(
             "protocol_raw_file_sha256"):
@@ -67,8 +68,13 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     case_axes = cell.get("case_axes")
     if not isinstance(case_axes, dict) or set(case_axes) != set(CASE_AXES):
         raise ValueError("Phase 4 dispatch cell has an invalid protocol case")
-    if not opponent_policy_runtime_domain_supported(
-            case_axes["scenario_id"], case_axes["category"]):
+    domain_supported = (
+        trench_interception_runtime_domain_supported(
+            case_axes["scenario_id"], case_axes["category"])
+        if cell.get("factor_id") == "opponent.trench_interception" else
+        opponent_policy_runtime_domain_supported(
+            case_axes["scenario_id"], case_axes["category"]))
+    if not domain_supported:
         raise ValueError("Phase 4 opponent dispatch is outside pressure-category runtime domain")
     protocol_rows = [row for row in protocol["cases"]
         if all(row.get(axis) == case_axes[axis] for axis in CASE_AXES)]
@@ -83,7 +89,8 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     schedule = compile_opponent_policy_schedule(
         policy_id=assignment["policy_id"], scenario_id=case_axes["scenario_id"],
         categories=(case_axes["category"],), qualification_case=qualification_case,
-        seeds=seeds, split="validation", factor_id=cell["factor_id"])
+        seeds=seeds, split="validation", factor_id=cell["factor_id"],
+        protocol_id=protocol["protocol_id"])
     if (schedule["policy_config_sha256"] != assignment.get("policy_config_sha256")
             or schedule["factor_id"] != cell.get("factor_id")
             or schedule["policy_family"] != assignment.get("policy_family")

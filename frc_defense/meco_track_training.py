@@ -2341,7 +2341,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             phase4_opponent_schedule, scenario_id=scenario_id,
             categories=categories, qualification_case=qualification_case or {},
             seeds=scored_seeds, split=split,
-            factor_id=phase4_opponent_schedule.get("factor_id"))
+            factor_id=phase4_opponent_schedule.get("factor_id"),
+            protocol_id=(evaluation_binding["protocol_id"]
+                         if evaluation_binding is not None else None))
         phase4_opponent_policy_id = validated_schedule["policy_id"]
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
@@ -2724,6 +2726,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         production_d0=is_production_d0,
                         phase4_factor=phase4_factor,
                         phase4_opponent_policy_id=phase4_opponent_policy_id,
+                        phase4_opponent_schedule=phase4_opponent_schedule,
+                        phase4_opponent_seed=(seed if phase4_opponent_schedule is not None else None),
                         contact_geometry_id=contact_geometry_id,
                         contact_geometry_config=contact_geometry_config,
                         phase4_start_profile_assignment=phase4_start_profile_assignment,
@@ -3460,6 +3464,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "policy_config_sha256": phase4_opponent_schedule[
                                     "policy_config_sha256"],
                                 "inputs": "own policy_pose plus validity-masked sensed opponent_pose/opponent_velocity and static scenario configuration",
+                                "runtime": env.phase4_opponent_runtime,
                                 "interception_rate": None,
                                 "paired_outcome_by_family": None,
                                 "qualification_eligible": False,
