@@ -3,7 +3,8 @@
 The supervisor is opt-in and is not started as part of import or dashboard
 startup. It runs at most one trainer process per configured device, gives each
 learned track the same update chunk and immutable training settings, and runs a
-paired all-track/control evaluation after every complete five-track cycle.
+paired all-track/control evaluation after every complete five-track cycle. A
+per-cycle queue refills a device as soon as its current track reaches the target.
 """
 from __future__ import annotations
 
@@ -570,45 +571,95 @@ class MecoSupervisor:
         logs = {}
         failed = {}
         abort_file = (self.output / ".sibling-aborts" /
-            f"{self.supervisor_id}-cycle-{cycle:06d}-{uuid.uuid4().hex}.json")
+            f"{self.supervisor_id}-cycle-{cycle:06d}.json")
         abort_started = None
         force_terminated = set()
-        try:
-            for track in tracks:
-                if self.request_stop:
-                    break
-                if source_identity() != self.sources:
-                    raise RuntimeError("source identity changed; refusing to continue queued training")
-                remaining_updates = target_update - self._completed_updates(track)
-                if remaining_updates <= 0:
-                    statuses[track] = "complete"
-                    continue
-                base_config = self.configs[track]
-                config = MecoTrainConfig(**{**asdict(base_config),
-                    "updates": min(self.chunk_updates, remaining_updates)})
-                latest = self.output / track / "latest.pt"
-                warm_artifact = (self.warm_start_paths.get(track)
-                    if not latest.is_file() else None)
-                if warm_artifact is not None and hashlib.sha256(
-                        warm_artifact.read_bytes()).hexdigest() != self.warm_start_hashes[track]:
-                    raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
-                command = _train_command(config=config, output=self.output / track,
-                    run_id=self.run_ids[track], stop_file=self.stop_file,
-                    abort_file=abort_file, invocation_id=self.supervisor_id,
-                    resume=latest if latest.is_file() else None,
-                    protocol_id=self.protocol_id, task_assignment=task_assignment,
-                    warm_start=warm_artifact,
-                    qualification_protocol=self.qualification_protocol_path)
-                log_path = self.output / track / "supervisor.log"
-                logs[track] = log_path.open("ab")
+        if len(tracks) != len(set(tracks)):
+            raise ValueError("training dispatch queue contains duplicate tracks")
+        pending = [track for track in tracks
+                   if self._completed_updates(track) < target_update]
+
+        def dispatch(track):
+            if source_identity() != self.sources:
+                raise RuntimeError("source identity changed; refusing to continue queued training")
+            remaining_updates = target_update - self._completed_updates(track)
+            if remaining_updates <= 0:
+                statuses[track] = "complete"
+                return
+            base_config = self.configs[track]
+            config = MecoTrainConfig(**{**asdict(base_config),
+                "updates": min(self.chunk_updates, remaining_updates)})
+            latest = self.output / track / "latest.pt"
+            warm_artifact = (self.warm_start_paths.get(track)
+                if not latest.is_file() else None)
+            if warm_artifact is not None and hashlib.sha256(
+                    warm_artifact.read_bytes()).hexdigest() != self.warm_start_hashes[track]:
+                raise RuntimeError(f"{track} warm-start artifact changed after supervisor initialization")
+            command = _train_command(config=config, output=self.output / track,
+                run_id=self.run_ids[track], stop_file=self.stop_file,
+                abort_file=abort_file, invocation_id=self.supervisor_id,
+                resume=latest if latest.is_file() else None,
+                protocol_id=self.protocol_id, task_assignment=task_assignment,
+                warm_start=warm_artifact,
+                qualification_protocol=self.qualification_protocol_path)
+            log_path = self.output / track / "supervisor.log"
+            logs[track] = log_path.open("ab")
+            try:
                 process = subprocess.Popen(command, cwd=ROOT,
                     stdout=logs[track], stderr=subprocess.STDOUT,
                     start_new_session=True)
-                processes[track] = process
-                self.worker_pids[track] = process.pid
-                statuses[track] = "running"
+            except BaseException:
+                logs[track].close()
+                logs.pop(track, None)
+                raise
+            processes[track] = process
+            self.worker_pids[track] = process.pid
+            statuses[track] = "running"
             self._write_queued_manifests(statuses)
             self._publish(cycle=cycle, phase="training", statuses=statuses)
+
+        try:
+            def fill_free_devices():
+                nonlocal abort_started
+                if abort_started is not None or self._observe_stop():
+                    return
+                for device in self.devices:
+                    if abort_started is not None or self.request_stop:
+                        break
+                    occupied = any(self.configs[track].device == device
+                                   for track in processes)
+                    if occupied:
+                        continue
+                    selected = next((track for track in pending
+                                     if self.configs[track].device == device), None)
+                    if selected is None:
+                        continue
+                    pending.remove(selected)
+                    try:
+                        dispatch(selected)
+                    except Exception as exc:
+                        failed[selected] = repr(exc)
+                        statuses[selected] = "failed"
+                        _atomic_json(self.output / selected / "run.json", {
+                            "schema_version": 1, "run_id": self.run_ids[selected],
+                            "track": selected, "config": asdict(self.configs[selected]),
+                            "sources": self.sources,
+                            "source_identity_sha256": self.source_hash,
+                            "protocol_id": self.protocol_id, "status": "failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "completed_updates": self._completed_updates(selected),
+                            "failed_utc": _utc()})
+                        abort_started = time.monotonic()
+                        _atomic_json(abort_file, {
+                            "schema_version": 1, "supervisor_id": self.supervisor_id,
+                            "invocation_id": self.supervisor_id, "cycle": cycle,
+                            "protocol_id": self.protocol_id,
+                            "source_identity_sha256": self.source_hash,
+                            "failed_track": selected, "failed_exit_code": None,
+                            "error": f"{type(exc).__name__}: {exc}", "created_utc": _utc()})
+                        break
+
+            fill_free_devices()
             while processes:
                 self._observe_stop()
                 if self.request_stop and not self.stop_file.exists():
@@ -699,6 +750,11 @@ class MecoSupervisor:
                             else:
                                 statuses[track] = "complete"
                                 self.completed_chunks += 1
+                    self._publish(cycle=cycle,
+                        phase="stopping" if self.request_stop else "training",
+                        statuses=statuses, error=failed or None)
+                if abort_started is None and not self.request_stop:
+                    fill_free_devices()
                 if abort_started is not None and processes and \
                         time.monotonic() - abort_started >= 1800.:
                     force_terminated.update(processes)
@@ -754,6 +810,31 @@ class MecoSupervisor:
             for log in logs.values():
                 if not log.closed:
                     log.close()
+        for track in pending:
+            if statuses.get(track) == "queued":
+                statuses[track] = ("stopped" if self.request_stop else
+                                   "aborted_due_to_sibling_failure" if abort_started is not None
+                                   else "queued")
+                if statuses[track] in ("stopped", "aborted_due_to_sibling_failure"):
+                    try:
+                        manifest = json.loads((self.output / track / "run.json").read_text())
+                    except (OSError, json.JSONDecodeError):
+                        manifest = {}
+                    manifest.update(schema_version=1, run_id=self.run_ids[track],
+                        track=track, config=asdict(self.configs[track]),
+                        sources=self.sources, source_identity_sha256=self.source_hash,
+                        protocol_id=self.protocol_id, status=statuses[track],
+                        completed_updates=self._completed_updates(track),
+                        cancelled_utc=_utc())
+                    if abort_started is not None:
+                        manifest.update(sibling_abort_file=str(abort_file),
+                            sibling_abort_invocation_id=self.supervisor_id)
+                    _atomic_json(self.output / track / "run.json", manifest)
+        if pending:
+            self._write_queued_manifests(statuses)
+            self._publish(cycle=cycle,
+                phase="stopping" if self.request_stop else "training",
+                statuses=statuses, error=failed or None)
         if failed:
             raise RuntimeError(f"training workers failed: {failed}")
 
@@ -860,7 +941,7 @@ class MecoSupervisor:
 
     def _mark_queued_stopped(self, statuses):
         for track in MECO_TRACKS:
-            if statuses.get(track) != "queued":
+            if statuses.get(track) not in ("queued", "stopped"):
                 continue
             run_dir = self.output / track
             manifest_path = run_dir / "run.json"
@@ -883,18 +964,9 @@ class MecoSupervisor:
                          task_assignment):
         remaining = [track for track in order
                      if self._completed_updates(track) < target_update]
-        while remaining and not self.request_stop:
-            batch = []
-            for device in self.devices:
-                selected = next((track for track in remaining
-                                 if self.configs[track].device == device), None)
-                if selected is not None:
-                    batch.append(selected)
-                    remaining.remove(selected)
-            self._run_training_batch(batch, cycle, statuses, target_update,
+        if remaining and not self.request_stop:
+            self._run_training_batch(remaining, cycle, statuses, target_update,
                                      task_assignment)
-            remaining = [track for track in order
-                         if self._completed_updates(track) < target_update]
             self._poll_evaluator(cycle, statuses)
         if not self.request_stop:
             wrong = {track: self._completed_updates(track) for track in order
