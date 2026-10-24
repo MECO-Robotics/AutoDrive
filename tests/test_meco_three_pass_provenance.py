@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 28
+    assert len(result["tranches"]) == 29
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -65,6 +65,12 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
+    pair_contact = next(t for t in result["tranches"]
+                        if t["requirement_id"] == "phase4-pair-contact-events")
+    assert pair_contact["implementer"]["commit"] == (
+        "b3adb19b055acece92952c69bed7c1e9e1290699")
+    assert pair_contact["reviewer"]["approved_commit"] == (
+        pair_contact["implementer"]["commit"])
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):

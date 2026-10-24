@@ -44,7 +44,7 @@
 > disclosing their seeds, and describes 6,488 design cells / 10,380,800
 > theoretical paired episode rows. This is a plan only: runtime stimuli,
 > dispatch, outcome aggregation, simulator runs, replay inspection, and
-> qualification remain outstanding. The three-pass manifest had 27 entries at this historical point; a later runtime-capture tranche raises it to 28.
+> qualification remain outstanding. The three-pass manifest had 27 entries at this historical point; runtime capture raised it to 28 and the pair-contact tranche below raises it to 29.
 > Dashboard currentness is
 > historical until restarted against the completed candidate state.
 
@@ -58,6 +58,19 @@
 > authoritative/available or their stimuli are not wired. The focused review
 > suite passed 33 tests. No simulator, GPU, training, or replay was run. The
 > dashboard has not been restarted against this candidate state.
+
+> **Simulator pair-contact summary source integrated — 2026-10-24.** Candidate
+> commits `0d1e5eabf` and `62b4a00dd` add pair-specific contact summaries from
+> the Torch and fused HIP robot collision paths. The record identifies slots
+> (2,3), counts distinct contact substeps separately from solver reports,
+> timestamps completed substeps, and sums normal/tangential/net impulse. It is
+> explicitly a bounded summary, not a full event stream. Contact geometry is
+> not yet scheduled by the validation matrix; recovery and route-completion
+> signals remain unavailable. Seventeen contract tests passed; no simulator,
+> HIP compile, GPU behavior test, or replay ran. Dashboard currentness remains
+> historical. The summary is recorded in the three-pass manifest, now at 29
+> entries with pinned SHA-256 `f9282381fabb8ff53c66e98b996ad626981d808a7e30550156a896c9f0e7ef82`;
+> the dashboard service has not been restarted against this candidate update.
 
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
