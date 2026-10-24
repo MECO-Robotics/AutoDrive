@@ -10,7 +10,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 
 from . import meco_supervised as supervised
 from . import meco_counterfactual as counterfactual
@@ -25,10 +27,6 @@ AUTHORED_KEYS = set(IDENTITY) | {
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _jsonl(path: Path):
@@ -67,16 +65,102 @@ def _index(rows, label):
     return out
 
 
+def _resolved(path: Path) -> Path:
+    return Path(path).resolve()
+
+
+def _preflight_destinations(output: Path, input_paths):
+    output = _resolved(output)
+    manifest = _resolved(output.with_suffix(output.suffix + ".manifest.json"))
+    if output == manifest:
+        raise ValueError("dataset and manifest output paths resolve to the same file")
+    for label, input_path in input_paths:
+        if _resolved(input_path) in (output, manifest):
+            raise ValueError(f"output path collides with input {label}: {_resolved(input_path)}")
+    return output, manifest
+
+
+def _stage_bytes(data: bytes, destination: Path) -> Path:
+    fd, name = tempfile.mkstemp(prefix=f".{destination.name}.meco-tmp-",
+                                dir=destination.parent)
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return path
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(path: Path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _publish_pair(output: Path, manifest_path: Path, data: bytes, manifest_data: bytes):
+    """Publish two staged files and restore the prior pair if either replace fails."""
+    staged, backups = [], []
+    preserve_backups = False
+    destinations = (output, manifest_path)
+    try:
+        for destination, payload in zip(destinations, (data, manifest_data)):
+            staged.append(_stage_bytes(payload, destination))
+        for destination in destinations:
+            if destination.is_dir():
+                raise ValueError(f"output destination is a directory: {destination}")
+            backups.append(None)
+            if destination.exists():
+                backups[-1] = _stage_bytes(destination.read_bytes(), destination)
+        os.replace(staged[0], output)
+        staged[0] = None
+        os.replace(staged[1], manifest_path)
+        staged[1] = None
+        _fsync_directory(output.parent)
+    except BaseException as exc:
+        rollback_errors = []
+        for index, (destination, backup) in enumerate(zip(destinations, backups)):
+            try:
+                if backup is not None:
+                    os.replace(backup, destination)
+                    backups[index] = None
+                else:
+                    destination.unlink(missing_ok=True)
+            except BaseException as rollback_exc:
+                rollback_errors.append(f"{destination}: {rollback_exc}")
+        try:
+            _fsync_directory(output.parent)
+        except BaseException as rollback_exc:
+            rollback_errors.append(f"directory fsync: {rollback_exc}")
+        preserve_backups = bool(rollback_errors)
+        detail = ("; rollback errors: " + "; ".join(rollback_errors)) if rollback_errors else ""
+        if preserve_backups:
+            detail += "; recovery backups retained: " + ", ".join(str(p) for p in backups if p is not None)
+        raise RuntimeError(f"failed to publish annotation dataset/manifest pair: {exc}{detail}") from exc
+    finally:
+        for path in staged + ([] if preserve_backups else backups):
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+
 def materialize_plan_a_annotations(*, authored_rows: Path, source_dataset: Path,
         legal_node_dataset: Path, qualification_protocol: Path,
         authority_json: Path, output: Path):
     """Write loader-schema JSONL and manifest from explicit authored sidecars."""
-    paths = [Path(p).resolve() for p in
-             (authored_rows, source_dataset, legal_node_dataset,
-              qualification_protocol, authority_json, output)]
-    authored_rows, source_dataset, legal_node_dataset, qualification_protocol, authority_json, output = paths
-    source_manifest_path = source_dataset.with_suffix(source_dataset.suffix + ".manifest.json")
-    legal_manifest_path = legal_node_dataset.with_suffix(legal_node_dataset.suffix + ".manifest.json")
+    authored_rows, source_dataset, legal_node_dataset, qualification_protocol, authority_json = map(
+        Path, (authored_rows, source_dataset, legal_node_dataset, qualification_protocol, authority_json))
+    source_manifest_path = _resolved(source_dataset.with_suffix(source_dataset.suffix + ".manifest.json"))
+    legal_manifest_path = _resolved(legal_node_dataset.with_suffix(legal_node_dataset.suffix + ".manifest.json"))
+    output, manifest_path = _preflight_destinations(output, (
+        ("annotation sidecar", authored_rows), ("source JSONL", source_dataset),
+        ("source manifest", source_manifest_path), ("legal-node JSONL", legal_node_dataset),
+        ("legal-node manifest", legal_manifest_path),
+        ("qualification protocol", qualification_protocol), ("authority JSON", authority_json)))
     source_manifest_bytes = source_manifest_path.read_bytes()
     legal_manifest_bytes = legal_manifest_path.read_bytes()
     source_manifest, legal_manifest = json.loads(source_manifest_bytes), json.loads(legal_manifest_bytes)
@@ -101,6 +185,12 @@ def materialize_plan_a_annotations(*, authored_rows: Path, source_dataset: Path,
         raise ValueError("explicit-goal source has invalid base dataset reference")
     base_path = (source_dataset.parent / base_name).resolve()
     base_manifest_path = base_path.with_suffix(base_path.suffix + ".manifest.json")
+    output, manifest_path = _preflight_destinations(output, (
+        ("annotation sidecar", authored_rows), ("source JSONL", source_dataset),
+        ("source manifest", source_manifest_path), ("legal-node JSONL", legal_node_dataset),
+        ("legal-node manifest", legal_manifest_path),
+        ("qualification protocol", qualification_protocol), ("authority JSON", authority_json),
+        ("base source JSONL", base_path), ("base source manifest", base_manifest_path)))
     base_sha, base_manifest_sha = _sha(base_path.read_bytes()), _sha(base_manifest_path.read_bytes())
     if (source_manifest.get("base_dataset_sha256") != base_sha or
             source_manifest.get("base_manifest_sha256") != base_manifest_sha or
@@ -226,12 +316,9 @@ def materialize_plan_a_annotations(*, authored_rows: Path, source_dataset: Path,
         "materializer_schema": "meco-plan-a-human-annotation-materializer-v1",
         "authored_rows_sha256": _sha(authored_rows.read_bytes()),
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path = output.with_suffix(output.suffix + ".manifest.json")
-    # Stage both artifacts before publication; deterministic bytes make reruns identical.
     manifest_data = (json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
-    output.write_bytes(data)
-    manifest_path.write_bytes(manifest_data)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _publish_pair(output, manifest_path, data, manifest_data)
     return {"dataset": str(output), "rows": len(rows), "dataset_sha256": _sha(data),
             "manifest": str(manifest_path), "manifest_sha256": _sha(manifest_data),
             "replay_validation_required": True}

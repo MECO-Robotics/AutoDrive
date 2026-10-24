@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -149,3 +150,81 @@ def test_materializer_rejects_heldout_seed_and_nonfinite_json(tmp_path, monkeypa
     paths[0].write_text(json.dumps(row, allow_nan=True) + "\n")
     with pytest.raises(ValueError, match="non-finite|finite"):
         _run(paths, tmp_path / "nan.jsonl")
+
+
+def _assert_no_staging_files(directory):
+    assert not list(directory.glob(".*.meco-tmp-*"))
+
+
+def test_materializer_rejects_output_collision_with_input(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="collides with input annotation sidecar"):
+        _run(paths, paths[0])
+    _assert_no_staging_files(tmp_path)
+
+
+def test_materializer_rejects_output_collision_through_symlink(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path, monkeypatch)
+    alias = tmp_path / "output-alias.jsonl"
+    alias.symlink_to(paths[1])
+    with pytest.raises(ValueError, match="collides with input source JSONL"):
+        _run(paths, alias)
+    _assert_no_staging_files(tmp_path)
+
+
+def test_materializer_rejects_dataset_and_manifest_path_alias(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "same.jsonl"
+    output.write_text("previous dataset")
+    output.with_suffix(output.suffix + ".manifest.json").symlink_to(output)
+    with pytest.raises(ValueError, match="dataset and manifest output paths"):
+        _run(paths, output)
+    _assert_no_staging_files(tmp_path)
+
+
+def test_pair_publish_replace_failure_restores_both_existing_outputs(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "published.jsonl"
+    manifest = output.with_suffix(output.suffix + ".manifest.json")
+    output.write_bytes(b"old dataset")
+    manifest.write_bytes(b"old manifest")
+    real_replace = os.replace
+    calls = 0
+
+    def fail_second_replace(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected replace failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(materializer.os, "replace", fail_second_replace)
+    with pytest.raises(RuntimeError, match="failed to publish.*injected replace failure"):
+        _run(paths, output)
+    assert output.read_bytes() == b"old dataset"
+    assert manifest.read_bytes() == b"old manifest"
+    _assert_no_staging_files(tmp_path)
+
+
+def test_pair_publish_staging_write_failure_preserves_outputs_and_cleans_temps(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "published.jsonl"
+    manifest = output.with_suffix(output.suffix + ".manifest.json")
+    output.write_bytes(b"old dataset")
+    manifest.write_bytes(b"old manifest")
+    real_stage = materializer._stage_bytes
+    calls = 0
+
+    def fail_second_stage(data, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected staging write failure")
+        return real_stage(data, destination)
+
+    monkeypatch.setattr(materializer, "_stage_bytes", fail_second_stage)
+    with pytest.raises(RuntimeError, match="failed to publish.*injected staging write failure"):
+        _run(paths, output)
+    assert output.read_bytes() == b"old dataset"
+    assert manifest.read_bytes() == b"old manifest"
+    _assert_no_staging_files(tmp_path)
