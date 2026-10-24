@@ -35,7 +35,7 @@ def test_phase4_factors_balance_deterministically_over_train_seeds(monkeypatch):
     first = _phase4_scheduler(monkeypatch)
     second = _phase4_scheduler(monkeypatch)
     assignments = []
-    for cycle in range(1, 9):
+    for cycle in range(1, 11):
         a = first.schedule(cycle, target_update=cycle * 100)
         b = second.schedule(cycle, target_update=cycle * 100)
         assert a == b
@@ -49,7 +49,7 @@ def test_phase4_factors_balance_deterministically_over_train_seeds(monkeypatch):
         assignments.append((a["phase4_factor"]["kind"], a["seed"]))
     assert set(assignments) == {(factor, seed)
         for factor in PHASE4_FACTORS for seed in (101, 202)}
-    assert len(set(assignments)) == 8
+    assert len(set(assignments)) == len(PHASE4_FACTORS) * 2
 
 
 def test_phase4_assignment_and_manifest_bind_factor_and_protocol(monkeypatch):
