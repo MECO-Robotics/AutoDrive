@@ -17,6 +17,14 @@ from torch.nn import functional as F
 PENALTY_MAP_PROJECTION = "mean_over_legal_heading_bins_xy_grid_v1"
 PENALTY_MAP_UNITS = "dimensionless_additive_penalty_per_cardinal_grid_step"
 PENALTY_PATH_UNITS = "normalized_grid_edge_units"
+PLAN_A_PPO_RECOMPUTATION_CONTRACT = (
+    "projected_xy_penalty_node_integral_over_frozen_legal_se2_shortest_path_tree"
+    "_including_root_pose_connector_v1")
+
+
+def plan_a_ppo_contract_metadata() -> dict[str, str]:
+    """Return the canonical Plan A PPO recomputation provenance field."""
+    return {"ppo_recomputation": PLAN_A_PPO_RECOMPUTATION_CONTRACT}
 
 
 def project_pose_penalty(track: str, penalty: torch.Tensor, legal_lookup: torch.Tensor,

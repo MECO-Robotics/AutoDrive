@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import time
 
+from .meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
+
 
 TRACKS = ("A1", "A2", "A3", "C1", "C2")
 ABLATIONS = ("A1_P0", "A2_P0", "A3_P0")
@@ -17,7 +19,6 @@ POLICIES = TRACKS + ABLATIONS + CONTROLS
 PENALTY_PROJECTION = "mean_over_legal_heading_bins_xy_grid_v1"
 PENALTY_MAP_UNITS = "dimensionless_additive_penalty_per_cardinal_grid_step"
 PENALTY_PATH_UNITS = "normalized_grid_edge_units"
-PENALTY_PPO_CONTRACT = "current_policy_penalty_integrated_on_frozen_rollout_routes"
 LEARNED_ROUTE_COST_PREFIX = (
     "meco_legal_heading_penalty_projection_v1:schema=xy_grid_f64le_v2:")
 LEGACY_ROUTE_COST_PROVENANCE = "legacy_bump_cost_path_integral_v2"
@@ -362,6 +363,21 @@ def _summarize(rows):
     return summary
 
 
+def _valid_plan_a_penalty_contract(penalty):
+    """Validate versioned Plan A penalty semantics and scale metadata."""
+    return (isinstance(penalty, dict)
+            and penalty.get("trained_mode") in ("learned", "p0")
+            and penalty.get("p0_ablation_mode") == "p0"
+            and penalty.get("projection") == PENALTY_PROJECTION
+            and penalty.get("map_units") == PENALTY_MAP_UNITS
+            and penalty.get("path_units") == PENALTY_PATH_UNITS
+            and penalty.get("ppo_recomputation") == PLAN_A_PPO_RECOMPUTATION_CONTRACT
+            and _finite_number(penalty.get("cost_scale"))
+            and penalty["cost_scale"] >= 0
+            and _finite_number(penalty.get("points_per_grid_edge"))
+            and penalty["points_per_grid_edge"] >= 0)
+
+
 def _comparison(report):
     """Validate a paired all-policy evaluation without inferring quality."""
     if (report.get("schema_version") != 1
@@ -382,17 +398,7 @@ def _comparison(report):
                "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table"
             or not isinstance(report.get("policy_manifest"), dict)
             or set(report["policy_manifest"]) != set(POLICIES)
-            or not isinstance(report.get("plan_a_penalty"), dict)
-            or report["plan_a_penalty"].get("trained_mode") not in ("learned", "p0")
-            or report["plan_a_penalty"].get("p0_ablation_mode") != "p0"
-            or report["plan_a_penalty"].get("projection") != PENALTY_PROJECTION
-            or report["plan_a_penalty"].get("map_units") != PENALTY_MAP_UNITS
-            or report["plan_a_penalty"].get("path_units") != PENALTY_PATH_UNITS
-            or report["plan_a_penalty"].get("ppo_recomputation") != PENALTY_PPO_CONTRACT
-            or not _finite_number(report["plan_a_penalty"].get("cost_scale"))
-            or report["plan_a_penalty"].get("cost_scale") < 0
-            or not _finite_number(report["plan_a_penalty"].get("points_per_grid_edge"))
-            or report["plan_a_penalty"].get("points_per_grid_edge") < 0
+            or not _valid_plan_a_penalty_contract(report.get("plan_a_penalty"))
             or any(not isinstance(value, dict)
                    or not isinstance(value.get("policy_id"), str)
                    or not value.get("policy_id")
