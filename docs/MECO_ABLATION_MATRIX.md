@@ -1,7 +1,7 @@
 # MECO matched ablation matrix
 
 `frc_defense.meco_ablation_matrix` defines the frozen diagnostic matrix for a
-single common five-checkpoint bundle. The runner records each checkpoint file
+single common five-checkpoint bundle (matrix schema 5). The runner records each checkpoint file
 SHA-256, immutable checkpoint configuration SHA-256, training protocol ID,
 source identity, exact category/seed list, condition ID, and evaluation report
 identity. Every contrast repeats the common bundle provenance so it can be
@@ -13,6 +13,7 @@ audited independently of the full matrix JSON.
 | --- | --- |
 | Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; P=0 versions for A1/A2/A3. C1/D1 both use CV here. |
 | Default controls, K=16 | D1=current-pose vs D2=bounded-CV prediction |
+| Multi-model controls, K=16 | D1=current-pose vs D2=`multi_model_v1` prediction |
 | Matched prediction, K=16 | All five learned tracks under current-pose and CV modes |
 | Candidate K sweep | C1/C2 candidate recall at K=8, 16, and 32 against the recorded bounded expanded-goal reference pool |
 | Inference-disabled fallback | Each learned track paired with its normal run; inference hands off to D1 at the first macro boundary at or after the requested tick |
@@ -28,6 +29,15 @@ The K sweep changes the runtime candidate capacity for every evaluated policy;
 Plan A continues to use its full legal-graph support and does not use K.
 P=0 is an inference-time ablation of the same A checkpoint, not a separately
 trained checkpoint.
+
+The default-control condition remains `D1=current` and `D2=cv`. The separate
+multi-model condition sets `D1=current` and `D2=multi_model_v1` and adds the
+`D1_vs_D2_multi_model_v1` paired contrast. For direct evaluator calls, the
+backward-compatible scalar `--control-prediction-mode MODE` sets both controls
+to one mode. Use `--control-prediction-modes '{"D1":"current","D2":"multi_model_v1"}'`
+for different modes; passing both options is rejected. The per-control map is
+bound into the evaluation protocol and D1/D2 policy provenance, which the
+matrix checks against the frozen condition.
 
 Example invocation:
 

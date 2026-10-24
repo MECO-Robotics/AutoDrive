@@ -103,11 +103,15 @@ def test_plan_a_node_risk_matches_shared_mixture_per_route_eta():
 
 
 def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
-    from frc_defense.meco_ablation_matrix import MatrixCondition
-    from frc_defense.meco_track_training import _parser, _prediction_record_fields
+    from frc_defense.meco_ablation_matrix import MatrixCondition, default_conditions
+    from frc_defense.meco_track_training import (
+        _parser, _prediction_record_fields, _resolve_control_prediction_modes)
 
     condition = MatrixCondition("matched_mm", "multi_model_v1", "multi_model_v1", 16)
     condition.validate()
+    with pytest.raises(ValueError, match="both"):
+        MatrixCondition("ambiguous", "cv", "cv", 16,
+            control_prediction_modes={"D1": "current"}).validate()
     args = _parser().parse_args(["evaluate", "--device", "cuda:0", "--output", "report.json",
         "--prediction-mode", "multi_model_v1", "--control-prediction-mode", "multi_model_v1",
         "--a1-checkpoint", "a1.pt", "--a2-checkpoint", "a2.pt",
@@ -116,3 +120,119 @@ def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
     row_provenance = _prediction_record_fields(args.control_prediction_mode)
     assert row_provenance["prediction_mode"] == "multi_model_v1"
     assert row_provenance["prediction_contract"] == prediction_contract("multi_model_v1")
+
+    args = _parser().parse_args(["evaluate", "--device", "cuda:0", "--output", "report.json",
+        "--control-prediction-modes", '{"D1":"current","D2":"multi_model_v1"}',
+        "--a1-checkpoint", "a1.pt", "--a2-checkpoint", "a2.pt",
+        "--a3-checkpoint", "a3.pt", "--c1-checkpoint", "c1.pt", "--c2-checkpoint", "c2.pt"])
+    assert args.control_prediction_modes == {"D1": "current", "D2": "multi_model_v1"}
+    assert _resolve_control_prediction_modes(
+        control_prediction_modes=args.control_prediction_modes) == args.control_prediction_modes
+    assert _resolve_control_prediction_modes(control_prediction_mode="multi_model_v1") == {
+        "D1": "multi_model_v1", "D2": "multi_model_v1"}
+    assert _resolve_control_prediction_modes() == {"D1": "current", "D2": "cv"}
+    with pytest.raises(ValueError, match="either"):
+        _resolve_control_prediction_modes("cv", {"D2": "multi_model_v1"})
+    with pytest.raises(ValueError, match="map"):
+        _resolve_control_prediction_modes(control_prediction_modes={"D3": "cv"})
+
+    controls = {condition.condition_name: condition for condition in
+        default_conditions("pickup_simple")}
+    assert controls["controls_default_d1_current_d2_cv_k16"].control_prediction_modes is None
+    multi = controls["controls_d1_current_d2_multimodel_v1_k16"]
+    assert multi.control_prediction_modes == {"D1": "current", "D2": "multi_model_v1"}
+    assert _resolve_control_prediction_modes(
+        control_prediction_modes=multi.control_prediction_modes) == {
+            "D1": "current", "D2": "multi_model_v1"}
+
+
+def test_matrix_runner_executes_and_records_per_control_condition(monkeypatch, tmp_path):
+    import hashlib
+    import json
+
+    import frc_defense.curriculum_training as curriculum_training
+    import frc_defense.fuel_physics_hip as fuel_physics_hip
+    import frc_defense.meco_ablation_matrix as matrix
+    import frc_defense.meco_device as meco_device
+    import frc_defense.meco_track_training as track_training
+    from frc_defense.meco_tracks import MECO_TRACKS, prediction_contract
+
+    source = {"source": "synthetic matrix runner fixture"}
+    monkeypatch.setattr(curriculum_training, "source_identity", lambda: source)
+    monkeypatch.setattr(fuel_physics_hip, "prepare_native_fuel_extension", lambda device: None)
+    monkeypatch.setattr(meco_device, "normalized_device_info", lambda device: {
+        "device": "cpu", "accelerator_backend": "cpu"})
+    monkeypatch.setattr(matrix, "normalized_device_info", lambda device: {
+        "device": "cpu", "accelerator_backend": "cpu"})
+    config_hashes = {track: f"config-{track}" for track in MECO_TRACKS}
+    protocol_ids = {track: "shared-training-protocol" for track in MECO_TRACKS}
+    shared_config = {"seed": 12}
+    monkeypatch.setattr(matrix, "_checkpoint_configuration_provenance",
+        lambda checkpoints: (config_hashes, protocol_ids, shared_config))
+
+    calls = []
+
+    def fake_evaluate(checkpoints, **kwargs):
+        calls.append(kwargs)
+        source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
+            allow_nan=False).encode()).hexdigest()
+        modes = track_training._resolve_control_prediction_modes(
+            kwargs["control_prediction_mode"], kwargs["control_prediction_modes"])
+        manifest = {}
+        for track in MECO_TRACKS:
+            manifest[track] = {"checkpoint_sha256": hashlib.sha256(
+                Path(checkpoints[track]).read_bytes()).hexdigest(),
+                "source_identity_sha256": source_hash,
+                "training_configuration_sha256": config_hashes[track],
+                "training_protocol_id": protocol_ids[track]}
+        for control, mode in (("D0", None), ("D1", modes["D1"]),
+                              ("D2", modes["D2"])):
+            manifest[control] = {"prediction_mode": mode,
+                "prediction_contract": prediction_contract(mode) if mode else None}
+        for track in ("A1", "A2", "A3"):
+            manifest[f"{track}_P0"] = dict(manifest[track])
+        records = []
+        policy_names = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+        if kwargs["inference_disable_tick"] is not None:
+            policy_names += tuple(f"{track}__INFERENCE_DISABLED_TO_D1"
+                                  for track in MECO_TRACKS)
+            for track in MECO_TRACKS:
+                manifest[f"{track}__INFERENCE_DISABLED_TO_D1"] = dict(manifest[track])
+        for policy in policy_names:
+            for category in kwargs["categories"]:
+                for seed in kwargs["episode_seeds"]:
+                    records.append({"policy": policy, "category": category,
+                        "seed": seed, "policy_id": f"synthetic-{policy}",
+                        "metrics": {"score": 0.}, "candidate_recall": 1.})
+        device_info = {"device": "cpu", "accelerator_backend": "cpu"}
+        return {"evaluation_id": f"eval-{len(calls)}", "protocol_id": f"proto-{len(calls)}",
+            "qualification_protocol_id": None, "source_identity_sha256": source_hash,
+            "execution_device": device_info,
+            "component_timing": {"provenance": device_info},
+            "policy_manifest": manifest, "shared_training_configuration": shared_config,
+            "phase4_factor": kwargs["phase4_factor"],
+            "prediction": {"control_modes": modes},
+            "candidate_k": kwargs["candidate_k_override"],
+            "inference_disable_fault": None, "categories": list(kwargs["categories"]),
+            "seeds": list(kwargs["episode_seeds"]), "records": records}
+
+    from pathlib import Path
+    monkeypatch.setattr(track_training, "evaluate_meco", fake_evaluate)
+    checkpoints = {}
+    for track in MECO_TRACKS:
+        path = tmp_path / f"{track}.pt"
+        path.write_bytes(track.encode())
+        checkpoints[track] = str(path)
+    report = matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
+        categories=("single",), seeds=(27,), device="cpu", output_dir=tmp_path / "matrix")
+
+    assert any(call["control_prediction_modes"] == {
+        "D1": "current", "D2": "multi_model_v1"} for call in calls)
+    condition = report["conditions"]["controls_d1_current_d2_multimodel_v1_k16"]
+    assert condition["policy_manifest"]["D1"]["prediction_mode"] == "current"
+    assert condition["policy_manifest"]["D2"]["prediction_mode"] == "multi_model_v1"
+    contrast = next(row for row in report["contrasts"]
+        if row["contrast"] == "D1_vs_D2_multi_model_v1")
+    assert contrast["condition_id"] == condition["condition_id"]
+    assert contrast["report_provenance"]["policy_manifest"]["D2"][
+        "prediction_contract"] == prediction_contract("multi_model_v1")

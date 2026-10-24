@@ -1392,6 +1392,28 @@ def _prediction_record_fields(mode: str | None) -> dict:
     return {"prediction_mode": mode, "prediction_contract": prediction_contract(mode)}
 
 
+def _resolve_control_prediction_modes(control_prediction_mode=None,
+                                     control_prediction_modes=None):
+    """Resolve compatible legacy scalar or explicit per-control overrides."""
+    if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
+        raise ValueError(f"control_prediction_mode must be one of {PREDICTION_MODES}")
+    if control_prediction_mode is not None and control_prediction_modes is not None:
+        raise ValueError("use either control_prediction_mode or control_prediction_modes, not both")
+    if control_prediction_modes is not None and (
+            not isinstance(control_prediction_modes, dict)
+            or not control_prediction_modes
+            or set(control_prediction_modes) - {"D1", "D2"}
+            or any(mode not in PREDICTION_MODES
+                   for mode in control_prediction_modes.values())):
+        raise ValueError("control_prediction_modes must map D1 and/or D2 to known modes")
+    modes = {"D1": "current", "D2": "cv"}
+    if control_prediction_mode is not None:
+        return {"D1": control_prediction_mode, "D2": control_prediction_mode}
+    if control_prediction_modes is not None:
+        modes.update(control_prediction_modes)
+    return modes
+
+
 def _timing_sync(env):
     """Synchronize the measured device before/after a host wall interval."""
     if torch.device(env.device).type == "cuda":
@@ -1427,6 +1449,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   prediction_mode: str | None = None,
                   candidate_k_override: int | None = None,
                   control_prediction_mode: str | None = None,
+                  control_prediction_modes: dict[str, str] | None = None,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
@@ -1436,8 +1459,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
-    if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
-        raise ValueError(f"control_prediction_mode must be one of {PREDICTION_MODES}")
+    effective_control_modes = _resolve_control_prediction_modes(
+        control_prediction_mode, control_prediction_modes)
     if candidate_k_override is not None and candidate_k_override not in (8, 16, 32):
         raise ValueError("candidate_k_override must be 8, 16, or 32")
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
@@ -1482,8 +1505,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("control_policies must be a unique subset of D0/D1/D2")
     if include_controls and "D0" not in controls:
         raise ValueError("matched evaluation requires D0 as the paired reference")
-    control_prediction_modes = {"D1": control_prediction_mode or "current",
-                                 "D2": control_prediction_mode or "cv"}
     if not selected and (controls != ("D0",) or not include_controls):
         raise ValueError("D0-only evaluation requires exactly the D0 control")
     sources = source_identity()
@@ -1587,7 +1608,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if first_macro_boundary >= scenario_horizon:
             raise ValueError("inference disable tick has no macro boundary before episode horizon")
     effective_prediction_mode = prediction_mode or learned_prediction_mode or "cv"
-    effective_control_modes = control_prediction_modes
     for track in ("A1", "A2", "A3"):
         if track not in policy_manifest:
             continue
@@ -1603,9 +1623,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
-            "prediction_mode": control_prediction_modes.get(control),
-            "prediction_contract": (prediction_contract(control_prediction_modes[control])
-                if control in control_prediction_modes else None),
+            "prediction_mode": effective_control_modes.get(control),
+            "prediction_contract": (prediction_contract(effective_control_modes[control])
+                if control in effective_control_modes else None),
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
     if inference_disable_tick is not None:
@@ -1629,6 +1649,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "candidate_builder": "shared_C1_C2_D1_D2_route_feasible_candidates"},
         "prediction": {"learned_mode": effective_prediction_mode,
             "control_override": control_prediction_mode,
+            "control_overrides": control_prediction_modes,
             "control_modes": effective_control_modes,
             "contract": prediction_contract(effective_prediction_mode)},
         "inference_disable_tick": inference_disable_tick,
@@ -2253,6 +2274,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 "control_modes": effective_control_modes,
                 "explicit_learned_override": prediction_mode,
                 "explicit_control_override": control_prediction_mode,
+                "explicit_control_overrides": control_prediction_modes,
                 "contract": prediction_contract(effective_prediction_mode)},
             "inference_disable_fault": ({
                 "requested_tick": inference_disable_tick,
@@ -2384,6 +2406,8 @@ def _parser():
         help="override learned A/C prediction mode; default preserves checkpoint mode")
     ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,
         help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--control-prediction-modes", type=json.loads,
+        help='JSON mapping for per-control modes, e.g. \'{"D1":"current","D2":"multi_model_v1"}\'; cannot combine with --control-prediction-mode')
     ev.add_argument("--candidate-k-override", type=int, choices=(8, 16, 32),
         help="evaluation-only candidate K for C tracks and controls")
     ev.add_argument("--inference-disable-tick", type=int,
@@ -2427,6 +2451,7 @@ def main(argv=None):
         episodes=args.episodes, master_seed=args.seed, device=args.device,
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
+        control_prediction_modes=args.control_prediction_modes,
         candidate_k_override=args.candidate_k_override,
         inference_disable_tick=args.inference_disable_tick)
     print(json.dumps({"evaluation_id": report["evaluation_id"],
