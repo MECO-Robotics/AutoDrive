@@ -171,6 +171,8 @@ def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
     "categories_missing", "categories_empty", "categories_truncated",
     "seeds_missing", "seeds_empty", "seeds_truncated",
     "seeds_bool_equal", "seeds_float_equal",
+    "split_report_missing", "split_report_wrong",
+    "split_row_missing", "split_row_wrong",
 ])
 def test_matrix_runner_executes_and_records_per_control_condition(
         monkeypatch, tmp_path, row_provenance_tamper):
@@ -229,7 +231,8 @@ def test_matrix_runner_executes_and_records_per_control_condition(
             for category in kwargs["categories"]:
                 for seed in kwargs["episode_seeds"]:
                     records.append({"policy": policy, "category": category,
-                        "seed": seed, "policy_id": f"synthetic-{policy}",
+                        "seed": seed, "split": kwargs["split"],
+                        "policy_id": f"synthetic-{policy}",
                         **track_training._prediction_record_fields(
                             modes[policy] if policy in modes else None),
                         "metrics": {"score": 0.}, "candidate_recall": 1.})
@@ -263,6 +266,17 @@ def test_matrix_runner_executes_and_records_per_control_condition(
                 report_seeds[1] = 27.0
             else:
                 report_seeds = report_seeds[:-1]
+        report_split = kwargs["split"]
+        if row_provenance_tamper == "split_report_missing":
+            report_split = None
+        elif row_provenance_tamper == "split_report_wrong":
+            report_split = "test" if report_split != "test" else "validation"
+        elif row_provenance_tamper in ("split_row_missing", "split_row_wrong"):
+            target = records[0]
+            if row_provenance_tamper == "split_row_missing":
+                target.pop("split")
+            else:
+                target["split"] = "test" if kwargs["split"] != "test" else "validation"
         device_info = {"device": "cpu", "accelerator_backend": "cpu"}
         return {"evaluation_id": f"eval-{len(calls)}", "protocol_id": f"proto-{len(calls)}",
             "qualification_protocol_id": None, "source_identity_sha256": source_hash,
@@ -273,6 +287,7 @@ def test_matrix_runner_executes_and_records_per_control_condition(
             "prediction": {"control_modes": modes},
             "candidate_k": kwargs["candidate_k_override"],
             "inference_disable_fault": None, "categories": report_categories,
+            "split": report_split,
             "seeds": report_seeds, "records": records}
 
     from pathlib import Path
@@ -287,7 +302,7 @@ def test_matrix_runner_executes_and_records_per_control_condition(
             categories=("single", "cluster"), seeds=(1, 27), device="cpu",
             output_dir=tmp_path / "matrix")
     else:
-        with pytest.raises(ValueError, match="evaluation report|row prediction provenance"):
+        with pytest.raises(ValueError, match="evaluation report|row prediction provenance|split"):
             matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
                 categories=("single", "cluster"), seeds=(1, 27), device="cpu",
                 output_dir=tmp_path / "matrix")

@@ -292,6 +292,20 @@ def _validate_report_category_seed_provenance(report: dict,
             "evaluation report seeds are missing, empty, or differ from frozen matrix seeds")
 
 
+def _validate_report_split_provenance(report: dict, expected_split: str) -> None:
+    """Bind the evaluator report and every episode row to the frozen split."""
+    if report.get("split") != expected_split:
+        raise ValueError(
+            "evaluation report split is missing or differs from frozen matrix split")
+    records = report.get("records")
+    if not isinstance(records, list):
+        raise ValueError("evaluation report records are missing for split provenance")
+    for index, row in enumerate(records):
+        if not isinstance(row, dict) or row.get("split") != expected_split:
+            raise ValueError(
+                f"evaluation record {index} split is missing or differs from frozen matrix split")
+
+
 def _validate_control_prediction_rows(report: dict,
                                      expected_modes: dict[str, str]) -> None:
     """Bind each D1/D2 episode row to the frozen mode and its full contract."""
@@ -459,6 +473,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             phase4_factor=condition.phase4_factor,
             output=str(report_path))
         _validate_report_category_seed_provenance(report, categories, seeds)
+        _validate_report_split_provenance(report, evaluation_split)
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         expected_control_modes = _expected_control_prediction_modes(condition)
