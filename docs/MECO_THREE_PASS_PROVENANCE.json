@@ -1833,6 +1833,44 @@
         "status": "approved-summary"
       },
       "limits": "35 focused offline tests, compilation, and diff checks passed. No simulator, training, GPU, replay, or qualification was performed. The live legacy supervisor was not modified and does not acquire these leases retroactively. Manifest launch remains diagnostic-only until Phase 2 evidence is validated; qualification remains false."
+    },
+    {
+      "requirement_id": "meco-c1-c2-phase2-campaign",
+      "title": "Opt-in matched-prefix C1/C2 Phase 2 warm-start campaign",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-c1-c2-campaign.md",
+          "sha256": "00e4d7317fe97de1092be4dd879125101282e6d82ca7440a4e936abe6a9405ed",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "82a1e8146aec2ad8d2172c0786d10a7e7f41d895",
+        "candidate_integration_commit": "4d80247942a3453651def4546a2735184cd5092b",
+        "source_head": "df5f4481134c7887735da58fba7088114eb90f6f",
+        "reviewed_diff_sha256": "4a360cddaf0def89175ef9059e9be63fd0a83f915799b074fbbb707f1edbef94",
+        "paths": [
+          "frc_defense/meco_phase2_campaign.py",
+          "tests/test_meco_phase2_campaign.py",
+          "docs/MECO_SUPERVISED_WARMSTART.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-c1-c2-campaign.md",
+          "sha256": "00e4d7317fe97de1092be4dd879125101282e6d82ca7440a4e936abe6a9405ed",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "82a1e8146aec2ad8d2172c0786d10a7e7f41d895",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved after correcting both protocol seed examples; reviewer confirmed the documented seeds belong to the frozen train split. Implementer reported 12 focused CPU-only tests passed; reviewer did not rerun them.",
+        "status": "approved-summary"
+      },
+      "limits": "12 focused offline tests, compilation, CLI help, and diff checks passed. No simulator, collection, fitting, GPU, training, replay, or qualification was performed. The executor keeps Phase 2 readiness and qualification false; it covers only C1/C2 pairwise gross-return warm starts. Plan A U/B/P is separate and still unimplemented at this point."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -1866,6 +1904,6 @@
     "The Phase 4 focal-pose assignment is protocol-bound and records initial truth-versus-estimate diagnostics only; it has 131 focused CPU contract tests but no simulator/E2E replay, GPU/HIP, training, dashboard-currentness, or qualification evidence. Generic Phase 4 factor capture does not support this dedicated assignment path; relocalization, recovery, and safety outcomes remain unavailable, and qualification is false.",
     "The Phase 4 teammate-behavior tranche records paired validation assignments and post-remask strategic macro-actions only; authoritative behavior/score/collision outcomes, simulator replay, GPU/HIP, training, dashboard currentness, and qualification remain absent.",
     "The trench-interceptor tranche wires protocol-bound per-category validation schedules over the exact 14-category domain; focused contract checks are not simulator validation, outcome signals remain null, and qualification remains false.",
-    "Tranches #44\u2013#46 are scoped implementation and metadata/contract evidence only; they require later runtime evidence. Tranche #44 provides the validated manifest, and #46 makes the supervisor consume it under shared leases, but no Phase 2 dataset/artifacts or qualification evidence exist."
+    "Tranches #44\u2013#47 are scoped implementation and metadata/contract evidence only; they require later runtime evidence. C1/C2 campaign execution remains pending lease availability, and Plan A U/B/P orchestration/evidence remains outstanding."
   ]
 }

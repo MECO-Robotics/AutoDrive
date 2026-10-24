@@ -35,6 +35,24 @@ with 46 entries and `meco-supervisor-manifest-device-lease` latest. The
 dashboard data root remains the live main checkout. No replay was generated;
 this verifies dashboard currentness and provenance only.
 
+## C1/C2 matched-prefix Phase 2 campaign executor — 2026-10-24
+
+Reviewed descriptor/executor commit `82a1e8146aec2ad8d2172c0786d10a7e7f41d895`
+is integrated at candidate commit `4d80247942a3453651def4546a2735184cd5092b`.
+The new offline descriptor binds a clean source snapshot, exact protocol,
+train-only seeds, fixed collection axes, indexed device, and isolated paths.
+Explicit execution acquires the shared lease, collects one matched-prefix
+dataset, fits C1 then C2 on that exact device/dataset, and validates both
+artifacts and hashes. The campaign executor is implemented but has not been
+executed because the live two-GPU training run remains active. Twelve focused
+offline tests and compilation passed; independent review approved the exact
+corrected files and protocol-assigned seed examples.
+
+This covers only C1/C2 pairwise gross-return warm starts. It does not generate
+Phase 2 artifacts or qualify tracks; Phase 2 readiness and qualification remain
+false. See tranche #47 and
+[`phase2-c1-c2-campaign.md`](implementation-provenance/phase2-c1-c2-campaign.md).
+
 ## Manifest-driven supervisor and cross-process device leases — 2026-10-24
 
 Reviewed implementation commit `5d81713310e9400b12fead981f118913f83222f0`

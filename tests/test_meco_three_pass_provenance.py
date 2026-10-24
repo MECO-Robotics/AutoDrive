@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 46
+    assert len(result["tranches"]) == 47
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -228,6 +228,15 @@ def test_current_manifest_is_validated_as_summary_only():
         manifest_supervisor["implementer"]["commit"])
     assert "Phase 2" in manifest_supervisor["limits"]
     assert "qualification remains false" in manifest_supervisor["limits"]
+    phase2_campaign = next(t for t in result["tranches"]
+        if t["requirement_id"] == "meco-c1-c2-phase2-campaign")
+    assert phase2_campaign["implementer"]["commit"] == (
+        "82a1e8146aec2ad8d2172c0786d10a7e7f41d895")
+    assert phase2_campaign["implementer"]["candidate_integration_commit"] == (
+        "4d80247942a3453651def4546a2735184cd5092b")
+    assert phase2_campaign["reviewer"]["approved_commit"] == (
+        phase2_campaign["implementer"]["commit"])
+    assert "No simulator" in phase2_campaign["limits"]
     profile_summary = (REPO / start_profiles["planner"]["artifact"]["path"]).read_text()
     assert "defers its initial perception" in profile_summary
     assert "legal-start rate and outcome-by-start-state" in profile_summary
