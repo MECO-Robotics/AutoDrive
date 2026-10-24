@@ -18,7 +18,7 @@ executed or qualified episode.
 | teammate behaviors | `teammate.behavior_pool` | none | outcome by behavior, teammate collision, score contribution | Schedule helper exists, but validation action assignment is not wired; signals unavailable |
 | sensor delay and low confidence | `sensor.delay_120ms`, `sensor.low_confidence` | delayed-observation ticks, confidence-cap refresh/reduction | outcome by sensor condition, stale-observation reaction latency, outcome by confidence band | Existing factors capture stimulus; required outcome signals unavailable |
 | abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` | reaction latency, interception, route completion | Existing factor can run and record switch; all required outcome signals unavailable |
-| bumps and contact | `contact.robot_bump` | `phase4_pair_contact_event` | robot contact rate, recovery time, route completion | Torch and HIP solvers expose pair (2,3) distinct contact substep count, first/last completed-substep endpoint times, and summed impulses. The contact geometry is not scheduled by validation; this is a bounded summary, not a full event stream. Recovery and route completion remain unavailable. |
+| bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event` | robot contact rate, recovery time, route completion | Three registered geometries now flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate assigned exposure/action ticks from solver-confirmed pair (2,3) contact and route-crossing bit/time. Recovery and route-completion outcomes remain unavailable; qualification stays disabled pending a reviewed recovery measure and simulator replay. |
 | observation-only focal pose mislocalization | `observation.focal_pose_offset` | none | relocalization time, pose-error recovery, safety contact | Observation-boundary helper exists, but validation reset/observation application is not wired; signals unavailable |
 
 The existing four factor configurations (`feinting_opponent`,
@@ -35,6 +35,9 @@ summaries from the Torch and fused HIP collision solvers. It binds the
 registered slot pair (2,3), first and last completed physics-substep times,
 distinct contact-substep count, and accumulated impulse. The contact summary
 does not contain a complete event stream and does not infer recovery or route
+completion. Contact geometry conditions are diagnostic-only and explicitly
+qualification-ineligible. They are blocked from final-test use. Route crossing
+is recorded as a separate observed event and is not promoted to route
 completion.
 
 The new contract and plan tests are static/contract checks. They do not test

@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 29
+    assert len(result["tranches"]) == 30
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -65,6 +65,12 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
+    contact_geometry = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-contact-geometry-path")
+    assert contact_geometry["implementer"]["commit"] == (
+        "1d4e4eb15562fb7b490310394a3f4f832e95a1b9")
+    assert contact_geometry["reviewer"]["approved_commit"] == (
+        contact_geometry["implementer"]["commit"])
     pair_contact = next(t for t in result["tranches"]
                         if t["requirement_id"] == "phase4-pair-contact-events")
     assert pair_contact["implementer"]["commit"] == (

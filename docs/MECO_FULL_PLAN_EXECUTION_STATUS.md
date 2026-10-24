@@ -72,6 +72,20 @@
 > entries with pinned SHA-256 `f9282381fabb8ff53c66e98b996ad626981d808a7e30550156a896c9f0e7ef82`;
 > the dashboard service has not been restarted against this candidate update.
 
+> **Diagnostic contact geometry path integrated — 2026-10-24.** Candidate
+> commit `1d4e4eb15` wires three registered contact geometries from matrix
+> conditions through reset and evaluation. Slot 2 receives the sensed-target
+> approach while slot 3's selected policy action is preserved. Episode rows
+> separate assigned exposure/action ticks, solver-confirmed pair (2,3)
+> contact, and route-crossing state/time. The matrix requires all 11 expected
+> policy rows across the exact category/seed grid and rejects missing,
+> unexpected, duplicate, or empty rows. Recovery and route-completion outcomes
+> remain unavailable; contact conditions are diagnostic-only, qualification
+> remains false, and final-test use is blocked. Eleven focused contract tests,
+> Python compilation, and diff checks passed. No simulator, GPU/HIP, campaign,
+> replay, or dashboard validation ran. The current checkout has not been
+> verified by the serving dashboard.
+
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
 > and is active as PID `1713013`, with this candidate worktree as its working
