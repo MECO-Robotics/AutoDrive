@@ -20,6 +20,8 @@ from typing import Any
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
 from .meco_phase4_runtime_adapter import validate_phase4_capture
+from .meco_phase4_context import (CONTACT_GEOMETRIES, phase4_context_identity,
+    validate_contact_geometry_split)
 from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
@@ -50,6 +52,8 @@ class MatrixCondition:
     phase4_factor: dict | None = None
     categories: tuple[str, ...] | None = None
     qualification_case: dict | None = None
+    contact_geometry_id: str | None = None
+    contact_geometry_config: dict | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -68,6 +72,13 @@ class MatrixCondition:
                     self.phase4_factor.get("kind") not in PHASE4_FACTORS or
                     self.phase4_factor != PHASE4_FACTORS[self.phase4_factor["kind"]]):
                 raise ValueError("Phase 4 factor differs from its frozen contract")
+        if self.contact_geometry_id is None:
+            if self.contact_geometry_config is not None:
+                raise ValueError("contact geometry config requires a geometry ID")
+        elif (self.contact_geometry_id not in CONTACT_GEOMETRIES or
+              self.contact_geometry_config != phase4_context_identity(
+                  "robot_contact_geometry", self.contact_geometry_id)):
+            raise ValueError("contact geometry differs from its frozen registry identity")
         if self.qualification_case is not None:
             if (not isinstance(self.qualification_case, dict) or
                     set(self.qualification_case) != set(DEFAULT_EVALUATION_STRATUM) or
@@ -307,7 +318,8 @@ def final_test_ledger_path(protocol_path: str | Path, protocol_id: str) -> Path:
 
 def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None = None,
                        inference_disable_tick: int | None = None,
-                       qualification_case: dict | None = None
+                       qualification_case: dict | None = None,
+                       contact_geometries: tuple[str, ...] = ()
                        ) -> tuple[MatrixCondition, ...]:
     """Return the plan's architecture/prediction/K/fault cases and eligible Phase 4 factors."""
     horizon = math.ceil(get_scenario(scenario_id).time_budget_s / .02)
@@ -338,6 +350,22 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
             categories=supported_categories,
             qualification_case=qualification_case)
             for name in PHASE4_FACTORS)
+    if contact_geometries:
+        if (not isinstance(contact_geometries, (tuple, list)) or
+                any(not isinstance(geometry, str) for geometry in contact_geometries) or
+                len(set(contact_geometries)) != len(contact_geometries) or
+                any(geometry not in CONTACT_GEOMETRIES for geometry in contact_geometries)):
+            raise ValueError("contact_geometries must be unique registered geometry IDs")
+        if not pressure_domain or not supported_categories:
+            raise ValueError("contact geometries require registered pressure/match categories")
+        conditions += tuple(MatrixCondition(
+            f"contact_{geometry_id}", "cv", "cv", 16,
+            categories=supported_categories,
+            qualification_case=qualification_case,
+            contact_geometry_id=geometry_id,
+            contact_geometry_config=phase4_context_identity(
+                "robot_contact_geometry", geometry_id))
+            for geometry_id in contact_geometries)
     for condition in conditions:
         condition.validate()
     return conditions
@@ -360,6 +388,22 @@ def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
             raise ValueError(f"duplicate policy/category/seed record: {key}")
         result[key] = row
     return result
+
+
+def _expected_contact_policy_ids(policy_manifest: dict) -> dict[str, str]:
+    """List every policy row evaluated by a contact matrix condition."""
+    if not isinstance(policy_manifest, dict):
+        raise ValueError("contact evaluation report lacks a policy manifest")
+    policy_names = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+    expected = {}
+    for policy_name in policy_names:
+        manifest = policy_manifest.get(policy_name)
+        policy_id = manifest.get("policy_id") if isinstance(manifest, dict) else None
+        if not isinstance(policy_id, str) or not policy_id:
+            raise ValueError(
+                f"contact evaluation report lacks expected policy ID: {policy_name}")
+        expected[policy_name] = policy_id
+    return expected
 
 
 def _validate_phase4_condition_records(records: list[dict], *, factor: dict,
@@ -386,6 +430,97 @@ def _validate_phase4_condition_records(records: list[dict], *, factor: dict,
         row_case = {name: row.get(name) for name in DEFAULT_EVALUATION_STRATUM}
         if capture.get("qualification_case") != row_case:
             raise ValueError("Phase 4 capture qualification case differs from its record")
+
+
+def _validate_contact_condition_records(records: list[dict], *, geometry_id: str,
+                                        geometry_config: dict,
+                                        expected_policy_ids: dict[str, str],
+                                        expected_category_seed_keys: set[tuple[str, int]]) -> dict:
+    """Require reset exposure and solver event provenance; never infer qualification."""
+    if not records:
+        raise ValueError("contact condition has no episode records")
+    if (not isinstance(expected_policy_ids, dict) or not expected_policy_ids or
+            any(not isinstance(policy, str) or not policy or
+                not isinstance(policy_id, str) or not policy_id
+                for policy, policy_id in expected_policy_ids.items())):
+        raise ValueError("contact condition requires explicit expected policy IDs")
+    if (not isinstance(expected_category_seed_keys, set) or
+            not expected_category_seed_keys or any(
+                not isinstance(key, tuple) or len(key) != 2 or
+                not isinstance(key[0], str) or type(key[1]) is not int
+                for key in expected_category_seed_keys)):
+        raise ValueError("contact condition requires explicit category/seed keys")
+    paired_rows: dict[tuple[str, int], dict[str, dict]] = {}
+    observed_keys = set()
+    for row in records:
+        exposure = row.get("phase4_contact_exposure")
+        event = row.get("phase4_pair_contact_event")
+        if (not isinstance(exposure, dict) or
+                exposure.get("geometry_id") != geometry_id or
+                exposure.get("geometry_config") != geometry_config or
+                exposure.get("exposure_assigned") is not True or
+                exposure.get("pair_slots") != [2, 3] or
+                exposure.get("opponent_action") != 5 or
+                exposure.get("opponent_action_source") != "fresh_sensed_track_action_5" or
+                exposure.get("slot2_env_control_mode") != "nn" or
+                exposure.get("route_seen") not in (True, False) or
+                (exposure.get("route_seen") is True and
+                 (not isinstance(exposure.get("route_seen_time_s"), (int, float)) or
+                  not math.isfinite(exposure["route_seen_time_s"]))) or
+                (exposure.get("route_seen") is False and
+                 exposure.get("route_seen_time_s") is not None) or
+                type(exposure.get("approach_action_ticks")) is not int or
+                exposure["approach_action_ticks"] < 0 or
+                exposure.get("focal_action_overridden") is not False or
+                exposure.get("qualification_eligible") is not False or
+                exposure.get("recovery_time_after_bump_s") is not None or
+                exposure.get("route_completion_rate") is not None):
+            raise ValueError("contact condition lacks exact assigned exposure metadata")
+        if (not isinstance(event, dict) or
+                event.get("event_source") != "simulator_robot_pair_sat_contact_solver" or
+                event.get("pair_slots") != [2, 3] or
+                event.get("qualification_eligible") is not False):
+            raise ValueError("contact condition lacks authoritative pair-contact event metadata")
+        category, seed, policy = row.get("category"), row.get("seed"), row.get("policy")
+        if (not isinstance(category, str) or type(seed) is not int or
+                policy not in expected_policy_ids):
+            raise ValueError("contact condition record has an unexpected category/seed/policy key")
+        if row.get("policy_id") != expected_policy_ids[policy]:
+            raise ValueError("contact condition record policy ID differs from expected manifest")
+        pair_key = (category, seed)
+        if pair_key not in expected_category_seed_keys:
+            raise ValueError("contact condition record has an unexpected category/seed key")
+        key = (policy, category, seed)
+        if key in observed_keys:
+            raise ValueError("contact condition has duplicate cross-policy exposure rows")
+        observed_keys.add(key)
+        paired_rows.setdefault(pair_key, {})[policy] = exposure
+    expected_keys = {(policy, category, seed)
+        for policy in expected_policy_ids for category, seed in expected_category_seed_keys}
+    missing, extra = expected_keys - observed_keys, observed_keys - expected_keys
+    if missing or extra:
+        raise ValueError("contact exposure rows do not cover expected policy/category/seed keys: "
+            f"missing={sorted(missing)}, extra={sorted(extra)}")
+    signatures = set()
+    action_ticks = []
+    for pair_key in expected_category_seed_keys:
+        group = paired_rows.get(pair_key, {})
+        if set(group) != set(expected_policy_ids):
+            raise ValueError("contact exposure rows are not cross-policy paired")
+        for exposure in group.values():
+            signatures.add((exposure["geometry_id"],
+                json.dumps(exposure["geometry_config"], sort_keys=True),
+                tuple(exposure["pair_slots"]), exposure["opponent_action"],
+                exposure["opponent_action_source"],
+                exposure["slot2_env_control_mode"],
+                exposure["focal_action_overridden"]))
+            action_ticks.append(exposure["approach_action_ticks"])
+    if len(signatures) != 1:
+        raise ValueError("paired contact rows do not share one exposure assignment")
+    return {"paired_by_category_seed": True,
+        "policy_set": sorted(expected_policy_ids),
+        "expected_category_seed_keys": [list(key) for key in sorted(expected_category_seed_keys)],
+        "approach_action_tick_counts_match": len(set(action_ticks)) == 1}
 
 
 def _record_metrics(row: dict | None) -> dict | None:
@@ -520,7 +655,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                replay_output_dir: str | Path | None = None,
                replay_seeds: tuple[int, ...] | None = None,
                seed_manifest: str | Path | None = None,
-               replay_selection: dict | None = None) -> dict:
+               replay_selection: dict | None = None,
+               contact_geometries: tuple[str, ...] = ()) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco, load_evaluation_protocol
@@ -606,7 +742,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         _checkpoint_configuration_provenance(checkpoints))
     conditions = default_conditions(scenario_id, categories=categories,
         inference_disable_tick=inference_disable_tick,
-        qualification_case=qualification_case)
+        qualification_case=qualification_case,
+        contact_geometries=contact_geometries)
     if replay_seeds is not None:
         # Backward compatible seed-only requests now capture once, for the
         # primary architecture condition, instead of duplicating every replay.
@@ -638,6 +775,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "qualification_protocol_id": (None if qualification_provenance is None else
             qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
+        "qualification_eligible": False,
         "seed_split_assignments": seed_split_assignments,
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
@@ -646,6 +784,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
         "conditions": condition_specs,
+        "contact_geometry_ids": [condition.contact_geometry_id
+            for condition in conditions if condition.contact_geometry_id is not None],
         "phase4_factor_schema": ("meco-phase4-five-level-pressure-v2" if phase4_enabled else None),
         "phase4_unsupported_categories": unsupported_phase4,
         "unsupported_conditions_open": ([] if phase4_enabled else [
@@ -656,6 +796,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if sealed_test_ledger.exists():
         raise ValueError("this matrix/protocol is sealed after final-test consumption")
     if evaluation_split == "test":
+        for condition in conditions:
+            validate_contact_geometry_split(condition.contact_geometry_id, evaluation_split)
         if qualification_provenance is None:
             raise ValueError("final test requires frozen qualification protocol provenance")
         _seal_final_test_consumption(sealed_test_ledger, matrix_id=matrix_id,
@@ -696,6 +838,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
+            phase4_contact_factor_id=("contact.robot_bump"
+                if condition.contact_geometry_id is not None else None),
+            contact_geometry_id=condition.contact_geometry_id,
+            contact_geometry_config=condition.contact_geometry_config,
             replay_output_dir=(replay_output_dir if condition_replay_selection else None),
             replay_seeds=None,
             replay_selection=condition_replay_selection,
@@ -703,6 +849,24 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             output=str(report_path))
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
+        if (report.get("contact_geometry_id") != condition.contact_geometry_id or
+                report.get("contact_geometry_config") != condition.contact_geometry_config):
+            raise ValueError("evaluation report contact geometry differs from frozen condition")
+        if condition.contact_geometry_id is not None:
+            policy_manifest = report.get("policy_manifest", {})
+            expected_policy_ids = _expected_contact_policy_ids(policy_manifest)
+            if (report.get("categories") != list(condition_categories) or
+                    report.get("seeds") != list(seeds)):
+                raise ValueError("contact evaluation report category/seed coverage differs from matrix")
+            expected_category_seed_keys = {
+                (category, seed) for category in condition_categories for seed in seeds}
+            contact_pairing = _validate_contact_condition_records(report.get("records", ()),
+                geometry_id=condition.contact_geometry_id,
+                geometry_config=condition.contact_geometry_config,
+                expected_policy_ids=expected_policy_ids,
+                expected_category_seed_keys=expected_category_seed_keys)
+        else:
+            contact_pairing = None
         if condition.phase4_factor is not None:
             _validate_phase4_condition_records(report.get("records", ()),
                 factor=condition.phase4_factor, source_hash=source_hash,
@@ -730,6 +894,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "qualification_protocol": qualification_provenance,
             "seed_split_assignments": seed_split_assignments}
         report["experiment_matrix"]["replay_selection"] = condition_replay_selection or {}
+        report["experiment_matrix"]["qualification_eligible"] = False
+        report["experiment_matrix"]["contact_exposure_pairing"] = contact_pairing
         _atomic_json(report_path, report)
         report_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
         condition_records = _records_by_key(report)
@@ -753,6 +919,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "effective_candidate_k": report["candidate_k"],
             "prediction": report["prediction"],
             "phase4_factor": condition.phase4_factor,
+            "contact_geometry_id": condition.contact_geometry_id,
+            "contact_geometry_config": condition.contact_geometry_config,
+            "contact_exposure_pairing": contact_pairing,
+            "qualification_eligible": False,
             "fault": report["inference_disable_fault"]}
         evaluation_reports[condition.condition_name] = {
             "report": report, "records": condition_records,
@@ -897,6 +1067,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "qualification_protocol_id": (None if qualification_provenance is None else
             qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
+        "qualification_eligible": False,
+        "contact_geometry_ids": [condition.contact_geometry_id
+            for condition in conditions if condition.contact_geometry_id is not None],
         "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
@@ -919,6 +1092,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "qualification_protocol_id": (None if qualification_provenance is None else
             qualification_provenance["protocol_id"]),
         "qualification_protocol": qualification_provenance,
+        "qualification_eligible": False,
         "seed_split_assignments": seed_split_assignments,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
@@ -944,7 +1118,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "A1/A2/A3/C1/C2 versus D0 rows are architecture-condition outcomes paired on exact category/seed; learned tracks use CV while D0 retains its production deterministic behavior, so these are not prediction-mode-matched contrasts.",
             "Fault rows hand off at the first 12-step macro boundary at or after the requested tick.",
             ("Each Phase 4 factor replaces only registered slot-0 pressure behavior and is paired with the no-factor row at the same category and seed; unsupported categories are listed explicitly. Metrics remain diagnostic until held-out evaluation and calibrated gates." if phase4_enabled else
-             "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require registered level_1 through level_5 pressure categories; level_0 has no scripted pressure slot.")],
+             "Feint, sensor-delay, separate low-confidence, and abrupt policy-change conditions require registered level_1 through level_5 pressure categories; level_0 has no scripted pressure slot."),
+            ("Contact geometry rows are diagnostic only, paired on category/seed and exact reset/action assignment; realized contact is reported separately from exposure. Recovery and route-completion outcomes are unavailable, and qualification eligibility remains false." if contact_geometries else
+             "Contact geometry rows are opt-in; recovery and route-completion outcomes remain unavailable and qualification eligibility remains false.")],
     }
     matrix_report["report_sha256"] = _canonical_hash(matrix_report)
     output_root.mkdir(parents=True, exist_ok=True)

@@ -2175,6 +2175,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None,
                   phase4_contact_factor_id: str | None = None,
+                  contact_geometry_id: str | None = None,
+                  contact_geometry_config: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2245,6 +2247,17 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     phase4_factor = validate_phase4_factor(phase4_factor)
     if phase4_contact_factor_id not in (None, "contact.robot_bump"):
         raise ValueError("unsupported Phase 4 contact factor")
+    from .meco_phase4_context import (CONTACT_GEOMETRIES,
+        phase4_context_identity, validate_contact_geometry_split)
+    if contact_geometry_id is None:
+        if contact_geometry_config is not None or phase4_contact_factor_id is not None:
+            raise ValueError("contact event capture requires a registered contact geometry")
+    elif (contact_geometry_id not in CONTACT_GEOMETRIES or
+            contact_geometry_config != phase4_context_identity(
+                "robot_contact_geometry", contact_geometry_id) or
+            phase4_contact_factor_id != "contact.robot_bump"):
+        raise ValueError("contact geometry and event factor must match the frozen registry")
+    validate_contact_geometry_split(contact_geometry_id, split)
     execution_device = normalized_device_info(device)
     if condition_id is not None and (not isinstance(condition_id, str) or not condition_id):
         raise ValueError("condition_id must be a nonempty string when provided")
@@ -2434,6 +2447,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "contract": prediction_contract(effective_prediction_mode)},
         "inference_disable_tick": inference_disable_tick,
         "phase4_factor": phase4_factor,
+        "phase4_contact": {"factor_id": phase4_contact_factor_id,
+            "geometry_id": contact_geometry_id,
+            "geometry_config": contact_geometry_config,
+            "qualification_eligible": False,
+            "recovery_outcome": "unavailable",
+            "route_completion_outcome": "unavailable"},
         "execution_device": execution_device,
         "dt": OBSERVATION_DT, "action_ticks": action_ticks, "route_weight": route_weight,
         "plan_a_penalty": {"p_mode": p_mode, "p_cost_scale": p_cost_scale,
@@ -2531,6 +2550,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
                         phase4_factor=phase4_factor,
+                        contact_geometry_id=contact_geometry_id,
+                        contact_geometry_config=contact_geometry_config,
                         **(qualification_case or {}))
                     episode_metric_ledger = None
                     replay_frames = []
@@ -3124,6 +3145,32 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
                                 if phase4_contact_factor_id is not None else None),
+                            "phase4_contact_exposure": ({
+                                "factor_id": "contact.robot_bump",
+                                "geometry_id": contact_geometry_id,
+                                "geometry_config": contact_geometry_config,
+                                "exposure_assigned": env.contact_geometry_runtime[
+                                    "exposure_assigned"],
+                                "pair_slots": env.contact_geometry_runtime["pair_slots"],
+                                "opponent_action": env.contact_geometry_runtime[
+                                    "opponent_action"],
+                                "opponent_action_source": env.contact_geometry_runtime[
+                                    "opponent_action_source"],
+                                "slot2_env_control_mode": env.contact_geometry_runtime[
+                                    "slot2_env_control_mode"],
+                                "approach_action_ticks": int(env.contact_geometry_runtime[
+                                    "approach_action_ticks"][0].item()),
+                                "focal_action_overridden": False,
+                                "route_seen": bool(env.contact_geometry_runtime[
+                                    "route_seen"][0].item()),
+                                "route_seen_time_s": (None if float(env.contact_geometry_runtime[
+                                    "route_seen_time_s"][0].item()) < 0. else float(
+                                        env.contact_geometry_runtime["route_seen_time_s"][0].item())),
+                                "qualification_eligible": False,
+                                "recovery_time_after_bump_s": None,
+                                "route_completion_rate": None,
+                                "status": "exposure_and_route_crossing_only_recovery_unavailable",
+                            } if contact_geometry_id is not None else None),
                             "phase4_factor_runtime": ({
                                 **env.phase4_runtime_metrics,
                                 "fuel_track_confidence_mean": float(
@@ -3176,6 +3223,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "candidate_k": candidate_k,
                                 "prediction_mode": decision_prediction_mode,
                                 "phase4_factor": phase4_factor,
+                                "contact_geometry_id": contact_geometry_id,
+                                "contact_geometry_config": contact_geometry_config,
+                                "qualification_eligible": False,
                                 "inference_disable_tick": inference_disable_tick})
                             replay_identity = _canonical_digest({
                                 "evaluation_id": eval_id, "condition_id": replay_condition_id,
@@ -3325,6 +3375,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
             "safety_metrics_schema": "meco-safety-rates-v1",
             "safety_metrics_source_identity_sha256": source_hash,
+            "contact_geometry_id": contact_geometry_id,
+            "contact_geometry_config": contact_geometry_config,
+            "qualification_eligible": False,
             "episode_metric_ledger_schema": {
                 "schema_version": 4,
                 "record_field": "meco_metric_ledger",

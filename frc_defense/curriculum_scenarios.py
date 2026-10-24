@@ -11,6 +11,9 @@ from .architecture_scenarios import reset_scenario
 from .curriculum_metrics import CurriculumMetrics
 from .fuel_physics_runtime import reset_fuel_physics
 from .meco_phase4 import validate_phase4_factor
+from .meco_phase4_context import (CONTACT_GEOMETRIES,
+    contact_exposure_actions, contact_exposure_profile,
+    phase4_context_identity)
 from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
@@ -61,7 +64,23 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         requested = torch.ones(self.n, device=self.device, dtype=torch.bool) if active_mask is None else torch.as_tensor(active_mask, device=self.device, dtype=torch.bool)
         active_requested = requested & ~self.curriculum_finished
         delay = int(getattr(self, 'phase4_observation_delay_ticks', 0))
+        geometry = getattr(self, 'contact_geometry_id', None)
+        if geometry is not None:
+            # Replace only the scripted opponent's slot-2 command. Slot 3 and
+            # all other actions remain those selected by the active policy.
+            actions = replace_contact_opponent_action(actions,
+                contact_exposure_actions(self))
+        route_seen_before = (self.curriculum_metrics.route_seen.clone()
+            if geometry is not None and hasattr(self, 'curriculum_metrics') else None)
         observation, reward, done, truncated, info = super().step(actions, active_requested, **kwargs)
+        if route_seen_before is not None:
+            self.contact_geometry_runtime['approach_action_ticks'] += active_requested.long()
+            crossed = self.curriculum_metrics.route_seen & ~route_seen_before
+            if bool(crossed.any()):
+                self.contact_geometry_runtime['route_seen'] |= crossed
+                unset = crossed & (self.contact_geometry_runtime['route_seen_time_s'] < 0.)
+                self.contact_geometry_runtime['route_seen_time_s'][unset] = (
+                    self.curriculum_metrics.elapsed[unset])
         if delay:
             current = self._phase4_capture_sensor_frame(observation)
             self._phase4_current_sensor_frame = current
@@ -160,7 +179,8 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
 def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True,
                         production_d0=False, layout_id='2026_rebuilt',
                         defender_family='category_scripted', start_condition='scenario_defined',
-                        sensor_profile='standard', phase4_factor=None):
+                        sensor_profile='standard', phase4_factor=None,
+                        contact_geometry_id=None, contact_geometry_config=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -180,6 +200,19 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     if category not in definition.required_categories:
         raise ValueError(f'unknown category for {scenario_id}: {category}')
     phase4_factor = validate_phase4_factor(phase4_factor)
+    if contact_geometry_id is None:
+        if contact_geometry_config is not None:
+            raise ValueError('contact geometry config requires a registered geometry ID')
+    else:
+        if contact_geometry_id not in CONTACT_GEOMETRIES:
+            raise ValueError('unknown contact geometry ID')
+        expected_contact_config = phase4_context_identity(
+            'robot_contact_geometry', contact_geometry_id)
+        if contact_geometry_config != expected_contact_config:
+            raise ValueError('contact geometry config differs from its frozen registry identity')
+        if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
+                or _pressure_level(category) not in (1, 2, 3, 4, 5)):
+            raise ValueError('contact geometry is only registered for pressure/match scenarios')
     pressure_level = _pressure_level(category)
     if phase4_factor is not None and (scenario_id not in (
             'offense_vs_scripted_pressure', 'full_match_offense')
@@ -203,6 +236,11 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         modes[4:6] = ['deterministic', 'deterministic']
     for slot in pressure['slots']:
         modes[slot] = 'nn'
+    if contact_geometry_id is not None:
+        # The evaluator supplies slot 2's sensed-target action 5 directly.
+        # NN mode makes TensorThreeVsThreeEnv consume that action rather than
+        # replacing it with an unrelated scripted deterministic offense action.
+        modes[2] = 'nn'
     env = CurriculumEnv(num_envs=num_envs, device=device, seed=seed, control_modes=modes,
         robot_roles=('defense', 'offense', 'offense', 'offense', 'offense', 'offense'),
         allow_nn_offense=True, dt=.02, horizon=horizon or math.ceil(definition.time_budget_s/.02),
@@ -213,6 +251,25 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         field_layout=layout_id,
         replan_interval=10)
     env.phase4_factor_config = phase4_factor
+    env.contact_geometry_id = contact_geometry_id
+    env.contact_geometry_config = contact_geometry_config
+    env.contact_geometry_runtime = {
+        'geometry_id': contact_geometry_id,
+        'factor_id': 'contact.robot_bump' if contact_geometry_id is not None else None,
+        'exposure_assigned': contact_geometry_id is not None,
+        'pair_slots': [2, 3] if contact_geometry_id is not None else None,
+        'opponent_action': 5 if contact_geometry_id is not None else None,
+        'opponent_action_source': ('fresh_sensed_track_action_5'
+            if contact_geometry_id is not None else None),
+        'slot2_env_control_mode': 'nn' if contact_geometry_id is not None else None,
+        'approach_action_ticks': torch.zeros(num_envs, device=device, dtype=torch.long),
+        'focal_action_overridden': False,
+        'route_seen': torch.zeros(num_envs, device=device, dtype=torch.bool),
+        'route_seen_time_s': torch.full((num_envs,), -1., device=device),
+        'qualification_eligible': False,
+        'recovery_time_after_bump_s': None,
+        'route_completion_rate': None,
+    }
     env.phase4_observation_delay_ticks = (phase4_factor['delay_ticks']
         if phase4_factor and phase4_factor['kind'] == 'observation_delay' else 0)
     env.phase4_confidence_cap = (phase4_factor['fuel_confidence_cap']
@@ -250,6 +307,17 @@ def _pressure(category, seed, family='category_scripted'):
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
             'phase': (int(seed) % 1000) / 1000 * 2 * math.pi, 'anchor_y': 4.035,
             'family': family}
+
+
+def replace_contact_opponent_action(actions, contact_actions):
+    """Return actions with only registered opponent slot 2 replaced."""
+    if (not isinstance(actions, torch.Tensor) or actions.ndim != 2 or
+            actions.shape[1] != 6 or not isinstance(contact_actions, torch.Tensor) or
+            contact_actions.shape != actions.shape):
+        raise ValueError('contact action override requires matching [world, 6] tensors')
+    result = actions.clone()
+    result[:, 2] = contact_actions[:, 2].to(device=result.device, dtype=result.dtype)
+    return result
 
 
 def _pressure_level(category):
@@ -293,6 +361,10 @@ def reset_curriculum_scenario(env, seed):
     """Clear all physics/planner/sensor state, then expose ordinary perception."""
     config = env.curriculum
     config['seed'] = int(seed)
+    if getattr(env, 'contact_geometry_id', None) is not None:
+        env.contact_geometry_runtime['route_seen'].zero_()
+        env.contact_geometry_runtime['route_seen_time_s'].fill_(-1.)
+        env.contact_geometry_runtime['approach_action_ticks'].zero_()
     # Architecture reset already clears the ordinary core state and caches.
     # Disable old metrics while it resets; no old lifecycle survives an episode.
     if hasattr(env, 'curriculum_metrics'):
@@ -480,6 +552,9 @@ def reset_curriculum_scenario(env, seed):
                     & (env.sim.pose[..., 1] >= 0.) & (env.sim.pose[..., 1] <= env.sim.field_width))
         env.sim.pose[..., 1] += on_field.to(env.sim.pose.dtype) * offset
         env.piece_pos[..., 1] += env.piece_active.to(env.piece_pos.dtype) * offset
+    if env.contact_geometry_id is not None:
+        env.sim.pose.copy_(contact_exposure_profile(env, env.contact_geometry_id))
+        env.sim.velocity.zero_()
     config['schedule'] = schedule
     env.curriculum_schedule = schedule
     env.match_elapsed.fill_(-env.dt)

@@ -101,7 +101,7 @@ PHASE4_REQUIREMENT_BINDINGS = {
         # The schema has an aggregate robot-contact metric, but it is not
         # bump-specific, so it is not authoritative for this requirement.
         "authoritative_signals": (),
-        "limitations": ("contact geometry helper is not wired into validation reset", "pair-contact summary is available only when contact.robot_bump is requested; full event stream, route-following recovery, and route completion signals remain unavailable; proxy metrics do not qualify")},
+        "limitations": ("registered contact geometry and sensed slot-2 approach are wired, but no representative simulator replay has validated contact geometry; pair-contact event summary is source-bound; recovery and route completion outcomes remain unavailable; qualification remains disabled")},
     "observation_only_focal_pose_mislocalization": {**_COMMON,
         "factor_ids": ("observation.focal_pose_offset",),
         "runtime_event": None,
@@ -177,6 +177,7 @@ def phase4_pair_contact_event_record(sim, *, factor_id: str = "contact.robot_bum
              "net_on_second_robot_n_s": value[2:4]} for value in impulses],
         "recovery_time_after_bump_s": None,
         "route_completion_rate": None,
+        "qualification_eligible": False,
         "outcome_status": "contact_event_available_recovery_and_route_outcomes_unavailable",
         "event_scope": "first_and_last_contact_substep_plus_distinct_substep_count_and_episode_impulse_sum; not a complete event stream",
     }

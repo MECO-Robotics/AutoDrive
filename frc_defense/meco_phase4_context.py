@@ -49,6 +49,12 @@ _CONTACT_APPROACHES = {
                           "focal_heading_rad": 0.,
                           "exposure": "oblique_corner_impact"},
 }
+
+
+def validate_contact_geometry_split(geometry_id: str | None, split: str) -> None:
+    """Contact geometry is diagnostic only and cannot enter held-out final test."""
+    if geometry_id is not None and split == "test":
+        raise ValueError("contact geometry evaluation is diagnostic only; final-test use is disabled")
 FOCAL_POSE_OFFSETS = {
     "translation_small": {"offset_xy_m": (0.30, 0.0), "heading_offset_rad": 0.0},
     "translation_large": {"offset_xy_m": (0.60, 0.0), "heading_offset_rad": 0.0},
