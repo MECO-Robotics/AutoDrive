@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 30
+    assert len(result["tranches"]) == 31
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -77,6 +77,18 @@ def test_current_manifest_is_validated_as_summary_only():
         "b3adb19b055acece92952c69bed7c1e9e1290699")
     assert pair_contact["reviewer"]["approved_commit"] == (
         pair_contact["implementer"]["commit"])
+    route_progress = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-first-route-progress-interval")
+    assert route_progress["implementer"]["commit"] == (
+        "9ee3369eb816c187e7ecd5fecfde520f89be0f78")
+    assert route_progress["reviewer"]["approved_commit"] == (
+        route_progress["implementer"]["commit"])
+    assert route_progress["implementer"]["paths"] == [
+        "frc_defense/meco_phase4_runtime_adapter.py",
+        "frc_defense/meco_track_training.py",
+        "tests/test_meco_phase4_runtime_adapter_contract.py"]
+    assert "recovery_time_after_bump_s" in route_progress["limits"]
+    assert "qualification remains false" in route_progress["limits"]
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):

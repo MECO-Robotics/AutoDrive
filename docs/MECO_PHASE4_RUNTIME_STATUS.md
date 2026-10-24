@@ -18,7 +18,7 @@ executed or qualified episode.
 | teammate behaviors | `teammate.behavior_pool` | none | outcome by behavior, teammate collision, score contribution | Schedule helper exists, but validation action assignment is not wired; signals unavailable |
 | sensor delay and low confidence | `sensor.delay_120ms`, `sensor.low_confidence` | delayed-observation ticks, confidence-cap refresh/reduction | outcome by sensor condition, stale-observation reaction latency, outcome by confidence band | Existing factors capture stimulus; required outcome signals unavailable |
 | abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` | reaction latency, interception, route completion | Existing factor can run and record switch; all required outcome signals unavailable |
-| bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event` | robot contact rate, recovery time, route completion | Three registered geometries now flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate assigned exposure/action ticks from solver-confirmed pair (2,3) contact and route-crossing bit/time. Recovery and route-completion outcomes remain unavailable; qualification stays disabled pending a reviewed recovery measure and simulator replay. |
+| bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event`, `first_route_progress_interval` | robot contact rate, recovery time, route completion | Three registered geometries flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate exposure, solver-confirmed pair (2,3) contact, route crossing, and an outer-tick interval-censored selected-route progress observation. The latter is diagnostic only; recovery and registry route-completion outcomes remain unavailable and qualification stays disabled. |
 | observation-only focal pose mislocalization | `observation.focal_pose_offset` | none | relocalization time, pose-error recovery, safety contact | Observation-boundary helper exists, but validation reset/observation application is not wired; signals unavailable |
 
 The existing four factor configurations (`feinting_opponent`,
@@ -40,13 +40,24 @@ qualification-ineligible. They are blocked from final-test use. Route crossing
 is recorded as a separate observed event and is not promoted to route
 completion.
 
+The separate `first_route_progress_interval` diagnostic checks whether
+remaining distance along the current executable route to the pinned selected
+goal later decreases after contact. Its lower bound is the latest solver
+contact timestamp; route-distance observation bounds are outer ticks. It
+records route fingerprints and censors changed goals or invalid clocks,
+counts, or routes. It is not `route_completion_rate`,
+`recovery_time_after_bump_s`, or qualification evidence.
+
 The new contract and plan tests are static/contract checks. They do not test
 simulator behavior. No simulator episode, HIP extension compile, GPU behavior
-test, or fresh replay was run for this change. After the candidate provenance
-integration, the dashboard service was restarted at 10:48 UTC against this
-worktree; `/meco`, `/api/meco-status`, `/api/curriculum-status`, and
-`/assets/meco.js` returned HTTP 200. The API validated all 30 provenance
-summaries and the served frontend asset hash matched the checkout. No replay
-was generated, so simulator behavior and replay inspection remain outstanding.
+test, or fresh replay was run for this change. After the prior candidate
+provenance integration, the dashboard service was restarted at 10:48 UTC
+against that worktree; `/meco`, `/api/meco-status`, `/api/curriculum-status`,
+and `/assets/meco.js` returned HTTP 200. That API snapshot validated 30
+provenance summaries and the served frontend asset hash matched that checkout.
+The current metadata-only update adds summary 31 and updates the dashboard
+manifest digest; the service has not been restarted or rechecked after this
+update. No replay was generated, so simulator behavior and replay inspection
+remain outstanding.
 The required representative end-to-end simulator evaluation and current-stack
 replay inspection remain a separate validation gate.
