@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,7 +14,8 @@ from frc_defense.meco_phase4_campaign_plan import (
 from frc_defense.meco_phase4_design import compile_phase4_design_overlay
 from frc_defense.meco_phase4_opponents import POLICY_POOL, compile_opponent_policy_schedule
 from frc_defense.meco_validation_campaign_runner import (
-    run_phase4_opponent_cell, run_phase4_start_profile_cell)
+    run_phase4_context_cell, run_phase4_opponent_cell,
+    run_phase4_start_profile_cell)
 import frc_defense.meco_validation_campaign_runner as campaign_runner
 from frc_defense.meco_tracks import MECO_TRACKS
 
@@ -525,3 +527,231 @@ def test_campaign_rejects_malformed_split_after_overlay_regeneration_attempt(tmp
         compile_phase4_design_overlay(protocol_path, registry_path)
     with pytest.raises(ValueError, match=expected_message):
         compile_phase4_campaign_plan(protocol_path, registry_path, OVERLAY)
+
+
+@pytest.mark.parametrize("factor,design_value", [
+    ("focal_pose", "translation_small"),
+    ("teammate_behavior", "score"),
+])
+def test_phase4_context_dispatch_binds_exact_paired_matrix_rows(
+        tmp_path, monkeypatch, factor, design_value):
+    from frc_defense.meco_phase4_context import (
+        TEAMMATE_BEHAVIORS, phase4_focal_pose_assignment,
+        phase4_teammate_behavior_assignment)
+
+    plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
+    requirement_id = ("observation_only_focal_pose_mislocalization"
+                      if factor == "focal_pose" else "teammate_behaviors")
+    requirement = next(row for row in plan["requirements"]
+                       if row["requirement_id"] == requirement_id)
+    axis = "focal_pose_offsets" if factor == "focal_pose" else "teammate_behaviors"
+    cell = next(row for row in requirement["cells"]
+        if row["design_axes"].get(axis) == design_value
+        and row["case_axes"]["scenario_id"] == "full_match_offense")
+    protocol_payload = json.loads(PROTOCOL.read_text())
+    case_axes = cell["case_axes"]
+    protocol_case = next(row for row in protocol_payload["cases"]
+        if all(row.get(key) == value for key, value in case_axes.items()))
+    seeds = protocol_case["seeds"]
+    categories = [case_axes["category"]]
+    case_binding = {key: case_axes[key] for key in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    checkpoints = {}
+    for track in MECO_TRACKS:
+        path = tmp_path / f"{track}.pt"
+        path.write_bytes(track.encode())
+        checkpoints[track] = str(path)
+    expected_binding = {"checkpoint_sha256": {
+        track: campaign_runner._file_sha(Path(path)) for track, path in checkpoints.items()},
+        "source_identity_sha256": "frozen-source-identity",
+        "execution_device": {"device": "cuda:1", "accelerator_backend": "ROCm"}}
+    monkeypatch.setattr(campaign_runner, "_capture_phase4_dispatch_binding",
+        lambda checkpoint_paths, device: expected_binding)
+    monkeypatch.setattr(campaign_runner, "_source_identity_sha256",
+        lambda: expected_binding["source_identity_sha256"])
+    condition_names = ([f"phase4_focal_pose_{design_value}_no_offset",
+                        f"phase4_focal_pose_{design_value}_offset"]
+        if factor == "focal_pose" else [
+            "phase4_teammate_behaviors_no_factor",
+            "phase4_teammate_behaviors_behavior_pool"])
+    policies = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+    if factor == "focal_pose":
+        common = dict(paired_offset_name=design_value,
+            scenario_id=case_axes["scenario_id"], split="validation",
+            protocol_id=protocol_payload["protocol_id"],
+            protocol_sha256=plan["protocol_binding"]["protocol_raw_file_sha256"],
+            qualification_case=case_binding, categories=categories, seeds=seeds)
+        assignments = {"no_factor": phase4_focal_pose_assignment(None, **common),
+            "factor_treatment": phase4_focal_pose_assignment(design_value, **common)}
+        outcome_fields = ["relocalization_time_s", "pose_error_recovery_rate",
+                          "safety_contact_rate"]
+    else:
+        pool_seed = TEAMMATE_BEHAVIORS.index(design_value)
+        common = dict(scenario_id=case_axes["scenario_id"], split="validation",
+            protocol_id=protocol_payload["protocol_id"],
+            protocol_sha256=plan["protocol_binding"]["protocol_raw_file_sha256"],
+            qualification_case=case_binding, categories=categories,
+            seeds=seeds, pool_seed=pool_seed)
+        assignments = {"no_factor": phase4_teammate_behavior_assignment(
+                arm="no_factor", **common),
+            "factor_treatment": phase4_teammate_behavior_assignment(
+                arm="behavior_pool", **common)}
+        outcome_fields = ["outcome_by_teammate_behavior", "teammate_collision_rate",
+                          "score_contribution"]
+
+    def fake_runner(argv):
+        assert argv[argv.index("--conditions") + 1] == ",".join(condition_names)
+        assert argv[argv.index("--device") + 1] == "cuda:1"
+        manifest = json.loads(Path(argv[argv.index("--seed-manifest") + 1]).read_text())
+        assert manifest["seed_list"] == seeds
+        assert manifest["categories"] == categories
+        outdir = Path(argv[argv.index("--output-dir") + 1])
+        conditions = {}
+        for arm, condition_name in zip(("no_factor", "factor_treatment"), condition_names):
+            assignment = assignments[arm]
+            rows = []
+            for policy in policies:
+                track = policy[:-3] if policy.endswith("_P0") else policy
+                for category in categories:
+                    for seed in seeds:
+                        row = {"policy": policy, "category": category, "seed": seed,
+                            "checkpoint_sha256": expected_binding["checkpoint_sha256"].get(track),
+                            "source_identity_sha256": expected_binding["source_identity_sha256"],
+                            "execution_device": expected_binding["execution_device"]}
+                        if factor == "focal_pose":
+                            row["phase4_focal_pose"] = {
+                                "assignment_sha256": assignment["assignment_sha256"],
+                                "pair_assignment_sha256": assignment["pair_assignment_sha256"],
+                                "arm": assignment["arm"],
+                                "requested_offset_name": assignment["requested_offset_name"],
+                                "applied_before_policy_observation": True,
+                                "physical_truth_unchanged": True,
+                                "qualification_eligible": False,
+                                **{field: None for field in outcome_fields}}
+                        else:
+                            expected_behaviors = (None if arm == "no_factor" else
+                                {str(slot): behavior for slot, behavior in
+                                 assignment["behavior_schedule"][seeds.index(seed)][
+                                     "assignments"].items()})
+                            row["phase4_teammate_behavior"] = {
+                                "assignment_pair_sha256": assignment["pair_sha256"],
+                                "arm": assignment["arm"], "assignments": expected_behaviors,
+                                "assignment_applied": expected_behaviors is not None,
+                                "qualification_eligible": False,
+                                **{field: None for field in outcome_fields}}
+                        rows.append(row)
+            report_path = outdir / f"{condition_name}.evaluation.json"
+            report = {"qualification_eligible": False, "records": rows,
+                "phase4_focal_pose_assignment": (
+                    assignment if factor == "focal_pose" else None),
+                "phase4_teammate_behavior_assignment": (
+                    assignment if factor == "teammate_behavior" else None)}
+            report.update(expected_binding)
+            report_bytes = json.dumps(report).encode()
+            report_path.write_bytes(report_bytes)
+            condition = {"report_path": str(report_path), **expected_binding,
+                "evaluation_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+                "phase4_focal_pose_assignment": (
+                    assignment if factor == "focal_pose" else None),
+                "phase4_teammate_behavior_assignment": (
+                    assignment if factor == "teammate_behavior" else None)}
+            conditions[condition_name] = condition
+        matrix = {"qualification_eligible": False, **expected_binding,
+            "protocol": {"qualification_eligible": False,
+                "evaluation_split": "validation", "qualification_case": case_binding,
+                "categories": categories, "seed_list": seeds,
+                "qualification_protocol_id": protocol_payload["protocol_id"],
+                "qualification_protocol": {"protocol_id": protocol_payload["protocol_id"],
+                    "protocol_sha256": plan["protocol_binding"]["protocol_raw_file_sha256"],
+                    "protocol_file": str(PROTOCOL.resolve())},
+                "seed_manifest": {"path": str(Path(argv[argv.index("--seed-manifest") + 1]).resolve()),
+                    "sha256": campaign_runner._file_sha(Path(argv[argv.index("--seed-manifest") + 1])),
+                    "schema": "meco-exact-seed-manifest-v1"}, **expected_binding},
+            "conditions": conditions}
+        (outdir / "paired.matrix.json").write_text(json.dumps(matrix))
+        return 0
+
+    result = run_phase4_context_cell(plan, cell["case_cell_key"], factor=factor,
+        protocol_path=PROTOCOL, checkpoint_paths=checkpoints,
+        matrix_script=tmp_path / "matrix.py", output_dir=tmp_path / "dispatch",
+        device="cuda:1", runner=fake_runner)
+    assert result["executed"] is True
+    assert result["paired_coverage"]["paired_row_count"] == len(policies) * len(seeds)
+    assert result["outcomes"] == {field: None for field in outcome_fields}
+    assert result["qualification_eligible"] is False
+    with pytest.raises(ValueError, match="output path already exists"):
+        run_phase4_context_cell(plan, cell["case_cell_key"], factor=factor,
+            protocol_path=PROTOCOL, checkpoint_paths=checkpoints,
+            matrix_script=tmp_path / "matrix.py", output_dir=tmp_path / "dispatch",
+            device="cuda:1", runner=lambda _argv: pytest.fail("existing evidence must not be overwritten"))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "unexpected",
+                                       "outside_report", "report_hash"])
+def test_phase4_context_pair_rejects_missing_duplicate_or_unexpected_rows(
+        tmp_path, mutation):
+    from frc_defense.meco_phase4_context import phase4_focal_pose_assignment
+
+    expected = {"checkpoint_sha256": {"A1": "a"},
+        "source_identity_sha256": "source", "execution_device": {"device": "cuda:1"}}
+    common = dict(paired_offset_name="translation_small",
+        scenario_id="full_match_offense", split="validation", protocol_id="p",
+        protocol_sha256="a" * 64, qualification_case={"layout_id": "l",
+            "defender_family": "d", "start_condition": "s", "sensor_profile": "x"},
+        categories=["category"], seeds=[1])
+    assignments = {"no_factor": phase4_focal_pose_assignment(None, **common),
+        "factor_treatment": phase4_focal_pose_assignment("translation_small", **common)}
+    policies = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+    rows = [{"policy": policy, "category": "category", "seed": 1}
+            for policy in policies]
+    if mutation == "missing":
+        rows.pop()
+    elif mutation == "duplicate":
+        rows.append(dict(rows[0]))
+    else:
+        rows.append({"policy": "unexpected", "category": "category", "seed": 1})
+    conditions = {}
+    for arm, name in (("no_factor", "no_factor"),
+                      ("factor_treatment", "factor_treatment")):
+        report_path = tmp_path / f"{name}.json"
+        report_bytes = json.dumps({"qualification_eligible": False,
+            "phase4_focal_pose_assignment": assignments[arm], "records": rows,
+            **expected}).encode()
+        report_path.write_bytes(report_bytes)
+        conditions[name] = {"report_path": str(report_path), **expected,
+            "evaluation_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "phase4_focal_pose_assignment": assignments[arm]}
+    if mutation == "outside_report":
+        outside_report = tmp_path.parent / f"{tmp_path.name}-outside.json"
+        outside_report.write_text("{}")
+        conditions["no_factor"]["report_path"] = str(outside_report)
+        conditions["no_factor"]["evaluation_report_sha256"] = campaign_runner._file_sha(
+            outside_report)
+    elif mutation == "report_hash":
+        conditions["no_factor"]["evaluation_report_sha256"] = "0" * 64
+    matrix_path = tmp_path / "pair.matrix.json"
+    seed_manifest_path = tmp_path / "seed-manifest.json"
+    seed_manifest_path.write_text(json.dumps({"schema": "meco-exact-seed-manifest-v1"}))
+    protocol_path = tmp_path / "protocol.json"
+    protocol_path.write_text("{}")
+    matrix_path.write_text(json.dumps({"qualification_eligible": False, **expected,
+        "protocol": {"qualification_eligible": False, "evaluation_split": "validation",
+            "qualification_case": common["qualification_case"],
+            "categories": ["category"], "seed_list": [1],
+            "qualification_protocol_id": "p",
+            "qualification_protocol": {"protocol_id": "p", "protocol_sha256": "a" * 64,
+                "protocol_file": str(protocol_path.resolve())},
+            "seed_manifest": {"path": str(seed_manifest_path.resolve()),
+                "sha256": campaign_runner._file_sha(seed_manifest_path),
+                "schema": "meco-exact-seed-manifest-v1"}, **expected},
+        "conditions": conditions}))
+    expected_error = ("outside its fresh case directory" if mutation == "outside_report"
+        else "byte hash differs" if mutation == "report_hash" else "duplicate|coverage")
+    with pytest.raises(ValueError, match=expected_error):
+        campaign_runner._validate_phase4_context_matrix_pair(
+            tmp_path, factor="focal_pose", assignments=assignments,
+            categories=["category"], seeds=[1],
+            condition_names=["no_factor", "factor_treatment"],
+            expected_binding=expected, outcome_fields=[],
+            protocol_path=protocol_path, protocol_id="p", protocol_sha256="a" * 64,
+            seed_manifest_path=seed_manifest_path)

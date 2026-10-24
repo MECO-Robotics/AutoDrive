@@ -451,6 +451,38 @@ def _validate_teammate_behavior_condition_selection(conditions, pool_seed):
         raise ValueError("condition selection must include both teammate behavior pair arms")
 
 
+def _matrix_condition_selection_mode(conditions, condition_names):
+    """Validate supported diagnostic selections and choose a contrast path."""
+    if condition_names is None:
+        return "full"
+    names = tuple(condition_names)
+    if names == ("architecture_matched_cv_k16",):
+        return "architecture_only"
+    if len(names) == 2:
+        selected = {condition.condition_name: condition for condition in conditions}
+        if set(names) == set(selected) and all(
+                selected[name].focal_pose_pair_offset is not None for name in names):
+            offsets = {selected[name].focal_pose_pair_offset for name in names}
+            arms = {selected[name].focal_pose_offset for name in names}
+            if len(offsets) == 1 and arms == {None, next(iter(offsets))}:
+                return "paired_context_only"
+        if set(names) == set(selected) and all(
+                selected[name].teammate_behavior_arm is not None for name in names):
+            arms = {selected[name].teammate_behavior_arm for name in names}
+            seeds = {selected[name].teammate_behavior_pool_seed for name in names}
+            if arms == {"no_factor", "behavior_pool"} and len(seeds) == 1:
+                return "paired_context_only"
+    raise ValueError("diagnostic condition selection must be architecture-only or one complete paired context factor")
+
+
+def _validate_matrix_contrast_inputs(selection_mode, evaluation_reports):
+    """Require baseline contrast inputs only for selections that use them."""
+    if selection_mode == "paired_context_only":
+        return
+    if "architecture_matched_cv_k16" not in evaluation_reports:
+        raise ValueError("matrix contrast selection lacks architecture_matched_cv_k16")
+
+
 def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
     result = {}
     for row in report.get("records", ()):
@@ -862,6 +894,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         _validate_focal_pose_condition_selection(conditions, focal_pose_offsets)
         _validate_teammate_behavior_condition_selection(
             conditions, teammate_behavior_pool_seed)
+    selection_mode = _matrix_condition_selection_mode(conditions, condition_names)
     if replay_seeds is not None:
         # Backward compatible seed-only requests now capture once, for the
         # primary architecture condition, instead of duplicating every replay.
@@ -1290,11 +1323,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "authoritative_signal_available": False, "qualification_eligible": False}
 
     architecture_name = "architecture_matched_cv_k16"
-    if architecture_name not in evaluation_reports:
-        raise ValueError("matrix condition selection must include architecture_matched_cv_k16")
-    if condition_names is not None:
-        if tuple(condition_names) != (architecture_name,):
-            raise ValueError("diagnostic condition selection currently supports architecture_matched_cv_k16 only")
+    _validate_matrix_contrast_inputs(selection_mode, evaluation_reports)
+    if selection_mode == "architecture_only":
         contrasts = []
         architecture = evaluation_reports[architecture_name]
         for track in MECO_TRACKS:
@@ -1302,6 +1332,11 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 track=track, condition_id=architecture["condition_id"],
                 report=architecture["report"], records=architecture["records"],
                 categories=categories, seeds=seeds))
+    elif selection_mode == "paired_context_only":
+        # The matrix contains only the exact no-factor/treatment pair. Pairing
+        # evidence is retained in condition reports; outcome contrasts remain
+        # unavailable until a validated summary consumes both records.
+        contrasts = []
     else:
         contrasts = []
         architecture_name = "architecture_matched_cv_k16"
@@ -1480,11 +1515,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             if replay_output_dir is not None else {"enabled": False}),
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
-            track: results[architecture_name]["policy_manifest"][track][
-                "training_configuration_sha256"] for track in MECO_TRACKS},
+            track: config_hashes[track] for track in MECO_TRACKS},
         "training_protocol_ids": {
-            track: results[architecture_name]["policy_manifest"][track][
-                "training_protocol_id"] for track in MECO_TRACKS},
+            track: protocol_ids[track] for track in MECO_TRACKS},
         "conditions": results,
         "phase4_route_completion_campaign": route_completion_campaign,
         "phase4_route_completion_policy_support": route_policy_support_statuses,

@@ -22,6 +22,30 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+## Phase 4 focal-pose and teammate-behavior paired dispatch — 2026-10-24
+
+The validation runner now dispatches the `observation.focal_pose_offset` and
+`teammate.behavior_pool` factors through one matrix invocation per exact
+protocol cell. Each matrix contains the no-factor and treatment conditions,
+with a shared protocol case, validation seed list, five-checkpoint hashes,
+source identity, and execution device. The runner verifies condition-level
+assignment digests and exact policy/category/seed rows, and rejects missing,
+duplicate, or unexpected rows. The matrix CLI exposes the deterministic
+teammate-pool seed used to bind a design-axis behavior to a reproducible pool
+rotation. Output is write-once: a pre-existing output path is rejected, and
+this dispatcher does not resume or overwrite prior evidence. The matrix runner
+accepts these complete paired conditions without also evaluating the
+architecture baseline; it emits no outcome contrasts for the pair-only matrix.
+Each evaluation report must resolve to a regular file within the fresh case
+directory and match the byte hash recorded by its matrix condition entry.
+
+This is dispatch and provenance wiring only. Focal-pose recovery/safety and
+teammate-behavior/collision/score outcomes remain null; qualification remains
+false. Five focused fake-runner and malformed-row contracts passed. No
+simulator evaluation, training, replay, GPU run, or dashboard action was
+performed. See the paired dispatch contracts in
+[`test_meco_phase4_campaign_plan.py`](../tests/test_meco_phase4_campaign_plan.py).
+
 ## Phase 4 legal full-team start profiles — 2026-10-24
 
 Reviewed implementation commit `28f906961115adffb11a3e7e11e4188e4660dcd9`

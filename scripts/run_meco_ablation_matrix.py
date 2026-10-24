@@ -45,6 +45,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase4-focal-pose-offset", action="append",
                         choices=("translation_small", "translation_large", "heading_offset"),
                         help="add a paired no-offset/registered-offset full-match validation pair")
+    parser.add_argument("--phase4-teammate-behavior-pool-seed", type=int,
+                        help="add paired no-factor/balanced teammate behavior-pool conditions")
     parser.add_argument("--conditions",
                         help="comma-separated exact condition names; diagnostic subset mode")
     parser.add_argument("--replay-output-dir", type=Path,
@@ -103,6 +105,7 @@ def main(argv=None) -> int:
             encoding="utf-8")) if args.phase4_opponent_schedule_json else None),
         start_profile_registry_id=args.phase4_start_profile,
         focal_pose_offsets=tuple(args.phase4_focal_pose_offset or ()),
+        teammate_behavior_pool_seed=args.phase4_teammate_behavior_pool_seed,
         condition_names=(None if args.conditions is None else tuple(
             part for part in args.conditions.split(",") if part)))
     print(json.dumps({"matrix_id": report["matrix_id"],

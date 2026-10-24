@@ -267,6 +267,287 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
         "executed": all(code == 0 for code in return_codes.values())}
 
 
+def run_phase4_context_cell(plan: dict, cell_key: str, *, factor: str,
+        protocol_path: str | Path, checkpoint_paths: dict[str, str],
+        matrix_script: str | Path, output_dir: str | Path, device: str,
+        runner: Callable[[list[str]], int] | None = None) -> dict:
+    """Dispatch one exact paired focal-pose or teammate-pool validation cell.
+
+    The matrix API creates both arms in one invocation, sharing its frozen
+    protocol case, seed list, checkpoints, source identity, and device.
+    Returned coverage is metadata evidence only; behavioral outcomes remain
+    unavailable and qualification remains disabled.
+    """
+    if (not isinstance(plan, dict) or plan.get("schema") !=
+            "meco-phase4-validation-campaign-plan-v1" or
+            plan.get("plan_id") != _sha({key: value for key, value in plan.items()
+                                          if key != "plan_id"})):
+        raise ValueError("invalid Phase 4 validation campaign plan")
+    requirement_id, design_axis = {
+        "focal_pose": ("observation_only_focal_pose_mislocalization",
+                       "focal_pose_offsets"),
+        "teammate_behavior": ("teammate_behaviors", "teammate_behaviors"),
+    }.get(factor, (None, None))
+    if requirement_id is None:
+        raise ValueError("unsupported paired Phase 4 context factor")
+    requirements = [row for row in plan.get("requirements", [])
+                    if row.get("requirement_id") == requirement_id]
+    if len(requirements) != 1:
+        raise ValueError("Phase 4 plan lacks a unique context requirement")
+    matches = [cell for cell in requirements[0].get("cells", [])
+               if cell.get("case_cell_key") == cell_key]
+    if len(matches) != 1:
+        raise ValueError("Phase 4 context cell key is missing or duplicated")
+    cell = matches[0]
+    if (not isinstance(checkpoint_paths, dict) or
+            set(checkpoint_paths) != set(MECO_TRACKS)):
+        raise ValueError("Phase 4 context dispatch requires all five checkpoints")
+
+    from .meco_phase4_design import CASE_AXES, _read_protocol_validation
+    from .meco_phase4_context import (TEAMMATE_BEHAVIORS,
+        phase4_focal_pose_assignment, phase4_teammate_behavior_assignment,
+        validate_phase4_focal_pose_assignment,
+        validate_phase4_teammate_behavior_assignment)
+    protocol, raw = _read_protocol_validation(protocol_path)
+    protocol_sha256 = hashlib.sha256(raw).hexdigest()
+    if protocol_sha256 != plan.get("protocol_binding", {}).get(
+            "protocol_raw_file_sha256"):
+        raise ValueError("Phase 4 context dispatch protocol differs from the frozen plan")
+    case_axes = cell.get("case_axes")
+    if (not isinstance(case_axes, dict) or set(case_axes) != set(CASE_AXES) or
+            case_axes.get("scenario_id") != "full_match_offense"):
+        raise ValueError("Phase 4 context cell is not an exact full-match protocol case")
+    protocol_rows = [row for row in protocol.get("cases", [])
+        if all(row.get(axis) == case_axes[axis] for axis in CASE_AXES)]
+    if len(protocol_rows) != 1:
+        raise ValueError("Phase 4 context case is not unique in the frozen protocol")
+    seeds = protocol_rows[0].get("seeds")
+    if (_sha(seeds) != cell.get("validation_seed_assignment_sha256") or
+            len(seeds) != cell.get("seed_count")):
+        raise ValueError("Phase 4 context seeds differ from the protocol-bound cell")
+    categories = [case_axes["category"]]
+    qualification_case = {axis: case_axes[axis] for axis in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    design_axes = cell.get("design_axes")
+    value = design_axes.get(design_axis) if isinstance(design_axes, dict) else None
+    if factor == "focal_pose":
+        from .meco_phase4_context import phase4_context_identity
+        phase4_context_identity("focal_pose_offsets", value)
+        common = dict(paired_offset_name=value, scenario_id=case_axes["scenario_id"],
+            split="validation", protocol_id=protocol["protocol_id"],
+            protocol_sha256=protocol_sha256, qualification_case=qualification_case,
+            categories=categories, seeds=seeds)
+        assignments = {"no_factor": phase4_focal_pose_assignment(None, **common),
+            "factor_treatment": phase4_focal_pose_assignment(value, **common)}
+        for assignment in assignments.values():
+            validate_phase4_focal_pose_assignment(assignment)
+        condition_names = [f"phase4_focal_pose_{value}_no_offset",
+                           f"phase4_focal_pose_{value}_offset"]
+        extra_args = ["--phase4-focal-pose-offset", value]
+        outcome_fields = ["relocalization_time_s", "pose_error_recovery_rate",
+                          "safety_contact_rate"]
+    else:
+        if value not in TEAMMATE_BEHAVIORS:
+            raise ValueError("teammate-behavior cell has an unknown behavior axis value")
+        # The named design-axis value fixes the deterministic pool rotation.
+        pool_seed = TEAMMATE_BEHAVIORS.index(value)
+        common = dict(scenario_id=case_axes["scenario_id"], split="validation",
+            protocol_id=protocol["protocol_id"], protocol_sha256=protocol_sha256,
+            qualification_case=qualification_case, categories=categories,
+            seeds=seeds, pool_seed=pool_seed)
+        assignments = {"no_factor": phase4_teammate_behavior_assignment(
+                arm="no_factor", **common),
+            "factor_treatment": phase4_teammate_behavior_assignment(
+                arm="behavior_pool", **common)}
+        for assignment in assignments.values():
+            validate_phase4_teammate_behavior_assignment(assignment)
+        condition_names = ["phase4_teammate_behaviors_no_factor",
+                           "phase4_teammate_behaviors_behavior_pool"]
+        extra_args = ["--phase4-teammate-behavior-pool-seed", str(pool_seed)]
+        outcome_fields = ["outcome_by_teammate_behavior", "teammate_collision_rate",
+                          "score_contribution"]
+
+    case_dir = Path(output_dir).resolve()
+    if case_dir.exists():
+        raise ValueError("Phase 4 context output path already exists; dispatch is not resumable")
+    case_dir.mkdir(parents=True, exist_ok=False)
+    dispatch_binding = _capture_phase4_dispatch_binding(checkpoint_paths, device)
+    seed_manifest = {"schema": "meco-exact-seed-manifest-v1",
+        "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": protocol_sha256,
+        "scenario_id": case_axes["scenario_id"], "categories": categories,
+        "split": "validation", "qualification_case": qualification_case,
+        "seed_list": seeds}
+    seed_path, case_path = case_dir / "seed-manifest.json", case_dir / "qualification-case.json"
+    _write_immutable(seed_path, seed_manifest)
+    _write_immutable(case_path, qualification_case)
+    argv = [sys.executable, str(Path(matrix_script).resolve()),
+        "--scenario", case_axes["scenario_id"], "--categories", categories[0],
+        "--seed-manifest", str(seed_path), "--qualification-protocol",
+        str(Path(protocol_path).resolve()), "--qualification-case-json", str(case_path),
+        "--device", device, "--conditions", ",".join(condition_names),
+        "--output-dir", str(case_dir), *extra_args]
+    for track in MECO_TRACKS:
+        argv += [f"--{track.lower()}-checkpoint",
+                 str(Path(checkpoint_paths[track]).resolve())]
+    execute = runner or (lambda command: subprocess.run(command, check=False).returncode)
+    return_code = execute(argv)
+    pairing = None
+    if return_code == 0:
+        pairing = _validate_phase4_context_matrix_pair(case_dir, factor=factor,
+            assignments=assignments, categories=categories, seeds=seeds,
+            condition_names=condition_names, expected_binding=dispatch_binding,
+            outcome_fields=outcome_fields, protocol_path=Path(protocol_path).resolve(),
+            protocol_id=protocol["protocol_id"], protocol_sha256=protocol_sha256,
+            seed_manifest_path=seed_path)
+        if (_source_identity_sha256() != dispatch_binding["source_identity_sha256"] or
+                _dispatch_checkpoint_hashes(checkpoint_paths) !=
+                    dispatch_binding["checkpoint_sha256"]):
+            raise ValueError("Phase 4 context source/checkpoint binding drifted during dispatch")
+    pair_sha = (assignments["no_factor"].get("pair_assignment_sha256")
+                if factor == "focal_pose" else assignments["no_factor"].get("pair_sha256"))
+    return {"case_cell_key": cell_key, "factor": factor, "design_axis_value": value,
+        "pair_assignment_sha256": pair_sha, "assignment_sha256": {
+            arm: assignment.get("assignment_sha256", assignment.get("pair_sha256"))
+            for arm, assignment in assignments.items()},
+        "dispatch_binding": dispatch_binding,
+        "runtime_status": "scheduled_not_simulator_validated",
+        "simulator_behavior_validated": False, "outcomes": {
+            field: None for field in outcome_fields}, "qualification_eligible": False,
+        "paired_coverage": pairing, "dispatch_return_code": return_code,
+        "executed": return_code == 0}
+
+
+def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
+        assignments: dict, categories: list[str], seeds: list[int],
+        condition_names: list[str], expected_binding: dict,
+        outcome_fields: list[str], protocol_path: Path, protocol_id: str,
+        protocol_sha256: str, seed_manifest_path: Path) -> dict:
+    """Bind both matrix arms to exact assignments and row keys; no outcomes inferred."""
+    policies = set((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
+    expected_keys = {(policy, category, seed) for policy in policies
+                     for category in categories for seed in seeds}
+    paths = sorted(case_dir.glob("*.matrix.json"))
+    if len(paths) != 1:
+        raise ValueError("Phase 4 context dispatch requires exactly one matrix report")
+    matrix = _read_json(paths[0])
+    protocol = matrix.get("protocol", {})
+    if (matrix.get("qualification_eligible") is not False or
+            protocol.get("qualification_eligible") is not False or
+            protocol.get("categories") != categories or
+            protocol.get("seed_list") != seeds or
+            protocol.get("evaluation_split") != "validation" or
+            protocol.get("qualification_protocol_id") != protocol_id or
+            protocol.get("qualification_protocol") != {
+                "protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+                "protocol_file": str(protocol_path)} or
+            protocol.get("seed_manifest") != {
+                "path": str(seed_manifest_path),
+                "sha256": _file_sha(seed_manifest_path),
+                "schema": "meco-exact-seed-manifest-v1"} or
+            protocol.get("qualification_case") != assignments["no_factor"]["qualification_case"]):
+        raise ValueError("Phase 4 context matrix differs from the frozen validation pair")
+    for name, report in (("matrix", matrix), ("matrix protocol", protocol)):
+        _validate_phase4_dispatch_report_binding(report, expected_binding,
+            context=f"paired context {name}")
+    conditions = matrix.get("conditions")
+    if not isinstance(conditions, dict) or set(conditions) != set(condition_names):
+        raise ValueError("Phase 4 context matrix has missing or unexpected paired conditions")
+    rows_by_arm = {}
+    report_hashes = {}
+    case_root = case_dir.resolve()
+    for arm, condition_name in zip(("no_factor", "factor_treatment"), condition_names):
+        condition = conditions[condition_name]
+        expected_assignment = assignments[arm]
+        assignment_field = ("phase4_focal_pose_assignment" if factor == "focal_pose"
+                            else "phase4_teammate_behavior_assignment")
+        expected_assignment_json = json.loads(_canonical_bytes(expected_assignment))
+        if condition.get(assignment_field) != expected_assignment_json:
+            raise ValueError(f"Phase 4 {arm} condition has a mismatched assignment")
+        _validate_phase4_dispatch_report_binding(condition, expected_binding,
+            context=f"{arm} matrix condition")
+        report_path = Path(condition["report_path"])
+        if not report_path.is_absolute():
+            report_path = case_root / report_path
+        try:
+            resolved_report_path = report_path.resolve(strict=True)
+            resolved_report_path.relative_to(case_root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Phase 4 {arm} report path is missing or outside its fresh case directory") from exc
+        if not resolved_report_path.is_file():
+            raise ValueError(f"Phase 4 {arm} report path is not a regular file")
+        report_bytes = resolved_report_path.read_bytes()
+        report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+        if condition.get("evaluation_report_sha256") != report_sha256:
+            raise ValueError(f"Phase 4 {arm} report byte hash differs from matrix condition binding")
+        report_hashes[condition_name] = report_sha256
+        report = json.loads(report_bytes)
+        if not isinstance(report, dict):
+            raise ValueError(f"Phase 4 {arm} evaluation report is not a JSON object")
+        _validate_phase4_dispatch_report_binding(report, expected_binding,
+            context=f"{arm} evaluation report")
+        rows = _records_by_key(report)
+        if (set(rows) != expected_keys or report.get("qualification_eligible") is not False or
+                report.get(assignment_field) != expected_assignment_json):
+            raise ValueError(f"Phase 4 {arm} evaluation lacks exact policy/category/seed coverage")
+        for key, row in rows.items():
+            policy = key[0]
+            track = policy[:-3] if policy.endswith("_P0") else policy
+            if (row.get("checkpoint_sha256") != expected_binding["checkpoint_sha256"].get(track) or
+                    row.get("source_identity_sha256") != expected_binding["source_identity_sha256"] or
+                    row.get("execution_device") != expected_binding["execution_device"]):
+                raise ValueError(f"Phase 4 context row has mismatched source/checkpoint/device: {key}")
+            if factor == "focal_pose":
+                captured = row.get("phase4_focal_pose")
+                if arm == "no_factor":
+                    if captured is None:
+                        raise ValueError(f"Phase 4 control row lacks no-offset assignment evidence: {key}")
+                if (not isinstance(captured, dict) or
+                        captured.get("assignment_sha256") != expected_assignment["assignment_sha256"] or
+                        captured.get("pair_assignment_sha256") != expected_assignment["pair_assignment_sha256"] or
+                        captured.get("arm") != expected_assignment["arm"] or
+                        captured.get("requested_offset_name") != expected_assignment["requested_offset_name"] or
+                        captured.get("applied_before_policy_observation") is not True or
+                        captured.get("physical_truth_unchanged") is not True or
+                        captured.get("qualification_eligible") is not False):
+                    raise ValueError(f"Phase 4 context row lacks exact focal-pose evidence: {key}")
+                for field in outcome_fields:
+                    if captured.get(field) is not None:
+                        raise ValueError(f"Phase 4 focal-pose outcome {field} must remain unavailable")
+            else:
+                captured = row.get("phase4_teammate_behavior")
+                seed = key[2]
+                schedule = expected_assignment["behavior_schedule"]
+                expected_behaviors = (None if arm == "no_factor" else
+                    {str(slot): behavior for slot, behavior in
+                     schedule[expected_assignment["seeds"].index(seed)]["assignments"].items()})
+                if (not isinstance(captured, dict) or
+                        captured.get("assignment_pair_sha256") != expected_assignment["pair_sha256"] or
+                        captured.get("arm") != expected_assignment["arm"] or
+                        captured.get("assignments") != expected_behaviors or
+                        captured.get("assignment_applied") != (expected_behaviors is not None) or
+                        captured.get("qualification_eligible") is not False):
+                    raise ValueError(f"Phase 4 context row lacks exact teammate-behavior evidence: {key}")
+                for field in outcome_fields:
+                    if captured.get(field) is not None:
+                        raise ValueError(f"Phase 4 teammate outcome {field} must remain unavailable")
+        rows_by_arm[arm] = rows
+    if set(rows_by_arm["no_factor"]) != set(rows_by_arm["factor_treatment"]):
+        raise ValueError("Phase 4 context arms have missing or unexpected paired rows")
+    return {"schema": "meco-phase4-context-pair-coverage-v1", "factor": factor,
+        "condition_names": condition_names, "categories": categories,
+        "seed_count": len(seeds), "paired_row_count": len(expected_keys),
+        "paired_rows_per_condition": {name: len(expected_keys) for name in condition_names},
+        "assignment_sha256": {arm: assignment.get("assignment_sha256",
+            assignment.get("pair_sha256")) for arm, assignment in assignments.items()},
+        "evaluation_report_sha256": report_hashes,
+        "matrix_sha256": _file_sha(paths[0]), "checkpoint_sha256":
+            expected_binding["checkpoint_sha256"], "source_identity_sha256":
+            expected_binding["source_identity_sha256"], "execution_device":
+            expected_binding["execution_device"], "outcomes": {
+                field: None for field in outcome_fields}, "qualification_eligible": False}
+
+
 def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         categories: list[str], seeds: list[int], expected_binding: dict) -> dict:
     """Check only exact assignment/coverage metadata, not behavioral outcomes."""
