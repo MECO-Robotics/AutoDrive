@@ -5,7 +5,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import urlopen
 
-from frc_defense.dashboard import create_handler
+from frc_defense.dashboard import create_handler, _merge_meco_track_status
 from frc_defense.dashboard_api import curriculum_status_payload, _category_passes, _curriculum_report_root
 from frc_defense.training_curriculum import CURRICULUM_VERSION, SCENARIOS
 
@@ -45,6 +45,37 @@ def _run(root, *, qualified=(), diagnostic=False, sources=None):
 
 def _payload(root):
     return json.loads(curriculum_status_payload(root, curriculum_root=root, project_root=root))
+
+
+def test_live_meco_assignment_overrides_run_config_on_active_tracks():
+    payload = {"tracks": [{"track": track} for track in ("A1", "A2", "A3", "C1", "C2")]}
+    policies = [{"policy_id": track, "training_state": "running",
+        "evaluation_state": "not_evaluated", "run": {"completed_updates": 4,
+            "config": {"scenario_id": "config_scenario"}, "device": "cuda:0"}}
+        for track in ("A1", "A2", "A3", "C1", "C2")]
+    lanes = {track: {"status": "running"} for track in ("A1", "A2", "A3", "C1", "C2")}
+    status = {"policies": policies, "queue": {"lanes": lanes, "curriculum": {
+        "state": "fresh", "assignment": {"scenario_id": "live_scenario",
+            "category": "live_category"}}}}
+
+    merged = json.loads(_merge_meco_track_status(json.dumps(payload).encode(), status))
+
+    assert all(track["current"] == "live_scenario" for track in merged["tracks"])
+    assert all(track["current_category"] == "live_category" for track in merged["tracks"])
+    assert all(track["current_source"] == "live_assignment" for track in merged["tracks"])
+
+
+def test_run_config_current_is_labeled_fallback_when_assignment_is_unavailable():
+    payload = {"tracks": [{"track": "A1"}]}
+    status = {"policies": [{"policy_id": "A1", "training_state": "idle",
+        "run": {"config": {"scenario_id": "config_scenario"}}}],
+        "queue": {"lanes": {}, "curriculum": {"state": "stale", "assignment": None}}}
+
+    merged = json.loads(_merge_meco_track_status(json.dumps(payload).encode(), status))
+
+    assert merged["tracks"][0]["current"] == "config_scenario"
+    assert merged["tracks"][0]["current_category"] is None
+    assert merged["tracks"][0]["current_source"] == "run_config_fallback"
 
 
 def _http_payload(run_dir, *, curriculum_root=None, meco_data_root=None):

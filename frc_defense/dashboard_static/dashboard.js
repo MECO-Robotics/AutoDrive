@@ -1345,8 +1345,14 @@ function renderCurriculum(data) {
   for (const lane of data.tracks || []) {
     const card = curriculumNode("article", "curriculum-card");
     card.append(curriculumNode("h3", "", lane.track || "unknown track"));
+    const current = lane.current
+      ? `${lane.current}${lane.current_category ? ` · ${lane.current_category}` : ""}`
+      : "unknown";
+    const currentSource = lane.current_source === "run_config_fallback"
+      ? " (run config fallback)" : lane.current_source === "live_assignment"
+        ? " (live assignment)" : "";
     card.append(curriculumNode("p", "curriculum-summary",
-      `Status: ${lane.status || "unknown"} · updates: ${lane.updates ?? "unknown"} · device: ${lane.device || "unknown"} · current: ${lane.current || "unknown"} · evaluation: ${lane.evaluation || "unknown"}`));
+      `Status: ${lane.status || "unknown"} · updates: ${lane.updates ?? "unknown"} · device: ${lane.device || "unknown"} · current: ${current}${currentSource} · evaluation: ${lane.evaluation || "unknown"}`));
     tracks.append(card);
   }
   const provenance = $("threePassProvenance");

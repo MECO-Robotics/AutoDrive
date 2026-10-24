@@ -148,6 +148,215 @@ def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
             "error": None if consistent else "heartbeat provenance mismatch"}
 
 
+def _training_curriculum_projection(root: Path, queue_payload: dict,
+                                    queue_state: str, data_root: Path):
+    """Project only scheduler exposure that matches the fresh queue snapshot."""
+    from .meco_phase4 import PHASE4_FACTORS, validate_phase4_training_assignment
+    from .training_curriculum import SCENARIOS
+
+    unavailable = {"state": "unavailable", "assignment": None,
+        "scenario_exposure_chunks": None, "category_exposure_chunks": None,
+        "phase4_exposure_by_factor": None,
+        "semantics": "training exposure only; not evaluation or qualification"}
+    assignment = queue_payload.get("task_assignment")
+    if queue_state != "fresh":
+        return {**unavailable, "state": "stale" if queue_state == "stale" else "unavailable",
+                "error": "queue snapshot is not fresh"}
+    scheduler_summary = queue_payload.get("task_scheduler")
+    queue_cycle = queue_payload.get("cycle")
+    if (not isinstance(assignment, dict) or not isinstance(scheduler_summary, dict)
+            or type(queue_cycle) is not int or type(assignment.get("cycle")) is not int
+            or assignment.get("cycle") != queue_cycle
+            or not isinstance(assignment.get("scenario_id"), str)
+            or assignment.get("scenario_id") not in SCENARIOS
+            or not isinstance(assignment.get("category"), str)
+            or assignment.get("category") not in SCENARIOS[
+                assignment.get("scenario_id")].required_categories
+            or type(assignment.get("seed")) is not int
+            or assignment["seed"] < 0
+            or not isinstance(assignment.get("assignment_id"), str)
+            or not assignment["assignment_id"]
+            or assignment.get("sampling_role") not in
+                ("recovery", "ancestor_retention", "stage_exposure")):
+        return {**unavailable, "error": "queue task assignment is malformed"}
+    projected_assignment = {key: assignment.get(key) for key in (
+        "cycle", "scenario_id", "category", "seed", "sampling_role", "assignment_id")}
+    try:
+        factor = validate_phase4_training_assignment(assignment)
+    except (ValueError, TypeError, KeyError):
+        return {**unavailable, "error": "queue Phase 4 assignment is malformed"}
+    if factor is None:
+        if "phase4_exposure_key" in assignment:
+            return {**unavailable, "error": "queue Phase 4 exposure key is unexpected"}
+    else:
+        factor_id = factor["kind"]
+        expected_key = _scheduler_phase4_exposure_key(
+            assignment["scenario_id"], assignment["category"],
+            assignment["seed"], factor_id)
+        if assignment.get("phase4_exposure_key") != expected_key:
+            return {**unavailable, "error": "queue Phase 4 exposure key is invalid"}
+        projected_assignment.update(phase4_factor=factor_id,
+                                    phase4_split=assignment["phase4_split"])
+
+    scheduler, error = _read_json_within(root / "task-scheduler-state.json", data_root)
+    if scheduler is None:
+        return {**unavailable, "error": error or "scheduler state is unavailable"}
+    counter_keys = ("exposure_chunks", "category_exposures", "recovery_pressure",
+                    "phase4_exposure_counts")
+    snapshot_pending = scheduler_summary.get("pending_assignment")
+    if (scheduler.get("schema_version") != 1
+            or type(scheduler.get("completed_cycle")) is not int
+            or scheduler.get("completed_cycle") < 0
+            or not isinstance(scheduler.get("pending_assignment"), dict)
+            or scheduler.get("pending_assignment") != assignment
+            or snapshot_pending != assignment
+            or scheduler_summary.get("completed_cycle") != scheduler.get("completed_cycle")
+            or queue_cycle != scheduler.get("completed_cycle") + 1
+            or any(not isinstance(scheduler.get(key), dict)
+                   or scheduler_summary.get(key) != scheduler.get(key)
+                   for key in counter_keys)):
+        return {**unavailable, "error": "queue and scheduler state do not match"}
+
+    history = scheduler.get("history")
+    if (not isinstance(history, list)
+            or len(history) != scheduler["completed_cycle"]):
+        return {**unavailable, "error": "scheduler history is incomplete"}
+    expected_scenarios = {}
+    expected_categories = {}
+    expected_phase4_hashes = {}
+    phase4_by_factor = {name: 0 for name in PHASE4_FACTORS}
+    for cycle, row in enumerate(history, start=1):
+        previous = row.get("assignment") if isinstance(row, dict) else None
+        if (not isinstance(previous, dict)
+                or previous.get("cycle") != cycle
+                or not isinstance(previous.get("scenario_id"), str)
+                or previous.get("scenario_id") not in SCENARIOS
+                or not isinstance(previous.get("category"), str)
+                or previous.get("category") not in SCENARIOS[
+                    previous.get("scenario_id")].required_categories
+                or type(previous.get("seed")) is not int
+                or previous["seed"] < 0):
+            return {**unavailable, "error": "scheduler history assignment is malformed"}
+        scenario = previous["scenario_id"]
+        category = previous["category"]
+        expected_scenarios[scenario] = expected_scenarios.get(scenario, 0) + 1
+        category_key = f"{scenario}/{category}"
+        expected_categories[category_key] = expected_categories.get(category_key, 0) + 1
+        try:
+            historical_factor = validate_phase4_training_assignment(previous)
+        except (ValueError, TypeError, KeyError):
+            return {**unavailable, "error": "scheduler history factor is malformed"}
+        if historical_factor is None:
+            if "phase4_exposure_key" in previous:
+                return {**unavailable, "error": "scheduler history has an unexpected Phase 4 key"}
+        else:
+            factor_id = historical_factor["kind"]
+            hash_key = _scheduler_phase4_exposure_key(
+                scenario, category, previous["seed"], factor_id)
+            if previous.get("phase4_exposure_key") != hash_key:
+                return {**unavailable, "error": "scheduler history factor key is invalid"}
+            expected_phase4_hashes[hash_key] = expected_phase4_hashes.get(hash_key, 0) + 1
+            phase4_by_factor[factor_id] += 1
+    if (scheduler["exposure_chunks"] != expected_scenarios
+            or scheduler["category_exposures"] != expected_categories
+            or scheduler["phase4_exposure_counts"] != expected_phase4_hashes):
+        return {**unavailable, "error": "scheduler counters do not match completed history"}
+    return {"state": "fresh", "assignment": projected_assignment,
+        "scenario_exposure_chunks": expected_scenarios,
+        "category_exposure_chunks": expected_categories,
+        "phase4_exposure_by_factor": phase4_by_factor,
+        "semantics": "training exposure only; not evaluation or qualification"}
+
+
+def _scheduler_phase4_exposure_key(scenario, category, seed, factor_id):
+    value = {"scenario_id": scenario, "category": category,
+             "seed": seed, "factor": factor_id}
+    return hashlib.sha256(json.dumps(value, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+
+
+def _process_evidence(pid, *, expected_run_id=None):
+    """Read raw procfs state and confirm that PID is a MECO trainer."""
+    if type(pid) is not int or pid <= 0:
+        return {"confirmed": False, "state": None, "error": "invalid PID"}
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"confirmed": False, "state": None, "error": "process missing"}
+    except PermissionError:
+        pass
+    except OSError:
+        return {"confirmed": False, "state": None, "error": "process unavailable"}
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return {"confirmed": False, "state": None, "error": "proc command unavailable"}
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return {"confirmed": False, "state": None, "error": "proc state unavailable"}
+    # comm is parenthesized and can itself contain spaces or closing parens.
+    closing = stat.rfind(")")
+    if closing < 0:
+        return {"confirmed": False, "state": None, "error": "proc state malformed"}
+    fields = stat[closing + 1:].split()
+    process_state = fields[0] if fields and len(fields[0]) == 1 else None
+    if process_state is None:
+        return {"confirmed": False, "state": None, "error": "proc state malformed"}
+    is_trainer = any(b"meco_track_training" in argument for argument in arguments)
+    has_expected_run = (expected_run_id is None or
+        isinstance(expected_run_id, str) and
+        any(argument == b"--run-id" and index + 1 < len(arguments)
+            and arguments[index + 1] == expected_run_id.encode()
+            for index, argument in enumerate(arguments)))
+    if not is_trainer or not has_expected_run:
+        return {"confirmed": False, "state": process_state,
+                "error": "PID command/run-ID mismatch"}
+    if process_state not in {"D", "R", "S", "I", "P", "W"}:
+        return {"confirmed": False, "state": process_state,
+                "error": "process is not in an active state"}
+    return {"confirmed": True, "state": process_state, "error": None}
+
+
+def _process_alive(pid) -> bool:
+    """Confirm a live PID still names a MECO trainer in procfs."""
+    return _process_evidence(pid)["confirmed"]
+
+
+def _heartbeat(run_dir: Path, manifest: dict, now: float, data_root: Path,
+               process_probe=_process_alive):
+    heartbeat, error = _read_json_within(run_dir / "heartbeat.json", data_root)
+    if not heartbeat:
+        return {"state": "missing", "age_seconds": None, "fresh": False,
+                "process_alive": False, "process_confirmed": False,
+                "process_state": None, "error": error if error else None}
+    stamp = _utc_timestamp(heartbeat.get("heartbeat_utc"))
+    age = None if stamp is None else max(0., now - stamp)
+    fresh = age is not None and age <= HEARTBEAT_STALE_SECONDS and stamp <= now + 5.
+    pid = heartbeat.get("pid")
+    alive = bool(process_probe(pid))
+    process = _process_evidence(pid, expected_run_id=heartbeat.get("run_id"))
+    process_confirmed = (process["confirmed"] if process_probe is _process_alive else alive)
+    track = manifest.get("track", manifest.get("config", {}).get("track")
+                         if isinstance(manifest.get("config"), dict) else None)
+    consistent = (heartbeat.get("schema_version") == 1
+                  and heartbeat.get("run_id") == manifest.get("run_id")
+                  and heartbeat.get("track") == track)
+    state = ("confirmed" if fresh and process_confirmed and consistent else
+             "stale" if stamp is not None else "invalid")
+    return {"state": state, "age_seconds": age, "fresh": fresh,
+            "process_alive": alive, "pid": pid if type(pid) is int else None,
+            "process_confirmed": process_confirmed,
+            "process_state": process["state"],
+            "process_error": process["error"],
+            "run_id": heartbeat.get("run_id"),
+            "provenance_consistent": consistent,
+            "completed_updates": heartbeat.get("completed_updates")
+                if type(heartbeat.get("completed_updates")) is int else None,
+            "error": None if consistent else "heartbeat provenance mismatch"}
+
+
+
 def _queue_state(root: Path, now: float, data_root: Path):
     path = root / "queue-status.json"
     payload, error = _read_json_within(path, data_root)
@@ -159,17 +368,59 @@ def _queue_state(root: Path, now: float, data_root: Path):
     fresh = (payload.get("schema_version") == 1 and age is not None
              and age <= QUEUE_STALE_SECONDS and stamp <= now + 5.)
     lanes = {}
+    malformed_lanes = False
+    lane_error = None
     raw_lanes = payload.get("lanes")
     valid_lane_statuses = {"queued", "running", "stalled", "complete", "stopped",
-                           "failed", "aborted_due_to_sibling_failure"}
-    if isinstance(raw_lanes, list):
-        for lane in raw_lanes:
+                           "failed", "aborted_due_to_sibling_failure",
+                           "deferred_for_evaluation"}
+    if isinstance(raw_lanes, dict):
+        lane_rows = []
+        if set(raw_lanes) != set(TRACKS):
+            malformed_lanes = True
+            lane_error = "queue dict lanes do not match the five-track schema"
+        for track, value in raw_lanes.items():
+            if track not in TRACKS or not isinstance(value, dict):
+                malformed_lanes = True
+                lane_error = lane_error or "queue lane record is malformed"
+                continue
+            lane = dict(value)
+            if "track" in lane and lane["track"] != track:
+                malformed_lanes = True
+                lane_error = lane_error or "queue lane key does not match its track"
+                continue
+            lane["track"] = track
+            lane_rows.append(lane)
+    elif isinstance(raw_lanes, list):
+        lane_rows = raw_lanes
+    else:
+        lane_rows = None
+        error = "queue lanes are malformed"
+        malformed_lanes = True
+        lane_error = error
+    seen_tracks = set()
+    if lane_rows is not None:
+        for lane in lane_rows:
             if (not isinstance(lane, dict) or lane.get("track") not in TRACKS
+                    or lane.get("track") in seen_tracks
                     or not isinstance(lane.get("run_id"), str)
                     or not lane["run_id"].strip()
                     or not isinstance(lane.get("status"), str)
-                    or lane.get("status") not in valid_lane_statuses):
+                    or lane.get("status") not in valid_lane_statuses
+                    or (lane.get("pid") is not None and type(lane.get("pid")) is not int)
+                    or not isinstance(lane.get("device"), str)
+                    or not isinstance(lane.get("run_directory"), str)
+                    or type(lane.get("completed_updates")) is not int
+                    or lane["completed_updates"] < 0
+                    or type(lane.get("chunk_updates")) is not int
+                    or lane["chunk_updates"] < 0):
+                malformed_lanes = True
+                lane_error = (lane_error or
+                    ("queue lane record is duplicate or malformed"
+                     if isinstance(lane, dict) and lane.get("track") in seen_tracks
+                     else "queue lane record is malformed"))
                 continue
+            seen_tracks.add(lane["track"])
             pid = lane.get("pid") if type(lane.get("pid")) is int else None
             process = _process_evidence(pid, expected_run_id=lane["run_id"])
             lanes[lane["track"]] = {"run_id": lane["run_id"],
@@ -179,6 +430,7 @@ def _queue_state(root: Path, now: float, data_root: Path):
                 "process_state": process["state"],
                 "process_error": process["error"],
                 "worker_state": ("unconfirmed" if lane.get("status") in ("running", "stalled")
+                                 else "queued" if lane.get("status") == "deferred_for_evaluation"
                                  else lane.get("status", "unknown")),
                 "device": lane.get("device") if isinstance(lane.get("device"), str) else None,
                 "run_directory": lane.get("run_directory") if isinstance(
@@ -187,17 +439,23 @@ def _queue_state(root: Path, now: float, data_root: Path):
                     if type(lane.get("completed_updates")) is int else None,
                 "chunk_updates": lane.get("chunk_updates")
                     if type(lane.get("chunk_updates")) is int else None}
-    else:
-        error = "queue lanes are malformed"
+    if seen_tracks != set(TRACKS):
+        malformed_lanes = True
+        lane_error = lane_error or "queue lanes do not contain exactly one record per track"
+    fresh = fresh and not malformed_lanes
+    if malformed_lanes:
+        error = lane_error
     active_lanes = [lane for lane in lanes.values()
                     if lane.get("status") in ("running", "stalled")]
     worker_state = ("unknown" if not fresh else
                     "unconfirmed" if active_lanes else
-                    "queued" if any(lane.get("status") == "queued"
+                    "queued" if any(lane.get("status") in ("queued", "deferred_for_evaluation")
                                      for lane in lanes.values()) else "idle")
     return {"state": "fresh" if fresh else "stale", "worker_state": worker_state,
             "age_seconds": age,
             "lanes": lanes,
+            "curriculum": _training_curriculum_projection(
+                root, payload, "fresh" if fresh else "stale", data_root),
             "phase": payload.get("phase") if isinstance(payload.get("phase"), str) else None,
             "cycle": payload.get("cycle") if type(payload.get("cycle")) is int else None,
             "evaluation": payload.get("evaluation") if isinstance(payload.get("evaluation"), dict) else None,
@@ -818,7 +1076,8 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                                   "unconfirmed" if any(lane.get("worker_state") != "running"
                                                        for lane in active_lanes) else
                                   "active" if active_lanes else
-                                  "queued" if any(lane.get("status") == "queued"
+                                  "queued" if any(lane.get("status") in (
+                                      "queued", "deferred_for_evaluation")
                                                   for lane in queue.get("lanes", {}).values())
                                   else "idle")
 

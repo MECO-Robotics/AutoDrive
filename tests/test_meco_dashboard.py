@@ -1,11 +1,16 @@
 import json
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from frc_defense.meco_dashboard import (
-    ABLATIONS, CONTROLS, TRACKS, _collect_status, meco_status_payload,
+    ABLATIONS, CONTROLS, TRACKS, _collect_status, _queue_state,
+    _training_curriculum_projection, meco_status_payload,
 )
 from frc_defense.meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
+from frc_defense.training_curriculum import SCENARIOS
 
 
 def _report(episodes=2):
@@ -121,9 +126,13 @@ def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_
         "schema_version": 1, "updated_utc": stamp,
         "phase": "training", "cycle": 3,
         "evaluation": {"active": True, "status": "running", "pid": 101},
-        "lanes": [{"track": "A1", "run_id": "r1", "status": "queued",
-                   "pid": 99, "device": "cuda:0", "completed_updates": 12,
-                   "chunk_updates": 100}],
+        "lanes": ([{"track": "A1", "run_id": "r1", "run_directory": "run-a",
+                    "status": "queued", "pid": 99, "device": "cuda:0",
+                    "completed_updates": 12, "chunk_updates": 100}] +
+                  [{"track": track, "run_id": f"r-{track}",
+                    "run_directory": track, "status": "complete", "pid": None,
+                    "device": "cuda:0", "completed_updates": 0,
+                    "chunk_updates": 100} for track in TRACKS if track != "A1"]),
     }))
     result = _collect_status(checkpoint_root, evaluation_root, now=now,
                              process_probe=lambda _pid: True)
@@ -290,3 +299,81 @@ def test_active_run_precedes_higher_update_completed_run(tmp_path):
                              process_probe=lambda _pid: False)
     policy = next(row for row in result["policies"] if row["policy_id"] == "A2")
     assert policy["run"]["run_id"] == "active"
+
+
+def _queue_lane(track):
+    return {"track": track, "run_id": f"run-{track}",
+        "run_directory": track, "device": "cuda:0", "status": "complete",
+        "pid": None, "completed_updates": 0, "chunk_updates": 100}
+
+
+def _read_queue_for_lanes(tmp_path, lanes):
+    now = datetime.now(timezone.utc)
+    root = tmp_path / "checkpoints"
+    root.mkdir(parents=True)
+    (root / "queue-status.json").write_text(json.dumps({
+        "schema_version": 1, "updated_utc": now.isoformat(), "lanes": lanes}))
+    return _queue_state(root, now.timestamp(), tmp_path)
+
+
+def test_native_queue_list_requires_exactly_one_lane_per_track(tmp_path):
+    result = _read_queue_for_lanes(
+        tmp_path, [_queue_lane(track) for track in TRACKS])
+
+    assert result["state"] == "fresh"
+    assert set(result["lanes"]) == set(TRACKS)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda rows: rows.pop(),
+    lambda rows: rows.append(_queue_lane("A1")),
+    lambda rows: rows.append(_queue_lane("unknown")),
+])
+def test_native_queue_list_rejects_missing_duplicate_and_unknown_tracks(tmp_path, mutate):
+    rows = [_queue_lane(track) for track in TRACKS]
+    mutate(rows)
+
+    result = _read_queue_for_lanes(tmp_path, rows)
+
+    assert result["state"] == "stale"
+    assert result["worker_state"] == "unknown"
+    assert result["error"]
+
+
+def test_dict_queue_requires_exact_keys_and_matching_lane_records(tmp_path):
+    rows = {track: {key: value for key, value in _queue_lane(track).items()
+                    if key != "track"} for track in TRACKS}
+    result = _read_queue_for_lanes(tmp_path, rows)
+    assert result["state"] == "fresh"
+
+    rows["A1"]["track"] = "A2"
+    mismatch = _read_queue_for_lanes(tmp_path / "mismatch", rows)
+    assert mismatch["state"] == "stale"
+    assert mismatch["worker_state"] == "unknown"
+
+
+def test_live_assignment_projection_requires_matching_scheduler_snapshot(tmp_path):
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    scenario = "offense_vs_scripted_pressure"
+    category = SCENARIOS[scenario].required_categories[0]
+    previous = {"cycle": 1, "scenario_id": scenario, "category": category,
+        "seed": 17, "assignment_id": "previous-1", "sampling_role": "stage_exposure"}
+    assignment = {"cycle": 2, "scenario_id": scenario, "category": category,
+        "seed": 18, "assignment_id": "pending-2", "sampling_role": "stage_exposure"}
+    counts = {"exposure_chunks": {scenario: 1},
+        "category_exposures": {f"{scenario}/{category}": 1},
+        "recovery_pressure": {}, "phase4_exposure_counts": {}}
+    scheduler = {"schema_version": 1, "completed_cycle": 1,
+        "pending_assignment": assignment, **counts,
+        "history": [{"assignment": previous}]}
+    (root / "task-scheduler-state.json").write_text(json.dumps(scheduler))
+    queue_payload = {"cycle": 2, "task_assignment": assignment,
+        "task_scheduler": {"completed_cycle": 1, "pending_assignment": assignment,
+            **counts}}
+
+    projected = _training_curriculum_projection(root, queue_payload, "fresh", tmp_path)
+
+    assert projected["state"] == "fresh"
+    assert projected["assignment"]["scenario_id"] == scenario
+    assert projected["assignment"]["category"] == category

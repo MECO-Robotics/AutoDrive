@@ -58,6 +58,58 @@ def load_ablation_records(run_dir: Path) -> list[dict]:
     return records
 
 
+def _merge_meco_track_status(curriculum_body: bytes, meco_status: dict | None) -> bytes:
+    """Project live MECO status onto cards while retaining saved evidence fields."""
+    payload = json.loads(curriculum_body)
+    policies = meco_status.get("policies") if isinstance(meco_status, dict) else None
+    policies = policies if isinstance(policies, list) else []
+    policies_by_track = {row.get("policy_id"): row for row in policies
+        if isinstance(row, dict) and row.get("policy_id") in ("A1", "A2", "A3", "C1", "C2")}
+    queue = meco_status.get("queue", {}) if isinstance(meco_status, dict) else {}
+    lanes = queue.get("lanes", {}) if isinstance(queue, dict) else {}
+    curriculum = queue.get("curriculum", {}) if isinstance(queue, dict) else {}
+    assignment = (curriculum.get("assignment")
+                  if isinstance(curriculum, dict)
+                  and curriculum.get("state") == "fresh"
+                  and isinstance(curriculum.get("assignment"), dict) else None)
+    for track in payload.get("tracks", []):
+        if not isinstance(track, dict) or track.get("track") not in (
+                "A1", "A2", "A3", "C1", "C2"):
+            continue
+        source = policies_by_track.get(track["track"])
+        if source is None:
+            track.update(status="unavailable", updates=None, device=None,
+                         current=None, current_category=None,
+                         current_source="unavailable", evaluation="unavailable")
+            continue
+        run = source.get("run") if isinstance(source.get("run"), dict) else {}
+        config = run.get("config") if isinstance(run.get("config"), dict) else {}
+        lane = lanes.get(track["track"]) if isinstance(lanes, dict) else {}
+        lane = lane if isinstance(lane, dict) else {}
+        active = (lane.get("status") in ("running", "stalled")
+                  or source.get("training_state") in ("running", "stalled", "unconfirmed"))
+        live_assignment = assignment if active else None
+        updates = run.get("completed_updates")
+        if type(updates) is not int:
+            updates = lane.get("completed_updates")
+        if type(updates) is not int:
+            updates = None
+        fallback_current = config.get("scenario_id") or run.get("current")
+        track.update(
+            status=(source.get("training_state")
+                    if isinstance(source.get("training_state"), str) else "unknown"),
+            updates=updates,
+            device=(run.get("device") or config.get("device") or lane.get("device")),
+            current=(live_assignment.get("scenario_id") if live_assignment else fallback_current),
+            current_category=(live_assignment.get("category") if live_assignment else None),
+            current_source=("live_assignment" if live_assignment else
+                            "run_config_fallback" if fallback_current else "unavailable"),
+            evaluation=(source.get("evaluation_state")
+                        if isinstance(source.get("evaluation_state"), str)
+                        else "not_evaluated"))
+    return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+
+
 @contextmanager
 def _dashboard_simulation_slot(run_dir: Path, *, dual_gpu: bool = False):
     """Pass dashboard jobs to the single or dual GPU scheduler."""
@@ -195,6 +247,14 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None, *,
                 body = curriculum_status_payload(
                     run_dir, curriculum_root=curriculum_root,
                     meco_data_root=selected_meco_data_root)
+                try:
+                    live_status = json.loads(meco_status_payload(
+                        Path(__file__).resolve().parents[1],
+                        data_root=selected_meco_data_root))
+                    if isinstance(live_status.get("policies"), list):
+                        body = _merge_meco_track_status(body, live_status)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/field-layout":
