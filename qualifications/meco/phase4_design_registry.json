@@ -3,31 +3,402 @@
   "mode": "validation_only_design_overlay",
   "pairing": {
     "unit": "scenario/category/layout/defender_family/start_condition/sensor_profile/factor",
-    "conditions": ["no_factor", "factor_treatment"],
-    "same_checkpoint_controls": ["D0", "D1", "D2", "A1", "A2", "A3", "C1", "C2"],
+    "conditions": [
+      "no_factor",
+      "factor_treatment"
+    ],
+    "same_checkpoint_controls": [
+      "D0",
+      "D1",
+      "D2",
+      "A1",
+      "A2",
+      "A3",
+      "C1",
+      "C2"
+    ],
     "seed_policy": "inherit_validation_protocol_without_serializing_or_exporting_seed_values",
     "expected_pairing": "one matched treatment and no-factor episode for every selected validation seed and applicable factor case"
   },
   "requirements": [
-    {"requirement_id":"stationary_blockage","source_plan_text":"stationary blockage","factor_ids":["blockage.stationary"],"validation_case_axes":{"category":"offense_vs_scripted_pressure.required_categories","layout_id":"validation.layouts","defender_family":"validation.defender_families","start_condition":"validation.start_conditions","sensor_profile":"validation.sensor_profiles"},"required_outcome_signals":["route_completion_rate","time_lost_to_blockage_s","successful_alternate_crossing_rate"],"signal_status":{"route_completion_rate":"unavailable","time_lost_to_blockage_s":"unavailable","successful_alternate_crossing_rate":"unavailable"},"stimulus_status":"design_only_not_runtime_registered"},
-    {"requirement_id":"direct_pursuit","source_plan_text":"direct pursuit","factor_ids":["opponent.direct_pursuit"],"validation_case_axes":{"category":"offense_vs_scripted_pressure.required_categories","layout_id":"validation.layouts","defender_family":"validation.defender_families","start_condition":"validation.start_conditions","sensor_profile":"validation.sensor_profiles"},"required_outcome_signals":["interception_rate","time_lost_to_opponents_s","robot_contact_rate"],"signal_status":{"interception_rate":"unavailable","time_lost_to_opponents_s":"unavailable","robot_contact_rate":"available_safety_robot_contact_rate_but_not_pursuit_specific"},"stimulus_status":"design_only_existing_factor_registry_has_policy_switch_but_not_standalone_pursuit_factor"},
-    {"requirement_id":"trench_interception","source_plan_text":"trench interception","factor_ids":["opponent.trench_interception"],"validation_case_axes":{"scenario_id":"offense_vs_scripted_pressure","category":"offense_vs_scripted_pressure.required_categories","layout_id":"validation.layouts","defender_family":"validation.defender_families","start_condition":"validation.start_conditions","sensor_profile":"validation.sensor_profiles"},"required_outcome_signals":["interception_rate","alternate_crossing_success_rate","trench_crossing_time_s"],"signal_status":{"interception_rate":"unavailable","alternate_crossing_success_rate":"unavailable","trench_crossing_time_s":"unavailable"},"stimulus_status":"design_only_not_runtime_registered"},
-    {"requirement_id":"feints","source_plan_text":"feints","factor_ids":["opponent.feint_reversal"],"existing_runtime_factor_ids":["feinting_opponent"],"validation_case_axes":{"scenario_id":"offense_vs_scripted_pressure","category":"offense_vs_scripted_pressure.required_categories","layout_id":"validation.layouts","defender_family":"validation.defender_families","start_condition":"validation.start_conditions","sensor_profile":"validation.sensor_profiles"},"required_outcome_signals":["reaction_latency_after_reversal_s","interception_rate","route_completion_rate"],"signal_status":{"reaction_latency_after_reversal_s":"unavailable","interception_rate":"unavailable","route_completion_rate":"unavailable"},"stimulus_status":"existing_runtime_factor_registered_but_no_phase4_outcome_runs"},
-    {"requirement_id":"reactive_defenders_and_opponent_pools","source_plan_text":"reactive defenders, opponent-policy pools, and hold out entire defense policy families","factor_ids":["defender.reactive_pool"],"validation_case_axes":{"scenario_id":["offense_vs_scripted_pressure","full_match_offense"],"defender_family":"validation.defender_families","opponent_policy_pool":"design_axis.policy_pool"},"required_outcome_signals":["interception_rate","policy_family_coverage","paired_outcome_by_family"],"signal_status":{"interception_rate":"unavailable","policy_family_coverage":"axis_exists_but_execution_unavailable","paired_outcome_by_family":"unavailable"},"stimulus_status":"design_only_existing_protocol_family_names_do_not_establish_reactive_pool_runtime"},
-    {"requirement_id":"multiple_legal_team_start_states","source_plan_text":"multiple robot start states","factor_ids":["start.legal_team_poses"],"validation_case_axes":{"scenario_id":"full_match_offense","start_condition":"validation.start_conditions","team_pose_set":"design_axis.legal_team_pose_sets"},"required_outcome_signals":["legal_start_validation_rate","outcome_by_start_state"],"signal_status":{"legal_start_validation_rate":"unavailable","outcome_by_start_state":"unavailable"},"stimulus_status":"design_only_protocol_has_named_start_condition_not_enumerated_team_pose_sets"},
-    {"requirement_id":"teammate_behaviors","source_plan_text":"simulated teammate behaviors","factor_ids":["teammate.behavior_pool"],"validation_case_axes":{"scenario_id":["full_match_offense","team_delivery_cycles"],"teammate_behavior":"design_axis.teammate_behaviors","layout_id":"validation.layouts","start_condition":"validation.start_conditions"},"required_outcome_signals":["outcome_by_teammate_behavior","teammate_collision_rate","score_contribution"],"signal_status":{"outcome_by_teammate_behavior":"unavailable","teammate_collision_rate":"unavailable","score_contribution":"available_fuel_scored_proxy_not_match_point_contribution"},"stimulus_status":"design_only_not_runtime_registered"},
-    {"requirement_id":"sensor_delay_and_low_confidence","source_plan_text":"sensor delay and low confidence","factor_ids":["sensor.delay_120ms","sensor.low_confidence"],"existing_runtime_factor_ids":["observation_delay","independent_low_confidence"],"validation_case_axes":{"sensor_profile":"validation.sensor_profiles","layout_id":"validation.layouts","defender_family":"validation.defender_families","start_condition":"validation.start_conditions"},"required_outcome_signals":["outcome_by_sensor_condition","stale_observation_reaction_latency_s","outcome_by_confidence_band"],"signal_status":{"outcome_by_sensor_condition":"unavailable","stale_observation_reaction_latency_s":"unavailable","outcome_by_confidence_band":"unavailable"},"stimulus_status":"existing_runtime_factors_registered_but_no_phase4_outcome_runs"},
-    {"requirement_id":"abrupt_opponent_change","source_plan_text":"abrupt opponent change","factor_ids":["opponent.abrupt_policy_change"],"existing_runtime_factor_ids":["abrupt_opponent_policy_change"],"validation_case_axes":{"scenario_id":"offense_vs_scripted_pressure","category":"offense_vs_scripted_pressure.required_categories","defender_family":"validation.defender_families","layout_id":"validation.layouts","start_condition":"validation.start_conditions","sensor_profile":"validation.sensor_profiles"},"required_outcome_signals":["reaction_latency_after_switch_s","interception_rate","route_completion_rate"],"signal_status":{"reaction_latency_after_switch_s":"unavailable","interception_rate":"unavailable","route_completion_rate":"unavailable"},"stimulus_status":"existing_runtime_factor_registered_but_no_phase4_outcome_runs"},
-    {"requirement_id":"bumps_and_contact","source_plan_text":"robot bumps","factor_ids":["contact.robot_bump"],"validation_case_axes":{"scenario_id":["offense_vs_scripted_pressure","full_match_offense"],"layout_id":"validation.layouts","start_condition":"validation.start_conditions","contact_geometry":"design_axis.bump_geometry"},"required_outcome_signals":["safety_robot_contact_rate","recovery_time_after_bump_s","route_completion_rate"],"signal_status":{"safety_robot_contact_rate":"available_schema_metric_but_not_bump_specific","recovery_time_after_bump_s":"unavailable","route_completion_rate":"unavailable"},"stimulus_status":"design_only_not_runtime_registered"},
-    {"requirement_id":"observation_only_focal_pose_mislocalization","source_plan_text":"mislocalized initial pose","factor_ids":["observation.focal_pose_offset"],"validation_case_axes":{"scenario_id":"full_match_offense","start_condition":"validation.start_conditions","pose_offset":"design_axis.focal_pose_offsets","truth_pose":"design_axis.truth_pose_boundary"},"required_outcome_signals":["relocalization_time_s","pose_error_recovery_rate","safety_contact_rate"],"signal_status":{"relocalization_time_s":"unavailable","pose_error_recovery_rate":"unavailable","safety_contact_rate":"available_schema_metric_not_mislocalization_specific"},"stimulus_status":"design_only_requires_observation_truth_separation_not_runtime_registered"}
+    {
+      "requirement_id": "stationary_blockage",
+      "source_plan_text": "stationary blockage",
+      "factor_ids": [
+        "blockage.stationary"
+      ],
+      "validation_case_axes": {
+        "category": "offense_vs_scripted_pressure.required_categories",
+        "layout_id": "validation.layouts",
+        "defender_family": "validation.defender_families",
+        "start_condition": "validation.start_conditions",
+        "sensor_profile": "validation.sensor_profiles"
+      },
+      "required_outcome_signals": [
+        "route_completion_rate",
+        "time_lost_to_blockage_s",
+        "successful_alternate_crossing_rate"
+      ],
+      "signal_status": {
+        "route_completion_rate": "unavailable",
+        "time_lost_to_blockage_s": "unavailable",
+        "successful_alternate_crossing_rate": "unavailable"
+      },
+      "stimulus_status": "design_only_not_runtime_registered"
+    },
+    {
+      "requirement_id": "direct_pursuit",
+      "source_plan_text": "direct pursuit",
+      "factor_ids": [
+        "opponent.direct_pursuit"
+      ],
+      "validation_case_axes": {
+        "category": "offense_vs_scripted_pressure.required_categories",
+        "layout_id": "validation.layouts",
+        "defender_family": "validation.defender_families",
+        "start_condition": "validation.start_conditions",
+        "sensor_profile": "validation.sensor_profiles"
+      },
+      "required_outcome_signals": [
+        "interception_rate",
+        "time_lost_to_opponents_s",
+        "robot_contact_rate"
+      ],
+      "signal_status": {
+        "interception_rate": "unavailable",
+        "time_lost_to_opponents_s": "unavailable",
+        "robot_contact_rate": "available_safety_robot_contact_rate_but_not_pursuit_specific"
+      },
+      "stimulus_status": "design_only_existing_factor_registry_has_policy_switch_but_not_standalone_pursuit_factor"
+    },
+    {
+      "requirement_id": "trench_interception",
+      "source_plan_text": "trench interception",
+      "factor_ids": [
+        "opponent.trench_interception"
+      ],
+      "validation_case_axes": {
+        "scenario_id": "offense_vs_scripted_pressure",
+        "category": {
+          "route_segment_index": 1,
+          "equals": "trench",
+          "expected_values": [
+            "active/trench/level_0",
+            "active/trench/level_1_stationary",
+            "active/trench/level_2_patrol",
+            "active/trench/level_3_seeded_choice",
+            "active/trench/level_3_trench",
+            "active/trench/level_4_reactive",
+            "active/trench/level_5_mixed",
+            "inactive/trench/level_0",
+            "inactive/trench/level_1_stationary",
+            "inactive/trench/level_2_patrol",
+            "inactive/trench/level_3_seeded_choice",
+            "inactive/trench/level_3_trench",
+            "inactive/trench/level_4_reactive",
+            "inactive/trench/level_5_mixed"
+          ],
+          "scenario_id": "offense_vs_scripted_pressure"
+        },
+        "layout_id": "validation.layouts",
+        "defender_family": "validation.defender_families",
+        "start_condition": "validation.start_conditions",
+        "sensor_profile": "validation.sensor_profiles"
+      },
+      "required_outcome_signals": [
+        "interception_rate",
+        "alternate_crossing_success_rate",
+        "trench_crossing_time_s"
+      ],
+      "signal_status": {
+        "interception_rate": "unavailable",
+        "alternate_crossing_success_rate": "unavailable",
+        "trench_crossing_time_s": "unavailable"
+      },
+      "stimulus_status": "design_only_not_runtime_registered",
+      "resolved_category_domain": {
+        "route_segment_index": 1,
+        "equals": "trench",
+        "expected_category_count": 14,
+        "expected_values": [
+          "active/trench/level_0",
+          "active/trench/level_1_stationary",
+          "active/trench/level_2_patrol",
+          "active/trench/level_3_seeded_choice",
+          "active/trench/level_3_trench",
+          "active/trench/level_4_reactive",
+          "active/trench/level_5_mixed",
+          "inactive/trench/level_0",
+          "inactive/trench/level_1_stationary",
+          "inactive/trench/level_2_patrol",
+          "inactive/trench/level_3_seeded_choice",
+          "inactive/trench/level_3_trench",
+          "inactive/trench/level_4_reactive",
+          "inactive/trench/level_5_mixed"
+        ],
+        "matching_rule": "category.split(\"/\")[1] == \"trench\"; exact segment equality, never substring matching"
+      }
+    },
+    {
+      "requirement_id": "feints",
+      "source_plan_text": "feints",
+      "factor_ids": [
+        "opponent.feint_reversal"
+      ],
+      "existing_runtime_factor_ids": [
+        "feinting_opponent"
+      ],
+      "validation_case_axes": {
+        "scenario_id": "offense_vs_scripted_pressure",
+        "category": "offense_vs_scripted_pressure.required_categories",
+        "layout_id": "validation.layouts",
+        "defender_family": "validation.defender_families",
+        "start_condition": "validation.start_conditions",
+        "sensor_profile": "validation.sensor_profiles"
+      },
+      "required_outcome_signals": [
+        "reaction_latency_after_reversal_s",
+        "interception_rate",
+        "route_completion_rate"
+      ],
+      "signal_status": {
+        "reaction_latency_after_reversal_s": "unavailable",
+        "interception_rate": "unavailable",
+        "route_completion_rate": "unavailable"
+      },
+      "stimulus_status": "existing_runtime_factor_registered_but_no_phase4_outcome_runs"
+    },
+    {
+      "requirement_id": "reactive_defenders_and_opponent_pools",
+      "source_plan_text": "reactive defenders, opponent-policy pools, and hold out entire defense policy families",
+      "factor_ids": [
+        "defender.reactive_pool"
+      ],
+      "validation_case_axes": {
+        "scenario_id": [
+          "offense_vs_scripted_pressure",
+          "full_match_offense"
+        ],
+        "defender_family": "validation.defender_families",
+        "opponent_policy_pool": "design_axis.policy_pool"
+      },
+      "required_outcome_signals": [
+        "interception_rate",
+        "policy_family_coverage",
+        "paired_outcome_by_family"
+      ],
+      "signal_status": {
+        "interception_rate": "unavailable",
+        "policy_family_coverage": "axis_exists_but_execution_unavailable",
+        "paired_outcome_by_family": "unavailable"
+      },
+      "stimulus_status": "design_only_existing_protocol_family_names_do_not_establish_reactive_pool_runtime"
+    },
+    {
+      "requirement_id": "multiple_legal_team_start_states",
+      "source_plan_text": "multiple robot start states",
+      "factor_ids": [
+        "start.legal_team_poses"
+      ],
+      "validation_case_axes": {
+        "scenario_id": "full_match_offense",
+        "start_condition": "validation.start_conditions",
+        "team_pose_set": "design_axis.legal_team_pose_sets"
+      },
+      "required_outcome_signals": [
+        "legal_start_validation_rate",
+        "outcome_by_start_state"
+      ],
+      "signal_status": {
+        "legal_start_validation_rate": "unavailable",
+        "outcome_by_start_state": "unavailable"
+      },
+      "stimulus_status": "design_only_protocol_has_named_start_condition_not_enumerated_team_pose_sets"
+    },
+    {
+      "requirement_id": "teammate_behaviors",
+      "source_plan_text": "simulated teammate behaviors",
+      "factor_ids": [
+        "teammate.behavior_pool"
+      ],
+      "validation_case_axes": {
+        "scenario_id": [
+          "full_match_offense",
+          "team_delivery_cycles"
+        ],
+        "teammate_behavior": "design_axis.teammate_behaviors",
+        "layout_id": "validation.layouts",
+        "start_condition": "validation.start_conditions"
+      },
+      "required_outcome_signals": [
+        "outcome_by_teammate_behavior",
+        "teammate_collision_rate",
+        "score_contribution"
+      ],
+      "signal_status": {
+        "outcome_by_teammate_behavior": "unavailable",
+        "teammate_collision_rate": "unavailable",
+        "score_contribution": "available_fuel_scored_proxy_not_match_point_contribution"
+      },
+      "stimulus_status": "design_only_not_runtime_registered"
+    },
+    {
+      "requirement_id": "sensor_delay_and_low_confidence",
+      "source_plan_text": "sensor delay and low confidence",
+      "factor_ids": [
+        "sensor.delay_120ms",
+        "sensor.low_confidence"
+      ],
+      "existing_runtime_factor_ids": [
+        "observation_delay",
+        "independent_low_confidence"
+      ],
+      "validation_case_axes": {
+        "sensor_profile": "validation.sensor_profiles",
+        "layout_id": "validation.layouts",
+        "defender_family": "validation.defender_families",
+        "start_condition": "validation.start_conditions"
+      },
+      "required_outcome_signals": [
+        "outcome_by_sensor_condition",
+        "stale_observation_reaction_latency_s",
+        "outcome_by_confidence_band"
+      ],
+      "signal_status": {
+        "outcome_by_sensor_condition": "unavailable",
+        "stale_observation_reaction_latency_s": "unavailable",
+        "outcome_by_confidence_band": "unavailable"
+      },
+      "stimulus_status": "existing_runtime_factors_registered_but_no_phase4_outcome_runs"
+    },
+    {
+      "requirement_id": "abrupt_opponent_change",
+      "source_plan_text": "abrupt opponent change",
+      "factor_ids": [
+        "opponent.abrupt_policy_change"
+      ],
+      "existing_runtime_factor_ids": [
+        "abrupt_opponent_policy_change"
+      ],
+      "validation_case_axes": {
+        "scenario_id": "offense_vs_scripted_pressure",
+        "category": "offense_vs_scripted_pressure.required_categories",
+        "defender_family": "validation.defender_families",
+        "layout_id": "validation.layouts",
+        "start_condition": "validation.start_conditions",
+        "sensor_profile": "validation.sensor_profiles"
+      },
+      "required_outcome_signals": [
+        "reaction_latency_after_switch_s",
+        "interception_rate",
+        "route_completion_rate"
+      ],
+      "signal_status": {
+        "reaction_latency_after_switch_s": "unavailable",
+        "interception_rate": "unavailable",
+        "route_completion_rate": "unavailable"
+      },
+      "stimulus_status": "existing_runtime_factor_registered_but_no_phase4_outcome_runs"
+    },
+    {
+      "requirement_id": "bumps_and_contact",
+      "source_plan_text": "robot-to-robot bumps/contact, excluding field bump terrain",
+      "factor_ids": [
+        "contact.robot_bump"
+      ],
+      "validation_case_axes": {
+        "scenario_id": [
+          "offense_vs_scripted_pressure",
+          "full_match_offense"
+        ],
+        "layout_id": "validation.layouts",
+        "start_condition": "validation.start_conditions",
+        "robot_contact_geometry": "design_axis.robot_contact_geometry"
+      },
+      "required_outcome_signals": [
+        "safety_robot_contact_rate",
+        "recovery_time_after_bump_s",
+        "route_completion_rate"
+      ],
+      "signal_status": {
+        "safety_robot_contact_rate": "available_schema_metric_but_not_bump_specific",
+        "recovery_time_after_bump_s": "unavailable",
+        "route_completion_rate": "unavailable"
+      },
+      "stimulus_status": "design_only_not_runtime_registered",
+      "contact_semantics": {
+        "event": "actual physical contact between two robots, identified by simulator robot-to-robot contact-pair/contact impulse signals",
+        "excluded_event": "robot interaction with field bump terrain; terrain collision/contact is not robot-to-robot contact",
+        "realization": "a requested geometry is realized only when the corresponding robot-to-robot contact signal is recorded in the episode; requested setup alone is not contact exposure",
+        "recovery_event": "recovery begins at the recorded end of robot-to-robot contact and ends at the first subsequent recorded return to the pre-contact route-following state; both event timestamps and the route-following state must be present",
+        "thresholds_or_margins": "none declared; no minimum contact impulse, distance, duration, or recovery-performance threshold is implied"
+      }
+    },
+    {
+      "requirement_id": "observation_only_focal_pose_mislocalization",
+      "source_plan_text": "mislocalized initial pose",
+      "factor_ids": [
+        "observation.focal_pose_offset"
+      ],
+      "validation_case_axes": {
+        "scenario_id": "full_match_offense",
+        "start_condition": "validation.start_conditions",
+        "pose_offset": "design_axis.focal_pose_offsets",
+        "truth_pose": "design_axis.truth_pose_boundary"
+      },
+      "required_outcome_signals": [
+        "relocalization_time_s",
+        "pose_error_recovery_rate",
+        "safety_contact_rate"
+      ],
+      "signal_status": {
+        "relocalization_time_s": "unavailable",
+        "pose_error_recovery_rate": "unavailable",
+        "safety_contact_rate": "available_schema_metric_not_mislocalization_specific"
+      },
+      "stimulus_status": "design_only_requires_observation_truth_separation_not_runtime_registered"
+    }
   ],
   "design_axes": {
-    "policy_pool": ["stationary_blockage", "direct_pursuit", "trench_interceptor", "telegraph_reversal", "reactive_defender_a", "reactive_defender_b", "orbit_to_pursuit_switch"],
-    "legal_team_pose_sets": ["team_start_set_a", "team_start_set_b", "team_start_set_c"],
-    "teammate_behaviors": ["collect", "score", "ferry", "defend", "hold_position"],
-    "bump_geometry": ["crossing_contact", "side_contact", "recovery_contact"],
-    "focal_pose_offsets": ["translation_small", "translation_large", "heading_offset"],
-    "truth_pose_boundary": ["simulator_truth_only_not_policy_input"]
+    "policy_pool": [
+      "stationary_blockage",
+      "direct_pursuit",
+      "trench_interceptor",
+      "telegraph_reversal",
+      "reactive_defender_a",
+      "reactive_defender_b",
+      "orbit_to_pursuit_switch"
+    ],
+    "legal_team_pose_sets": [
+      "team_start_set_a",
+      "team_start_set_b",
+      "team_start_set_c"
+    ],
+    "teammate_behaviors": [
+      "collect",
+      "score",
+      "ferry",
+      "defend",
+      "hold_position"
+    ],
+    "focal_pose_offsets": [
+      "translation_small",
+      "translation_large",
+      "heading_offset"
+    ],
+    "truth_pose_boundary": [
+      "simulator_truth_only_not_policy_input"
+    ],
+    "robot_contact_geometry": [
+      "crossing_contact",
+      "side_contact",
+      "recovery_contact"
+    ]
   },
-  "prohibitions": ["no_final_test_seed_values_or_arrays", "no_safety_margins", "no_qualification_claim", "no_runtime_stimulus_claim_from_design_only_entries"]
+  "prohibitions": [
+    "no_final_test_seed_values_or_arrays",
+    "no_safety_margins",
+    "no_qualification_claim",
+    "no_runtime_stimulus_claim_from_design_only_entries"
+  ]
 }

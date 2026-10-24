@@ -1,10 +1,5 @@
 {
   "design_axes": {
-    "bump_geometry": [
-      "crossing_contact",
-      "side_contact",
-      "recovery_contact"
-    ],
     "focal_pose_offsets": [
       "translation_small",
       "translation_large",
@@ -23,6 +18,11 @@
       "reactive_defender_a",
       "reactive_defender_b",
       "orbit_to_pursuit_switch"
+    ],
+    "robot_contact_geometry": [
+      "crossing_contact",
+      "side_contact",
+      "recovery_contact"
     ],
     "teammate_behaviors": [
       "collect",
@@ -44,7 +44,7 @@
     "validation_case_count": 466
   },
   "factor_registry_binding": {
-    "registry_raw_file_sha256": "c2344dc640b2377c9b3d6e6115e2cd516a075a8507087c8d2aa1ed77a907d771",
+    "registry_raw_file_sha256": "f731466a43f39b4eb7d3f9450e96b63201f36ff3baec618b68ae0aed87181194",
     "registry_schema": "meco-phase4-design-registry-v1"
   },
   "family_separation": {
@@ -59,7 +59,7 @@
     ],
     "whole_family_holdout_verified": true
   },
-  "overlay_id": "c5e6091d14536f6ac327b6569da68c16aac7a3d4667d910e0a02375a5b54966d",
+  "overlay_id": "df935d1f9c606cba32b5099084cc20a2652057ce8892c75a986fa093acd8bf2e",
   "planned_pairing": {
     "conditions": [
       "no_factor",
@@ -92,6 +92,7 @@
   "qualification_eligible": false,
   "requirements": [
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -1481,6 +1482,7 @@
         "successful_alternate_crossing_rate"
       ],
       "requirement_id": "stationary_blockage",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "category": [
           "active/bump/level_0",
@@ -1538,6 +1540,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "route_completion_rate": "unavailable",
         "successful_alternate_crossing_rate": "unavailable",
@@ -1546,6 +1549,7 @@
       "stimulus_status": "design_only_not_runtime_registered"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -2935,6 +2939,7 @@
         "robot_contact_rate"
       ],
       "requirement_id": "direct_pursuit",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "category": [
           "active/bump/level_0",
@@ -2992,6 +2997,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "interception_rate": "unavailable",
         "robot_contact_rate": "available_safety_robot_contact_rate_but_not_pursuit_specific",
@@ -3000,6 +3006,7 @@
       "stimulus_status": "design_only_existing_factor_registry_has_policy_switch_but_not_standalone_pursuit_factor"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -3011,442 +3018,10 @@
       "implicit_scenario_scope": [
         "offense_vs_scripted_pressure"
       ],
-      "planned_paired_protocol_condition_rows_per_factor": 304,
-      "protocol_bound_case_count_per_factor": 152,
+      "planned_paired_protocol_condition_rows_per_factor": 112,
+      "protocol_bound_case_count_per_factor": 56,
       "protocol_bound_case_rows": [
         {
-          "category": "active/bump/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_bump",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_bump",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_bump",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_bump",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_seeded_choice",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_seeded_choice",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_seeded_choice",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_3_seeded_choice",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/bump/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "active/open/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
           "category": "active/trench/level_0",
           "defender_family": "orbiting_interceptor",
           "factor_id": "opponent.trench_interception",
@@ -3691,438 +3266,6 @@
         },
         {
           "category": "active/trench/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_bump",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_bump",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_bump",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_bump",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_seeded_choice",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_seeded_choice",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_seeded_choice",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_3_seeded_choice",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/bump/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_0",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_0",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_1_stationary",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_1_stationary",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_2_patrol",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_2_patrol",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_4_reactive",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_4_reactive",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_5_mixed",
-          "defender_family": "split_chaser",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v1",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_5_mixed",
-          "defender_family": "orbiting_interceptor",
-          "factor_id": "opponent.trench_interception",
-          "layout_id": "2026_rebuilt_shifted_structures_v2",
-          "scenario_id": "offense_vs_scripted_pressure",
-          "sensor_profile": "noisy",
-          "start_condition": "offset_upper_lane"
-        },
-        {
-          "category": "inactive/open/level_5_mixed",
           "defender_family": "split_chaser",
           "factor_id": "opponent.trench_interception",
           "layout_id": "2026_rebuilt_shifted_structures_v2",
@@ -4389,20 +3532,10 @@
         "trench_crossing_time_s"
       ],
       "requirement_id": "trench_interception",
-      "resolved_protocol_constraints": {
-        "category": [
-          "active/bump/level_0",
-          "active/bump/level_1_stationary",
-          "active/bump/level_2_patrol",
-          "active/bump/level_3_bump",
-          "active/bump/level_3_seeded_choice",
-          "active/bump/level_4_reactive",
-          "active/bump/level_5_mixed",
-          "active/open/level_0",
-          "active/open/level_1_stationary",
-          "active/open/level_2_patrol",
-          "active/open/level_4_reactive",
-          "active/open/level_5_mixed",
+      "resolved_category_domain": {
+        "equals": "trench",
+        "expected_category_count": 14,
+        "expected_values": [
           "active/trench/level_0",
           "active/trench/level_1_stationary",
           "active/trench/level_2_patrol",
@@ -4410,18 +3543,26 @@
           "active/trench/level_3_trench",
           "active/trench/level_4_reactive",
           "active/trench/level_5_mixed",
-          "inactive/bump/level_0",
-          "inactive/bump/level_1_stationary",
-          "inactive/bump/level_2_patrol",
-          "inactive/bump/level_3_bump",
-          "inactive/bump/level_3_seeded_choice",
-          "inactive/bump/level_4_reactive",
-          "inactive/bump/level_5_mixed",
-          "inactive/open/level_0",
-          "inactive/open/level_1_stationary",
-          "inactive/open/level_2_patrol",
-          "inactive/open/level_4_reactive",
-          "inactive/open/level_5_mixed",
+          "inactive/trench/level_0",
+          "inactive/trench/level_1_stationary",
+          "inactive/trench/level_2_patrol",
+          "inactive/trench/level_3_seeded_choice",
+          "inactive/trench/level_3_trench",
+          "inactive/trench/level_4_reactive",
+          "inactive/trench/level_5_mixed"
+        ],
+        "matching_rule": "category.split(\"/\")[1] == \"trench\"; exact segment equality, never substring matching",
+        "route_segment_index": 1
+      },
+      "resolved_protocol_constraints": {
+        "category": [
+          "active/trench/level_0",
+          "active/trench/level_1_stationary",
+          "active/trench/level_2_patrol",
+          "active/trench/level_3_seeded_choice",
+          "active/trench/level_3_trench",
+          "active/trench/level_4_reactive",
+          "active/trench/level_5_mixed",
           "inactive/trench/level_0",
           "inactive/trench/level_1_stationary",
           "inactive/trench/level_2_patrol",
@@ -4449,6 +3590,30 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [
+        {
+          "axis": "category",
+          "equals": "trench",
+          "resolved_values": [
+            "active/trench/level_0",
+            "active/trench/level_1_stationary",
+            "active/trench/level_2_patrol",
+            "active/trench/level_3_seeded_choice",
+            "active/trench/level_3_trench",
+            "active/trench/level_4_reactive",
+            "active/trench/level_5_mixed",
+            "inactive/trench/level_0",
+            "inactive/trench/level_1_stationary",
+            "inactive/trench/level_2_patrol",
+            "inactive/trench/level_3_seeded_choice",
+            "inactive/trench/level_3_trench",
+            "inactive/trench/level_4_reactive",
+            "inactive/trench/level_5_mixed"
+          ],
+          "route_segment_index": 1,
+          "scenario_id": "offense_vs_scripted_pressure"
+        }
+      ],
       "signal_status": {
         "alternate_crossing_success_rate": "unavailable",
         "interception_rate": "unavailable",
@@ -4457,6 +3622,7 @@
       "stimulus_status": "design_only_not_runtime_registered"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -5848,6 +5014,7 @@
         "route_completion_rate"
       ],
       "requirement_id": "feints",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "category": [
           "active/bump/level_0",
@@ -5908,6 +5075,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "interception_rate": "unavailable",
         "reaction_latency_after_reversal_s": "unavailable",
@@ -5916,6 +5084,7 @@
       "stimulus_status": "existing_runtime_factor_registered_but_no_phase4_outcome_runs"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 7,
       "design_only_rows": [
         {
@@ -8735,6 +7904,7 @@
         "paired_outcome_by_family"
       ],
       "requirement_id": "reactive_defenders_and_opponent_pools",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "defender_family": [
           "none",
@@ -8746,6 +7916,7 @@
           "offense_vs_scripted_pressure"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "interception_rate": "unavailable",
         "paired_outcome_by_family": "unavailable",
@@ -8754,6 +7925,7 @@
       "stimulus_status": "design_only_existing_protocol_family_names_do_not_establish_reactive_pool_runtime"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 3,
       "design_only_rows": [
         {
@@ -10168,6 +9340,7 @@
         "outcome_by_start_state"
       ],
       "requirement_id": "multiple_legal_team_start_states",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "scenario_id": [
           "full_match_offense"
@@ -10176,6 +9349,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "legal_start_validation_rate": "unavailable",
         "outcome_by_start_state": "unavailable"
@@ -10183,6 +9357,7 @@
       "stimulus_status": "design_only_protocol_has_named_start_condition_not_enumerated_team_pose_sets"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 5,
       "design_only_rows": [
         {
@@ -11940,6 +11115,7 @@
         "score_contribution"
       ],
       "requirement_id": "teammate_behaviors",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "layout_id": [
           "2026_rebuilt_shifted_structures_v1",
@@ -11953,6 +11129,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "outcome_by_teammate_behavior": "unavailable",
         "score_contribution": "available_fuel_scored_proxy_not_match_point_contribution",
@@ -11961,6 +11138,7 @@
       "stimulus_status": "design_only_not_runtime_registered"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -20372,6 +19550,7 @@
         "outcome_by_confidence_band"
       ],
       "requirement_id": "sensor_delay_and_low_confidence",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "defender_family": [
           "none",
@@ -20389,6 +19568,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "outcome_by_confidence_band": "unavailable",
         "outcome_by_sensor_condition": "unavailable",
@@ -20397,6 +19577,7 @@
       "stimulus_status": "existing_runtime_factors_registered_but_no_phase4_outcome_runs"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 0,
       "design_only_rows": [],
       "design_only_rows_are_executed_coverage": false,
@@ -21788,6 +20969,7 @@
         "route_completion_rate"
       ],
       "requirement_id": "abrupt_opponent_change",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "category": [
           "active/bump/level_0",
@@ -21848,6 +21030,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "interception_rate": "unavailable",
         "reaction_latency_after_switch_s": "unavailable",
@@ -21856,13 +21039,20 @@
       "stimulus_status": "existing_runtime_factor_registered_but_no_phase4_outcome_runs"
     },
     {
+      "contact_semantics": {
+        "event": "actual physical contact between two robots, identified by simulator robot-to-robot contact-pair/contact impulse signals",
+        "excluded_event": "robot interaction with field bump terrain; terrain collision/contact is not robot-to-robot contact",
+        "realization": "a requested geometry is realized only when the corresponding robot-to-robot contact signal is recorded in the episode; requested setup alone is not contact exposure",
+        "recovery_event": "recovery begins at the recorded end of robot-to-robot contact and ends at the first subsequent recorded return to the pre-contact route-following state; both event timestamps and the route-following state must be present",
+        "thresholds_or_margins": "none declared; no minimum contact impulse, distance, duration, or recovery-performance threshold is implied"
+      },
       "design_only_row_count_per_factor": 3,
       "design_only_rows": [
         {
           "counts_as_executed_coverage": false,
           "counts_as_protocol_coverage": false,
           "design_axes": {
-            "contact_geometry": "crossing_contact"
+            "robot_contact_geometry": "crossing_contact"
           },
           "factor_id": "contact.robot_bump",
           "status": "design_only_unassigned_to_protocol_case"
@@ -21871,7 +21061,7 @@
           "counts_as_executed_coverage": false,
           "counts_as_protocol_coverage": false,
           "design_axes": {
-            "contact_geometry": "side_contact"
+            "robot_contact_geometry": "side_contact"
           },
           "factor_id": "contact.robot_bump",
           "status": "design_only_unassigned_to_protocol_case"
@@ -21880,7 +21070,7 @@
           "counts_as_executed_coverage": false,
           "counts_as_protocol_coverage": false,
           "design_axes": {
-            "contact_geometry": "recovery_contact"
+            "robot_contact_geometry": "recovery_contact"
           },
           "factor_id": "contact.robot_bump",
           "status": "design_only_unassigned_to_protocol_case"
@@ -24639,6 +23829,7 @@
         "route_completion_rate"
       ],
       "requirement_id": "bumps_and_contact",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "layout_id": [
           "2026_rebuilt_shifted_structures_v1",
@@ -24652,6 +23843,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "recovery_time_after_bump_s": "unavailable",
         "route_completion_rate": "unavailable",
@@ -24660,6 +23852,7 @@
       "stimulus_status": "design_only_not_runtime_registered"
     },
     {
+      "contact_semantics": null,
       "design_only_row_count_per_factor": 3,
       "design_only_rows": [
         {
@@ -26078,6 +25271,7 @@
         "safety_contact_rate"
       ],
       "requirement_id": "observation_only_focal_pose_mislocalization",
+      "resolved_category_domain": null,
       "resolved_protocol_constraints": {
         "scenario_id": [
           "full_match_offense"
@@ -26086,6 +25280,7 @@
           "offset_upper_lane"
         ]
       },
+      "resolved_selector_details": [],
       "signal_status": {
         "pose_error_recovery_rate": "unavailable",
         "relocalization_time_s": "unavailable",

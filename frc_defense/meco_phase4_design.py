@@ -29,9 +29,36 @@ SOURCE_PLAN_REQUIREMENTS = frozenset({
 
 def _resolve_selector(axis: str, selector: Any, protocol: dict,
                       registry: dict) -> tuple[set[Any] | None, dict[str, list[Any]],
-                                               set[str]]:
+                                               set[str], dict[str, Any] | None]:
     """Resolve a registry selector to protocol constraints or design-only axes."""
     design_axes = registry.get("design_axes", {})
+    if isinstance(selector, dict):
+        if axis != "category" or set(selector) != {
+                "route_segment_index", "equals", "expected_values", "scenario_id"}:
+            raise ValueError(f"unsupported structured selector for {axis}: {selector}")
+        index, expected, declared, scenario = (
+            selector["route_segment_index"], selector["equals"],
+            selector["expected_values"], selector["scenario_id"])
+        if (not isinstance(index, int) or index < 0 or not isinstance(expected, str) or
+                not expected or not isinstance(declared, list) or not declared or
+                not isinstance(scenario, str) or scenario not in protocol.get("scenario_ids", []) or
+                any(not isinstance(value, str) or not value for value in declared) or
+                len(set(declared)) != len(declared)):
+            raise ValueError(f"malformed exact route-category selector: {selector}")
+        known = {row.get("category") for row in protocol.get("cases", [])
+                 if row.get("split") == "validation" and row.get("scenario_id") == scenario
+                 and isinstance(row.get("category"), str)}
+        resolved = {value for value in known
+                    if len(value.split("/")) > index and value.split("/")[index] == expected}
+        if not resolved:
+            raise ValueError("exact route-category selector resolved to an empty set")
+        if resolved != set(declared):
+            raise ValueError("exact route-category selector resolved outside its declared domain")
+        return resolved, {}, {scenario}, {
+            "axis": axis, "route_segment_index": index, "equals": expected,
+            "resolved_values": sorted(resolved),
+            "scenario_id": scenario,
+        }
     if isinstance(selector, list):
         values = selector
         implicit_scenarios: set[str] = set()
@@ -41,7 +68,7 @@ def _resolve_selector(axis: str, selector: Any, protocol: dict,
         name = selector.removeprefix("design_axis.")
         if name not in design_axes or not isinstance(design_axes[name], list) or not design_axes[name]:
             raise ValueError(f"unknown or empty design-axis selector: {selector}")
-        return None, {axis: list(design_axes[name])}, set()
+        return None, {axis: list(design_axes[name])}, set(), None
     elif selector.startswith("validation."):
         name = selector.removeprefix("validation.")
         if name in ("layouts", "defender_families"):
@@ -77,7 +104,7 @@ def _resolve_selector(axis: str, selector: Any, protocol: dict,
              if row.get("split") == "validation"}
     if not set(values).issubset(known):
         raise ValueError(f"selector for {axis} does not resolve to validation cases: {selector}")
-    return set(values), {}, implicit_scenarios
+    return set(values), {}, implicit_scenarios, None
 
 
 def _expand_design_rows(factor_ids: list[str], design_selectors: dict[str, list[Any]]) -> list[dict]:
@@ -201,8 +228,9 @@ def compile_phase4_design_overlay(protocol_path: str | Path,
         protocol_constraints: dict[str, set[Any]] = {}
         design_selectors: dict[str, list[Any]] = {}
         implicit_scenarios: set[str] = set()
+        resolved_selector_details: list[dict[str, Any]] = []
         for axis, selector in selectors.items():
-            values, design, scoped_scenarios = _resolve_selector(
+            values, design, scoped_scenarios, detail = _resolve_selector(
                 axis, selector, protocol, registry)
             if values is not None:
                 protocol_constraints[axis] = values
@@ -211,6 +239,21 @@ def compile_phase4_design_overlay(protocol_path: str | Path,
                     raise ValueError(f"{req_id} repeats design axis {design_axis}")
                 design_selectors[design_axis] = design_values
             implicit_scenarios.update(scoped_scenarios)
+            if detail is not None:
+                resolved_selector_details.append(detail)
+        declared_domain = req.get("resolved_category_domain")
+        for detail in resolved_selector_details:
+            if detail["axis"] != "category":
+                continue
+            if (not isinstance(declared_domain, dict) or
+                    declared_domain.get("route_segment_index") != detail["route_segment_index"] or
+                    declared_domain.get("equals") != detail["equals"] or
+                    declared_domain.get("expected_category_count") != len(detail["resolved_values"]) or
+                    declared_domain.get("expected_values") != detail["resolved_values"] or
+                    declared_domain.get("matching_rule") != (
+                        f'category.split("/")[{detail["route_segment_index"]}] == '
+                        f'"{detail["equals"]}"; exact segment equality, never substring matching')):
+                raise ValueError(f"{req_id} has inconsistent resolved category-domain metadata")
         applicable = [case for case in axis_rows
                       if (not implicit_scenarios or
                           case["scenario_id"] in implicit_scenarios)
@@ -231,8 +274,11 @@ def compile_phase4_design_overlay(protocol_path: str | Path,
             "factor_ids": list(factors),
             "existing_runtime_factor_ids": list(runtime_ids),
             "stimulus_status": req.get("stimulus_status"),
+            "resolved_category_domain": req.get("resolved_category_domain"),
+            "contact_semantics": req.get("contact_semantics"),
             "resolved_protocol_constraints": {
                 axis: sorted(values) for axis, values in sorted(protocol_constraints.items())},
+            "resolved_selector_details": resolved_selector_details,
             "implicit_scenario_scope": sorted(implicit_scenarios),
             "protocol_bound_case_rows": protocol_rows,
             "protocol_bound_case_count_per_factor": len(applicable),

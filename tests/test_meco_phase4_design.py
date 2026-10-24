@@ -28,7 +28,10 @@ def _write_fixture(tmp_path, *, overlap=False):
         "final_test": {"defender_families": ["never-export-test-family"]},
         "cases": [],
     }
-    categories = {"offense_vs_scripted_pressure": ["level_1", "level_2"],
+    pressure_categories = ["active/trench/level_3_trench", "inactive/trench/level_0",
+                           "active/trenched/level_3_trench",
+                           "active/not_trench/level_3_trench"]
+    categories = {"offense_vs_scripted_pressure": pressure_categories,
                   "full_match_offense": ["full_match_single"],
                   "team_delivery_cycles": ["delivery_single"]}
     for scenario, scenario_categories in categories.items():
@@ -54,8 +57,16 @@ def _write_fixture(tmp_path, *, overlap=False):
     protocol["protocol_id"] = _sha(protocol)
     protocol_path = tmp_path / "protocol.json"
     protocol_path.write_text(json.dumps(protocol, indent=2) + "\n")
-    registry_path = (Path(__file__).resolve().parents[1] / "qualifications" / "meco" /
-                     "phase4_design_registry.json")
+    source_registry_path = (Path(__file__).resolve().parents[1] / "qualifications" / "meco" /
+                            "phase4_design_registry.json")
+    registry = json.loads(source_registry_path.read_text())
+    trench = next(item for item in registry["requirements"]
+                  if item["requirement_id"] == "trench_interception")
+    trench["validation_case_axes"]["category"]["expected_values"] = pressure_categories[:2]
+    trench["resolved_category_domain"]["expected_values"] = pressure_categories[:2]
+    trench["resolved_category_domain"]["expected_category_count"] = 2
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n")
     return protocol_path, registry_path
 
 
@@ -121,20 +132,31 @@ def test_factor_rows_resolve_exact_protocol_axes_and_design_cross_products(tmp_p
 
     pressure = {
         ("offense_vs_scripted_pressure", category, layout, family, "val-start", "noisy")
-        for category in ("level_1", "level_2")
+        for category in ("active/trench/level_3_trench", "inactive/trench/level_0",
+                         "active/trenched/level_3_trench", "active/not_trench/level_3_trench")
         for layout in ("val-layout-a", "val-layout-b")
         for family in ("held-family", "held-family-b")}
-    for requirement_id in ("stationary_blockage", "direct_pursuit",
-                           "trench_interception", "feints", "abrupt_opponent_change"):
+    for requirement_id in ("stationary_blockage", "direct_pursuit", "feints",
+                           "abrupt_opponent_change"):
         assert cases(requirement_id) == pressure
-        assert by_id[requirement_id]["protocol_bound_case_count_per_factor"] == 8
+        assert by_id[requirement_id]["protocol_bound_case_count_per_factor"] == 16
+    trench_expected = {
+        ("offense_vs_scripted_pressure", category, layout, family, "val-start", "noisy")
+        for category in ("active/trench/level_3_trench", "inactive/trench/level_0")
+        for layout in ("val-layout-a", "val-layout-b")
+        for family in ("held-family", "held-family-b")}
+    assert cases("trench_interception") == trench_expected
+    assert by_id["trench_interception"]["protocol_bound_case_count_per_factor"] == 8
+    selector_detail = by_id["trench_interception"]["resolved_selector_details"][0]
+    assert selector_detail["resolved_values"] == [
+        "active/trench/level_3_trench", "inactive/trench/level_0"]
 
     reactive_expected = pressure | {
         ("full_match_offense", "full_match_single", layout, family, "val-start", "noisy")
         for layout in ("val-layout-a", "val-layout-b")
         for family in ("held-family", "held-family-b")}
     assert cases("reactive_defenders_and_opponent_pools") == reactive_expected
-    assert by_id["reactive_defenders_and_opponent_pools"]["protocol_bound_case_count_per_factor"] == 12
+    assert by_id["reactive_defenders_and_opponent_pools"]["protocol_bound_case_count_per_factor"] == 20
     assert {row["design_axes"]["opponent_policy_pool"] for row in
             by_id["reactive_defenders_and_opponent_pools"]["design_only_rows"]} == {
         "stationary_blockage", "direct_pursuit", "trench_interceptor",
@@ -161,16 +183,22 @@ def test_factor_rows_resolve_exact_protocol_axes_and_design_cross_products(tmp_p
         for family in ("held-family", "held-family-b")}
     assert cases("sensor_delay_and_low_confidence") == {
         (scenario, category, layout, family, "val-start", "noisy")
-        for scenario, category in (("offense_vs_scripted_pressure", "level_1"),
-                                   ("offense_vs_scripted_pressure", "level_2"),
+        for scenario, category in (("offense_vs_scripted_pressure", "active/trench/level_3_trench"),
+                                   ("offense_vs_scripted_pressure", "inactive/trench/level_0"),
+                                   ("offense_vs_scripted_pressure", "active/trenched/level_3_trench"),
+                                   ("offense_vs_scripted_pressure", "active/not_trench/level_3_trench"),
                                    ("full_match_offense", "full_match_single"),
                                    ("team_delivery_cycles", "delivery_single"))
         for layout in ("val-layout-a", "val-layout-b")
         for family in ("held-family", "held-family-b")}
+    assert "field bump terrain" in by_id["bumps_and_contact"]["contact_semantics"]["excluded_event"]
+    assert by_id["bumps_and_contact"]["contact_semantics"]["thresholds_or_margins"] == "none declared; no minimum contact impulse, distance, duration, or recovery-performance threshold is implied"
     assert cases("bumps_and_contact") == {
         (scenario, category, layout, family, "val-start", "noisy")
-        for scenario, category in (("offense_vs_scripted_pressure", "level_1"),
-                                   ("offense_vs_scripted_pressure", "level_2"),
+        for scenario, category in (("offense_vs_scripted_pressure", "active/trench/level_3_trench"),
+                                   ("offense_vs_scripted_pressure", "inactive/trench/level_0"),
+                                   ("offense_vs_scripted_pressure", "active/trenched/level_3_trench"),
+                                   ("offense_vs_scripted_pressure", "active/not_trench/level_3_trench"),
                                    ("full_match_offense", "full_match_single"))
         for layout in ("val-layout-a", "val-layout-b")
         for family in ("held-family", "held-family-b")}
@@ -179,6 +207,9 @@ def test_factor_rows_resolve_exact_protocol_axes_and_design_cross_products(tmp_p
         for layout in ("val-layout-a", "val-layout-b")
         for family in ("held-family", "held-family-b")}
 
+    assert {row["design_axes"]["team_pose_set"] for row in
+            by_id["multiple_legal_team_start_states"]["design_only_rows"]} == {
+        "team_start_set_a", "team_start_set_b", "team_start_set_c"}
     pose_rows = by_id["observation_only_focal_pose_mislocalization"]["design_only_rows"]
     assert {tuple(row["design_axes"][axis] for axis in ("pose_offset", "truth_pose"))
             for row in pose_rows} == {
@@ -199,4 +230,61 @@ def test_registry_rejects_unresolved_axis_and_incomplete_source_plan_ids(tmp_pat
     registry["requirements"].pop()
     bad_path.write_text(json.dumps(registry))
     with pytest.raises(ValueError, match="differ from source plan"):
+        compile_phase4_design_overlay(protocol_path, bad_path)
+
+
+def test_real_protocol_resolves_exactly_fourteen_trench_route_categories():
+    root = Path(__file__).resolve().parents[1]
+    overlay = compile_phase4_design_overlay(
+        root / "qualifications" / "meco" / "protocol.json",
+        root / "qualifications" / "meco" / "phase4_design_registry.json")
+    trench = next(req for req in overlay["requirements"]
+                  if req["requirement_id"] == "trench_interception")
+    resolved = trench["resolved_selector_details"][0]
+    assert resolved["route_segment_index"] == 1
+    assert resolved["equals"] == "trench"
+    assert len(resolved["resolved_values"]) == 14
+    assert all(category.split("/")[1] == "trench"
+               for category in resolved["resolved_values"])
+    assert all(len(category.split("/")) == 3 and "level_" in category.split("/")[2]
+               for category in resolved["resolved_values"])
+    assert trench["protocol_bound_case_count_per_factor"] == 56
+
+
+def test_exact_category_selector_fails_closed_on_empty_or_wrong_domain(tmp_path):
+    protocol_path, registry_path = _write_fixture(tmp_path)
+    registry = json.loads(registry_path.read_text())
+    trench = next(req for req in registry["requirements"]
+                  if req["requirement_id"] == "trench_interception")
+    trench["validation_case_axes"]["category"]["expected_values"] = [
+        "active/trench/level_3_trench", "active/trenched/level_3_trench"]
+    wrong_path = tmp_path / "wrong-domain-registry.json"
+    wrong_path.write_text(json.dumps(registry))
+    with pytest.raises(ValueError, match="outside its declared domain"):
+        compile_phase4_design_overlay(protocol_path, wrong_path)
+
+    protocol = json.loads(protocol_path.read_text())
+    for row in protocol["cases"]:
+        if row.get("split") == "validation" and row.get("scenario_id") == "offense_vs_scripted_pressure":
+            row["category"] = "active/trenched/level_3_trench"
+    protocol["protocol_id"] = _sha({k: v for k, v in protocol.items()
+                                    if k != "protocol_id"})
+    protocol_path.write_text(json.dumps(protocol))
+    trench["validation_case_axes"]["category"]["expected_values"] = [
+        "active/trench/level_3_trench", "inactive/trench/level_0"]
+    empty_path = tmp_path / "empty-registry.json"
+    empty_path.write_text(json.dumps(registry))
+    with pytest.raises(ValueError, match="resolved to an empty set"):
+        compile_phase4_design_overlay(protocol_path, empty_path)
+
+
+def test_exact_category_overlay_contract_rejects_forged_domain_metadata(tmp_path):
+    protocol_path, registry_path = _write_fixture(tmp_path)
+    registry = json.loads(registry_path.read_text())
+    trench = next(req for req in registry["requirements"]
+                  if req["requirement_id"] == "trench_interception")
+    trench["resolved_category_domain"]["expected_category_count"] = 14
+    bad_path = tmp_path / "forged-domain-registry.json"
+    bad_path.write_text(json.dumps(registry))
+    with pytest.raises(ValueError, match="inconsistent resolved category-domain metadata"):
         compile_phase4_design_overlay(protocol_path, bad_path)
