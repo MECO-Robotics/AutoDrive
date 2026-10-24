@@ -626,3 +626,8 @@ read-only WX9100 replay measurements and SHA-256 bindings for the run manifest,
 checkpoint, failure report, and tensor artifact are recorded in
 `docs/implementation-provenance/c2-wx9100-replay-diagnostic-20261024.json`
 (SHA-256 `932baa149646c6d7ac4aade70e6cf57980bb4e37f1c60673ee3d8379a9f71543`).
+The exact integrated-source replay of the preserved update-20 row is recorded
+in `docs/implementation-provenance/c2-integrated-head-replay-20261024.json`
+(SHA-256 `0d823984706ada26431d45230c676fbce04abb4d0077b0681a88e43ff85a5eac`);
+it reproduced identical logits and log probabilities in 10/10 WX9100 runs and
+matched the saved rollout log probability exactly.
