@@ -1,5 +1,18 @@
 # MECO learning tracks plan: execution status
 
+> **Launch correction — 2026-10-24 23:24 UTC.** A new isolated five-track
+> diagnostic campaign was attempted using two WX9100 devices, but the
+> supervisor exited before creating its campaign root or starting GPU work.
+> The cause was manifest launch wiring: a diagnostic split was passed to the
+> supervisor together with a bound evaluation protocol, which requires the
+> validation split. The scoped planner/implementer/reviewer fix is integrated
+> at `6d60294cd3d1741b0c685b15fb2e71e3d14efa0b`; it retains manifest protocol
+> and seed validation while leaving the runtime diagnostic evaluation
+> unbound. The dashboard three-pass ledger includes this scoped approval.
+> The external manifest must be regenerated against the final clean checkout
+> before relaunch. At this snapshot the training service is failed/stopped;
+> there are no new training updates or qualification results.
+
 > **Snapshot — 2026-10-24 23:16 UTC.** The implementation candidate was
 > fast-forwarded into `main` at `08b93828032ca6561552358142bb6b1781bc5071`;
 > evidence, dashboard-pin, and status updates are committed through
