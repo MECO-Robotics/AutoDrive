@@ -22,6 +22,37 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+> **Latest integrated-candidate and training status — 2026-10-24 21:51 UTC.**
+> The integrated implementation candidate is
+> `codex/meco-full-plan-final-integration` at
+> `68997963a76226c1f1dad0a1021d3a4432b98696`, based directly on current
+> `main` (`20665a5136eac72138ba1d0759d96bcf0ee68a5f`). The candidate includes
+> the reviewed dashboard live-curriculum lane projection and qualification-v4
+> workflow gate. Its combined scoped suite passed 128 tests; this is contract
+> evidence, not simulator qualification. The manifest follow-up records 49
+> scoped tranches. The dashboard has not yet been restarted against this
+> candidate or checked for current assets/API provenance.
+>
+> The five-track supervisor is stopped (`checkpoints/meco-five/STOP`,
+> timestamp 2026-10-24 21:48:55 UTC; terminal supervisor heartbeat
+> 21:51:36 UTC). Its last recorded totals are A1 525, A2 526, A3 500, C1 500,
+> and C2 500 optimizer updates. Cycle 6 was interrupted; only A1/A2 had
+> advanced into it. The evaluation split was `diagnostic`, with no bound
+> evaluation protocol, and no warm-start artifact. The latest completed
+> diagnostic evaluation was cycle 5 (22 records). Curriculum exposure covered
+> only `pickup_simple` (five cycles: four `cluster`, one `single`); the other
+> planned scenario families had zero exposure. These counts do not establish
+> 100/100 evaluation cases, pass status, or a qualified winner.
+>
+> Qualification-v4 code and workflow admission are implemented and reviewed,
+> but the checked-in protocol is still provisional v1. The only calibration
+> artifact is D0 `pickup_simple`; there is no v4 protocol, reviewed operational
+> margin set, matched held-out result, learned-policy confidence interval, or
+> qualification decision. No fresh five-track simulator replay has been
+> generated or reviewed. The dashboard currentness check and representative
+> seeded simulator evaluation remain outstanding. This is the current
+> implementation candidate state, not a completion claim.
+
 ## Dashboard currentness after C1/C2 campaign integration — 2026-10-24
 
 After candidate commit `7d16d49dfe57c7f426ec2c28714a6d038692f7a9`,
@@ -562,7 +593,7 @@ The old campaign's checkpoints do not satisfy strict source identity for the cur
 | **3. Deterministic and predictive controls** | D0/D1/D2 evaluation paths and prediction-mode controls exist. The schema-5 paired matrix analyzer binds exact seed manifests, reports, source, checkpoints, condition/policy replay selection, and can calculate paired outcome and runtime/fallback diagnostic intervals. Schema-4 report reading remains supported. | No current matrix report or interval exists for the requested architecture, control, prediction, penalty, candidate-recall, and fallback comparisons. D3 is not established. |
 | **4. Shared observation and planner contract** | Shared raster/scalar inputs, candidate masks/order, stale-output fallback, legal action support, Plan A penalty provenance, evaluation-to-replay record binding, and generation-based replay publication are implemented. The async broker has deterministic fake-adapter contract coverage, including replacement, freshness, faults, and close; raised inference exceptions no longer kill its worker. No-route replay validation checks complete contiguous action coverage. The matrix can select replay seeds by condition and policy; latency and fallback diagnostics are tagged as non-qualification metrics. | No fresh five-track learned-policy replay has been generated and inspected. Broker contract tests do not establish GPU-load freshness or simulator fallback. Replay selection and timing instrumentation do not prove P-shaped routes, robot behavior, collection/scoring, fallback behavior, or representative end-to-end safety. Global planning remains XY AD* with swept SE(2) checks, not full global SE(2). |
 | **5. Training strategy** | Phase 0 protocol/configuration, Phase 1 interfaces, stochastic PPO support, Phase 4 train-split exposure scheduling, and the resumable two-device supervisor exist. Phase 2 collectors/loaders/fitters exist. A human-authored Plan A goal annotation materializer packages explicit sidecar labels with source/legal/protocol/authority hashes. The legal-node rollout U contract now defines a bounded, replay-bound matched gross-return estimand, strict repeat evidence digest, explicit censoring/completeness, and fitted-artifact semantics; P stays at P0 absent independent P labels. | No Plan A rollout dataset, human-authored annotations, or warm-start artifact is available; the new U contract has not generated labels or weights. The current campaign does not consume warm starts. Baseline variance calibration, a matched evaluation frontier, Phase 4 factor outcome runs, and candidate-source training remain outstanding. |
-| **6. Metrics and decision gates** | Metrics, qualification protocol, confidence interval, calibration, promotion interfaces, and paired compute/fallback diagnostics exist. A protocol-scoped single-use final-test ledger binds source, checkpoints, stratum, categories, and seeds; both supervisor and direct training entry points reject training after test consumption. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | The D0 baseline calibration report and bundle are complete for `pickup_simple` (see milestone above); this is not learned-policy qualification. Target v2 still requires explicit operational margins and review. The learned-policy held-out report, confidence interval on match outcomes, and primary success gate are absent. The active supervisor records a protocol ID, but its evaluation split is diagnostic and has no bound evaluation protocol. |
+| **6. Metrics and decision gates** | Metrics, qualification protocol versions, confidence intervals, calibration, promotion interfaces, paired compute/fallback diagnostics, and a protocol-scoped single-use final-test ledger exist. New qualification claims are restricted to validated v4 gate status; legacy v1–v3 are diagnostic/read-only. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | The supervisor is stopped and its prior run was diagnostic with no evaluation-protocol binding. D0 calibration exists only for `pickup_simple`; the checked-in protocol remains provisional v1. There is no v4 protocol artifact, reviewed operational margin set, learned-policy held-out report, match-outcome confidence interval, or primary success-gate result. No model is qualified. |
 | **7. A/B experiments** | Matrix runs record paired policy rows and bind inputs to schema-5 reports; the analyzer enforces exact seed/category/stratum and policy completeness and calculates paired bootstrap intervals. Schema-4 reports remain readable. Phase 4 factor completeness is checked. | The analyzer has no experiment results to summarize. The listed A/B experiments, K=8/16/32 candidate recall, P=0 ablation, matched prediction and inference-disable comparisons have not been completed as a current results bundle. |
 | **8. Implementation boundaries and order** | Candidate generation, model adapters, controls, evaluation, replay capture, provenance, deployment interfaces, and the three-pass dashboard are present in the current checkout. | A frozen baseline/fixture evidence package, complete matched five-track bundle, representative replay, qualification, and promotion evidence remain absent. |
 | **9. Unresolved design decisions** | The code exposes candidate K, prediction mode, graph support, penalty mode, profiling, and replay/provenance fields needed to measure several open questions. | Legal graph/bin adequacy, candidate recall, route evaluation cost, prediction calibration/occlusion, held-out generalization, Hailo support, latency, and simulator shortcut resistance remain measurement questions. No result should be inferred from current code or synthetic tests. |
@@ -571,7 +602,7 @@ The annotation materializer publishes staged dataset and manifest files with rol
 
 ## Three-pass evidence and validation
 
-The dashboard's structured evidence validator is at `docs/MECO_THREE_PASS_PROVENANCE.json`. It validates hashes, paths, role records, commit formats, reviewer verdicts, and per-tranche limits, and the UI separates workflow pass status from agent liveness. Candidate HEAD `ed138ee5a` carries 18 selected tranches and remains explicitly classified as `scoped-transcript-summaries`. The preference-v2 and input-provenance entries summarize parent approval messages; those original planner/reviewer messages are not persisted verbatim. This is not whole-plan approval, original-transcript evidence, runtime validation, or proof that any agent is currently active.
+The dashboard's structured evidence validator is at `docs/MECO_THREE_PASS_PROVENANCE.json`. It validates hashes, paths, role records, commit formats, reviewer verdicts, and per-tranche limits, and the UI separates workflow pass status from agent liveness. The integrated candidate at `68997963a76226c1f1dad0a1021d3a4432b98696` carries 49 selected tranches and remains explicitly classified as `scoped_transcript_summary`. Some entries summarize parent approval messages because original planner/reviewer artifacts were not persisted. This is not whole-plan approval, original-transcript evidence, runtime validation, or proof that any agent is currently active. The latest dashboard-lane and qualification-v4 entries are summary-only and explicitly retain their runtime/evaluation limits.
 
 On the integrated candidate at `0e133780a`, the focused suites for curriculum and MECO dashboards, replay integrity, async inference broker, transition history, evaluation binding, deployment contracts, Phase 4 exposure, penalty provenance, paired CI analysis, three-pass provenance, and Plan A annotation materialization passed **156 tests and 5 mutation subtests**. Static Python compilation, JavaScript syntax checks, protocol/provenance JSON parsing, and `git diff --check` passed. The curriculum dashboard fixtures now use the active curriculum version (`2`) instead of a stale hard-coded version (`1`). These are unit/contract checks; no test in this validation run exercised end-to-end simulated game behavior, so no simulator evaluation was run.
 
