@@ -1,28 +1,24 @@
 # MECO learning tracks plan: execution status
 
-> **Snapshot — 2026-10-24 23:14 UTC.** The
-> implementation candidate was fast-forwarded into `main` at
-> `08b93828032ca6561552358142bb6b1781bc5071`; the evidence and dashboard-pin
-> update is committed at `e852a0770da9fc014746e4fcd53255b210849ff4`. The
-> previously untracked GPU inventory was preserved and verified byte-identical
-> to the integrated file. Two startup/replay defects were fixed and reviewed:
-> deferred initial observation, then D0 replay cadence when no learned-policy
-> cadence exists. The focused replay module passed 33 tests, plus compilation
-> and diff checks.
+> **Snapshot — 2026-10-24 23:16 UTC.** The implementation candidate was
+> fast-forwarded into `main` at `08b93828032ca6561552358142bb6b1781bc5071`;
+> evidence, dashboard-pin, and status updates are committed through
+> `3425eddc6f5b4db98369ab3f1bfc4a247e2d278b`. The previously untracked GPU
+> inventory was preserved and verified byte-identical to the integrated file.
+> Two startup/replay defects were fixed and reviewed: deferred initial
+> observation, then D0 replay cadence when no learned-policy cadence exists.
+> The focused replay module passed 33 tests, plus compilation and diff checks.
 >
 > A fresh representative GPU diagnostic completed on this checkout: D0,
 > `pickup_simple/cluster`, seed `61720261024`, `cuda:0` (AMD Radeon Pro
 > WX 9100). The scenario completed after six acquisitions at 1.16 simulated
-> seconds. Replay `scenario-meco-1e00f4361b661a9d7dc18096` has 59 frames; its
+> seconds. Replay `scenario-meco-105c38cbec61cc109461c3e5` has 59 frames; its
 > initial frame marks action audits unavailable and the next frame contains
 > action-derived values. The report and replay are under
-> `evaluations/meco-five/`; replay `scenario-meco-78afe74b3281fb35512778bf`
-> was generated after the dashboard restart and reports source commit
-> `e852a0770` with no dirty files. A later docs-only status commit advances
-> `main` to `6bf225e1c`; the replay is now correctly marked outdated by commit
-> provenance and must be regenerated on that checkout. At the prior check,
-> the dashboard ran from `main`; status, curriculum, replay, page, and asset
-> endpoints returned HTTP 200 and the API validated 51 provenance tranches.
+> `evaluations/meco-five/`; the replay reports source commit `3425eddc6`, no
+> dirty files, and `outdated=false`. The dashboard runs from this `main`
+> checkout; status, curriculum, replay, page, and asset endpoints return HTTP
+> 200, and the API validates 51 provenance tranches.
 >
 > This runtime check is diagnostic evidence only. The five-track supervisor
 > remains stopped; the prior run's A1/A2/A3/C1/C2 counts (525/526/500/500/500)
