@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .meco_ablation_matrix import (
 )
 from .meco_track_training import load_evaluation_protocol
 from .meco_tracks import MECO_TRACKS
+from .meco_qualification import MIN_EPISODES, protocol_cases
 from .training_curriculum import SCENARIOS
 
 
@@ -47,6 +49,23 @@ def _validate_sha(value: Any, label: str) -> str:
     return value
 
 
+def _validate_exact_validation_cases(protocol: dict) -> None:
+    episodes = protocol.get("episodes_per_category_stratum")
+    master_seed = protocol.get("master_seed")
+    if type(episodes) is not int or episodes < MIN_EPISODES:
+        raise ValueError("protocol validation episode count is invalid")
+    if type(master_seed) is not int or master_seed < 0:
+        raise ValueError("protocol master seed is invalid")
+    expected = [asdict(case) for scenario in SCENARIOS
+        for case in protocol_cases(scenario, "validation", episodes=episodes,
+                                   master_seed=master_seed)]
+    expected_rows = Counter(_canonical_bytes(row) for row in expected)
+    observed_rows = Counter(_canonical_bytes(row) for row in protocol.get("cases", [])
+        if isinstance(row, dict) and row.get("split") == "validation")
+    if observed_rows != expected_rows:
+        raise ValueError("protocol validation cases differ from the complete deterministic scenario/stratum/category/seed schedule")
+
+
 def _load_protocol(path: str | Path, *, qualification_claim: bool):
     protocol_path = Path(path).expanduser().resolve()
     raw = protocol_path.read_bytes()
@@ -68,6 +87,7 @@ def _load_protocol(path: str | Path, *, qualification_claim: bool):
                         if key != "protocol_id"})
     if protocol.get("protocol_id") != expected_id:
         raise ValueError("qualification protocol ID does not match its contents")
+    _validate_exact_validation_cases(protocol)
     # The shared loader validates protocol schema, exact seeds and split disjointness.
     for scenario in scenarios:
         loaded, protocol_id, _, _ = load_evaluation_protocol(protocol,

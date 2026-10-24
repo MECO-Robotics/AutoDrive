@@ -73,6 +73,32 @@ def test_rejects_split_seed_overlap(tmp_path):
         compile_validation_campaign(protocol_path=path)
 
 
+@pytest.mark.parametrize("mutation", ["omit_stratum", "add_unregistered_stratum"])
+def test_rejects_incomplete_or_extra_validation_strata(tmp_path, mutation):
+    protocol = protocol_document()
+    target = next(row for row in protocol["cases"]
+                  if row["scenario_id"] == "pickup_simple"
+                  and row["split"] == "validation")
+    stratum = {field: target[field] for field in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    if mutation == "omit_stratum":
+        protocol["cases"] = [row for row in protocol["cases"]
+            if not (row["scenario_id"] == "pickup_simple"
+                and row["split"] == "validation"
+                and all(row[field] == value for field, value in stratum.items()))]
+    else:
+        extra = dict(target)
+        extra["start_condition"] = "unregistered_validation_stratum"
+        protocol["cases"].append(extra)
+    protocol["protocol_id"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in protocol.items() if key != "protocol_id"},
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    path = tmp_path / f"{mutation}.json"
+    _write_protocol(path, protocol)
+    with pytest.raises(ValueError, match="complete deterministic scenario/stratum/category/seed schedule"):
+        compile_validation_campaign(protocol_path=path)
+
+
 def test_optional_checkpoint_source_and_config_provenance_is_bound(tmp_path):
     path = tmp_path / "protocol.json"
     _write_protocol(path, protocol_document())
