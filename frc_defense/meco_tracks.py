@@ -1083,7 +1083,23 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                     "inference_provenance": provenance}
         output = response.outputs
     else:
-        output = model(**inputs)
+        # C1 scores candidates with nearly tied utility logits. On ROCm, the
+        # default parallel reduction path can produce a few ULPs of forward
+        # variation for identical inputs; categorical log-prob replay then
+        # crosses the strict PPO integrity tolerance. Keep that model forward
+        # deterministic and restore the process setting immediately after it.
+        # The trainer and evaluator both use this adapter, so rollout and replay
+        # share the same backend algorithm without changing the guard tolerance.
+        deterministic_before = None
+        if track == "C1" and raster.device.type == "cuda":
+            deterministic_before = torch.are_deterministic_algorithms_enabled()
+            if not deterministic_before:
+                torch.use_deterministic_algorithms(True)
+        try:
+            output = model(**inputs)
+        finally:
+            if deterministic_before is False:
+                torch.use_deterministic_algorithms(False)
     if track in ("C1", "C2"):
         utility = output["candidate_utility"][0]
     elif track == "A1":

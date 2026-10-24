@@ -6,7 +6,7 @@ or relaxes the simulator's existing action legality and safety checks.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 from functools import wraps
@@ -197,8 +197,27 @@ def _tensor_evidence(tensor):
     value = tensor.detach().contiguous()
     digest = hashlib.sha256(value.cpu().reshape(-1).view(
         torch.uint8).numpy().tobytes()).hexdigest()
+    finite = (bool(torch.isfinite(value).all())
+              if value.is_floating_point() or value.is_complex() else True)
     return {"present": True, "sha256": digest, "shape": list(value.shape),
-        "dtype": str(value.dtype), "device": str(value.device)}
+        "dtype": str(value.dtype), "device": str(value.device),
+        "finite": finite}
+
+
+def _cpu_replay_value(value):
+    """Copy the exact C1 replay inputs into a portable CPU artifact."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu").clone()
+    if is_dataclass(value) and not isinstance(value, type):
+        return type(value)(**{item.name: _cpu_replay_value(getattr(value, item.name))
+                              for item in fields(value)})
+    if isinstance(value, dict):
+        return {key: _cpu_replay_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_replay_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_replay_value(item) for item in value)
+    return value
 
 
 def _json_number(value):
@@ -225,8 +244,22 @@ def _candidate_identity_evidence(candidate_set):
         "features_sha256": hashlib.sha256(canonical.encode()).hexdigest()}
 
 
+def _candidate_replay_fingerprints(row, model):
+    candidate_set = row.get("candidate_set")
+    return {"raster": _tensor_evidence(row.get("raster")),
+        "globals": _tensor_evidence(row.get("globals")),
+        "hidden": _tensor_evidence(row.get("hidden_before")),
+        "candidate_features": _candidate_identity_evidence(candidate_set),
+        "candidate_digest": (candidate_digest(candidate_set.table)
+            if candidate_set is not None else None),
+        "candidate_replay_digest": row.get("candidate_replay_digest"),
+        "route_cost": _tensor_evidence(row.get("route_cost")),
+        "risk_cost": _tensor_evidence(row.get("risk_cost")),
+        "model_parameters_sha256": _model_id(model)}
+
+
 def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
-                               *, update_number, output):
+                               *, update_number, row_index, config, output):
     saved_logprob = row["logprob"].reshape(())
     replay_scalar = replay_logprob.reshape(())
     absolute_delta = float((replay_scalar - saved_logprob).abs().detach().cpu())
@@ -267,13 +300,11 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
         "raster": row.get("raster"), "globals": row.get("globals"),
         "hidden_before": row.get("hidden_before"),
         "hidden_next": row.get("hidden_next")}
-    replay_fingerprints = {"raster": _tensor_evidence(row.get("raster")),
-        "globals": _tensor_evidence(row.get("globals")),
-        "hidden": _tensor_evidence(row.get("hidden_before")),
-        "candidate_features": _candidate_identity_evidence(candidate_set),
-        "route_cost": _tensor_evidence(row.get("route_cost")),
-        "risk_cost": _tensor_evidence(row.get("risk_cost")),
-        "model_parameters_sha256": _model_id(model)}
+    replay_fingerprints = _candidate_replay_fingerprints(row, model)
+    replay_fingerprints["route_cost_sha256"] = replay_fingerprints[
+        "route_cost"]["sha256"]
+    replay_fingerprints["risk_cost_sha256"] = replay_fingerprints[
+        "risk_cost"]["sha256"]
     repeated_replay = []
     if track in ("C1", "C2"):
         # Only pay for these extra model forwards on an actual strict-guard
@@ -293,10 +324,13 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
             except Exception as exc:
                 repeated_replay.append({"repeat": repeat_index + 1,
                     "error": f"{type(exc).__name__}: {exc}"})
-    payload = {"schema_version": 2, "track": track,
-        "update": int(update_number), "episode_id": row.get("episode_id"),
+    payload = {"schema_version": 3, "track": track,
+        "update": int(update_number), "row_index": int(row_index),
+        "episode_id": row.get("episode_id"),
         "absolute_logprob_delta": _json_number(absolute_delta),
         "relative_logprob_delta": _json_number(relative_delta),
+        "expected_logprob": _json_number(saved_logprob.detach().cpu()),
+        "actual_replay_logprob": _json_number(replay_scalar.detach().cpu()),
         "max_logits_delta": (None if max_logits_delta is None else
                              _json_number(max_logits_delta)),
         "finite_valid_max_logits_delta": (None if finite_valid_max_logits_delta is None
@@ -320,19 +354,44 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
             replay_fingerprints.get("model_parameters_sha256")),
         "chosen_action": int(row["action"].reshape(-1)[0].detach().cpu()),
         "model_training": bool(model.training),
+        "rollout_inference_state": row.get("inference_provenance"),
+        "replay_inference_state": replay.get("inference_provenance"),
+        "input_finite_checks": {name: evidence.get("finite")
+            for name, evidence in replay_fingerprints.items()
+            if isinstance(evidence, dict) and "finite" in evidence},
         "tensors": {name: _tensor_evidence(tensor)
                     for name, tensor in named_tensors.items()}}
-    path = Path(output) / f"ppo-logprob-replay-failure-{track}-update-{update_number:08d}.json"
+    path = Path(output) / (f"ppo-logprob-replay-failure-{track}-update-"
+        f"{update_number:08d}-row-{row_index:04d}.json")
+    _atomic_json(path, payload)
+    replay_path = path.with_suffix(".pt")
+    replay_row = {name: row.get(name) for name in (
+        "episode_id", "raster", "globals", "graph", "candidate_set",
+        "candidate_digest", "candidate_replay_digest", "route_cost", "risk_cost",
+        "action", "logprob", "rollout_logits", "hidden_before", "hidden_next",
+        "inference_provenance", "rollout_candidate_ids", "rollout_valid_mask")}
+    _atomic_torch(replay_path, {"schema_version": 1, "track": track,
+        "update": int(update_number), "row_index": int(row_index),
+        "episode_id": row.get("episode_id"),
+        "config": asdict(config) if config is not None else None,
+        "row": _cpu_replay_value(replay_row),
+        "model_state_dict": _cpu_replay_value(model.state_dict()),
+        "model_parameters_sha256": _model_id(model),
+        "rollout_logits": _cpu_replay_value(row.get("rollout_logits")),
+        "replay_logits": _cpu_replay_value(replay_logits),
+        "replay_logprob": _cpu_replay_value(replay_scalar)})
+    payload["replay_tensor_artifact"] = str(replay_path)
     _atomic_json(path, payload)
     return path, payload
 
 
 def _logprob_replay_error(message, track, model, row, replay, replay_logprob,
-                          *, update_number, output):
+                          *, update_number, row_index, config, output):
     """Preserve the strict replay failure even if writing evidence fails."""
     try:
         path, diagnostic = _logprob_replay_diagnostic(track, model, row,
-            replay, replay_logprob, update_number=update_number, output=output)
+            replay, replay_logprob, update_number=update_number,
+            row_index=row_index, config=config, output=output)
     except Exception as exc:
         return RuntimeError(
             f"{message}; diagnostic recording failed: {type(exc).__name__}: {exc}")
@@ -972,7 +1031,7 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     # step. The support tensors are shared by each row, so digesting catches
     # accidental in-place mutation of pair IDs, descriptors, mask, or paths.
     with torch.no_grad():
-        for row in rows:
+        for row_index, row in enumerate(rows):
             support = row.get("support")
             if support is None:
                 continue
@@ -992,8 +1051,9 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                 raise _logprob_replay_error(
                     "Plan A rollout log-probability does not replay under frozen support",
                     track, model, row, replay, replay_logprob,
-                    update_number=update_number, output=diagnostic_output)
-        for row in rows:
+                    update_number=update_number, row_index=row_index,
+                    config=config, output=diagnostic_output)
+        for row_index, row in enumerate(rows):
             if track not in ("C1", "C2") or row.get("candidate_set") is None:
                 continue
             expected = row.get("candidate_digest")
@@ -1008,12 +1068,22 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
                                             row["hidden_before"], config)
             replay_logprob = categorical_from_candidate_logits(
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
+            rollout_fingerprints = row.get("replay_fingerprints")
+            replay_fingerprints = _candidate_replay_fingerprints(row, model)
+            if (not isinstance(rollout_fingerprints, dict) or
+                    rollout_fingerprints != replay_fingerprints):
+                raise _logprob_replay_error(
+                    "Plan C frozen rollout inputs changed before PPO replay",
+                    track, model, row, replay, replay_logprob,
+                    update_number=update_number, row_index=row_index,
+                    config=config, output=diagnostic_output)
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
                 raise _logprob_replay_error(
                     "Plan C rollout log-probability does not replay under frozen candidate table",
                     track, model, row, replay, replay_logprob,
-                    update_number=update_number, output=diagnostic_output)
+                    update_number=update_number, row_index=row_index,
+                    config=config, output=diagnostic_output)
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))
@@ -1444,6 +1514,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     "candidate_set": prepared["candidate_set"],
                     "candidate_digest": prepared.get("candidate_digest"),
                     "candidate_replay_digest": prepared.get("candidate_replay_digest"),
+                    "inference_provenance": prepared["decision"].get(
+                        "inference_provenance"),
                     "rollout_candidate_ids": (
                         list(prepared["candidate_set"].table.candidate_ids)
                         if config.track in ("C1", "C2") else None),
@@ -1460,6 +1532,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                          "hidden": _tensor_evidence(hidden_before),
                          "candidate_features": _candidate_identity_evidence(
                              prepared["candidate_set"]),
+                         "candidate_digest": prepared.get("candidate_digest"),
+                         "candidate_replay_digest": prepared.get(
+                             "candidate_replay_digest"),
                          "route_cost": _tensor_evidence(prepared["route_cost"]),
                          "risk_cost": _tensor_evidence(prepared["risk_cost"]),
                          "model_parameters_sha256": rollout_model_fingerprint}
