@@ -1,0 +1,42 @@
+{
+  "diagnostic_id": "c2-update20-row21-integrated-head-replay-20261024",
+  "scope": "read-only replay of the preserved C2 PPO update-20 row 21 artifact using the integrated source checkout; no training, optimizer, simulator, checkpoint writes, or campaign artifact changes",
+  "integrated_source": {
+    "git_head": "70193381965aaa7da50ed14e0c12fa812402be9c",
+    "source_identity_sha256": "c88cfd8b66b6f1026d92fc0dfda8fae6421bfe500af3b178e6996a9f8ecb92d1",
+    "frc_defense/meco_tracks.py_sha256": "e2e47b4ceb6c50bc95bc63bd5e99baefa668ba3f9db4357d31c2ce811741ab55"
+  },
+  "input": {
+    "path": "/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive-meco-c1-replay-integrated/checkpoints/meco-five/C2/ppo-logprob-replay-failure-C2-update-00000020-row-0021.pt",
+    "sha256": "185f051b3308a6c9d393cc785d16a4caa83cc8f852c6d884a49660ea011d679d",
+    "track": "C2",
+    "update": 20,
+    "row_index": 21
+  },
+  "runtime": {
+    "device": "AMD Radeon Pro WX 9100",
+    "device_index": 0,
+    "torch": "2.14.0+rocm10.2.0a20260927",
+    "hip": "7.17.26385",
+    "python": "3.12.14"
+  },
+  "result": {
+    "replays": 10,
+    "unique_logits": 1,
+    "unique_logprobs": 1,
+    "replay_logprob": -0.6931471824645996,
+    "saved_rollout_logprob": -0.6931471824645996,
+    "exact_logits_parity_across_replays": true,
+    "exact_logprob_parity_across_replays": true,
+    "exact_logprob_match_to_saved_rollout": true
+  },
+  "reproduction": {
+    "replay": "Load the input PT with torch.load(map_location='cpu', weights_only=False); instantiate make_meco_track('C2', candidate_features=len(payload['row']['candidate_set'].table.feature_names)); load payload['model_state_dict']; move model and row tensors to cuda:0; under torch.no_grad(), repeat ten times: call _policy_inputs_for_row('C2', model, row, row['hidden_before'], MecoTrainConfig(track='C2', device='cuda:0')), then compute categorical_from_candidate_logits(decision['logits']).log_prob(row['action']).reshape(()). Assert torch.equal for all logits/logprobs and assert the first logprob equals payload['row']['logprob'].",
+    "focused_tests_command": "PYTHONPATH=. /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/bin/python -m pytest -q tests/test_meco_c1_ppo_replay.py",
+    "focused_tests_result": "4 passed in 5.14s"
+  },
+  "validation_limits": [
+    "This is a single preserved-row forward replay, not a simulator evaluation or assessment of policy quality.",
+    "The replay reads campaign artifacts but writes no files under the campaign directory."
+  ]
+}
