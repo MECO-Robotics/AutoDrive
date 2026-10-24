@@ -27,8 +27,11 @@ evaluator, report, and qualification JSON path is resolved and checked against
 that root before it is read, so symlinked status inputs outside the selected
 data root are rejected. The campaign ledger remains checkout-local.
 The default, when the option is omitted, keeps both live data and campaign
-ledger checkout-local. The option only configures the read-only MECO status
-endpoint; other dashboard routes continue to use `--run-dir` as before.
+ledger checkout-local. An explicit `--curriculum-root` may point inside this
+dashboard checkout or inside the configured `--meco-data-root`. When omitted,
+the curriculum endpoint considers `--run-dir` only if it is inside the dashboard
+checkout; configuring an external MECO data root does not implicitly redirect
+curriculum reads. Other dashboard routes continue to use `--run-dir` as before.
 
 This documents a serving command; it does not claim that a dashboard process is
 currently serving this checkout or that its endpoint has been runtime-verified.

@@ -8,13 +8,16 @@ _EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "ed3781ae5307811989f156938fc594341ca5ba
 _EXPECTED_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
 
 
-def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) -> bytes:
+def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None,
+                              meco_data_root=None) -> bytes:
     """Return a read-only curriculum summary and registry metadata."""
     from pathlib import Path
     from scripts.report_curriculum_progress import summarize
     from .training_curriculum import SCENARIOS, CURRICULUM_VERSION
 
-    root = _curriculum_report_root(run_dir, project_root=project_root, curriculum_root=curriculum_root)
+    root = _curriculum_report_root(
+        run_dir, project_root=project_root, curriculum_root=curriculum_root,
+        meco_data_root=meco_data_root)
     try:
         report = summarize(root)  # Deliberately omit cache_dir: dashboard reads never write caches.
         error = None
@@ -161,8 +164,9 @@ def curriculum_status_payload(run_dir, curriculum_root=None, project_root=None) 
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
 
 
-def _curriculum_report_root(run_dir, project_root=None, curriculum_root=None):
-    """Use an explicit in-project root, or run_dir only when it is a curriculum root."""
+def _curriculum_report_root(run_dir, project_root=None, curriculum_root=None,
+                            meco_data_root=None):
+    """Use an explicit checkout/data root, or an implicit in-checkout run root."""
     from pathlib import Path
 
     project = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
@@ -170,7 +174,11 @@ def _curriculum_report_root(run_dir, project_root=None, curriculum_root=None):
     if _contains_symlink(selected):
         return None
     resolved = selected.resolve()
-    if not (resolved == project or project in resolved.parents):
+    allowed_roots = [project]
+    if curriculum_root is not None and meco_data_root is not None:
+        allowed_roots.append(Path(meco_data_root).resolve())
+    if not any(resolved == allowed or allowed in resolved.parents
+               for allowed in allowed_roots):
         return None
     if _has_curriculum_data(resolved) or curriculum_root is not None and resolved.is_dir():
         return resolved

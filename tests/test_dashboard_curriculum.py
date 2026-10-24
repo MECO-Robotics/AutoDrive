@@ -47,6 +47,87 @@ def _payload(root):
     return json.loads(curriculum_status_payload(root, curriculum_root=root, project_root=root))
 
 
+def _http_payload(run_dir, *, curriculum_root=None, meco_data_root=None):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(
+        run_dir, curriculum_root=curriculum_root, meco_data_root=meco_data_root))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        return json.loads(urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/curriculum-status").read())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_external_curriculum_root_is_allowed_under_configured_meco_data_root(tmp_path):
+    data_root = tmp_path / "external-data"
+    curriculum_root = data_root / "evaluations" / "curriculum"
+    run_dir = data_root / "checkpoints" / "defense"
+    _run(curriculum_root)
+    run_dir.mkdir(parents=True)
+    checkout = Path(__file__).resolve().parents[1]
+
+    api = json.loads(curriculum_status_payload(
+        run_dir, curriculum_root=curriculum_root, project_root=checkout,
+        meco_data_root=data_root))
+    http = _http_payload(run_dir, curriculum_root=curriculum_root,
+                         meco_data_root=data_root)
+
+    assert len(api["runs"]) == 1
+    assert len(http["runs"]) == 1
+
+
+def test_explicit_curriculum_root_outside_checkout_and_configured_data_root_is_rejected(tmp_path):
+    data_root = tmp_path / "configured-data"
+    outside_root = tmp_path / "outside-data" / "curriculum"
+    run_dir = data_root / "checkpoints" / "defense"
+    _run(outside_root)
+    run_dir.mkdir(parents=True)
+    checkout = Path(__file__).resolve().parents[1]
+
+    api = json.loads(curriculum_status_payload(
+        run_dir, curriculum_root=outside_root, project_root=checkout,
+        meco_data_root=data_root))
+    http = _http_payload(run_dir, curriculum_root=outside_root,
+                         meco_data_root=data_root)
+
+    assert api["runs"] == []
+    assert http["runs"] == []
+
+
+def test_explicit_external_curriculum_root_through_symlink_is_rejected(tmp_path):
+    data_root = tmp_path / "external-data"
+    curriculum_root = data_root / "evaluations" / "curriculum"
+    symlinked_root = data_root / "evaluations" / "curriculum-link"
+    run_dir = data_root / "checkpoints" / "defense"
+    _run(curriculum_root)
+    symlinked_root.symlink_to(curriculum_root, target_is_directory=True)
+    run_dir.mkdir(parents=True)
+
+    api = json.loads(curriculum_status_payload(
+        run_dir, curriculum_root=symlinked_root,
+        project_root=Path(__file__).resolve().parents[1], meco_data_root=data_root))
+    http = _http_payload(run_dir, curriculum_root=symlinked_root,
+                         meco_data_root=data_root)
+
+    assert api["runs"] == []
+    assert http["runs"] == []
+
+
+def test_implicit_curriculum_root_stays_confined_to_dashboard_checkout(tmp_path):
+    data_root = tmp_path / "external-data"
+    _run(data_root)
+    checkout = Path(__file__).resolve().parents[1]
+
+    api = json.loads(curriculum_status_payload(
+        data_root, project_root=checkout, meco_data_root=data_root))
+    http = _http_payload(data_root, meco_data_root=data_root)
+
+    assert api["runs"] == []
+    assert http["runs"] == []
+
+
 def test_empty_curriculum_has_registry_and_no_runs(tmp_path):
     data = _payload(tmp_path)
     assert data["runs"] == []

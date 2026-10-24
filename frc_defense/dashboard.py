@@ -192,7 +192,9 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None, *,
                     self.send_response(503)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/curriculum-status":
-                body = curriculum_status_payload(run_dir, curriculum_root=curriculum_root)
+                body = curriculum_status_payload(
+                    run_dir, curriculum_root=curriculum_root,
+                    meco_data_root=selected_meco_data_root)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/api/field-layout":
@@ -882,7 +884,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", default="checkpoints/tensor-ppo")
     parser.add_argument("--curriculum-root", type=Path,
-                        help="Explicit curriculum report root (must be inside this project)")
+                        help="Explicit curriculum report root (inside this checkout or --meco-data-root)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--also-host", action="append", default=[],
                         help="Bind an additional address on the same port")
