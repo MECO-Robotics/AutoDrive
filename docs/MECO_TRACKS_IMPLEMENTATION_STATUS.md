@@ -707,3 +707,29 @@ This is diagnostic wiring evidence, not a simulator result. Pressure levels
 scope. Simulator behavior and replay validation were not run. Family-specific
 outcomes remain null/unavailable, and qualification eligibility remains false.
 Summary-only three-pass record: `docs/implementation-provenance/phase4-reactive-opponent-validation-wiring.md`.
+
+### Phase 4 route outcome capture — tranche #40
+
+Commit `387a0ef0e5a50bb986af923800245e0ef965624d`, integrated in candidate
+commit `b8f30d9e5a92675d069a740cdca070d04bc330c5`, adds source-bound route-goal
+lifecycle accounting, evaluator-truth endpoint completion evidence, and an
+independently generated expected policy/factor/category/case/seed/condition
+grid. The reviewer approved the exact source diff at HEAD
+`54219fece5ca0d3ba9820d77e38108a3a8f71ce4` (diff SHA-256
+`5664272c5dfac610cefbf486f14119e6ea9196d7888428befa299253df82610c`).
+
+Plan A attempts bind the selected destination node, rather than the changing
+per-macro candidate ID. Target-bound collection attempts have no durable target
+allocation generation and remain unsupported; their rows are reported apart
+from the attempt denominator. Missing treatments and records are explicit,
+and campaign rates remain null when required lanes or lifecycle outcomes are
+missing or censored. Recovery remains unavailable without a registered return
+criterion.
+
+Forty-one focused route/runtime contracts passed before commit. The integration
+candidate passed 50 selected-goal, Phase 4 runtime, and remask-taxonomy tests;
+Python compilation and `git diff --check` passed. No simulator, replay,
+GPU/HIP, training, dashboard restart, or qualification was performed.
+Dashboard provenance now includes this as tranche #40; the API validates the
+manifest dynamically. Summary-only three-pass record:
+`docs/implementation-provenance/phase4-route-outcome-capture.md`.

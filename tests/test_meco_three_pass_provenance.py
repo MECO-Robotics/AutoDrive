@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 39
+    assert len(result["tranches"]) == 40
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -221,6 +221,30 @@ def test_current_manifest_is_validated_as_summary_only():
         "9597d16e33d18d6dea5ea4f2ee6d6e0715191428")
     assert root_fix["reviewer"]["approved_commit"] == root_fix["implementer"]["commit"]
     assert "No simulator evaluation or replay was run" in root_fix["limits"]
+    route_outcome = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-route-outcome-capture")
+    assert route_outcome["implementer"]["commit"] == (
+        "387a0ef0e5a50bb986af923800245e0ef965624d")
+    assert route_outcome["implementer"]["source_head"] == (
+        "54219fece5ca0d3ba9820d77e38108a3a8f71ce4")
+    assert route_outcome["implementer"]["reviewed_diff_sha256"] == (
+        "5664272c5dfac610cefbf486f14119e6ea9196d7888428befa299253df82610c")
+    assert route_outcome["implementer"]["candidate_integration_commit"] == (
+        "b8f30d9e5a92675d069a740cdca070d04bc330c5")
+    assert route_outcome["reviewer"]["approved_commit"] == (
+        route_outcome["implementer"]["commit"])
+    assert route_outcome["reviewer"]["integrated_approved_commit"] == (
+        route_outcome["implementer"]["candidate_integration_commit"])
+    assert route_outcome["planner"]["artifact"]["sha256"] == (
+        "435c2d45e891a910894b4b3148684db6842be842c76cfbaab518ae2c3001d4a8")
+    assert "41 focused route/runtime contracts passed before" in route_outcome["limits"]
+    assert "50 selected-goal, Phase 4 runtime, and execution-failure taxonomy tests" in route_outcome["limits"]
+    assert "No simulator evaluation, replay, GPU/HIP run, training, dashboard restart" in route_outcome["limits"]
+    assert "qualification eligibility remains false" in route_outcome["limits"]
+    route_summary = (REPO / route_outcome["planner"]["artifact"]["path"]).read_text()
+    assert "lifecycle identity" in route_summary
+    assert "selected destination node" in route_summary
+    assert "D0 has no selected-goal ledger" in route_summary
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
