@@ -448,12 +448,15 @@ unvalidated.
 This initial implementer pass received static review only. Later, focused
 contract/provenance tests for calibration identity, margin provenance,
 shard-artifact manifest provenance, normalized runtime equivalence, and intake
-binding were added and reviewed as part of a 52-test CPU suite on staging branch
-`codex/meco-reviewed-plan-integrations` at `a921842a5`. Those tests use
-synthetic reports and do not establish actual GPU calibration, merged-report
-intake from produced shards, simulation behavior, or the complete
-report-to-protocol chain. No calibration run or simulator evaluation has been
-performed; runtime evidence remains pending.
+binding were added and reviewed on staging. The staging branch also now
+contains Phase 2 contract tests for P-oracle integration and expert-goal
+authority/U fail-closed behavior, plus a fix for the expert-goal loader's local
+helper import. All five focused CPU test files passed together (64 tests) at
+staging HEAD `62f259b6f`. These synthetic tests do not establish actual GPU
+calibration, merged-report intake from produced shards, real Phase 2 dataset
+collection or fitting, simulation behavior, or the complete report-to-protocol
+chain. No calibration run or simulator evaluation has been performed; runtime
+evidence remains pending.
 
 ## D0 calibration sharding tranche v1
 
