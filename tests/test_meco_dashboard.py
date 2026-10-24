@@ -5,54 +5,109 @@ import subprocess
 from pathlib import Path
 
 from frc_defense.meco_dashboard import (
-    CONTROLS, TRACKS, _collect_status, _three_pass_provenance, meco_status_payload,
+    ABLATIONS, CONTROLS, PENALTY_MAP_UNITS, PENALTY_PATH_UNITS,
+    PENALTY_PPO_CONTRACT, PENALTY_PROJECTION, TRACKS, _collect_status,
+    _three_pass_provenance, meco_status_payload,
 )
 
 
-def _report():
-    categories, seeds = ["open", "defended"], [11, 12]
+def _report(episodes=2):
+    categories = ["open", "defended"]
+    seeds = list(range(11, 11 + episodes))
     sources = {"simulator": "abc", "policy": "def"}
     source_hash = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    checkpoint_hashes = {
+        policy: hashlib.sha256(policy.encode()).hexdigest()
+        for policy in TRACKS + ABLATIONS
+    }
     policy_manifest = {
         policy: {"policy_id": f"model-{policy}",
-                 "checkpoint_sha256": hashlib.sha256(policy.encode()).hexdigest(),
+                 "checkpoint_sha256": checkpoint_hashes[policy],
                  "source_identity_sha256": source_hash}
-        for policy in TRACKS
+        for policy in TRACKS + ABLATIONS
     }
+    for policy in TRACKS[:3]:
+        policy_manifest[policy]["p_mode"] = "learned"
+    for policy in ABLATIONS:
+        policy_manifest[policy]["p_mode"] = "p0"
     control_ids = {"D0": "D0_teacher_proxy", "D1": "D1_hand_weighted",
                    "D2": "D2_kinematic_prediction"}
     policy_manifest.update({policy: {"policy_id": control_ids[policy], "checkpoint_sha256": None,
                                     "source_identity_sha256": source_hash}
                            for policy in CONTROLS})
-    return {
+    report = {
         "schema_version": 1, "evaluation_id": "eval-001", "protocol_id": "proto-a",
         "sources": sources, "source_identity_sha256": source_hash,
         "scenario_id": "fuel-test", "categories": categories, "seeds": seeds,
         "episodes_per_category": len(seeds),
-        "tracks": list(TRACKS), "controls": list(CONTROLS), "paired": True,
-        "split": "validation", "diagnostic": True,
-        "control_definitions": {"D0": "curriculum teacher proxy; not production AutoDrive controller",
+        "tracks": list(TRACKS), "ablations": list(ABLATIONS),
+        "controls": list(CONTROLS), "paired": True,
+        "split": "validation", "diagnostic": len(seeds) < 100,
+        "control_definitions": {"D0": "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table",
             "D1": "hand-weighted scorer over the shared feasible candidate table",
             "D2": "D1 scorer with kinematic opponent endpoint prediction"},
+        "plan_a_penalty": {
+            "trained_mode": "learned", "p0_ablation_mode": "p0",
+            "cost_scale": 2.0, "points_per_grid_edge": 1.0,
+            "projection": PENALTY_PROJECTION,
+            "map_units": PENALTY_MAP_UNITS,
+            "path_units": PENALTY_PATH_UNITS,
+            "ppo_recomputation": PENALTY_PPO_CONTRACT},
         "policy_manifest": policy_manifest,
-        "records": [{"scenario_id": "fuel-test", "category": category,
-                     "seed": seed, "policy": policy,
-                     "policy_id": policy_manifest[policy]["policy_id"],
-                     "checkpoint_sha256": policy_manifest[policy]["checkpoint_sha256"],
-                     "protocol_id": "proto-a", "split": "validation",
-                     "source_identity_sha256": source_hash,
-                     "metrics": {"success": True, "useful_throughput": 2.5,
-                                 "collisions": 0, "p95_latency_ms": 3.5},
-                     "candidate_recall": .9}
-                    for category in categories for seed in seeds
-                    for policy in TRACKS + CONTROLS],
+        "records": [],
     }
+    for category in categories:
+        for seed in seeds:
+            for policy in TRACKS + ABLATIONS + CONTROLS:
+                provenance = policy_manifest[policy]
+                row = {
+                    "scenario_id": "fuel-test", "category": category,
+                    "seed": seed, "policy": policy,
+                    "policy_id": provenance["policy_id"],
+                    "checkpoint_sha256": provenance["checkpoint_sha256"],
+                    "protocol_id": "proto-a", "split": "validation",
+                    "source_identity_sha256": source_hash,
+                    "metrics": {"success": True, "useful_throughput": 2.5,
+                                "collisions": 0, "p95_latency_ms": 3.5},
+                    "candidate_recall": .9,
+                    "p_mode": provenance.get("p_mode"),
+                }
+                if policy == "D0":
+                    row.update({
+                        "action_source": "production_deterministic",
+                        "controller_cadence": "native_20ms_physics_step",
+                        "action_count_semantics": "executed_per_physics_step",
+                        "elapsed_ticks": 3,
+                        "executed_action_trace": [0, 1, 2],
+                        "actions": [1, 1, 1, 0, 0, 0, 0, 0],
+                    })
+                if policy in TRACKS[:3] + ABLATIONS:
+                    p_mode = "p0" if policy in ABLATIONS else "learned"
+                    route_provenance = (
+                        "legacy_bump_cost_path_integral_v2" if p_mode == "p0" else
+                        "meco_legal_heading_penalty_projection_v1:schema=xy_grid_f64le_v2:"
+                        + "sha256=" + "a" * 64
+                        + ":scale=" + float(2.0).hex()
+                        + ":path_integral_grid_edge_v2")
+                    row["route_trace"] = [{
+                        "p_mode": p_mode,
+                        "ppo_path_penalty_points": 0.0 if p_mode == "p0" else 1.25,
+                        "ppo_path_penalty_units": "reward_points",
+                        "p_map_scale": 2.0,
+                        "p_points_per_grid_edge": 1.0,
+                        "path_points_m": [[0.0, 0.0], [1.0, 0.0]],
+                        "route_cost_units": PENALTY_PATH_UNITS,
+                        "route_cost_provenance": route_provenance,
+                    }]
+                report["records"].append(row)
+    return report
 
 
 def test_fixed_checkout_roots_and_all_policy_rows(tmp_path):
     payload = json.loads(meco_status_payload(tmp_path))
     assert Path(payload["checkpoint_root"]) == tmp_path / "checkpoints/meco-five"
-    assert [row["policy_id"] for row in payload["policies"]] == list(TRACKS + CONTROLS)
+    assert [row["policy_id"] for row in payload["policies"]] == list(
+        TRACKS + ABLATIONS + CONTROLS)
     assert payload["policies"][0]["training_state"] == "not_started"
     assert payload["policies"][-1]["training_state"] == "not_applicable"
 
@@ -134,8 +189,9 @@ def test_only_complete_matched_evaluation_is_exposed_with_category_uncertainty(t
     assert len(result["comparison_groups"]) == 1
     group = result["comparison_groups"][0]
     assert group["matched_status"] == "diagnostic matched"
+    assert len(report["records"]) == 44
     assert group["record_count"] == 4
-    assert group["control_definitions"]["D0"].startswith("curriculum teacher proxy")
+    assert report["control_definitions"]["D0"].startswith("production deterministic offense")
     assert group["policy_metrics"]["A1"]["open"]["success"]["n"] == 2
     assert group["policy_metrics"]["A1"]["open"]["success"]["normal_95_interval"] is not None
     assert next(row for row in result["policies"] if row["policy_id"] == "D2")["evaluation_state"] == "diagnostic matched"
@@ -186,14 +242,14 @@ def test_evaluator_manifest_reports_live_progress_and_stale_state(tmp_path):
     checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
     checkpoint_root.mkdir()
     evaluation_root.mkdir()
-    report = _report()
+    report = _report(100)
     report["diagnostic"] = False
     report["evaluation_id"] = "eval-live"
     (evaluation_root / "run.json").write_text(json.dumps(report))
     manifest = {"schema_version": 1, "evaluation_id": "eval-live",
         "protocol_id": "proto-a", "split": "validation", "status": "running",
         "pid": 42, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
-        "output_file": "run.json", "progress": {"completed_records": 3, "total_records": 24}}
+        "output_file": "run.json", "progress": {"completed_records": 3, "total_records": 2200}}
     status_path = evaluation_root / "run.json.status.json"
     status_path.write_text(json.dumps(manifest))
     live = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.,
@@ -209,14 +265,16 @@ def test_evaluator_complete_requires_valid_report(tmp_path):
     checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
     checkpoint_root.mkdir()
     evaluation_root.mkdir()
-    report = _report()
+    report = _report(100)
     report.update(evaluation_id="eval-complete", diagnostic=False)
+    # This complete-scale report is invalid only because one record is missing
+    # from its otherwise fully matched matrix.
     report["records"].pop()
     (evaluation_root / "report.json").write_text(json.dumps(report))
     status = {"schema_version": 1, "evaluation_id": "eval-complete",
         "protocol_id": "proto-a", "split": "validation", "status": "complete",
         "pid": 42, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
-        "output_file": "report.json", "progress": {"completed_records": 23, "total_records": 24}}
+        "output_file": "report.json", "progress": {"completed_records": 2199, "total_records": 2200}}
     (evaluation_root / "report.json.status.json").write_text(json.dumps(status))
     result = _collect_status(checkpoint_root, evaluation_root, now=1_800_000_000.,
                              process_probe=lambda _pid: False)
