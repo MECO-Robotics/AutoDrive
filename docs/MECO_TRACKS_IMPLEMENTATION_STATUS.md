@@ -554,6 +554,20 @@ scoped static review approved the exact diff. Runtime evidence pending. Static `
 and JSON parsing are the only checks performed here. No tests or simulator
 runs were run.
 
+### Plan A matched-rollout U oracle contract v1
+
+Commit `88b0bb9270ad912fb0cc651c33990e57c111b9b0` versions the sampled-node U
+target as matched-prefix equal-feasible-behavior gross return. Per-node hashes
+bind exact sampled descriptors, paired repeat seeds, outcomes, and target
+values. The offline audit enforces the common-random-number schedule and
+complete uncensored feasible-behavior support; the fitter records the U
+semantics and keeps P at P0. The independent reviewer approved this exact
+commit. Seventeen focused offline audit tests, Python compilation, and
+`git diff --check` passed. No labels, dataset, or fitted weights were
+generated; no simulator, replay, GPU training, or qualification was run. This
+bounded rollout-value estimand does not claim a globally optimal goal or
+policy. Three-pass summary: `docs/implementation-provenance/phase2-plan-a-matched-rollout-u-oracle.md`.
+
 ## Joint Plan A U+B+P warm start v1
 
 A new standalone fitter combines replay-bound legal-node U/B supervision and

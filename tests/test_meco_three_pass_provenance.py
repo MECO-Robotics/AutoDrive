@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 34
+    assert len(result["tranches"]) == 35
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -119,6 +119,27 @@ def test_current_manifest_is_validated_as_summary_only():
         "docs/implementation-provenance/production-input-onnx-parity.md"]
     assert "synthetic inputs" in onnx["limits"]
     assert "No real production capture" in onnx["limits"]
+    rollout_u = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase2-plan-a-matched-rollout-u-oracle")
+    assert rollout_u["implementer"]["commit"] == (
+        "88b0bb9270ad912fb0cc651c33990e57c111b9b0")
+    assert rollout_u["implementer"]["candidate_integration_commit"] == (
+        rollout_u["implementer"]["commit"])
+    assert rollout_u["reviewer"]["approved_commit"] == rollout_u["implementer"]["commit"]
+    assert rollout_u["implementer"]["paths"] == [
+        "frc_defense/meco_counterfactual.py",
+        "frc_defense/meco_plan_a_oracle_audit.py",
+        "frc_defense/meco_supervised.py",
+        "tests/test_meco_plan_a_oracle_audit.py",
+        "docs/MECO_SUPERVISED_WARMSTART.md"]
+    assert "Seventeen focused offline audit tests passed" in rollout_u["limits"]
+    assert "No labels" in rollout_u["limits"]
+    assert "No simulator, replay, GPU training" in rollout_u["limits"]
+    assert "no global optimality claim" in rollout_u["limits"]
+    assert "P remains P0" in rollout_u["limits"]
+    oracle_summary = (REPO / rollout_u["planner"]["artifact"]["path"]).read_text()
+    assert "/root/phase2_goal_oracle_implementer" not in oracle_summary
+    assert "88b0bb9270ad912fb0cc651c33990e57c111b9b0" in oracle_summary
     matrix_ci = next(t for t in result["tranches"]
                      if t["requirement_id"] == "matrix-paired-effects-confidence-intervals")
     assert matrix_ci["implementer"]["commit"] == (
