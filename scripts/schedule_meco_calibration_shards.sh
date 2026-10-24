@@ -18,6 +18,9 @@ initial_manifest="$manifest_dir/$initial_shard_id.json"
 
 initial_worker_is_running() {
   local proc_cmdline="/proc/$initial_pid/cmdline"
+  local proc_cwd="/proc/$initial_pid/cwd"
+  local relative_manifest="${initial_manifest#"$repo_root"/}"
+  local resolved_cwd
   local -a proc_args=()
   local has_device=0 has_manifest=0 has_command=0 has_shard=0 i
 
@@ -30,7 +33,14 @@ initial_worker_is_running() {
 
   for ((i = 0; i + 1 < ${#proc_args[@]}; i++)); do
     [[ "${proc_args[i]}" == "--device" && "${proc_args[i + 1]}" == "$device" ]] && has_device=1
-    [[ "${proc_args[i]}" == "--manifest" && "${proc_args[i + 1]}" == "$initial_manifest" ]] && has_manifest=1
+    if [[ "${proc_args[i]}" == "--manifest" ]]; then
+      if [[ "${proc_args[i + 1]}" == "$initial_manifest" ]]; then
+        has_manifest=1
+      elif [[ "${proc_args[i + 1]}" == "$relative_manifest" ]]; then
+        resolved_cwd=$(readlink -f -- "$proc_cwd" 2>/dev/null || true)
+        [[ "$resolved_cwd" == "$repo_root" ]] && has_manifest=1
+      fi
+    fi
   done
   for i in "${proc_args[@]}"; do
     [[ "$i" == "calibrate-d0-shard" ]] && has_command=1
