@@ -684,6 +684,11 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
             "exact_episode_seeds": report.get("exact_episode_seeds"),
             "split": report.get("split"),
             "training_qualification_protocol_id": report.get("qualification_protocol_id"),
+            "record_bindings": [{key: record.get(key) for key in (
+                "policy", "category", "seed", "split",
+                "qualification_protocol_id", "evaluation_protocol_id",
+                "evaluation_protocol_sha256", "evaluation_case_id")}
+                for record in report.get("records", [])],
             "cycle": evaluation_cycle, "checkpoint_snapshots": evaluation_checkpoints,
             "snapshot_inventory": entry["snapshot_inventory"],
             "source_identity_sha256": report["source_identity_sha256"]})
@@ -698,6 +703,7 @@ def _audit_segment_locked(segment_dir: Path, qualification_protocol: Path,
         "scheduler_history_sha256": _sha((root / "task-scheduler-state.json").read_bytes()),
         "qualification_protocol_id_checked": protocol_id,
         "qualification_protocol_sha256_checked": protocol_sha,
+        "qualification_protocol_path_checked": str(Path(qualification_protocol).resolve()),
         "training_qualification_protocol_id": queue_status.get("qualification_protocol_id"),
         "training_qualification_protocol_sha256": queue_status.get("qualification_protocol_sha256"),
         "evaluation_protocol_path_checked": (str(Path(evaluation_protocol).resolve())
@@ -733,6 +739,19 @@ def _export_transition_locked(audit_path: Path, output_path: Path, audit: dict) 
     if audit.get("qualification_eligible") is not False or audit.get("audit_status") != "consistent_historical_segment":
         raise ValueError("transition export requires a consistent, explicitly nonqualifying audit")
     segment_root = Path(audit["segment_path"]).resolve()
+    qualification_protocol = Path(audit.get("qualification_protocol_path_checked", ""))
+    evaluation_protocol = (Path(audit["evaluation_protocol_path_checked"])
+        if audit.get("evaluation_protocol_path_checked") else None)
+    try:
+        recomputed_audit = _audit_segment_locked(segment_root,
+            qualification_protocol, Path(audit.get("evaluation_inventory_root", "")),
+            evaluation_protocol)
+        if _canonical(recomputed_audit) != _canonical(audit):
+            raise ValueError("supplied audit differs from a fresh audit of current evidence")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"cannot recompute transition audit from current evidence: {exc}") from exc
     if (_sha((segment_root / "supervisor-status.json").read_bytes()) !=
             audit.get("supervisor_status_sha256") or
             _sha((segment_root / "queue-status.json").read_bytes()) !=

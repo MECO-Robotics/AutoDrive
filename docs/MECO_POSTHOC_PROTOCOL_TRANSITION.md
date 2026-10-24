@@ -42,10 +42,13 @@ python3 scripts/meco_protocol_transition.py export \
   --output /path/to/weights-only-transition.pt
 ```
 
-Export rechecks checkpoint byte hashes and actor-state hashes, the frozen
-evaluation protocol bytes and content ID, the history chain, every report/status
-hash, and every checkpoint snapshot path/hash and complete snapshot directory
-inventory. It constructs each
+Export recomputes the complete audit from the current segment, evaluation root,
+and recorded frozen protocol artifacts while holding the supervisor lock. It
+rejects a supplied audit JSON that differs from current evidence, including a
+changed case, seed list, protocol identity, or per-record binding. It then
+rechecks checkpoint byte hashes and actor-state hashes, evaluation protocol
+bytes and content ID, the history chain, every report/status hash, and every
+checkpoint snapshot path/hash and complete snapshot directory inventory. It constructs each
 registered track model on CPU, and strictly validates its actor state dict.
 The artifact and JSON sidecar bind all five checkpoint identities, model
 shapes/dtypes, source lineage, checked protocol identity, evaluation hashes,

@@ -1,5 +1,6 @@
 import hashlib
 import fcntl
+import copy
 import json
 import os
 import shutil
@@ -370,8 +371,40 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             audit_path.write_text(json.dumps(audit))
             eval_protocol_path = root / "evaluation-protocol.json"
             eval_protocol_path.write_text(eval_protocol_path.read_text() + " ")
-            with self.assertRaisesRegex(ValueError, "protocol artifact changed"):
+            with self.assertRaisesRegex(ValueError,
+                    "held-out evaluation protocol|protocol artifact changed"):
                 transition.export_transition(audit_path, root / "transition.pt")
+
+    def test_export_recomputes_audit_and_rejects_mutated_evaluation_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protocol_path = root / "protocol.json"
+            protocol = _protocol(protocol_path)
+            segment = root / "segment"
+            _segment(segment, protocol)
+            audit = _audit(segment, protocol_path)
+            mutations = {
+                "evaluation_case": lambda item: item["evaluations"][0][
+                    "evaluation_case"].update(split="test"),
+                "exact_episode_seeds": lambda item: item["evaluations"][0].update(
+                    exact_episode_seeds=[999]),
+                "evaluation_protocol_id": lambda item: item["evaluations"][0].update(
+                    evaluation_protocol_id="tampered-id"),
+                "evaluation_protocol_sha256": lambda item: item["evaluations"][0].update(
+                    evaluation_protocol_sha256="0" * 64),
+                "per_record_binding": lambda item: item["evaluations"][0][
+                    "record_bindings"][0].update(evaluation_case_id=[]),
+            }
+            for name, mutate in mutations.items():
+                changed = copy.deepcopy(audit)
+                mutate(changed)
+                audit_path = root / f"audit-{name}.json"
+                audit_path.write_text(json.dumps(changed))
+                with self.subTest(field=name):
+                    with self.assertRaisesRegex(ValueError,
+                            "differs from a fresh audit"):
+                        transition.export_transition(audit_path,
+                            root / f"transition-{name}.pt")
 
     def test_diagnostic_unbound_evaluation_stays_nonqualifying(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -493,7 +526,8 @@ class MecoProtocolTransitionTests(unittest.TestCase):
             audit_path.write_text(json.dumps(audit))
             checkpoint = root / "segment" / "A1" / "latest.pt"
             checkpoint.write_bytes(checkpoint.read_bytes() + b"tamper")
-            with self.assertRaisesRegex(ValueError, "changed since audit"):
+            with self.assertRaisesRegex(ValueError,
+                    "differs from a fresh audit|changed since audit"):
                 transition.export_transition(audit_path, root / "transition.pt")
 
     def test_snapshot_tamper_after_audit_blocks_export(self):
