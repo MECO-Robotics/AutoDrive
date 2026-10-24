@@ -263,6 +263,9 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             if pair["feasible"]:
                 descriptor_population[(pair["node_id"], pair["behavior_id"])] += 1
             feasible_descriptor_counts[str(pair["behavior_id"])] += 1
+        represented_feasible_nodes = {pair["node_id"] for pair in feasible_pairs}
+        if represented_feasible_nodes != set(feasible):
+            raise ValueError("feasible node inventory differs from full feasible pair layout")
         behavior_count = max(1, len({pair["behavior_id"] for pair in feasible_pairs}))
         requested = max(1, len(feasible) // 16)
         budget_node_limit = max(1, PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX //

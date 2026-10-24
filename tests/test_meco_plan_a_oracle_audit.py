@@ -318,3 +318,18 @@ def test_audit_rejects_coherently_rewritten_non_sampled_node(tmp_path):
     _rewrite_legal(args, inject_node_two)
     with pytest.raises(ValueError, match="deterministic capped round-robin sample"):
         audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_rejects_feasible_node_missing_from_layout_after_digest_rewrite(tmp_path):
+    args = _fixture(tmp_path, expert=False)
+
+    def remove_node_seven_layout_rows(row):
+        row["full_pair_layout"] = [pair for pair in row["full_pair_layout"]
+            if pair["node_id"] != 7]
+        for index, pair in enumerate(row["full_pair_layout"]):
+            pair["pair_index"] = index
+        row["full_pair_layout_sha256"] = _hash(row["full_pair_layout"])
+
+    _rewrite_legal(args, remove_node_seven_layout_rows)
+    with pytest.raises(ValueError, match="feasible node inventory differs"):
+        audit_plan_a_legal_nodes(*args)
