@@ -1,4 +1,6 @@
 import json
+import copy
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from frc_defense.meco_phase4_runtime_adapter import (
     phase4_requirement_binding,
     validate_phase4_capture,
 )
+from frc_defense.meco_ablation_matrix import _validate_phase4_condition_records
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +54,9 @@ def test_capture_binds_only_realized_existing_stimuli_and_marks_missing_outcomes
     capture = phase4_factor_exposure(factor, runtime,
         {"success": 1.0, "safety_robot_contact_rate": 0.0},
         source_identity=source, split="validation", seed=21,
-        scenario_id="offense_vs_scripted_pressure", category="active/trench/level_1_stationary")
+        scenario_id="offense_vs_scripted_pressure", category="active/trench/level_1_stationary",
+        qualification_case={"layout_id": "layout-a", "defender_family": "family-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"})
     assert capture["status"] == "realized_stimulus_outcomes_incomplete"
     assert capture["runtime_event"]["realized"] is True
     assert capture["required_signals_unavailable"]
@@ -59,6 +64,35 @@ def test_capture_binds_only_realized_existing_stimuli_and_marks_missing_outcomes
     validate_phase4_capture(capture, expected_source_identity=source)
     with pytest.raises(ValueError, match="source identity mismatch"):
         validate_phase4_capture(capture, expected_source_identity={"commit": "different"})
+    validate_phase4_capture(capture, expected_source_identity_sha256=
+        capture["source_identity_sha256"], expected_episode_seed=21,
+        expected_split="validation", expected_qualification_case=capture["qualification_case"])
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda row: row.update(factor_sha256="0" * 64), "factor registration or digest"),
+    (lambda row: row.update(status="stimulus_not_realized"), "not a realized"),
+    (lambda row: row["runtime_event"].update(realized=False), "was not realized"),
+    (lambda row: row["runtime_event"].update(observed=359), "does not match"),
+    (lambda row: row.update(required_signals_unavailable=[]), "signal accounting"),
+    (lambda row: row.update(seed=22), "seed differs"),
+    (lambda row: row.update(qualification_case={"layout_id": "wrong"}), "qualification case"),
+])
+def test_capture_validator_rejects_provenance_and_realization_tampering(mutation, error):
+    factor = phase4_factor_config("feinting_opponent")
+    source = {"commit": "abc123"}
+    case = {"layout_id": "layout-a", "defender_family": "family-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"}
+    capture = phase4_factor_exposure(factor, {"feint_reversal_tick": 360}, {},
+        source_identity=source, split="validation", seed=21,
+        scenario_id="offense_vs_scripted_pressure", category="active/trench/level_1_stationary",
+        qualification_case=case)
+    tampered = copy.deepcopy(capture)
+    mutation(tampered)
+    with pytest.raises(ValueError, match=error):
+        validate_phase4_capture(tampered, expected_source_identity=source,
+            expected_episode_seed=21, expected_split="validation",
+            expected_qualification_case=case)
 
 
 def test_capture_does_not_claim_unrealized_stimulus_or_expose_test_seed():
@@ -74,3 +108,52 @@ def test_capture_does_not_claim_unrealized_stimulus_or_expose_test_seed():
     assert "987654321" not in json.dumps(capture)
     with pytest.raises(ValueError, match="not a realized"):
         validate_phase4_capture(capture, expected_source_identity=source)
+
+
+def test_realized_test_capture_keeps_seed_redacted_and_mismatch_is_rejected():
+    factor = phase4_factor_config("feinting_opponent")
+    source = {"commit": "abc123"}
+    capture = phase4_factor_exposure(factor, {"feint_reversal_tick": 360}, {},
+        source_identity=source, split="test", seed=987654321,
+        scenario_id="offense_vs_scripted_pressure", category="active/trench/level_1_stationary")
+    validate_phase4_capture(capture, expected_source_identity=source,
+                            expected_episode_seed=987654321, expected_split="test")
+    assert capture["seed"] is None and capture["seed_redacted"] is True
+    leaked = copy.deepcopy(capture)
+    leaked.update(seed=987654321, seed_redacted=False)
+    with pytest.raises(ValueError, match="must redact"):
+        validate_phase4_capture(leaked, expected_source_identity=source,
+                                expected_split="test")
+
+
+def test_matrix_intake_rejects_unrealized_or_episode_mismatched_capture():
+    factor = phase4_factor_config("feinting_opponent")
+    source = {"commit": "abc123"}
+    source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    case = {"layout_id": "layout-a", "defender_family": "family-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"}
+    capture = phase4_factor_exposure(factor, {"feint_reversal_tick": 360}, {},
+        source_identity=source, split="validation", seed=21,
+        scenario_id="offense_vs_scripted_pressure", category="active/trench/level_1_stationary",
+        qualification_case=case)
+    row = {"phase4_realization_capture": capture, "scenario_id": capture["scenario_id"],
+        "category": capture["category"], "seed": 21, **case}
+    _validate_phase4_condition_records([row], factor=factor,
+        source_hash=source_hash, split="validation", qualification_case=case)
+
+    unrealized = copy.deepcopy(row)
+    unrealized["phase4_realization_capture"]["status"] = "stimulus_not_realized"
+    with pytest.raises(ValueError, match="not a realized"):
+        _validate_phase4_condition_records([unrealized], factor=factor,
+            source_hash=source_hash, split="validation", qualification_case=case)
+    event_not_realized = copy.deepcopy(row)
+    event_not_realized["phase4_realization_capture"]["runtime_event"]["realized"] = False
+    with pytest.raises(ValueError, match="was not realized"):
+        _validate_phase4_condition_records([event_not_realized], factor=factor,
+            source_hash=source_hash, split="validation", qualification_case=case)
+    wrong_seed = copy.deepcopy(row)
+    wrong_seed["phase4_realization_capture"]["seed"] = 22
+    with pytest.raises(ValueError, match="seed differs"):
+        _validate_phase4_condition_records([wrong_seed], factor=factor,
+            source_hash=source_hash, split="validation", qualification_case=case)

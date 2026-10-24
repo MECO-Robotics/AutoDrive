@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
 
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
 
@@ -110,11 +109,6 @@ PHASE4_REQUIREMENT_BINDINGS = {
 }
 
 
-def _canonical_hash(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True,
-        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-
-
 def phase4_requirement_binding(requirement_id: str) -> dict:
     """Return a copy-like JSON-safe binding for one registered requirement."""
     try:
@@ -138,7 +132,8 @@ def requirement_ids_for_factor(factor: dict | None) -> tuple[str, ...]:
 def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
                            metrics: dict | None, *, source_identity: dict,
                            split: str, seed: int, scenario_id: str,
-                           category: str) -> dict | None:
+                           category: str,
+                           qualification_case: dict | None = None) -> dict | None:
     """Build an immutable-provenance capture; missing/unrealized signals fail closed."""
     if factor is None:
         return None
@@ -150,6 +145,13 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         raise ValueError("Phase 4 capture seed must be a non-negative integer")
     if not isinstance(source_identity, dict) or not source_identity:
         raise ValueError("Phase 4 capture requires evaluator source identity")
+    if qualification_case is not None and (
+            not isinstance(qualification_case, dict) or
+            set(qualification_case) != {"layout_id", "defender_family",
+                                        "start_condition", "sensor_profile"} or
+            any(not isinstance(value, str) or not value
+                for value in qualification_case.values())):
+        raise ValueError("Phase 4 capture has invalid qualification case")
     runtime = runtime_metrics if isinstance(runtime_metrics, dict) else {}
     outcomes = metrics if isinstance(metrics, dict) else {}
     # Match the evaluator's established source_identity_sha256 serialization.
@@ -160,18 +162,25 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         event = runtime.get("feint_reversal_tick")
         event_expected = factor["reversal_tick"]
         event_field = "feint_reversal_tick"
+        event_evidence = {}
     elif kind == "abrupt_opponent_policy_change":
         event = runtime.get("policy_change_tick")
         event_expected = factor["switch_tick"]
         event_field = "policy_change_tick"
+        event_evidence = {}
     elif kind == "observation_delay":
         event = runtime.get("delayed_observation_ticks", 0)
         event_expected = ">0"
         event_field = "delayed_observation_ticks"
+        event_evidence = {}
     elif kind == "independent_low_confidence":
         event = runtime.get("confidence_cap_refresh_count", 0)
         event_expected = ">0"
         event_field = "confidence_cap_refresh_count"
+        event_evidence = {
+            "confidence_cap_applied": runtime.get("confidence_cap_applied"),
+            "confidence_cap_reduced_track_values": runtime.get(
+                "confidence_cap_reduced_track_values", 0)}
     else:  # guarded by validate_phase4_factor, kept fail-closed for future additions
         event, event_expected, event_field = None, None, None
     if kind in ("feinting_opponent", "abrupt_opponent_policy_change"):
@@ -197,6 +206,7 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         "split": split,
         "scenario_id": scenario_id,
         "category": category,
+        "qualification_case": qualification_case,
         "seed": seed if split != "test" else None,
         "seed_redacted": split == "test",
         "source_identity": source_identity,
@@ -205,7 +215,8 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         "factor_sha256": phase4_factor_digest(factor),
         "requirement_ids": list(requirements),
         "runtime_event": {"field": event_field, "observed": event,
-                          "expected": event_expected, "realized": realized},
+                          "expected": event_expected, "realized": realized,
+                          "evidence": event_evidence},
         "authoritative_observed_signals": observed,
         "required_signals_unavailable": unavailable,
         "missing_runtime_sources": sorted({limitation for row in bindings
@@ -215,19 +226,104 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
     }
 
 
-def validate_phase4_capture(capture: dict, *, expected_source_identity: dict) -> None:
-    """Check basic source binding and fail closed on incomplete captures."""
+def validate_phase4_capture(capture: dict, *,
+                            expected_source_identity: dict | None = None,
+                            expected_source_identity_sha256: str | None = None,
+                            expected_episode_seed: int | None = None,
+                            expected_split: str | None = None,
+                            expected_qualification_case: dict | None = None) -> None:
+    """Validate exact source, factor, realization, split, episode, and signals."""
     if not isinstance(capture, dict) or capture.get("schema") != "meco-phase4-realized-stimulus-capture-v1":
         raise ValueError("invalid Phase 4 realization capture schema")
-    if capture.get("source_identity") != expected_source_identity:
-        raise ValueError("Phase 4 capture source identity mismatch")
-    expected_hash = hashlib.sha256(json.dumps(expected_source_identity,
+    embedded_source = capture.get("source_identity")
+    if not isinstance(embedded_source, dict) or not embedded_source:
+        raise ValueError("Phase 4 capture source identity is missing")
+    embedded_hash = hashlib.sha256(json.dumps(embedded_source,
         sort_keys=True, allow_nan=False).encode()).hexdigest()
-    if capture.get("source_identity_sha256") != expected_hash:
+    expected_hash = expected_source_identity_sha256
+    if expected_source_identity is not None:
+        if embedded_source != expected_source_identity:
+            raise ValueError("Phase 4 capture source identity mismatch")
+        expected_hash = hashlib.sha256(json.dumps(expected_source_identity,
+            sort_keys=True, allow_nan=False).encode()).hexdigest()
+    if expected_hash is None or capture.get("source_identity_sha256") != expected_hash or embedded_hash != expected_hash:
         raise ValueError("Phase 4 capture source digest mismatch")
+    factor = capture.get("factor")
+    if (not isinstance(factor, dict) or factor.get("kind") not in PHASE4_FACTORS or
+            factor != PHASE4_FACTORS[factor["kind"]] or
+            capture.get("factor_sha256") != phase4_factor_digest(factor)):
+        raise ValueError("Phase 4 capture factor registration or digest mismatch")
     if capture.get("qualification_eligible") is not False:
         raise ValueError("runtime capture alone cannot claim qualification")
     if capture.get("status") != "realized_stimulus_outcomes_incomplete":
         raise ValueError("Phase 4 capture is not a realized, outcome-incomplete event")
-    if capture.get("required_signals_unavailable") is None:
-        raise ValueError("Phase 4 capture omitted required-signal accounting")
+    split = capture.get("split")
+    if split not in ("validation", "test", "train", "calibration", "diagnostic"):
+        raise ValueError("Phase 4 capture split is invalid")
+    if expected_split is not None and split != expected_split:
+        raise ValueError("Phase 4 capture split differs from its episode")
+    seed = capture.get("seed")
+    redacted = capture.get("seed_redacted")
+    if split == "test":
+        if seed is not None or redacted is not True:
+            raise ValueError("test-split Phase 4 capture must redact its seed")
+    elif type(seed) is not int or seed < 0 or redacted is not False:
+        raise ValueError("non-test Phase 4 capture must contain its episode seed")
+    if expected_episode_seed is not None and split != "test" and seed != expected_episode_seed:
+        raise ValueError("Phase 4 capture seed differs from its episode")
+    disclosure = capture.get("disclosure")
+    if (not isinstance(disclosure, dict) or
+            disclosure.get("contains_final_test_seed_assignments") is not False):
+        raise ValueError("Phase 4 capture final-test disclosure metadata is invalid")
+    case = capture.get("qualification_case")
+    if case is not None and (
+            not isinstance(case, dict) or
+            set(case) != {"layout_id", "defender_family", "start_condition", "sensor_profile"} or
+            any(not isinstance(value, str) or not value for value in case.values())):
+        raise ValueError("Phase 4 capture qualification case is invalid")
+    if expected_qualification_case is not None and case != expected_qualification_case:
+        raise ValueError("Phase 4 capture qualification case differs from its episode")
+
+    requirements = requirement_ids_for_factor(factor)
+    if not requirements or capture.get("requirement_ids") != list(requirements):
+        raise ValueError("Phase 4 capture requirement binding differs from its factor")
+    rows = [PHASE4_REQUIREMENT_BINDINGS[item] for item in requirements]
+    required = sorted({signal for row in rows for signal in row["required_signals"]})
+    authoritative = sorted({signal for row in rows for signal in row["authoritative_signals"]})
+    observed = capture.get("authoritative_observed_signals")
+    unavailable = capture.get("required_signals_unavailable")
+    if (not isinstance(observed, dict) or not all(isinstance(key, str) for key in observed) or
+            not set(observed).issubset(authoritative) or
+            not set(observed).issubset(required) or
+            not isinstance(unavailable, list) or
+            not all(isinstance(signal, str) for signal in unavailable) or
+            len(unavailable) != len(set(unavailable)) or
+            unavailable != sorted(set(required) - set(observed)) or not unavailable):
+        raise ValueError("Phase 4 capture required/unavailable signal accounting is inconsistent")
+
+    event = capture.get("runtime_event")
+    if not isinstance(event, dict) or event.get("realized") is not True:
+        raise ValueError("Phase 4 runtime stimulus was not realized")
+    kind = factor["kind"]
+    if kind == "feinting_opponent":
+        expected_field, expected_value = "feint_reversal_tick", factor["reversal_tick"]
+        valid_observed = type(event.get("observed")) is int and event["observed"] == expected_value
+    elif kind == "abrupt_opponent_policy_change":
+        expected_field, expected_value = "policy_change_tick", factor["switch_tick"]
+        valid_observed = type(event.get("observed")) is int and event["observed"] == expected_value
+    elif kind == "observation_delay":
+        expected_field, expected_value = "delayed_observation_ticks", ">0"
+        valid_observed = type(event.get("observed")) is int and event["observed"] > 0
+    elif kind == "independent_low_confidence":
+        expected_field, expected_value = "confidence_cap_refresh_count", ">0"
+        evidence = event.get("evidence")
+        valid_observed = (type(event.get("observed")) is int and event["observed"] > 0 and
+            isinstance(evidence, dict) and
+            evidence.get("confidence_cap_applied") == factor["fuel_confidence_cap"] and
+            type(evidence.get("confidence_cap_reduced_track_values")) is int and
+            evidence["confidence_cap_reduced_track_values"] > 0)
+    else:
+        raise ValueError("Phase 4 capture factor has no registered runtime event contract")
+    if (event.get("field") != expected_field or event.get("expected") != expected_value or
+            not valid_observed):
+        raise ValueError("Phase 4 runtime event does not match the registered factor")

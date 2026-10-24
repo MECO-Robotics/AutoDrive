@@ -19,6 +19,7 @@ from typing import Any
 
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
+from .meco_phase4_runtime_adapter import validate_phase4_capture
 from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
@@ -361,6 +362,32 @@ def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
     return result
 
 
+def _validate_phase4_condition_records(records: list[dict], *, factor: dict,
+                                       source_hash: str, split: str,
+                                       qualification_case: dict) -> None:
+    """Require every treatment episode to carry a realized, exact capture."""
+    for row in records:
+        capture = row.get("phase4_realization_capture")
+        try:
+            validate_phase4_capture(capture,
+                expected_source_identity_sha256=source_hash,
+                expected_episode_seed=row.get("seed"),
+                expected_split=split,
+                expected_qualification_case=qualification_case)
+        except ValueError as exc:
+            raise ValueError(
+                "Phase 4 episode has an invalid source-bound realization capture: "
+                f"{exc}") from exc
+        if (capture.get("factor") != factor or
+                capture.get("scenario_id") != row.get("scenario_id") or
+                capture.get("category") != row.get("category") or
+                capture.get("seed") != (None if split == "test" else row.get("seed"))):
+            raise ValueError("Phase 4 capture episode identity differs from its record")
+        row_case = {name: row.get(name) for name in DEFAULT_EVALUATION_STRATUM}
+        if capture.get("qualification_case") != row_case:
+            raise ValueError("Phase 4 capture qualification case differs from its record")
+
+
 def _record_metrics(row: dict | None) -> dict | None:
     if row is None:
         return None
@@ -677,19 +704,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         if condition.phase4_factor is not None:
-            for row in report.get("records", ()):
-                capture = row.get("phase4_realization_capture")
-                if (not isinstance(capture, dict) or
-                        capture.get("factor") != condition.phase4_factor or
-                        capture.get("factor_sha256") != phase4_factor_digest(
-                            condition.phase4_factor) or
-                        capture.get("source_identity_sha256") !=
-                            row.get("source_identity_sha256") or
-                        capture.get("split") != evaluation_split or
-                        capture.get("scenario_id") != row.get("scenario_id") or
-                        capture.get("category") != row.get("category")):
-                    raise ValueError(
-                        "Phase 4 episode lacks matching source-bound realization capture")
+            _validate_phase4_condition_records(report.get("records", ()),
+                factor=condition.phase4_factor, source_hash=source_hash,
+                split=evaluation_split, qualification_case=qualification_case)
         observed_configs, observed_protocols, shared_config = _validate_condition_manifest(
             report, frozen_checkpoint_hashes=bundle_hashes,
             frozen_source_hash=source_hash,
