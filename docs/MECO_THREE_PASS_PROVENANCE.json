@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -297,6 +297,41 @@
         "status": "approved-summary"
       },
       "limits": "Fake CPU adapter contract checks only; GPU-load freshness, simulator fallback, replay, and deployment profiling pending."
+    },
+    {
+      "requirement_id": "qualification-streak-progression",
+      "title": "Qualification streak progression across updated checkpoints",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/qualification-streak-progression.md",
+          "sha256": "801772a7a9c03942989b8394859550e1459a290aa7891b7467f124ec62f33a62",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "e9faa56978fe7a74a00ecd2813e094fb8e81ba66",
+        "paths": [
+          "docs/MECO_QUALIFICATION.md",
+          "frc_defense/training_curriculum.py",
+          "tests/test_training_curriculum.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/qualification-streak-progression.md",
+          "sha256": "801772a7a9c03942989b8394859550e1459a290aa7891b7467f124ec62f33a62",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "e9faa56978fe7a74a00ecd2813e094fb8e81ba66",
+        "verdict": "approved",
+        "verdict_detail": "approved exact integration commit after verifying changing-checkpoint streaks, per-round bundle matching, duplicate no-op, final checkpoint binding, and tests",
+        "status": "approved-summary"
+      },
+      "limits": "74 focused contract tests passed; no simulator evaluation or dashboard replay is claimed because this tranche changes qualification bookkeeping, not simulated gameplay."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
