@@ -21,6 +21,7 @@ from .meco_phase4_design import (
     _sha256,
     compile_phase4_design_overlay,
 )
+from .meco_phase4_runtime_adapter import phase4_requirement_binding
 
 
 PLAN_SCHEMA = "meco-phase4-validation-campaign-plan-v1"
@@ -101,6 +102,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
     total_rows = 0
     for compiled in overlay["requirements"]:
         req_id = compiled["requirement_id"]
+        runtime_binding = phase4_requirement_binding(req_id)
         source_req = registry_requirements[req_id]
         factors = source_req["factor_ids"]
         selectors = source_req["validation_case_axes"]
@@ -148,7 +150,21 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "status": ("design_only_unassigned_to_protocol_case" if design_axes
                                    else "planned_validation_not_executed"),
                         "schedulable": True,
-                        "executable": not bool(design_axes),
+                        "runtime_factor_kind": runtime_binding[
+                            "runtime_factor_by_factor_id"].get(factor),
+                        "runtime_event": runtime_binding[
+                            "runtime_event_by_factor_id"].get(factor),
+                        "runtime_stimulus_supported": (
+                            factor in runtime_binding["runtime_factor_by_factor_id"]
+                            and runtime_binding["stimulus_supported"]),
+                        "required_outcome_signals_complete": set(
+                            runtime_binding["required_signals"]).issubset(
+                                runtime_binding["authoritative_signals"]),
+                        "executable": (not bool(design_axes)
+                            and factor in runtime_binding["runtime_factor_by_factor_id"]
+                            and runtime_binding["stimulus_supported"]
+                            and set(runtime_binding["required_signals"]).issubset(
+                                runtime_binding["authoritative_signals"])),
                         "executed": False,
                     }
                     schedule_identity = {"factor_id": factor, "case_axes": case,
@@ -174,6 +190,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
             "pairing_grid_sha256": _sha256(_canonical_bytes([
                 {"policy_id": p, "condition": c} for p in POLICIES for c in CONDITIONS])),
             "pair_coverage": "exactly_one_control_and_one_treatment_per_validation_seed_policy_cell",
+            "runtime_binding": runtime_binding,
             "scheduled_row_count_theoretical": req_rows,
             "cells": cells,
         })
@@ -201,6 +218,10 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
         "episode_rows_materialized": False,
         "final_test_rows_or_seed_values_included": False,
         "design_only_cells_executable": False,
+        "executable_cell_count": sum(1 for requirement in plan_requirements
+                                      for cell in requirement["cells"]
+                                      if cell["executable"]),
+        "runtime_capture_schema": "meco-phase4-realized-stimulus-capture-v1",
         "requirements": plan_requirements,
         "runtime_and_evaluator_wiring_required": True,
     }

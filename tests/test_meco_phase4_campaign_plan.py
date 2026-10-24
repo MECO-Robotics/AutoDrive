@@ -35,6 +35,8 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
     assert plan["episode_rows_materialized"] is False
     assert plan["final_test_rows_or_seed_values_included"] is False
     assert plan["design_only_cells_executable"] is False
+    assert plan["executable_cell_count"] == 0
+    assert plan["runtime_capture_schema"] == "meco-phase4-realized-stimulus-capture-v1"
     assert plan["policies"] == list(POLICIES)
     assert plan["pair_conditions"] == list(CONDITIONS)
     assert sum(r["factor_case_axis_cell_count"] for r in plan["requirements"]) == 6488
@@ -48,16 +50,27 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
             {"policy_id": policy, "condition": condition}
             for policy in POLICIES for condition in CONDITIONS]
         assert requirement["pair_coverage"].startswith("exactly_one_control")
+        assert requirement["runtime_binding"]["required_signals"]
+        assert requirement["runtime_binding"]["factor_ids"]
         for cell in requirement["cells"]:
             assert cell["seed_count"] == 100
             assert cell["planned_pair_rows_per_policy"] == 200
             assert cell["executed"] is False
+            expected_runtime_factor = requirement["runtime_binding"][
+                "runtime_factor_by_factor_id"].get(cell["factor_id"])
+            assert cell["runtime_factor_kind"] == expected_runtime_factor
+            assert cell["runtime_event"] == requirement["runtime_binding"][
+                "runtime_event_by_factor_id"].get(cell["factor_id"])
+            assert cell["runtime_stimulus_supported"] == bool(expected_runtime_factor)
             assert cell["case_cell_key"]
             if cell["design_axes"]:
                 assert cell["status"] == "design_only_unassigned_to_protocol_case"
                 assert cell["executable"] is False
             else:
-                assert cell["executable"] is True
+                # Protocol assignment alone does not make a cell executable:
+                # the exact runtime stimulus and all required outcome signals
+                # must both be wired before campaign dispatch.
+                assert cell["executable"] is False
     assert "seeds" not in set(_walk_keys(plan))
     assert "final_test" not in set(_walk_keys(plan))
 

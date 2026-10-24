@@ -50,6 +50,7 @@ from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
+from .meco_phase4_runtime_adapter import phase4_factor_exposure
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -3122,6 +3123,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     if bool(env.track_mask[0, 3].any()) else None,
                                 "confidence_semantics": "requested and applied caps are reported separately; refresh count and reduced sensed-track values prove application; final mean is over sensed learner tracks; positions, velocities, ages, masks, dropout and noise are unchanged",
                             } if phase4_factor is not None else None),
+                            "phase4_realization_capture": phase4_factor_exposure(
+                                phase4_factor, env.phase4_runtime_metrics,
+                                metrics, source_identity=sources, split=split,
+                                seed=seed, scenario_id=scenario_id,
+                                category=category),
                             "phase4_response_metrics": ({name: metrics.get(name)
                                 for name in ("success", "useful_throughput",
                                     "route_switches", "route_aba_proxy",

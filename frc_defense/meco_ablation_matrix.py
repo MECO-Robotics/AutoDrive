@@ -676,6 +676,20 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             output=str(report_path))
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
+        if condition.phase4_factor is not None:
+            for row in report.get("records", ()):
+                capture = row.get("phase4_realization_capture")
+                if (not isinstance(capture, dict) or
+                        capture.get("factor") != condition.phase4_factor or
+                        capture.get("factor_sha256") != phase4_factor_digest(
+                            condition.phase4_factor) or
+                        capture.get("source_identity_sha256") !=
+                            row.get("source_identity_sha256") or
+                        capture.get("split") != evaluation_split or
+                        capture.get("scenario_id") != row.get("scenario_id") or
+                        capture.get("category") != row.get("category")):
+                    raise ValueError(
+                        "Phase 4 episode lacks matching source-bound realization capture")
         observed_configs, observed_protocols, shared_config = _validate_condition_manifest(
             report, frozen_checkpoint_hashes=bundle_hashes,
             frozen_source_hash=source_hash,
@@ -853,6 +867,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                             "factor_metrics": _record_metrics(treated),
                             "baseline_metrics": _record_metrics(control),
                             "factor_runtime": treated.get("phase4_factor_runtime")})
+                        contrasts[-1]["realization_capture"] = treated.get(
+                            "phase4_realization_capture")
 
     # Repeat the frozen bundle identity on every contrast so a contrast row
     # remains auditable when copied out of the matrix-level report.
