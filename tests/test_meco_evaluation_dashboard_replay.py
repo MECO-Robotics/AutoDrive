@@ -19,6 +19,7 @@ from frc_defense import dashboard_simulation
 from frc_defense.meco_ablation_matrix import run_matrix
 import torch
 from frc_defense.meco_track_training import (
+    _d0_replay_action_ticks, _d0_replay_decision,
     _capture_meco_replay_frame, _evaluation_record_digest,
     _selected_policy_candidate_id, _validate_meco_replay_alignment,
     _validate_replay_seed_selection,
@@ -75,6 +76,36 @@ def test_replay_alignment_rejects_seed_record_tick_and_policy_divergence():
         _validate_meco_replay_alignment(record, bad, final_tick=24)
 
 
+def test_d0_control_only_replay_uses_one_action_per_frame():
+    actions = []
+    assert _d0_replay_action_ticks(None) == 1
+    for elapsed, action in ((1, 3), (2, 4), (3, 2)):
+        actions.append(action)
+        decision = _d0_replay_decision(elapsed_ticks=elapsed, action_ticks=None,
+            executed_actions=actions, policy="D0", action=action, candidate_k=8,
+            prediction_mode="cv")
+        assert decision["macro_start_tick"] == elapsed - 1
+        assert decision["macro_end_tick"] == elapsed
+        assert decision["executed_actions"] == [action]
+
+
+def test_d0_replay_preserves_configured_12_tick_cadence_and_terminal_capture():
+    actions = [index % 8 for index in range(14)]
+    assert _d0_replay_action_ticks(12) == 12
+    assert _d0_replay_decision(elapsed_ticks=11, action_ticks=12,
+        executed_actions=actions, policy="D0", action=actions[10], candidate_k=16,
+        prediction_mode="cv") is None
+    boundary = _d0_replay_decision(elapsed_ticks=12, action_ticks=12,
+        executed_actions=actions, policy="D0", action=actions[11], candidate_k=16,
+        prediction_mode="cv")
+    assert boundary["macro_start_tick"] == 0
+    assert boundary["executed_actions"] == actions[:12]
+    terminal = _d0_replay_decision(elapsed_ticks=14, action_ticks=12,
+        executed_actions=actions, policy="D0", action=actions[13], candidate_k=16,
+        prediction_mode="cv", terminal=True)
+    assert terminal["macro_start_tick"] == 12
+    assert terminal["macro_end_tick"] == 14
+    assert terminal["executed_actions"] == actions[12:14]
 def test_versioned_executed_policy_trace_is_bound_to_replay_actions_and_candidate():
     record = _row()
     record["executed_policy_decision_trace"] = [

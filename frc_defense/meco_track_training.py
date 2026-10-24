@@ -466,6 +466,27 @@ def _validate_replay_seed_selection(output_dir, replay_seeds, scored_seeds) -> s
     return set(replay_seeds)
 
 
+def _d0_replay_action_ticks(action_ticks: int | None) -> int:
+    """Return D0's replay grouping interval without changing evaluation cadence metadata."""
+    return 1 if action_ticks is None else action_ticks
+
+
+def _d0_replay_decision(*, elapsed_ticks: int, action_ticks: int | None,
+                        executed_actions: list[int], policy: str, action: int,
+                        candidate_k: int, prediction_mode: str,
+                        terminal: bool = False) -> dict | None:
+    """Build a D0 replay decision at each configured grouping boundary."""
+    interval = _d0_replay_action_ticks(action_ticks)
+    if elapsed_ticks % interval and not terminal:
+        return None
+    start_tick = ((elapsed_ticks - 1) // interval) * interval
+    return {"kind": "policy_decision", "policy": policy, "action": action,
+        "action_source": "production_deterministic", "macro_start_tick": start_tick,
+        "macro_end_tick": elapsed_ticks,
+        "executed_actions": executed_actions[start_tick:elapsed_ticks],
+        "candidate_k": candidate_k, "prediction_mode": prediction_mode}
+
+
 def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
     """Capture renderer state from the evaluated environment without stepping it."""
     audit_valid = getattr(env, "_last_action_audit_valid", None)
@@ -2964,17 +2985,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 executed_action_trace.append(executed)
                                 actions_count[executed] += 1
                                 elapsed += 1
-                                if capture_replay and (elapsed % action_ticks == 0 or
-                                        bool(done[0].item()) or bool(truncated[0].item())):
-                                    macro_start_tick = ((elapsed - 1) // action_ticks) * action_ticks
-                                    decision = {"kind": "policy_decision", "policy": record_policy,
-                                        "action": executed, "action_source": "production_deterministic",
-                                        "macro_start_tick": macro_start_tick,
-                                        "macro_end_tick": int(env.steps[0].item()),
-                                        "executed_actions": executed_action_trace[
-                                            macro_start_tick:elapsed],
-                                        "candidate_k": candidate_k,
-                                        "prediction_mode": decision_prediction_mode}
+                                terminal = bool(done[0].item()) or bool(truncated[0].item())
+                                decision = (_d0_replay_decision(
+                                    elapsed_ticks=elapsed, action_ticks=action_ticks,
+                                    executed_actions=executed_action_trace,
+                                    policy=record_policy, action=executed,
+                                    candidate_k=candidate_k,
+                                    prediction_mode=decision_prediction_mode,
+                                    terminal=terminal) if capture_replay else None)
+                                if decision is not None:
+                                    decision["macro_end_tick"] = int(env.steps[0].item())
                                     replay_frames.append(_capture_meco_replay_frame(
                                         env, int(env.steps[0].item()), decision))
                                 update_evaluation_status("running", len(records))
@@ -3787,8 +3807,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "robot_roles": list(env.robot_roles),
                                 "simulation_ticks": final_tick,
                                 "simulated_seconds": final_tick * env.dt,
-                                "dt": env.dt, "capture_stride": action_ticks,
-                                "action_repeat": action_ticks,
+                                "dt": env.dt, "capture_stride": (
+                                    _d0_replay_action_ticks(action_ticks)
+                                    if is_production_d0 else action_ticks),
+                                "action_repeat": (1 if is_production_d0 else action_ticks),
                                 "perception_interval": env.perception_interval,
                                 "simulation_constraints": {"fuel_physics": True,
                                     "perception_simulation": True,
