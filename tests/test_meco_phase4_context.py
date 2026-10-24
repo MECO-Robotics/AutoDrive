@@ -6,12 +6,12 @@ import torch
 from frc_defense.field import qualification_field
 from frc_defense.meco_phase4_context import (
     CONTACT_GEOMETRIES, START_PROFILE_NAMES, TEAMMATE_BEHAVIORS,
-    ContactExposureRecorder,
+    ContactExposureProxyRecorder,
     TeammateBehaviorPool, apply_focal_pose_offset,
     apply_full_team_start_profile, bump_contact_exposure_geometry,
     contact_exposure_actions, contact_exposure_profile,
     full_team_start_profile, phase4_context_identity,
-    teammate_behavior_actions, validate_full_team_start_profile,
+    teammate_behavior_actions, validate_full_team_start_profile, start_profile_identity,
 )
 
 
@@ -33,10 +33,12 @@ def test_full_team_start_profiles_are_legal_and_apply_only_at_reset(profile):
     assert poses.shape == (2, 6, 3)
     assert torch.equal(env.sim.pose, before)
     validate_full_team_start_profile(env, poses)
-    identity = phase4_context_identity("legal_team_pose_sets", profile)
+    identity = start_profile_identity(profile)
     assert identity["factor_id"] == "start.legal_team_poses"
+    assert identity["value_name"] == {"midfield_spread": "team_start_set_a", "crossing_lanes": "team_start_set_b", "opposing_lane_stagger": "team_start_set_c"}[profile]
+    assert identity["config"]["runtime_profile_name"] == profile
     assert identity["config_sha256"] == phase4_context_identity(
-        "legal_team_pose_sets", profile)["config_sha256"]
+        "legal_team_pose_sets", identity["value_name"])["config_sha256"]
 
     applied = apply_full_team_start_profile(env, profile)
     assert torch.equal(env.sim.pose, applied)
@@ -54,21 +56,42 @@ def test_contact_exposure_profiles_start_clear_and_face_each_other(geometry):
     radius += .5 * (env.sim.length[:, 3].square()+env.sim.width[:, 3].square()).sqrt()
     assert (pair_distance > radius).all()
     direction = torch.atan2(delta[:, 1], delta[:, 0])
-    assert torch.allclose(torch.sin(poses[:, 2, 2]-direction), torch.zeros_like(direction), atol=.01)
-    assert torch.allclose(torch.sin(poses[:, 3, 2]-(direction+torch.pi)),
+    assert torch.allclose(torch.sin(poses[:, 2, 2]-direction),
                           torch.zeros_like(direction), atol=.01)
-    identity = phase4_context_identity("bump_geometry", geometry)
+    identity = phase4_context_identity("robot_contact_geometry", geometry)
     assert identity["factor_id"] == "contact.robot_bump"
     assert identity["config"]["physics"] == "ordinary"
 
 
-def test_contact_actions_require_sensed_opponents_and_use_defend_motion():
+def test_contact_geometries_are_physically_distinct():
+    env = _env(1)
+    profiles = [contact_exposure_profile(env, geometry)[0, 2:4].clone()
+                for geometry in CONTACT_GEOMETRIES]
+    assert not torch.equal(profiles[0], profiles[1])
+    assert not torch.equal(profiles[0], profiles[2])
+    assert not torch.equal(profiles[1], profiles[2])
+
+
+def test_contact_actions_require_fresh_track_directed_at_focal_and_use_defend_motion():
     class FakeEnv:
         n = 2
         device = torch.device("cpu")
+        dt = .02
+        perception_interval = 1
 
-        def __init__(self, sensed):
-            self.sensed = sensed
+        def __init__(self, valid=True, age=0., target_slot=3, mask=True):
+            self.opponent_valid = torch.zeros((2, 6), dtype=torch.bool)
+            self.opponent_valid[:, 2] = valid
+            self.opponent_age = torch.full((2, 6), float("inf"))
+            self.opponent_age[:, 2] = age
+            self.team_ids = torch.tensor([0, 0, 0, 1, 1, 1])
+            self.sim = SimpleNamespace(pose=torch.zeros((2, 6, 3)))
+            self.sim.pose[:, 3, :2] = torch.tensor([5., 5.])
+            self.sim.pose[:, 4, :2] = torch.tensor([6., 5.])
+            self.sim.pose[:, 5, :2] = torch.tensor([7., 5.])
+            self.opponent_pose = torch.zeros((2, 6, 3))
+            self.opponent_pose[:, 2, :2] = self.sim.pose[:, target_slot, :2]
+            self.mask = mask
 
         def _candidates(self):
             valid = torch.zeros((2, 6, 4), dtype=torch.bool)
@@ -78,13 +101,18 @@ def test_contact_actions_require_sensed_opponents_and_use_defend_motion():
             del indices, valid
             mask = torch.zeros((2, 6, 8), dtype=torch.bool)
             mask[..., 7] = True
-            mask[:, 2, 5] = self.sensed
-            mask[:, 3, 5] = self.sensed
+            mask[:, 2, 5] = self.mask
             return mask, torch.zeros((2, 6), dtype=torch.long)
 
-    with pytest.raises(ValueError, match="sense the focal robot"):
-        contact_exposure_actions(FakeEnv(False))
-    actions = contact_exposure_actions(FakeEnv(True))
+    with pytest.raises(ValueError, match="fresh valid"):
+        contact_exposure_actions(FakeEnv(valid=False))
+    with pytest.raises(ValueError, match="fresh valid"):
+        contact_exposure_actions(FakeEnv(age=.1))
+    with pytest.raises(ValueError, match="not directed"):
+        contact_exposure_actions(FakeEnv(target_slot=4))
+    with pytest.raises(ValueError, match="action mask"):
+        contact_exposure_actions(FakeEnv(mask=False))
+    actions = contact_exposure_actions(FakeEnv())
     assert actions.tolist() == [[7, 7, 5, 7, 7, 7]] * 2
 
 
@@ -198,7 +226,7 @@ def test_pose_offset_recomputes_relative_features_and_invalidates_route_cost():
 
 
 def test_contact_metric_contract_counts_first_pair_tick_and_stable_recovery():
-    recorder = ContactExposureRecorder(1, dt=.02, stable_ticks=3)
+    recorder = ContactExposureProxyRecorder(1, dt=.02, stable_ticks=3)
     pose = torch.zeros((1, 6, 3))
     velocity = torch.zeros((1, 6, 3))
     radius = torch.full((1, 6), .5)
@@ -206,20 +234,23 @@ def test_contact_metric_contract_counts_first_pair_tick_and_stable_recovery():
     pose[0, 3, 0] = 1.0
     contact[0, 2] = contact[0, 3] = True
     recorder.record_tick(pose, velocity, contact, radius)
-    assert recorder.contact_realization_tick.tolist() == [0]
-    assert recorder.contact_realization_count.tolist() == [1]
+    assert recorder.pair_contact_proxy_first_tick.tolist() == [0]
+    assert recorder.pair_contact_proxy_last_tick.tolist() == [0]
+    assert recorder.pair_contact_proxy_tick_count.tolist() == [1]
 
     contact.zero_()
     pose[0, 3, 0] = 2.2
     for _ in range(3):
         recorder.record_tick(pose, velocity, contact, radius)
     summary = recorder.summary()
-    assert summary["contact_realization_tick"] == [0]
-    assert summary["contact_realization_count"] == [1]
-    assert summary["recovery_time_s"] == pytest.approx([.02])
+    assert summary["pair_contact_proxy_first_tick"] == [0]
+    assert summary["pair_contact_proxy_last_tick"] == [0]
+    assert summary["pair_contact_proxy_tick_count"] == [1]
+    assert summary["post_contact_clearance_proxy_s"] == pytest.approx([.06])
     assert summary["factor_identity"]["factor_id"] == "contact.robot_bump"
-    assert summary["contact_flag_scope"] == "distance_gated_pair_proxy_from_per_robot_flags"
-    assert summary["promotion_status"] == "pending_replay_review"
+    assert summary["registry_contact_signal_status"] == "unavailable_without_pair_impulse_signal"
+    assert summary["registry_recovery_time_after_bump_s"] is None
+    assert "proxy_only" in summary["promotion_status"]
 
 
 def test_heading_offset_is_wrapped_and_registry_identity_is_stable():

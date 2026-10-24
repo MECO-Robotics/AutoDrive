@@ -19,10 +19,10 @@ import torch
 CONTEXT_FACTOR_VERSION = 1
 _FACTOR_AXES = {
     "legal_team_pose_sets": ("start.legal_team_poses", {
-        "midfield_spread", "crossing_lanes", "opposing_lane_stagger"}),
+        "team_start_set_a", "team_start_set_b", "team_start_set_c"}),
     "teammate_behaviors": ("teammate.behavior_pool", {
         "collect", "score", "ferry", "defend", "hold_position"}),
-    "bump_geometry": ("contact.robot_bump", {
+    "robot_contact_geometry": ("contact.robot_bump", {
         "crossing_contact", "side_contact", "recovery_contact"}),
     "focal_pose_offsets": ("observation.focal_pose_offset", {
         "translation_small", "translation_large", "heading_offset"}),
@@ -32,7 +32,23 @@ _FACTOR_AXES = {
 
 TEAMMATE_BEHAVIORS = ("collect", "score", "ferry", "defend", "hold_position")
 START_PROFILE_NAMES = ("midfield_spread", "crossing_lanes", "opposing_lane_stagger")
+START_PROFILE_REGISTRY_IDS = {
+    "midfield_spread": "team_start_set_a",
+    "crossing_lanes": "team_start_set_b",
+    "opposing_lane_stagger": "team_start_set_c",
+}
 CONTACT_GEOMETRIES = ("crossing_contact", "side_contact", "recovery_contact")
+_CONTACT_APPROACHES = {
+    "crossing_contact": {"opponent_heading_rad": math.pi/4,
+                         "focal_heading_rad": -math.pi/4,
+                         "exposure": "crossing_diagonal_axes"},
+    "side_contact": {"opponent_heading_rad": math.pi/2,
+                      "focal_heading_rad": 0.,
+                      "exposure": "orthogonal_side_impact"},
+    "recovery_contact": {"opponent_heading_rad": math.radians(25.),
+                          "focal_heading_rad": 0.,
+                          "exposure": "oblique_corner_impact"},
+}
 FOCAL_POSE_OFFSETS = {
     "translation_small": {"offset_xy_m": (0.30, 0.0), "heading_offset_rad": 0.0},
     "translation_large": {"offset_xy_m": (0.60, 0.0), "heading_offset_rad": 0.0},
@@ -75,10 +91,26 @@ def phase4_context_identity(axis_name: str, value_name: str) -> dict:
             "factor_config_id": f"{factor_id}:{value_name}"}
 
 
+def start_profile_identity(runtime_profile: str) -> dict:
+    """Return the exact registry identity for a runtime profile name."""
+    try:
+        registry_id = START_PROFILE_REGISTRY_IDS[runtime_profile]
+    except KeyError as exc:
+        raise ValueError(f"unknown full-team start profile: {runtime_profile}") from exc
+    return phase4_context_identity("legal_team_pose_sets", registry_id)
+
+
 def _context_config(axis_name: str, value_name: str) -> dict:
     if axis_name == "legal_team_pose_sets":
+        runtime_name = next((name for name, registry_id in
+                             START_PROFILE_REGISTRY_IDS.items()
+                             if registry_id == value_name), None)
+        if runtime_name is None:
+            raise ValueError(f"registry ID has no runtime start profile: {value_name}")
         return {"robot_slot_poses_m_rad": [list(pose)
-                for pose in _START_LAYOUTS[value_name]],
+                for pose in _START_LAYOUTS[runtime_name]],
+                "runtime_profile_name": runtime_name,
+                "registry_profile_id": value_name,
                 "field_reference_m": [16.54, 8.07],
                 "legal_start_validation": "field_bounds_robot_clearance_solids_pairwise"}
     if axis_name == "teammate_behaviors":
@@ -86,16 +118,17 @@ def _context_config(axis_name: str, value_name: str) -> dict:
             "collect": "nearest_legal_sensed_candidate_0_to_3",
             "score": 4, "ferry": 6, "defend": 5,
             "hold_position": 7}[value_name]}
-    if axis_name == "bump_geometry":
+    if axis_name == "robot_contact_geometry":
         return {"geometry": value_name, "robot_pair_slots": [2, 3],
+                "geometry_contract": _CONTACT_APPROACHES[value_name],
                 "contact_approach": {"opponent_slot": 2, "focal_slot": 3,
                     "opponent_action": 5, "focal_action": 7,
                     "target": "sensed_opponent_track",
                     "command_path": "bounded_native_motion_controller"},
                 "contact_injection": False,
-                "contact_metric": {"tick": "first distance-gated co-contact physics tick",
-                    "count": "number of physics ticks with both pair flags and near-pair geometry",
-                    "recovery": "first of five consecutive separated low-speed ticks after contact"},
+                "contact_metric": {"approach": "slot 2 action 5 targets a fresh valid sensed track verified as focal slot 3",
+                    "contact_proxy": "distance-gated co-contact physics ticks from per-robot flags; not registry contact signal",
+                    "recovery_proxy": "first stable separated low-speed interval after last proxy contact; not route-following recovery"},
                 "physics": "ordinary"}
     if axis_name == "focal_pose_offsets":
         values = FOCAL_POSE_OFFSETS[value_name]
@@ -175,18 +208,21 @@ def contact_exposure_profile(env, geometry: str) -> torch.Tensor:
     length, width = _dimensions(env)
     radius = _robot_radii(env)
     separation = float((radius[:, 2] + radius[:, 3]).max().item()) + .08
-    angle = {"crossing_contact": 0., "side_contact": math.pi/2,
-             "recovery_contact": .15}[geometry]
+    approach = _CONTACT_APPROACHES[geometry]
+    opponent_heading = approach["opponent_heading_rad"]
+    focal_heading = approach["focal_heading_rad"]
     cx, cy = length*.5, width*.5
-    half = separation*.5
-    dx, dy = half*math.cos(angle), half*math.sin(angle)
+    # Slot 2 advances along its heading toward focal slot 3.  This gives each
+    # registered geometry a distinct pair pose/orientation while preserving
+    # the same conservative chassis clearance.
+    dx, dy = separation*math.cos(opponent_heading), separation*math.sin(opponent_heading)
     poses = torch.tensor((
-        (length*.365, width*.15, angle),
-        (length*.365, width*.85, angle),
-        (cx-dx, cy-dy, angle),
-        (cx+dx, cy+dy, angle+math.pi),
-        (length*.635, width*.15, angle+math.pi),
-        (length*.635, width*.85, angle+math.pi)),
+        (length*.365, width*.15, opponent_heading),
+        (length*.365, width*.85, opponent_heading),
+        (cx-dx, cy-dy, opponent_heading),
+        (cx, cy, focal_heading),
+        (length*.635, width*.15, focal_heading),
+        (length*.635, width*.85, focal_heading)),
         device=env.device, dtype=env.sim.pose.dtype)
     validate_full_team_start_profile(env, poses.expand(env.n, -1, -1))
     return poses.expand(env.n, -1, -1).clone()
@@ -197,27 +233,54 @@ def contact_exposure_actions(env, *, focal_slot: int = 3,
     """Hold the focal robot while a scripted opponent approaches its track.
 
     Action 5 uses the existing opponent-track target and ordinary motion and
-    collision code. Fail closed until both robots have a valid perceived
-    opponent and the action mask allows the approach.
+    collision code. Fail closed until observer slot 2 has a fresh valid track
+    for focal slot 3 and its action mask allows the approach.
     """
     if (focal_slot, opponent_slot) != (3, 2):
         raise ValueError("registered contact geometry uses focal/opponent slots (3, 2)")
+    if not all(hasattr(env, attr) for attr in
+               ("opponent_valid", "opponent_age", "opponent_pose", "team_ids", "dt")):
+        raise ValueError("contact approach requires sensed opponent validity, age, pose, team, and dt")
+    if (env.opponent_valid.shape[1] <= opponent_slot or
+            env.opponent_age.shape[1] <= opponent_slot or
+            env.opponent_pose.shape[1] <= opponent_slot):
+        raise ValueError("contact approach opponent track tensors have invalid shape")
+    fresh_limit = max(float(env.dt), float(getattr(env, "perception_interval", 1)) * float(env.dt))
+    track_valid = env.opponent_valid[:, opponent_slot]
+    track_fresh = env.opponent_age[:, opponent_slot] <= fresh_limit + 1e-6
+    if not (track_valid & track_fresh).all():
+        raise ValueError("contact approach requires a fresh valid opponent track")
+    # Verify that the anonymous sensed track currently corresponds to focal
+    # slot 3.  Truth is used only as an evaluation-harness identity check; the
+    # command itself targets the sensed opponent track through action 5.
+    if env.team_ids.shape != (6,):
+        raise ValueError("contact approach requires six robot team IDs")
+    opposing = env.team_ids != env.team_ids[opponent_slot]
+    if not opposing[focal_slot] or int(opposing.sum().item()) != 3:
+        raise ValueError("contact approach team assignment does not identify focal as opponent")
+    sensed_xy = env.opponent_pose[:, opponent_slot, :2]
+    true_opponents = env.sim.pose[:, opposing, :2]
+    distances = torch.linalg.vector_norm(sensed_xy[:, None, :] - true_opponents, dim=-1)
+    focal_index = torch.nonzero(torch.arange(6, device=env.device)[opposing] == focal_slot).item()
+    if not (distances.argmin(-1) == focal_index).all():
+        raise ValueError("fresh sensed opponent track is not directed at focal slot 3")
     indices, valid, _ = env._candidates()
     legal, _ = env._action_mask(indices, valid)
     if not legal[:, opponent_slot, 5].all():
-        raise ValueError("contact approach requires the scripted opponent to sense the focal robot")
+        raise ValueError("contact approach requires action mask to allow approach action 5")
     actions = torch.full((env.n, 6), 7, device=env.device, dtype=torch.long)
     actions[:, opponent_slot] = 5
     return actions
 
 
-class ContactExposureRecorder:
-    """Contract recorder for ordinary-physics robot-pair contact/recovery.
+class ContactExposureProxyRecorder:
+    """Proxy recorder for ordinary-physics robot-pair contact and clearance.
 
     The simulator exposes per-robot contact flags, not the contacting partner.
     A pair event therefore requires both robots' same-tick flags and their
     measured chassis centers within the conservative pair envelope. This is an
-    explicit proxy and must be verified against the generated replay.
+    explicit proxy and cannot satisfy the registry's pair-impulse or
+    return-to-precontact-route-following measurements.
     """
     def __init__(self, worlds: int, *, device="cpu", dt: float = .02,
                  geometry: str = "crossing_contact",
@@ -238,18 +301,20 @@ class ContactExposureRecorder:
             raise ValueError("stable_ticks must be a positive integer")
         self.worlds, self.device = worlds, torch.device(device)
         self.dt, self.pair, self.geometry = float(dt), pair, geometry
-        self.factor_identity = phase4_context_identity("bump_geometry", geometry)
+        self.factor_identity = phase4_context_identity("robot_contact_geometry", geometry)
         self.low_speed_m_s = float(low_speed_m_s)
         self.recovery_clearance_m = float(recovery_clearance_m)
         self.stable_ticks_required = stable_ticks
         self.tick = 0
-        self.contact_realization_tick = torch.full((worlds,), -1,
+        self.pair_contact_proxy_first_tick = torch.full((worlds,), -1,
             device=self.device, dtype=torch.long)
-        self.contact_realization_count = torch.zeros((worlds,),
+        self.pair_contact_proxy_last_tick = torch.full((worlds,), -1,
+            device=self.device, dtype=torch.long)
+        self.pair_contact_proxy_tick_count = torch.zeros((worlds,),
             device=self.device, dtype=torch.long)
         self._recovery_stable_ticks = torch.zeros((worlds,),
             device=self.device, dtype=torch.long)
-        self.recovery_time_s = torch.full((worlds,), float("nan"),
+        self.post_contact_clearance_proxy_s = torch.full((worlds,), float("nan"),
             device=self.device, dtype=torch.float32)
 
     def record_tick(self, pose: torch.Tensor, velocity: torch.Tensor,
@@ -269,40 +334,50 @@ class ContactExposureRecorder:
         pair_radius = robot_radius[:, i]+robot_radius[:, j]
         near_pair = distance <= pair_radius + .04
         contact = (robot_contact_by_robot[:, i] & robot_contact_by_robot[:, j] & near_pair)
-        first = contact & (self.contact_realization_tick < 0)
-        self.contact_realization_tick = torch.where(first,
-            torch.full_like(self.contact_realization_tick, self.tick),
-            self.contact_realization_tick)
-        self.contact_realization_count += contact.long()
-        contacted = self.contact_realization_tick >= 0
+        first = contact & (self.pair_contact_proxy_first_tick < 0)
+        self.pair_contact_proxy_first_tick = torch.where(first,
+            torch.full_like(self.pair_contact_proxy_first_tick, self.tick),
+            self.pair_contact_proxy_first_tick)
+        self.pair_contact_proxy_last_tick = torch.where(contact,
+            torch.full_like(self.pair_contact_proxy_last_tick, self.tick),
+            self.pair_contact_proxy_last_tick)
+        self.pair_contact_proxy_tick_count += contact.long()
+        contacted = self.pair_contact_proxy_first_tick >= 0
         speeds = torch.linalg.vector_norm(velocity[:, (i, j), :2], dim=-1)
         recovered_clearance = distance >= pair_radius+self.recovery_clearance_m
         stable = (contacted & recovered_clearance &
                   (speeds <= self.low_speed_m_s).all(-1) &
-                  torch.isnan(self.recovery_time_s))
+                  torch.isnan(self.post_contact_clearance_proxy_s) & ~contact)
         self._recovery_stable_ticks = torch.where(stable,
             self._recovery_stable_ticks+1, torch.zeros_like(self._recovery_stable_ticks))
         recovered = (self._recovery_stable_ticks >= self.stable_ticks_required) & \
-                    torch.isnan(self.recovery_time_s)
-        duration_ticks = (self.tick-self.contact_realization_tick-
-                          (self.stable_ticks_required-1))
+                    torch.isnan(self.post_contact_clearance_proxy_s)
+        # self.tick is the 0-based tick currently being recorded.  The proxy
+        # timestamp is end-of-tick; elapsed time is the number of complete
+        # clear physics intervals after the final contact tick.
+        duration_ticks = self.tick-self.pair_contact_proxy_last_tick
         duration = duration_ticks.clamp_min(0).to(torch.float32)*self.dt
-        self.recovery_time_s = torch.where(recovered, duration, self.recovery_time_s)
+        self.post_contact_clearance_proxy_s = torch.where(
+            recovered, duration, self.post_contact_clearance_proxy_s)
         self.tick += 1
 
     def summary(self) -> dict:
         """Return explicit observed, not-qualified contact/recovery fields."""
-        ticks = self.contact_realization_tick.tolist()
-        counts = self.contact_realization_count.tolist()
-        recovery = self.recovery_time_s.tolist()
-        return {"schema": "meco-phase4-contact-exposure-observation-v1",
+        ticks = self.pair_contact_proxy_first_tick.tolist()
+        last_ticks = self.pair_contact_proxy_last_tick.tolist()
+        counts = self.pair_contact_proxy_tick_count.tolist()
+        recovery = self.post_contact_clearance_proxy_s.tolist()
+        return {"schema": "meco-phase4-contact-exposure-proxy-v2",
                 "factor_identity": self.factor_identity,
                 "pair_slots": list(self.pair), "physics_tick_count": self.tick,
-                "contact_realization_tick": [None if tick < 0 else tick for tick in ticks],
-                "contact_realization_count": counts,
-                "recovery_time_s": [None if math.isnan(value) else value for value in recovery],
-                "contact_flag_scope": "distance_gated_pair_proxy_from_per_robot_flags",
-                "promotion_status": "pending_replay_review"}
+                "pair_contact_proxy_first_tick": [None if tick < 0 else tick for tick in ticks],
+                "pair_contact_proxy_last_tick": [None if tick < 0 else tick for tick in last_ticks],
+                "pair_contact_proxy_tick_count": counts,
+                "post_contact_clearance_proxy_s": [None if math.isnan(value) else value for value in recovery],
+                "registry_contact_signal_status": "unavailable_without_pair_impulse_signal",
+                "registry_recovery_time_after_bump_s": None,
+                "proxy_scope": "distance_gated_pair_proxy_from_per_robot_flags",
+                "promotion_status": "proxy_only_requires_pair_impulse_and_route_state_timestamps"}
 
 
 @dataclass(frozen=True)
