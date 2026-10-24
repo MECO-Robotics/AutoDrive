@@ -244,8 +244,10 @@ def _candidate_identity_evidence(candidate_set):
         "features_sha256": hashlib.sha256(canonical.encode()).hexdigest()}
 
 
-def _candidate_replay_fingerprints(row, model):
+def _candidate_replay_fingerprints(row, model, *, model_parameters_sha256=None):
     candidate_set = row.get("candidate_set")
+    if model_parameters_sha256 is None:
+        model_parameters_sha256 = _model_id(model)
     return {"raster": _tensor_evidence(row.get("raster")),
         "globals": _tensor_evidence(row.get("globals")),
         "hidden": _tensor_evidence(row.get("hidden_before")),
@@ -255,11 +257,12 @@ def _candidate_replay_fingerprints(row, model):
         "candidate_replay_digest": row.get("candidate_replay_digest"),
         "route_cost": _tensor_evidence(row.get("route_cost")),
         "risk_cost": _tensor_evidence(row.get("risk_cost")),
-        "model_parameters_sha256": _model_id(model)}
+        "model_parameters_sha256": model_parameters_sha256}
 
 
 def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
-                               *, update_number, row_index, config, output):
+                               *, update_number, row_index, config, output,
+                               model_parameters_sha256=None):
     saved_logprob = row["logprob"].reshape(())
     replay_scalar = replay_logprob.reshape(())
     absolute_delta = float((replay_scalar - saved_logprob).abs().detach().cpu())
@@ -300,7 +303,8 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
         "raster": row.get("raster"), "globals": row.get("globals"),
         "hidden_before": row.get("hidden_before"),
         "hidden_next": row.get("hidden_next")}
-    replay_fingerprints = _candidate_replay_fingerprints(row, model)
+    replay_fingerprints = _candidate_replay_fingerprints(row, model,
+        model_parameters_sha256=model_parameters_sha256)
     replay_fingerprints["route_cost_sha256"] = replay_fingerprints[
         "route_cost"]["sha256"]
     replay_fingerprints["risk_cost_sha256"] = replay_fingerprints[
@@ -376,7 +380,8 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
         "config": asdict(config) if config is not None else None,
         "row": _cpu_replay_value(replay_row),
         "model_state_dict": _cpu_replay_value(model.state_dict()),
-        "model_parameters_sha256": _model_id(model),
+        "model_parameters_sha256": replay_fingerprints[
+            "model_parameters_sha256"],
         "rollout_logits": _cpu_replay_value(row.get("rollout_logits")),
         "replay_logits": _cpu_replay_value(replay_logits),
         "replay_logprob": _cpu_replay_value(replay_scalar)})
@@ -386,12 +391,14 @@ def _logprob_replay_diagnostic(track, model, row, replay, replay_logprob,
 
 
 def _logprob_replay_error(message, track, model, row, replay, replay_logprob,
-                          *, update_number, row_index, config, output):
+                          *, update_number, row_index, config, output,
+                          model_parameters_sha256=None):
     """Preserve the strict replay failure even if writing evidence fails."""
     try:
         path, diagnostic = _logprob_replay_diagnostic(track, model, row,
             replay, replay_logprob, update_number=update_number,
-            row_index=row_index, config=config, output=output)
+            row_index=row_index, config=config, output=output,
+            model_parameters_sha256=model_parameters_sha256)
     except Exception as exc:
         return RuntimeError(
             f"{message}; diagnostic recording failed: {type(exc).__name__}: {exc}")
@@ -1031,6 +1038,8 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
     # step. The support tensors are shared by each row, so digesting catches
     # accidental in-place mutation of pair IDs, descriptors, mask, or paths.
     with torch.no_grad():
+        current_model_parameters_sha256 = (
+            _model_id(model) if track in ("C1", "C2") else None)
         for row_index, row in enumerate(rows):
             support = row.get("support")
             if support is None:
@@ -1069,21 +1078,24 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             replay_logprob = categorical_from_candidate_logits(
                 replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
             rollout_fingerprints = row.get("replay_fingerprints")
-            replay_fingerprints = _candidate_replay_fingerprints(row, model)
+            replay_fingerprints = _candidate_replay_fingerprints(row, model,
+                model_parameters_sha256=current_model_parameters_sha256)
             if (not isinstance(rollout_fingerprints, dict) or
                     rollout_fingerprints != replay_fingerprints):
                 raise _logprob_replay_error(
                     "Plan C frozen rollout inputs changed before PPO replay",
                     track, model, row, replay, replay_logprob,
                     update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output)
+                    config=config, output=diagnostic_output,
+                    model_parameters_sha256=current_model_parameters_sha256)
             if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
                                   atol=5e-5, rtol=5e-5):
                 raise _logprob_replay_error(
                     "Plan C rollout log-probability does not replay under frozen candidate table",
                     track, model, row, replay, replay_logprob,
                     update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output)
+                    config=config, output=diagnostic_output,
+                    model_parameters_sha256=current_model_parameters_sha256)
     with torch.no_grad():
         next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
                       else bootstrap_value.reshape(()))

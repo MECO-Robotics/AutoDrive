@@ -1,8 +1,8 @@
 # MECO learning tracks plan: execution status
 
-**Snapshot:** 2026-10-24 01:06 UTC
+**Snapshot:** 2026-10-24 01:10 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
-**Candidate:** `codex/meco-c1-replay-integrated`, based on reviewed staging `codex/meco-reviewed-plan-integrations` and reviewed C1 replay-integrity chain. This isolated integration is pending independent review; the failed run remains unchanged.
+**Candidate:** `codex/meco-c1-replay-integrated`, based on reviewed staging `codex/meco-reviewed-plan-integrations` and reviewed C1 replay-integrity chain. The original C1 replay-integrity integration received scoped reviewer approval; its one-hash-per-update follow-up is pending re-review. The failed run remains unchanged.
 **Plan hash:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
 
 This ledger records implementation and evidence status against all nine plan sections. “Implemented” means code or an evaluation interface exists; it does not mean the behavior has passed representative simulation, qualification, or hardware validation.
@@ -41,4 +41,6 @@ The campaign failed after A1/A2 reached 100 updates, A3 reached 12, and C1 reach
 
 The isolated `codex/meco-c1-replay-integrated` branch combines the reviewed staging changes with C1 replay-integrity commit `f53a2acf64b387ba376508a4e68da263c16545c6`. The merge retains the staged Phase 4 train-split assignment checks and factor provenance in `meco_track_training.py`; C1's replay instrumentation adds exact rollout/replay input fingerprints and writes JSON plus CPU tensor/model-state evidence before raising the original PPO integrity failure. The accompanying C1 adapter change enables deterministic Torch algorithms only around CUDA-backed C1 model forwards when they were previously disabled, then restores the prior process setting. It is intended to reduce backend forward variation at the strict replay guard; it does not relax that guard or establish empirical replay parity.
 
-The C1 branch's focused replay test command is `pytest -q tests/test_meco_c1_ppo_replay.py`. It has not been run on this integration candidate. No tests or simulator evaluations have been run on this integration candidate. Its code review is pending. The failed campaign remains terminal and immutable; this fix is for a fresh, reviewed campaign after the cause is investigated.
+Scoped reviewer validation of the original C1 replay-integrity integration reported 89 passed and one skipped test under system Python (the accelerator-only case), with the ROCm equivalent passing on a WX9100. The reviewer measured about 1.56 ms per C1 row fingerprint, including a redundant full model-state hash for every replay row. This follow-up computes the current C1/C2 model hash once per PPO update, reuses it for every row comparison and any failure artifact, and still recomputes each row's raster, globals, hidden state, candidate features/digests, route cost, and risk cost fingerprints. The new regression checks exactly one model hash across a two-row update while detecting a changed second-row input.
+
+The focused test command is `pytest -q tests/test_meco_c1_ppo_replay.py`. It was not rerun after this follow-up, and the optimization is pending scoped re-review. No simulator evaluation or training was run for this follow-up. The failed campaign remains terminal and immutable; its missing transition record is still unavailable, so the fix supports diagnosis of future failures only.

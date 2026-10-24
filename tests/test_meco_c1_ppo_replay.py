@@ -5,6 +5,7 @@ import torch
 
 from frc_defense.learning_contract import CandidateTable, ObservationSnapshot
 from frc_defense.meco_candidates import RouteFeasibleCandidates
+from frc_defense import meco_track_training
 from frc_defense.meco_track_training import (_candidate_replay_fingerprints,
     _candidate_replay_digest, _policy_inputs_for_row, _tensor_evidence,
     _ppo_update)
@@ -91,6 +92,34 @@ def test_c1_replay_artifact_reproduces_exact_logits_and_detects_input_mutation(
     mutated["globals"] = mutated["globals"] + 1.
     assert (_tensor_evidence(mutated["globals"])["sha256"] !=
             _tensor_evidence(replay_row["globals"])["sha256"])
+
+
+def test_c1_replay_hashes_model_once_per_update_and_checks_each_row(
+        tmp_path, monkeypatch):
+    first_row, model = _row_and_model()
+    second_row = dict(first_row)
+    second_row["globals"] = first_row["globals"] + .25
+    hash_calls = 0
+    original_model_id = meco_track_training._model_id
+
+    def count_model_hash(model_arg):
+        nonlocal hash_calls
+        hash_calls += 1
+        return original_model_id(model_arg)
+
+    monkeypatch.setattr(meco_track_training, "_model_id", count_model_hash)
+    with pytest.raises(RuntimeError, match="frozen rollout inputs changed"):
+        _ppo_update("C1", model, None, None, [first_row, second_row],
+            MecoTrainConfig(track="C1"), torch.tensor(0.), update_number=8,
+            diagnostic_output=tmp_path)
+
+    assert hash_calls == 1
+    diagnostic_path = next(tmp_path.glob("ppo-logprob-replay-failure-C1-*.json"))
+    diagnostic = json.loads(diagnostic_path.read_text())
+    assert diagnostic["row_index"] == 1
+    assert diagnostic["rollout_fingerprints"]["globals"] != (
+        diagnostic["replay_fingerprints"]["globals"])
+    assert diagnostic["model_parameters_match_rollout"] is True
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ROCm/CUDA device required")
