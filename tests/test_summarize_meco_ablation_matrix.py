@@ -507,6 +507,19 @@ def test_schema6_accepts_and_binds_start_profile_assignment(tmp_path):
     assert loaded["common"]["evaluation_split"] == "validation"
 
 
+def test_schema6_rejects_condition_manifest_assignment_tampering(tmp_path):
+    path = _fixture(tmp_path, schema_version=6)
+    _schema6_fixture(path)
+    matrix = json.loads(path.read_text())
+    matrix["conditions"]["architecture_matched_cv_k16"][
+        "phase4_start_profile_assignment"] = None
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    with pytest.raises(ValueError, match="condition manifest start-profile assignment"):
+        _resolve_conditions(matrix, path)
+
+
 @pytest.mark.parametrize("mutate,match", [
     (lambda m: m["protocol"].update(phase4_start_profile_assignment=None),
      "matching start-profile assignment"),

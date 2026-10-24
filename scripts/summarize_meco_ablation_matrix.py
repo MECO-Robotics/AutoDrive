@@ -506,6 +506,8 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
         if schema_version >= 6:
             if "phase4_start_profile_assignment" not in condition:
                 raise ValueError(f"{name} condition manifest omits start-profile assignment")
+            if condition.get("phase4_start_profile_assignment") != expected_start_assignment:
+                raise ValueError(f"{name} condition manifest start-profile assignment differs from frozen matrix")
             report_assignment = report.get("phase4_start_profile_assignment")
             experiment_assignment = experiment.get("phase4_start_profile_assignment")
             if (report_assignment != expected_start_assignment or
@@ -538,7 +540,10 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
                    (condition_assignment, report_assignment, experiment_assignment)):
                 raise ValueError(f"condition {name} teammate behavior assignment differs from frozen spec")
             if expected_teammate_assignment is not None:
-                teammate_pair_assignments[expected_teammate_assignment["arm"]] = expected_teammate_assignment
+                arm = expected_teammate_assignment["arm"]
+                if arm in teammate_pair_assignments:
+                    raise ValueError(f"schema-7 teammate behavior pair has duplicate {arm} condition")
+                teammate_pair_assignments[arm] = expected_teammate_assignment
         for key in ("evaluation_design", "evaluation_split",
                     "qualification_protocol_id", "qualification_protocol",
                     "seed_split_assignments"):
