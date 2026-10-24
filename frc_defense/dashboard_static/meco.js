@@ -6,6 +6,14 @@
     const response = await fetch(`/api/meco-status?t=${Date.now()}`, {cache:"no-store"});
     if (!response.ok) throw new Error(`Status endpoint returned ${response.status}`);
     const data = await response.json();
+    let provenance;
+    try {
+      const evidenceResponse = await fetch(`/api/curriculum-status?t=${Date.now()}`, {cache:"no-store"});
+      if (!evidenceResponse.ok) throw new Error(`Evidence endpoint returned ${evidenceResponse.status}`);
+      provenance = (await evidenceResponse.json()).three_pass_provenance;
+    } catch (error) {
+      provenance = {status:"untrusted", tranches:[], untrusted_reason:error.message};
+    }
     updated.textContent = `Updated ${data.generated_utc || "unknown"}`;
     updated.dataset.stale = "false";
     document.querySelector("#sources").textContent =
@@ -65,10 +73,35 @@
       `<small>Heartbeat ${esc(run.heartbeat_state)} · ${esc(run.heartbeat_age_seconds ?? "?")}s · process ${run.process_alive ? "alive" : "not confirmed"}</small>`+
       `<p>Protocol ${esc(run.protocol_id)} · split ${esc(run.split)} · output ${esc(run.output_file)}</p></article>`).join("") : "<p class='muted'>No evaluator status manifest is available.</p>";
     const workflow = data.implementation_passes;
-    document.querySelector("#passes").innerHTML = workflow?.passes?.length ? workflow.passes.map(pass =>
+    const passStatus = workflow?.passes?.length ? workflow.passes.map(pass =>
       `<article class="group"><h3>${esc(pass.pass)} · ${esc(pass.status)}</h3>`+
-      `<small>Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
-      "<p class='muted'>No three-pass workflow evidence is available.</p>";
+      `<small>Workflow status only; this does not report agent liveness. Provenance: ${esc((pass.provenance || []).join(" · "))}</small></article>`).join("") :
+      "<p class='muted'>No campaign pass-status records are available.</p>";
+    const roleEvidence = (name, role) => {
+      if (!role) return `<li>${esc(name)}: missing</li>`;
+      const artifact = role.artifact || {};
+      const commit = name === "implementer" ?
+        Object.entries(role).filter(([key]) => key === "commit" || key.endsWith("_commit"))
+          .map(([key, value]) => `${key} ${value}`).join(" · ") :
+        name === "reviewer" ? `approved ${role.approved_commit || "—"}` : "";
+      const paths = name === "implementer" ? (role.paths || []).join(", ") : "";
+      return `<li><strong>${esc(name)}</strong> · ${esc(role.status || "unknown")}`+
+        `${commit ? `<small>${esc(commit)}</small>` : ""}`+
+        `${artifact.path ? `<small>${esc(artifact.kind)} · ${esc(artifact.path)} · SHA-256 ${esc(artifact.sha256)}</small>` : ""}`+
+        `${paths ? `<small>Changed paths ${esc(paths)}</small>` : ""}`+
+        `${role.verdict_detail ? `<small>Review ${esc(role.verdict)}: ${esc(role.verdict_detail)}</small>` : ""}</li>`;
+    };
+    const provenanceHtml = provenance?.validation_status === "validated_summary_only"
+      ? `<p class="muted">Validated summary-only provenance. This is not whole-plan approval or agent-liveness evidence.</p>`+
+        `${(provenance.tranches || []).map(tranche =>
+          `<article class="group"><h3>${esc(tranche.title)} · ${esc(tranche.requirement_id)}</h3>`+
+          `<small>Evidence class ${esc(provenance.evidence_class)} · validation ${esc(provenance.validation_status)}</small>`+
+          `<ul>${roleEvidence("planner", tranche.planner)}${roleEvidence("implementer", tranche.implementer)}${roleEvidence("reviewer", tranche.reviewer)}</ul>`+
+          `<p>Limits: ${esc(tranche.limits)}</p></article>`).join("")}`+
+        `<p class="muted">${(provenance.limits || []).map(esc).join(" · ")}</p>`
+      : `<p class="muted">Three-pass provenance is untrusted: ${esc(provenance?.untrusted_reason || "no validated evidence payload")}</p>`;
+    document.querySelector("#passes").innerHTML = `<h3>Campaign pass status</h3>${passStatus}`+
+      `<h3>Scoped implementation evidence</h3>${provenanceHtml}`;
     document.querySelector("#phase4-factors").innerHTML = workflow?.phase4_factors?.length
       ? workflow.phase4_factors.map(factor =>
         `<article class="group"><h3>${esc(factor.factor_id)} · ${esc(factor.status)}</h3>`+

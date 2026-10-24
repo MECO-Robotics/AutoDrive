@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 
-_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "b97e5bde6451a6651efbbe97f29577e1f016dac40b48457ce3a356516370ac4a"
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "a831d1b283c289088182c0667f90e3de3e5797d7d6fea3a0941070bea1f89ad0"
 _EXPECTED_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
 
 
@@ -202,35 +202,109 @@ def _three_pass_provenance():
     from pathlib import Path
     project = Path(__file__).resolve().parents[1]
     relative_manifest = "docs/MECO_THREE_PASS_PROVENANCE.json"
-    unknown = {"status": "untrusted", "tranches": [],
-               "message": "Provenance evidence failed integrity checks."}
     try:
         path = _verified_repo_file(project, relative_manifest)
         if path is None:
-            return unknown
+            return _untrusted_three_pass("manifest path is missing, escaped, or symlinked")
         if hashlib.sha256(path.read_bytes()).hexdigest() != _EXPECTED_THREE_PASS_PROVENANCE_SHA256:
-            return unknown
+            return _untrusted_three_pass("manifest hash does not match the dashboard-pinned digest")
         data = json.loads(path.read_text())
-        if data.get("schema") != "meco-three-pass-provenance-v1":
-            return unknown
-        plan = _verified_repo_file(project, data.get("plan_path"))
-        if plan is None or hashlib.sha256(plan.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256:
-            return unknown
-        if data.get("plan_sha256") != _EXPECTED_PLAN_SHA256:
-            return unknown
-        for tranche in data.get("tranches", []):
-            if not isinstance(tranche, dict):
-                return unknown
-            for section in ("planner", "reviewer"):
-                details = tranche.get(section)
-                artifact = _verified_repo_file(
-                    project, details.get("artifact") if isinstance(details, dict) else None)
-                if (artifact is None or hashlib.sha256(artifact.read_bytes()).hexdigest()
-                        != details.get("artifact_sha256")):
-                    return unknown
-        return data
-    except (OSError, ValueError, TypeError, AttributeError):
-        return unknown
+        return _validate_three_pass_manifest(project, data)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return _untrusted_three_pass(f"manifest could not be read: {type(exc).__name__}")
+
+
+def _untrusted_three_pass(reason):
+    return {"status": "untrusted", "evidence_class": "scoped_transcript_summary",
+            "tranches": [], "untrusted_reason": reason}
+
+
+def _validate_three_pass_manifest(project, data):
+    """Validate summary-only role evidence and exact commit linkage."""
+    import hashlib
+    import re
+
+    def reject(reason):
+        return _untrusted_three_pass(reason)
+
+    if not isinstance(data, dict) or data.get("schema") != "meco-three-pass-provenance-v2":
+        return reject("unsupported provenance schema")
+    if (data.get("status") != "scoped-transcript-summaries"
+            or data.get("evidence_class") != "scoped_transcript_summary"):
+        return reject("evidence is not explicitly classified as scoped transcript summaries")
+    if data.get("plan_sha256") != _EXPECTED_PLAN_SHA256:
+        return reject("plan digest does not match the dashboard-pinned digest")
+    plan = _verified_repo_file(project, data.get("plan_path"))
+    if plan is None or hashlib.sha256(plan.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256:
+        return reject("plan path or digest is invalid")
+    if (not isinstance(data.get("scope"), str) or not data["scope"].strip()
+            or not isinstance(data.get("limits"), list) or not data["limits"]
+            or any(not isinstance(item, str) or not item.strip() for item in data["limits"])):
+        return reject("scope and summary-only limits are required")
+    tranches = data.get("tranches")
+    if not isinstance(tranches, list) or not tranches:
+        return reject("tranche list is missing or empty")
+    seen = set()
+    commit_pattern = re.compile(r"^[0-9a-f]{40}$")
+    path_pattern = re.compile(r"^[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*$")
+
+    def valid_artifact(role):
+        artifact = role.get("artifact") if isinstance(role, dict) else None
+        if not isinstance(artifact, dict):
+            return False
+        if (artifact.get("kind") != "scoped-transcript-summary"
+                or artifact.get("status") not in {"transcript-summary", "review-summary"}
+                or not isinstance(artifact.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])):
+            return False
+        path = _verified_repo_file(project, artifact.get("path"))
+        return path is not None and hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+
+    for tranche in tranches:
+        if not isinstance(tranche, dict):
+            return reject("tranche entry is not an object")
+        requirement_id = tranche.get("requirement_id")
+        if (not isinstance(requirement_id, str)
+                or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", requirement_id)
+                or requirement_id in seen):
+            return reject("tranche requirement ID is malformed or duplicated")
+        seen.add(requirement_id)
+        if not isinstance(tranche.get("title"), str) or not tranche["title"].strip():
+            return reject(f"{requirement_id}: title is missing")
+        planner, implementer, reviewer = (tranche.get(key) for key in ("planner", "implementer", "reviewer"))
+        if (not isinstance(planner, dict) or planner.get("status") != "summary-only"
+                or not valid_artifact(planner)
+                or planner["artifact"].get("status") != "transcript-summary"):
+            return reject(f"{requirement_id}: planner summary artifact is invalid")
+        if not isinstance(implementer, dict) or implementer.get("status") != "implemented":
+            return reject(f"{requirement_id}: implementation status is invalid")
+        commits = [value for key, value in implementer.items() if key.endswith("_commit") or key == "commit"]
+        if not commits or any(not isinstance(value, str) or not commit_pattern.fullmatch(value) for value in commits):
+            return reject(f"{requirement_id}: implementation commit IDs must be exact 40-character hashes")
+        changed_paths = implementer.get("paths")
+        if (not isinstance(changed_paths, list) or not changed_paths
+                or any(not isinstance(item, str) for item in changed_paths)
+                or len(set(changed_paths)) != len(changed_paths)):
+            return reject(f"{requirement_id}: implementation paths are missing or duplicated")
+        for changed_path in changed_paths:
+            if (not isinstance(changed_path, str) or not path_pattern.fullmatch(changed_path)
+                    or _verified_repo_file(project, changed_path) is None):
+                return reject(f"{requirement_id}: implementation path is missing or unsafe")
+        if (not isinstance(reviewer, dict) or reviewer.get("status") != "approved-summary"
+                or reviewer.get("verdict") != "approved" or not valid_artifact(reviewer)
+                or reviewer["artifact"].get("status") != "review-summary"):
+            return reject(f"{requirement_id}: reviewer evidence does not record an approved summary")
+        approved = reviewer.get("approved_commit")
+        if not isinstance(approved, str) or not commit_pattern.fullmatch(approved):
+            return reject(f"{requirement_id}: reviewer approved commit is not an exact 40-character hash")
+        if not isinstance(reviewer.get("verdict_detail"), str) or not reviewer["verdict_detail"].strip():
+            return reject(f"{requirement_id}: reviewer verdict detail is missing")
+        if not isinstance(tranche.get("limits"), str) or not tranche["limits"].strip():
+            return reject(f"{requirement_id}: tranche limits are missing")
+    result = dict(data)
+    result["validation_status"] = "validated_summary_only"
+    result["message"] = "Validated scoped summaries; this is not whole-plan approval or agent-liveness evidence."
+    return result
 
 
 def _verified_repo_file(project, relative_path):
@@ -238,7 +312,7 @@ def _verified_repo_file(project, relative_path):
     if not isinstance(relative_path, str) or not relative_path:
         return None
     relative = Path(relative_path)
-    if relative.is_absolute() or ".." in relative.parts:
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         return None
     lexical = project / relative
     if _contains_symlink(lexical):
