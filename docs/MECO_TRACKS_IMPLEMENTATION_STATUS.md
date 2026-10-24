@@ -445,11 +445,15 @@ recomputes summaries from raw rows, and keeps protocol intake as the sole
 acceptance gate. GPU runtime, merged-report intake and protocol creation remain
 unvalidated.
 
-This implementer pass received static review only. No calibration, simulation,
-training, test suite, or dashboard evaluation was run, so GPU runtime behavior,
-calibration output acceptance, and the end-to-end report/protocol chain remain
-unproven. Static compilation and diff checks are the only planned checks for
-this worktree.
+This initial implementer pass received static review only. Later, focused
+contract/provenance tests for calibration identity, margin provenance, shard
+coverage, normalized runtime equivalence, and intake binding were added and
+reviewed as part of a 52-test CPU suite on staging branch
+`codex/meco-reviewed-plan-integrations` at `a921842a5`. Those tests use
+synthetic reports and do not establish actual GPU calibration, merged-report
+intake from produced shards, simulation behavior, or the complete
+report-to-protocol chain. No calibration run or simulator evaluation has been
+performed; runtime evidence remains pending.
 
 ## D0 calibration sharding tranche v1
 
