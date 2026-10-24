@@ -78,6 +78,21 @@
 > or passes. Reads were non-atomic; the snapshot pins the captured runtime
 > files and response bodies.
 
+> **Training interruption and recovery — 2026-10-24 06:26:48 UTC.** Snapshot
+> [`MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T062648Z.json`](MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T062648Z.json),
+> SHA-256 `09ec0c981ceffec1800bf6142f842021857d82708270ac96da1ad5631dfe77b9`.
+> A merge command was accidentally run in the live checkout while preparing the
+> isolated integration candidate. The supervisor's source guard stopped A3 and
+> C1 at their last saved checkpoints (56 and 88 updates) and aborted queued C2;
+> A1/A2 remained complete at 100. I reverted the source change and confirmed the
+> saved checkpoint file hashes match the restored source files and protocol. The
+> same continuous two-device supervisor configuration was relaunched as PID
+> `1523650`; at capture it had resumed A3 at 56 and C1 at 88, with C2 queued and
+> no supervisor error. This recovery is recorded explicitly; the run was not
+> uninterrupted. Dashboard endpoints returned HTTP 200 and the served asset
+> matched the checkout. Reads were non-atomic; see pinned files and response
+> digests in the snapshot.
+
 > **Phase 5 production-input parity tranche — 2026-10-24.** Isolated branch
 > `codex/meco-production-input-parity`, commit
 > `b098d725b7c2c2da90ddd6b228989bfc27d949ac`, passed scoped reviewer re-review.
