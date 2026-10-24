@@ -85,7 +85,7 @@
     "resume_compatibility": "incompatible; repaired source differs from checkpoint-bound source, so strict resume must fail closed"
   },
   "validation": {
-    "command": "PYTHONPATH=. <AutoDrive .venv>/bin/python -m pytest -q tests/test_meco_c1_ppo_replay.py",
+    "command": "PYTHONPATH=. /mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive/.venv/bin/python -m pytest -q tests/test_meco_c1_ppo_replay.py",
     "git_diff_check": "passed",
     "py_compile": "passed",
     "result": "4 passed on WX9100/ROCm"

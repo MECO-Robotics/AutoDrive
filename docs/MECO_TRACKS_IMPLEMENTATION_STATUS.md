@@ -625,4 +625,4 @@ until a new run is explicitly scheduled with the updated source identity. The
 read-only WX9100 replay measurements and SHA-256 bindings for the run manifest,
 checkpoint, failure report, and tensor artifact are recorded in
 `docs/implementation-provenance/c2-wx9100-replay-diagnostic-20261024.json`
-(SHA-256 `fe3dbb8bf63d298cce1d647e4070552b7dec9fb942dce06691f0bcbfe28c6335`).
+(SHA-256 `932baa149646c6d7ac4aade70e6cf57980bb4e37f1c60673ee3d8379a9f71543`).
