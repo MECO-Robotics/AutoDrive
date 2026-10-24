@@ -14,8 +14,9 @@ from typing import Any, Callable
 from .meco_ablation_matrix import _records_by_key
 from .meco_tracks import MECO_TRACKS
 from .training_curriculum import SCENARIOS
-from .meco_validation_campaign import _artifact_bytes, _canonical_bytes, _sha
-from .meco_validation_campaign import compile_validation_campaign
+from .meco_qualification import PROTOCOL_VERSION
+from .meco_validation_campaign import (CALIBRATED_GATE_STATUSES, _artifact_bytes,
+    _canonical_bytes, _sha, compile_validation_campaign)
 from .meco_device_lease import lease_devices
 
 
@@ -817,11 +818,18 @@ def _validate_plan(plan: dict) -> None:
     if plan.get("plan_digest") != _sha(unhashed):
         raise ValueError("validation plan digest mismatch")
     if (plan.get("split") != "validation" or plan.get("qualification_claim") is not False
-            or plan.get("qualification_eligible") is not False
             or plan.get("final_test_seed_handling") != "not_exported"):
         raise ValueError("campaign execution is restricted to diagnostic validation plans")
-    if plan.get("protocol", {}).get("gate_calibration_status") != "provisional_pending_baseline_variance_review":
-        raise ValueError("campaign runner requires the currently provisional diagnostic protocol")
+    protocol = plan.get("protocol", {})
+    version = protocol.get("protocol_version")
+    gate_status = protocol.get("gate_calibration_status")
+    calibrated = (version in CALIBRATED_GATE_STATUSES
+        and gate_status == CALIBRATED_GATE_STATUSES[version]
+        and protocol.get("safety_gate_status") == "metrics_schema_verified")
+    provisional = (version == PROTOCOL_VERSION
+        and gate_status == "provisional_pending_baseline_variance_review")
+    if (not calibrated and not provisional) or plan.get("qualification_eligible") is not calibrated:
+        raise ValueError("campaign plan calibration eligibility/status is inconsistent")
     jobs = plan.get("jobs")
     if not isinstance(jobs, list) or len(jobs) != 28 or plan.get("job_count") != 28:
         raise ValueError("campaign requires the exact 28-job all-scenario validation matrix")

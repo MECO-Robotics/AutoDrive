@@ -96,9 +96,14 @@ def _protocol(path):
     pid = value.get("protocol_id")
     body = {k: v for k, v in value.items() if k != "protocol_id"}
     version = value.get("protocol_version")
-    if pid != _sha(body) or version not in ("meco-qualification-v1", "meco-qualification-v2"):
+    from .meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+        PROTOCOL_VERSION)
+    calibrated_versions = (LEGACY_CALIBRATED_PROTOCOL_VERSION,
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION)
+    if pid != _sha(body) or version not in (PROTOCOL_VERSION, *calibrated_versions):
         raise ValueError("qualification protocol ID/version is invalid")
-    if version == "meco-qualification-v2":
+    if version in calibrated_versions:
         from .meco_qualification import _validate_v2_protocol
         _validate_v2_protocol(value, value.get("promotion_target_scenario"))
     split_seeds = {name: set() for name in ("train", "validation", "test")}
@@ -259,6 +264,9 @@ def _device_inventory(device_pool):
 
 
 def _gate_calibration(protocol):
+    # This training manifest binds protocol bytes for training/validation use.
+    # It has no trusted calibration-artifact validator, so it never admits a
+    # qualification claim, including for v4 protocols.
     return {"protocol_version": protocol.get("protocol_version"),
         "status": protocol.get("gate_calibration_status"),
         "trusted_calibration_report_binding": False,

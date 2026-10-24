@@ -320,3 +320,9 @@ checkpoints.
 Diagnostics remain available through `python -m frc_defense.meco_track_training
 evaluate`, but they never update promotion state and require an explicit
 `--device cuda:N`.
+
+The five-track training manifest can bind v1 through v4 protocol bytes for
+training and validation planning. Its calibration projection does not validate
+the required calibration artifacts, so it always reports qualification
+eligibility as false. Use the qualification protocol and report validators for
+promotion; the training manifest is not a qualification admission path.

@@ -2169,16 +2169,22 @@ def load_evaluation_protocol(value, *, scenario_id=None):
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     if protocol_id != expected_id:
         raise ValueError("evaluation protocol ID does not match its contents")
-    if protocol.get("protocol_version") not in ("meco-qualification-v1",
-                                                  "meco-qualification-v2"):
+    from .meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+        PROTOCOL_VERSION)
+    version = protocol.get("protocol_version")
+    if version not in (PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+                       D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+                       CALIBRATED_PROTOCOL_VERSION):
         raise ValueError("unsupported evaluation protocol version")
-    if protocol.get("protocol_version") == "meco-qualification-v1" and not isinstance(value, dict):
+    if version == PROTOCOL_VERSION and not isinstance(value, dict):
         from .meco_supervised import _load_protocol
         checked, checked_id, checked_sha, checked_path = _load_protocol(Path(value))
         return checked, checked_id, checked_sha, checked_path.name
-    if protocol.get("protocol_version") == "meco-qualification-v2":
+    if version in (LEGACY_CALIBRATED_PROTOCOL_VERSION,
+                   D0_PAIRED_REFERENCE_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION):
         if not isinstance(scenario_id, str) or not scenario_id:
-            raise ValueError("calibrated v2 evaluation protocol requires an explicit scenario")
+            raise ValueError("calibrated evaluation protocol requires an explicit scenario")
         from .meco_qualification import _validate_v2_protocol
         _validate_v2_protocol(protocol, scenario_id)
     cases = protocol.get("cases")

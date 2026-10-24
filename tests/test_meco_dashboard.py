@@ -6,11 +6,14 @@ from pathlib import Path
 import pytest
 
 from frc_defense.meco_dashboard import (
-    ABLATIONS, CONTROLS, TRACKS, _collect_status, _queue_attempt_projection, _queue_state,
-    _training_curriculum_projection, meco_status_payload,
+    ABLATIONS, CONTROLS, TRACKS, _collect_status, _qualification_status,
+    _queue_attempt_projection, _queue_state, _training_curriculum_projection,
+    meco_status_payload,
 )
 from frc_defense.meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
-from frc_defense.training_curriculum import SCENARIOS
+from frc_defense.meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+    D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION)
+from frc_defense.training_curriculum import SCENARIOS, _ancestors
 
 
 def _report(episodes=2):
@@ -247,6 +250,52 @@ def test_evaluator_manifest_reports_live_progress_and_stale_state(tmp_path):
     stale = _collect_status(checkpoint_root, evaluation_root, now=1_800_001_000.,
                             process_probe=lambda _pid: False)
     assert stale["evaluation_runs"][0]["status"] == "stale/unconfirmed"
+
+
+@pytest.mark.parametrize("version,gate_status", [
+    (LEGACY_CALIBRATED_PROTOCOL_VERSION, "calibrated_baseline_frozen"),
+    (D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+     "d0_operational_margin_frozen_reference_variance_unverified"),
+    (CALIBRATED_PROTOCOL_VERSION,
+     "matched_reference_variance_and_reviewed_margin_frozen"),
+])
+def test_qualification_status_accepts_version_matched_calibration(version, gate_status, tmp_path):
+    scenario = "pickup_simple"
+    closure = {scenario, *_ancestors(scenario)}
+    calibration_ids = {name: hashlib.sha256(name.encode()).hexdigest() for name in closure}
+    calibration_id = hashlib.sha256(json.dumps(calibration_ids, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    status = {"schema_version": 1, "split": "validation", "scenario_id": scenario,
+        "protocol_id": "a" * 64, "bundle_id": "b" * 64, "checkpoint_sha256": None,
+        "confidence_intervals": {}, "promotion": {"passed": True},
+        "protocol_version": version, "gate_calibration_status": gate_status,
+        "safety_gate_status": "metrics_schema_verified", "calibration_id": calibration_id,
+        "calibration_ids": calibration_ids,
+        "retention_scenario_ids": [name for name in SCENARIOS if name in closure and name != scenario]}
+    root = tmp_path / "qualifications" / "meco"
+    root.mkdir(parents=True)
+    (root / "qualification-status.json").write_text(json.dumps(status))
+    errors = []
+    projected = _qualification_status(tmp_path, errors, tmp_path)
+    assert errors == []
+    assert projected["protocol_version"] == version
+    assert projected["gate_calibration_status"] == gate_status
+
+
+def test_v4_qualification_status_rejects_legacy_gate_label(tmp_path):
+    status = {"schema_version": 1, "split": "validation", "scenario_id": "pickup_simple",
+        "protocol_id": "a" * 64, "bundle_id": "b" * 64, "checkpoint_sha256": None,
+        "confidence_intervals": {}, "promotion": {"passed": True},
+        "protocol_version": CALIBRATED_PROTOCOL_VERSION,
+        "gate_calibration_status": "calibrated_baseline_frozen",
+        "safety_gate_status": "metrics_schema_verified", "calibration_id": "c" * 64,
+        "calibration_ids": {"pickup_simple": "d" * 64}, "retention_scenario_ids": []}
+    root = tmp_path / "qualifications" / "meco"
+    root.mkdir(parents=True)
+    (root / "qualification-status.json").write_text(json.dumps(status))
+    errors = []
+    assert _qualification_status(tmp_path, errors, tmp_path) is None
+    assert errors and "invalid provenance" in errors[0]["error"]
 
 
 def test_evaluator_complete_requires_valid_report(tmp_path):

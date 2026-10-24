@@ -14,7 +14,9 @@ from .meco_ablation_matrix import (
 )
 from .meco_track_training import load_evaluation_protocol
 from .meco_tracks import MECO_TRACKS
-from .meco_qualification import MIN_EPISODES, protocol_cases
+from .meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+    D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+    MIN_EPISODES, protocol_cases)
 from .training_curriculum import SCENARIOS
 
 
@@ -22,6 +24,12 @@ PLAN_SCHEMA = "meco-validation-campaign-plan-v1"
 SEED_MANIFEST_SCHEMA = "meco-exact-seed-manifest-v1"
 CASE_FIELDS = tuple(DEFAULT_EVALUATION_STRATUM)
 BASE_POLICIES = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+CALIBRATED_GATE_STATUSES = {
+    LEGACY_CALIBRATED_PROTOCOL_VERSION: "calibrated_baseline_frozen",
+    D0_PAIRED_REFERENCE_PROTOCOL_VERSION:
+        "d0_operational_margin_frozen_reference_variance_unverified",
+    CALIBRATED_PROTOCOL_VERSION:
+        "matched_reference_variance_and_reviewed_margin_frozen"}
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -77,10 +85,11 @@ def _load_protocol(path: str | Path, *, qualification_claim: bool):
     if protocol.get("scenario_ids") != list(scenarios):
         raise ValueError("validation campaign requires a frozen protocol covering all registered scenarios")
     if qualification_claim and (
-            protocol.get("protocol_version") != "meco-qualification-v2" or
-            protocol.get("gate_calibration_status") != "calibrated_baseline_frozen" or
+            protocol.get("protocol_version") not in CALIBRATED_GATE_STATUSES or
+            protocol.get("gate_calibration_status") != CALIBRATED_GATE_STATUSES.get(
+                protocol.get("protocol_version")) or
             protocol.get("safety_gate_status") != "metrics_schema_verified"):
-        raise ValueError("qualification claim requires a calibrated v2 protocol with frozen safety gates")
+        raise ValueError("qualification claim requires a calibrated v2/v3/v4 protocol with version-matched frozen safety gates")
     if protocol.get("gate_calibration_status") == "provisional_pending_baseline_variance_review" and qualification_claim:
         raise ValueError("provisional protocol cannot support a qualification claim")
     expected_id = _sha({key: value for key, value in protocol.items()
@@ -255,13 +264,15 @@ def compile_validation_campaign(*, protocol_path: str | Path,
     body = {"schema": PLAN_SCHEMA,
         "qualification_claim": qualification_claim,
         "qualification_eligible": (
-            protocol.get("protocol_version") == "meco-qualification-v2" and
-            protocol.get("gate_calibration_status") == "calibrated_baseline_frozen" and
+            protocol.get("protocol_version") in CALIBRATED_GATE_STATUSES and
+            protocol.get("gate_calibration_status") == CALIBRATED_GATE_STATUSES.get(
+                protocol.get("protocol_version")) and
             protocol.get("safety_gate_status") == "metrics_schema_verified"),
         "protocol": {"file": protocol_file, "protocol_id": protocol_id,
                      "protocol_sha256": protocol_sha256,
                      "protocol_version": protocol.get("protocol_version"),
-                     "gate_calibration_status": protocol.get("gate_calibration_status")},
+                     "gate_calibration_status": protocol.get("gate_calibration_status"),
+                     "safety_gate_status": protocol.get("safety_gate_status")},
         "split": "validation",
         "scenario_ids": list(SCENARIOS),
         "job_count": len(jobs),

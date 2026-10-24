@@ -9,15 +9,28 @@ from frc_defense.meco_tracks import MECO_TRACKS
 from frc_defense.meco_validation_campaign import compile_validation_campaign
 from frc_defense.meco_validation_campaign_runner import (
     _sha,
+    _validate_plan,
     _validate_replay_artifact,
     aggregate_campaign,
     run_campaign,
 )
 
 
-def _inputs(tmp_path):
+def _inputs(tmp_path, *, v4=False, monkeypatch=None):
     protocol_path = tmp_path / "protocol.json"
-    protocol_path.write_text(json.dumps(protocol_document(), sort_keys=True,
+    protocol = protocol_document()
+    if v4:
+        from frc_defense import meco_qualification
+        protocol.update({"protocol_version": meco_qualification.CALIBRATED_PROTOCOL_VERSION,
+            "gate_calibration_status": "matched_reference_variance_and_reviewed_margin_frozen",
+            "safety_gate_status": "metrics_schema_verified",
+            "safety_metrics_schema": meco_qualification.SAFETY_METRICS_SCHEMA,
+            "safety_metrics_source_identity_sha256": "a" * 64})
+        protocol["protocol_id"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in protocol.items() if key != "protocol_id"},
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        monkeypatch.setattr(meco_qualification, "_validate_v2_protocol", lambda *_: None)
+    protocol_path.write_text(json.dumps(protocol, sort_keys=True,
         indent=2) + "\n", encoding="utf-8")
     checkpoints = {}
     configs = {}
@@ -30,6 +43,21 @@ def _inputs(tmp_path):
         checkpoint_paths=checkpoints, source_identity={"prepared": "hip-device"},
         training_configuration_sha256=configs)
     return protocol_path, checkpoints, plan
+
+
+def test_v4_protocol_plan_is_admitted_as_validation_only(tmp_path, monkeypatch):
+    _, _, plan = _inputs(tmp_path, v4=True, monkeypatch=monkeypatch)
+    assert plan["qualification_claim"] is False
+    assert plan["qualification_eligible"] is True
+    _validate_plan(plan)
+    assert plan["protocol"]["gate_calibration_status"] == (
+        "matched_reference_variance_and_reviewed_margin_frozen")
+    mismatched = json.loads(json.dumps(plan))
+    mismatched["protocol"]["gate_calibration_status"] = "calibrated_baseline_frozen"
+    mismatched["plan_digest"] = _sha({key: value for key, value in mismatched.items()
+        if key != "plan_digest"})
+    with pytest.raises(ValueError, match="calibration eligibility/status"):
+        _validate_plan(mismatched)
 
 
 def test_runner_resumes_only_valid_complete_mocked_jobs_and_aggregates_per_scenario(

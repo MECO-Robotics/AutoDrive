@@ -884,7 +884,9 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
     # Qualification provenance is intentionally projected field by field. In
     # particular, the calibration seed pools and raw qualification evidence
     # remain private to the qualification artifact.
-    from .meco_qualification import CALIBRATED_PROTOCOL_VERSION, PROTOCOL_VERSION
+    from .meco_qualification import (CALIBRATED_PROTOCOL_VERSION,
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION,
+        PROTOCOL_VERSION)
     from .training_curriculum import SCENARIOS, _ancestors
 
     protocol_version = status.get("protocol_version")
@@ -909,7 +911,13 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
         and all(type(name) is str and name in SCENARIOS
                 for name in retention_scenario_ids)
         and len(set(retention_scenario_ids)) == len(retention_scenario_ids))
-    if protocol_version == CALIBRATED_PROTOCOL_VERSION:
+    calibrated_status = {
+        LEGACY_CALIBRATED_PROTOCOL_VERSION: "calibrated_baseline_frozen",
+        D0_PAIRED_REFERENCE_PROTOCOL_VERSION:
+            "d0_operational_margin_frozen_reference_variance_unverified",
+        CALIBRATED_PROTOCOL_VERSION:
+            "matched_reference_variance_and_reviewed_margin_frozen"}
+    if protocol_version in calibrated_status:
         combined_calibration_id = (hashlib.sha256(json.dumps(calibration_ids,
             sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             if valid_calibration_ids else None)
@@ -919,7 +927,7 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
             and calibration_id == combined_calibration_id
             and valid_retention_ids and retention_scenario_ids == expected_retention
             and safety_gate_status == "metrics_schema_verified"
-            and status.get("gate_calibration_status") == "calibrated_baseline_frozen")
+            and status.get("gate_calibration_status") == calibrated_status[protocol_version])
     elif protocol_version == PROTOCOL_VERSION:
         # Older v1 status files predate these projection fields. Permit only
         # absent/null or canonical empty calibration containers for them.
@@ -936,7 +944,7 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
         valid_calibration = False
     failure_messages = failure.get("failures") if isinstance(failure, dict) else None
     failed_round = (
-        protocol_version in (PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION)
+        protocol_version in (PROTOCOL_VERSION, *calibrated_status)
         and valid_scenario
         and isinstance(promotion, dict) and promotion.get("passed") is False
         and isinstance(failure, dict)

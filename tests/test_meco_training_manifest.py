@@ -242,6 +242,27 @@ def test_protocol_parser_accepts_v2_through_official_validator(tmp_path, monkeyp
     assert parsed["protocol_version"] == "meco-qualification-v2"
 
 
+def test_protocol_parser_accepts_v4_but_training_manifest_does_not_attest_qualification(
+        tmp_path, monkeypatch):
+    from frc_defense import meco_qualification
+
+    protocol_path = tmp_path / "protocol-v4.json"
+    protocol = _protocol(protocol_path)
+    protocol.update({"protocol_version": meco_qualification.CALIBRATED_PROTOCOL_VERSION,
+        "promotion_target_scenario": "pickup_simple",
+        "gate_calibration_status": "matched_reference_variance_and_reviewed_margin_frozen",
+        "safety_gate_status": "metrics_schema_verified"})
+    protocol["protocol_id"] = _canonical({key: value for key, value in protocol.items()
+        if key != "protocol_id"})
+    protocol_path.write_text(json.dumps(protocol))
+    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol", lambda *_: None)
+    _, parsed, _, _ = manifest_api._protocol(protocol_path)
+    assert parsed["protocol_version"] == meco_qualification.CALIBRATED_PROTOCOL_VERSION
+    calibration = manifest_api._gate_calibration(parsed)
+    assert calibration["calibrated_and_reviewed"] is False
+    assert calibration["trusted_calibration_report_binding"] is False
+
+
 def test_hardware_inventory_requires_matching_wx9100_evidence(campaign, monkeypatch):
     tmp_path, config = campaign
     original = json.loads(manifest_api.HOST_GPU_INVENTORY.read_text())

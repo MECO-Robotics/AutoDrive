@@ -54,8 +54,58 @@ def test_compiles_complete_validation_only_campaign(tmp_path):
 def test_provisional_protocol_cannot_make_qualification_claim(tmp_path):
     path = tmp_path / "protocol.json"
     _write_protocol(path, protocol_document())
-    with pytest.raises(ValueError, match="calibrated v2 protocol"):
+    with pytest.raises(ValueError, match="calibrated v2/v3/v4 protocol"):
         compile_validation_campaign(protocol_path=path, qualification_claim=True)
+
+
+def test_v4_protocol_qualifies_only_with_exact_reviewed_gate_status(tmp_path, monkeypatch):
+    from frc_defense import meco_qualification
+
+    protocol = protocol_document()
+    protocol.update({"protocol_version": meco_qualification.CALIBRATED_PROTOCOL_VERSION,
+        "gate_calibration_status": "matched_reference_variance_and_reviewed_margin_frozen",
+        "safety_gate_status": "metrics_schema_verified",
+        "safety_metrics_schema": meco_qualification.SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": "a" * 64})
+    protocol["protocol_id"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in protocol.items() if key != "protocol_id"},
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    path = tmp_path / "v4.json"
+    _write_protocol(path, protocol)
+    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol", lambda *_: None)
+    plan = compile_validation_campaign(protocol_path=path, qualification_claim=True)
+    assert plan["qualification_claim"] is True
+    assert plan["qualification_eligible"] is True
+    assert plan["protocol"]["protocol_version"] == meco_qualification.CALIBRATED_PROTOCOL_VERSION
+
+    protocol["gate_calibration_status"] = "calibrated_baseline_frozen"
+    protocol["protocol_id"] = hashlib.sha256(json.dumps(
+        {key: value for key, value in protocol.items() if key != "protocol_id"},
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    _write_protocol(path, protocol)
+    with pytest.raises(ValueError, match="version-matched frozen safety gates"):
+        compile_validation_campaign(protocol_path=path, qualification_claim=True)
+
+
+def test_evaluator_protocol_loader_routes_calibrated_versions_to_validator(monkeypatch):
+    from frc_defense import meco_qualification, meco_track_training
+
+    calls = []
+    monkeypatch.setattr(meco_qualification, "_validate_v2_protocol",
+        lambda protocol, scenario: calls.append((protocol["protocol_version"], scenario)))
+    for version in (meco_qualification.LEGACY_CALIBRATED_PROTOCOL_VERSION,
+                    meco_qualification.CALIBRATED_PROTOCOL_VERSION):
+        protocol = protocol_document()
+        protocol["protocol_version"] = version
+        protocol["protocol_id"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in protocol.items() if key != "protocol_id"},
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        loaded, protocol_id, _, _ = meco_track_training.load_evaluation_protocol(
+            protocol, scenario_id="pickup_simple")
+        assert loaded is protocol
+        assert protocol_id == protocol["protocol_id"]
+    assert calls == [(meco_qualification.LEGACY_CALIBRATED_PROTOCOL_VERSION, "pickup_simple"),
+                     (meco_qualification.CALIBRATED_PROTOCOL_VERSION, "pickup_simple")]
 
 
 def test_rejects_split_seed_overlap(tmp_path):
