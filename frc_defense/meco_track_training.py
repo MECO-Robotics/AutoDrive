@@ -51,7 +51,9 @@ from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
-    phase4_pair_contact_event_record)
+    phase4_pair_contact_event_record, route_remaining_distance_m,
+    FirstRouteProgressInterval,
+    PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -516,7 +518,66 @@ def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
         "robot_cluster_counts": env._last_audit_cluster_count[0].tolist(),
         "meco_policy_decision": decision,
     }
+    progress_observer = getattr(env, "_phase4_first_route_progress_observer", None)
+    if progress_observer is not None:
+        frame["first_route_progress_interval"] = progress_observer.record(trace_limit=1)
     return frame
+
+
+def _observe_phase4_contact_route_progress(env, observer, *, selected_goal_id,
+                                           selected_goal_xy_m):
+    """Sample evaluator-only slot-3 truth and current executable planner route."""
+    event = phase4_pair_contact_event_record(env.sim)
+    planner = env.planner
+    route_goal_tolerance = None
+    route_fingerprint = None
+    try:
+        path = planner.last_path.reshape(env.n, 6, planner.last_path.shape[-2], 2)[0, 3]
+        length = int(planner.last_lengths.reshape(env.n, 6)[0, 3].item())
+        goal = planner.last_goal.reshape(env.n, 6, 2)[0, 3].tolist()
+        route_goal_tolerance = (float(planner.resolution) *
+            PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR)
+        path_points = path[:length].tolist()
+        normalized_path = [[float(value) for value in point] for point in path_points]
+        if (length >= 2 and all(len(point) == 2 and
+                all(math.isfinite(value) for value in point)
+                for point in normalized_path)):
+            route_fingerprint = hashlib.sha256(json.dumps(normalized_path,
+                separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        truth_xy = env.sim.pose[0, 3, :2].tolist()
+        pinned_xy = (None if selected_goal_xy_m is None else
+                     [float(value) for value in selected_goal_xy_m])
+        route_matches_goal = (pinned_xy is not None and len(goal) == 2 and
+            math.isfinite(route_goal_tolerance) and route_goal_tolerance > 0. and
+            all(math.isfinite(float(v)) for v in (*goal, *pinned_xy)) and
+            math.dist([float(v) for v in goal], pinned_xy) <= route_goal_tolerance)
+        remaining = (route_remaining_distance_m(path_points, truth_xy, pinned_xy,
+            goal_tolerance_m=route_goal_tolerance)
+                     if route_matches_goal else None)
+        if remaining is None:
+            route_fingerprint = None
+    except (AttributeError, IndexError, TypeError, ValueError, RuntimeError):
+        truth_xy, pinned_xy, remaining, route_fingerprint = None, None, None, None
+        route_matches_goal = False
+    world = 0
+    counts = event["distinct_contact_substeps_by_world"]
+    last_times = event["last_contact_physics_time_s_by_world"]
+    last_steps = event["last_contact_physics_substep_by_world"]
+    clock = float(env.steps[0].item()) * float(env.dt)
+    observer.observe({
+        "outer_tick": int(env.steps[0].item()), "outer_tick_time_s": clock,
+        "contact_factor_id": event["factor_id"], "contact_pair_slots": event["pair_slots"],
+        "distinct_contact_substeps": int(counts[world]),
+        "last_contact_physics_substep": last_steps[world],
+        "last_contact_physics_time_s": last_times[world],
+        "slot3_truth_xy_m": truth_xy,
+        "selected_goal_id": selected_goal_id,
+        "selected_goal_xy_m": pinned_xy,
+        "route_matches_selected_goal": bool(route_matches_goal and remaining is not None),
+        "route_goal_tolerance_m": route_goal_tolerance,
+        "route_fingerprint_sha256": route_fingerprint,
+        "route_remaining_distance_m": remaining,
+    })
 
 
 def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
@@ -1084,6 +1145,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     planner_route_trace: list | None = None,
                     safety_counts: dict | None = None,
                     metric_ledger: MecoEpisodeMetricLedger | None = None,
+                    contact_progress_observer=None,
+                    contact_progress_goal_id=None,
                     return_execution_flags: bool = False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
     actions[0, 3] = int(action_index)
@@ -1116,6 +1179,10 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_heading_override=goal_heading,
             planner_force_goal_replan=(planner_force_goal_replan and tick_index == 0),
             **planner_kwargs)
+        if contact_progress_observer is not None:
+            _observe_phase4_contact_route_progress(env, contact_progress_observer,
+                selected_goal_id=contact_progress_goal_id,
+                selected_goal_xy_m=goal_xy)
         if planner_route_trace is not None:
             planner = env.planner
             route_length = int(planner.last_lengths[3].detach().item())
@@ -2577,6 +2644,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         episode_metric_ledger = MecoEpisodeMetricLedger(
                             env, route_tracking_available=not is_production_d0,
                             goal_tracking_available=not is_production_d0)
+                        contact_progress_observer = (FirstRouteProgressInterval()
+                            if contact_geometry_id is not None else None)
+                        if contact_progress_observer is not None:
+                            env._phase4_first_route_progress_observer = contact_progress_observer
                         capture_replay = (replay_output_dir is not None and
                             seed in replay_seed_set and
                             (replay_policy_seeds is None or
@@ -2636,6 +2707,19 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                              dtype=torch.long)
                                 _, _, done, truncated, _ = env.step(
                                     native_actions, capture_info=False)
+                                if contact_progress_observer is not None:
+                                    planner_goal = env.planner.last_goal.reshape(
+                                        env.n, 6, 2)[0, 3].tolist()
+                                    planner_goal = [float(value) for value in planner_goal]
+                                    goal_id = ("d0_native:" + hashlib.sha256(
+                                        json.dumps(planner_goal, separators=(",", ":"),
+                                            allow_nan=False).encode()).hexdigest()[:16]
+                                        if all(math.isfinite(value) for value in planner_goal)
+                                        else None)
+                                    _observe_phase4_contact_route_progress(env,
+                                        contact_progress_observer,
+                                        selected_goal_id=goal_id,
+                                        selected_goal_xy_m=planner_goal if goal_id else None)
                                 executed = int(env.last_actions[0, 3].item())
                                 episode_metric_ledger.observe_outer_step(executed)
                                 executed_action_trace.append(executed)
@@ -2826,6 +2910,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     if (prepared is not None and not use_d1_fallback and
                                         not prepared.get("fallback_used", False)) else 1.),
                                 metric_ledger=episode_metric_ledger,
+                                contact_progress_observer=contact_progress_observer,
+                                contact_progress_goal_id=(selected_candidate_id or
+                                    ("selected_goal:" + json.dumps(
+                                        [round(float(v), 6) for v in goal_xy],
+                                        separators=(",", ":")) if goal_xy is not None else None)),
                                 safety_counts=(post_fault_safety if use_d1_fallback else None))
                             if policy in ("A1", "A2", "A3", "A1_P0", "A2_P0", "A3_P0"):
                                 planner = env.planner
@@ -3171,6 +3260,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "route_completion_rate": None,
                                 "status": "exposure_and_route_crossing_only_recovery_unavailable",
                             } if contact_geometry_id is not None else None),
+                            "first_route_progress_interval": (
+                                contact_progress_observer.record()
+                                if contact_progress_observer is not None else None),
                             "phase4_factor_runtime": ({
                                 **env.phase4_runtime_metrics,
                                 "fuel_track_confidence_mean": float(

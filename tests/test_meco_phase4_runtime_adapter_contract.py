@@ -9,12 +9,16 @@ import torch
 from frc_defense.meco_phase4 import phase4_factor_config
 from frc_defense.meco_phase4 import PHASE4_FACTORS
 from frc_defense.meco_phase4_runtime_adapter import (
+    FirstRouteProgressInterval,
+    PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR,
     PHASE4_REQUIREMENT_BINDINGS,
     phase4_factor_exposure,
     phase4_pair_contact_event_record,
+    route_remaining_distance_m,
     phase4_requirement_binding,
     validate_phase4_capture,
 )
+from frc_defense.meco_track_training import _observe_phase4_contact_route_progress
 from frc_defense.tensor_physics_collision import pair_contact_substep_endpoint
 from frc_defense.meco_ablation_matrix import _validate_phase4_condition_records
 
@@ -216,9 +220,191 @@ def test_first_contact_clock_uses_completed_substep_endpoint():
         torch.tensor([0]), torch.tensor([0.], dtype=torch.float64), dt)
     assert substep.tolist() == [1]
     assert time_s.tolist() == pytest.approx([dt])
-
     hip_source = (ROOT / "frc_defense/csrc/tensor_collision_multi_hip_kernel.hip").read_text()
     assert "physics_substep_index[world] + 1" in hip_source
     assert "physics_time_s[world] + step_dt" in hip_source
     assert "physics_substep_index[0] + 1" in hip_source
     assert "physics_time_s[0] + step_dt" in hip_source
+
+
+def test_route_progress_interval_is_outer_tick_censored_and_contact_resets_baseline():
+    observer = FirstRouteProgressInterval()
+    def sample(tick, count, distance, goal="g"):
+        return {"outer_tick": tick, "outer_tick_time_s": tick * .02,
+            "distinct_contact_substeps": count,
+            "last_contact_physics_time_s": count * .02,
+            "last_contact_physics_substep": count,
+            "selected_goal_id": goal, "selected_goal_xy_m": [1., 0.],
+            "route_remaining_distance_m": distance}
+    observer.observe(sample(1, 1, 1.0))
+    observer.observe(sample(2, 1, .9))
+    assert observer.record()["first_route_progress_interval"] is not None
+    interval = observer.record()["first_route_progress_interval"]
+    assert interval["contact_physics_time_lower_bound_s"] == .02
+    assert interval["baseline_route_sample_outer_tick_time_s"] == .02
+    assert interval["route_progress_outer_tick_upper_bound_s"] == .04
+    assert observer.record()["recovery_time_after_bump_s"] is None
+    assert observer.record()["qualification_eligible"] is False
+    observer.observe(sample(3, 2, .7))
+    assert observer.record()["first_route_progress_interval"] is None
+    assert observer.record()["null_reason"] == "horizon_without_route_progress"
+
+    reset = FirstRouteProgressInterval()
+    reset.observe(sample(1, 1, 1.0))
+    reset.observe(sample(2, 2, .99))
+    reset.observe(sample(3, 2, .90))
+    assert reset.record()["first_route_progress_interval"][
+        "contact_physics_time_lower_bound_s"] == .04
+    changed = FirstRouteProgressInterval()
+    changed.observe(sample(1, 1, 1.0))
+    changed.observe(sample(2, 1, .9, goal="other"))
+    assert changed.record()["null_reason"] == "goal_changed"
+
+
+def test_route_projection_and_null_reasons_fail_closed():
+    tol = .2 * PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR
+    assert route_remaining_distance_m([[0., 0.], [1., 0.], [1., 1.]],
+        [.5, .1], [1., 1.], goal_tolerance_m=tol) == pytest.approx(1.5)
+    assert route_remaining_distance_m([[0., 0.], [1., 0.]], [0., 0.], [2., 0.],
+        goal_tolerance_m=tol) is None
+    no_contact = FirstRouteProgressInterval().record()
+    assert no_contact["null_reason"] == "no_contact_observed"
+    invalid = FirstRouteProgressInterval()
+    invalid.observe({"outer_tick": 1, "outer_tick_time_s": .02, "distinct_contact_substeps": 1,
+        "last_contact_physics_time_s": .015, "last_contact_physics_substep": 1,
+        "selected_goal_id": "g", "selected_goal_xy_m": [1., 0.],
+        "route_remaining_distance_m": None})
+    assert invalid.record()["null_reason"] == "no_valid_executable_route"
+    horizon = FirstRouteProgressInterval()
+    horizon.observe({"outer_tick": 1, "outer_tick_time_s": .02, "distinct_contact_substeps": 1,
+        "last_contact_physics_time_s": .02,
+        "last_contact_physics_substep": 1,
+        "selected_goal_id": "g", "selected_goal_xy_m": [1., 0.],
+        "route_remaining_distance_m": 1.})
+    assert horizon.record()["null_reason"] == "horizon_without_route_progress"
+
+    small_progress = FirstRouteProgressInterval()
+    small_progress.observe({"outer_tick": 1, "outer_tick_time_s": .02, "distinct_contact_substeps": 1,
+        "last_contact_physics_time_s": .02, "last_contact_physics_substep": 1,
+        "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": 1.})
+    small_progress.observe({"outer_tick": 2, "outer_tick_time_s": .04, "distinct_contact_substeps": 1,
+        "last_contact_physics_time_s": .02, "last_contact_physics_substep": 1,
+        "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": .999})
+    assert small_progress.record()["first_route_progress_interval"] is not None
+
+    nonmonotonic = FirstRouteProgressInterval()
+    nonmonotonic.observe({"outer_tick": 2, "outer_tick_time_s": .04,
+        "distinct_contact_substeps": 1, "last_contact_physics_time_s": .03,
+        "selected_goal_id": "g", "selected_goal_xy_m": [1., 0.],
+        "route_remaining_distance_m": 1.})
+    nonmonotonic.observe({"outer_tick": 2, "outer_tick_time_s": .06,
+        "distinct_contact_substeps": 1, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": .9})
+    assert nonmonotonic.record()["null_reason"] == "non_monotonic_outer_tick_or_time"
+    regressed = FirstRouteProgressInterval()
+    regressed.observe({"outer_tick": 1, "outer_tick_time_s": .02,
+        "distinct_contact_substeps": 2, "last_contact_physics_time_s": .02,
+        "selected_goal_id": "g", "selected_goal_xy_m": [1., 0.],
+        "route_remaining_distance_m": 1.})
+    regressed.observe({"outer_tick": 2, "outer_tick_time_s": .04,
+        "distinct_contact_substeps": 1, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": .9})
+    assert regressed.record()["null_reason"] == "contact_substep_count_regressed"
+
+    solver_time_regressed = FirstRouteProgressInterval()
+    solver_time_regressed.observe({"outer_tick": 1, "outer_tick_time_s": .02,
+        "distinct_contact_substeps": 1, "last_contact_physics_time_s": .015,
+        "last_contact_physics_substep": 4, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": 1.})
+    solver_time_regressed.observe({"outer_tick": 2, "outer_tick_time_s": .04,
+        "distinct_contact_substeps": 2, "last_contact_physics_time_s": .015,
+        "last_contact_physics_substep": 5, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": .9})
+    assert solver_time_regressed.record()["first_route_progress_interval"] is None
+    assert solver_time_regressed.record()["null_reason"] == \
+        "solver_contact_time_or_substep_regressed"
+
+    solver_step_regressed = FirstRouteProgressInterval()
+    solver_step_regressed.observe({"outer_tick": 1, "outer_tick_time_s": .02,
+        "distinct_contact_substeps": 1, "last_contact_physics_time_s": .015,
+        "last_contact_physics_substep": 4, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": 1.})
+    solver_step_regressed.observe({"outer_tick": 2, "outer_tick_time_s": .04,
+        "distinct_contact_substeps": 2, "last_contact_physics_time_s": .018,
+        "last_contact_physics_substep": 4, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": .9})
+    assert solver_step_regressed.record()["first_route_progress_interval"] is None
+    assert solver_step_regressed.record()["null_reason"] == \
+        "solver_contact_time_or_substep_regressed"
+
+    missing_count = FirstRouteProgressInterval()
+    missing_count.observe({"outer_tick": 1, "outer_tick_time_s": .02,
+        "distinct_contact_substeps": 1, "last_contact_physics_time_s": .015,
+        "last_contact_physics_substep": 4, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": 1.})
+    missing_count.observe({"outer_tick": 2, "outer_tick_time_s": .04,
+        "last_contact_physics_time_s": .015, "last_contact_physics_substep": 4,
+        "selected_goal_id": "g", "selected_goal_xy_m": [1., 0.],
+        "route_remaining_distance_m": .9})
+    assert missing_count.record()["first_route_progress_interval"] is None
+    assert missing_count.record()["null_reason"] == \
+        "contact_substep_count_missing_or_invalid"
+
+    non_integer_count = FirstRouteProgressInterval()
+    non_integer_count.observe({"outer_tick": 1, "outer_tick_time_s": .02,
+        "distinct_contact_substeps": 1.5, "selected_goal_id": "g",
+        "selected_goal_xy_m": [1., 0.], "route_remaining_distance_m": 1.})
+    assert non_integer_count.record()["first_route_progress_interval"] is None
+    assert non_integer_count.record()["null_reason"] == \
+        "contact_substep_count_missing_or_invalid"
+
+
+def test_fake_contact_outer_step_sampler_records_truth_goal_route_and_solver_clock():
+    class Sim:
+        num_robots = 6
+        _collision_pair_i = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4])
+        _collision_pair_j = torch.tensor([1, 2, 3, 4, 5, 2, 3, 4, 5, 3, 4, 5, 4, 5, 5])
+        pair_contact_event_count = torch.zeros((1, 15), dtype=torch.long)
+        pair_contact_solver_report_count = torch.zeros((1, 15), dtype=torch.long)
+        pair_contact_first_substep = torch.full((1, 15), -1, dtype=torch.long)
+        pair_contact_last_substep = torch.full((1, 15), -1, dtype=torch.long)
+        pair_contact_first_time_s = torch.full((1, 15), float("nan"), dtype=torch.float64)
+        pair_contact_last_time_s = torch.full_like(pair_contact_first_time_s, float("nan"))
+        pair_contact_impulse_sum = torch.zeros((1, 15, 4))
+        pose = torch.zeros((1, 6, 3))
+    sim = Sim()
+    sim.pair_contact_event_count[0, 9] = 1
+    sim.pair_contact_last_substep[0, 9] = 1
+    sim.pair_contact_last_time_s[0, 9] = .02
+    planner = type("Planner", (), {})()
+    planner.last_path = torch.zeros((1, 6, 3, 2))
+    planner.last_path[0, 3] = torch.tensor([[0., 0.], [.5, 0.], [1., 0.]])
+    planner.last_lengths = torch.tensor([[0, 0, 0, 3, 0, 0]])
+    planner.last_goal = torch.zeros((1, 6, 2))
+    planner.last_goal[0, 3] = torch.tensor([1., 0.])
+    planner.resolution = .2
+    env = type("Env", (), {"n": 1, "sim": sim, "planner": planner,
+        "steps": torch.tensor([1]), "dt": .02})()
+    observer = FirstRouteProgressInterval()
+    _observe_phase4_contact_route_progress(env, observer,
+        selected_goal_id="chosen", selected_goal_xy_m=[1., 0.])
+    sample = observer.record()["trace"][0]
+    assert sample["contact_pair_slots"] == [2, 3]
+    assert sample["contact_substep_delta"] == 1
+    assert sample["last_contact_physics_time_s"] == .02
+    assert sample["slot3_truth_xy_m"] == [0., 0.]
+    assert sample["selected_goal_id"] == "chosen"
+    assert sample["route_matches_selected_goal"] is True
+    assert sample["route_goal_tolerance_m"] == pytest.approx(
+        .2 * PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR)
+    assert sample["route_remaining_distance_m"] == pytest.approx(1.)
+    first_route_fingerprint = sample["route_fingerprint_sha256"]
+    env.steps[0] = 2
+    planner.last_path[0, 3] = torch.tensor([[0., 0.], [0., .5], [1., 0.]])
+    _observe_phase4_contact_route_progress(env, observer,
+        selected_goal_id="chosen", selected_goal_xy_m=[1., 0.])
+    second_sample = observer.record()["trace"][-1]
+    assert second_sample["selected_goal_id"] == sample["selected_goal_id"]
+    assert second_sample["route_fingerprint_sha256"] != first_route_fingerprint

@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
+
+
+# Keep route endpoint matching aligned with evaluate_routes' grid tolerance.
+PHASE4_CONTACT_ROUTE_GOAL_TOLERANCE_RESOLUTION_FACTOR = 0.72
 
 
 _COMMON = {
@@ -181,6 +186,177 @@ def phase4_pair_contact_event_record(sim, *, factor_id: str = "contact.robot_bum
         "outcome_status": "contact_event_available_recovery_and_route_outcomes_unavailable",
         "event_scope": "first_and_last_contact_substep_plus_distinct_substep_count_and_episode_impulse_sum; not a complete event stream",
     }
+
+
+def route_remaining_distance_m(path_xy, pose_xy, goal_xy, *, goal_tolerance_m):
+    """Return route distance after nearest polyline projection, or None if invalid."""
+    try:
+        points = [[float(v) for v in point] for point in path_xy]
+        pose = [float(v) for v in pose_xy]
+        goal = [float(v) for v in goal_xy]
+        if (len(points) < 2 or len(pose) != 2 or len(goal) != 2 or
+                any(len(point) != 2 for point in points) or
+                any(not math.isfinite(v) for point in points for v in point) or
+                any(not math.isfinite(v) for v in (*pose, *goal))):
+            return None
+        if math.dist(points[-1], goal) > goal_tolerance_m:
+            return None
+        lengths = [math.dist(a, b) for a, b in zip(points, points[1:])]
+        best = None
+        traversed = 0.
+        best_remaining = None
+        for index, (a, b) in enumerate(zip(points, points[1:])):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            denom = dx * dx + dy * dy
+            ratio = 0. if denom == 0. else max(0., min(1.,
+                ((pose[0] - a[0]) * dx + (pose[1] - a[1]) * dy) / denom))
+            projected = (a[0] + ratio * dx, a[1] + ratio * dy)
+            distance = math.dist(pose, projected)
+            remaining = (traversed + lengths[index] * (1. - ratio) +
+                         sum(lengths[index + 1:]))
+            if best is None or distance < best:
+                best, best_remaining = distance, remaining
+            traversed += lengths[index]
+        return float(best_remaining)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+class FirstRouteProgressInterval:
+    """Outer-tick interval-censored route progress observation; never qualification evidence."""
+    def __init__(self):
+        self.previous_contact_count = 0
+        self.samples = []
+        self.baseline = None
+        self.result = None
+        self.last_reason = "no_contact_observed"
+        self.last_outer_tick = None
+        self.last_outer_time = None
+        self.last_solver_contact_time = None
+        self.last_solver_contact_substep = None
+
+    def observe(self, sample):
+        sample = dict(sample)
+        raw_count = sample.get("distinct_contact_substeps")
+        count_invalid = type(raw_count) is not int or raw_count < 0
+        count = None if count_invalid else raw_count
+        outer_tick = sample.get("outer_tick")
+        now = sample.get("outer_tick_time_s")
+        monotonic_time = isinstance(now, (int, float)) and math.isfinite(now)
+        monotonic_tick = type(outer_tick) is int
+        if self.last_outer_tick is not None:
+            monotonic_tick &= outer_tick > self.last_outer_tick
+        if self.last_outer_time is not None:
+            monotonic_time &= isinstance(now, (int, float)) and now > self.last_outer_time
+        count_regressed = count is not None and count < self.previous_contact_count
+        if count_regressed:
+            count = None
+        invalid_clock = not monotonic_tick or not monotonic_time
+        invalid_sample = invalid_clock or count_regressed or count_invalid
+        delta = 0 if count is None else max(0, count - self.previous_contact_count)
+        if count is not None:
+            self.previous_contact_count = count
+        if monotonic_tick and type(outer_tick) is int:
+            self.last_outer_tick = outer_tick
+        if monotonic_time and isinstance(now, (int, float)) and math.isfinite(now):
+            self.last_outer_time = float(now)
+        sample["contact_substep_delta"] = delta
+        if delta or self.baseline is not None or invalid_sample:
+            self.samples.append(sample)
+        contact_time = sample.get("last_contact_physics_time_s")
+        route = sample.get("route_remaining_distance_m")
+        goal = (sample.get("selected_goal_id"), sample.get("selected_goal_xy_m"))
+        valid_clock = isinstance(now, (int, float)) and math.isfinite(now)
+        if invalid_sample:
+            self.baseline = None
+            self.result = None
+            self.last_reason = ("non_monotonic_outer_tick_or_time" if invalid_clock
+                else "contact_substep_count_regressed" if count_regressed else
+                "contact_substep_count_missing_or_invalid")
+            sample["window_event"] = "window_censored_invalid_clock_or_contact_count"
+            return
+        if delta:
+            self.result = None
+            valid_contact_clock = (isinstance(contact_time, (int, float)) and
+                math.isfinite(contact_time) and contact_time <= now)
+            contact_substep = sample.get("last_contact_physics_substep")
+            valid_contact_substep = type(contact_substep) is int and contact_substep >= 0
+            solver_clock_regressed = (
+                valid_contact_clock and valid_contact_substep and
+                ((self.last_solver_contact_time is not None and
+                  contact_time <= self.last_solver_contact_time) or
+                 (self.last_solver_contact_substep is not None and
+                  contact_substep <= self.last_solver_contact_substep)))
+            if solver_clock_regressed:
+                self.baseline = None
+                self.last_reason = "solver_contact_time_or_substep_regressed"
+                sample["window_event"] = "window_censored_solver_contact_clock_regressed"
+                return
+            if not valid_contact_clock or not valid_contact_substep:
+                self.baseline = None
+                self.last_reason = "invalid_solver_contact_clock"
+                sample["window_event"] = "window_censored_invalid_solver_contact_clock"
+                return
+            self.last_solver_contact_time = float(contact_time)
+            self.last_solver_contact_substep = contact_substep
+            if (valid_clock and valid_contact_clock and
+                    isinstance(route, (int, float)) and math.isfinite(route) and
+                    goal[0] is not None):
+                self.baseline = {"time": float(now), "contact_time": float(contact_time),
+                                 "distance": float(route), "goal": goal}
+                self.last_reason = "contact_window_open"
+            else:
+                self.baseline = None
+                self.last_reason = ("no_valid_executable_route" if route is None else
+                    "no_valid_solver_contact_clock" if not valid_contact_clock else
+                    "no_valid_clock_or_goal")
+            sample["window_event"] = "contact_baseline_reset"
+            return
+        if self.baseline is None:
+            sample["window_event"] = None
+            return
+        if not valid_clock:
+            self.baseline = None
+            self.last_reason = "no_valid_clock"
+            sample["window_event"] = "window_censored_no_valid_clock"
+            return
+        if goal != self.baseline["goal"]:
+            self.baseline = None
+            self.last_reason = "goal_changed"
+            sample["window_event"] = "window_censored_goal_changed"
+            return
+        if not isinstance(route, (int, float)) or not math.isfinite(route):
+            self.baseline = None
+            self.last_reason = "no_valid_executable_route"
+            sample["window_event"] = "window_censored_no_valid_executable_route"
+            return
+        if float(route) < self.baseline["distance"]:
+            if self.result is None:
+                self.result = {"contact_physics_time_lower_bound_s": self.baseline["contact_time"],
+                    "baseline_route_sample_outer_tick_time_s": self.baseline["time"],
+                    "route_progress_outer_tick_upper_bound_s": float(now),
+                    "baseline_route_remaining_distance_m": self.baseline["distance"],
+                    "progress_route_remaining_distance_m": float(route),
+                    "selected_goal_id": goal[0], "selected_goal_xy_m": goal[1],
+                    "semantics": "interval_censored_first_route_progress_after_contact; outer_tick_bounds_only"}
+            self.last_reason = "interval_observed"
+            self.baseline = None
+            sample["window_event"] = "first_route_progress_interval_observed"
+            return
+        sample["window_event"] = None
+
+    def record(self, *, trace_limit=None):
+        reason = ("horizon_without_route_progress" if self.result is None and
+                  self.baseline is not None else self.last_reason)
+        trace = self.samples if trace_limit is None else self.samples[-trace_limit:]
+        return {"first_route_progress_interval": self.result,
+            "null_reason": None if self.result is not None else reason,
+            "trace": trace, "trace_total_samples": len(self.samples),
+            "trace_truncated": len(trace) < len(self.samples),
+            "trace_clock": "outer_20ms_environment_ticks; contact time is solver summary timestamp",
+            "recovery_time_after_bump_s": None,
+            "authoritative_signal_available": False,
+            "qualification_eligible": False}
 
 
 def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
