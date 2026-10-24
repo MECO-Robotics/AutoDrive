@@ -22,6 +22,18 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+## Candidate dashboard verification — 2026-10-24 14:33 UTC
+
+After the provenance ledger and digest pin were integrated, user service
+`frc-defense-dashboard.service` restarted with PID `2047704` from this
+candidate worktree. `/meco`, `/api/meco-status`, `/api/curriculum-status`, and
+`/assets/meco.js` returned HTTP 200. The served MECO JavaScript SHA-256 matched
+the checkout (`6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`).
+The curriculum API validated the three-pass ledger as `validated_summary_only`
+with 45 entries and `phase4-context-paired-dispatch` latest. The dashboard data
+root remains the live main checkout. No replay was generated; this verifies
+the current dashboard stack and provenance summary only.
+
 ## Phase 4 focal-pose and teammate-behavior paired dispatch — 2026-10-24
 
 The validation runner now dispatches the `observation.focal_pose_offset` and
