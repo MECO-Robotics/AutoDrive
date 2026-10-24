@@ -6,6 +6,7 @@ evaluation gates in ``training_curriculum``.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -141,7 +142,7 @@ class MecoTaskScheduler:
                 raise ValueError("pending task assignment belongs to a different cycle")
             if target_update is not None and pending.get("target_update") != target_update:
                 raise ValueError("pending task assignment has a different update frontier")
-            return dict(pending)
+            return deepcopy(pending)
         if type(cycle) is not int or cycle != self.state["completed_cycle"] + 1:
             raise ValueError("task cycles must advance sequentially")
         curriculum_state = self._exposure_state()
@@ -182,7 +183,8 @@ class MecoTaskScheduler:
         if self.phase4_train_exposure and phase4_train_categories(scenario_id):
             choices = []
             counts = self.state["phase4_exposure_counts"]
-            for factor_name, factor in sorted(PHASE4_FACTORS.items()):
+            for factor_name, factor_spec in sorted(PHASE4_FACTORS.items()):
+                factor = deepcopy(factor_spec)
                 for phase_category in phase4_train_categories(scenario_id):
                     for phase_seed in train_case.seeds:
                         exposure_key = _digest({"scenario_id": scenario_id,
@@ -234,14 +236,15 @@ class MecoTaskScheduler:
             if type(target_update) is not int or target_update < 1:
                 raise ValueError("target_update must be a positive integer")
             assignment["target_update"] = target_update
-        self.state["pending_assignment"] = assignment
-        return dict(assignment)
+        self.state["pending_assignment"] = deepcopy(assignment)
+        return deepcopy(assignment)
 
     def complete(self, assignment: dict, lane_results: dict[str, dict]):
         self._validate_assignment(assignment)
         pending = self.state["pending_assignment"]
         if pending is None or pending["assignment_id"] != assignment.get("assignment_id"):
             raise ValueError("completed task does not match pending scheduler assignment")
+        assignment = deepcopy(pending)
         scenario_id, category = assignment["scenario_id"], assignment["category"]
         self.state["exposure_chunks"][scenario_id] = (
             self.state["exposure_chunks"].get(scenario_id, 0) + 1)

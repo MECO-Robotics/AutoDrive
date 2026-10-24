@@ -9,7 +9,8 @@ from frc_defense.meco_supervisor import (_parser as supervisor_parser,
     _train_command)
 from frc_defense.meco_phase4 import (
     PHASE4_FACTORS, phase4_factor_digest, phase4_train_categories,
-    phase4_training_metadata, validate_phase4_training_assignment,
+    phase4_train_protocol_id, phase4_training_metadata,
+    validate_phase4_training_assignment,
 )
 from frc_defense.meco_task_scheduler import MecoTaskScheduler
 from frc_defense.meco_track_training import MecoTrainConfig, _parser as train_parser
@@ -68,6 +69,27 @@ def test_phase4_assignment_and_manifest_bind_factor_and_protocol(monkeypatch):
     altered = dict(assignment, phase4_factor={"kind": "observation_delay"})
     with pytest.raises(ValueError, match="frozen registered contract"):
         phase4_training_metadata(altered)
+
+
+def test_returned_assignments_cannot_mutate_global_factor_or_pending_state(monkeypatch):
+    scheduler = _phase4_scheduler(monkeypatch)
+    protocol_before = phase4_train_protocol_id()
+    assignment = scheduler.schedule(1)
+    pending_before = json.loads(json.dumps(scheduler.state["pending_assignment"]))
+    factor_kind = assignment["phase4_factor"]["kind"]
+    assert assignment["phase4_factor"] is not PHASE4_FACTORS[factor_kind]
+    assert scheduler.state["pending_assignment"]["phase4_factor"] is not assignment["phase4_factor"]
+
+    assignment["phase4_factor"].clear()
+    assignment["phase4_factor"]["kind"] = "mutated"
+    assert PHASE4_FACTORS[factor_kind]["kind"] == factor_kind
+    assert scheduler.state["pending_assignment"] == pending_before
+    assert phase4_train_protocol_id() == protocol_before
+
+    pending_copy = scheduler.schedule(1)
+    pending_copy["phase4_factor"].clear()
+    assert scheduler.state["pending_assignment"] == pending_before
+    assert phase4_train_protocol_id() == protocol_before
 
 
 @pytest.mark.parametrize("split", ["validation", "test", "calibration", "diagnostic"])
