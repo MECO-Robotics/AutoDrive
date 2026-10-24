@@ -38,6 +38,16 @@
 > tranches; its dashboard pin is updated, but the service needs another restart
 > after this checkout change before replay.
 
+> **Phase 4 campaign plan compiler integrated — 2026-10-24.** The candidate
+> now includes the selective validation-only protocol reader and compact plan
+> compiler. It validates split metadata without decoding final-test rows or
+> disclosing their seeds, and describes 6,488 design cells / 10,380,800
+> theoretical paired episode rows. This is a plan only: runtime stimuli,
+> dispatch, outcome aggregation, simulator runs, replay inspection, and
+> qualification remain outstanding. The three-pass manifest has 27 entries and its digest/count pins now match.
+> Dashboard currentness is
+> historical until restarted against the completed candidate state.
+
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
 > and is active as PID `1713013`, with this candidate worktree as its working

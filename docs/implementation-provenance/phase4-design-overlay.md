@@ -14,11 +14,15 @@
   field-bump terrain, and makes the contact/recovery event definitions
   explicit without inventing thresholds. The integration candidate contains
   the contract at `5a37fc73c509c3c785958d279b3845cc2b6eb262` and the runtime modules at
-  `f2867715c08e71fd6365b8ddb5ba742e62109fba`.
+  `f2867715c08e71fd6365b8ddb5ba742e62109fba`. Campaign follow-up
+  `69151e1ffc7b3635a7036e8c85904ae61e642aa8` adds a selective protocol reader
+  that decodes validation rows only and treats the full-file digest as opaque.
 - **Independent reviewer:** approved exact `69e7e79b61113e9b64e90ce8e676a60b3b25b777`
   and follow-up `4033acc8a2a67f0d206247363e6c98ca21ce7a97`, checking selector
   coverage, contact semantics, overlay digests, and absence of final-test
-  seed values/rows.
+  seed values/rows. The later parser follow-up was checked at exact campaign
+  compiler head `ddd55ad8df185dc0776573f884fb84f2bcb086d1`, including sentinel
+  tests proving final-test values do not reach JSON decoding or plan output.
 
 ## Evidence and limits
 
@@ -34,8 +38,9 @@ axes contain 7 opponent policies, 3 legal team-pose sets, 5 teammate profiles,
 counted as protocol or executed coverage.
 
 The original contract implementation had five focused tests; the scope fix had
-eight focused tests. Both report Python compilation, actual protocol overlay
-generation, and `git diff --check`. No simulator or GPU was used. The design
+eight focused tests; the final selective-reader and campaign review covered 19
+combined tests. Python compilation, actual protocol overlay generation, and
+`git diff --check` passed. No simulator or GPU was used. The design
 contract now precisely scopes planned factors, while runtime stimuli are still
 not wired to the curriculum/evaluation runner. Full-factor campaign execution,
 simulator replays, realized outcome signals, qualification, and deployment
