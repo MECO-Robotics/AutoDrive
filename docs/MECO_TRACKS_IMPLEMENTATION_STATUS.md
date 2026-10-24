@@ -733,3 +733,23 @@ GPU/HIP, training, dashboard restart, or qualification was performed.
 Dashboard provenance now includes this as tranche #40; the API validates the
 manifest dynamically. Summary-only three-pass record:
 `docs/implementation-provenance/phase4-route-outcome-capture.md`.
+
+### Phase 4 focal-pose validation assignment — tranche #41
+
+Commit `fd9ba22eaa35919fcd206323f7615ca8c8166c07`, based on source HEAD
+`b8f30d9e5a92675d069a740cdca070d04bc330c5`, adds paired no-offset and
+registered-offset assignments bound to the exact full-match validation
+protocol, case, categories, and seeds. Candidate integration is
+`c4425862bdaac32e9f5206bdcd2a22fe0626692d`. Independent review approved the
+exact cached diff SHA-256
+`1c9ff7ced88c5175dfc0fba97a83d6a2f6cbdd078839c7b8fa5a8ee0371aee71`.
+
+The estimate is applied after final scenario reset and before first policy
+observation, with physical simulator truth preserved. The dedicated evaluator
+report binds the assignment and initial truth-versus-estimate diagnostics;
+generic Phase 4 factor capture does not claim support. The integrated candidate
+passed 131 focused CPU contract tests, compilation, and `git diff --check`.
+No simulator/E2E replay, GPU/HIP, training, dashboard currentness check, or
+qualification was performed. Recovery/relocalization and safety outcomes
+remain unavailable; qualification remains false. Summary-only three-pass
+record: `docs/implementation-provenance/phase4-focal-pose-assignment.md`.

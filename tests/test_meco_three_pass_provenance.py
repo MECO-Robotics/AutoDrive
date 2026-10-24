@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 40
+    assert len(result["tranches"]) == 41
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -245,6 +245,36 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "lifecycle identity" in route_summary
     assert "selected destination node" in route_summary
     assert "D0 has no selected-goal ledger" in route_summary
+    focal_pose = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-focal-pose-assignment")
+    assert focal_pose["implementer"]["commit"] == (
+        "fd9ba22eaa35919fcd206323f7615ca8c8166c07")
+    assert focal_pose["implementer"]["source_head"] == (
+        "b8f30d9e5a92675d069a740cdca070d04bc330c5")
+    assert focal_pose["implementer"]["reviewed_diff_sha256"] == (
+        "1c9ff7ced88c5175dfc0fba97a83d6a2f6cbdd078839c7b8fa5a8ee0371aee71")
+    assert focal_pose["implementer"]["candidate_integration_commit"] == (
+        "c4425862bdaac32e9f5206bdcd2a22fe0626692d")
+    assert focal_pose["reviewer"]["approved_commit"] == (
+        focal_pose["implementer"]["commit"])
+    assert focal_pose["implementer"]["paths"] == [
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/meco_ablation_matrix.py",
+        "frc_defense/meco_phase4_context.py",
+        "frc_defense/meco_phase4_runtime_adapter.py",
+        "frc_defense/meco_track_training.py",
+        "scripts/run_meco_ablation_matrix.py",
+        "tests/test_meco_focal_pose_boundary.py",
+        "tests/test_meco_phase4_runtime_adapter_contract.py"]
+    assert focal_pose["planner"]["artifact"]["sha256"] == (
+        "0b4096e1588b5fffd80fc9d4a0010d47102720fe1f69fa531db02d9c5c780372")
+    assert "131 focused CPU contract tests" in focal_pose["limits"]
+    for excluded in ("No simulator evaluation", "E2E replay", "GPU/HIP run",
+                     "training", "dashboard currentness check", "qualification"):
+        assert excluded in focal_pose["limits"]
+    focal_summary = (REPO / focal_pose["planner"]["artifact"]["path"]).read_text()
+    assert "generic `phase4_factor_exposure`" in focal_summary
+    assert "initial-only" in focal_summary
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
