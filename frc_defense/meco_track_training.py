@@ -431,6 +431,12 @@ def _evaluation_record_digest(record: dict) -> str:
                               if key != "dashboard_replay"})
 
 
+def _evaluation_action_was_remasked(selected_action: int,
+        executed_action_trace) -> bool:
+    """Return whether any recorded tick action differs from the selection."""
+    return any(value != selected_action for value in executed_action_trace)
+
+
 def _evaluation_execution_failure_reason(*, action_was_remasked: bool,
         native_preempted: bool, selected_target_lost: bool,
         policy_fallback: bool, fallback_reason: str | None) -> str:
@@ -3027,7 +3033,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "start_tick": int(elapsed),
                                     "end_tick": int(elapsed + len(actual_trace)),
                                     "actual_tick_actions": list(actual_trace),
-                                    "divergence": any(value != action for value in actual_trace),
+                                    "divergence": _evaluation_action_was_remasked(
+                                        action, actual_trace),
                                     "fallback": bool(not forced_eval_goal and prepared is not None and
                                         prepared.get("fallback_used", False)),
                                     "status": ("pending_goal_continuation" if forced_eval_goal else
@@ -3046,7 +3053,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             simulator_macro_latency_samples.append(macro_elapsed_ms)
                             goal_complete = (goal_distance is not None and goal_distance <= .04 and
                                              (heading_error is None or heading_error <= .1))
-                            remasked = any(item != action for item in actual_trace)
+                            remasked = _evaluation_action_was_remasked(action,
+                                actual_trace)
                             hard_failure = (remasked or native_preempted or
                                             selected_target_lost)
                             if policy in ("C1", "C2", "D1", "D2"):
