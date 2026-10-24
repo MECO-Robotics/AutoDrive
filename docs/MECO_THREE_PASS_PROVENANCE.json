@@ -1,10 +1,10 @@
 {
   "schema": "meco-three-pass-provenance-v2",
   "status": "validated-summary-only",
-  "scope": "Candidate-local summaries record scoped planner intent, implementation scope, and independent reviewer approval for three exact commits. They are concise provenance summaries, not agent transcripts and not evidence of training or evaluation outcomes.",
+  "scope": "Candidate-local summaries record scoped planner intent, implementation scope, and independent reviewer approval for four exact commits. They are concise provenance summaries, not agent transcripts and not evidence of training or evaluation outcomes.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47",
-  "artifact_origin": "Only the three independently reviewed exact commits listed below are included. No evidence is inherited from unrelated branches or worktrees.",
+  "artifact_origin": "Only the four independently reviewed exact commits listed below are included. No evidence is inherited from unrelated branches or worktrees.",
   "tranches": [
     {
       "tranche_id": "dashboard-three-pass-availability",
@@ -69,6 +69,28 @@
         "reviewer": {
           "path": "docs/implementation-provenance/d1-d2-multimodel-matrix-reviewer.md",
           "sha256": "251f701e12f57c87829460acfe5432b492a5b1723c6470c02f65481deffdbd92"
+        }
+      }
+    },
+    {
+      "tranche_id": "three-pass-summary-validation",
+      "title": "Candidate-local three-pass summary validation",
+      "commits": {
+        "feature_commit": "962a2f1814eec2a4d32f998a4e009ac2962cacc3",
+        "reviewer_approved_commit": "962a2f1814eec2a4d32f998a4e009ac2962cacc3"
+      },
+      "summaries": {
+        "planner": {
+          "path": "docs/implementation-provenance/three-pass-summary-validation-planner.md",
+          "sha256": "1ef1af8f7b665a1cbbfe49b2d3ff87b05edb0131924621009ee622b545f128c5"
+        },
+        "implementer": {
+          "path": "docs/implementation-provenance/three-pass-summary-validation-implementer.md",
+          "sha256": "e2c9b7c6fc98fa67e38c2db0f1eb68218ea9fd395a4da48edbefdc350e8093ec"
+        },
+        "reviewer": {
+          "path": "docs/implementation-provenance/three-pass-summary-validation-reviewer.md",
+          "sha256": "ada2f0fd20df15396b2f6d2fd01cececeda080e8a9adb8b2710d1f653a27e00b"
         }
       }
     }
