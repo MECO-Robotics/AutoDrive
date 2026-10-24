@@ -9,7 +9,7 @@ from frc_defense.meco_ablation_matrix import (
     default_conditions,
 )
 from scripts.summarize_meco_ablation_matrix import _diagnostic_performance_summaries
-from frc_defense.meco_supervisor import _assert_training_not_released_after_final_test
+from frc_defense.meco_final_test_ledger import assert_training_not_released_after_final_test
 from frc_defense.meco_ablation_matrix import run_matrix
 from frc_defense.meco_tracks import MECO_TRACKS
 from scripts.run_meco_ablation_matrix import _parser
@@ -136,11 +136,48 @@ def test_sealed_final_test_blocks_training_and_detects_source_drift(tmp_path):
         "protocol_sha256": protocol_sha, "source_identity_sha256": source_hash}),
         encoding="utf-8")
     with pytest.raises(ValueError, match="source identity changed"):
-        _assert_training_not_released_after_final_test(
+        assert_training_not_released_after_final_test(
             protocol_path, protocol_id, protocol_sha, "modified-source")
     with pytest.raises(ValueError, match="training is forbidden"):
-        _assert_training_not_released_after_final_test(
+        assert_training_not_released_after_final_test(
             protocol_path, protocol_id, protocol_sha, source_hash)
+
+
+@pytest.mark.parametrize("initialization", ["fresh", "resume", "warm_start"])
+def test_train_meco_api_blocks_after_final_test_for_all_initialization_modes(
+        tmp_path, monkeypatch, initialization):
+    import frc_defense.fuel_physics_hip as hip
+    import frc_defense.meco_supervised as supervised
+    import frc_defense.meco_track_training as training
+    import frc_defense.meco_device as device
+
+    protocol_path = tmp_path / "protocol.json"
+    protocol_id, protocol_sha = "p1", "p-sha"
+    source = {"source": "prepared"}
+    source_hash = hashlib.sha256(json.dumps(source, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    protocol_path.with_name(
+        f"{protocol_id}.sealed-final-test-consumption.json").write_text(
+            json.dumps({"protocol_id": protocol_id,
+                "protocol_sha256": protocol_sha,
+                "source_identity_sha256": source_hash}), encoding="utf-8")
+    monkeypatch.setattr(supervised, "_load_protocol",
+        lambda path: ({"protocol_id": protocol_id}, protocol_id, protocol_sha, path))
+    monkeypatch.setattr(supervised, "validate_training_assignment", lambda *args: None)
+    monkeypatch.setattr(training, "source_identity", lambda: source)
+    monkeypatch.setattr(training.torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(device, "require_indexed_cuda_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hip, "prepare_native_fuel_extension", lambda device: None)
+    kwargs = {}
+    if initialization == "resume":
+        kwargs["resume"] = str(tmp_path / "resume.pt")
+    elif initialization == "warm_start":
+        kwargs.update(warm_start=str(tmp_path / "warm.pt"), protocol_id="train-p1")
+    config = training.MecoTrainConfig(track="A1", device="cuda:0",
+        output=str(tmp_path / "output"))
+    with pytest.raises(ValueError, match="training is forbidden"):
+        training.train_meco(config, qualification_protocol=str(protocol_path), **kwargs)
+    assert not (tmp_path / "output").exists()
 
 
 def test_matrix_cli_defaults_to_accelerator_and_rejects_cpu_before_gpu_setup(tmp_path):

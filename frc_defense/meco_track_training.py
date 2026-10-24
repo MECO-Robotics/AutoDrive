@@ -1402,8 +1402,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     prepare_native_fuel_extension(config.device)
     run_id = run_id_override or uuid.uuid4().hex
     output = Path(config.output or ROOT / "checkpoints" / "meco-five" / config.track)
-    output.mkdir(parents=True, exist_ok=True)
     sources = source_identity()
+    if qualification_protocol_data is not None:
+        from .meco_final_test_ledger import assert_training_not_released_after_final_test
+        source_hash = hashlib.sha256(json.dumps(
+            sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        assert_training_not_released_after_final_test(
+            Path(qualification_protocol).resolve(), qualification_protocol_id,
+            qualification_protocol_sha256, source_hash)
+    output.mkdir(parents=True, exist_ok=True)
     model = make_meco_track(config.track,
         candidate_features=CANDIDATE_BASE_FEATURE_COUNT).to(config.device)
     warm_start_provenance = None
