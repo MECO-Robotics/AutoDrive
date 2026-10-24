@@ -84,7 +84,11 @@
 > remains false, and final-test use is blocked. Eleven focused contract tests,
 > Python compilation, and diff checks passed. No simulator, GPU/HIP, campaign,
 > replay, or dashboard validation ran. The current checkout has not been
-> verified by the serving dashboard.
+> verified by the serving dashboard at implementation review. After the
+> provenance integration commit, the service was restarted at 10:48 UTC with
+> this candidate worktree, the Three-Pass API validated all 30 summary entries,
+> `/meco`, both relevant APIs, and `/assets/meco.js` returned HTTP 200, and the
+> served JS hash matched the checkout. No replay was generated.
 
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted

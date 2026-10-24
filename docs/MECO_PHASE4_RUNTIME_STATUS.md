@@ -42,7 +42,11 @@ completion.
 
 The new contract and plan tests are static/contract checks. They do not test
 simulator behavior. No simulator episode, HIP extension compile, GPU behavior
-test, or fresh replay was run for this change, and the dashboard stack has not
-been restarted against this candidate.
+test, or fresh replay was run for this change. After the candidate provenance
+integration, the dashboard service was restarted at 10:48 UTC against this
+worktree; `/meco`, `/api/meco-status`, `/api/curriculum-status`, and
+`/assets/meco.js` returned HTTP 200. The API validated all 30 provenance
+summaries and the served frontend asset hash matched the checkout. No replay
+was generated, so simulator behavior and replay inspection remain outstanding.
 The required representative end-to-end simulator evaluation and current-stack
 replay inspection remain a separate validation gate.
