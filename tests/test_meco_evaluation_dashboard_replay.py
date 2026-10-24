@@ -133,7 +133,6 @@ def test_dashboard_bundle_contains_compact_decisions_and_staleness_metadata(tmp_
     assert (generation / "result.meta.json").is_file()
     assert (generation / "result.json.gz").is_file()
     assert (generation / "result.view.json.gz").is_file()
-    assert json.loads((tmp_path / "scenario-meco-contract.json").read_text())["status"] == "ready"
     metadata = json.loads((generation / "result.meta.json").read_text())
     assert metadata["condition_id"] == "cond-def"
     assert metadata["checkpoint_source_outdated"] is True
@@ -179,16 +178,17 @@ def test_replay_listing_surfaces_source_and_checkpoint_staleness(tmp_path):
 
 
 @pytest.mark.parametrize("failure_stage", ["asset:result.json", "manifest",
-    "generation", "before_pointer"])
+    "generation", "generation_parent_synced", "ready_temp_written", "before_pointer"])
 def test_replay_publication_failure_keeps_previous_generation_and_retry_succeeds(
         tmp_path, monkeypatch, failure_stage):
     progress = tmp_path / ".scenario-progress"
     progress.mkdir()
     record = {"simulation_id": "scenario-atomic", "seed": 1,
+        "simulation_ticks": 10,
         "scenarios": [{"label": "first", "frames": []}]}
     write_dashboard_replay_bundle(progress / "scenario-atomic.result.json", record)
     old_pointer = json.loads((progress / "scenario-atomic.ready.json").read_text())
-    changed = {**record, "seed": 2}
+    changed = {**record, "seed": 2, "simulation_ticks": 99}
     def fail_before_pointer(stage):
         if stage == failure_stage:
             raise OSError("injected crash before publication")
@@ -197,14 +197,32 @@ def test_replay_publication_failure_keeps_previous_generation_and_retry_succeeds
     with pytest.raises(OSError, match="injected crash"):
         write_dashboard_replay_bundle(progress / "scenario-atomic.result.json", changed)
     assert json.loads((progress / "scenario-atomic.ready.json").read_text()) == old_pointer
-    old_generation, _ = resolve_dashboard_replay_generation(progress, "scenario-atomic")
+    old_generation, old_manifest = resolve_dashboard_replay_generation(progress, "scenario-atomic")
     assert json.loads((old_generation / "result.json").read_text())["seed"] == 1
+    assert old_manifest["ready_status"]["tick"] == 10
+    generations = progress / "scenario-atomic.generations"
+    assert list(generations.iterdir()) == [old_generation]
+    assert not list(progress.glob(".*.tmp"))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(tmp_path))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status = json.loads(urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/zone-playback-progress"
+            "?simulation_id=scenario-atomic").read())
+        assert status["tick"] == 10
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
     monkeypatch.setattr(dashboard_simulation, "_replay_publication_checkpoint",
                         lambda _stage: None)
     write_dashboard_replay_bundle(progress / "scenario-atomic.result.json", changed)
     new_generation, _ = resolve_dashboard_replay_generation(progress, "scenario-atomic")
     assert new_generation != old_generation
+    new_generation, new_manifest = resolve_dashboard_replay_generation(progress, "scenario-atomic")
     assert json.loads((new_generation / "result.json").read_text())["seed"] == 2
+    assert new_manifest["ready_status"]["tick"] == 99
 
 
 def test_replay_discovery_and_load_reject_corrupted_generation(tmp_path):
@@ -247,6 +265,23 @@ def test_replay_alignment_matches_selected_and_executed_actions_including_remask
     frames[1]["meco_policy_decision"]["executed_actions"] = [0, 0]
     with pytest.raises(ValueError, match="actions differ"):
         _validate_meco_replay_alignment(record, frames, final_tick=24)
+
+
+def test_replay_alignment_compares_full_no_route_macro_trace_and_allows_remask():
+    record = _row()
+    record.update({"policy": "C1", "elapsed_ticks": 3,
+        "executed_planner_route_trace": [], "executed_action_trace": [0, 2, 1],
+        "selected_action_trace": [0]})
+    frames = [{"tick": 0, "meco_policy_decision": None},
+        {"tick": 3, "meco_policy_decision": {"policy": "C1",
+         "kind": "policy_decision", "macro_start_tick": 0, "macro_end_tick": 3,
+         "action": 0, "executed_actions": [0, 2, 1]}}]
+    _validate_meco_replay_alignment(record, frames, final_tick=3)
+    # Preserve the selected action and final executed action while corrupting
+    # only the middle tick: endpoint-only comparisons would miss this change.
+    frames[1]["meco_policy_decision"]["executed_actions"] = [0, 9, 1]
+    with pytest.raises(ValueError, match="macro slice"):
+        _validate_meco_replay_alignment(record, frames, final_tick=3)
 
 
 def test_matrix_capture_requires_explicit_seeds_before_gpu_setup(monkeypatch, tmp_path):

@@ -483,20 +483,32 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                     return
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 progress=json.loads(_json_or_default(progress_path,{}))
-                if progress.get("status")=="error":
+                result_path=progress_path.with_name(progress_path.stem+".result.json")
+                generation=None
+                manifest=None
+                try:
+                    generation,manifest=resolve_dashboard_replay_generation(
+                        result_path.parent,simulation_id)
+                except (OSError,ValueError,json.JSONDecodeError):
+                    pass
+                if manifest is not None:
+                    progress=manifest["ready_status"]
+                if progress.get("status")=="error" and manifest is None:
                     body=json.dumps({"error":progress.get("error","scenario failed")}).encode()
                     self.send_response(500)
                     self.send_header("Content-Type","application/json")
-                elif progress.get("status")!="ready":
+                elif manifest is None and (progress.get("status")=="ready" or
+                        result_path.with_name(f"{simulation_id}.ready.json").exists()):
+                    body=json.dumps({"error":"scenario replay failed integrity verification"}).encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type","application/json")
+                elif manifest is None:
                     body=json.dumps({"error":"scenario playback is not ready"}).encode()
                     self.send_response(409)
                     self.send_header("Content-Type","application/json")
                 else:
-                    result_path=run_dir/".scenario-progress"/f"{simulation_id}.result.json"
                     try:
                         playback_view=params.get("view",["0"])[0]=="1"
-                        generation, _manifest = resolve_dashboard_replay_generation(
-                            result_path.parent, simulation_id)
                         view_path=generation/"result.view.json.gz"
                         compressed_path=(view_path if playback_view else
                                          generation/"result.json.gz")
@@ -522,6 +534,13 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                 progress_path=run_dir/".scenario-progress"/f"{simulation_id}.json"
                 body=_json_or_default(progress_path,{"status":"waiting","tick":0,"total_ticks":ZONE_PLAYBACK_TICKS,"percent":0})
                 progress=json.loads(body)
+                try:
+                    _generation,manifest=resolve_dashboard_replay_generation(
+                        progress_path.parent,simulation_id,verify=False)
+                    progress=manifest["ready_status"]
+                except (OSError,ValueError,json.JSONDecodeError):
+                    pass
+                body=json.dumps(progress,separators=(",", ":")).encode()
                 request_path=progress_path.with_name(progress_path.stem+".request.json")
                 if progress.get("status") in ("waiting","running") and request_path.is_file():
                     try:
@@ -542,6 +561,12 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                         progress=json.loads(progress_path.read_text())
                     except (OSError,json.JSONDecodeError):
                         continue
+                    try:
+                        _generation,manifest=resolve_dashboard_replay_generation(
+                            progress_dir,simulation_id,verify=False)
+                        progress=manifest["ready_status"]
+                    except (OSError,ValueError,json.JSONDecodeError):
+                        pass
                     if progress.get("status") in ("waiting","running","ready"):
                         jobs.append((request_path.stat().st_mtime,{**request,
                             "simulation_id":simulation_id,"progress":progress}))

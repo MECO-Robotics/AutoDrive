@@ -520,19 +520,29 @@ def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
             if actual != expected:
                 raise ValueError("replay selected or executed actions differ from evaluator route trace")
     else:
-        # Deterministic D0 is selected anew on every physics tick and therefore
-        # has no learned macro route rows. Bind each sampled replay boundary to
-        # the corresponding evaluator tick action instead.
+        # Some evaluators do not emit route rows for the policy. Their canonical
+        # action trace is tick-level, so compare the complete macro slice.
         executed = record.get("executed_action_trace")
-        if isinstance(executed, list) and executed:
-            for decision in macro_decisions:
-                end_tick = decision.get("macro_end_tick")
-                trace = decision.get("executed_actions")
-                if (type(end_tick) is not int or end_tick < 1 or
-                        end_tick > len(executed) or not isinstance(trace, list) or
-                        not trace or trace[-1] != executed[end_tick - 1] or
-                        decision.get("action") != executed[end_tick - 1]):
-                    raise ValueError("replay action differs from evaluator tick action trace")
+        selected = record.get("selected_action_trace")
+        if not isinstance(executed, list) or not executed:
+            raise ValueError("evaluator tick action trace is required for replay alignment")
+        if isinstance(selected, list) and selected and len(selected) != len(macro_decisions):
+            raise ValueError("replay macro count differs from evaluator selected action trace")
+        for index, decision in enumerate(macro_decisions):
+            start_tick, end_tick = (decision.get("macro_start_tick"),
+                                    decision.get("macro_end_tick"))
+            trace = decision.get("executed_actions")
+            if (type(start_tick) is not int or type(end_tick) is not int or
+                    start_tick < 0 or end_tick <= start_tick or end_tick > len(executed) or
+                    not isinstance(trace, list) or trace != executed[start_tick:end_tick]):
+                raise ValueError("replay executed action trace differs from evaluator macro slice")
+            if isinstance(selected, list) and selected:
+                if decision.get("action") != selected[index]:
+                    raise ValueError("replay selected action differs from evaluator selected action trace")
+            elif decision.get("action") != trace[-1]:
+                # D0 chooses anew at every physics tick; its replay action is
+                # the actual choice on the final tick of the sampled macro.
+                raise ValueError("replay action differs from evaluator tick action trace")
 
 
 def _snapshot_tensors(snapshot, *, device):
@@ -2496,11 +2506,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 elapsed += 1
                                 if capture_replay and (elapsed % action_ticks == 0 or
                                         bool(done[0].item()) or bool(truncated[0].item())):
+                                    macro_start_tick = ((elapsed - 1) // action_ticks) * action_ticks
                                     decision = {"kind": "policy_decision", "policy": record_policy,
                                         "action": executed, "action_source": "production_deterministic",
-                                        "macro_start_tick": elapsed - 1,
+                                        "macro_start_tick": macro_start_tick,
                                         "macro_end_tick": int(env.steps[0].item()),
-                                        "executed_actions": [executed],
+                                        "executed_actions": executed_action_trace[
+                                            macro_start_tick:elapsed],
                                         "candidate_k": candidate_k,
                                         "prediction_mode": decision_prediction_mode}
                                     replay_frames.append(_capture_meco_replay_frame(

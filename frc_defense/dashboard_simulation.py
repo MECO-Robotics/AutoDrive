@@ -147,7 +147,6 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
     generation_id = uuid.uuid4().hex
     staging = generations / f".{generation_id}.tmp"
     generation = generations / generation_id
-    staging.mkdir()
     serialized = json.dumps(record, separators=(",", ":"), allow_nan=False).encode()
     metadata = {key: record.get(key) for key in (
         "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state",
@@ -159,6 +158,10 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
     metadata["label"] = (scenarios[0].get("label") if scenarios else simulation_id)
     view = json.dumps(scenario_playback_view(record), separators=(",", ":"),
                       allow_nan=False).encode()
+    status = {"status": "ready", "tick": int(record.get("simulation_ticks", 0)),
+        "total_ticks": int(record.get("simulation_ticks", 0)), "percent": 100,
+        "simulated_seconds": record.get("simulated_seconds", 0),
+        "updated_at": time.time()}
     assets = {
         "result.json": serialized,
         "result.json.gz": gzip.compress(serialized, compresslevel=6, mtime=0),
@@ -166,6 +169,9 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
                                         allow_nan=False).encode(),
         "result.view.json.gz": gzip.compress(view, compresslevel=1, mtime=0),
     }
+    pointer_published = False
+    temporary = None
+    staging.mkdir()
     try:
         for name, content in assets.items():
             path = staging / name
@@ -176,6 +182,7 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
             _replay_publication_checkpoint(f"asset:{name}")
         manifest = {"schema": "dashboard-replay-generation-v1",
             "simulation_id": simulation_id, "generation_id": generation_id,
+            "ready_status": status,
             "assets": {name: {"size_bytes": len(content),
                 "sha256": hashlib.sha256(content).hexdigest()}
                 for name, content in assets.items()}}
@@ -193,6 +200,12 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
             os.close(directory_fd)
         os.replace(staging, generation)
         _replay_publication_checkpoint("generation")
+        generations_fd = os.open(generations, os.O_RDONLY)
+        try:
+            os.fsync(generations_fd)
+        finally:
+            os.close(generations_fd)
+        _replay_publication_checkpoint("generation_parent_synced")
         pointer = {"schema": "dashboard-replay-ready-v1",
             "simulation_id": simulation_id, "generation_id": generation_id,
             "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}
@@ -204,22 +217,13 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
             stream.write(pointer_bytes)
             stream.flush()
             os.fsync(stream.fileno())
+        _replay_publication_checkpoint("ready_temp_written")
         _replay_publication_checkpoint("before_pointer")
-        status = {"status": "ready", "tick": int(record.get("simulation_ticks", 0)),
-            "total_ticks": int(record.get("simulation_ticks", 0)), "percent": 100,
-            "simulated_seconds": record.get("simulated_seconds", 0),
-            "updated_at": time.time()}
-        status_path = progress_dir / f"{simulation_id}.json"
-        status_tmp = progress_dir / f".{simulation_id}.{generation_id}.status.tmp"
-        with status_tmp.open("xb") as stream:
-            stream.write(json.dumps(status, separators=(",", ":"),
-                                   allow_nan=False).encode())
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(status_tmp, status_path)
         # This atomic pointer replacement is the publication point: all assets
-        # and readiness metadata are durable before dashboard discovery sees it.
+        # and generation-bound readiness metadata are durable before dashboard
+        # discovery sees it. The progress sidecar is not the readiness authority.
         os.replace(temporary, ready_path)
+        pointer_published = True
         directory_fd = os.open(progress_dir, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -227,11 +231,25 @@ def publish_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
             os.close(directory_fd)
         return pointer
     except Exception:
-        # An unpublished generation is harmless. Never remove the currently
-        # referenced generation when a later publication attempt fails.
+        # Clean temporary and renamed-but-unpublished material. Never remove a
+        # generation after its ready pointer has become visible.
+        if not pointer_published:
+            try:
+                current_pointer = json.loads(ready_path.read_text())
+                pointer_published = current_pointer.get("generation_id") == generation_id
+            except (OSError, ValueError, UnboundLocalError):
+                pass
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         if staging.exists():
             import shutil
             shutil.rmtree(staging, ignore_errors=True)
+        if generation.exists() and not pointer_published:
+            import shutil
+            shutil.rmtree(generation, ignore_errors=True)
         raise
 
 
@@ -256,6 +274,12 @@ def resolve_dashboard_replay_generation(progress_dir: Path, simulation_id: str,
             manifest.get("simulation_id") != simulation_id or
             manifest.get("generation_id") != pointer["generation_id"]):
         raise ValueError("replay generation manifest identity mismatch")
+    status = manifest.get("ready_status")
+    if (not isinstance(status, dict) or status.get("status") != "ready" or
+            type(status.get("tick")) is not int or
+            type(status.get("total_ticks")) is not int or
+            status["tick"] != status["total_ticks"]):
+        raise ValueError("replay generation readiness status is invalid")
     if verify:
         assets = manifest.get("assets")
         if not isinstance(assets, dict) or set(assets) != {
