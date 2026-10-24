@@ -2305,6 +2305,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   prediction_mode: str | None = None,
                   candidate_k_override: int | None = None,
                   control_prediction_mode: str | None = None,
+                  control_prediction_modes: dict[str, str] | None = None,
+                  calibration_control_policy: str | None = None,
+                  calibration_route_cost_points_per_second: float | None = None,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None,
                   phase4_opponent_schedule: dict | None = None,
@@ -2377,8 +2380,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"control_prediction_mode must be one of {PREDICTION_MODES}")
+    if control_prediction_mode is not None and control_prediction_modes is not None:
+        raise ValueError("use either control_prediction_mode or control_prediction_modes, not both")
+    if control_prediction_modes is not None and (
+            not isinstance(control_prediction_modes, dict)
+            or not control_prediction_modes
+            or set(control_prediction_modes) - {"D1", "D2"}
+            or any(mode not in PREDICTION_MODES for mode in control_prediction_modes.values())):
+        raise ValueError("control_prediction_modes must map D1 and D2 to known modes")
     if candidate_k_override is not None and candidate_k_override not in (8, 16, 32):
         raise ValueError("candidate_k_override must be 8, 16, or 32")
+    if calibration_control_policy is not None and calibration_control_policy not in ("D1", "D2"):
+        raise ValueError("calibration_control_policy must be D1 or D2")
+    if calibration_control_policy is not None and phase4_factor is not None:
+        raise ValueError("calibration control evaluation does not permit phase4_factor")
+    if calibration_route_cost_points_per_second is not None and (
+            type(calibration_route_cost_points_per_second) not in (int, float)
+            or not math.isfinite(calibration_route_cost_points_per_second)
+            or calibration_route_cost_points_per_second < 0):
+        raise ValueError("calibration route-cost weight must be finite and nonnegative")
     if inference_disable_tick is not None and (type(inference_disable_tick) is not int
             or inference_disable_tick <= 0):
         raise ValueError("inference_disable_tick must be a positive physics tick")
@@ -2491,10 +2511,52 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("control_policies must be a unique subset of D0/D1/D2")
     if include_controls and "D0" not in controls:
         raise ValueError("matched evaluation requires D0 as the paired reference")
-    control_prediction_modes = {"D1": control_prediction_mode or "current",
-                                 "D2": control_prediction_mode or "cv"}
+    effective_control_prediction_modes = {"D1": "current", "D2": "cv"}
+    if control_prediction_mode is not None:
+        effective_control_prediction_modes = {"D1": control_prediction_mode,
+                                              "D2": control_prediction_mode}
+    elif control_prediction_modes is not None:
+        effective_control_prediction_modes.update(control_prediction_modes)
+    calibration_control_case_binding = None
+    if calibration_control_policy is not None:
+        expected_mode = ("current" if calibration_control_policy == "D1" else
+                         (control_prediction_modes or {}).get("D2"))
+        valid_mode = (expected_mode == "current" if calibration_control_policy == "D1"
+                      else expected_mode in ("cv", "multi_model_v1"))
+        if (split != "calibration" or evaluation_policies != () or selected
+                or checkpoints != {} or not include_controls
+                or controls != ("D0", calibration_control_policy)
+                or inference_disable_tick is not None or replay_output_dir is not None
+                or replay_seeds is not None or replay_selection is not None
+                or qualification_case is None
+                or control_prediction_modes != {calibration_control_policy: expected_mode}
+                or not valid_mode or candidate_k_override != 16
+                or calibration_route_cost_points_per_second is None):
+            raise ValueError("calibration control opt-in requires calibration split, empty checkpoints/policies, "
+                "D0 plus exactly the selected D1/D2 reference, an explicit supported mode and frozen case, "
+                "no inference fault or replay, candidate_k=16, and explicit route-cost weight")
+        from .meco_qualification import protocol_cases
+        frozen_cases = protocol_cases(scenario_id, "calibration", episodes=episodes,
+            master_seed=master_seed)
+        matching_cases = [case for case in frozen_cases
+            if case.category in categories
+            and {"layout_id": case.layout_id, "defender_family": case.defender_family,
+                "start_condition": case.start_condition, "sensor_profile": case.sensor_profile}
+                == qualification_case]
+        if (len(categories) != 1 or len(matching_cases) != 1
+                or tuple(episode_seeds or ()) != matching_cases[0].seeds):
+            raise ValueError("calibration control evaluation must match one frozen calibration case and its exact seed tuple")
+        frozen_case = matching_cases[0]
+        calibration_control_case_binding = {"scenario_id": scenario_id,
+            "master_seed": master_seed, "episodes": episodes,
+            "category": frozen_case.category,
+            "qualification_case": dict(qualification_case),
+            "episode_seeds": list(frozen_case.seeds)}
+    elif calibration_route_cost_points_per_second is not None:
+        raise ValueError("calibration route-cost weight requires calibration_control_policy opt-in")
     if not selected and (controls != ("D0",) or not include_controls):
-        raise ValueError("D0-only evaluation requires exactly the D0 control")
+        if calibration_control_policy is None or not include_controls:
+            raise ValueError("control-only evaluation permits D0 only unless calibration_control_policy is explicit")
     sources = source_identity()
     source_hash = hashlib.sha256(json.dumps(
         sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
@@ -2592,6 +2654,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 immutable_track_config, sort_keys=True, allow_nan=False).encode()).hexdigest(),
             "source_identity_sha256": hashlib.sha256(
             json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+    if calibration_control_policy is not None:
+        route_weight = float(calibration_route_cost_points_per_second)
+        action_ticks = 12
     candidate_k = (checkpoint_candidate_k if candidate_k_override is None
                    else candidate_k_override)
     if inference_disable_tick is not None:
@@ -2601,7 +2666,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if first_macro_boundary >= scenario_horizon:
             raise ValueError("inference disable tick has no macro boundary before episode horizon")
     effective_prediction_mode = prediction_mode or learned_prediction_mode or "cv"
-    effective_control_modes = control_prediction_modes
+    effective_control_modes = effective_control_prediction_modes
     for track in ("A1", "A2", "A3"):
         if track not in policy_manifest:
             continue
@@ -2619,11 +2684,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
             "execution_device": execution_device,
             "input_contract_sha256": input_contract_digest(),
-            "prediction_mode": control_prediction_modes.get(control),
-            "prediction_contract": (prediction_contract(control_prediction_modes[control])
-                if control in control_prediction_modes else None),
+            "prediction_mode": effective_control_prediction_modes.get(control),
+            "prediction_contract": (prediction_contract(effective_control_prediction_modes[control])
+                if control in effective_control_prediction_modes else None),
             "source_identity_sha256": hashlib.sha256(
                 json.dumps(sources, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+        if control == calibration_control_policy:
+            policy_manifest[control]["calibration_candidate_configuration"] = {
+                "candidate_k": candidate_k,
+                "route_cost_points_per_second": route_weight,
+                "action_ticks": action_ticks}
     if inference_disable_tick is not None:
         for track in selected:
             base = policy_manifest[track]
@@ -2639,6 +2709,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "qualification_protocol_id": qualification_protocol_id,
         "evaluation_binding": evaluation_binding,
         "qualification_case": qualification_case,
+        "calibration_control_case_binding": calibration_control_case_binding,
         "candidate_k": {"checkpoint": checkpoint_candidate_k,
             "evaluation_override": candidate_k_override, "effective": candidate_k},
         "candidate_service": {"contract": CANDIDATE_BOUNDARY,
@@ -2646,8 +2717,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "candidate_builder": "shared_C1_C2_D1_D2_route_feasible_candidates"},
         "prediction": {"learned_mode": effective_prediction_mode,
             "control_override": control_prediction_mode,
+            "control_mode_overrides": control_prediction_modes,
             "control_modes": effective_control_modes,
             "contract": prediction_contract(effective_prediction_mode)},
+        "calibration_control_policy": calibration_control_policy,
+        "calibration_candidate_configuration": ({
+            "candidate_k": candidate_k,
+            "route_cost_points_per_second": route_weight,
+            "action_ticks": action_ticks}
+            if calibration_control_policy is not None else None),
         "inference_disable_tick": inference_disable_tick,
         "phase4_factor": phase4_factor,
         "phase4_contact": {"factor_id": phase4_contact_factor_id,
@@ -2697,6 +2775,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
                 if evaluation_binding else None),
             "evaluation_case": evaluation_binding,
+            "calibration_control_case_binding": calibration_control_case_binding,
             "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
             "split": split, "status": status,
             "execution_device": execution_device,
@@ -3768,6 +3847,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
                 if evaluation_binding else None),
             "evaluation_case": evaluation_binding,
+            "calibration_control_case_binding": calibration_control_case_binding,
             "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
             "evaluation_design": ("frozen_protocol_held_out" if evaluation_binding
                 else "diagnostic_unbound"),

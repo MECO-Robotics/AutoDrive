@@ -21,7 +21,9 @@ from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
     seed_partition)
 
 PROTOCOL_VERSION = "meco-qualification-v1"
-CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
+LEGACY_CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
+D0_PAIRED_REFERENCE_PROTOCOL_VERSION = "meco-qualification-v3"
+CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v4"
 D0_CALIBRATION_VERSION = "meco-d0-calibration-v2"
 D0_CALIBRATION_SHARD_MANIFEST = "meco-d0-calibration-shard-manifest-v1"
 D0_CALIBRATION_SHARD_ARTIFACT = "meco-d0-calibration-shard-v1"
@@ -30,6 +32,59 @@ TRAIN_SEED_POOL_SIZE = 100
 BOOTSTRAP_REPLICATES = 10_000
 POLICIES = ("A1", "A2", "A3", "C1", "C2")
 REFERENCE_POLICY = "D0"
+MATCHED_REFERENCE_POLICIES = frozenset(("D1", "D2"))
+MATCHED_REFERENCE_VARIANTS = {
+    "D1/current": ("D1", "D1_hand_weighted", "current"),
+    "D2/cv": ("D2", "D2_kinematic_prediction", "cv"),
+    "D2/multi_model_v1": ("D2", "D2_kinematic_prediction", "multi_model_v1"),
+}
+
+
+def _reference_variant(value: str) -> str:
+    # Keep the earlier API spellings as aliases for protocol construction.
+    aliases = {"D1": "D1/current", "D2": "D2/cv"}
+    variant = aliases.get(value, value)
+    if variant not in MATCHED_REFERENCE_VARIANTS:
+        raise ValueError("matched reference must be D1/current, D2/cv, or D2/multi_model_v1")
+    return variant
+
+
+def _matched_reference_identity(policy: str, mode: str | None = None) -> dict:
+    if mode is None:
+        variant = _reference_variant(policy)
+        policy, policy_id, mode = MATCHED_REFERENCE_VARIANTS[variant]
+    else:
+        policy_id = {"D1": "D1_hand_weighted", "D2": "D2_kinematic_prediction"}.get(policy)
+        if policy_id is None or not (
+                (policy == "D1" and mode == "current")
+                or (policy == "D2" and mode in ("cv", "multi_model_v1"))):
+            raise ValueError("matched reference policy/mode is unsupported")
+        variant = f"{policy}/{mode}"
+    from .meco_tracks import prediction_contract
+    return {"selection_id": variant, "policy": policy, "policy_id": policy_id,
+        "prediction_mode": mode, "prediction_contract": prediction_contract(mode),
+        "checkpoint_sha256": None}
+
+
+def _control_prediction_modes(protocol: dict) -> dict[str, str]:
+    """Keep D1 at current pose while applying the frozen mode to D2."""
+    reference = protocol.get("paired_reference_policy")
+    mode = protocol.get("paired_reference_mode")
+    if reference == "D1":
+        if mode != "current":
+            raise ValueError("D1 reference is only supported with current-pose prediction")
+        return {"D1": "current", "D2": "cv"}
+    if reference == "D2" and mode in ("cv", "multi_model_v1"):
+        return {"D1": "current", "D2": mode}
+    raise ValueError("frozen reference policy/mode is unsupported")
+
+
+def _reference_control_kwargs(protocol: dict) -> dict:
+    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        return {"control_prediction_modes": _control_prediction_modes(protocol)}
+    if protocol.get("protocol_version") == D0_PAIRED_REFERENCE_PROTOCOL_VERSION:
+        return {"control_prediction_modes": _control_prediction_modes(protocol)}
+    return {}
 SAFETY_METRICS_SCHEMA = "meco-safety-rates-v1"
 SAFETY_METRIC_NAMES = frozenset(("safety_robot_contact_rate",
     "safety_field_contact_rate", "safety_wall_contact_rate"))
@@ -292,14 +347,256 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
     return ids, pools, source_hash, report_hashes
 
 
+def _reference_variance_report_index(reports, scenarios, *, source_hash,
+                                     reference_variant, d0_reports):
+    if isinstance(reports, dict) and "calibration_reports" in reports:
+        reports = reports["calibration_reports"]
+    if not isinstance(reports, dict) or set(reports) != set(scenarios):
+        raise ValueError("matched reference variance bundle must cover the exact prerequisite closure")
+    indexed, hashes, ids, seed_union, runtime_identity = {}, {}, {}, set(), None
+    expected_variant = _reference_variant(reference_variant)
+    for scenario in scenarios:
+        report = reports[scenario]
+        _validate_matched_reference_variance_report(report)
+        if (not isinstance(report, dict)
+                or report.get("artifact_type") != MATCHED_REFERENCE_VARIANCE_VERSION
+                or report.get("scenario_id") != scenario
+                or report.get("config", {}).get("reference_selection_id") != expected_variant
+                or report.get("source_identity_sha256") != source_hash
+                or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                or report.get("safety_metrics_source_identity_sha256") != source_hash):
+            raise ValueError(f"matched reference variance report is incompatible for {scenario}")
+        unsigned = {key: value for key, value in report.items() if key != "calibration_id"}
+        calibration_id = _canonical_sha256(unsigned)
+        if report.get("calibration_id") != calibration_id:
+            raise ValueError(f"matched reference variance digest is invalid for {scenario}")
+        config = report.get("config", {})
+        if (config.get("prediction_contract") != _matched_reference_identity(expected_variant)["prediction_contract"]
+                or report.get("policy_manifest", {}).get(config.get("reference_policy"), {}).get("policy_id")
+                    != MATCHED_REFERENCE_VARIANTS[expected_variant][1]
+                or report.get("policy_manifest", {}).get(config.get("reference_policy"), {}).get("prediction_mode")
+                    != MATCHED_REFERENCE_VARIANTS[expected_variant][2]):
+            raise ValueError(f"matched reference policy/mode/contract differs for {scenario}")
+        if report.get("policy_manifest", {}).get(REFERENCE_POLICY, {}).get("policy_id") != "D0_production_deterministic":
+            raise ValueError(f"matched reference report lacks the D0 safety-floor policy for {scenario}")
+        d0_report = d0_reports[scenario]
+        d0_cases = d0_report.get("case_ids")
+        reference_cases = [{key: value for key, value in row.items() if key != "reference_policy"}
+                           for row in report.get("case_ids", [])]
+        d0_episodes = d0_report.get("episodes_per_category_stratum")
+        d0_master_seed = d0_report.get("master_seed")
+        d0_protocol_cases = protocol_cases(scenario, "calibration",
+            episodes=d0_episodes, master_seed=d0_master_seed)
+        expected_d0_cases = [{"category": case.category, "layout_id": case.layout_id,
+            "defender_family": case.defender_family,
+            "start_condition": case.start_condition,
+            "sensor_profile": case.sensor_profile} for case in d0_protocol_cases]
+        expected_reference_cases = [{**row, "seeds": list(case.seeds)}
+            for row, case in zip(expected_d0_cases, d0_protocol_cases)]
+        if (d0_cases != expected_d0_cases or reference_cases != expected_reference_cases
+                or report.get("config", {}).get("episodes_per_category_stratum") != d0_episodes
+                or report.get("config", {}).get("master_seed") != d0_master_seed):
+            raise ValueError(f"matched reference and D0 calibration seed tables differ for {scenario}")
+        episodes = config.get("episodes_per_category_stratum")
+        master_seed = config.get("master_seed")
+        _validate_d0_calibration_case_table(scenario, episodes, master_seed, d0_cases)
+        seeds = {seed for case in reference_cases for seed in case["seeds"]}
+        if seeds & seed_union:
+            raise ValueError("matched reference calibration seed pools overlap across prerequisite scenarios")
+        seed_union.update(seeds)
+        runtime = report.get("normalized_runtime_identity")
+        if runtime != _normalized_calibration_runtime(report.get("runtime_device")):
+            raise ValueError(f"matched reference runtime identity is invalid for {scenario}")
+        if runtime_identity is not None and runtime_identity != runtime:
+            raise ValueError("matched reference reports have runtime identity drift")
+        d0_runtime = d0_report.get("normalized_runtime_identity")
+        if d0_runtime is not None and d0_runtime != runtime:
+            raise ValueError("matched reference and D0 calibration runtime identities differ")
+        runtime_identity = runtime
+        indexed[scenario] = report
+        ids[scenario] = calibration_id
+        hashes[scenario] = _canonical_sha256(report)
+    return indexed, ids, hashes, runtime_identity
+
+
+def _validate_matched_reference_variance_report(report):
+    """Revalidate raw repeated rows and summaries before protocol binding."""
+    if (not isinstance(report, dict)
+            or report.get("artifact_type") != MATCHED_REFERENCE_VARIANCE_VERSION
+            or report.get("schema_version") != 1
+            or report.get("calibration") is not True):
+        raise ValueError("unsupported matched reference variance report")
+    config = report.get("config")
+    scenario = report.get("scenario_id")
+    if not isinstance(config, dict) or config.get("scenario_id") != scenario:
+        raise ValueError("matched reference variance config is invalid")
+    variant = _reference_variant(config.get("reference_selection_id"))
+    policy, policy_id, mode = MATCHED_REFERENCE_VARIANTS[variant]
+    identity = _matched_reference_identity(variant)
+    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
+    candidate_configuration = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
+        "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
+        "action_ticks": 12}
+    if (config.get("reference_policy") != policy
+            or config.get("reference_policy_id") != policy_id
+            or config.get("prediction_mode") != mode
+            or config.get("prediction_contract") != identity["prediction_contract"]
+            or config.get("candidate_configuration") != candidate_configuration
+            or config.get("safety_floor_policy") != REFERENCE_POLICY
+            or config.get("required_safety_metrics") != sorted(SAFETY_METRIC_NAMES)
+            or config.get("split") != "calibration"
+            or type(config.get("episodes_per_category_stratum")) is not int
+            or config["episodes_per_category_stratum"] < MIN_EPISODES
+            or type(config.get("repetitions")) is not int or config["repetitions"] < 2
+            or type(config.get("master_seed")) is not int or config["master_seed"] < 0):
+        raise ValueError("matched reference variance policy, mode, seed, or runtime settings are invalid")
+    cases = protocol_cases(scenario, "calibration",
+        episodes=config["episodes_per_category_stratum"], master_seed=config["master_seed"])
+    expected_cases = [{"category": case.category, "layout_id": case.layout_id,
+        "defender_family": case.defender_family, "start_condition": case.start_condition,
+        "sensor_profile": case.sensor_profile, "seeds": list(case.seeds),
+        "reference_policy": policy} for case in cases]
+    if report.get("case_ids") != expected_cases:
+        raise ValueError("matched reference variance case/seed table differs from the frozen calibration protocol")
+    _validate_d0_calibration_case_table(scenario, config["episodes_per_category_stratum"],
+        config["master_seed"], [{key: value for key, value in row.items()
+            if key != "reference_policy"} for row in expected_cases])
+    source_hash = report.get("source_identity_sha256")
+    runtime = report.get("runtime_device")
+    normalized_runtime = _normalized_calibration_runtime(runtime)
+    if (report.get("normalized_runtime_identity") != normalized_runtime
+            or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or report.get("safety_metrics_source_identity_sha256") != source_hash):
+        raise ValueError("matched reference variance source/runtime/safety identity is invalid")
+    expected_protocol = _canonical_sha256({"version": MATCHED_REFERENCE_VARIANCE_VERSION,
+        "config": config, "case_table": expected_cases,
+        "source_identity_sha256": source_hash, "runtime_identity": normalized_runtime})
+    if report.get("protocol_identity_sha256") != expected_protocol:
+        raise ValueError("matched reference variance protocol identity is invalid")
+    manifest = report.get("policy_manifest")
+    if (not isinstance(manifest, dict)
+            or manifest.get(REFERENCE_POLICY, {}).get("policy_id") != "D0_production_deterministic"
+            or manifest.get(policy, {}).get("policy_id") != policy_id
+            or manifest.get(policy, {}).get("checkpoint_sha256") is not None
+            or manifest.get(policy, {}).get("source_identity_sha256") != report.get("source_identity_sha256")
+            or manifest.get(policy, {}).get("prediction_mode") != mode
+            or manifest.get(policy, {}).get("prediction_contract") != identity["prediction_contract"]
+            or manifest.get(policy, {}).get("calibration_candidate_configuration")
+                != candidate_configuration):
+        raise ValueError("matched reference variance policy manifest is invalid")
+    expected = {(rep, name, case.category, case.layout_id, case.defender_family,
+        case.start_condition, case.sensor_profile, seed)
+        for rep in range(config["repetitions"])
+        for name in (REFERENCE_POLICY, policy) for case in cases for seed in case.seeds}
+    case_bindings = {}
+    for case in expected_cases:
+        key_fields = (case["category"], case["layout_id"], case["defender_family"],
+            case["start_condition"], case["sensor_profile"])
+        case_bindings[key_fields] = {"scenario_id": scenario,
+            "master_seed": config["master_seed"],
+            "episodes": config["episodes_per_category_stratum"],
+            "category": case["category"],
+            "qualification_case": {field: case[field] for field in
+                ("layout_id", "defender_family", "start_condition", "sensor_profile")},
+            "episode_seeds": case["seeds"]}
+    found = {}
+    for row in report.get("records", []):
+        if not isinstance(row, dict):
+            raise ValueError("matched reference variance record is malformed")
+        if type(row.get("repetition")) is not int or type(row.get("seed")) is not int:
+            raise ValueError("matched reference repetition and seed must be exact integers")
+        key = (row.get("repetition"), row.get("policy"), row.get("category"),
+            row.get("layout_id"), row.get("defender_family"),
+            row.get("start_condition"), row.get("sensor_profile"), row.get("seed"))
+        if key not in expected or key in found:
+            raise ValueError("matched reference variance contains duplicate or unexpected rows")
+        if row.get("calibration_control_case_binding") != case_bindings.get(key[2:7]):
+            raise ValueError("matched reference row is not bound to its frozen evaluator case and seed tuple")
+        expected_id = "D0_production_deterministic" if key[1] == REFERENCE_POLICY else policy_id
+        if (row.get("policy_id") != expected_id
+                or row.get("split") != "calibration"
+                or row.get("scenario_id") != scenario
+                or row.get("source_identity_sha256") != source_hash
+                or row.get("calibration_runtime_device") != runtime
+                or (key[1] == policy and (row.get("prediction_mode") != mode
+                    or row.get("prediction_contract") != identity["prediction_contract"]))):
+            raise ValueError("matched reference variance row provenance differs from its frozen report")
+        metrics = row.get("metrics")
+        if (not isinstance(metrics, dict)
+                or {key for key in metrics if isinstance(key, str) and key.startswith("safety_")}
+                    != SAFETY_METRIC_NAMES
+                or any(type(metrics.get(metric)) not in (int, float)
+                    or not math.isfinite(metrics[metric]) or not 0 <= metrics[metric] <= 1
+                    for metric in SAFETY_METRIC_NAMES)
+                or type(metrics.get("useful_throughput")) not in (int, float)
+                or not math.isfinite(metrics["useful_throughput"])
+                or metrics["useful_throughput"] < 0):
+            raise ValueError("matched reference variance row metrics are incomplete")
+        found[key] = row
+    if set(found) != expected:
+        raise ValueError("matched reference variance report has incomplete repeated seed coverage")
+    expected_summary = _matched_reference_variance_summary(expected_cases,
+        config["repetitions"], list(found.values()))
+    if report.get("summary") != expected_summary:
+        raise ValueError("matched reference variance summary does not match raw repeated outcomes")
+    unsigned = {key: value for key, value in report.items() if key != "calibration_id"}
+    if report.get("calibration_id") != _canonical_sha256(unsigned):
+        raise ValueError("matched reference variance report digest is invalid")
+    return report
+
+
+def _validate_reference_margin_review(review, *, target, reference_variant,
+                                     reference_ids, reference_hashes,
+                                     safety_margins):
+    categories = set(SCENARIOS[target].required_categories)
+    required_keys = {"schema_version", "reviewed_by", "reviewed_utc", "decision",
+        "reference_variant", "reference_calibration_ids", "reference_report_sha256",
+        "minimum_useful_gain", "safety_noninferiority_margins"}
+    if (not isinstance(review, dict) or review.get("schema_version") != 1
+            or set(review) != required_keys
+            or review.get("reference_variant") != reference_variant
+            or review.get("reference_calibration_ids") != reference_ids
+            or review.get("reference_report_sha256") != reference_hashes
+            or not isinstance(review.get("reviewed_by"), str)
+            or not review["reviewed_by"].strip()
+            or not isinstance(review.get("reviewed_utc"), str)
+            or not review["reviewed_utc"].strip()
+            or review.get("decision") != "accepted"):
+        raise ValueError("reference variance margin review must bind the frozen reports and record an explicit approval")
+    gains = review.get("minimum_useful_gain")
+    if (not isinstance(gains, dict) or set(gains) != categories
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                   for value in gains.values())):
+        raise ValueError("review must provide an explicit nonnegative useful-gain margin per target category")
+    reviewed_safety = review.get("safety_noninferiority_margins")
+    if (not isinstance(reviewed_safety, dict) or reviewed_safety != safety_margins
+            or set(reviewed_safety) != SAFETY_METRIC_NAMES):
+        raise ValueError("reviewed safety margins must exactly match the separately declared safety margin file")
+    return {"schema_version": 1, "reviewed_by": review["reviewed_by"],
+        "reviewed_utc": review["reviewed_utc"], "decision": "accepted",
+        "reference_variant": reference_variant,
+        "reference_calibration_ids": reference_ids,
+        "reference_report_sha256": reference_hashes,
+        "minimum_useful_gain": dict(gains),
+        "safety_noninferiority_margins": dict(reviewed_safety),
+        "review_sha256": _canonical_sha256(review)}
+
+
 def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPISODES,
                       master_seed: int = 20261024, calibration_report: dict | None = None,
                       minimum_useful_gain: dict | None = None,
-                      safety_noninferiority_margins: dict[str, float] | None = None) -> dict:
+                      safety_noninferiority_margins: dict[str, float] | None = None,
+                      reference_policy: str = "D1/current",
+                      matched_reference_calibration_report: dict | None = None,
+                      reference_margin_review: dict | None = None) -> dict:
     """Canonical target-scoped protocol; the digest is the protocol identity."""
     if scenario_id is not None and scenario_id not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario_id}")
     calibrated = calibration_report is not None
+    if calibrated:
+        reference_policy = _reference_variant(reference_policy)
+        if minimum_useful_gain is not None:
+            raise ValueError("v4 useful-gain margins come only from the explicit reference margin review")
     if calibrated and scenario_id is None:
         raise ValueError("calibrated protocol requires an explicit promotion target")
     target = scenario_id
@@ -350,17 +647,38 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             raise ValueError("calibration input must be a report or scenario-to-report bundle")
         calibration_ids, calibration_seed_pools, source_hash, calibration_report_hashes = _calibration_report_index(
             reports, scenarios)
-        minimum_useful_gain, useful_gain_derivation = derive_useful_gain_margins(
-            reports, target, minimum_useful_gain)
         if (not isinstance(safety_noninferiority_margins, dict)
                 or set(safety_noninferiority_margins) != SAFETY_METRIC_NAMES
                 or any(type(value) not in (int, float) or not math.isfinite(value)
                        or not 0 <= value <= 1 for value in safety_noninferiority_margins.values())):
             raise ValueError("provide the exact supported safety metric names and margins")
+        reference_reports, reference_ids, reference_hashes, reference_runtime = \
+            _reference_variance_report_index(matched_reference_calibration_report,
+                scenarios, source_hash=source_hash, reference_variant=reference_policy,
+                d0_reports=reports)
+        reviewed = _validate_reference_margin_review(reference_margin_review,
+            target=target, reference_variant=reference_policy,
+            reference_ids=reference_ids, reference_hashes=reference_hashes,
+            safety_margins=safety_noninferiority_margins)
+        minimum_useful_gain = reviewed["minimum_useful_gain"]
+        useful_gain_derivation = {"schema_version": 1,
+            "method": "explicit_reviewed_reference_variance_margins",
+            "minimum_useful_gain": minimum_useful_gain,
+            "review_sha256": reviewed["review_sha256"],
+            "reviewed_by": reviewed["reviewed_by"],
+            "reviewed_utc": reviewed["reviewed_utc"]}
         baseline_id = hashlib.sha256(json.dumps(calibration_ids, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
+        reference_variance_calibration = {"version": MATCHED_REFERENCE_VARIANCE_VERSION,
+            "calibration_ids": reference_ids, "report_sha256": reference_hashes,
+            "normalized_runtime_identity": reference_runtime,
+            "seed_table_sha256": {name: _canonical_sha256(reference_reports[name]["case_ids"])
+                                  for name in scenarios},
+            "margin_review": reviewed}
     else:
         calibration_ids, calibration_seed_pools, calibration_report_hashes, source_hash, baseline_id = {}, {}, {}, None, None
+        reference_reports, reference_ids, reference_hashes = {}, {}, {}
+        reviewed, reference_variance_calibration = None, None
     body = {"protocol_version": CALIBRATED_PROTOCOL_VERSION if calibrated else PROTOCOL_VERSION,
         "promotion_target_scenario": target,
         "scenario_ids": list(scenarios),
@@ -384,8 +702,17 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         "sensor_profiles": {"train": list(TRAIN_SENSOR_PROFILES),
             "validation": list(VALIDATION_SENSOR_PROFILES),
             "test": list(FINAL_TEST_SENSOR_PROFILES)},
-        "paired_reference_policy": REFERENCE_POLICY,
-        "gate_calibration_status": ("calibrated_baseline_frozen" if calibrated
+        "paired_reference_policy": (MATCHED_REFERENCE_VARIANTS[reference_policy][0]
+            if calibrated else REFERENCE_POLICY),
+        "paired_reference_mode": (MATCHED_REFERENCE_VARIANTS[reference_policy][2]
+            if calibrated else None),
+        "paired_reference_variant": reference_policy if calibrated else None,
+        "paired_reference_identity": (_matched_reference_identity(reference_policy)
+            if calibrated else None),
+        "reference_selection_basis": ("predeclared_matched_baseline_before_heldout_evaluation"
+            if calibrated else None),
+        "safety_floor_policy": REFERENCE_POLICY if calibrated else None,
+        "gate_calibration_status": ("matched_reference_variance_and_reviewed_margin_frozen" if calibrated
             else "provisional_pending_baseline_variance_review"),
         "calibration_id": baseline_id, "calibration_ids": calibration_ids,
         "calibration_seed_pools": calibration_seed_pools,
@@ -393,6 +720,12 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         "calibration_source_identity_sha256": source_hash,
         "minimum_useful_gain": minimum_useful_gain if calibrated else None,
         "useful_gain_derivation": useful_gain_derivation if calibrated else None,
+        "useful_gain_calibration_basis": ({"policy": REFERENCE_POLICY,
+            "calibration_id": baseline_id,
+            "calibration_report_sha256": calibration_report_hashes,
+            "role": "separate_safety_floor_and_seeded_runtime_control"}
+            if calibrated else None),
+        "matched_reference_variance_calibration": reference_variance_calibration,
         "safety_noninferiority_margins": safety_noninferiority_margins if calibrated else None,
         "safety_gate_status": "metrics_schema_verified" if calibrated else "not_calibrated",
         "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate) for scenario in scenarios},
@@ -407,7 +740,9 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
 
 def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
     """Validate a target-scoped calibrated protocol for target or retention use."""
-    if not isinstance(protocol, dict) or protocol.get("protocol_version") != CALIBRATED_PROTOCOL_VERSION:
+    if not isinstance(protocol, dict) or protocol.get("protocol_version") not in (
+            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            LEGACY_CALIBRATED_PROTOCOL_VERSION):
         raise ValueError("promotion requires a calibrated v2 protocol")
     body = {key: value for key, value in protocol.items() if key != "protocol_id"}
     digest = hashlib.sha256(json.dumps(body, sort_keys=True,
@@ -425,9 +760,38 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
     if (protocol.get("scenario_versions") != {name: SCENARIOS[name].version for name in scenarios}
             or protocol.get("promotion_gates") != {name: asdict(SCENARIOS[name].gate) for name in scenarios}):
         raise ValueError("calibrated protocol scenario versions/gates are invalid")
-    if (protocol.get("gate_calibration_status") != "calibrated_baseline_frozen"
+    legacy_v2 = protocol.get("protocol_version") == LEGACY_CALIBRATED_PROTOCOL_VERSION
+    legacy_v3 = protocol.get("protocol_version") == D0_PAIRED_REFERENCE_PROTOCOL_VERSION
+    expected_gate_status = ("calibrated_baseline_frozen" if legacy_v2 else
+        "d0_operational_margin_frozen_reference_variance_unverified" if legacy_v3 else
+        "matched_reference_variance_and_reviewed_margin_frozen")
+    if (protocol.get("gate_calibration_status") != expected_gate_status
             or protocol.get("safety_gate_status") != "metrics_schema_verified"):
         raise ValueError("calibrated protocol status fields are invalid or unsupported")
+    reference = protocol.get("paired_reference_policy")
+    if legacy_v2:
+        if reference != REFERENCE_POLICY:
+            raise ValueError("legacy calibrated v2 protocol must retain its D0 reference")
+    else:
+        variant = protocol.get("paired_reference_variant")
+        if variant not in MATCHED_REFERENCE_VARIANTS:
+            raise ValueError("calibrated protocol must freeze D1/current, D2/cv, or D2/multi_model_v1")
+        expected_policy, _, expected_mode = MATCHED_REFERENCE_VARIANTS[variant]
+        expected_basis = ({"policy": REFERENCE_POLICY,
+            "calibration_id": protocol.get("calibration_id"),
+            "calibration_report_sha256": protocol.get("calibration_report_sha256"),
+            "reference_variance_calibration_status": "not_available"} if legacy_v3 else {
+            "policy": REFERENCE_POLICY,
+            "calibration_id": protocol.get("calibration_id"),
+            "calibration_report_sha256": protocol.get("calibration_report_sha256"),
+            "role": "separate_safety_floor_and_seeded_runtime_control"})
+        if (reference != expected_policy or protocol.get("paired_reference_mode") != expected_mode
+                or protocol.get("paired_reference_identity") != _matched_reference_identity(variant)
+                or protocol.get("reference_selection_basis")
+                    != "predeclared_matched_baseline_before_heldout_evaluation"
+                or protocol.get("safety_floor_policy") != REFERENCE_POLICY
+                or protocol.get("useful_gain_calibration_basis") != expected_basis):
+            raise ValueError("calibrated protocol reference identity, D0 calibration basis, or safety floor is invalid")
     for field in ("calibration_id", "calibration_source_identity_sha256"):
         value = protocol.get(field)
         if (not isinstance(value, str) or len(value) != 64
@@ -486,7 +850,46 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
                    for value in gain_margins.values())):
         raise ValueError("calibrated protocol useful-gain categories or margins are invalid")
     derivation = protocol.get("useful_gain_derivation")
-    if (not isinstance(derivation, dict)
+    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        if (not isinstance(derivation, dict)
+                or derivation.get("schema_version") != 1
+                or derivation.get("method") != "explicit_reviewed_reference_variance_margins"
+                or derivation.get("minimum_useful_gain") != gain_margins
+                or not isinstance(derivation.get("review_sha256"), str)
+                or derivation.get("review_sha256") != protocol.get(
+                    "matched_reference_variance_calibration", {}).get("margin_review", {}).get("review_sha256")
+                or not isinstance(derivation.get("reviewed_by"), str)
+                or not derivation["reviewed_by"].strip()
+                or not isinstance(derivation.get("reviewed_utc"), str)
+                or not derivation["reviewed_utc"].strip()):
+            raise ValueError("v4 useful-gain margins lack an explicit reviewed reference-variance decision")
+        reference_calibration = protocol.get("matched_reference_variance_calibration")
+        review = reference_calibration.get("margin_review") if isinstance(reference_calibration, dict) else None
+        if (not isinstance(reference_calibration, dict)
+                or reference_calibration.get("version") != MATCHED_REFERENCE_VARIANCE_VERSION
+                or not isinstance(reference_calibration.get("calibration_ids"), dict)
+                or set(reference_calibration["calibration_ids"]) != set(scenarios)
+                or not isinstance(reference_calibration.get("report_sha256"), dict)
+                or set(reference_calibration["report_sha256"]) != set(scenarios)
+                or not isinstance(reference_calibration.get("seed_table_sha256"), dict)
+                or set(reference_calibration["seed_table_sha256"]) != set(scenarios)
+                or not isinstance(reference_calibration.get("normalized_runtime_identity"), dict)
+                or not isinstance(review, dict)
+                or any(not isinstance(value, str) or len(value) != 64
+                    or any(char not in "0123456789abcdef" for char in value)
+                    for mapping_name in ("calibration_ids", "report_sha256", "seed_table_sha256")
+                    for value in reference_calibration.get(mapping_name, {}).values())
+                or review.get("reviewed_by") != derivation.get("reviewed_by")
+                or review.get("reviewed_utc") != derivation.get("reviewed_utc")
+                or review.get("reference_variant") != protocol.get("paired_reference_variant")
+                or review.get("reference_calibration_ids") != reference_calibration.get("calibration_ids")
+                or review.get("reference_report_sha256") != reference_calibration.get("report_sha256")
+                or review.get("minimum_useful_gain") != gain_margins
+                or review.get("safety_noninferiority_margins") != safety_margins
+                or review.get("review_sha256") != _canonical_sha256({key: value for key, value in review.items()
+                    if key != "review_sha256"})):
+            raise ValueError("v4 matched-reference calibration or explicit margin review binding is invalid")
+    elif (not isinstance(derivation, dict)
             or derivation.get("schema_version") != 1
             or derivation.get("method") != "declared_operational_threshold_plus_multiplier_times_max_stratum_standard_error"
             or derivation.get("calibration_id") != ids[target]
@@ -499,6 +902,8 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or derivation["uncertainty_multiplier"] < 0):
         raise ValueError("calibrated protocol useful-gain derivation provenance is invalid")
     for category in categories:
+        if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+            break
         uncertainty = derivation["uncertainty_by_category"][category]
         threshold = derivation["operational_gain_threshold"][category]
         se = uncertainty.get("maximum_stratum_standard_error") if isinstance(uncertainty, dict) else None
@@ -525,26 +930,56 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         raise ValueError("calibration seed pools overlap train/validation/test seeds")
 
 
-_EVIDENCE_FIELDS = ("schema_version", "qualification", "evaluation_id", "protocol_id",
+_EVIDENCE_FIELDS = ("schema_version", "evidence_schema_version", "qualification", "evaluation_id", "protocol_id",
     "scenario_id", "split", "candidate_policy", "bundle_id", "policy_manifest",
     "retention_scenario_ids",
     "source_identity_sha256", "gate_definition", "gate_calibration_status",
     "protocol_version", "calibration_id", "calibration_ids", "calibration_seed_pools",
     "calibration_report_sha256", "minimum_useful_gain", "useful_gain_derivation",
+    "useful_gain_calibration_basis",
     "safety_noninferiority_margins", "safety_gate_status",
     "safety_metrics_schema", "safety_metrics_source_identity_sha256",
-    "paired_reference_policy", "paired", "episodes_per_category_stratum",
-    "master_seed", "records", "case_ids", "reference_report", "generated_utc")
+    "paired_reference_policy", "paired_reference_mode", "paired_reference_variant",
+    "paired_reference_identity", "reference_selection_basis",
+    "safety_floor_policy", "matched_reference_variance_calibration",
+    "paired", "episodes_per_category_stratum",
+    "master_seed", "records", "case_ids", "reference_report", "generated_utc",
+    "final_test_isolated", "final_test_results")
+
+
+_LEGACY_EVIDENCE_FIELDS = tuple(key for key in _EVIDENCE_FIELDS
+    if key not in ("evidence_schema_version", "final_test_isolated", "final_test_results",
+                   "useful_gain_calibration_basis", "paired_reference_identity",
+                   "paired_reference_mode", "paired_reference_variant",
+                   "reference_selection_basis", "safety_floor_policy",
+                   "matched_reference_variance_calibration"))
+_D0_PAIRED_EVIDENCE_FIELDS = tuple(key for key in _EVIDENCE_FIELDS
+    if key != "matched_reference_variance_calibration")
 
 
 def _evidence_digest(report: dict) -> str:
-    evidence = {key: report.get(key) for key in _EVIDENCE_FIELDS}
+    version = report.get("evidence_schema_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("qualification evidence schema version is unsupported")
+    if report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+            D0_PAIRED_REFERENCE_PROTOCOL_VERSION) and version != 2:
+        raise ValueError("calibrated v3/v4 reports require evidence schema v2")
+    fields = (_LEGACY_EVIDENCE_FIELDS if version == 1 else
+        _D0_PAIRED_EVIDENCE_FIELDS if report.get("protocol_version") == D0_PAIRED_REFERENCE_PROTOCOL_VERSION
+        else _EVIDENCE_FIELDS)
+    evidence = {key: report.get(key) for key in fields}
     return hashlib.sha256(json.dumps(evidence, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def _validate_evidence_digest(report: dict) -> None:
-    if not isinstance(report, dict) or report.get("evidence_sha256") != _evidence_digest(report):
+    if (not isinstance(report, dict)
+            or type(report.get("evidence_schema_version", 1)) is not int
+            or report.get("evidence_schema_version", 1) not in (1, 2)
+            or (report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+                D0_PAIRED_REFERENCE_PROTOCOL_VERSION)
+                and report.get("evidence_schema_version") != 2)
+            or report.get("evidence_sha256") != _evidence_digest(report)):
         raise ValueError("qualification evidence digest is missing or invalid")
 
 
@@ -557,10 +992,32 @@ def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
         "safety_noninferiority_margins", "safety_gate_status",
         "safety_metrics_schema", "safety_metrics_source_identity_sha256",
         "episodes_per_category_stratum", "master_seed")
+    if protocol.get("protocol_version") != LEGACY_CALIBRATED_PROTOCOL_VERSION:
+        bindings += ("paired_reference_policy", "paired_reference_mode",
+                     "paired_reference_variant", "paired_reference_identity",
+                     "reference_selection_basis", "safety_floor_policy",
+                     "useful_gain_calibration_basis")
+    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        bindings += ("matched_reference_variance_calibration",)
     if any(report.get(field) != protocol.get(field) for field in bindings):
         raise ValueError("qualification report calibration/protocol provenance mismatch")
-    if report.get("paired_reference_policy") != REFERENCE_POLICY or report.get("paired") is not True:
+    legacy_v2 = report.get("protocol_version") == LEGACY_CALIBRATED_PROTOCOL_VERSION
+    valid_reference = (report.get("paired_reference_policy") == REFERENCE_POLICY
+        if legacy_v2 else report.get("paired_reference_policy") in MATCHED_REFERENCE_POLICIES)
+    if not valid_reference or report.get("paired") is not True:
         raise ValueError("qualification report reference pairing provenance is invalid")
+    reference_report = report.get("reference_report")
+    if (not isinstance(reference_report, dict) or (not legacy_v2 and (
+            reference_report.get("paired_reference_policy") != report.get("paired_reference_policy")
+            or reference_report.get("paired_reference_mode") != report.get("paired_reference_mode")
+            or reference_report.get("paired_reference_variant") != report.get("paired_reference_variant")
+            or reference_report.get("paired_reference_identity") != report.get("paired_reference_identity")
+            or reference_report.get("reference_selection_basis") != report.get("reference_selection_basis")
+            or reference_report.get("safety_floor_policy") != report.get("safety_floor_policy")
+            or (report.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION
+                and reference_report.get("matched_reference_variance_calibration")
+                    != report.get("matched_reference_variance_calibration"))))):
+        raise ValueError("qualification reference report declaration differs from its frozen protocol")
 
 
 def _variance(values):
@@ -1176,6 +1633,176 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
     return body
 
 
+MATCHED_REFERENCE_VARIANCE_VERSION = "meco-matched-reference-variance-v1"
+MATCHED_REFERENCE_CANDIDATE_K = 16
+
+
+def _matched_reference_variance_summary(cases, repetitions, records):
+    metrics = ("useful_throughput", *sorted(SAFETY_METRIC_NAMES))
+    summary = {}
+    for case in cases:
+        key_fields = ("category", "layout_id", "defender_family",
+                      "start_condition", "sensor_profile")
+        key = tuple(case[name] for name in key_fields)
+        for policy in (REFERENCE_POLICY, "D1", "D2"):
+            if policy not in (REFERENCE_POLICY, case["reference_policy"]):
+                continue
+            by_seed = {}
+            for row in records:
+                if (row["policy"] == policy
+                        and tuple(row[name] for name in key_fields) == key):
+                    by_seed.setdefault(row["seed"], []).append(row["metrics"])
+            if set(by_seed) != set(case["seeds"]) or any(
+                    len(values) != repetitions for values in by_seed.values()):
+                raise ValueError("matched reference calibration repeated seed coverage is incomplete")
+            for metric in metrics:
+                values_by_seed = []
+                for seed in case["seeds"]:
+                    values = [row.get(metric) for row in by_seed[seed]]
+                    if any(type(value) not in (int, float) or not math.isfinite(value)
+                           for value in values):
+                        raise ValueError(f"matched reference calibration is missing {metric} records")
+                    values_by_seed.append([float(value) for value in values])
+                seed_means = [sum(values) / repetitions for values in values_by_seed]
+                repeat_variances = [_variance(values) for values in values_by_seed]
+                summary["/".join((policy, metric, *key))] = {
+                    "policy": policy, "metric": metric,
+                    **dict(zip(key_fields, key)),
+                    "seed_count": len(case["seeds"]),
+                    "repetition_count": repetitions,
+                    "mean": sum(seed_means) / len(seed_means),
+                    "between_seed_variance": _variance(seed_means),
+                    "mean_within_seed_repeat_variance": sum(repeat_variances) / len(repeat_variances),
+                    "seed_digest": hashlib.sha256(json.dumps(list(case["seeds"]),
+                        separators=(",", ":")).encode()).hexdigest()}
+    return summary
+
+
+def run_matched_reference_variance_calibration(*, scenario_id: str, episodes: int,
+        repetitions: int, master_seed: int, reference_policy: str, device: str) -> dict:
+    """Measure repeat and seed variance for one frozen learned reference plus D0 safety floor."""
+    variant = _reference_variant(reference_policy)
+    policy, policy_id, mode = MATCHED_REFERENCE_VARIANTS[variant]
+    runtime = _require_calibration_gpu(device)
+    if type(repetitions) is not int or repetitions < 2:
+        raise ValueError("matched reference calibration requires at least two repetitions")
+    if type(episodes) is not int or episodes < MIN_EPISODES:
+        raise ValueError(f"matched reference calibration requires at least {MIN_EPISODES} episodes per stratum")
+    if type(master_seed) is not int or master_seed < 0:
+        raise ValueError("calibration master seed must be a nonnegative integer")
+    from .meco_track_training import evaluate_meco
+    cases = protocol_cases(scenario_id, "calibration", episodes=episodes,
+                           master_seed=master_seed)
+    case_table = [{"category": case.category, "layout_id": case.layout_id,
+        "defender_family": case.defender_family, "start_condition": case.start_condition,
+        "sensor_profile": case.sensor_profile, "seeds": list(case.seeds),
+        "reference_policy": policy} for case in cases]
+    _validate_d0_calibration_case_table(scenario_id, episodes, master_seed,
+        [{key: value for key, value in row.items() if key != "reference_policy"}
+         for row in case_table])
+    source_hash = _calibration_source_identity_sha256()
+    identity = _matched_reference_identity(variant)
+    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
+    candidate_configuration = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
+        "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
+        "action_ticks": 12}
+    config = {"scenario_id": scenario_id, "split": "calibration",
+        "episodes_per_category_stratum": episodes, "repetitions": repetitions,
+        "master_seed": master_seed, "seed_partition_code": 3,
+        "repeat_semantics": "same exact calibration seeds repeated independently",
+        "reference_selection_id": variant, "reference_policy": policy,
+        "reference_policy_id": policy_id, "prediction_mode": mode,
+        "prediction_contract": identity["prediction_contract"],
+        "candidate_configuration": candidate_configuration,
+        "safety_floor_policy": REFERENCE_POLICY,
+        "required_safety_metrics": sorted(SAFETY_METRIC_NAMES)}
+    protocol_identity = _canonical_sha256({"version": MATCHED_REFERENCE_VARIANCE_VERSION,
+        "config": config, "case_table": case_table, "source_identity_sha256": source_hash,
+        "runtime_identity": _normalized_calibration_runtime(runtime)})
+    control_modes = {policy: mode}
+    records, policy_manifest = [], None
+    for repetition in range(repetitions):
+        for case in cases:
+            case_binding = {"scenario_id": scenario_id,
+                "master_seed": master_seed, "episodes": len(case.seeds),
+                "category": case.category,
+                "qualification_case": {"layout_id": case.layout_id,
+                    "defender_family": case.defender_family,
+                    "start_condition": case.start_condition,
+                    "sensor_profile": case.sensor_profile},
+                "episode_seeds": list(case.seeds)}
+            result = evaluate_meco({}, scenario_id=scenario_id,
+                categories=(case.category,), episodes=len(case.seeds),
+                master_seed=master_seed, episode_seeds=case.seeds,
+                device=device, split="calibration", evaluation_policies=(),
+                control_policies=(REFERENCE_POLICY, policy), include_controls=True,
+                control_prediction_modes=control_modes,
+                calibration_control_policy=policy,
+                candidate_k_override=MATCHED_REFERENCE_CANDIDATE_K,
+                calibration_route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND,
+                qualification_case=case_binding["qualification_case"])
+            if result.get("calibration_control_case_binding") != case_binding:
+                raise ValueError("matched reference evaluator did not bind the frozen calibration case and seed tuple")
+            if (result.get("source_identity_sha256") != source_hash
+                    or result.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+                    or result.get("safety_metrics_source_identity_sha256") != source_hash):
+                raise ValueError("matched reference source/safety provenance drifted during calibration")
+            expected_execution_device = {"device": runtime["device"],
+                "accelerator_backend": "ROCm" if runtime["backend"] == "hip" else "CUDA"}
+            if result.get("execution_device") != expected_execution_device:
+                raise ValueError("matched reference execution device/runtime identity drifted")
+            current_manifest = result.get("policy_manifest")
+            if (not isinstance(current_manifest, dict)
+                    or current_manifest.get(REFERENCE_POLICY, {}).get("policy_id")
+                        != "D0_production_deterministic"
+                    or any(current_manifest.get(name, {}).get(field) != expected
+                        for name, field, expected in ((policy, "policy_id", policy_id),
+                            (policy, "prediction_mode", mode),
+                            (policy, "prediction_contract", identity["prediction_contract"])) )):
+                raise ValueError("matched reference policy or prediction contract differs from the frozen selection")
+            if current_manifest.get(policy, {}).get("calibration_candidate_configuration") != candidate_configuration:
+                raise ValueError("matched reference candidate configuration differs from the frozen selection")
+            if policy_manifest is not None and policy_manifest != current_manifest:
+                raise ValueError("matched reference policy manifest changed during calibration")
+            policy_manifest = current_manifest
+            eval_rows = result.get("records", [])
+            by_key = {(row.get("policy"), row.get("seed")): row for row in eval_rows}
+            expected = {(name, seed) for name in (REFERENCE_POLICY, policy)
+                        for seed in case.seeds}
+            if set(by_key) != expected or len(by_key) != len(eval_rows):
+                raise ValueError("matched reference/D0 safety-floor records have incomplete seed coverage")
+            for name, seed in sorted(expected):
+                row = by_key[(name, seed)]
+                metrics = row.get("metrics")
+                if (not isinstance(metrics, dict)
+                        or {key for key in metrics if isinstance(key, str) and key.startswith("safety_")}
+                            != SAFETY_METRIC_NAMES
+                        or any(type(metrics.get(metric)) not in (int, float)
+                            or not math.isfinite(metrics[metric]) or not 0 <= metrics[metric] <= 1
+                            for metric in SAFETY_METRIC_NAMES)
+                        or type(metrics.get("useful_throughput")) not in (int, float)
+                        or not math.isfinite(metrics["useful_throughput"])):
+                    raise ValueError("matched reference calibration row lacks throughput or required safety metrics")
+                records.append({"repetition": repetition,
+                    "calibration_control_case_binding": case_binding, **row,
+                    "calibration_runtime_device": runtime})
+    body = {"schema_version": 1, "calibration": True,
+        "artifact_type": MATCHED_REFERENCE_VARIANCE_VERSION,
+        "scenario_id": scenario_id, "config": config,
+        "protocol_identity_sha256": protocol_identity,
+        "case_ids": case_table, "policy_manifest": policy_manifest,
+        "source_identity_sha256": source_hash, "runtime_device": runtime,
+        "normalized_runtime_identity": _normalized_calibration_runtime(runtime),
+        "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": source_hash,
+        "summary": _matched_reference_variance_summary(case_table, repetitions, records),
+        "records": records,
+        "generated_utc": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).isoformat()}
+    body["calibration_id"] = _canonical_sha256(body)
+    return body
+
+
 def bundle_identity(policy_manifest: dict) -> str:
     """Hash the exact policy checkpoint bundle used by a qualification round."""
     if not isinstance(policy_manifest, dict):
@@ -1281,12 +1908,16 @@ def _validate_case_rows(report, expected_cases, policy):
                 or row.get("checkpoint_sha256") != manifest.get("checkpoint_sha256")
                 or row.get("source_identity_sha256") != report.get("source_identity_sha256")):
             raise ValueError("qualification record policy/checkpoint/source provenance mismatch")
+        if (row.get("prediction_mode") != manifest.get("prediction_mode")
+                or row.get("prediction_contract") != manifest.get("prediction_contract")):
+            raise ValueError("qualification row prediction mode/contract differs from policy manifest")
         metrics = row.get("metrics")
         safety_keys = ({key for key in metrics if isinstance(key, str) and key.startswith("safety_")}
                        if isinstance(metrics, dict) else set())
         if safety_keys - SAFETY_METRIC_NAMES:
             raise ValueError("qualification row contains an unknown safety metric")
-        if report.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        if report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+                D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
             source_hash = report.get("source_identity_sha256")
             if (not isinstance(source_hash, str) or len(source_hash) != 64
                     or any(char not in "0123456789abcdef" for char in source_hash)
@@ -1364,8 +1995,18 @@ def consume_validation_round(report: dict, *, protocol: dict,
     candidate_policy = report.get("candidate_policy")
     if candidate_policy not in POLICIES:
         raise ValueError("qualification report names an unknown candidate policy")
+    reference_policy = protocol["paired_reference_policy"]
+    legacy_v2 = protocol.get("protocol_version") == LEGACY_CALIBRATED_PROTOCOL_VERSION
+    expected_reference = protocol.get("paired_reference_identity")
+    reference_manifest = report.get("policy_manifest", {}).get(reference_policy)
+    if (not legacy_v2 and (report.get("paired_reference_identity") != expected_reference
+            or not isinstance(reference_manifest, dict)
+            or any(reference_manifest.get(key) != expected_reference.get(key)
+                   for key in ("policy_id", "prediction_mode", "prediction_contract",
+                               "checkpoint_sha256")))):
+        raise ValueError("paired reference identity differs from the frozen protocol")
     per_policy = {policy: _validate_case_rows(report, expected_cases, policy)
-                  for policy in (candidate_policy, REFERENCE_POLICY)}
+                  for policy in (candidate_policy, reference_policy, REFERENCE_POLICY)}
     categories = []
     ci = {}
     gate_failures = []
@@ -1383,7 +2024,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
             (case.category, case.layout_id, case.defender_family,
              case.start_condition, case.sensor_profile, seed)]
             for case in case_rows for seed in case.seeds]
-        reference_rows = [per_policy[REFERENCE_POLICY][
+        reference_rows = [per_policy[reference_policy][
             (case.category, case.layout_id, case.defender_family,
              case.start_condition, case.sensor_profile, seed)]
             for case in case_rows for seed in case.seeds]
@@ -1408,6 +2049,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
         ci[category] = {"candidate_mean": candidate_rate,
             "reference_mean": reference_rate,
             "paired_difference_95_ci": _cluster_bootstrap_ci(paired_by_cluster, seed=seed),
+            "paired_reference_policy": reference_policy,
             "clusters": len(groups), "episodes": len(candidate_rows),
             "cluster_keys": [list(key) for key in sorted(groups)]}
         margin = protocol.get("minimum_useful_gain", {}).get(category)
@@ -1416,31 +2058,48 @@ def consume_validation_round(report: dict, *, protocol: dict,
         elif ci[category]["paired_difference_95_ci"][0] <= margin:
             gate_failures.append(f"{category}: paired useful-throughput CI does not exceed frozen margin")
         safety_cis = {}
+        d0_rows = [per_policy[REFERENCE_POLICY][
+            (case.category, case.layout_id, case.defender_family,
+             case.start_condition, case.sensor_profile, seed)]
+            for case in case_rows for seed in case.seeds]
         for metric, safety_margin in protocol.get("safety_noninferiority_margins", {}).items():
             safety_groups = {key: [] for key in groups}
+            d0_safety_groups = {key: [] for key in groups}
             valid = True
-            for case, candidate, reference in zip(
+            for case, candidate, reference, d0 in zip(
                     (case for case in case_rows for _ in case.seeds),
-                    candidate_rows, reference_rows):
+                    candidate_rows, reference_rows, d0_rows):
                 candidate_value = candidate["metrics"].get(metric)
                 reference_value = reference["metrics"].get(metric)
+                d0_value = d0["metrics"].get(metric)
                 if (type(candidate_value) not in (int, float)
                         or type(reference_value) not in (int, float)
+                        or type(d0_value) not in (int, float)
                         or not math.isfinite(candidate_value)
-                        or not math.isfinite(reference_value)):
+                        or not math.isfinite(reference_value)
+                        or not math.isfinite(d0_value)):
                     valid = False
                     break
-                safety_groups[(case.layout_id, case.defender_family)].append(
+                cluster = (case.layout_id, case.defender_family)
+                safety_groups[cluster].append(
                     float(candidate_value) - float(reference_value))
+                d0_safety_groups[cluster].append(float(candidate_value) - float(d0_value))
             if not valid:
                 gate_failures.append(f"{category}: safety metric {metric} is absent or invalid")
                 safety_cis[metric] = None
             else:
                 interval = _cluster_bootstrap_ci(safety_groups, seed=seed ^ 0x5AFE)
-                safety_cis[metric] = {"candidate_minus_D0_95_ci": interval,
-                                      "noninferiority_margin": safety_margin}
+                d0_interval = _cluster_bootstrap_ci(d0_safety_groups,
+                    seed=seed ^ 0xD00D)
+                safety_cis[metric] = {
+                    "candidate_minus_reference_95_ci": interval,
+                    "reference_policy": reference_policy,
+                    "candidate_minus_D0_safety_floor_95_ci": d0_interval,
+                    "noninferiority_margin": safety_margin}
                 if interval[1] > safety_margin:
                     gate_failures.append(f"{category}: safety noninferiority CI exceeds {metric} margin")
+                if d0_interval[1] > safety_margin:
+                    gate_failures.append(f"{category}: D0 safety floor CI exceeds {metric} margin")
         ci[category]["safety_noninferiority"] = safety_cis
         categories.append(CategoryResult(category, len(candidate_rows), successes,
             candidate_rate, reference_rate, True, True, protocol_id,
@@ -1548,8 +2207,7 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         raise ValueError("scenario is not in the frozen qualification protocol")
     if split == "validation" and scenario_id != protocol.get("promotion_target_scenario") and not collect_only:
         raise ValueError("validation promotion is target-only; prerequisites are retention evidence")
-    if split == "validation":
-        _validate_v2_protocol(protocol, scenario_id)
+    _validate_v2_protocol(protocol, scenario_id)
     if protocol.get("promotion_gates", {}).get(scenario_id) != asdict(SCENARIOS[scenario_id].gate):
         raise ValueError("protocol gate definition does not match curriculum version")
     episodes = protocol.get("episodes_per_category_stratum")
@@ -1561,7 +2219,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     if protocol.get("protocol_id") != protocol_id:
         raise ValueError("qualification protocol hash mismatch")
-    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+    if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+            D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
         from .curriculum_training import source_identity
         current_source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
             allow_nan=False).encode()).hexdigest()
@@ -1613,8 +2272,11 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                 "defender_family": case.defender_family,
                 "start_condition": case.start_condition,
                 "sensor_profile": case.sensor_profile},
-            evaluation_policies=(candidate_policy,), control_policies=(REFERENCE_POLICY,),
-            include_controls=True, device=device)
+            evaluation_policies=(candidate_policy,),
+            control_policies=tuple(dict.fromkeys((REFERENCE_POLICY,
+                protocol["paired_reference_policy"]))),
+            include_controls=True, device=device,
+            **_reference_control_kwargs(protocol))
         if manifest is None:
             manifest = report["policy_manifest"]
             source_hash = report["source_identity_sha256"]
@@ -1622,7 +2284,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
             raise ValueError("checkpoint/source identity changed during qualification round")
         report_safety_schema = report.get("safety_metrics_schema")
         report_safety_source_hash = report.get("safety_metrics_source_identity_sha256")
-        if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+                D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
             if (report_safety_schema != protocol.get("safety_metrics_schema")
                     or report_safety_source_hash != protocol.get("safety_metrics_source_identity_sha256")
                     or report_safety_source_hash != protocol.get("calibration_source_identity_sha256")
@@ -1637,7 +2300,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
             raise ValueError("safety schema/source identity changed during qualification round")
         records.extend(report["records"])
     bundle_id = bundle_identity(manifest)
-    round_report = {"schema_version": 1, "qualification": True,
+    round_report = {"schema_version": 1, "evidence_schema_version": 2,
+        "qualification": True,
         "evaluation_id": run_id, "protocol_id": protocol_id,
         "scenario_id": scenario_id, "split": split,
         "candidate_policy": candidate_policy, "bundle_id": bundle_id,
@@ -1652,24 +2316,51 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "retention_scenario_ids": protocol.get("retention_scenario_ids"),
         "minimum_useful_gain": protocol.get("minimum_useful_gain"),
         "useful_gain_derivation": protocol.get("useful_gain_derivation"),
+        "useful_gain_calibration_basis": protocol.get("useful_gain_calibration_basis"),
+        "matched_reference_variance_calibration": protocol.get("matched_reference_variance_calibration"),
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
         "safety_metrics_schema": safety_schema,
         "safety_metrics_source_identity_sha256": safety_source_hash,
-        "paired_reference_policy": REFERENCE_POLICY, "paired": True,
+        "paired_reference_policy": protocol.get("paired_reference_policy"),
+        "paired_reference_mode": protocol.get("paired_reference_mode"),
+        "paired_reference_variant": protocol.get("paired_reference_variant"),
+        "paired_reference_identity": protocol.get("paired_reference_identity"),
+        "reference_selection_basis": protocol.get("reference_selection_basis"),
+        "safety_floor_policy": REFERENCE_POLICY if protocol.get("protocol_version") in (
+            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            LEGACY_CALIBRATED_PROTOCOL_VERSION) else None,
+        "paired": True,
         "episodes_per_category_stratum": episodes,
         "master_seed": master_seed, "records": records,
         "case_ids": [{key: row[key] for key in ("category", "layout_id",
             "defender_family", "start_condition", "sensor_profile")} for row in raw_cases],
         "generated_utc": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat()}
-    round_report["reference_report"] = {"policy_manifest": manifest}
+    round_report["reference_report"] = {
+        "policy_manifest": manifest,
+        "paired_reference_policy": protocol.get("paired_reference_policy"),
+        "paired_reference_mode": protocol.get("paired_reference_mode"),
+        "paired_reference_variant": protocol.get("paired_reference_variant"),
+        "paired_reference_identity": protocol.get("paired_reference_identity"),
+        "reference_selection_basis": protocol.get("reference_selection_basis"),
+        "safety_floor_policy": REFERENCE_POLICY if protocol.get("protocol_version") in (
+            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            LEGACY_CALIBRATED_PROTOCOL_VERSION) else None,
+        "matched_reference_variance_calibration": protocol.get("matched_reference_variance_calibration")}
     round_report["evidence_sha256"] = _evidence_digest(round_report)
     if collect_only:
         return None, round_report
     if split == "test":
         candidate_map = _validate_case_rows(round_report, expected, candidate_policy)
-        reference_map = _validate_case_rows(round_report, expected, REFERENCE_POLICY)
+        reference_policy = protocol["paired_reference_policy"]
+        reference_map = _validate_case_rows(round_report, expected, reference_policy)
+        d0_map = _validate_case_rows(round_report, expected, REFERENCE_POLICY)
+        reference_manifest = manifest.get(reference_policy, {})
+        if (protocol.get("protocol_version") != LEGACY_CALIBRATED_PROTOCOL_VERSION
+                and any(reference_manifest.get(key) != protocol["paired_reference_identity"].get(key)
+                    for key in ("policy_id", "prediction_mode", "prediction_contract", "checkpoint_sha256"))):
+            raise ValueError("final-test reference identity differs from the preselected protocol")
         summary = {}
         for category in SCENARIOS[scenario_id].required_categories:
             cases = [case for case in expected if case.category == category]
@@ -1680,20 +2371,44 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
             ref = [reference_map[(case.category, case.layout_id,
                 case.defender_family, case.start_condition, case.sensor_profile, seed)]
                 for case, seed in keys]
+            d0 = [d0_map[(case.category, case.layout_id, case.defender_family,
+                case.start_condition, case.sensor_profile, seed)] for case, seed in keys]
             success = sum(bool(row["metrics"]["success"]) for row in cand)
             grouped = {}
             for (case, _), a, b in zip(keys, cand, ref):
                 grouped.setdefault((case.layout_id, case.defender_family), []).append(
                     float(a["metrics"]["useful_throughput"])
                     - float(b["metrics"]["useful_throughput"]))
+            safety_summary = {}
+            for metric, margin in protocol.get("safety_noninferiority_margins", {}).items():
+                reference_diffs = {}
+                d0_diffs = {}
+                for (case, _), candidate_row, reference_row, d0_row in zip(keys, cand, ref, d0):
+                    key = (case.layout_id, case.defender_family)
+                    reference_diffs.setdefault(key, []).append(
+                        candidate_row["metrics"][metric] - reference_row["metrics"][metric])
+                    d0_diffs.setdefault(key, []).append(
+                        candidate_row["metrics"][metric] - d0_row["metrics"][metric])
+                safety_summary[metric] = {
+                    "candidate_minus_reference_95_ci": _cluster_bootstrap_ci(reference_diffs,
+                        seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/ref".encode()).hexdigest()[:16], 16)),
+                    "candidate_minus_D0_safety_floor_95_ci": _cluster_bootstrap_ci(d0_diffs,
+                        seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/D0".encode()).hexdigest()[:16], 16)),
+                    "noninferiority_margin": margin}
             summary[category] = {"episodes": len(cand), "successes": success,
                 "success_rate": success / len(cand),
                 "candidate_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in cand) / len(cand),
                 "reference_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in ref) / len(ref),
+                "paired_reference_policy": reference_policy,
+                "paired_reference_mode": protocol.get("paired_reference_mode"),
+                "paired_reference_variant": protocol.get("paired_reference_variant"),
+                "safety_noninferiority": safety_summary,
                 "paired_difference_95_ci": _cluster_bootstrap_ci(grouped,
                     seed=int(hashlib.sha256(f"{run_id}/{category}".encode()).hexdigest()[:16], 16))}
         round_report["final_test_isolated"] = True
         round_report["final_test_results"] = summary
+        round_report["evidence_sha256"] = _evidence_digest(round_report)
+        _validate_evidence_digest(round_report)
         write_immutable_report(output, round_report)
         return None, round_report
     retention_reports = list(retention_reports)
@@ -1761,6 +2476,14 @@ def main(argv=None):
         help="JSON with schema_version, per-category operational_gain_threshold, and uncertainty_multiplier")
     create.add_argument("--safety-margins-json",
         help="JSON mapping each supported safety rate to its explicit noninferiority tolerance")
+    create.add_argument("--matched-reference-calibration-bundle-json",
+        help="matched-reference variance reports for the exact prerequisite closure")
+    create.add_argument("--reference-margin-review-json",
+        help="explicit reviewed final useful-gain and safety margins bound to matched-reference variance reports")
+    create.add_argument("--reference-policy",
+        choices=(*MATCHED_REFERENCE_VARIANTS, "D1", "D2"),
+        default="D1/current",
+        help="preselect D1/current, D2/cv, or D2/multi_model_v1 before held-out evaluation")
     calibrate = commands.add_parser("calibrate-d0")
     calibrate.add_argument("--scenario", required=True)
     calibrate.add_argument("--episodes", type=int, default=MIN_EPISODES)
@@ -1769,6 +2492,20 @@ def main(argv=None):
     calibrate.add_argument("--device", required=True,
         help="explicit GPU device (for example cuda:0); CPU calibration is unsupported")
     calibrate.add_argument("--output", required=True)
+    ref_calibrate = commands.add_parser("calibrate-matched-reference")
+    ref_calibrate.add_argument("--scenario", required=True)
+    ref_calibrate.add_argument("--reference-policy", choices=(*MATCHED_REFERENCE_VARIANTS, "D1", "D2"),
+        required=True)
+    ref_calibrate.add_argument("--episodes", type=int, default=MIN_EPISODES)
+    ref_calibrate.add_argument("--repetitions", type=int, default=3)
+    ref_calibrate.add_argument("--master-seed", type=int, default=20261024)
+    ref_calibrate.add_argument("--device", required=True,
+        help="explicit indexed GPU, for example cuda:0")
+    ref_calibrate.add_argument("--output", required=True)
+    ref_bundle = commands.add_parser("bundle-matched-reference-calibrations")
+    ref_bundle.add_argument("--report", action="append", required=True,
+        help="matched-reference calibration report; repeat for target and each prerequisite")
+    ref_bundle.add_argument("--output", required=True)
     plan_shards = commands.add_parser("plan-d0-calibration-shards")
     plan_shards.add_argument("--scenario", required=True)
     plan_shards.add_argument("--episodes", type=int, default=MIN_EPISODES)
@@ -1819,10 +2556,17 @@ def main(argv=None):
             calibration = calibration["calibration_reports"]
         gain_margins = _load_json(args.minimum_useful_gain_json) if args.minimum_useful_gain_json else None
         safety_margins = _load_json(args.safety_margins_json) if args.safety_margins_json else None
+        reference_calibration = (_load_json(args.matched_reference_calibration_bundle_json)
+            if args.matched_reference_calibration_bundle_json else None)
+        margin_review = (_load_json(args.reference_margin_review_json)
+            if args.reference_margin_review_json else None)
         write_immutable_report(args.output, protocol_document(
             scenario_id=args.scenario, episodes=args.episodes, master_seed=args.master_seed,
             calibration_report=calibration, minimum_useful_gain=gain_margins,
-            safety_noninferiority_margins=safety_margins))
+            safety_noninferiority_margins=safety_margins,
+            reference_policy=args.reference_policy,
+            matched_reference_calibration_report=reference_calibration,
+            reference_margin_review=margin_review))
         return
     if args.command == "calibrate-d0":
         report = run_d0_calibration(scenario_id=args.scenario, episodes=args.episodes,
@@ -1830,6 +2574,48 @@ def main(argv=None):
         report_digest = write_immutable_report(args.output, report)
         print(json.dumps({"calibration_id": report["calibration_id"],
             "report_sha256": report_digest, "output": args.output}, indent=2))
+        return
+    if args.command == "calibrate-matched-reference":
+        report = run_matched_reference_variance_calibration(
+            scenario_id=args.scenario, episodes=args.episodes,
+            repetitions=args.repetitions, master_seed=args.master_seed,
+            reference_policy=args.reference_policy, device=args.device)
+        report_digest = write_immutable_report(args.output, report)
+        print(json.dumps({"calibration_id": report["calibration_id"],
+            "report_sha256": _canonical_sha256(report), "file_sha256": report_digest,
+            "scenario_id": args.scenario,
+            "reference_variant": report["config"]["reference_selection_id"],
+            "output": args.output}, indent=2))
+        return
+    if args.command == "bundle-matched-reference-calibrations":
+        indexed = {}
+        common = None
+        seen_seeds = set()
+        for path in args.report:
+            report = _load_json(path)
+            _validate_matched_reference_variance_report(report)
+            scenario = report.get("scenario_id")
+            if not isinstance(scenario, str) or scenario in indexed:
+                raise ValueError("matched reference calibration scenarios must be present and unique")
+            config = report["config"]
+            identity = (config["reference_selection_id"], report["source_identity_sha256"],
+                report["normalized_runtime_identity"], config["master_seed"],
+                config["episodes_per_category_stratum"], config["repetitions"])
+            if common is not None and common != identity:
+                raise ValueError("matched reference calibration bundle mixes variant/source/runtime/seed protocols")
+            common = identity
+            seeds = {seed for case in report["case_ids"] for seed in case["seeds"]}
+            if seeds & seen_seeds:
+                raise ValueError("matched reference calibration seed pools overlap across scenarios")
+            seen_seeds.update(seeds)
+            indexed[scenario] = report
+        bundle = {"schema_version": 1, "calibration_reports": indexed}
+        write_immutable_report(args.output, bundle)
+        print(json.dumps({"scenario_ids": sorted(indexed),
+            "reports": {scenario: {"calibration_id": report["calibration_id"],
+                "report_sha256": _canonical_sha256(report)}
+                for scenario, report in sorted(indexed.items())},
+            "output": args.output}, indent=2))
         return
     if args.command == "plan-d0-calibration-shards":
         manifests = _d0_calibration_shard_manifests(

@@ -2,11 +2,15 @@
 
 ## Calibrate before validating
 
-Promotion uses a target-scoped calibrated v2 protocol. Historical v1 protocol
-files and reports remain readable for audit, but are **nonpromotable**. Do not
-run promotion validation until the target's complete prerequisite closure has
-disjoint D0 calibration reports, a verified bundle, explicit useful-gain and
-safety margins, and an immutable v2 protocol.
+New promotion runs use a target-scoped calibrated v4 protocol. It freezes one
+matched deterministic reference before held-out evaluation: `D1/current`,
+`D2/cv`, or `D2/multi_model_v1`. D0 remains a separately reported safety floor.
+Historical v1 protocols are nonpromotable; legacy calibrated v2 and v3
+protocols and their reports remain readable with their original comparison
+semantics. Do not run promotion validation until the target's complete
+prerequisite closure has disjoint D0 calibration reports, a verified bundle,
+repeated matched-reference variance reports, an explicit reviewed margin
+decision, and an immutable v4 protocol.
 
 Calibration, model evaluation, and qualification currently require an
 explicitly indexed available ROCm/HIP GPU, exposed by PyTorch with a device name
@@ -16,6 +20,13 @@ alias, and unavailable device indices fail before MECO compute starts. The
 simulator/model/evaluator compute runs on the selected GPU. Python orchestration,
 artifact serialization, and checkpoint `map_location`/RNG handling may use host
 CPU; this GPU-only contract does not claim zero host CPU activity.
+
+The current user requirement is stricter than that legacy contract: algorithmic
+training, candidate generation/scoring, route/risk calculation, and statistical
+evaluation must stay on the GPU. The isolated candidate has moved only D1/D2
+scorer arithmetic onto the episode device; other host-side decision and
+analysis work remains. Do not treat device-selection checks as proof of
+end-to-end GPU residency.
 
 Choose the promotion target. This executable sequence prints its exact
 prerequisite closure, collects one disjoint D0 report per scenario, and bundles
@@ -134,17 +145,63 @@ checkout, Python environment, HIP extension path/binary, and toolchain fixed
 from manifest creation through shard completion; changing them invalidates
 the captured source or runtime identity.
 
-The bundle is rejected if any prerequisite is missing, extra, duplicated, or
-has an overlapping calibration seed pool.
+The D0 bundle is rejected if any prerequisite is missing, extra, duplicated,
+or has an overlapping calibration seed pool.
 
-Declare operational useful-gain thresholds per target category and the
-uncertainty multiplier in `qualifications/meco/useful-gain-margins.json`:
+Collect matched-reference variance evidence for every scenario in the target's
+prerequisite closure, using the same scenario seed table as its D0 report.
+Each repeat evaluates the selected D1/D2 reference and D0. D0 remains a
+separate safety floor; these paired rows do not replace its immutable
+calibration report. The runner rejects non-indexed devices, missing safety
+metrics, source/runtime drift, policy/mode/contract drift, and calibration
+seeds that overlap train, validation, or test.
+The calibration evaluator uses a frozen candidate configuration of K=16,
+the training default route-cost weight, and 12 physics ticks per action. Its
+explicit `calibration_control_policy` opt-in accepts only an empty checkpoint
+set, empty learned-policy selection, D0 plus exactly the selected D1/D2
+control, a fixed stratum, and no inference fault or replay output. Ordinary
+evaluation and D0-only calibration retain their existing validation rules.
+
+```bash
+TARGET=pickup_simple
+REFERENCE=D1/current
+DEVICE=cuda:0
+mapfile -t scenarios < <(python -c 'import sys; from frc_defense.meco_qualification import _scenario_closure; print("\n".join(_scenario_closure(sys.argv[1])))' "$TARGET")
+reference_reports=()
+for scenario in "${scenarios[@]}"; do
+  report="qualifications/meco/reference-variance-${scenario}.json"
+  python -m frc_defense.meco_qualification calibrate-matched-reference \
+    --scenario "$scenario" --reference-policy "$REFERENCE" --episodes 100 \
+    --repetitions 3 --master-seed 20261024 --device "$DEVICE" --output "$report"
+  reference_reports+=(--report "$report")
+done
+python -m frc_defense.meco_qualification bundle-matched-reference-calibrations \
+  "${reference_reports[@]}" \
+  --output "qualifications/meco/reference-variance-${TARGET}-bundle.json"
+```
+
+Review the variance evidence and provide final margins explicitly. Protocol
+creation does not calculate operational margins from observed variance. The
+review file binds the exact report IDs and hashes, records reviewer identity
+and timestamp, and declares the final useful-gain margins plus safety margins:
+The report ID and hash maps contain one entry for every scenario in the
+prerequisite closure; the example shows one entry for brevity.
 
 ```json
 {
   "schema_version": 1,
-  "operational_gain_threshold": {"single": 0.05, "cluster": 0.03},
-  "uncertainty_multiplier": 1.96
+  "reviewed_by": "reviewer name or role",
+  "reviewed_utc": "2026-10-24T12:00:00Z",
+  "decision": "accepted",
+  "reference_variant": "D1/current",
+  "reference_calibration_ids": {"pickup_simple": "<64 hex chars>"},
+  "reference_report_sha256": {"pickup_simple": "<64 hex chars>"},
+  "minimum_useful_gain": {"single": 0.05, "cluster": 0.03},
+  "safety_noninferiority_margins": {
+    "safety_robot_contact_rate": 0.01,
+    "safety_field_contact_rate": 0.01,
+    "safety_wall_contact_rate": 0.01
+  }
 }
 ```
 
@@ -160,40 +217,45 @@ Declare explicit noninferiority tolerances in
 ```
 
 The safety file must use exactly the `meco-safety-rates-v1` metric names and
-finite nonnegative noninferiority margins in [0, 1]. These values are
-operational choices and must be reviewed for the target; calibration variance
-does not choose the useful-gain threshold.
+finite nonnegative noninferiority margins in [0, 1]. The margin review must
+repeat these values exactly.
 
-Create and retain the immutable target-scoped v2 protocol:
+Choose the matched reference before any held-out evaluation. The old `D1` and
+`D2` CLI spellings remain accepted as aliases for `D1/current` and `D2/cv`.
+The selected variant, exact predictor contract, policy ID, and D0 safety-floor
+role are included in the protocol identity.
 
 ```bash
 TARGET=pickup_simple
+REFERENCE=D1/current
 python -m frc_defense.meco_qualification create-protocol \
   --scenario "$TARGET" --episodes 100 --master-seed 20261024 \
+  --reference-policy "$REFERENCE" \
   --calibration-bundle-json "qualifications/meco/d0-calibration-${TARGET}-bundle.json" \
-  --minimum-useful-gain-json qualifications/meco/useful-gain-margins.json \
+  --matched-reference-calibration-bundle-json "qualifications/meco/reference-variance-${TARGET}-bundle.json" \
+  --reference-margin-review-json "qualifications/meco/reference-margin-review-${TARGET}.json" \
   --safety-margins-json qualifications/meco/safety-margins.json \
-  --output "qualifications/meco/protocol-${TARGET}-v2.json"
+  --output "qualifications/meco/protocol-${TARGET}-v4.json"
 ```
 
 Replace `pickup_simple` with the selected promotion target. The protocol binds
 the target and all transitive prerequisites, exact train/validation/test seed
-lists, calibration report IDs and hashes, source identity, safety schema,
-operational thresholds, and derived gains. Its useful-gain margin is the
-declared operational threshold plus the uncertainty multiplier times the
-maximum stratum standard error estimated from between-seed and within-seed
-repeat variance. Existing v1 protocol files are never rewritten.
+lists, D0 and matched-reference report IDs and hashes, source/runtime identity,
+the frozen matched reference and prediction contract, safety schema, and
+explicit reviewer-approved useful-gain and safety margins. D0 remains the
+separately bound safety floor. Existing protocol files are never rewritten.
 
-## Run validation under the frozen v2 protocol
+## Run validation under the frozen v4 protocol
 
 Validation requires at least 100 episodes per category and each frozen
 layout/family stratum. Within each round, use the exact same protocol and
 checkpoint bundle for the target and every transitive prerequisite. Run
 prerequisite scenarios as retention evidence, then run the target to advance
-its promotion streak. Each round pairs the selected policy with deterministic
-D0 on identical seeds and checks useful-throughput confidence intervals and
-all frozen safety metrics. Keep a separate state file for each candidate
-policy.
+its promotion streak. Each v4 round pairs the selected learned policy with the
+preselected D1/D2 reference on identical seeds, and separately checks safety
+against D0. Useful-throughput and safety confidence intervals use the frozen
+reference; no reference is selected after observing held-out outcomes. Keep a
+separate state file for each candidate policy.
 
 The continuous `MecoTaskScheduler` selects from the protocol's training seed
 pool by scenario and records the pool hash and selected seed on each assignment.
@@ -206,7 +268,7 @@ across-seed variance.
 python -m frc_defense.meco_qualification run-validation \
   --scenario pickup_simple --candidate-policy A1 \
   --checkpoint checkpoints/meco-five/A1/latest.pt \
-  --protocol qualifications/meco/protocol-pickup-simple-v2.json \
+  --protocol qualifications/meco/protocol-pickup_simple-v4.json \
   --state qualifications/meco/A1-state.json \
   --output qualifications/meco/A1-pickup-simple-round-1.json \
   --device cuda:0
@@ -236,7 +298,11 @@ backend, runtime, source, seed pools, and variance evidence. Calibration itself
 does not qualify a policy. Promotion revalidates the full protocol, category
 and safety metric sets, schema/source binding, exact seed case table,
 calibration/source IDs, and an `evidence_sha256` over the immutable report's
-policy manifest, source identity, cases, safety provenance, and raw rows.
+policy manifest, source identity, cases, safety provenance, and raw rows. New
+evidence schema v2 also binds final-test summary fields; older reports without
+an explicit evidence schema retain the legacy digest field set, and calibrated
+v3 and v4 reports require schema v2. V4 evidence additionally binds matched-
+reference variance reports and the explicit margin review.
 Unknown `safety_*` row fields fail closed. These unkeyed SHA-256 checks detect
 edits while the recorded digest is retained; they do not authenticate the
 producer. No signing key or trusted attestor is configured. Runtime calibration
@@ -244,8 +310,10 @@ and representative simulator replay are still required; schema readiness does
 not establish runtime parity or promotion eligibility.
 
 Final-test execution is separate and requires an already promoted scenario,
-the same protocol, and the exact checkpoint bundle recorded at promotion. It
-uses only the selected candidate plus D0 and never changes promotion state. Do
+the same protocol, and the exact checkpoint bundle recorded at promotion. A
+v3/v4 test includes the selected candidate, its preselected D1/D2 reference, and D0
+as a separate safety floor; legacy v2 keeps its D0 comparison. Final-test
+results are digest-bound and never change promotion state. Do
 not regenerate or inspect final-test reports while selecting among policy
 checkpoints.
 
