@@ -1,0 +1,130 @@
+{
+  "captured_utc": "2026-10-24T06:02:43.131259+00:00",
+  "checkout": {
+    "head": "bd31d583dc5b76edec175672bba22b9b66c2771b",
+    "path": "project root",
+    "source_identity_sha256": "31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350"
+  },
+  "dashboard": {
+    "data_root": "project root",
+    "listener_port": 8765,
+    "local_asset_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+    "pid": 1403399,
+    "responses": {
+      "/api/curriculum-status": {
+        "body_sha256": "9427bdef5d261fbe22670ca2e387a12cb119a1258aab881d78711f9ea70cb3f0",
+        "bytes": 21968,
+        "content_type": "application/json",
+        "status": 200
+      },
+      "/api/meco-status": {
+        "body_sha256": "eee4889fe4ee258eb82d2f5a6950f0058b3e300bdaf3b64f293e47578b1cfdb1",
+        "bytes": 171046,
+        "content_type": "application/json",
+        "generated_utc": "2026-10-24T06:02:43.063884+00:00",
+        "status": 200
+      },
+      "/assets/meco.js": {
+        "body_sha256": "6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c",
+        "bytes": 13859,
+        "content_type": "text/javascript; charset=utf-8",
+        "status": 200
+      },
+      "/meco": {
+        "body_sha256": "6c0ab568fd6d7fddbd223986b117808d8c4814df726f93c4a9699811b943cf4f",
+        "bytes": 2025,
+        "content_type": "text/html; charset=utf-8",
+        "status": 200
+      }
+    },
+    "served_asset_matches_local": true
+  },
+  "file_sha256_pins": {
+    "checkpoints/meco-five/A1/heartbeat.json": "1c5babdbe06bc19f3121ab1e23736c5ca1de8f54104f8a78e668a1be8d74afc0",
+    "checkpoints/meco-five/A1/run.json": "163583a6d4bae645751b4fd5594791b0461d059d35b15164dca7d9a1f8ba61f2",
+    "checkpoints/meco-five/A2/heartbeat.json": "bdb75adba20a157c761615f99762e42a80e419047fe71174f8ce3a5edb11a082",
+    "checkpoints/meco-five/A2/run.json": "2dc37b60ddc06599a5ffc98c6917d1ccdf27ce3baaac2206b5d6387832e3c5c7",
+    "checkpoints/meco-five/A3/heartbeat.json": "2140f0cf4fda9b46dd7432b2fbdc818ad43ddd7bf51d43f7a69d0d6527713989",
+    "checkpoints/meco-five/A3/run.json": "5e795bc07b3b1f43228d3b25142d938aa8d69f93e39cc0c82c062c025671ad7c",
+    "checkpoints/meco-five/C1/heartbeat.json": "e135a8de52cf06c263e134340021acea8d0383afdcc599c626a10a406961799b",
+    "checkpoints/meco-five/C1/run.json": "21ef818bbebbc2285e77889630902804d23db58c5ff8c16ecbb35bedff273ddf",
+    "checkpoints/meco-five/queue-status.json": "44894323fe0427a65392040f67aa33bac95a482651a2e1216f43c3e89f07f3a8",
+    "checkpoints/meco-five/supervisor-status.json": "2b4154190c4e2569e51cf85eb3508d561aedaa7152afd1e54b1318369f68c043"
+  },
+  "reads_non_atomic": true,
+  "schema_version": 1,
+  "training": {
+    "completed_training_chunks": 2,
+    "cycle": 1,
+    "error": null,
+    "evaluation_protocol_id": null,
+    "evaluation_split": "diagnostic",
+    "heartbeat_utc": "2026-10-24T06:02:42.471360+00:00",
+    "lanes": [
+      {
+        "chunk_updates": 100,
+        "completed_updates": 100,
+        "device": "cuda:0",
+        "error": null,
+        "heartbeat_utc": null,
+        "pid": null,
+        "status": "complete",
+        "track": "A1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 100,
+        "device": "cuda:1",
+        "error": null,
+        "heartbeat_utc": null,
+        "pid": null,
+        "status": "complete",
+        "track": "A2"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 29,
+        "device": "cuda:0",
+        "error": null,
+        "heartbeat_utc": null,
+        "pid": 1476741,
+        "status": "running",
+        "track": "A3"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 41,
+        "device": "cuda:1",
+        "error": null,
+        "heartbeat_utc": null,
+        "pid": 1482130,
+        "status": "running",
+        "track": "C1"
+      },
+      {
+        "chunk_updates": 100,
+        "completed_updates": 0,
+        "device": "cuda:0",
+        "error": null,
+        "heartbeat_utc": null,
+        "pid": null,
+        "status": "queued",
+        "track": "C2"
+      }
+    ],
+    "live_process_rows": [
+      "1400209    01:39:36 Dsl  python",
+      "1403399    01:37:13 Ssl  python3",
+      "1476741       23:54 Rsl  python",
+      "1482130       18:20 Rsl  python"
+    ],
+    "protocol_id": "5c97828e98a95d4b4de3c93d0981aafbe5c8b1d699bab61d38ef4fac09ac8f51",
+    "queue": {
+      "cycle": 1,
+      "updated_utc": "2026-10-24T06:02:42.471360+00:00"
+    },
+    "run_id": "5e8f956474594bf8b69417b39b4692fa",
+    "status": "training",
+    "supervisor_pid": 1400209
+  }
+}

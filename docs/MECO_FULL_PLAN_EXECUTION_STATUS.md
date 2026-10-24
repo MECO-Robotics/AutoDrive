@@ -53,6 +53,18 @@
 > equality, plus two active training tracks and three queued. Reads were not atomic;
 > this is historical evidence, and current status must be read from runtime.
 
+> **Live status refresh — 2026-10-24 06:02:43 UTC.** Snapshot
+> [`MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T060243Z.json`](MECO_DASHBOARD_TRAINING_SNAPSHOT_20261024T060243Z.json),
+> SHA-256 `c41fbdca73b18c77d09c71c6a2709a0a4f466cd7e2d23461dff8c7c04fdaa51b`.
+> The supervisor is healthy on `main` at source identity
+> `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`:
+> A1 and A2 completed 100/100 updates, A3 is 29/100, C1 is 41/100, and C2
+> remains queued. A3 and C1 are confirmed on separate WX9100 GPUs. All four
+> dashboard endpoints returned HTTP 200 and the served frontend asset matches
+> this checkout. The split is diagnostic and has no held-out protocol binding;
+> these are training updates, not qualification results. Reads were
+> non-atomic; the snapshot pins each captured runtime file.
+
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
 **Plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
