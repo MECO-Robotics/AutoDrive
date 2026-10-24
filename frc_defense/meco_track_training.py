@@ -1795,6 +1795,132 @@ def _metric_snapshot(metrics):
             for name, value in metrics.outcomes().items()}
 
 
+_EVALUATION_CASE_FIELDS = frozenset(("layout_id", "defender_family",
+    "start_condition", "sensor_profile"))
+
+
+def _load_evaluation_protocol(value):
+    if isinstance(value, dict):
+        protocol = value
+        raw = json.dumps(protocol, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode()
+        path_name = None
+    else:
+        protocol_path = Path(value).expanduser().resolve()
+        raw = protocol_path.read_bytes()
+        protocol = json.loads(raw)
+        path_name = protocol_path.name
+    if not isinstance(protocol, dict):
+        raise ValueError("evaluation protocol must be a JSON object")
+    protocol_id = protocol.get("protocol_id")
+    body = {key: item for key, item in protocol.items() if key != "protocol_id"}
+    expected_id = hashlib.sha256(json.dumps(body, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if protocol_id != expected_id:
+        raise ValueError("evaluation protocol ID does not match its contents")
+    if protocol.get("protocol_version") not in ("meco-qualification-v1",
+                                                  "meco-qualification-v2"):
+        raise ValueError("unsupported evaluation protocol version")
+    cases = protocol.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("evaluation protocol has no frozen cases")
+    split_seeds = {name: set() for name in ("train", "validation", "test")}
+    for case in cases:
+        if (not isinstance(case, dict) or case.get("split") not in split_seeds
+                or not isinstance(case.get("seeds"), list)
+                or any(type(seed) is not int or seed < 0 for seed in case["seeds"])
+                or len(set(case["seeds"])) != len(case["seeds"])
+                or not all(isinstance(case.get(field), str) and case[field]
+                    for field in ("scenario_id", "category", *_EVALUATION_CASE_FIELDS))):
+            raise ValueError("evaluation protocol contains malformed case data")
+        split_seeds[case["split"]].update(case["seeds"])
+    if (split_seeds["train"] & split_seeds["validation"]
+            or split_seeds["train"] & split_seeds["test"]
+            or split_seeds["validation"] & split_seeds["test"]):
+        raise ValueError("evaluation protocol split seed pools overlap")
+    return protocol, protocol_id, hashlib.sha256(raw).hexdigest(), path_name
+
+
+def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
+                                episode_seeds, qualification_case):
+    """Validate an exact held-out evaluation binding without starting a simulator."""
+    if split not in ("validation", "test"):
+        raise ValueError("evaluation protocol binding is only valid for validation or test")
+    if path is None:
+        raise ValueError("held-out evaluation requires an explicit evaluation protocol")
+    protocol, protocol_id, protocol_sha256, protocol_file = _load_evaluation_protocol(path)
+    if not isinstance(qualification_case, dict) or set(qualification_case) != _EVALUATION_CASE_FIELDS:
+        raise ValueError("held-out evaluation requires an exact four-field case stratum")
+    if not categories or len(set(categories)) != len(categories):
+        raise ValueError("held-out evaluation categories must be nonempty and unique")
+    if not isinstance(episode_seeds, (tuple, list)) or not episode_seeds:
+        raise ValueError("held-out evaluation requires an explicit exact seed list")
+    seeds = tuple(episode_seeds)
+    if (any(type(seed) is not int or seed < 0 for seed in seeds)
+            or len(set(seeds)) != len(seeds)):
+        raise ValueError("evaluation protocol seed list is malformed")
+    selected_cases = []
+    for category in categories:
+        matches = [case for case in protocol.get("cases", [])
+            if case.get("scenario_id") == scenario_id and case.get("category") == category
+            and case.get("split") == split and all(
+                case.get(field) == qualification_case[field]
+                for field in _EVALUATION_CASE_FIELDS)]
+        if len(matches) != 1:
+            raise ValueError("evaluation protocol case is missing or ambiguous for category")
+        if tuple(matches[0].get("seeds", ())) != seeds:
+            raise ValueError("evaluation seeds differ from exact protocol case seed membership")
+        selected_cases.append(matches[0])
+    for case in protocol.get("cases", []):
+        if (case.get("scenario_id") == scenario_id and case.get("category") in categories
+                and case.get("split") != split and set(seeds).intersection(case.get("seeds", []))):
+            raise ValueError("evaluation seed list overlaps another protocol split")
+    return {"protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+        "protocol_file": protocol_file, "split": split,
+        "scenario_id": scenario_id, "categories": list(categories),
+        "qualification_case": dict(qualification_case), "seeds": list(seeds),
+        "case_ids": [{"category": case["category"], **{
+            field: case[field] for field in _EVALUATION_CASE_FIELDS}}
+            for case in selected_cases]}
+
+
+def resolve_evaluation_case(path, *, scenario_id, categories, split,
+                            qualification_case=None):
+    """Resolve one shared stratum, refusing implicit selection when ambiguous."""
+    protocol, _, _, _ = _load_evaluation_protocol(path)
+    if qualification_case is not None:
+        if not isinstance(qualification_case, dict) or set(qualification_case) != _EVALUATION_CASE_FIELDS:
+            raise ValueError("evaluation case must contain exactly the four frozen stratum identifiers")
+        chosen = dict(qualification_case)
+    else:
+        candidates = []
+        for category in categories:
+            cases = [case for case in protocol.get("cases", [])
+                if case.get("scenario_id") == scenario_id and case.get("category") == category
+                and case.get("split") == split]
+            if not cases:
+                raise ValueError("evaluation protocol has no case for requested scenario/category/split")
+            candidates.append({(tuple(case.get(field) for field in sorted(_EVALUATION_CASE_FIELDS)),
+                                tuple(case.get("seeds", []))) for case in cases})
+        shared = set.intersection(*candidates) if candidates else set()
+        if len(shared) != 1:
+            raise ValueError("evaluation protocol case is missing or ambiguous; select a stratum explicitly")
+        stratum, _ = next(iter(shared))
+        chosen = dict(zip(sorted(_EVALUATION_CASE_FIELDS), stratum))
+    matching_seed_lists = []
+    for category in categories:
+        matches = [case for case in protocol.get("cases", [])
+            if case.get("scenario_id") == scenario_id and case.get("category") == category
+            and case.get("split") == split and all(
+                case.get(field) == chosen[field] for field in _EVALUATION_CASE_FIELDS)]
+        if len(matches) != 1:
+            raise ValueError("evaluation protocol case is missing or ambiguous for requested category")
+        matching_seed_lists.append(tuple(matches[0].get("seeds", [])))
+    if not matching_seed_lists or any(seeds != matching_seed_lists[0] for seeds in matching_seed_lists):
+        raise ValueError("evaluation categories do not share one exact seed list")
+    return chosen, matching_seed_lists[0]
+
+
 def _manage_evaluation_adapters(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
@@ -1809,8 +1935,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   categories: tuple[str, ...], episodes: int, master_seed: int,
                   device: str, include_controls=True, output: str | None = None,
                   episode_seeds: tuple[int, ...] | None = None,
-                  split: str = "validation", qualification_case: dict | None = None,
+                  split: str = "diagnostic", qualification_case: dict | None = None,
                   qualification_protocol_id: str | None = None,
+                  evaluation_protocol: str | Path | None = None,
+                  evaluation_case: dict | None = None,
                   evaluation_policies: tuple[str, ...] | None = None,
                   control_policies: tuple[str, ...] | None = None,
                   prediction_mode: str | None = None,
@@ -1821,8 +1949,27 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
+    if episode_seeds is not None:
+        if (not isinstance(episode_seeds, (tuple, list))
+                or any(type(seed) is not int or not 0 <= seed < 2**63
+                    for seed in episode_seeds)
+                or len(episode_seeds) != episodes
+                or len(set(episode_seeds)) != episodes):
+            raise ValueError("episode_seeds must be a unique exact seed list matching episodes")
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
+    evaluation_binding = None
+    if split in ("validation", "test"):
+        if evaluation_case is None:
+            evaluation_case = qualification_case
+        evaluation_binding = resolve_evaluation_protocol(evaluation_protocol,
+            scenario_id=scenario_id, categories=categories, split=split,
+            episode_seeds=episode_seeds, qualification_case=evaluation_case)
+        if qualification_case is not None and qualification_case != evaluation_case:
+            raise ValueError("qualification and evaluation case strata disagree")
+        qualification_case = evaluation_case
+    elif evaluation_protocol is not None or evaluation_case is not None:
+        raise ValueError("evaluation protocol/case cannot bind diagnostic or training evaluation")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
@@ -1845,10 +1992,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
     execution_device = normalized_device_info(device)
-    if episode_seeds is not None and (len(episode_seeds) != episodes or
-            len(set(episode_seeds)) != episodes or any(type(seed) is not int
-            or not 0 <= seed < 2**63 for seed in episode_seeds)):
-        raise ValueError("episode_seeds must be a unique exact seed list matching episodes")
     if qualification_case is not None:
         required_case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
         if not isinstance(qualification_case, dict) or set(qualification_case) != required_case_fields:
@@ -2020,6 +2163,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         "episode_seeds": list(episode_seeds) if episode_seeds is not None else None,
         "split": split,
         "qualification_protocol_id": qualification_protocol_id,
+        "evaluation_binding": evaluation_binding,
         "qualification_case": qualification_case,
         "candidate_k": {"checkpoint": checkpoint_candidate_k,
             "evaluation_override": candidate_k_override, "effective": candidate_k},
@@ -2068,6 +2212,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         _atomic_json(status_path, {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol,
             "qualification_protocol_id": qualification_protocol_id,
+            "evaluation_protocol_id": (evaluation_binding["protocol_id"]
+                if evaluation_binding else None),
+            "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
+                if evaluation_binding else None),
+            "evaluation_case": evaluation_binding,
+            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
             "split": split, "status": status,
             "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
@@ -2558,6 +2708,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 if decision_prediction_mode in PREDICTION_MODES else None),
                             "protocol_id": protocol,
                             "qualification_protocol_id": qualification_protocol_id,
+                            "evaluation_protocol_id": (evaluation_binding["protocol_id"]
+                                if evaluation_binding else None),
+                            "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
+                                if evaluation_binding else None),
+                            "evaluation_case_id": (evaluation_binding["case_ids"]
+                                if evaluation_binding else None),
                             "split": split,
                             **(qualification_case or {}),
                             "source_identity_sha256": source_hash,
@@ -2603,6 +2759,14 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         report = {"schema_version": 1, "evaluation_id": eval_id,
             "protocol_id": protocol,
             "qualification_protocol_id": qualification_protocol_id,
+            "evaluation_protocol_id": (evaluation_binding["protocol_id"]
+                if evaluation_binding else None),
+            "evaluation_protocol_sha256": (evaluation_binding["protocol_sha256"]
+                if evaluation_binding else None),
+            "evaluation_case": evaluation_binding,
+            "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else None),
+            "evaluation_design": ("frozen_protocol_held_out" if evaluation_binding
+                else "diagnostic_unbound"),
             "sources": sources,
             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
             "safety_metrics_schema": "meco-safety-rates-v1",
@@ -2788,6 +2952,14 @@ def _parser():
     ev.add_argument("--categories", default="single,cluster")
     ev.add_argument("--episodes", type=int, default=1)
     ev.add_argument("--seed", type=int, default=20261024)
+    ev.add_argument("--split", choices=("diagnostic", "train", "validation", "test"),
+        default="diagnostic")
+    ev.add_argument("--evaluation-protocol",
+        help="immutable protocol binding for an exact validation/test evaluation")
+    ev.add_argument("--evaluation-case-json",
+        help="JSON object selecting the frozen layout/family/start/sensor stratum")
+    ev.add_argument("--episode-seeds",
+        help="comma-separated exact held-out seed list; required with --evaluation-protocol")
     ev.add_argument("--device", required=True,
         help="explicit indexed CUDA/ROCm device, for example cuda:0")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
@@ -2836,6 +3008,12 @@ def main(argv=None):
     report = evaluate_meco(checkpoints, scenario_id=args.scenario,
         categories=tuple(item for item in args.categories.split(",") if item),
         episodes=args.episodes, master_seed=args.seed, device=args.device,
+        split=args.split,
+        evaluation_protocol=args.evaluation_protocol,
+        evaluation_case=(json.loads(args.evaluation_case_json)
+            if args.evaluation_case_json else None),
+        episode_seeds=(tuple(int(item) for item in args.episode_seeds.split(",") if item)
+            if args.episode_seeds else None),
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
         candidate_k_override=args.candidate_k_override,

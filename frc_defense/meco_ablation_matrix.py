@@ -508,6 +508,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             qualification_case=condition.qualification_case,
             qualification_protocol_id=(None if qualification_provenance is None else
                 qualification_provenance["protocol_id"]),
+            evaluation_protocol=(qualification_protocol
+                if evaluation_split in ("validation", "test") else None),
+            evaluation_case=(condition.qualification_case or qualification_case
+                if evaluation_split in ("validation", "test") else None),
             candidate_k_override=condition.candidate_k,
             prediction_mode=condition.prediction_mode,
             control_prediction_mode=condition.control_prediction_mode,

@@ -1602,6 +1602,11 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                 "defender_family": case.defender_family,
                 "start_condition": case.start_condition,
                 "sensor_profile": case.sensor_profile},
+            evaluation_protocol=protocol,
+            evaluation_case={"layout_id": case.layout_id,
+                "defender_family": case.defender_family,
+                "start_condition": case.start_condition,
+                "sensor_profile": case.sensor_profile},
             evaluation_policies=(candidate_policy,), control_policies=(REFERENCE_POLICY,),
             include_controls=True, device=device)
         if manifest is None:
