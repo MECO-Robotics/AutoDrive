@@ -4,7 +4,9 @@ import json
 import pytest
 
 from frc_defense.meco_counterfactual import (DATASET_SCHEMA,
-    TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA)
+    TARGET_SCHEMA, PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
+    PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+    PLAN_A_LEGAL_NODE_TARGET_SCHEMA)
 from frc_defense.meco_counterfactual import _artifact_identity_sha256, _hash
 from frc_defense.meco_plan_a_oracle_audit import audit_plan_a_legal_nodes
 
@@ -18,7 +20,7 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, *, expert=False):
     sources = {"tracked_sources": ["source.py"], "_native_fuel_extension": {"status": "present"}}
     source_identity = _sha(json.dumps(sources, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode())
@@ -52,35 +54,60 @@ def _fixture(tmp_path):
         "source_identity_sha256": source_identity, "device": {"device": "cuda:0"}}
     source_manifest_bytes = _bytes(source_manifest)
     source_dataset.with_suffix(".jsonl.manifest.json").write_bytes(source_manifest_bytes)
+    expert_path = tmp_path / "expert.jsonl"
+    expert_sha = expert_manifest_sha = None
+    if expert:
+        expert_row = {"scenario_id": "pickup_simple", "category": "single",
+            "seed": 17, "decision_index": 3, "base_record": source_row,
+            "snapshot_id": "snap", "state_sha256": "state", "support_digest": "support",
+            "execution_failure": False, "selected_goal": {"node_id": 2}}
+        expert_bytes = _bytes(expert_row)
+        expert_path.write_bytes(expert_bytes)
+        expert_manifest_bytes = _bytes({"schema": PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
+            "target_schema": PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA, "split": "train",
+            "base_dataset_sha256": _sha(source_bytes),
+            "base_manifest_sha256": _sha(source_manifest_bytes), "protocol_id": protocol_id,
+            "qualification_protocol_sha256": _sha(protocol_bytes), "sources": sources,
+            "source_identity_sha256": source_identity, "device": {"device": "cuda:0"},
+            "record_count": 1, "dataset_sha256": _sha(expert_bytes)})
+        expert_path.with_suffix(".jsonl.manifest.json").write_bytes(expert_manifest_bytes)
+        expert_sha, expert_manifest_sha = _sha(expert_bytes), _sha(expert_manifest_bytes)
+    expert_node_pi = 1. if expert else .5
+    expert_node_weight = 1. if expert else 2.
     legal_row = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
         "scenario_id": "pickup_simple", "category": "single", "seed": 17,
         "decision_index": 3,
         "source_identity_sha256": source_identity, "snapshot_id": "snap",
         "state_sha256": "state", "support_digest": "support",
-        "feasible_node_ids": [0, 1, 2, 3], "selected_node_ids": [0, 2],
-        "canonical_poses": [{"node_id": i, "heading_bin": i % 2, "region_id": i // 2}
-            for i in range(4)],
+        "feasible_node_ids": list(range(8)), "selected_node_ids": [0, 2],
+        "canonical_poses": [{"node_id": i, "heading_bin": i % 2, "region_id": (i % 4) // 2}
+            for i in range(8)],
         "full_pair_layout": [{"pair_index": i, "node_id": node,
             "behavior_id": behavior, "descriptor_id": f"d-{i}", "feasible": True}
             for i, (node, behavior) in enumerate([(0, 1), (0, 1), (0, 2),
-                (0, 3), (0, 4), (1, 2), (1, 1), (2, 2), (3, 1)])],
+                (0, 3), (0, 4), (1, 2), (1, 1), (2, 2), (3, 1),
+                (4, 1), (5, 2), (6, 2), (7, 1)])],
         "node_u_targets": [
             {"node_id": 0, "status": "available", "u_target": 1.75,
                 "feasible_behavior_ids": [1, 2, 3, 4],
                 "available_behavior_ids": [1, 2, 3, 4],
-                "censored_feasible_behavior_ids": [], "node_inclusion_probability": .5,
+                "censored_feasible_behavior_ids": [], "node_inclusion_probability": 1.,
                 "unavailable_behavior_ids": [0],
-                "node_inverse_probability_weight": 2.,
+                "node_inverse_probability_weight": 1.,
                 "behavior_repeat_return_variances": {"1": 0., "2": 0.,
                     "3": 0., "4": 1.}},
             {"node_id": 2, "status": "unavailable", "u_target": None,
                 "feasible_behavior_ids": [2],
                 "available_behavior_ids": [],
-                "censored_feasible_behavior_ids": [2], "node_inclusion_probability": .5,
+                "censored_feasible_behavior_ids": [2], "node_inclusion_probability": expert_node_pi,
                 "unavailable_behavior_ids": [0, 1, 3, 4],
-                "node_inverse_probability_weight": 2.,
+                "node_inverse_probability_weight": expert_node_weight,
                 "behavior_repeat_return_variances": {}}],
+        "root_node": 0, "root_node_behavior_supported": True,
+        "node_inclusion_probabilities": {"0": 1., "2": expert_node_pi},
+        "stratum_population_counts": {"0:0": 2, "1:0": 2, "0:1": 2, "1:1": 2},
+        "stratum_selected_counts": {"0:0": 1, "1:0": 0, "0:1": 1, "1:1": 0},
         "pairs": [], "behavior_preferences": []}
     outcome_returns = {1: [2., 2.], 2: [1., 1.], 3: [2., 2.], 4: [1., 3.]}
     for behavior, values in outcome_returns.items():
@@ -132,6 +159,9 @@ def _fixture(tmp_path):
         "protocol_id": protocol_id, "qualification_protocol_sha256": _sha(protocol_bytes),
         "qualification_protocol_file": protocol_path.name, "sources": sources,
         "source_identity_sha256": source_identity, "device": {"device": "cuda:0"}}
+    legal_manifest["expert_goal_source"] = expert_path.name if expert else None
+    legal_manifest["expert_goal_source_sha256"] = expert_sha
+    legal_manifest["expert_goal_source_manifest_sha256"] = expert_manifest_sha
     legal_dataset.with_suffix(".jsonl.manifest.json").write_bytes(_bytes(legal_manifest))
     return legal_dataset, source_dataset, protocol_path
 
@@ -152,10 +182,10 @@ def test_offline_audit_summarizes_coverage_labels_and_weights_without_claiming_r
     args = _fixture(tmp_path)
     report = audit_plan_a_legal_nodes(*args)
     assert report["coverage"]["sampled_legal_nodes"] == 2
-    assert report["coverage"]["feasible_legal_nodes"] == 4
+    assert report["coverage"]["feasible_legal_nodes"] == 8
     assert report["coverage"]["sampled_heading_region_counts"] == {"0:0": 1, "0:1": 1}
     assert report["coverage"]["feasible_node_behavior_counts"] == {
-        "1": 3, "2": 3, "3": 1, "4": 1}
+        "1": 5, "2": 5, "3": 1, "4": 1}
     assert report["coverage"]["sampled_node_behavior_counts"] == {
         "1": 1, "2": 2, "3": 1, "4": 1}
     assert report["u_summary"]["available_node_count"] == 1
@@ -164,10 +194,16 @@ def test_offline_audit_summarizes_coverage_labels_and_weights_without_claiming_r
     assert report["u_summary"]["per_behavior_repeat_return_variance"]["4"]["mean"] == 1.
     assert report["b_summary"] == {"preference_count": 6, "comparable_count": 2,
         "tie_count": 1, "uncertain_count": 3}
-    assert report["sampling_weights"]["node"]["effective_sample_size"] == 2.
+    assert report["sampling_weights"]["node"]["effective_sample_size"] == 1.8
     assert report["sampling_weights"]["descriptor"]["effective_sample_size"] == 4.5
     assert report["evidence_status"] == {"replay_validated": False,
         "empirical_oracle_established": False, "warm_start_artifact_produced": False}
+
+
+def test_audit_counts_replay_bound_expert_goal_as_a_certainty_unit(tmp_path):
+    report = audit_plan_a_legal_nodes(*_fixture(tmp_path, expert=True))
+    assert report["provenance"]["expert_goal_source"]["dataset_sha256"]
+    assert report["sampling_weights"]["node"]["effective_sample_size"] == 2.
 
 
 def test_audit_rejects_modified_dataset_bytes(tmp_path):
@@ -228,4 +264,21 @@ def test_audit_binds_descriptor_probability_to_full_support_population(tmp_path)
         pair["descriptor_inverse_probability_weight"] = 4.
     _rewrite_legal(args, mutate)
     with pytest.raises(ValueError, match="descriptor inclusion"):
+        audit_plan_a_legal_nodes(*args)
+
+
+@pytest.mark.parametrize("node_id,pi,weight,expected_message", [
+    (2, .25, 4., "node inclusion probability"),
+    (0, .5, 2., "node inclusion probability"),
+])
+def test_audit_recomputes_node_inclusion_from_strata_and_certainty_units(
+        tmp_path, node_id, pi, weight, expected_message):
+    args = _fixture(tmp_path)
+    def mutate(row):
+        target = next(item for item in row["node_u_targets"] if item["node_id"] == node_id)
+        target["node_inclusion_probability"] = pi
+        target["node_inverse_probability_weight"] = weight
+        row["node_inclusion_probabilities"][str(node_id)] = pi
+    _rewrite_legal(args, mutate)
+    with pytest.raises(ValueError, match=expected_message):
         audit_plan_a_legal_nodes(*args)

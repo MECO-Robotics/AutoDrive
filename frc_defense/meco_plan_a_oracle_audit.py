@@ -42,6 +42,7 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
     """Verify artifact bindings and summarize recorded sampled U/B coverage."""
     from .meco_counterfactual import (DATASET_SCHEMA,
         TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA, PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
         _artifact_identity_sha256)
     from .meco_supervised import _load_protocol, _protocol_train_seeds
 
@@ -125,6 +126,61 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
     if set(source_by_key) != set(legal_by_key):
         raise ValueError("source and legal-node rows do not bind the exact same branch identities")
 
+    expert_nodes = {}
+    expert_provenance = None
+    expert_reference = legal_manifest.get("expert_goal_source")
+    if expert_reference is None:
+        if (legal_manifest.get("expert_goal_source_sha256") is not None or
+                legal_manifest.get("expert_goal_source_manifest_sha256") is not None):
+            raise ValueError("expert-goal source hashes exist without a source reference")
+    else:
+        if (not isinstance(expert_reference, str) or not expert_reference or
+                Path(expert_reference).is_absolute()):
+            raise ValueError("expert-goal source reference is malformed")
+        expert_path = (dataset.parent / expert_reference).resolve()
+        expert_manifest_path = expert_path.with_suffix(expert_path.suffix + ".manifest.json")
+        expert_bytes, expert_manifest_bytes = expert_path.read_bytes(), expert_manifest_path.read_bytes()
+        expert_manifest = json.loads(expert_manifest_bytes)
+        expert_sha, expert_manifest_sha = _sha(expert_bytes), _sha(expert_manifest_bytes)
+        if not isinstance(expert_manifest, dict):
+            raise ValueError("expert-goal source manifest must be an object")
+        if (expert_manifest.get("schema") != PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA or
+                expert_manifest.get("target_schema") != PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA or
+                expert_manifest.get("split") != "train" or
+                expert_manifest.get("base_dataset_sha256") != source_sha or
+                expert_manifest.get("base_manifest_sha256") != source_manifest_sha or
+                expert_manifest.get("protocol_id") != protocol_id or
+                expert_manifest.get("qualification_protocol_sha256") != protocol_sha or
+                expert_manifest.get("sources") != sources or
+                expert_manifest.get("source_identity_sha256") != source_identity_sha or
+                expert_manifest.get("device") != source_manifest.get("device") or
+                expert_manifest.get("dataset_sha256") != expert_sha or
+                expert_sha != legal_manifest.get("expert_goal_source_sha256") or
+                expert_manifest_sha != legal_manifest.get("expert_goal_source_manifest_sha256")):
+            raise ValueError("expert-goal source bytes or source/protocol binding mismatch")
+        expert_rows = _jsonl(expert_bytes, "expert-goal source")
+        if len(expert_rows) != expert_manifest.get("record_count"):
+            raise ValueError("expert-goal source record count mismatch")
+        for expert in expert_rows:
+            expert_key = (expert.get("scenario_id"), expert.get("category"),
+                expert.get("seed"), expert.get("decision_index"))
+            base = source_by_key.get(expert_key)
+            branch_state = base.get("branch_state") if isinstance(base, dict) else None
+            goal = expert.get("selected_goal")
+            if (base is None or expert_key in expert_nodes or expert.get("base_record") != base or
+                    not isinstance(branch_state, dict) or
+                    expert.get("snapshot_id") != branch_state.get("snapshot_id") or
+                    expert.get("state_sha256") != base.get("predecision_simulator_state_sha256") or
+                    expert.get("support_digest") != base.get("support_digest") or
+                    expert.get("execution_failure") is not False or
+                    not isinstance(goal, dict) or type(goal.get("node_id")) is not int):
+                raise ValueError("expert-goal record is not bound to its exact source branch")
+            expert_nodes[expert_key] = goal["node_id"]
+        if set(expert_nodes) != set(source_by_key):
+            raise ValueError("expert-goal source does not cover exact source branches")
+        expert_provenance = {"dataset": str(expert_path), "dataset_sha256": expert_sha,
+            "manifest": str(expert_manifest_path), "manifest_sha256": expert_manifest_sha}
+
     totals = Counter()
     heading_region = Counter()
     feasible_behavior_counts = Counter()
@@ -159,6 +215,48 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
         pose_by_node = {pose.get("node_id"): pose for pose in poses if isinstance(pose, dict)}
         if len(pose_by_node) != len(poses) or not set(feasible) <= set(pose_by_node):
             raise ValueError("canonical legal-node poses do not cover feasible nodes uniquely")
+        populations = Counter((pose_by_node[node].get("heading_bin"),
+            pose_by_node[node].get("region_id")) for node in feasible)
+        selected_counts = Counter((pose_by_node[node].get("heading_bin"),
+            pose_by_node[node].get("region_id")) for node in selected)
+        expected_populations = {f"{heading}:{region}": count
+            for (heading, region), count in populations.items()}
+        expected_selected_counts = {f"{heading}:{region}": selected_counts.get((heading, region), 0)
+            for heading, region in populations}
+        if (legal.get("stratum_population_counts") != expected_populations or
+                legal.get("stratum_selected_counts") != expected_selected_counts):
+            raise ValueError("recorded heading-region population/selection counts differ from canonical nodes")
+        root = legal.get("root_node")
+        root_supported = legal.get("root_node_behavior_supported")
+        if (type(root) is not int or type(root_supported) is not bool or
+                root_supported != (root in feasible)):
+            raise ValueError("root-node mandatory-unit provenance is malformed")
+        mandatory_nodes = {root} if root_supported else set()
+        expert_node = expert_nodes.get(key)
+        if expert_node is not None:
+            if expert_node not in feasible or expert_node not in selected:
+                raise ValueError("replay-bound expert goal is not a selected feasible certainty unit")
+            mandatory_nodes.add(expert_node)
+        if not mandatory_nodes <= set(selected):
+            raise ValueError("mandatory root/expert certainty units are missing from the selected nodes")
+        expected_node_pi = {}
+        for node in selected:
+            cell = (pose_by_node[node].get("heading_bin"), pose_by_node[node].get("region_id"))
+            forced_in_stratum = sum(1 for mandatory in mandatory_nodes
+                if (pose_by_node[mandatory].get("heading_bin"),
+                    pose_by_node[mandatory].get("region_id")) == cell)
+            if node in mandatory_nodes:
+                expected_node_pi[node] = 1.0
+            else:
+                population = populations[cell] - forced_in_stratum
+                sample = selected_counts[cell] - forced_in_stratum
+                if population <= 0 or not 0 < sample <= population:
+                    raise ValueError("node sampling stratum has invalid residual population/count")
+                expected_node_pi[node] = sample / population
+        recorded_node_pi = legal.get("node_inclusion_probabilities")
+        if (not isinstance(recorded_node_pi, dict) or
+                set(recorded_node_pi) != {str(node) for node in selected}):
+            raise ValueError("node inclusion probability map does not cover selected nodes exactly")
         layout = legal.get("full_pair_layout")
         if not isinstance(layout, list):
             raise ValueError("full feasible legal-node behavior layout is missing")
@@ -245,8 +343,13 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
                 raise ValueError("U target available-behavior inventory is inconsistent")
             pi = target.get("node_inclusion_probability")
             weight = target.get("node_inverse_probability_weight")
+            expected_pi = expected_node_pi[target["node_id"]]
             if (not _number(pi) or not 0 < pi <= 1 or not _number(weight) or
-                    not math.isclose(weight, 1 / pi)):
+                    not math.isclose(pi, expected_pi, rel_tol=1e-12, abs_tol=1e-12) or
+                    not _number(recorded_node_pi[str(target["node_id"])]) or
+                    not math.isclose(recorded_node_pi[str(target["node_id"])], expected_pi,
+                        rel_tol=1e-12, abs_tol=1e-12) or
+                    not math.isclose(weight, 1 / expected_pi, rel_tol=1e-12, abs_tol=1e-12)):
                 raise ValueError("node inclusion probability/weight is invalid")
             node_weights.append(weight)
         pairs = legal.get("pairs")
@@ -411,7 +514,8 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             "qualification_protocol_sha256": protocol_sha,
             "source_identity_sha256": source_identity_sha, "split": "train",
             "scenario_id": scenario, "category": category,
-            "device_identity": legal_manifest["device"]},
+            "device_identity": legal_manifest["device"],
+            "expert_goal_source": expert_provenance},
         "coverage": {"branch_count": totals["branches"], "sampled_legal_nodes": selected_nodes,
             "feasible_legal_nodes": feasible_nodes,
             "sampled_node_coverage_fraction": selected_nodes / feasible_nodes,
