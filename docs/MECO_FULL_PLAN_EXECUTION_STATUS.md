@@ -28,7 +28,7 @@
 > define seven opponent policies, team starts, teammate actions, contact
 > geometry, and pose-offset transforms, but they are not wired into
 > `CurriculumEnv` or campaign execution. Contact and recovery values remain
-> proxies/unavailable; pose no-leak remains explicitly incomplete. No
+> proxies/unavailable; pose no-leak remains explicitly incomplete.
 > **Policy-pose boundary approved and integrated — 2026-10-24.** Exact follow-up
 > `7f8c567c0a2a712235a1e464c06b2b3adb1f86b1` passed independent review and is
 > integrated at `8fe3c9daf411a7914e0ee6bcf7f1fc89ae27b729`. The perception
