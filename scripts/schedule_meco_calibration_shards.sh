@@ -13,17 +13,46 @@ shift 3
 manifest_device="${device//:/-}"
 output_dir="$repo_root/evaluations/meco-five/d0-calibration-20261024/source-31e5/$manifest_device"
 manifest_dir="$repo_root/qualifications/meco/shards/pickup-simple-20261024/source-31e5/$manifest_device"
+initial_shard_id=$(printf 'd0-calibration-pickup_simple-shard-%04d-of-0008' "$initial_index")
+initial_manifest="$manifest_dir/$initial_shard_id.json"
 
 initial_worker_is_running() {
-  local proc_cmd
-  [[ -r "/proc/$initial_pid/cmdline" ]] || return 1
-  proc_cmd=$(tr '\0' ' ' < "/proc/$initial_pid/cmdline")
-  [[ "$proc_cmd" == *"calibrate-d0-shard"* &&
-     "$proc_cmd" == *"shard-$(printf '%04d' "$initial_index")-of-0008.json"* ]]
+  local proc_cmdline="/proc/$initial_pid/cmdline"
+  local -a proc_args=()
+  local has_device=0 has_manifest=0 has_command=0 has_shard=0 i
+
+  [[ -d "/proc/$initial_pid" ]] || return 1
+  if [[ ! -r "$proc_cmdline" ]] || ! mapfile -d '' -t proc_args < "$proc_cmdline"; then
+    if [[ ! -d "/proc/$initial_pid" ]]; then return 1; fi
+    echo "cannot read live PID $initial_pid command line; refusing to continue" >&2
+    return 2
+  fi
+
+  for ((i = 0; i + 1 < ${#proc_args[@]}; i++)); do
+    [[ "${proc_args[i]}" == "--device" && "${proc_args[i + 1]}" == "$device" ]] && has_device=1
+    [[ "${proc_args[i]}" == "--manifest" && "${proc_args[i + 1]}" == "$initial_manifest" ]] && has_manifest=1
+  done
+  for i in "${proc_args[@]}"; do
+    [[ "$i" == "calibrate-d0-shard" ]] && has_command=1
+    [[ "$i" == *"shard-$(printf '%04d' "$initial_index")-of-0008.json" ]] || continue
+    has_shard=1
+  done
+
+  if (( has_device && has_manifest && has_command && has_shard )); then return 0; fi
+  echo "live PID $initial_pid does not match shard $initial_index on $device with manifest $initial_manifest; refusing to continue" >&2
+  return 2
 }
 
 echo "$(date -u +%FT%TZ) waiting for shard $initial_index on $device (pid $initial_pid)"
-while initial_worker_is_running; do sleep 5; done
+while :; do
+  if initial_worker_is_running; then
+    sleep 5
+  else
+    worker_status=$?
+    [[ "$worker_status" -eq 1 ]] && break
+    exit "$worker_status"
+  fi
+done
 
 mkdir -p "$output_dir"
 exec 9>"$output_dir/.remaining-shards.lock"
