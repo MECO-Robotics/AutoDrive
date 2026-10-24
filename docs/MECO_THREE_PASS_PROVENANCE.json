@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -522,6 +522,42 @@
         "status": "approved-summary"
       },
       "limits": "Ten focused CPU contract tests only; no simulator/GPU run, hardware-equivalence, model-quality, fairness, learned-policy qualification, or deployment evidence. Original planner/reviewer messages were not persisted verbatim."
+    },
+    {
+      "requirement_id": "meco-evaluation-device-lease",
+      "title": "MECO evaluator GPU lease and execution-failure taxonomy",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/evaluation-device-lease.md",
+          "sha256": "25cc2f3d2b0a6b5affa5b6cc948cad7823fce97f8ce4cffde3de590c4ed8bff8",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "9e41078fd438767217d051b89a58b2110449b3fb",
+        "paths": [
+          "frc_defense/meco_supervisor.py",
+          "frc_defense/meco_track_training.py",
+          "tests/test_meco_supervisor_dispatch.py",
+          "tests/test_meco_execution_failure_taxonomy.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/evaluation-device-lease.md",
+          "sha256": "25cc2f3d2b0a6b5affa5b6cc948cad7823fce97f8ce4cffde3de590c4ed8bff8",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "9e41078fd438767217d051b89a58b2110449b3fb",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved the exact scoped implementation commit; approval is limited to the implementation and focused tests.",
+        "status": "approved-summary"
+      },
+      "limits": "15 focused scheduler and taxonomy tests passed; compilation and diff checks passed. No simulator, hardware, fresh dashboard replay, active-campaign, or qualification evidence. Simulator evaluation and a fresh replay from the current checkout remain activation gates."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -529,6 +565,7 @@
     "Original planner and reviewer transcripts were not persisted for earlier tranches.",
     "This ledger does not claim whole-plan approval, track-wide completion, runtime validation, or agent liveness.",
     "The preference-v2 and A/C input-provenance approval evidence is a scoped summary of parent messages; original planner/reviewer transcripts are not stored.",
-    "The combined branch is a review-only integration candidate; it has no simulator/GPU qualification, captured production parity run, or deployment qualification."
+    "The combined branch is a review-only integration candidate; it has no simulator/GPU qualification, captured production parity run, or deployment qualification.",
+    "The evaluation-device lease tranche has focused implementation and review evidence only; simulator, hardware, fresh dashboard replay, active-campaign, and qualification evidence are absent."
   ]
 }
