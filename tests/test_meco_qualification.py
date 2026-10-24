@@ -142,3 +142,145 @@ def test_invalid_safety_rate_and_incomplete_paired_coverage_are_rejected(monkeyp
     report, protocol, state = _synthetic_round(monkeypatch, drop_candidate_seed=100)
     with pytest.raises(ValueError, match="incomplete qualification coverage"):
         qualification.consume_validation_round(report, protocol=protocol, state=state)
+
+
+def _calibration_runtime_identity(**overrides):
+    identity = {"device": "cuda:0", "device_name": "WX9100",
+        "backend": "hip", "torch_version": "2.8.0+rocm7.0",
+        "hip_version": "7.0.0"}
+    identity.update(overrides)
+    return identity
+
+
+@pytest.mark.parametrize("device", ("cuda", "cuda:-1", "cuda:1junk", "cuda:01", "cuda:0.0"))
+def test_calibration_runtime_identity_rejects_malformed_device(device):
+    with pytest.raises(ValueError):
+        qualification._validate_calibration_runtime_device(
+            _calibration_runtime_identity(device=device))
+
+
+@pytest.mark.parametrize("identity", (
+    _calibration_runtime_identity(torch_version=None),
+    _calibration_runtime_identity(torch_version=7),
+    _calibration_runtime_identity(torch_version=" "),
+    _calibration_runtime_identity(backend="hip", hip_version=None),
+    _calibration_runtime_identity(backend="hip", hip_version=7),
+    _calibration_runtime_identity(backend="hip", hip_version=" "),
+    _calibration_runtime_identity(backend="cuda", hip_version="7.0.0"),
+    _calibration_runtime_identity(backend="vulkan", hip_version=None),
+))
+def test_calibration_runtime_identity_rejects_malformed_versions(identity):
+    with pytest.raises(ValueError):
+        qualification._validate_calibration_runtime_device(identity)
+
+
+def test_calibration_runtime_identity_accepts_typed_cuda_and_hip():
+    qualification._validate_calibration_runtime_device(_calibration_runtime_identity())
+    qualification._validate_calibration_runtime_device(_calibration_runtime_identity(
+        device="cuda:1", backend="cuda", hip_version=None))
+
+
+def test_d0_calibration_manifest_is_source_bound_and_checkpoint_free():
+    source = "a" * 64
+    manifest = {"D0": {"policy_id": "D0_production_deterministic",
+        "source_identity_sha256": source, "checkpoint_sha256": None}}
+    qualification._validate_calibration_d0_manifest(manifest, source)
+
+    wrong_source = copy.deepcopy(manifest)
+    wrong_source["D0"]["source_identity_sha256"] = "b" * 64
+    with pytest.raises(ValueError, match="manifest"):
+        qualification._validate_calibration_d0_manifest(wrong_source, source)
+
+    checkpointed = copy.deepcopy(manifest)
+    checkpointed["D0"]["checkpoint_sha256"] = "c" * 64
+    with pytest.raises(ValueError, match="manifest"):
+        qualification._validate_calibration_d0_manifest(checkpointed, source)
+
+    with pytest.raises(ValueError, match="manifest"):
+        qualification._validate_calibration_d0_manifest({}, source)
+
+
+def _synthetic_d0_calibration_bundle(monkeypatch):
+    scenario = "pickup_simple"
+    case = qualification.QualificationCase(scenario, "single", "calibration",
+        "layout-a", "family-a", "start-a", "sensor-a", (103,))
+    monkeypatch.setattr(qualification, "protocol_cases", lambda *args, **kwargs: (case,))
+    source = "a" * 64
+    runtime = _calibration_runtime_identity()
+    policy_manifest = {"D0": {"policy_id": "D0_production_deterministic",
+        "source_identity_sha256": source, "checkpoint_sha256": None}}
+    rows = []
+    for repetition in range(2):
+        rows.append({"repetition": repetition, "category": case.category,
+            "layout_id": case.layout_id, "defender_family": case.defender_family,
+            "start_condition": case.start_condition, "sensor_profile": case.sensor_profile,
+            "seed": 103, "policy": "D0", "split": "calibration",
+            "policy_id": "D0_production_deterministic", "checkpoint_sha256": None,
+            "source_identity_sha256": source,
+            "calibration_runtime_device": copy.deepcopy(runtime),
+            "metrics": {"useful_throughput": 1.0,
+                **{name: 0.0 for name in qualification.SAFETY_METRIC_NAMES}}})
+    stratum = (case.category, case.layout_id, case.defender_family,
+               case.start_condition, case.sensor_profile)
+    summary = {"/".join(stratum): {"category": case.category,
+        "layout_id": case.layout_id, "defender_family": case.defender_family,
+        "start_condition": case.start_condition, "sensor_profile": case.sensor_profile,
+        "seed_count": 1, "repetition_count": 2,
+        "mean_useful_throughput": 1.0, "between_seed_variance": 0.0,
+        "mean_within_seed_repeat_variance": 0.0,
+        "seed_digest": hashlib.sha256(b"[103]").hexdigest()}}
+    report = {"schema_version": 2, "calibration": True,
+        "protocol_version": qualification.D0_CALIBRATION_VERSION,
+        "scenario_id": scenario, "episodes_per_category_stratum": qualification.MIN_EPISODES,
+        "repetitions": 2, "master_seed": 23,
+        "case_ids": [{"category": case.category, "layout_id": case.layout_id,
+            "defender_family": case.defender_family,
+            "start_condition": case.start_condition, "sensor_profile": case.sensor_profile}],
+        "policy_manifest": policy_manifest, "source_identity_sha256": source,
+        "runtime_device": runtime,
+        "normalized_runtime_identity": qualification._normalized_calibration_runtime(runtime),
+        "safety_metrics_schema": qualification.SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": source,
+        "summary": summary, "records": rows}
+    report["calibration_id"] = qualification._canonical_sha256(report)
+    return report
+
+
+def _rehash_calibration_report(report):
+    report.pop("calibration_id", None)
+    report["calibration_id"] = qualification._canonical_sha256(report)
+
+
+def test_calibration_intake_requires_each_row_to_bind_exact_runtime(monkeypatch):
+    report = _synthetic_d0_calibration_bundle(monkeypatch)
+    qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
+
+    report = _synthetic_d0_calibration_bundle(monkeypatch)
+    del report["records"][0]["calibration_runtime_device"]
+    _rehash_calibration_report(report)
+    with pytest.raises(ValueError, match="row provenance"):
+        qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
+
+    report = _synthetic_d0_calibration_bundle(monkeypatch)
+    report["records"][0]["calibration_runtime_device"]["device"] = "cuda:1"
+    _rehash_calibration_report(report)
+    with pytest.raises(ValueError, match="row provenance"):
+        qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
+
+
+@pytest.mark.parametrize("corruption", ("manifest_source", "manifest_checkpoint",
+                                         "runtime_device", "normalized_runtime"))
+def test_calibration_intake_rejects_manifest_or_runtime_corruption(monkeypatch, corruption):
+    report = _synthetic_d0_calibration_bundle(monkeypatch)
+    if corruption == "manifest_source":
+        report["policy_manifest"]["D0"]["source_identity_sha256"] = "b" * 64
+    elif corruption == "manifest_checkpoint":
+        report["policy_manifest"]["D0"]["checkpoint_sha256"] = "c" * 64
+    elif corruption == "runtime_device":
+        report["runtime_device"]["device"] = "cuda:1junk"
+    else:
+        report["normalized_runtime_identity"]["torch_version"] = "different"
+    _rehash_calibration_report(report)
+
+    with pytest.raises(ValueError):
+        qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))

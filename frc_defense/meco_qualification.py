@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import argparse
+import re
 import uuid
 
 from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
@@ -111,6 +112,42 @@ def _retention_scenarios(target: str) -> tuple[str, ...]:
     return tuple(scenario for scenario in _scenario_closure(target) if scenario != target)
 
 
+def _validate_calibration_runtime_device(runtime_device: object) -> None:
+    """Validate the typed CUDA/HIP identity emitted by v2 D0 calibration."""
+    if not isinstance(runtime_device, dict):
+        raise ValueError("D0 calibration runtime device identity is invalid")
+    device = runtime_device.get("device")
+    if not isinstance(device, str) or re.fullmatch(r"cuda:(?:0|[1-9][0-9]*)", device) is None:
+        raise ValueError("D0 calibration runtime device must be an indexed CUDA device")
+    backend = runtime_device.get("backend")
+    torch_version = runtime_device.get("torch_version")
+    hip_version = runtime_device.get("hip_version")
+    device_name = runtime_device.get("device_name")
+    if (backend not in ("hip", "cuda")
+            or not isinstance(torch_version, str) or not torch_version.strip()
+            or torch_version != torch_version.strip()
+            or not isinstance(device_name, str) or not device_name.strip()):
+        raise ValueError("D0 calibration runtime device/version identity is invalid")
+    if backend == "hip":
+        if (not isinstance(hip_version, str) or not hip_version.strip()
+                or hip_version != hip_version.strip()):
+            raise ValueError("HIP calibration runtime requires a typed HIP version")
+    elif hip_version is not None:
+        raise ValueError("CUDA calibration runtime must not report a HIP version")
+
+
+def _validate_calibration_d0_manifest(policy_manifest: object, source_identity: str) -> None:
+    """Bind D0's production manifest entry to the report's exact source."""
+    if not isinstance(policy_manifest, dict):
+        raise ValueError("D0 calibration policy manifest is invalid")
+    d0 = policy_manifest.get(REFERENCE_POLICY)
+    if (not isinstance(d0, dict)
+            or d0.get("policy_id") != "D0_production_deterministic"
+            or d0.get("source_identity_sha256") != source_identity
+            or d0.get("checkpoint_sha256") is not None):
+        raise ValueError("D0 calibration manifest source/checkpoint provenance is invalid")
+
+
 def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tuple[dict, dict, str, dict]:
     """Validate every D0 report and return its IDs, exact seed pools, and shared source."""
     if set(reports) != set(scenarios):
@@ -174,27 +211,21 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
         current_source = report.get("source_identity_sha256")
         if (not isinstance(current_source, str) or len(current_source) != 64
                 or any(c not in "0123456789abcdef" for c in current_source)
-                or report.get("policy_manifest", {}).get(REFERENCE_POLICY, {}).get("policy_id")
-                    != "D0_production_deterministic"
                 or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
                 or report.get("safety_metrics_source_identity_sha256") != current_source
                 or any(row.get("source_identity_sha256") != current_source for row in rows)):
             raise ValueError(f"D0 calibration source/controller provenance is invalid for {scenario}")
+        _validate_calibration_d0_manifest(report.get("policy_manifest"), current_source)
         runtime_device = report.get("runtime_device")
-        if (not isinstance(runtime_device, dict)
-                or runtime_device.get("backend") not in ("hip", "cuda")
-                or not isinstance(runtime_device.get("device"), str)
-                or not runtime_device["device"].startswith("cuda:")
-                or not isinstance(runtime_device.get("device_name"), str)
-                or not runtime_device["device_name"].strip()):
-            raise ValueError(f"D0 calibration did not record a verified GPU device for {scenario}")
+        try:
+            _validate_calibration_runtime_device(runtime_device)
+        except ValueError as exc:
+            raise ValueError(f"D0 calibration GPU provenance is invalid for {scenario}") from exc
         normalized_runtime = report.get("normalized_runtime_identity")
-        if normalized_runtime is not None:
-            if (_normalized_calibration_runtime(runtime_device) != normalized_runtime
-                    or any(row.get("calibration_runtime_device") is None
-                        or _normalized_calibration_runtime(row["calibration_runtime_device"])
-                            != normalized_runtime for row in rows)):
-                raise ValueError(f"D0 calibration normalized runtime provenance is invalid for {scenario}")
+        expected_normalized_runtime = _normalized_calibration_runtime(runtime_device)
+        if (normalized_runtime != expected_normalized_runtime
+                or any(row.get("calibration_runtime_device") != runtime_device for row in rows)):
+            raise ValueError(f"D0 calibration normalized runtime/row provenance is invalid for {scenario}")
         for row in rows:
             metrics = row.get("metrics")
             safety_keys = ({key for key in metrics
@@ -602,18 +633,9 @@ def _unit_key(unit) -> str:
 
 
 def _normalized_calibration_runtime(runtime_device):
-    if not isinstance(runtime_device, dict):
-        raise ValueError("calibration runtime identity is missing")
-    device = runtime_device.get("device")
-    if (not isinstance(device, str) or not device.startswith("cuda:")
-            or not device[5:].isdigit()):
-        raise ValueError("calibration runtime device must be an indexed CUDA/HIP device")
+    _validate_calibration_runtime_device(runtime_device)
     normalized = {key: value for key, value in runtime_device.items() if key != "device"}
     normalized["device_model"] = runtime_device.get("device_name")
-    if (runtime_device.get("backend") not in ("cuda", "hip")
-            or not isinstance(normalized["device_model"], str)
-            or not normalized["device_model"].strip()):
-        raise ValueError("calibration runtime backend/device model is invalid")
     return normalized
 
 
@@ -1090,7 +1112,8 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
                     or safety_source_hash != result.get("safety_metrics_source_identity_sha256")):
                 raise ValueError("D0 source identity changed during calibration")
             for row in result["records"]:
-                records.append({"repetition": repetition, **row})
+                records.append({"repetition": repetition, **row,
+                    "calibration_runtime_device": device_identity})
     summaries = {}
     for case in cases:
         key = (case.category, case.layout_id, case.defender_family,
@@ -1126,6 +1149,7 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
             "sensor_profile": c.sensor_profile} for c in cases],
         "policy_manifest": manifest, "source_identity_sha256": source_hash,
         "runtime_device": device_identity,
+        "normalized_runtime_identity": _normalized_calibration_runtime(device_identity),
         "safety_metrics_schema": safety_schema,
         "safety_metrics_source_identity_sha256": safety_source_hash,
         "summary": summaries, "records": records,
