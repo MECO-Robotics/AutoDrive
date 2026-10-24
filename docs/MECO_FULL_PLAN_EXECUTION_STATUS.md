@@ -1,22 +1,26 @@
 # MECO learning tracks plan: execution status
 
-> **Current campaign update — 2026-10-24 04:28:14 UTC.** A fresh continuous
-> run is active from the current checkout `main` at `2ecc067b780a693088ec0992df70560806485628`,
+> **Current campaign update — 2026-10-24 04:36:58 UTC.** A fresh continuous
+> run was launched from `main` at `2ecc067b780a693088ec0992df70560806485628`; current HEAD
+> `6982596e978654a577c4d025ee02f985de7ae682` adds only status documentation,
 > source identity `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`.
 > Supervisor `5e8f956474594bf8b69417b39b4692fa` writes to this checkout's
 > `checkpoints/meco-five` and `evaluations/meco-five`, uses `cuda:0,cuda:1`,
 > evaluation device `cuda:1`, `--cycles 0`, and protocol
 > `dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2`.
-> At the recorded heartbeat, A1 and A2 were alive at 2/100 updates on the two
-> WX9100s; A3, C1, and C2 were queued; no chunk or evaluation had completed.
+> At the recorded heartbeat, A1 and A2 were alive at 14/100 and 13/100 updates
+> on the two WX9100s; A3, C1, and C2 were queued; no chunk or evaluation had
+> completed. D0 baseline calibration shard `shard-0000` was live with 88
+> complete entries out of 150, on `cuda:1`, sharing that device with A2. This
+> is calibration progress, not a completed calibration bundle.
 > This confirms launch only, not completed optimizer progress, evaluation, or
 > qualification. The evaluation split is diagnostic, so this run does not by
 > itself produce held-out qualification evidence. The current service on port
 > 8765 was restarted and verified against this checkout: `/meco`, the status
 > API, and both dashboard JavaScript assets returned HTTP 200; served asset
 > hashes matched the checkout. Its data root now points to this checkout.
-> The point-in-time evidence is [`MECO_CAMPAIGN_SNAPSHOT_20261024T042814Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T042814Z.json),
-> SHA-256 `3f98af6d40d16719aabdafb134fa7538649c6d7ff90d39d6a0e9753bbf7d94f5`.
+> The point-in-time evidence is [`MECO_CAMPAIGN_SNAPSHOT_20261024T0436Z.json`](MECO_CAMPAIGN_SNAPSHOT_20261024T0436Z.json),
+> SHA-256 `0890f80bb3985dd0200f94432822c8d231772d5535d830f79cf4f1db134e12b4`.
 > The source identity is recomputed from both live workers' `run.json` source
 > manifests and matches the supervisor record; the native HIP extension's
 > initialization state changes the result of a later fresh identity call.
@@ -27,7 +31,7 @@
 **Historical analysis snapshot:** 2026-10-24 03:53 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
 **Plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
-**Current implementation checkout:** `main` at `2ecc067b780a693088ec0992df70560806485628`
+**Current implementation checkout at the historical analysis snapshot:** `main` at `2ecc067b780a693088ec0992df70560806485628`
 **Prior implementation candidate at the historical snapshot:** `codex/meco-full-plan-integration` at `0e133780a0fadfb9015b84719e75291be89370e0`
 **Prior campaign checkout:** `codex/meco-c1-replay-integrated` at `d7b8dd4b1c1814c2a368ded7604b3c887571fdcc`
 

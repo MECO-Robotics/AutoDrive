@@ -8,8 +8,10 @@ run promotion validation until the target's complete prerequisite closure has
 disjoint D0 calibration reports, a verified bundle, explicit useful-gain and
 safety margins, and an immutable v2 protocol.
 
-Calibration, model evaluation, and qualification require an explicitly indexed
-available CUDA or ROCm/HIP device such as `cuda:0`. `cpu`, the unindexed `cuda`
+Calibration, model evaluation, and qualification currently require an
+explicitly indexed available ROCm/HIP GPU, exposed by PyTorch with a device name
+such as `cuda:0`. The native fuel extension rejects an NVIDIA CUDA runtime;
+support for CUDA without HIP is not implemented. `cpu`, the unindexed `cuda`
 alias, and unavailable device indices fail before MECO compute starts. The
 simulator/model/evaluator compute runs on the selected GPU. Python orchestration,
 artifact serialization, and checkpoint `map_location`/RNG handling may use host
@@ -46,10 +48,21 @@ case table, settings, source identity, runtime, and exact `(repetition, case,
 seed)` assignment in each immutable manifest. Each shard checkpoints complete
 case/repetition groups to a digest-checked `.partial` file and resumes only
 when that file still matches its manifest. A completed shard is immutable.
-Generate manifests on the indexed device that will execute each shard:
+The shard CLI must prepare the native HIP extension and capture provenance in
+the **same Python process**. A plain `python -m frc_defense.meco_qualification`
+call can record an `unprepared` extension identity in the manifest, while
+evaluation records the loaded binary identity; the shard will then reject its
+own manifest. Use this helper for both manifest creation and shard execution:
 
 ```bash
-python -m frc_defense.meco_qualification plan-d0-calibration-shards \
+run_prepared_meco_cli() {
+  local gpu_device="$1"
+  shift
+  python -c 'import sys; from frc_defense.fuel_physics_hip import prepare_native_fuel_extension; prepare_native_fuel_extension(sys.argv[1]); from frc_defense.meco_qualification import main; main(sys.argv[2:])' \
+    "$gpu_device" "$@"
+}
+
+run_prepared_meco_cli "$DEVICE" plan-d0-calibration-shards \
   --scenario "$scenario" --episodes 100 --repetitions 3 \
   --master-seed 20261024 --shard-count 8 --device "$DEVICE" \
   --manifest-dir "qualifications/meco/shards/${scenario}-${DEVICE//:/-}"
@@ -59,9 +72,16 @@ Run every manifest once, retaining its shard artifact, then merge all shard
 artifacts into the ordinary immutable v2 calibration report before bundling:
 
 ```bash
+run_prepared_meco_cli() {
+  local gpu_device="$1"
+  shift
+  python -c 'import sys; from frc_defense.fuel_physics_hip import prepare_native_fuel_extension; prepare_native_fuel_extension(sys.argv[1]); from frc_defense.meco_qualification import main; main(sys.argv[2:])' \
+    "$gpu_device" "$@"
+}
+
 for manifest in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/*.json; do
   shard_id=$(basename "$manifest" .json)
-  python -m frc_defense.meco_qualification calibrate-d0-shard \
+  run_prepared_meco_cli "$DEVICE" calibrate-d0-shard \
     --manifest "$manifest" --device "$DEVICE" \
     --output "qualifications/meco/shards/${scenario}-${DEVICE//:/-}/artifacts/${shard_id}.artifact.json"
 done
@@ -69,18 +89,26 @@ shards=()
 for artifact in qualifications/meco/shards/"${scenario}-${DEVICE//:/-}"/artifacts/*.artifact.json; do
   shards+=(--shard "$artifact")
 done
-python -m frc_defense.meco_qualification merge-d0-calibration-shards \
+run_prepared_meco_cli "$DEVICE" merge-d0-calibration-shards \
   "${shards[@]}" --output "qualifications/meco/d0-calibration-${scenario}.json"
 ```
 
 The merge requires every shard index exactly once, checks that each assigned
 tuple appears once and that no unexpected tuple appears, validates source,
 controller, safety, and normalized runtime provenance, and recomputes the v2
-summary from raw merged records. Shards may use different CUDA ordinals only
-when backend, GPU model, and the remaining runtime identity match. The merged
+summary from raw merged records. Shards may use different indexed GPU ordinals
+only when backend, GPU model, and the remaining runtime identity match. The merged
 v2 report records normalized runtime identity and each row's exact shard
 device. Shard manifests and shard outputs are not accepted as calibration
 reports by protocol creation or bundle intake.
+
+Each manifest is bound to the exact indexed device named in
+`runtime_device`; invoke its shard on that same ordinal. To split work across
+devices, generate the shard set on each intended ordinal and use the
+manifest for each shard index that matches the executing device. Keep the
+checkout, Python environment, HIP extension path/binary, and toolchain fixed
+from manifest creation through shard completion; changing them invalidates
+the captured source or runtime identity.
 
 The bundle is rejected if any prerequisite is missing, extra, duplicated, or
 has an overlapping calibration seed pool.
