@@ -223,9 +223,16 @@ def _calibration_report_index(reports: dict, scenarios: tuple[str, ...]) -> tupl
             raise ValueError(f"D0 calibration GPU provenance is invalid for {scenario}") from exc
         normalized_runtime = report.get("normalized_runtime_identity")
         expected_normalized_runtime = _normalized_calibration_runtime(runtime_device)
-        if (normalized_runtime != expected_normalized_runtime
-                or any(row.get("calibration_runtime_device") != runtime_device for row in rows)):
+        if normalized_runtime != expected_normalized_runtime:
             raise ValueError(f"D0 calibration normalized runtime/row provenance is invalid for {scenario}")
+        try:
+            row_runtime_matches = all(
+                _normalized_calibration_runtime(row.get("calibration_runtime_device"))
+                == expected_normalized_runtime for row in rows)
+        except ValueError as exc:
+            raise ValueError(f"D0 calibration row runtime provenance is invalid for {scenario}") from exc
+        if not row_runtime_matches:
+            raise ValueError(f"D0 calibration row runtime provenance is invalid for {scenario}")
         for row in rows:
             metrics = row.get("metrics")
             safety_keys = ({key for key in metrics
@@ -790,6 +797,8 @@ def _validate_d0_shard_artifact(artifact, manifest):
             or artifact.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
             or artifact.get("safety_metrics_source_identity_sha256") != manifest["source_identity_sha256"]):
         raise ValueError("D0 calibration shard policy/safety provenance is invalid")
+    _validate_calibration_d0_manifest(artifact["policy_manifest"],
+                                      manifest["source_identity_sha256"])
     return entries
 
 
@@ -967,6 +976,7 @@ def _merged_d0_calibration_report(manifests, artifacts):
     policy_manifests = [artifact.get("policy_manifest") for artifact in artifacts]
     if any(value != policy_manifests[0] for value in policy_manifests[1:]):
         raise ValueError("D0 calibration shards disagree on controller policy manifest")
+    _validate_calibration_d0_manifest(policy_manifests[0], base["source_identity_sha256"])
     entries = []
     for manifest, artifact in zip(manifests, artifacts):
         entries.extend(_validate_d0_shard_artifact(artifact, manifest))

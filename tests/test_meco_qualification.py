@@ -251,20 +251,35 @@ def _rehash_calibration_report(report):
     report["calibration_id"] = qualification._canonical_sha256(report)
 
 
-def test_calibration_intake_requires_each_row_to_bind_exact_runtime(monkeypatch):
+def test_calibration_intake_binds_row_runtime_while_allowing_device_ordinal(monkeypatch):
     report = _synthetic_d0_calibration_bundle(monkeypatch)
     qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
 
     report = _synthetic_d0_calibration_bundle(monkeypatch)
     del report["records"][0]["calibration_runtime_device"]
     _rehash_calibration_report(report)
-    with pytest.raises(ValueError, match="row provenance"):
+    with pytest.raises(ValueError, match="row runtime provenance"):
         qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
 
     report = _synthetic_d0_calibration_bundle(monkeypatch)
     report["records"][0]["calibration_runtime_device"]["device"] = "cuda:1"
     _rehash_calibration_report(report)
-    with pytest.raises(ValueError, match="row provenance"):
+    qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
+
+
+@pytest.mark.parametrize("runtime_change", (
+    {"backend": "cuda", "hip_version": None},
+    {"device_name": "different GPU model"},
+    {"torch_version": "2.9.0+rocm7.0"},
+    {"hip_version": "7.1.0"},
+))
+def test_calibration_intake_rejects_row_runtime_backend_model_or_version_mismatch(
+        monkeypatch, runtime_change):
+    report = _synthetic_d0_calibration_bundle(monkeypatch)
+    report["records"][0]["calibration_runtime_device"].update(runtime_change)
+    _rehash_calibration_report(report)
+
+    with pytest.raises(ValueError, match="row runtime provenance"):
         qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
 
 
@@ -284,3 +299,30 @@ def test_calibration_intake_rejects_manifest_or_runtime_corruption(monkeypatch, 
 
     with pytest.raises(ValueError):
         qualification._calibration_report_index({"pickup_simple": report}, ("pickup_simple",))
+
+
+@pytest.mark.parametrize("corruption", (None, "source", "checkpoint"))
+def test_shard_artifact_validation_binds_d0_manifest_to_source(monkeypatch, corruption):
+    source = "a" * 64
+    manifest = {"manifest_id": "manifest-test", "source_identity_sha256": source}
+    policy_manifest = {"D0": {"policy_id": "D0_production_deterministic",
+        "source_identity_sha256": source, "checkpoint_sha256": None}}
+    if corruption == "source":
+        policy_manifest["D0"]["source_identity_sha256"] = "b" * 64
+    elif corruption == "checkpoint":
+        policy_manifest["D0"]["checkpoint_sha256"] = "c" * 64
+    artifact = {"schema_version": 1,
+        "artifact_type": qualification.D0_CALIBRATION_SHARD_ARTIFACT,
+        "manifest_id": manifest["manifest_id"], "manifest": manifest,
+        "policy_manifest": policy_manifest,
+        "safety_metrics_schema": qualification.SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": source, "entries": []}
+    artifact["artifact_sha256"] = qualification._canonical_sha256(artifact)
+    monkeypatch.setattr(qualification, "_validate_d0_shard_entries",
+        lambda artifact, manifest, *, require_complete: [])
+
+    if corruption is None:
+        assert qualification._validate_d0_shard_artifact(artifact, manifest) == []
+    else:
+        with pytest.raises(ValueError, match="manifest"):
+            qualification._validate_d0_shard_artifact(artifact, manifest)
