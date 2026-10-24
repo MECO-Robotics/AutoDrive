@@ -496,6 +496,12 @@ class _AsyncInferenceBroker:
                     item["done"] = True
                 if late_response:
                     self._mark_late(item)
+            except Exception:
+                # Adapter faults are isolated to this request; keep the broker
+                # worker alive for subsequent snapshots.
+                with self.lock:
+                    self.faults += 1
+                    item["response"] = None
             finally:
                 with self.lock:
                     item["done"] = True

@@ -155,13 +155,14 @@ device models, and inference rejects CPU tensors or tensors on another device.
 Existing training calls still use their direct model path and do not establish
 production qualification.
 
-This async broker is an implementation pass with review and runtime evidence
-pending. Its worker lifecycle and evaluator cleanup have static review only and
-have not been runtime exercised. Static compilation and diff checks are the
-only checks so far; no simulator,
-fault-injection, or replay evaluation has exercised queue replacement,
-freshness rejection, or fallback behavior. This is not evidence
-of ONNX parity, Hailo operator support, accelerator execution, full planner
-latency, simulator fallback behavior, or robot actuation. The synthetic export
-and profile harness remains diagnostic and its zero tensors are never passed
-into this production request adapter.
+Focused deterministic CPU tests now exercise the broker state machine with a
+fake adapter: latest-pending replacement, identity rejection, one-time
+publication, poll-before-completion non-reuse, expired/empty/raised inference
+faults, and idempotent close/join/reject-after-close. A raised adapter
+exception is counted as a per-request fault and does not terminate the worker.
+These tests do not construct the production CUDA-only adapter or demonstrate
+GPU-load freshness, evaluator lifecycle under real checkpoint loading,
+simulator fallback behavior, or replay correctness. ONNX parity, Hailo operator
+support, accelerator execution, full planner latency, and robot actuation also
+remain unvalidated. The synthetic export/profile harness remains diagnostic;
+its zero tensors are never passed into this production request adapter.
