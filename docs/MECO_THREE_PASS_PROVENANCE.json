@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -632,6 +632,50 @@
         "status": "approved-summary"
       },
       "limits": "139,800 D0 records are planned and unrun. No GPU/simulator results, CI result, or qualification evidence is claimed."
+    },
+    {
+      "requirement_id": "matched-evaluation-controls",
+      "title": "Protocol-bound matched evaluation, replay selection, diagnostics, and sealed final-test release",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/matched-evaluation-controls.md",
+          "sha256": "d9147ce715e66c7d19a21338f16637b2dbc26f5a000010e9dba815d8ffd81b0b",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "0db1e6436fbd753d82e49fbab02850d81fce1f07",
+        "candidate_integration_commit": "049c81e076bba74897590d66621592553bd7ddf8",
+        "initial_commit": "415ce63d457f076c112a25b648ad6f58e404ffde",
+        "paths": [
+          "frc_defense/meco_ablation_matrix.py",
+          "frc_defense/meco_supervisor.py",
+          "frc_defense/meco_final_test_ledger.py",
+          "frc_defense/meco_track_training.py",
+          "scripts/run_meco_ablation_matrix.py",
+          "scripts/summarize_meco_ablation_matrix.py",
+          "docs/MECO_ABLATION_MATRIX.md",
+          "tests/test_meco_matched_eval_controls.py",
+          "tests/test_meco_evaluation_protocol_binding.py",
+          "tests/test_summarize_meco_ablation_matrix.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/matched-evaluation-controls.md",
+          "sha256": "d9147ce715e66c7d19a21338f16637b2dbc26f5a000010e9dba815d8ffd81b0b",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "0db1e6436fbd753d82e49fbab02850d81fce1f07",
+        "verdict": "approved",
+        "verdict_detail": "Independent reviewer rejected the initial supervisor-only ledger guard, then approved the exact final implementer head after the shared guard was enforced in train_meco for fresh, resume, and warm-start paths. Approval covers scoped implementation and focused contracts only.",
+        "status": "approved-summary"
+      },
+      "limits": "78 focused tests, py_compile, and diff check reported passing. Reviewer spot verification passed 10 matched-control tests and 9 supervisor-dispatch tests. No GPU, simulator, dashboard, active training, final-test consumption, held-out outcome, qualification, or deployment evidence."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

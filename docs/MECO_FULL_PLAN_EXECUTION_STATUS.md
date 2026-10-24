@@ -1,5 +1,29 @@
 # MECO learning tracks plan: execution status
 
+> **Matched-evaluation controls integrated — 2026-10-24 08:49 UTC.** The
+> planner → implementer → independent reviewer tranche is integrated into
+> candidate HEAD `049c81e07` (implementer fix `0db1e6436fbd753d82e49fbab02850d81fce1f07`;
+> initial feature commit `415ce63d457f076c112a25b648ad6f58e404ffde`). It adds
+> protocol-bound exact seed manifests, condition/policy replay selection,
+> paired runtime/fallback diagnostics, report digest validation, and a
+> protocol-scoped single-use final-test ledger that blocks both supervisor
+> launches and direct `train_meco()` fresh/resume/warm-start calls. The matrix
+> CLI now requires an indexed accelerator and defaults to `cuda:0`. Three-pass
+> provenance is updated to 18 scoped tranche summaries; see
+> [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json) and
+> [`implementation-provenance/matched-evaluation-controls.md`](implementation-provenance/matched-evaluation-controls.md).
+> Focused verification reported 78 tests, Python compilation, and diff checks
+> passing; the independent reviewer rechecked 10 matched-control and 9
+> supervisor-dispatch tests. No simulator, GPU, dashboard, or live training
+> operation was run for this tranche. The dashboard still requires restart
+> and current-checkout verification after this integration. The live main
+> supervisor remains a separate checkout at source identity
+> `31e5f85370c3ad83d0b68392de59ec3b525828d2045e86b98aedf309cd8f1350`; at the
+> latest poll cycle 2 is training with no error, A2/A3 running on the two
+> WX9100 devices and A1/C1/C2 queued at 100 updates. These are updates, not
+> qualification results. No fresh replay, held-out matrix, qualification, or
+> deployment evidence is claimed.
+
 > **Dashboard promotion capture — 2026-10-24 06:41:03 UTC.** Snapshot
 > [`MECO_DASHBOARD_PROMOTION_SNAPSHOT_20261024T064103Z.json`](MECO_DASHBOARD_PROMOTION_SNAPSHOT_20261024T064103Z.json),
 > SHA-256 `9bee3debbd535f973cd79d430d23737f12ab8d34b8b55a39b86b6140a71f8660`.
