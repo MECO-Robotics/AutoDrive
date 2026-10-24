@@ -14,7 +14,7 @@ from frc_defense.meco_tracks import (categorical_from_candidate_logits,
     make_meco_track, candidate_digest, score_candidates)
 
 
-def _row_and_model():
+def _row_and_model(track="C1"):
     torch.manual_seed(42)
     observation = ObservationSnapshot(snapshot_id="snapshot-1", episode_id="episode-1",
         sequence=1, timestamp=0., raster_shape=(6, 1, 1), raster=(0.,) * 6,
@@ -27,7 +27,7 @@ def _row_and_model():
         fallback_candidate_id="candidate-a", action_indices=(0, 1),
         route_cost_points=torch.zeros(2), risk_cost_points=torch.zeros(2),
         route_records=({}, {}), candidate_recall={})
-    model = make_meco_track("C1", candidate_features=2).eval()
+    model = make_meco_track(track, candidate_features=2).eval()
     row = {"episode_id": "episode-1", "raster": torch.zeros(1, 6, 1, 1),
         "globals": torch.zeros(1, 7), "graph": None,
         "candidate_set": candidate_set, "candidate_digest": candidate_digest(table),
