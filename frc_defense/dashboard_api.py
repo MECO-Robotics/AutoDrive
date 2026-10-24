@@ -210,7 +210,7 @@ def _three_pass_provenance():
             return _untrusted_three_pass("manifest hash does not match the dashboard-pinned digest")
         data = json.loads(path.read_text())
         return _validate_three_pass_manifest(project, data)
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
         return _untrusted_three_pass(f"manifest could not be read: {type(exc).__name__}")
 
 
@@ -311,16 +311,19 @@ def _verified_repo_file(project, relative_path):
     from pathlib import Path
     if not isinstance(relative_path, str) or not relative_path:
         return None
-    relative = Path(relative_path)
-    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+    try:
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            return None
+        lexical = project / relative
+        if _contains_symlink(lexical):
+            return None
+        resolved = lexical.resolve()
+        if resolved != project and project not in resolved.parents:
+            return None
+        return resolved if resolved.is_file() and not resolved.is_symlink() else None
+    except (OSError, ValueError, RuntimeError):
         return None
-    lexical = project / relative
-    if _contains_symlink(lexical):
-        return None
-    resolved = lexical.resolve()
-    if resolved != project and project not in resolved.parents:
-        return None
-    return resolved if resolved.is_file() and not resolved.is_symlink() else None
 
 
 def _category_passes(row, definition, category, curriculum_version):
