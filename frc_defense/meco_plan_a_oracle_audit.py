@@ -169,6 +169,7 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
         if legal.get("full_pair_layout_sha256") != _canonical_sha(layout):
             raise ValueError("full feasible legal-node behavior layout digest mismatch")
         behavior_by_node = Counter()
+        descriptor_population = Counter()
         for index_in_layout, pair in enumerate(layout):
             if (pair.get("pair_index") != index_in_layout or
                     not isinstance(pair.get("descriptor_id"), str) or not pair["descriptor_id"]):
@@ -178,6 +179,8 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
                     type(pair.get("behavior_id")) is not int or not 0 <= pair["behavior_id"] < 5):
                 raise ValueError("full pair layout contains invalid feasible node/behavior identity")
             behavior_by_node[pair["node_id"]] += 1
+            if pair["feasible"]:
+                descriptor_population[(pair["node_id"], pair["behavior_id"])] += 1
             feasible_descriptor_counts[str(pair["behavior_id"])] += 1
         feasible_node_behaviors = {(pair["node_id"], pair["behavior_id"])
             for pair in feasible_pairs}
@@ -261,6 +264,7 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             "selected_pair_indices": [pair.get("pair_index") for pair in pairs]})
         if legal.get("selection_digest") != selection_digest:
             raise ValueError("sampled legal-node selection digest mismatch")
+        behavior_repeats_by_node = {node: {} for node in selected}
         for pair in pairs:
             pair_index = pair.get("pair_index")
             if (type(pair_index) is not int or not 0 <= pair_index < len(layout) or
@@ -274,8 +278,12 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             pi = pair.get("descriptor_inclusion_probability")
             weight = pair.get("descriptor_inverse_probability_weight")
             repeats = pair.get("repeat_returns", pair.get("repeat_outcomes"))
+            population = descriptor_population[(pair["node_id"], pair["behavior_id"])]
             if (not _number(pi) or not 0 < pi <= 1 or not _number(weight) or
-                    not math.isclose(weight, 1 / pi) or not isinstance(repeats, list) or
+                    not math.isclose(pi, 1 / population) or
+                    not math.isclose(weight, population) or
+                    pair.get("behavior_descriptor_support_count") != population or
+                    not isinstance(repeats, list) or
                     len(repeats) != 2 or any(not isinstance(repeat, dict) or
                     repeat.get("status") not in ("available", "unavailable") for repeat in repeats)):
                 raise ValueError("descriptor inclusion or paired-repeat provenance is invalid")
@@ -291,21 +299,98 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             behavior = pair.get("behavior_id")
             if pair.get("status") == "available":
                 totals["available_behavior_outcomes"] += 1
-                node_target = target_by_node[pair["node_id"]]
-                variance = node_target.get("behavior_repeat_return_variances", {}).get(str(behavior))
-                if not _number(variance) or variance < 0:
-                    raise ValueError("available behavior outcome lacks finite repeat variance")
-                per_behavior_variances[str(behavior)].append(variance)
+                repeat_values = [repeat["gross_horizon_return"] for repeat in repeats]
+                mean_return = sum(repeat_values) / len(repeat_values)
+                if (not _number(pair.get("gross_horizon_return")) or
+                        not math.isclose(pair["gross_horizon_return"], mean_return,
+                            rel_tol=1e-10, abs_tol=1e-12)):
+                    raise ValueError("behavior mean differs from recorded repeat returns")
+                behavior_repeats_by_node[pair["node_id"]][behavior] = repeat_values
             else:
                 totals["unavailable_behavior_outcomes"] += 1
+        for node in selected:
+            target = target_by_node[node]
+            feasible_behaviors = set(target["feasible_behavior_ids"])
+            available_behaviors = set(behavior_repeats_by_node[node])
+            censored = set(target["censored_feasible_behavior_ids"])
+            unavailable = set(target["unavailable_behavior_ids"])
+            if (available_behaviors != set(target["available_behavior_ids"]) or
+                    censored != feasible_behaviors - available_behaviors or
+                    unavailable != set(range(5)) - feasible_behaviors or
+                    (target["status"] == "available") != (available_behaviors == feasible_behaviors)):
+                raise ValueError("U available/censored/unavailable behavior inventories are inconsistent")
+            variance_map = target.get("behavior_repeat_return_variances")
+            if not isinstance(variance_map, dict) or set(variance_map) != {
+                    str(behavior) for behavior in available_behaviors}:
+                raise ValueError("U repeat variance inventory differs from available behaviors")
+            for behavior, values in behavior_repeats_by_node[node].items():
+                mean = sum(values) / len(values)
+                variance = sum((value - mean) ** 2 for value in values) / len(values)
+                stored_variance = variance_map[str(behavior)]
+                if (not _number(stored_variance) or stored_variance < 0 or
+                        not math.isclose(stored_variance, variance,
+                            rel_tol=1e-10, abs_tol=1e-12)):
+                    raise ValueError("stored behavior repeat variance differs from recorded outcomes")
+                per_behavior_variances[str(behavior)].append(variance)
+            if target["status"] == "available":
+                means = [sum(values) / len(values)
+                    for values in behavior_repeats_by_node[node].values()]
+                expected_u = sum(means) / len(means)
+                if not math.isclose(target["u_target"], expected_u,
+                        rel_tol=1e-10, abs_tol=1e-12):
+                    raise ValueError("U target differs from equal-weight feasible behavior returns")
         preferences = legal.get("behavior_preferences")
         if not isinstance(preferences, list) or any(not isinstance(item, dict) for item in preferences):
             raise ValueError("B behavior preferences are missing")
+        expected_preferences = {}
+        for node in selected:
+            behavior_repeats = behavior_repeats_by_node[node]
+            available = sorted(behavior_repeats)
+            for offset, left in enumerate(available):
+                for right in available[offset + 1:]:
+                    differences = [a - b for a, b in zip(
+                        behavior_repeats[left], behavior_repeats[right])]
+                    signs = [0 if value == 0 else 1 if value > 0 else -1
+                        for value in differences]
+                    status = ("comparable" if len(set(signs)) == 1 and signs[0] != 0
+                        else "tie" if all(value == 0 for value in differences) else "uncertain")
+                    expected_preferences[(node, left, right)] = (status, differences)
+        actual_preferences = {}
         for preference in preferences:
-            status = preference.get("status")
-            if status not in ("comparable", "tie", "uncertain"):
-                raise ValueError("B preference status is malformed")
-            totals[f"b_{status}"] += 1
+            identity = (preference.get("node_id"), preference.get("left_behavior_id"),
+                preference.get("right_behavior_id"))
+            if (any(type(value) is not int for value in identity) or
+                    identity in actual_preferences or
+                    preference.get("status") not in ("comparable", "tie", "uncertain")):
+                raise ValueError("B preference identity/status is malformed or duplicated")
+            actual_preferences[identity] = preference
+        if set(actual_preferences) != set(expected_preferences):
+            raise ValueError("B preferences do not cover exactly all available feasible behavior pairs")
+        for identity, (expected_status, differences) in expected_preferences.items():
+            preference = actual_preferences[identity]
+            left_values = behavior_repeats_by_node[identity[0]][identity[1]]
+            right_values = behavior_repeats_by_node[identity[0]][identity[2]]
+            left_mean, right_mean = sum(left_values) / 2, sum(right_values) / 2
+            mean_difference = left_mean - right_mean
+            expected_variance = sum((value - mean_difference) ** 2
+                for value in differences) / len(differences)
+            signs = [0 if value == 0 else 1 if value > 0 else -1 for value in differences]
+            preferred = ((identity[1] if signs[0] > 0 else identity[2])
+                if expected_status == "comparable" else None)
+            if (preference.get("status") != expected_status or
+                    preference.get("paired_repeat_differences") != differences or
+                    not _number(preference.get("left_mean_return")) or
+                    not _number(preference.get("right_mean_return")) or
+                    not math.isclose(preference["left_mean_return"], left_mean,
+                        rel_tol=1e-10, abs_tol=1e-12) or
+                    not math.isclose(preference["right_mean_return"], right_mean,
+                        rel_tol=1e-10, abs_tol=1e-12) or
+                    not _number(preference.get("paired_repeat_difference_variance")) or
+                    not math.isclose(preference["paired_repeat_difference_variance"],
+                        expected_variance, rel_tol=1e-10, abs_tol=1e-12) or
+                    preference.get("preferred_behavior_id") != preferred):
+                raise ValueError("B preference label differs from its paired recorded repeats")
+            totals[f"b_{expected_status}"] += 1
 
     def weight_summary(weights):
         if not weights:

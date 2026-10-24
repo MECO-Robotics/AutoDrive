@@ -63,16 +63,17 @@ def _fixture(tmp_path):
             for i in range(4)],
         "full_pair_layout": [{"pair_index": i, "node_id": node,
             "behavior_id": behavior, "descriptor_id": f"d-{i}", "feasible": True}
-            for i, (node, behavior) in enumerate([(0, 1), (1, 2), (1, 1),
-                (2, 2), (3, 1)])],
+            for i, (node, behavior) in enumerate([(0, 1), (0, 1), (0, 2),
+                (0, 3), (0, 4), (1, 2), (1, 1), (2, 2), (3, 1)])],
         "node_u_targets": [
-            {"node_id": 0, "status": "available", "u_target": 1.,
-                "feasible_behavior_ids": [1],
-                "available_behavior_ids": [1],
+            {"node_id": 0, "status": "available", "u_target": 1.75,
+                "feasible_behavior_ids": [1, 2, 3, 4],
+                "available_behavior_ids": [1, 2, 3, 4],
                 "censored_feasible_behavior_ids": [], "node_inclusion_probability": .5,
-                "unavailable_behavior_ids": [0, 2, 3, 4],
+                "unavailable_behavior_ids": [0],
                 "node_inverse_probability_weight": 2.,
-                "behavior_repeat_return_variances": {"1": 1.5}},
+                "behavior_repeat_return_variances": {"1": 0., "2": 0.,
+                    "3": 0., "4": 1.}},
             {"node_id": 2, "status": "unavailable", "u_target": None,
                 "feasible_behavior_ids": [2],
                 "available_behavior_ids": [],
@@ -80,23 +81,45 @@ def _fixture(tmp_path):
                 "unavailable_behavior_ids": [0, 1, 3, 4],
                 "node_inverse_probability_weight": 2.,
                 "behavior_repeat_return_variances": {}}],
-        "pairs": [{"pair_index": 0, "node_id": 0, "behavior_id": 1, "descriptor_id": "d-0",
-            "status": "available", "gross_horizon_return": 1.,
-            "descriptor_inclusion_probability": .25,
-            "descriptor_inverse_probability_weight": 4.,
-            "repeat_returns": [{"status": "available", "gross_horizon_return": 1.},
-                {"status": "available", "gross_horizon_return": 1.}]},
-            {"pair_index": 3, "node_id": 2, "behavior_id": 2, "descriptor_id": "d-3",
-            "status": "unavailable",
-            "descriptor_inclusion_probability": 1.,
-            "descriptor_inverse_probability_weight": 1.,
-            "repeat_returns": [{"status": "unavailable"}, {"status": "unavailable"}]}],
-        "behavior_preferences": [{"status": "comparable"}, {"status": "tie"},
-            {"status": "uncertain"}]}
+        "pairs": [], "behavior_preferences": []}
+    outcome_returns = {1: [2., 2.], 2: [1., 1.], 3: [2., 2.], 4: [1., 3.]}
+    for behavior, values in outcome_returns.items():
+        pair_index = {1: 0, 2: 2, 3: 3, 4: 4}[behavior]
+        population = 2 if behavior == 1 else 1
+        legal_row["pairs"].append({"pair_index": pair_index, "node_id": 0,
+            "behavior_id": behavior, "descriptor_id": f"d-{pair_index}",
+            "status": "available", "gross_horizon_return": sum(values) / 2,
+            "behavior_descriptor_support_count": population,
+            "descriptor_inclusion_probability": 1 / population,
+            "descriptor_inverse_probability_weight": population,
+            "repeat_returns": [{"status": "available", "gross_horizon_return": value}
+                for value in values]})
+    legal_row["pairs"].append({"pair_index": 7, "node_id": 2,
+        "behavior_id": 2, "descriptor_id": "d-7", "status": "unavailable",
+        "behavior_descriptor_support_count": 1,
+        "descriptor_inclusion_probability": 1., "descriptor_inverse_probability_weight": 1.,
+        "repeat_outcomes": [{"status": "unavailable"}, {"status": "unavailable"}]})
+    for offset, left in enumerate(sorted(outcome_returns)):
+        for right in sorted(outcome_returns)[offset + 1:]:
+            differences = [a - b for a, b in zip(outcome_returns[left], outcome_returns[right])]
+            signs = [0 if value == 0 else 1 if value > 0 else -1 for value in differences]
+            status = ("comparable" if len(set(signs)) == 1 and signs[0] != 0 else
+                "tie" if all(value == 0 for value in differences) else "uncertain")
+            mean_diff = sum(differences) / 2
+            legal_row["behavior_preferences"].append({"node_id": 0,
+                "left_behavior_id": left, "right_behavior_id": right,
+                "left_mean_return": sum(outcome_returns[left]) / 2,
+                "right_mean_return": sum(outcome_returns[right]) / 2,
+                "paired_repeat_differences": differences,
+                "paired_repeat_difference_variance": sum((value - mean_diff) ** 2
+                    for value in differences) / 2,
+                "preferred_behavior_id": (left if signs[0] > 0 else right)
+                    if status == "comparable" else None,
+                "status": status})
     legal_row["full_pair_layout_sha256"] = _hash(legal_row["full_pair_layout"])
     legal_row["selection_digest"] = _hash({"protocol_id": protocol_id,
         "key": ("pickup_simple", "single", 17, 3), "support_digest": "support",
-        "selected_node_ids": [0, 2], "selected_pair_indices": [0, 3]})
+        "selected_node_ids": [0, 2], "selected_pair_indices": [0, 2, 3, 4, 7]})
     legal_bytes = _bytes(legal_row)
     legal_dataset = tmp_path / "legal.jsonl"
     legal_dataset.write_bytes(legal_bytes)
@@ -113,22 +136,36 @@ def _fixture(tmp_path):
     return legal_dataset, source_dataset, protocol_path
 
 
+def _rewrite_legal(args, mutate):
+    dataset, _, _ = args
+    row = json.loads(dataset.read_text())
+    mutate(row)
+    data = _bytes(row)
+    dataset.write_bytes(data)
+    manifest_path = dataset.with_suffix(".jsonl.manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["dataset_sha256"] = _sha(data)
+    manifest_path.write_bytes(_bytes(manifest))
+
+
 def test_offline_audit_summarizes_coverage_labels_and_weights_without_claiming_replay(tmp_path):
     args = _fixture(tmp_path)
     report = audit_plan_a_legal_nodes(*args)
     assert report["coverage"]["sampled_legal_nodes"] == 2
     assert report["coverage"]["feasible_legal_nodes"] == 4
     assert report["coverage"]["sampled_heading_region_counts"] == {"0:0": 1, "0:1": 1}
-    assert report["coverage"]["feasible_node_behavior_counts"] == {"1": 3, "2": 2}
-    assert report["coverage"]["sampled_node_behavior_counts"] == {"1": 1, "2": 1}
+    assert report["coverage"]["feasible_node_behavior_counts"] == {
+        "1": 3, "2": 3, "3": 1, "4": 1}
+    assert report["coverage"]["sampled_node_behavior_counts"] == {
+        "1": 1, "2": 2, "3": 1, "4": 1}
     assert report["u_summary"]["available_node_count"] == 1
     assert report["u_summary"]["censored_node_count"] == 1
-    assert report["u_summary"]["repeat_available_count"] == 2
-    assert report["u_summary"]["per_behavior_repeat_return_variance"]["1"]["mean"] == 1.5
-    assert report["b_summary"] == {"preference_count": 3, "comparable_count": 1,
-        "tie_count": 1, "uncertain_count": 1}
+    assert report["u_summary"]["repeat_available_count"] == 8
+    assert report["u_summary"]["per_behavior_repeat_return_variance"]["4"]["mean"] == 1.
+    assert report["b_summary"] == {"preference_count": 6, "comparable_count": 2,
+        "tie_count": 1, "uncertain_count": 3}
     assert report["sampling_weights"]["node"]["effective_sample_size"] == 2.
-    assert report["sampling_weights"]["descriptor"]["effective_sample_size"] == 1.4705882352941178
+    assert report["sampling_weights"]["descriptor"]["effective_sample_size"] == 4.5
     assert report["evidence_status"] == {"replay_validated": False,
         "empirical_oracle_established": False, "warm_start_artifact_produced": False}
 
@@ -151,4 +188,44 @@ def test_audit_rejects_heldout_seed_even_with_updated_dataset_digest(tmp_path):
     manifest["dataset_sha256"] = _sha(data)
     manifest_path.write_bytes(_bytes(manifest))
     with pytest.raises(ValueError, match="out-of-train"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_recomputes_behavior_variance_from_repeats(tmp_path):
+    args = _fixture(tmp_path)
+    _rewrite_legal(args, lambda row: row["node_u_targets"][0][
+        "behavior_repeat_return_variances"].update({"4": 999.}))
+    with pytest.raises(ValueError, match="repeat variance differs"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_requires_exact_feasible_censoring_inventory(tmp_path):
+    args = _fixture(tmp_path)
+    _rewrite_legal(args, lambda row: row["node_u_targets"][1][
+        "censored_feasible_behavior_ids"].clear())
+    with pytest.raises(ValueError, match="inventories are inconsistent"):
+        audit_plan_a_legal_nodes(*args)
+
+
+@pytest.mark.parametrize("mutation", ["remove", "wrong_status"])
+def test_audit_requires_exact_b_pair_coverage_and_repeat_status(tmp_path, mutation):
+    args = _fixture(tmp_path)
+    def mutate(row):
+        if mutation == "remove":
+            row["behavior_preferences"].pop()
+        else:
+            row["behavior_preferences"][0]["status"] = "tie"
+    _rewrite_legal(args, mutate)
+    with pytest.raises(ValueError, match="B preference"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_binds_descriptor_probability_to_full_support_population(tmp_path):
+    args = _fixture(tmp_path)
+    def mutate(row):
+        pair = next(item for item in row["pairs"] if item["pair_index"] == 0)
+        pair["descriptor_inclusion_probability"] = .25
+        pair["descriptor_inverse_probability_weight"] = 4.
+    _rewrite_legal(args, mutate)
+    with pytest.raises(ValueError, match="descriptor inclusion"):
         audit_plan_a_legal_nodes(*args)
