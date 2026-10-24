@@ -631,3 +631,22 @@ in `docs/implementation-provenance/c2-integrated-head-replay-20261024.json`
 (SHA-256 `0d823984706ada26431d45230c676fbce04abb4d0077b0681a88e43ff85a5eac`);
 it reproduced identical logits and log probabilities in 10/10 WX9100 runs and
 matched the saved rollout log probability exactly.
+
+### Paired matrix effects and confidence intervals
+
+`scripts/summarize_meco_ablation_matrix.py` now adds equal-category-weighted
+paired effects and within-category bootstrap confidence intervals to the
+existing per-category matrix summaries. The report requires all five learned
+track-vs-D0 pairs and each producer-defined named contrast, including the three
+A1/A2/A3 pairwise comparisons. Missing pairs, missing metrics, null paired
+values, nonfinite values, and unsupported named mappings fail closed. Bootstrap
+seeds bind to the caller seed and frozen matrix/evaluation-report content.
+
+The source implementation commit is
+`185aba4b411eed9698df0e251c469dfc580bb141`; it is integrated in candidate
+commit `3d5f4b0df3ff97795c8733d743040cb23d14c3bb`. Its focused summarizer suite
+passed 39 tests. The analyzer is CPU-only postprocessing over existing report
+files. These intervals are diagnostic and do not make promotion, qualification,
+deployment, simulator, or whole-plan completion claims. The scoped planner,
+implementation, and reviewer summaries are recorded in
+`docs/implementation-provenance/matrix-paired-effects-confidence-intervals.md`.

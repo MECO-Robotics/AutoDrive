@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 32
+    assert len(result["tranches"]) == 33
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -102,6 +102,24 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "episode-wide" in endpoint["limits"]
     assert "D0 has no selected-goal ledger" in endpoint["limits"]
     assert "not contact-caused recovery" in endpoint["limits"]
+    matrix_ci = next(t for t in result["tranches"]
+                     if t["requirement_id"] == "matrix-paired-effects-confidence-intervals")
+    assert matrix_ci["implementer"]["commit"] == (
+        "185aba4b411eed9698df0e251c469dfc580bb141")
+    assert matrix_ci["implementer"]["candidate_integration_commit"] == (
+        "3d5f4b0df3ff97795c8733d743040cb23d14c3bb")
+    assert matrix_ci["reviewer"]["approved_commit"] == matrix_ci["implementer"]["commit"]
+    assert matrix_ci["planner"]["artifact"]["path"] == (
+        "docs/implementation-provenance/matrix-paired-effects-confidence-intervals.md")
+    assert matrix_ci["planner"]["artifact"]["sha256"] == matrix_ci["reviewer"]["artifact"]["sha256"]
+    assert matrix_ci["implementer"]["paths"] == [
+        "scripts/summarize_meco_ablation_matrix.py",
+        "tests/test_summarize_meco_ablation_matrix.py"]
+    assert "diagnostic paired effects only" in matrix_ci["limits"]
+    matrix_summary = (REPO / matrix_ci["planner"]["artifact"]["path"]).read_text()
+    assert "/root/phase4_next_planner" in matrix_summary
+    assert "/root/phase4_pair_contact_review" in matrix_summary
+    assert "185aba4b411eed9698df0e251c469dfc580bb141" in matrix_summary
 
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
