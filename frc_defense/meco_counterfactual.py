@@ -44,6 +44,12 @@ PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA = "meco-executed-route-independent-cost-v1"
 PLAN_A_P_ROUTE_ORACLE_VERSION = "base-bump-plus-effective-p-grid-edge-integral-v1"
 PLAN_A_LEGAL_NODE_DATASET_SCHEMA = "meco-counterfactual-plan-a-legal-node-v1"
 PLAN_A_LEGAL_NODE_TARGET_SCHEMA = "meco-plan-a-legal-node-utility-and-feasible-preference-v1"
+PLAN_A_U_ORACLE_VERSION = "matched-prefix-equal-feasible-behavior-gross-return-v1"
+PLAN_A_U_ORACLE_SEMANTICS = (
+    "gross undiscounted reward through the fixed horizon after one uniformly sampled "
+    "feasible descriptor per feasible behavior, equal-weighted across feasible behaviors; "
+    "each repeat index uses common random numbers across goal/behavior branches; fixed "
+    "deterministic teacher continuation; sampled node only; no optimality claim")
 PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA = "meco-plan-a-expert-goal-source-v1"
 PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA = "meco-plan-a-explicit-selected-goal-trace-v1"
 PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX = 512
@@ -91,6 +97,28 @@ _VALIDATED_EPISODE_ELIGIBILITY_CACHE = {}
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                             allow_nan=False).encode()).hexdigest()
+
+
+def _plan_a_u_evidence_sha256(support_digest, target, pair_outcomes):
+    """Bind a sampled-node U estimand to every matched rollout used to form it."""
+    node = target.get("node_id")
+    evidence = []
+    for pair in pair_outcomes:
+        if pair.get("node_id") != node:
+            continue
+        repeats = pair.get("repeat_returns", pair.get("repeat_outcomes", []))
+        evidence.append({"pair_index": pair.get("pair_index"),
+            "behavior_id": pair.get("behavior_id"),
+            "descriptor_id": pair.get("descriptor_id"),
+            "status": pair.get("status"),
+            "repeat_statuses": [item.get("status") for item in repeats],
+            "repeat_seeds": [item.get("repeat_seed") for item in repeats],
+            "gross_horizon_returns": [item.get("gross_horizon_return")
+                if item.get("status") == "available" else None for item in repeats]})
+    return _hash({"oracle_version": PLAN_A_U_ORACLE_VERSION,
+        "support_digest": support_digest, "node_id": node,
+        "feasible_behavior_ids": target.get("feasible_behavior_ids"),
+        "u_target": target.get("u_target"), "pair_evidence": evidence})
 
 
 def _native_fuel_extension_identity():
@@ -1513,7 +1541,11 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
                     "censored_feasible_behavior_ids": censored_behaviors,
                     "behavior_mean_returns": means, "behavior_repeat_return_variances": variances,
                     "behavior_repeat_mean_returns": repeat_means,
-                    "behavior_weighting": "equal over feasible behaviors; one uniform hash-ranked descriptor estimates each behavior mean"})
+                    "behavior_weighting": "equal over feasible behaviors; one uniform hash-ranked descriptor estimates each behavior mean",
+                    "u_oracle_version": PLAN_A_U_ORACLE_VERSION,
+                    "u_evidence_sha256": None})
+                node_targets[-1]["u_evidence_sha256"] = _plan_a_u_evidence_sha256(
+                    support.support_digest, node_targets[-1], outcomes)
                 available = sorted(means)
                 for i, left in enumerate(available):
                     for right in available[i + 1:]:
@@ -1535,6 +1567,7 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
                             "stability_rule": "both paired repeats have the same nonzero sign; no calibrated noise margin; otherwise uncertain"})
             out_rows.append({"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
                 "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+                "u_oracle_version": PLAN_A_U_ORACLE_VERSION,
                 "scenario_id": record["scenario_id"], "category": record["category"],
                 "seed": record["seed"], "decision_index": record["decision_index"],
                 "macro_start_tick": record["macro_start_tick"],
@@ -1584,6 +1617,8 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
         raise
     manifest = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA, "split": "train",
+        "u_oracle_version": PLAN_A_U_ORACLE_VERSION,
+        "u_oracle_semantics": PLAN_A_U_ORACLE_SEMANTICS,
         "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
         "qualification_protocol_file": protocol_path.name, "sources": sources,
         "source_identity_sha256": _hash(sources), "source_dataset_sha256": source_sha,

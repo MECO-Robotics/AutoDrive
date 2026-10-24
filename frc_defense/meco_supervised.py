@@ -3178,6 +3178,7 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
     """Fail-closed validator: regenerate all labels from strict source replays."""
     from .meco_counterfactual import (collect_plan_a_legal_nodes_v1,
         PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        PLAN_A_U_ORACLE_VERSION, PLAN_A_U_ORACLE_SEMANTICS, CONTINUATION_POLICY,
         _hash, replay_counterfactual_branch)
     from .curriculum_training import source_identity
     import hashlib, tempfile
@@ -3191,6 +3192,9 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
     sources = source_identity()
     if (manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
             manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            manifest.get("u_oracle_version") != PLAN_A_U_ORACLE_VERSION or
+            manifest.get("u_oracle_semantics") != PLAN_A_U_ORACLE_SEMANTICS or
+            manifest.get("continuation_policy") != CONTINUATION_POLICY or
             manifest.get("split") != "train" or manifest.get("sources") != sources or
             manifest.get("source_identity_sha256") != _canonical_hash(sources) or
             manifest.get("dataset_sha256") != digest):
@@ -3376,6 +3380,9 @@ def warm_start_plan_a_legal_nodes_v1(track: str, dataset: Path, source_dataset: 
         "protocol_id": manifest["protocol_id"], "protocol_sha256": manifest["qualification_protocol_sha256"],
         "target_schema": "meco-plan-a-legal-node-utility-and-feasible-preference-v1",
         "dataset_schema": "meco-counterfactual-plan-a-legal-node-v1",
+        "u_oracle_version": manifest["u_oracle_version"],
+        "u_oracle_semantics": manifest["u_oracle_semantics"],
+        "u_label_provenance": "strictly replayed matched simulator branch returns; bounded sampled support; no global optimality claim",
         "source_dataset_schema": "meco-counterfactual-trajectory-v3",
         "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
         "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
@@ -3383,8 +3390,8 @@ def warm_start_plan_a_legal_nodes_v1(track: str, dataset: Path, source_dataset: 
         "split": "train", "prediction_mode": manifest["prediction_mode"],
         "coverage_rule": manifest["coverage_rule"], "u_loss": "inverse-node-inclusion-weighted smooth_l1(U(node), equal-feasible-behavior mean of uniform descriptor-sample returns)",
         "b_loss": "pairwise_softplus on behavior logits centered over sampled feasible behaviors per node; uniformly sampled descriptor alternatives estimate behavior marginals; equal node weighting with node inclusion weights",
-        "p_target": None, "p_prior": 0.0,
-        "p_mode": "p0", "optimizer_state_included": False, "resume_compatible": False,
+        "p_target": None, "p_prior": 0.0, "p_mode": "p0",
+        "optimizer_state_included": False, "resume_compatible": False,
         "device": manifest["device"], "updates": updates, "learning_rate": learning_rate,
         "node_target_count": node_count, "comparable_behavior_pair_count": preference_count,
         "selector_digest": _canonical_hash([x["row"]["selection_digest"] for x in samples]),

@@ -6,7 +6,9 @@ import pytest
 from frc_defense.meco_counterfactual import (DATASET_SCHEMA,
     TARGET_SCHEMA, PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA,
     PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
-    PLAN_A_LEGAL_NODE_TARGET_SCHEMA)
+    PLAN_A_LEGAL_NODE_TARGET_SCHEMA, PLAN_A_U_ORACLE_VERSION,
+    PLAN_A_U_ORACLE_SEMANTICS, CONTINUATION_POLICY,
+    _plan_a_u_evidence_sha256)
 from frc_defense.meco_counterfactual import _artifact_identity_sha256, _hash
 from frc_defense.meco_plan_a_oracle_audit import audit_plan_a_legal_nodes
 
@@ -77,6 +79,7 @@ def _fixture(tmp_path, *, expert=True):
     expert_node_weight = 1. if expert else 2.
     legal_row = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
+        "u_oracle_version": PLAN_A_U_ORACLE_VERSION,
         "scenario_id": "pickup_simple", "category": "single", "seed": 17,
         "decision_index": 3,
         "source_identity_sha256": source_identity, "snapshot_id": "snap",
@@ -97,14 +100,15 @@ def _fixture(tmp_path, *, expert=True):
                 "unavailable_behavior_ids": [0],
                 "node_inverse_probability_weight": 1.,
                 "behavior_repeat_return_variances": {"1": 0., "2": 0.,
-                    "3": 0., "4": 1.}},
+                    "3": 0., "4": 1.}, "u_oracle_version": PLAN_A_U_ORACLE_VERSION},
             *([{"node_id": 2, "status": "unavailable", "u_target": None,
                 "feasible_behavior_ids": [2],
                 "available_behavior_ids": [],
                 "censored_feasible_behavior_ids": [2], "node_inclusion_probability": expert_node_pi,
                 "unavailable_behavior_ids": [0, 1, 3, 4],
                 "node_inverse_probability_weight": expert_node_weight,
-                "behavior_repeat_return_variances": {}}] if expert else []),
+                "behavior_repeat_return_variances": {},
+                "u_oracle_version": PLAN_A_U_ORACLE_VERSION}] if expert else []),
         ],
         "root_node": 0, "root_node_behavior_supported": True,
         "node_inclusion_probabilities": ({"0": 1., "2": expert_node_pi}
@@ -123,14 +127,21 @@ def _fixture(tmp_path, *, expert=True):
             "behavior_descriptor_support_count": population,
             "descriptor_inclusion_probability": 1 / population,
             "descriptor_inverse_probability_weight": population,
-            "repeat_returns": [{"status": "available", "gross_horizon_return": value}
-                for value in values]})
+            "repeat_returns": [{"status": "available", "gross_horizon_return": value,
+                "repeat_seed": int.from_bytes(hashlib.sha256(
+                    f"legal-node-repeat:17:{repeat}".encode()).digest()[:4], "big")}
+                for repeat, value in enumerate(values)]})
     if expert:
         legal_row["pairs"].append({"pair_index": 7, "node_id": 2,
         "behavior_id": 2, "descriptor_id": "d-7", "status": "unavailable",
         "behavior_descriptor_support_count": 1,
         "descriptor_inclusion_probability": 1., "descriptor_inverse_probability_weight": 1.,
-        "repeat_outcomes": [{"status": "unavailable"}, {"status": "unavailable"}]})
+        "repeat_outcomes": [{"status": "unavailable", "repeat_seed": int.from_bytes(
+            hashlib.sha256(f"legal-node-repeat:17:{repeat}".encode()).digest()[:4], "big")}
+            for repeat in range(2)]})
+    for target in legal_row["node_u_targets"]:
+        target["u_evidence_sha256"] = _plan_a_u_evidence_sha256(
+            "support", target, legal_row["pairs"])
     for offset, left in enumerate(sorted(outcome_returns)):
         for right in sorted(outcome_returns)[offset + 1:]:
             differences = [a - b for a, b in zip(outcome_returns[left], outcome_returns[right])]
@@ -158,6 +169,9 @@ def _fixture(tmp_path, *, expert=True):
     legal_dataset.write_bytes(legal_bytes)
     legal_manifest = {"schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         "target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA, "split": "train",
+        "u_oracle_version": PLAN_A_U_ORACLE_VERSION,
+        "u_oracle_semantics": PLAN_A_U_ORACLE_SEMANTICS,
+        "continuation_policy": CONTINUATION_POLICY,
         "record_count": 1, "dataset_sha256": _sha(legal_bytes),
         "source_dataset_sha256": _sha(source_bytes),
         "source_manifest_sha256": _sha(source_manifest_bytes),
@@ -238,6 +252,40 @@ def test_audit_recomputes_behavior_variance_from_repeats(tmp_path):
     _rewrite_legal(args, lambda row: row["node_u_targets"][0][
         "behavior_repeat_return_variances"].update({"4": 999.}))
     with pytest.raises(ValueError, match="repeat variance differs"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_binds_u_target_to_exact_matched_rollout_returns(tmp_path):
+    args = _fixture(tmp_path)
+    _rewrite_legal(args, lambda row: row["pairs"][0]["repeat_returns"][0].update(
+        {"gross_horizon_return": 4.}))
+    with pytest.raises(ValueError, match="evidence digest|mean differs"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_rejects_rewritten_u_evidence_digest(tmp_path):
+    args = _fixture(tmp_path)
+    _rewrite_legal(args, lambda row: row["node_u_targets"][0].update(
+        {"u_evidence_sha256": "0" * 64}))
+    with pytest.raises(ValueError, match="evidence digest"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_rejects_unpaired_repeat_seed(tmp_path):
+    args = _fixture(tmp_path)
+    _rewrite_legal(args, lambda row: row["pairs"][0]["repeat_returns"][0].update(
+        {"repeat_seed": 0}))
+    with pytest.raises(ValueError, match="repeat seed"):
+        audit_plan_a_legal_nodes(*args)
+
+
+def test_audit_requires_explicit_u_oracle_semantics(tmp_path):
+    args = _fixture(tmp_path)
+    manifest_path = args[0].with_suffix(".jsonl.manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["u_oracle_semantics"] = "expert optimality"
+    manifest_path.write_bytes(_bytes(manifest))
+    with pytest.raises(ValueError, match="manifest bytes"):
         audit_plan_a_legal_nodes(*args)
 
 

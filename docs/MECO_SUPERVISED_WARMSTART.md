@@ -280,6 +280,21 @@ until the independent P-v3 oracle supplies them. Fresh deterministic
 recollection must byte-match the dataset before fitting; the dedicated
 weights-only consumer rejects CPU and nonmatching track/device/P contracts.
 
+The U oracle contract is versioned as
+`matched-prefix-equal-feasible-behavior-gross-return-v1`. Each repeated branch
+starts from the same frozen prefix state, executes its sampled legal goal and
+behavior, then follows the fixed deterministic teacher continuation to the
+fixed horizon. A repeat index uses the same protocol-derived RNG seed across
+goal/behavior branches, so the recorded differences are paired. U is gross
+undiscounted horizon return, averaged first over the two repeats, then equally
+over feasible behaviors. Per-node evidence digests bind the target to exact
+sampled descriptors, repeat seeds, statuses, and returns; the offline audit
+recomputes those digests and rejects changed pairing or incomplete feasible
+behavior support. This is a bounded rollout-value estimand for sampled legal
+nodes. It does not establish a globally optimal goal or policy. The fitter
+records this U definition and keeps the unlabelled P head at P0 (`p_mode=p0`,
+zero prior); it does not infer P from returns.
+
 The offline audit command checks exact legal-node/source dataset and manifest
 bytes, their train-split and protocol binding, source identity, row identities,
 and recorded replay-state/support digests, then summarizes sampled heading and

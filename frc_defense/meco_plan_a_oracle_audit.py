@@ -43,6 +43,8 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
     from .meco_counterfactual import (DATASET_SCHEMA,
         TARGET_SCHEMA, PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
         PLAN_A_EXPERT_GOAL_SOURCE_SCHEMA, PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA,
+        PLAN_A_U_ORACLE_VERSION, PLAN_A_U_ORACLE_SEMANTICS,
+        CONTINUATION_POLICY, _plan_a_u_evidence_sha256,
         PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX, PLAN_A_LEGAL_NODE_REPEATS,
         _artifact_identity_sha256)
     from .meco_supervised import _load_protocol, _protocol_train_seeds
@@ -67,6 +69,9 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
         raise ValueError("legal-node manifest source identity digest is missing or invalid")
     if (legal_manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
             legal_manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+            legal_manifest.get("u_oracle_version") != PLAN_A_U_ORACLE_VERSION or
+            legal_manifest.get("u_oracle_semantics") != PLAN_A_U_ORACLE_SEMANTICS or
+            legal_manifest.get("continuation_policy") != CONTINUATION_POLICY or
             legal_manifest.get("split") != "train" or
             legal_manifest.get("dataset_sha256") != legal_sha or
             legal_manifest.get("record_count") != len(legal_rows) or
@@ -198,6 +203,7 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
             if isinstance(branch_state, dict) else None)
         if (legal.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
                 legal.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+                legal.get("u_oracle_version") != PLAN_A_U_ORACLE_VERSION or
                 source.get("source_identity_sha256") != source_identity_sha or
                 legal.get("source_identity_sha256") != source_identity_sha or
                 legal.get("snapshot_id") != source_snapshot_id or
@@ -345,7 +351,8 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
                     sorted(set(feasible_behaviors)) != layout_behaviors):
                 raise ValueError("U target behavior coverage differs from the full feasible layout")
         for target in targets:
-            if (target.get("status") not in ("available", "unavailable") or
+            if (target.get("u_oracle_version") != PLAN_A_U_ORACLE_VERSION or
+                    target.get("status") not in ("available", "unavailable") or
                     (target.get("status") == "available") != (target.get("u_target") is not None)):
                 raise ValueError("U target status/value is inconsistent")
             if target["status"] == "available" and not _number(target["u_target"]):
@@ -430,7 +437,11 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
                 raise ValueError("descriptor outcome status differs from its paired repeats")
             descriptor_weights.append(weight)
             totals["pair_outcomes"] += 1
-            for repeat in repeats:
+            for repeat_index, repeat in enumerate(repeats):
+                expected_repeat_seed = int.from_bytes(hashlib.sha256(
+                    f"legal-node-repeat:{key[2]}:{repeat_index}".encode()).digest()[:4], "big")
+                if repeat.get("repeat_seed") != expected_repeat_seed:
+                    raise ValueError("matched rollout repeat seed differs from the frozen pairing schedule")
                 if repeat["status"] == "available" and not _number(repeat.get("gross_horizon_return")):
                     raise ValueError("available repeat return is not finite")
                 totals["repeat_available" if repeat["status"] == "available" else "repeat_unavailable"] += 1
@@ -477,6 +488,10 @@ def audit_plan_a_legal_nodes(dataset: Path, source_dataset: Path,
                 if not math.isclose(target["u_target"], expected_u,
                         rel_tol=1e-10, abs_tol=1e-12):
                     raise ValueError("U target differs from equal-weight feasible behavior returns")
+            expected_evidence = _plan_a_u_evidence_sha256(
+                legal["support_digest"], target, pairs)
+            if target.get("u_evidence_sha256") != expected_evidence:
+                raise ValueError("U target evidence digest differs from matched rollout returns")
         preferences = legal.get("behavior_preferences")
         if not isinstance(preferences, list) or any(not isinstance(item, dict) for item in preferences):
             raise ValueError("B behavior preferences are missing")
