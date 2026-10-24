@@ -401,9 +401,14 @@ class MecoSupervisor:
             "D0_control": "production deterministic slot-3 controller; native 20 ms cadence; outside candidate table"})
 
     def _lane_payload(self, track, statuses):
+        status = statuses.get(track, "queued")
+        deferred = (status == "queued" and
+            self.configs[track].device == self.evaluation_device and
+            (self.evaluator is not None or self.pending_evaluations))
         return {"track": track, "run_id": self.run_ids[track],
                 "run_directory": track, "device": self.configs[track].device,
-                "status": statuses.get(track, "queued"),
+                "status": "deferred_for_evaluation" if deferred else status,
+                "deferred_reason": "evaluation_device_lease" if deferred else None,
                 "pid": self.worker_pids.get(track),
                 "completed_updates": self._heartbeat_updates(track),
                 "chunk_updates": self.chunk_updates}
@@ -747,6 +752,11 @@ class MecoSupervisor:
                                    for track in processes)
                     if occupied:
                         continue
+                    # A queued or running evaluator owns its indexed device.
+                    # Keep that lane pending until the evaluation releases it.
+                    if (device == self.evaluation_device and
+                            (self.evaluator is not None or self.pending_evaluations)):
+                        continue
                     selected = next((track for track in pending
                                      if self.configs[track].device == device), None)
                     if selected is None:
@@ -777,7 +787,7 @@ class MecoSupervisor:
                         break
 
             fill_free_devices()
-            while processes:
+            while processes or (pending and abort_started is None and not self.request_stop):
                 self._observe_stop()
                 if self.request_stop and not self.stop_file.exists():
                     self.stop_file.parent.mkdir(parents=True, exist_ok=True)
@@ -901,8 +911,10 @@ class MecoSupervisor:
                             f"worker process groups remained after bounded sibling-abort reap: {unreaped}")
                 self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
                               statuses=statuses, error=failed or None)
-                self._poll_evaluator(cycle, statuses)
-                if processes:
+                self._poll_evaluator(cycle, statuses,
+                    occupied_devices={self.configs[track].device
+                                      for track in processes})
+                if processes or self.evaluator is not None:
                     time.sleep(.5)
         except BaseException:
             # Child processes are detached into their own sessions. On setup
@@ -988,8 +1000,10 @@ class MecoSupervisor:
                           ignore_errors=True)
         self.pending_evaluations = [job]
 
-    def _start_next_evaluation(self):
+    def _start_next_evaluation(self, *, occupied_devices=()):
         if self.evaluator is not None or not self.pending_evaluations or self.request_stop:
+            return
+        if self.evaluation_device in occupied_devices:
             return
         job = self.pending_evaluations.pop(0)
         command = _evaluation_command(checkpoints=job["checkpoints"], scenario=self.scenario,
@@ -1015,10 +1029,10 @@ class MecoSupervisor:
                 "output_file": job["output"].name, "status": "failed_to_start",
                 "error": f"{type(exc).__name__}: {exc}"}
 
-    def _poll_evaluator(self, cycle, statuses):
+    def _poll_evaluator(self, cycle, statuses, *, occupied_devices=()):
         self._observe_stop()
         if self.evaluator is None:
-            self._start_next_evaluation()
+            self._start_next_evaluation(occupied_devices=occupied_devices)
         if self.evaluator is None:
             return
         result = self.evaluator.poll()
@@ -1052,7 +1066,7 @@ class MecoSupervisor:
         _append_evaluation_history(self.evaluation_output,
             cycle=job["cycle"], output=output, completion=completion,
             checkpoints=job["checkpoints"])
-        self._start_next_evaluation()
+        self._start_next_evaluation(occupied_devices=occupied_devices)
         self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
                       statuses=statuses, evaluation=completion)
 

@@ -33,6 +33,11 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
     for track in MECO_TRACKS:
         (tmp_path / track).mkdir()
     supervisor.devices = ("cuda:0", "cuda:1")
+    supervisor.evaluation_device = "cuda:1"
+    supervisor.evaluator = None
+    supervisor.evaluator_log = None
+    supervisor.evaluator_job = None
+    supervisor.pending_evaluations = []
     supervisor.chunk_updates = 10
     supervisor.stop_file = tmp_path / "STOP"
     supervisor.supervisor_id = "dispatch-test"
@@ -53,7 +58,7 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
     supervisor._completed_updates = lambda track: completed[track]
     supervisor._refresh_progress = lambda track: None
     supervisor._write_queued_manifests = lambda statuses: None
-    supervisor._poll_evaluator = lambda cycle, statuses: None
+    supervisor._poll_evaluator = lambda cycle, statuses, **kwargs: None
     supervisor.published = []
     supervisor._publish = lambda **kwargs: supervisor.published.append(
         (kwargs["phase"], dict(kwargs["statuses"])))
@@ -76,6 +81,8 @@ def make_supervisor(tmp_path, monkeypatch, *, plans=None, completed=None,
         track = command[command.index("--track") + 1]
         device = supervisor.configs[track].device
         assert device not in active_devices, f"two workers active on {device}"
+        assert (supervisor.evaluator is None or
+                device != supervisor.evaluation_device), "trainer overlapped evaluator GPU lease"
         active_devices.add(device)
         started.append(track)
         active_tracks.add(track)
@@ -171,6 +178,62 @@ def test_dispatch_rejects_duplicate_queue_tracks(tmp_path, monkeypatch):
         supervisor._run_training_batch(["A1", "A1"], 1,
             {track: "queued" for track in MECO_TRACKS}, 10, {})
     assert started == []
+
+
+def test_evaluation_device_lease_defers_only_matching_lanes_and_resumes(
+        tmp_path, monkeypatch):
+    supervisor, completed, started, _, events = make_supervisor(
+        tmp_path, monkeypatch, plans={track: (1, 0) for track in MECO_TRACKS})
+    supervisor.evaluator = object()
+    eval_ticks = {"left": 3}
+
+    def poll_eval(_cycle, _statuses, *, occupied_devices=()):
+        if supervisor.evaluator is None:
+            return
+        assert supervisor.evaluation_device not in occupied_devices
+        events.append(("evaluation_poll", None, set(occupied_devices)))
+        eval_ticks["left"] -= 1
+        if eval_ticks["left"] == 0:
+            supervisor.evaluator = None
+            events.append(("evaluation_released", None, set(occupied_devices)))
+
+    supervisor._poll_evaluator = poll_eval
+    statuses = {track: "queued" for track in MECO_TRACKS}
+    supervisor._run_training_batch(list(MECO_TRACKS), 1, statuses, 10, {})
+
+    assert all(value == 10 for value in completed.values())
+    assert statuses == {track: "complete" for track in MECO_TRACKS}
+    first_eval_gpu_lane = next(i for i, event in enumerate(events)
+                               if event[:2] == ("start", "A2"))
+    release_index = next(i for i, event in enumerate(events)
+                         if event[0] == "evaluation_released")
+    assert len([event for event in events if event[:2] == ("finish", "A1")]) == 1
+    assert release_index < first_eval_gpu_lane
+    assert any(i < release_index and event[:2] in {
+            ("finish", "A1"), ("finish", "A3"), ("finish", "C2")}
+        for i, event in enumerate(events))
+
+
+def test_deferred_device_lane_is_visible_in_queue_payload(tmp_path, monkeypatch):
+    supervisor, *_ = make_supervisor(tmp_path, monkeypatch)
+    supervisor.evaluator = object()
+    supervisor.worker_pids = {}
+    lane = supervisor._lane_payload("A2", {track: "queued" for track in MECO_TRACKS})
+    assert lane["status"] == "deferred_for_evaluation"
+    assert lane["deferred_reason"] == "evaluation_device_lease"
+
+
+def test_queued_evaluation_waits_for_its_device_lease(tmp_path, monkeypatch):
+    supervisor, *_ = make_supervisor(tmp_path, monkeypatch)
+    queued = {"job": "must-remain-queued"}
+    supervisor.pending_evaluations = [queued]
+    launched = []
+    monkeypatch.setattr(module.subprocess, "Popen",
+        lambda *args, **kwargs: launched.append(args))
+    supervisor._start_next_evaluation(occupied_devices={"cuda:1"})
+    assert supervisor.pending_evaluations == [queued]
+    assert supervisor.evaluator is None
+    assert launched == []
 
 
 def test_target_barrier_and_restart_catchup_dispatch_only_lagging_tracks(

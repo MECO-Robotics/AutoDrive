@@ -426,6 +426,21 @@ def _evaluation_record_digest(record: dict) -> str:
                               if key != "dashboard_replay"})
 
 
+def _evaluation_execution_failure_reason(*, action_was_remasked: bool,
+        native_preempted: bool, selected_target_lost: bool,
+        policy_fallback: bool, fallback_reason: str | None) -> str:
+    """Classify observed failures without calling inference fallback a remask."""
+    if selected_target_lost:
+        return "selected_target_lost"
+    if native_preempted:
+        return "native_behavior_preempted_selected_goal"
+    if action_was_remasked:
+        return "action_was_remasked"
+    if policy_fallback:
+        return fallback_reason or "policy_inference_fallback"
+    raise ValueError("execution failure reason requested without a failure")
+
+
 def _validate_replay_seed_selection(output_dir, replay_seeds, scored_seeds) -> set[int]:
     if (output_dir is None) != (replay_seeds is None):
         raise ValueError("replay_output_dir and explicit replay_seeds must be supplied together")
@@ -849,6 +864,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             "counters": model.inference_counters}
     finite_decision = bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
     fallback_used = production_inference_failed or not finite_decision
+    fallback_reason = ("policy_inference_fallback" if production_inference_failed else
+                       "nonfinite_policy_decision" if not finite_decision else None)
     if not finite_decision:
         action = torch.tensor([support.fallback_pair], device=env.device, dtype=torch.long)
         logprob = torch.zeros((1,), device=env.device, dtype=logits.dtype)
@@ -873,6 +890,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
         "risk_cost_nodes": risk_nodes, "graph_object": graph,
         "planner_object": env.planner, "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
         "prediction": prediction_metadata,
         "inference_provenance": inference_provenance if isinstance(model, ProductionMecoAdapter) else None}
 
@@ -2783,21 +2801,28 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 terminal_goal_distance_m=goal_distance,
                                 terminal_heading_error_rad=heading_error,
                                 heading_alignment_opportunity=heading_opportunity)
-                            if ((not forced_eval_goal and prepared is not None and
-                                 prepared.get("fallback_used", False)) or hard_failure):
+                            policy_fallback = bool(not forced_eval_goal and
+                                prepared is not None and prepared.get("fallback_used", False))
+                            fallback_reason = (prepared.get("fallback_reason")
+                                if prepared is not None else None)
+                            if policy_fallback or hard_failure:
                                 execution_failures.append({
                                     "selected_action": action,
                                     "executed_action_trace": actual_trace,
+                                    "action_was_remasked": remasked,
+                                    "policy_inference_fallback": policy_fallback,
+                                    "fallback_reason": fallback_reason,
                                     "terminal_heading_error": heading_error,
                                     "terminal_goal_distance_m": goal_distance,
-                                        "heading_alignment_opportunity": heading_opportunity,
-                                        "reason": ("selected_target_lost"
-                                                   if selected_target_lost else
-                                                   "native_behavior_preempted_selected_goal"
-                                                   if native_preempted else
-                                                   "action_was_remasked"),
-                                        "native_goal_preempted": native_preempted,
-                                        "selected_target_track_lost": selected_target_lost,
+                                    "heading_alignment_opportunity": heading_opportunity,
+                                    "reason": _evaluation_execution_failure_reason(
+                                        action_was_remasked=remasked,
+                                        native_preempted=native_preempted,
+                                        selected_target_lost=selected_target_lost,
+                                        policy_fallback=policy_fallback,
+                                        fallback_reason=fallback_reason),
+                                    "native_goal_preempted": native_preempted,
+                                    "selected_target_track_lost": selected_target_lost,
                                     "policy_fallback": (prepared.get("fallback_used", False)
                                                         if prepared is not None else False),
                                     "route_id": route_id})
