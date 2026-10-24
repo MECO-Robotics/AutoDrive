@@ -9,6 +9,13 @@ were not changed or restarted during this integration.
 
 ## Campaign setup
 
+An offline manifest API now describes the five-track configuration and
+validates source, protocol, device inventory, and isolated output paths. It
+does not launch a campaign: `launch_ready` stays false until a supervisor
+consumes the manifest and acquires shared device leases. Phase 2 coverage also
+stays false until bound dataset/replay evidence is validated. See
+`frc_defense.meco_training_manifest` and provenance tranche #44.
+
 - Create one frozen supervisor configuration for A1, A2, A3, C1, and C2; bind
   the training protocol, qualification protocol, source identity, runtime and
   device, seed schedule, update frontier, and per-track configuration hashes.

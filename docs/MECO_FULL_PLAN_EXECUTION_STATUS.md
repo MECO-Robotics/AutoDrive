@@ -46,6 +46,19 @@ simulator evaluation, training, replay, GPU run, or dashboard action was
 performed. See the paired dispatch contracts in
 [`test_meco_phase4_campaign_plan.py`](../tests/test_meco_phase4_campaign_plan.py).
 
+## Offline five-track campaign manifest — 2026-10-24
+
+Reviewed implementation commit `bc7eb512512a134272d84b96ba11c8767d67a596`
+adds a source/config/protocol-bound manifest API and CLI for A1, A2, A3, C1,
+and C2. It binds the verified two-WX9100 inventory, campaign paths, scheduler,
+and warm-start bytes. The manifest is planning metadata only: Phase 2 coverage,
+qualification eligibility, and launch readiness remain false until validated
+dataset/replay evidence, trusted calibration binding, and supervisor support
+exist. Thirteen offline metadata contracts passed. No simulator, training,
+GPU, replay, dashboard verification, or qualification was run. See
+[`five-track-campaign-manifest.md`](implementation-provenance/five-track-campaign-manifest.md)
+and provenance tranche #44.
+
 ## Phase 4 legal full-team start profiles — 2026-10-24
 
 Reviewed implementation commit `28f906961115adffb11a3e7e11e4188e4660dcd9`

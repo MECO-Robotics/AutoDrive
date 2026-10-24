@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 41
+    assert len(result["tranches"]) == 45
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -202,6 +202,22 @@ def test_current_manifest_is_validated_as_summary_only():
     assert start_profiles["limits"].count("No simulator") == 1
     assert "outcome_by_start_state is null/unavailable" in start_profiles["limits"]
     assert "qualification eligibility remains false" in start_profiles["limits"]
+    campaign_manifest = next(t for t in result["tranches"]
+        if t["requirement_id"] == "meco-five-track-campaign-manifest")
+    assert campaign_manifest["implementer"]["commit"] == (
+        "bc7eb512512a134272d84b96ba11c8767d67a596")
+    assert campaign_manifest["implementer"]["candidate_integration_commit"] == (
+        "50aaef203da7cee6e97569d865628444241070c1")
+    assert campaign_manifest["reviewer"]["approved_commit"] == (
+        campaign_manifest["implementer"]["commit"])
+    assert "launch readiness remain false" in campaign_manifest["limits"]
+    context_dispatch = next(t for t in result["tranches"]
+        if t["requirement_id"] == "phase4-context-paired-dispatch")
+    assert context_dispatch["implementer"]["commit"] == (
+        "509b219d3dc6c18ff177b03e8532785268be4253")
+    assert context_dispatch["reviewer"]["approved_commit"] == (
+        context_dispatch["implementer"]["commit"])
+    assert "No simulator" in context_dispatch["limits"]
     profile_summary = (REPO / start_profiles["planner"]["artifact"]["path"]).read_text()
     assert "defers its initial perception" in profile_summary
     assert "legal-start rate and outcome-by-start-state" in profile_summary
