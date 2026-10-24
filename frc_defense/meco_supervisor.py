@@ -1574,8 +1574,11 @@ def main(argv=None):
             evaluation_seed=ev["episode_seeds"][0],
             evaluation_device=manifest["devices"]["evaluation"], cycles=0, stop_file=None,
             qualification_protocol=manifest["qualification_protocol"]["path"],
-            evaluation_protocol=ev["path"], evaluation_split=ev["split"],
-            campaign_manifest=manifest)
+            # The manifest validator above verifies protocol bytes and the
+            # diagnostic seed's declared split. Keep the artifact out of the
+            # runtime evaluator binding for diagnostic runs.
+            evaluation_protocol=(None if ev["split"] == "diagnostic" else ev["path"]),
+            evaluation_split=ev["split"], campaign_manifest=manifest)
         result = supervisor.run()
         print(json.dumps(result, indent=2))
         return result
