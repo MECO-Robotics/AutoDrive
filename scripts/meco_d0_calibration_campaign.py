@@ -27,6 +27,27 @@ def _sha(value):
     return q._canonical_sha256(value)
 
 
+def _write_immutable_or_verify_stable(path, payload):
+    """Write once or accept identical content, returning the same digest either way."""
+    destination = Path(path)
+    encoded = json.dumps(payload, sort_keys=True, indent=2, allow_nan=False).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    if destination.exists():
+        if q._load_json(destination) != payload:
+            raise ValueError(f"immutable artifact already exists with different content: {destination}")
+        return digest
+    try:
+        written_digest = q.write_immutable_report(destination, payload)
+    except FileExistsError:
+        # Another identical merge may have won the exclusive create race.
+        if q._load_json(destination) != payload:
+            raise ValueError(f"immutable artifact already exists with different content: {destination}")
+        return digest
+    if written_digest != digest:
+        raise RuntimeError("immutable report writer returned an unexpected content digest")
+    return digest
+
+
 def _closure():
     """Full registry closure in stable curriculum order, never a target subset."""
     names = tuple(SCENARIOS)
@@ -181,7 +202,7 @@ def merge_campaign(campaign, output_root: str | Path, report_root: str | Path):
         manifests, artifacts = completed[scenario]
         report = q._merged_d0_calibration_report(manifests, artifacts)
         report_path = reports / f"{scenario}.calibration.json"
-        digest = q.write_immutable_report(report_path, report)
+        digest = _write_immutable_or_verify_stable(report_path, report)
         scenario_reports.append(report_path)
         coverage[scenario] = {
             "records": len(report["records"]),
@@ -204,7 +225,7 @@ def merge_campaign(campaign, output_root: str | Path, report_root: str | Path):
         raise ValueError("campaign merged record count does not match planned closure")
     bundle["campaign_report_id"] = _sha(bundle)
     bundle_path = reports / "campaign.report.json"
-    digest = q.write_immutable_report(bundle_path, bundle)
+    digest = _write_immutable_or_verify_stable(bundle_path, bundle)
     return {"campaign_id": campaign["campaign_id"],
             "campaign_report_id": bundle["campaign_report_id"],
             "report_sha256": digest, "scenario_count": len(coverage),

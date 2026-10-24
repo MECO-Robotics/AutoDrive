@@ -64,14 +64,12 @@ def test_merge_refuses_missing_shards_before_emitting_report(tmp_path, monkeypat
     assert not (tmp_path / "reports" / "campaign.report.json").exists()
 
 
-def test_merge_requires_and_merges_all_scenarios(tmp_path, monkeypatch):
+def test_merge_is_restartable_after_partial_write_and_rejects_conflicts(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, "validate_campaign", lambda value: value)
-    monkeypatch.setattr(q, "_load_json", lambda path: {"path": str(path)})
     monkeypatch.setattr(q, "_validate_d0_shard_artifact", lambda artifact, manifest: None)
     monkeypatch.setattr(q, "_merged_d0_calibration_report", lambda manifests, artifacts: {
         "records": [{}], "case_ids": [{}], "summary": {},
         "calibration_id": "a" * 64})
-    monkeypatch.setattr(q, "write_immutable_report", lambda path, value: "b" * 64)
     scenarios = campaign._closure()
     value = {"campaign_id": "c" * 64, "scenario_ids": list(scenarios),
              "source_identity_sha256": "f" * 64,
@@ -84,10 +82,36 @@ def test_merge_requires_and_merges_all_scenarios(tmp_path, monkeypatch):
         output = campaign._artifact_path(root, name, 0, 1)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("{}")
-    result = campaign.merge_campaign(value, root, tmp_path / "reports")
+    reports = tmp_path / "reports"
+    original_writer = campaign._write_immutable_or_verify_stable
+    writes = 0
+
+    def fail_after_four_writes(path, payload):
+        nonlocal writes
+        result = original_writer(path, payload)
+        writes += 1
+        if writes == 4:
+            raise RuntimeError("simulated interruption")
+        return result
+
+    monkeypatch.setattr(campaign, "_write_immutable_or_verify_stable", fail_after_four_writes)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        campaign.merge_campaign(value, root, reports)
+    assert len(list(reports.glob("*.calibration.json"))) == 4
+
+    monkeypatch.setattr(campaign, "_write_immutable_or_verify_stable", original_writer)
+    result = campaign.merge_campaign(value, root, reports)
     assert result["scenario_count"] == 12
     assert result["record_count"] == 12
     assert result["output"].endswith("campaign.report.json")
+    first_digest = result["report_sha256"]
+    resumed = campaign.merge_campaign(value, root, reports)
+    assert resumed["report_sha256"] == first_digest
+
+    conflict = reports / f"{scenarios[0]}.calibration.json"
+    conflict.write_text('{"conflict":true}')
+    with pytest.raises(ValueError, match="different content"):
+        campaign.merge_campaign(value, root, reports)
 
 
 def test_calibration_variance_summary_matches_population_variance():
