@@ -59,15 +59,15 @@ def _output_contract(track: str) -> list[dict]:
     if track == "A1":
         outputs = (("utility", (BATCH, 8, RASTER_H, RASTER_W)),
             ("penalty", (BATCH, 8, RASTER_H, RASTER_W)),
-            ("behavior_logits", (BATCH, 5)), ("hidden", (BATCH, HIDDEN)))
+            ("behavior_logits", (BATCH, 5)), ("hidden_out", (BATCH, HIDDEN)))
     elif track in ("A2", "A3"):
         outputs = (("utility", (BATCH, NODES)),
             ("penalty", (BATCH, NODES)),
-            ("behavior_logits", (BATCH, 5)), ("hidden", (BATCH, HIDDEN)))
+            ("behavior_logits", (BATCH, 5)), ("hidden_out", (BATCH, HIDDEN)))
     else:
         outputs = (("candidate_utility", (BATCH, CANDIDATES)),
             ("uncertainty", (BATCH, CANDIDATES)),
-            ("hidden", (BATCH, HIDDEN)))
+            ("hidden_out", (BATCH, HIDDEN)))
     return [{"name": name, "shape": list(shape), "dtype": "torch.float32"}
             for name, shape in outputs]
 
@@ -413,8 +413,8 @@ def export_track(track: str, checkpoint: Path, output: Path,
         raise ValueError("ONNX export inputs must be finite, contiguous CPU tensors")
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(model, tensors, str(output), input_names=names,
-        output_names=("utility", "penalty", "behavior_logits", "hidden") if track.startswith("A")
-                      else ("candidate_utility", "uncertainty", "hidden"),
+        output_names=("utility", "penalty", "behavior_logits", "hidden_out") if track.startswith("A")
+                      else ("candidate_utility", "uncertainty", "hidden_out"),
         opset_version=17, do_constant_folding=True, dynamo=False)
     return {"track": track, "checkpoint_provenance": provenance,
             "path": str(output), "size_bytes": output.stat().st_size,

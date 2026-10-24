@@ -28,3 +28,23 @@ tests, Hailo compiler/device, or deployment qualification was run or established
 Capture parity implementation is not a qualification result and makes no claim
 about simulator behavior, route correctness, actuation, Hailo support, or robot
 hardware.
+
+## Follow-up verifier audit
+
+The base candidate already contained `verify_onnx_parity` logic that created an
+ONNX Runtime session and ran the graph. It had not been exercised by a test that
+exported and executed graphs, and its Torch-output handling did not match the
+production `ExportAdapter` tuple contract. The follow-up adds synthetic CPU
+contracts that export and execute all five model constructors through ONNX
+Runtime, exercise both direct mapping and `ExportAdapter` tuple outputs, reject
+input-name drift, and reject outputs outside the declared tolerance. The
+canonical recurrent input remains named `hidden`; its graph output is now named
+`hidden_out` to avoid ONNX's input/output value-name collision.
+
+The executed evidence uses seeded synthetic tensors, random initialized model
+weights, and CPU `CPUExecutionProvider` with ONNX 1.19.1 and ONNX Runtime 1.23.2
+installed only in the isolated worktree's `.localdeps` environment. This proves
+synthetic graph export/runtime parity for the tested software stack. It does not
+prove parity on a real production capture, against training checkpoints, on
+Hailo, or on robot hardware; the production capture and export-manifest binding
+path remains unrun.

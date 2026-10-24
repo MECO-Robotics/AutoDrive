@@ -20,11 +20,11 @@ from frc_defense.meco_request_capture import load_capture
 
 
 OUTPUT_NAMES = {
-    "A1": ("utility", "penalty", "behavior_logits", "hidden"),
-    "A2": ("utility", "penalty", "behavior_logits", "hidden"),
-    "A3": ("utility", "penalty", "behavior_logits", "hidden"),
-    "C1": ("candidate_utility", "uncertainty", "hidden"),
-    "C2": ("candidate_utility", "uncertainty", "hidden"),
+    "A1": ("utility", "penalty", "behavior_logits", "hidden_out"),
+    "A2": ("utility", "penalty", "behavior_logits", "hidden_out"),
+    "A3": ("utility", "penalty", "behavior_logits", "hidden_out"),
+    "C1": ("candidate_utility", "uncertainty", "hidden_out"),
+    "C2": ("candidate_utility", "uncertainty", "hidden_out"),
 }
 
 
@@ -54,6 +54,8 @@ def _seeded_inputs(track: str, seed: int):
             if name == "node_features":
                 value[:, :, 6:8] = torch.rand(
                     value[:, :, 6:8].shape, generator=generator, dtype=value.dtype)
+                value[:, :, 8] = torch.randint(
+                    0, 8, value[:, :, 8].shape, generator=generator).to(value.dtype)
         tensors.append(value.contiguous())
     return tuple(tensors)
 
@@ -118,10 +120,10 @@ def _compare_outputs(track, torch_outputs, onnx_outputs, atol, rtol):
     return reports
 
 
-def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
-           provider: str, atol: float, rtol: float,
-           production_capture_dir: Path | None = None,
-           export_manifest_path: Path | None = None) -> dict:
+def verify_onnx_parity(checkpoint_root: Path, onnx_root: Path, seed: int,
+                       provider: str, atol: float, rtol: float,
+                       production_capture_dir: Path | None = None,
+                       export_manifest_path: Path | None = None) -> dict:
     current_sources = curriculum_training.source_identity()
     report = {
         "schema": "meco-onnx-numerical-parity-v1",
@@ -249,20 +251,31 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             item["inputs"] = [{"name": name, "shape": list(tensor.shape),
                                 "dtype": str(tensor.dtype)}
                                for name, tensor in zip(names, inputs)]
-            session = ort.InferenceSession(str(graph), providers=[provider])
-            actual_providers = list(session.get_providers())
-            item["active_providers"] = actual_providers
-            report["provider"] = actual_providers
-            if provider not in actual_providers:
-                raise RuntimeError(
-                    f"requested provider {provider!r} is not active in the session")
-            graph_input_values = session.get_inputs()
-            graph_output_values = session.get_outputs()
+            # Session metadata exposes the loaded graph's contract for exact
+            # name, order, shape, and dtype comparison before inference.
+            graph = ort.InferenceSession(str(graph), providers=[provider])
+            graph_input_values = graph.get_inputs()
+            graph_output_values = graph.get_outputs()
             graph_inputs = [entry.name for entry in graph_input_values]
             graph_outputs = [entry.name for entry in graph_output_values]
             feeds = {name: tensor.numpy() for name, tensor in zip(names, inputs)}
             with torch.inference_mode():
-                torch_outputs = model(*inputs)
+                model_outputs = model(*inputs)
+            if isinstance(model_outputs, dict):
+                # Direct track models expose semantic dictionary keys.
+                # The graph uses `hidden_out` to avoid colliding with the
+                # canonical recurrent-state input named `hidden`.
+                output_keys = tuple("hidden" if name == "hidden_out" else name
+                                    for name in OUTPUT_NAMES[track])
+                if any(name not in model_outputs for name in output_keys):
+                    raise ValueError("checkpoint model output mapping differs from the graph contract")
+                torch_outputs = tuple(model_outputs[name] for name in output_keys)
+            elif isinstance(model_outputs, (tuple, list)):
+                # Production loading wraps the track model in ExportAdapter,
+                # which already returns the ordered graph output tuple.
+                torch_outputs = tuple(model_outputs)
+            else:
+                raise TypeError("checkpoint model outputs must be a named mapping or ordered tuple")
             if graph_inputs != list(names):
                 raise ValueError(f"ONNX input names/order mismatch: {graph_inputs!r}")
             if graph_outputs != list(OUTPUT_NAMES[track]):
@@ -291,6 +304,13 @@ def verify(checkpoint_root: Path, onnx_root: Path, seed: int,
             if (None in expected_input_types or actual_input_types != expected_input_types
                     or actual_output_types != item["output_types"]["expected"]):
                 raise ValueError("ONNX input/output tensor type mismatch")
+            session = graph
+            actual_providers = list(session.get_providers())
+            item["active_providers"] = actual_providers
+            report["provider"] = actual_providers
+            if provider not in actual_providers:
+                raise RuntimeError(
+                    f"requested provider {provider!r} is not active in the session")
             onnx_outputs = session.run(None, feeds)
             item["outputs"] = _compare_outputs(track, torch_outputs, onnx_outputs, atol, rtol)
             item["status"] = ("pass" if all(output["allclose"] for output in item["outputs"])
@@ -322,9 +342,9 @@ def main() -> int:
             or args.atol < 0 or args.rtol < 0:
         parser.error("seed and tolerances must be finite and nonnegative")
     try:
-        report = verify(args.checkpoint_root, args.onnx_root, args.seed,
-                        args.provider, args.atol, args.rtol,
-                        args.production_capture_dir, args.export_manifest)
+        report = verify_onnx_parity(args.checkpoint_root, args.onnx_root, args.seed,
+                                    args.provider, args.atol, args.rtol,
+                                    args.production_capture_dir, args.export_manifest)
     except Exception as exc:
         # Preserve a machine-readable failure record even if setup fails before
         # the per-track evidence loop (for example source inventory or ORT API).

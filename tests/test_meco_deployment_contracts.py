@@ -91,7 +91,7 @@ def test_deployment_export_records_checkpoint_and_tensor_contract(tmp_path, monk
     report = meco_deployment.export_track("A1", checkpoint, tmp_path / "A1.onnx")
 
     assert captured["input_names"] == meco_deployment.input_names("A1")
-    assert captured["output_names"] == ("utility", "penalty", "behavior_logits", "hidden")
+    assert captured["output_names"] == ("utility", "penalty", "behavior_logits", "hidden_out")
     assert len(captured["outputs"]) == len(captured["output_names"])
     assert report["checkpoint_provenance"]["sha256"] == checkpoint_digest
     assert report["size_bytes"] == len(b"onnx-fixture")
