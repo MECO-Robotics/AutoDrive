@@ -834,6 +834,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                "diagnostic": any(row["diagnostic"] for row in rows),
                "matched_status": rows[-1]["matched_status"],
                "record_count": len(rows[-1]["seeds"]) * len(rows[-1]["categories"]),
+               "control_definitions": rows[-1]["control_definitions"],
                "route_cost_provenance": rows[-1]["route_cost_provenance"],
                "candidate_boundary": rows[-1].get("candidate_boundary"),
                "policy_metrics": rows[-1]["policy_metrics"]}

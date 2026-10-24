@@ -30,7 +30,7 @@ def _report(episodes=2):
         policy_manifest[policy]["p_mode"] = "learned"
     for policy in ABLATIONS:
         policy_manifest[policy]["p_mode"] = "p0"
-    control_ids = {"D0": "D0_teacher_proxy", "D1": "D1_hand_weighted",
+    control_ids = {"D0": "D0_production_deterministic", "D1": "D1_hand_weighted",
                    "D2": "D2_kinematic_prediction"}
     policy_manifest.update({policy: {"policy_id": control_ids[policy], "checkpoint_sha256": None,
                                     "source_identity_sha256": source_hash}
@@ -191,7 +191,7 @@ def test_only_complete_matched_evaluation_is_exposed_with_category_uncertainty(t
     assert group["matched_status"] == "diagnostic matched"
     assert len(report["records"]) == 44
     assert group["record_count"] == 4
-    assert report["control_definitions"]["D0"].startswith("production deterministic offense")
+    assert group["control_definitions"]["D0"].startswith("production deterministic offense")
     assert group["policy_metrics"]["A1"]["open"]["success"]["n"] == 2
     assert group["policy_metrics"]["A1"]["open"]["success"]["normal_95_interval"] is not None
     assert next(row for row in result["policies"] if row["policy_id"] == "D2")["evaluation_state"] == "diagnostic matched"
