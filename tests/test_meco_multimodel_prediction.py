@@ -150,6 +150,7 @@ def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
     None, "missing", "tampered",
     "categories_missing", "categories_empty", "categories_truncated",
     "seeds_missing", "seeds_empty", "seeds_truncated",
+    "seeds_bool_equal", "seeds_float_equal",
 ])
 def test_matrix_runner_executes_and_records_per_control_condition(
         monkeypatch, tmp_path, row_provenance_tamper):
@@ -236,6 +237,10 @@ def test_matrix_runner_executes_and_records_per_control_condition(
                 report_seeds = None
             elif row_provenance_tamper == "seeds_empty":
                 report_seeds = []
+            elif row_provenance_tamper == "seeds_bool_equal":
+                report_seeds[0] = True
+            elif row_provenance_tamper == "seeds_float_equal":
+                report_seeds[1] = 27.0
             else:
                 report_seeds = report_seeds[:-1]
         device_info = {"device": "cpu", "accelerator_backend": "cpu"}
@@ -259,12 +264,12 @@ def test_matrix_runner_executes_and_records_per_control_condition(
         checkpoints[track] = str(path)
     if row_provenance_tamper is None:
         report = matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
-            categories=("single", "cluster"), seeds=(27, 28), device="cpu",
+            categories=("single", "cluster"), seeds=(1, 27), device="cpu",
             output_dir=tmp_path / "matrix")
     else:
         with pytest.raises(ValueError, match="evaluation report|row prediction provenance"):
             matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
-                categories=("single", "cluster"), seeds=(27, 28), device="cpu",
+                categories=("single", "cluster"), seeds=(1, 27), device="cpu",
                 output_dir=tmp_path / "matrix")
         return
 

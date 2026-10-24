@@ -283,6 +283,7 @@ def _validate_report_category_seed_provenance(report: dict,
             "evaluation report categories are missing, empty, or differ from frozen matrix categories")
     if (not isinstance(declared_seeds, (list, tuple))
             or not declared_seeds
+            or any(type(seed) is not int for seed in declared_seeds)
             or tuple(declared_seeds) != seeds):
         raise ValueError(
             "evaluation report seeds are missing, empty, or differ from frozen matrix seeds")
