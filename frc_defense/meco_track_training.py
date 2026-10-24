@@ -39,7 +39,9 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
     PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
-    PREDICTION_MODEL_ID)
+    PREDICTION_MODEL_ID, MULTIMODEL_MAX_HORIZON_S,
+    MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
+    MULTIMODEL_DAMPING_PER_S)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     PlanAEmptySupportError, SUPPORT_ORDER)
@@ -300,6 +302,7 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
     meta = prediction_contract(prediction_mode, horizon_s=horizon)
     horizon_semantics = (
         "observed_current_pose" if prediction_mode == "current" else
+        "per_support_node_eta_clamped_to_multi_model_max_horizon" if prediction_mode == "multi_model_v1" else
         "maximum_eta_over_support_valid_pair_nodes; unreachable_and_masked_nodes_excluded; null_when_no_valid_endpoint")
     valid = bool(env.opponent_valid[0, 3])
     if not valid:
@@ -326,14 +329,57 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         predicted = position[None] + safe_eta[:, None] * bounded_velocity[None]
         fallback = None
         used_cv = True
-    separation = (support.goal_xy - predicted).norm(dim=-1)
-    risk_values = PREDICTION_MAX_PENALTY_POINTS * (
-        (PREDICTION_THREAT_RADIUS_M - separation) /
-        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    if prediction_mode == "multi_model_v1" and math.isfinite(age) and 0. <= age <= PREDICTION_MAX_AGE_S:
+        velocity = env.opponent_velocity[0, 3, :2]
+        omega_observed = env.opponent_velocity[0, 3, 2]
+        if bool(torch.isfinite(velocity).all()):
+            horizon_nodes = safe_eta.clamp(max=MULTIMODEL_MAX_HORIZON_S)
+            speed = velocity.norm().clamp_min(1e-8)
+            bounded_velocity = velocity * torch.clamp(PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+            vx, vy = bounded_velocity[0], bounded_velocity[1]
+            rate = torch.nan_to_num(omega_observed, nan=0., posinf=0., neginf=0.).abs().clamp(
+                min=MULTIMODEL_TURN_RATE_MIN_RAD_S,
+                max=MULTIMODEL_TURN_RATE_MAX_RAD_S)
+            theta = rate * horizon_nodes
+            damped_time = -torch.expm1(-MULTIMODEL_DAMPING_PER_S * horizon_nodes) / MULTIMODEL_DAMPING_PER_S
+            endpoints = [position[None] + horizon_nodes[:, None] * bounded_velocity[None]]
+            for sign in (1., -1.):
+                angle = theta * sign
+                sin_a, cos_a = torch.sin(angle), torch.cos(angle)
+                turn_dx = (vx * sin_a + vy * (cos_a - 1.)) / (rate * sign)
+                turn_dy = (vx * (1. - cos_a) + vy * sin_a) / (rate * sign)
+                endpoints.append(position[None] + torch.stack((turn_dx, turn_dy), dim=-1))
+            endpoints.append(position[None] + damped_time[:, None] * bounded_velocity[None])
+            weights = eta.new_tensor((.40, .15, .15, .30))
+            forecast_points = torch.stack(endpoints, dim=0)
+            separation = (support.goal_xy[None] - forecast_points).norm(dim=-1)
+            penalties = PREDICTION_MAX_PENALTY_POINTS * (
+                (PREDICTION_THREAT_RADIUS_M - separation) /
+                PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+            risk_values = (penalties * weights[:, None]).sum(dim=0)
+            fallback = None
+            predicted = (forecast_points * weights[:, None, None]).sum(dim=0)
+            meta = {**meta, "forecast_hypotheses": [
+                {"id": "constant_velocity", "weight": .40},
+                {"id": "turn_left", "weight": .15},
+                {"id": "turn_right", "weight": .15},
+                {"id": "damped_velocity", "weight": .30}],
+                "max_horizon_s": MULTIMODEL_MAX_HORIZON_S,
+                "risk_semantics": "weighted_expected_penalty_over_hypothesis_endpoints"}
+        else:
+            risk_values = PREDICTION_MAX_PENALTY_POINTS * (
+                (PREDICTION_THREAT_RADIUS_M - (support.goal_xy - predicted).norm(dim=-1)) /
+                PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    else:
+        separation = (support.goal_xy - predicted).norm(dim=-1)
+        risk_values = PREDICTION_MAX_PENALTY_POINTS * (
+            (PREDICTION_THREAT_RADIUS_M - separation) /
+            PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
     risk = torch.where(valid_nodes, risk_values, risk)
     age = float(env.opponent_age[0, 3])
     return risk, {**meta, "horizon_semantics": horizon_semantics,
         "fallback": fallback, "used_cv": used_cv,
+        "used_multimodel": prediction_mode == "multi_model_v1" and fallback is None,
         "observed_age_s": age if math.isfinite(age) else None,
         "horizon_min_s": horizon_min,
         "horizon_max_s": horizon_max}
@@ -1337,6 +1383,15 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
     return torch.tensor(values, device=env.device, dtype=torch.float32)[None]
 
 
+def _prediction_record_fields(mode: str | None) -> dict:
+    """Return the predictor identity bound to each evaluator policy record."""
+    if mode is None:
+        return {"prediction_mode": None, "prediction_contract": None}
+    if mode not in PREDICTION_MODES:
+        raise ValueError(f"prediction mode must be one of {PREDICTION_MODES}")
+    return {"prediction_mode": mode, "prediction_contract": prediction_contract(mode)}
+
+
 def _timing_sync(env):
     """Synchronize the measured device before/after a host wall interval."""
     if torch.device(env.device).type == "cuda":
@@ -2095,9 +2150,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "checkpoint_sha256": policy_manifest[record_policy]["checkpoint_sha256"],
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
-                            "prediction_mode": decision_prediction_mode,
-                            "prediction_contract": (prediction_contract(decision_prediction_mode)
-                                if decision_prediction_mode in PREDICTION_MODES else None),
+                            **_prediction_record_fields(decision_prediction_mode),
                             "protocol_id": protocol,
                             "qualification_protocol_id": qualification_protocol_id,
                             "split": split,

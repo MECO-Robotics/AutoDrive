@@ -24,13 +24,24 @@ from .learning_inputs import build_observation_snapshot
 MECO_TRACKS = ("A1", "A2", "A3", "C1", "C2")
 MECO_SCHEMA_VERSION = 1
 HIDDEN = 64
-PREDICTION_MODES = ("current", "cv")
+PREDICTION_MODES = ("current", "cv", "multi_model_v1")
 PREDICTION_MODEL_ID = "meco_opponent_forecast_v1"
 PREDICTION_MAX_SPEED_MPS = 3.0
 PREDICTION_MAX_AGE_S = .5
 PREDICTION_DEFAULT_HORIZON_S = 1.0
 PREDICTION_THREAT_RADIUS_M = 2.0
 PREDICTION_MAX_PENALTY_POINTS = .75
+MULTIMODEL_ID = "meco_opponent_kinematics_mm_v1"
+MULTIMODEL_MAX_HORIZON_S = 2.5
+MULTIMODEL_TURN_RATE_MIN_RAD_S = .6
+MULTIMODEL_TURN_RATE_MAX_RAD_S = 1.5
+MULTIMODEL_DAMPING_PER_S = .8
+MULTIMODEL_HYPOTHESES = (
+    ("constant_velocity", .40),
+    ("turn_left", .15),
+    ("turn_right", .15),
+    ("damped_velocity", .30),
+)
 SAFE_ACTION_FEATURES = (
     "action_index", "sensor_track_buffer_index", "goal_x_m", "goal_y_m",
     "heading_bin", "behavior_index", "field_length_m", "field_width_m",
@@ -42,36 +53,6 @@ EXTRA_FEATURES = ("legal_node_index", "route_distance_m",
                   "is_continue", "commitment_switch_cost")
 MECO_CANDIDATE_RAW_FEATURE_COUNT = len(SAFE_ACTION_FEATURES) + len(EXTRA_FEATURES)
 MECO_CANDIDATE_MODEL_INPUT_WIDTH = 2 * MECO_CANDIDATE_RAW_FEATURE_COUNT
-
-# Shared opponent forecast contract used by learned policies and controls.
-PREDICTION_MODES = ("current", "cv")
-PREDICTION_MODEL_ID = "meco_opponent_forecast_v1"
-PREDICTION_MAX_SPEED_MPS = 3.0
-PREDICTION_MAX_AGE_S = 0.5
-PREDICTION_DEFAULT_HORIZON_S = 1.0
-PREDICTION_THREAT_RADIUS_M = 2.0
-PREDICTION_MAX_PENALTY_POINTS = 0.75
-
-
-def prediction_contract(mode: str, *, horizon_s: float | None = None) -> dict:
-    """Describe forecast semantics in immutable training/evaluation provenance."""
-    if mode not in PREDICTION_MODES:
-        raise ValueError(f"prediction mode must be one of {PREDICTION_MODES}")
-    horizon = (0.0 if mode == "current" else
-               None if horizon_s is None else float(horizon_s))
-    if horizon is not None and (not math.isfinite(horizon) or horizon < 0.):
-        raise ValueError("prediction horizon must be finite and nonnegative")
-    return {"model": PREDICTION_MODEL_ID, "mode": mode,
-        "horizon_s": horizon,
-        "horizon_semantics": ("observed_current_pose" if mode == "current" else
-            "caller_supplied_eta_or_fixed_horizon" if horizon is None else "fixed_or_caller_supplied"),
-        "max_speed_mps": PREDICTION_MAX_SPEED_MPS if mode == "cv" else None,
-        "max_track_age_s": PREDICTION_MAX_AGE_S if mode == "cv" else None,
-        "threat_radius_m": PREDICTION_THREAT_RADIUS_M,
-        "max_penalty_points": PREDICTION_MAX_PENALTY_POINTS,
-        "fallback": ("none_if_observed_pose_missing_or_nonfinite" if mode == "current"
-            else "current_finite_observed_pose_when_cv_unavailable; otherwise_none")}
-
 
 def observation_digest(snapshot: ObservationSnapshot) -> str:
     payload = {"snapshot_id": snapshot.snapshot_id, "episode_id": snapshot.episode_id,
@@ -746,7 +727,8 @@ def prediction_contract(mode: str, *, horizon_s: float | None = None) -> dict:
                None if horizon_s is None else float(horizon_s))
     if horizon is not None and (not math.isfinite(horizon) or horizon < 0.):
         raise ValueError("prediction horizon must be finite and nonnegative")
-    return {"model": PREDICTION_MODEL_ID, "mode": mode,
+    contract = {"model": MULTIMODEL_ID if mode == "multi_model_v1" else PREDICTION_MODEL_ID,
+        "mode": mode,
         "horizon_s": horizon,
         "horizon_semantics": ("observed_current_pose" if mode == "current" else
             "caller_supplied_eta_or_fixed_horizon" if horizon is None else "fixed_or_caller_supplied"),
@@ -756,11 +738,25 @@ def prediction_contract(mode: str, *, horizon_s: float | None = None) -> dict:
         "max_penalty_points": PREDICTION_MAX_PENALTY_POINTS,
         "fallback": ("none_if_observed_pose_missing_or_nonfinite" if mode == "current"
             else "current_finite_observed_pose_when_cv_unavailable; otherwise_none")}
+    if mode == "multi_model_v1":
+        contract.update({
+            "horizon_semantics": "candidate_route_eta_clamped_to_max_horizon",
+            "max_horizon_s": MULTIMODEL_MAX_HORIZON_S,
+            "max_speed_mps": PREDICTION_MAX_SPEED_MPS,
+            "max_track_age_s": PREDICTION_MAX_AGE_S,
+            "hypotheses": [{"id": name, "weight": weight} for name, weight in MULTIMODEL_HYPOTHESES],
+            "turn_rate_min_rad_s": MULTIMODEL_TURN_RATE_MIN_RAD_S,
+            "turn_rate_max_rad_s": MULTIMODEL_TURN_RATE_MAX_RAD_S,
+            "damping_per_s": MULTIMODEL_DAMPING_PER_S,
+            "fallback": "finite_observed_pose_if_track_missing_stale_or_nonfinite",
+        })
+    return contract
 
 
 def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
-                      age_s, horizon_s: float | None = None) -> dict:
-    """Return an observed-pose or bounded CV forecast with explicit fallback."""
+                      age_s, horizon_s: float | None = None,
+                      angular_velocity_rad_s: float | None = None) -> dict:
+    """Return a versioned finite-pose, CV, or bounded kinematic mixture."""
     if mode not in PREDICTION_MODES:
         raise ValueError(f"prediction mode must be one of {PREDICTION_MODES}")
     pose = None
@@ -776,7 +772,7 @@ def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
     fallback = None
     if mode == "current":
         forecast = pose
-    elif pose is not None:
+    elif pose is not None and mode == "cv":
         if velocity_xy is not None and age_s is not None:
             forecast = predict_opponent_endpoint(valid=True, position_xy=pose,
                 velocity_xy=velocity_xy, age_s=float(age_s), horizon_s=horizon,
@@ -785,8 +781,87 @@ def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
         if forecast is None:
             forecast = pose
             fallback = "observed_current_pose"
-    return {"xy": forecast, "mode": mode, "horizon_s": horizon,
+    hypotheses = []
+    horizon_clamped = False
+    if mode == "multi_model_v1" and pose is not None:
+        fresh_motion = (velocity_xy is not None and age_s is not None
+            and math.isfinite(float(age_s)) and 0. <= float(age_s) <= PREDICTION_MAX_AGE_S
+            and len(velocity_xy) == 2
+            and all(math.isfinite(float(v)) for v in velocity_xy))
+        if fresh_motion:
+            t = min(horizon, MULTIMODEL_MAX_HORIZON_S)
+            horizon_clamped = t != horizon
+            vx, vy = map(float, velocity_xy)
+            speed = math.hypot(vx, vy)
+            scale = min(1., PREDICTION_MAX_SPEED_MPS / max(speed, 1e-8))
+            vx, vy = vx * scale, vy * scale
+            observed_omega = (float(angular_velocity_rad_s)
+                if angular_velocity_rad_s is not None and
+                   math.isfinite(float(angular_velocity_rad_s)) else 0.)
+            turn_rate = min(MULTIMODEL_TURN_RATE_MAX_RAD_S,
+                            max(MULTIMODEL_TURN_RATE_MIN_RAD_S, abs(observed_omega)))
+            cv_xy = (pose[0] + vx * t, pose[1] + vy * t)
+            damped_distance_time = -math.expm1(-MULTIMODEL_DAMPING_PER_S * t) / MULTIMODEL_DAMPING_PER_S
+            damped_xy = (pose[0] + vx * damped_distance_time,
+                         pose[1] + vy * damped_distance_time)
+            for name, weight in MULTIMODEL_HYPOTHESES:
+                if name == "constant_velocity":
+                    xy = cv_xy
+                elif name.startswith("turn_"):
+                    omega = turn_rate * (1. if name == "turn_left" else -1.)
+                    angle = omega * t
+                    if abs(omega) < 1e-8:
+                        dx, dy = vx * t, vy * t
+                    else:
+                        dx = (vx * math.sin(angle) + vy * (math.cos(angle) - 1.)) / omega
+                        dy = (vx * (1. - math.cos(angle)) + vy * math.sin(angle)) / omega
+                    xy = (pose[0] + dx, pose[1] + dy)
+                else:
+                    xy = damped_xy
+                hypotheses.append({"id": name, "weight": weight, "xy": xy})
+            forecast = tuple(sum(item["weight"] * item["xy"][axis]
+                                 for item in hypotheses) for axis in (0, 1))
+        else:
+            fallback = "observed_current_pose"
+            hypotheses = [{"id": "observed_current_pose", "weight": 1., "xy": pose}]
+            forecast = pose
+    if mode == "multi_model_v1" and pose is None:
+        fallback = "none_no_finite_observed_pose"
+    result = {"xy": forecast, "mode": mode, "horizon_s": horizon,
         "observed_age_s": (float(age_s) if age_s is not None and
                             math.isfinite(float(age_s)) else None),
         "used_cv": bool(mode == "cv" and forecast is not None and fallback is None),
         "fallback": fallback}
+    if mode == "multi_model_v1":
+        result.update({"model": MULTIMODEL_ID,
+            "horizon_s": min(horizon, MULTIMODEL_MAX_HORIZON_S),
+            "requested_horizon_s": horizon,
+            "horizon_clamped": horizon_clamped,
+            "hypotheses": hypotheses,
+            "used_multimodel": len(hypotheses) > 1})
+    return result
+
+
+def opponent_risk_penalty(goal_xy, forecast: Mapping) -> float | None:
+    """Expected bounded proximity penalty over a forecast mixture."""
+    hypotheses = forecast.get("hypotheses") or []
+    if not hypotheses:
+        xy = forecast.get("xy")
+        hypotheses = [] if xy is None else [{"weight": 1., "xy": xy}]
+    if not hypotheses:
+        return None
+    weighted = 0.
+    total = 0.
+    for item in hypotheses:
+        xy = item.get("xy")
+        weight = float(item.get("weight", 0.))
+        if (xy is None or len(xy) != 2 or not math.isfinite(weight) or weight <= 0.
+                or not all(math.isfinite(float(value)) for value in xy)):
+            continue
+        separation = math.hypot(float(goal_xy[0]) - float(xy[0]),
+                                float(goal_xy[1]) - float(xy[1]))
+        penalty = PREDICTION_MAX_PENALTY_POINTS * max(0., min(1.,
+            (PREDICTION_THREAT_RADIUS_M - separation) / PREDICTION_THREAT_RADIUS_M))
+        weighted += weight * penalty
+        total += weight
+    return None if total <= 0. else weighted / total
