@@ -94,14 +94,33 @@ def opponent_velocity_command(policy_id: str, sensed_state: Mapping[str, torch.T
         raise ValueError("own/target positions and sensed target velocity must share [...,2] shape")
     if anchor.shape != own.shape or objective.shape != own.shape or valid.shape != own.shape[:-1]:
         raise ValueError("anchor/objective/valid tensors must match the policy batch shape")
+    # Sanitize before arithmetic so a corrupt sensor/metadata value cannot
+    # escape as a NaN command. Keep validity masks on-device; bad rows fail
+    # closed to a zero velocity request without a host synchronization.
+    finite_state = (torch.isfinite(own).all(-1) & torch.isfinite(target).all(-1) &
+                    torch.isfinite(velocity).all(-1) & torch.isfinite(anchor).all(-1) &
+                    torch.isfinite(objective).all(-1))
+    own = torch.nan_to_num(own, nan=0., posinf=0., neginf=0.)
+    target = torch.nan_to_num(target, nan=0., posinf=0., neginf=0.)
+    velocity = torch.nan_to_num(velocity, nan=0., posinf=0., neginf=0.)
+    anchor = torch.nan_to_num(anchor, nan=0., posinf=0., neginf=0.)
+    objective = torch.nan_to_num(objective, nan=0., posinf=0., neginf=0.)
     speed = torch.as_tensor(max_speed_mps, dtype=own.dtype, device=own.device)
     if speed.ndim and speed.shape != valid.shape:
         raise ValueError("max_speed_mps must be scalar or match the policy batch shape")
+    finite_speed = torch.isfinite(speed)
+    speed = torch.nan_to_num(speed, nan=0., posinf=0., neginf=0.)
     phase = sensed_state.get("phase")
     if phase is None:
         phase = torch.zeros_like(valid, dtype=own.dtype)
     else:
         phase = torch.as_tensor(phase, dtype=own.dtype, device=own.device)
+        if phase.shape != valid.shape:
+            raise ValueError("phase must be scalar or match the policy batch shape")
+    finite_phase = torch.isfinite(phase)
+    phase = torch.nan_to_num(phase, nan=0., posinf=0., neginf=0.)
+    tick_tensor = torch.as_tensor(tick, device=own.device)
+    finite_tick = torch.isfinite(tick_tensor) if tick_tensor.is_floating_point() else True
     if policy_id == "stationary_blockage":
         command = torch.zeros_like(own)
     elif policy_id in ("direct_pursuit", "reactive_defender_b"):
@@ -118,7 +137,7 @@ def opponent_velocity_command(policy_id: str, sensed_state: Mapping[str, torch.T
         along = torch.minimum(along, route.norm(dim=-1, keepdim=True))
         command = target + direction * along - own
     elif policy_id == "telegraph_reversal":
-        sign = torch.where(torch.as_tensor(tick, device=own.device) >= POLICY_CONFIG["switch_tick"],
+        sign = torch.where(tick_tensor >= POLICY_CONFIG["switch_tick"],
                            -1., 1.).to(dtype=own.dtype)
         route = _unit(objective - anchor)
         perpendicular = torch.stack((-route[..., 1], route[..., 0]), dim=-1)
@@ -131,10 +150,18 @@ def opponent_velocity_command(policy_id: str, sensed_state: Mapping[str, torch.T
             (torch.cos(orbit_phase), torch.sin(orbit_phase)), dim=-1)
         if policy_id == "orbit_to_pursuit_switch":
             pursuit = target - own
-            use_pursuit = torch.as_tensor(tick, device=own.device) >= POLICY_CONFIG["switch_tick"]
+            use_pursuit = tick_tensor >= POLICY_CONFIG["switch_tick"]
             command = torch.where(use_pursuit[..., None], pursuit, orbit_target - own)
         else:
             command = orbit_target - own
     if policy_id not in ("stationary_blockage", "telegraph_reversal"):
         command = torch.where(valid[..., None], command, torch.zeros_like(command))
-    return _bounded(command, speed.clamp_min(0.))
+    command = _bounded(command, speed.clamp_min(0.))
+    safe_row = finite_state & finite_phase
+    if isinstance(finite_tick, torch.Tensor):
+        safe_row = safe_row & finite_tick
+    if isinstance(finite_speed, torch.Tensor) and finite_speed.ndim:
+        safe_row = safe_row & finite_speed
+    elif isinstance(finite_speed, torch.Tensor):
+        safe_row = safe_row & finite_speed
+    return torch.where(safe_row[..., None], command, torch.zeros_like(command))

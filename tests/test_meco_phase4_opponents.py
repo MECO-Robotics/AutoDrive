@@ -77,3 +77,29 @@ def test_pool_rejects_unknown_policy_and_malformed_observation():
         assert "target_xy" in str(exc)
     else:
         raise AssertionError("incomplete sensed state accepted")
+
+
+def test_nonfinite_sensed_state_and_speed_fail_closed_to_finite_zero_commands():
+    state = _state()
+    state["target_xy"][0, 0] = float("nan")
+    state["target_velocity_xy"][1, 1] = float("inf")
+    for policy in ("direct_pursuit", "trench_interceptor", "reactive_defender_b",
+                   "orbit_to_pursuit_switch"):
+        command = opponent_velocity_command(policy, state, tick=400)
+        assert torch.isfinite(command).all()
+        torch.testing.assert_close(command, torch.zeros_like(command))
+
+    command = opponent_velocity_command(
+        "stationary_blockage", _state(), tick=0,
+        max_speed_mps=torch.tensor(float("nan")))
+    assert torch.isfinite(command).all()
+    torch.testing.assert_close(command, torch.zeros_like(command))
+
+
+def test_nonfinite_batch_speed_fails_closed_only_for_corrupt_rows():
+    command = opponent_velocity_command(
+        "direct_pursuit", _state(), tick=0,
+        max_speed_mps=torch.tensor([float("nan"), 0.8]))
+    assert torch.isfinite(command).all()
+    torch.testing.assert_close(command[0], torch.zeros(2))
+    torch.testing.assert_close(command[1], torch.zeros(2))
