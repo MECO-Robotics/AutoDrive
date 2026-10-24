@@ -16,7 +16,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
+from .meco_tracks import MECO_TRACKS, PREDICTION_MODES, prediction_contract
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
 from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
@@ -270,6 +270,34 @@ def _expected_control_prediction_modes(condition: MatrixCondition) -> dict[str, 
     return modes
 
 
+def _validate_control_prediction_rows(report: dict,
+                                     expected_modes: dict[str, str]) -> None:
+    """Bind each D1/D2 episode row to the frozen mode and its full contract."""
+    manifest = report.get("policy_manifest")
+    rows = report.get("records")
+    if not isinstance(manifest, dict) or not isinstance(rows, list):
+        raise ValueError("evaluation report lacks control prediction provenance")
+    expected_count = len(report.get("categories", ())) * len(report.get("seeds", ()))
+    for control in ("D1", "D2"):
+        mode = expected_modes[control]
+        contract = prediction_contract(mode)
+        policy = manifest.get(control)
+        if (not isinstance(policy, dict)
+                or policy.get("prediction_mode") != mode
+                or policy.get("prediction_contract") != contract):
+            raise ValueError(
+                f"evaluation {control} policy prediction provenance differs from frozen condition")
+        control_rows = [row for row in rows
+                        if isinstance(row, dict) and row.get("policy") == control]
+        if len(control_rows) != expected_count:
+            raise ValueError(f"evaluation {control} prediction rows are incomplete")
+        for row in control_rows:
+            if (row.get("prediction_mode") != mode
+                    or row.get("prediction_contract") != contract):
+                raise ValueError(
+                    f"evaluation {control} row prediction provenance differs from frozen condition")
+
+
 def _contrast_pair(*, name: str, condition_id: str, report: dict,
                    records: dict, candidate_policy: str,
                    reference_policy: str) -> dict:
@@ -286,7 +314,13 @@ def _contrast_pair(*, name: str, condition_id: str, report: dict,
                 "candidate_metrics": _record_metrics(candidate),
                 "reference_metrics": _record_metrics(reference),
                 "candidate_record_policy_id": candidate.get("policy_id"),
-                "reference_record_policy_id": reference.get("policy_id")})
+                "reference_record_policy_id": reference.get("policy_id"),
+                "candidate_prediction_provenance": {
+                    "prediction_mode": candidate.get("prediction_mode"),
+                    "prediction_contract": candidate.get("prediction_contract")},
+                "reference_prediction_provenance": {
+                    "prediction_mode": reference.get("prediction_mode"),
+                    "prediction_contract": reference.get("prediction_contract")}})
     return {"contrast": name,
         "candidate_policy": candidate_policy,
         "reference_policy": reference_policy,
@@ -405,6 +439,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
         expected_control_modes = _expected_control_prediction_modes(condition)
+        _validate_control_prediction_rows(report, expected_control_modes)
         observed_control_modes = {
             control: report["policy_manifest"].get(control, {}).get("prediction_mode")
             for control in ("D1", "D2")}

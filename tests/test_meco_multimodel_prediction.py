@@ -146,7 +146,9 @@ def test_matrix_accepts_multimodel_in_matched_learned_and_control_contract():
             "D1": "current", "D2": "multi_model_v1"}
 
 
-def test_matrix_runner_executes_and_records_per_control_condition(monkeypatch, tmp_path):
+@pytest.mark.parametrize("row_provenance_tamper", [None, "missing", "tampered"])
+def test_matrix_runner_executes_and_records_per_control_condition(
+        monkeypatch, tmp_path, row_provenance_tamper):
     import hashlib
     import json
 
@@ -203,7 +205,19 @@ def test_matrix_runner_executes_and_records_per_control_condition(monkeypatch, t
                 for seed in kwargs["episode_seeds"]:
                     records.append({"policy": policy, "category": category,
                         "seed": seed, "policy_id": f"synthetic-{policy}",
+                        **track_training._prediction_record_fields(
+                            modes[policy] if policy in modes else None),
                         "metrics": {"score": 0.}, "candidate_recall": 1.})
+        if row_provenance_tamper is not None:
+            # Corrupt the multi-model condition's D2 row, preserving the report
+            # manifest and summary prediction modes to exercise row-level checks.
+            target = next((row for row in records if row["policy"] == "D2"), None)
+            if target is not None and kwargs["control_prediction_modes"] == {
+                    "D1": "current", "D2": "multi_model_v1"}:
+                if row_provenance_tamper == "missing":
+                    target.pop("prediction_mode")
+                else:
+                    target["prediction_contract"] = prediction_contract("cv")
         device_info = {"device": "cpu", "accelerator_backend": "cpu"}
         return {"evaluation_id": f"eval-{len(calls)}", "protocol_id": f"proto-{len(calls)}",
             "qualification_protocol_id": None, "source_identity_sha256": source_hash,
@@ -223,8 +237,15 @@ def test_matrix_runner_executes_and_records_per_control_condition(monkeypatch, t
         path = tmp_path / f"{track}.pt"
         path.write_bytes(track.encode())
         checkpoints[track] = str(path)
-    report = matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
-        categories=("single",), seeds=(27,), device="cpu", output_dir=tmp_path / "matrix")
+    if row_provenance_tamper is None:
+        report = matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
+            categories=("single",), seeds=(27,), device="cpu", output_dir=tmp_path / "matrix")
+    else:
+        with pytest.raises(ValueError, match="row prediction provenance"):
+            matrix.run_matrix(checkpoints=checkpoints, scenario_id="pickup_simple",
+                categories=("single",), seeds=(27,), device="cpu",
+                output_dir=tmp_path / "matrix")
+        return
 
     assert any(call["control_prediction_modes"] == {
         "D1": "current", "D2": "multi_model_v1"} for call in calls)
@@ -236,3 +257,10 @@ def test_matrix_runner_executes_and_records_per_control_condition(monkeypatch, t
     assert contrast["condition_id"] == condition["condition_id"]
     assert contrast["report_provenance"]["policy_manifest"]["D2"][
         "prediction_contract"] == prediction_contract("multi_model_v1")
+    paired_row = contrast["paired_episode_rows"][0]
+    assert paired_row["candidate_prediction_provenance"] == {
+        "prediction_mode": "current",
+        "prediction_contract": prediction_contract("current")}
+    assert paired_row["reference_prediction_provenance"] == {
+        "prediction_mode": "multi_model_v1",
+        "prediction_contract": prediction_contract("multi_model_v1")}
