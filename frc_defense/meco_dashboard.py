@@ -948,16 +948,40 @@ def meco_status_payload(project_root: Path | str, *, data_root: Path | str | Non
     return json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
 
 
-_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "ea5e6edb691d062d6ea9a0e58edc17fa1fc564552174c8ed9ab57cb9694ad867"
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "fe9a0a624e1ebd194eef81a7151f536ec6855ff99d22450ac47e19874b1507bf"
 _EXPECTED_PLAN_SHA256 = "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47"
 
 
 def _three_pass_provenance(project: Path) -> dict:
-    """Report candidate-local provenance availability without inferring transcripts."""
+    """Validate candidate-local scoped summaries; never infer transcripts or outcomes."""
     import hashlib
+    import re
 
     manifest_path = project / "docs" / "MECO_THREE_PASS_PROVENANCE.json"
     plan_path = project / "docs" / "MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md"
+    commit_re = re.compile(r"^[0-9a-f]{40}$")
+    digest_re = re.compile(r"^[0-9a-f]{64}$")
+
+    def artifact(relpath, expected_hash):
+        if (not isinstance(relpath, str) or not relpath or Path(relpath).is_absolute()
+                or "\\" in relpath or ".." in Path(relpath).parts
+                or not isinstance(expected_hash, str) or not digest_re.fullmatch(expected_hash)):
+            raise ValueError("summary artifact path or digest is invalid")
+        candidate = project / relpath
+        # Reject symlinks in every component, then require a regular in-repo file.
+        current = project
+        for part in Path(relpath).parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("summary artifact path is symlinked")
+        resolved_root, resolved = project.resolve(), candidate.resolve()
+        if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
+            raise ValueError("summary artifact is missing or outside the checkout")
+        content = resolved.read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected_hash:
+            raise ValueError("summary artifact hash mismatch")
+        return content.decode("utf-8")
+
     try:
         if (manifest_path.is_symlink() or plan_path.is_symlink()
                 or not manifest_path.is_file() or not plan_path.is_file()):
@@ -967,15 +991,46 @@ def _three_pass_provenance(project: Path) -> dict:
             raise ValueError("manifest hash does not match the dashboard-pinned digest")
         data = json.loads(manifest_bytes)
         if (not isinstance(data, dict)
-                or data.get("schema") != "meco-three-pass-provenance-v1"
-                or data.get("status") != "no-scoped-transcript-records"
-                or data.get("tranches") != []
+                or data.get("schema") != "meco-three-pass-provenance-v2"
+                or data.get("status") != "validated-summary-only"
                 or data.get("plan_path") != "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md"
                 or data.get("plan_sha256") != _EXPECTED_PLAN_SHA256
-                or hashlib.sha256(plan_path.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256):
+                or hashlib.sha256(plan_path.read_bytes()).hexdigest() != _EXPECTED_PLAN_SHA256
+                or not isinstance(data.get("scope"), str)
+                or not isinstance(data.get("limits"), list)
+                or not all(isinstance(x, str) for x in data["limits"])):
             raise ValueError("manifest schema or plan binding is invalid")
-        return {"status": "no_scoped_evidence", "evidence_class": "unavailable",
-                "tranches": [], "message": data["scope"], "limits": data["limits"]}
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        tranches = data.get("tranches")
+        if not isinstance(tranches, list) or not tranches:
+            raise ValueError("manifest has no scoped tranche records")
+        validated = []
+        seen = set()
+        required_roles = {"planner", "implementer", "reviewer"}
+        for tranche in tranches:
+            if not isinstance(tranche, dict):
+                raise ValueError("tranche record is invalid")
+            tranche_id = tranche.get("tranche_id")
+            if not isinstance(tranche_id, str) or not tranche_id or tranche_id in seen:
+                raise ValueError("tranche identity is invalid or duplicated")
+            seen.add(tranche_id)
+            commits = tranche.get("commits")
+            if (not isinstance(commits, dict)
+                    or set(commits) != {"feature_commit", "reviewer_approved_commit"}
+                    or not all(isinstance(v, str) and commit_re.fullmatch(v) for v in commits.values())
+                    or commits["feature_commit"] != commits["reviewer_approved_commit"]):
+                raise ValueError("feature and reviewer-approved commits must match exact commit ids")
+            summaries = tranche.get("summaries")
+            if not isinstance(summaries, dict) or set(summaries) != required_roles:
+                raise ValueError("tranche must contain planner, implementer, and reviewer summaries")
+            summary_text = {}
+            for role, record in summaries.items():
+                if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+                    raise ValueError("summary record fields are invalid")
+                summary_text[role] = artifact(record["path"], record["sha256"])
+            validated.append({"tranche_id": tranche_id, "title": tranche.get("title"),
+                "commits": commits, "summaries": summary_text})
+        return {"status": "validated_summary_only", "evidence_class": "scoped_summaries",
+                "tranches": validated, "message": data["scope"], "limits": data["limits"]}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return {"status": "untrusted", "evidence_class": "unavailable", "tranches": [],
                 "untrusted_reason": str(exc)}

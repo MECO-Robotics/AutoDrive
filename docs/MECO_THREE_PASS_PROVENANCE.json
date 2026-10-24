@@ -1,14 +1,60 @@
 {
-  "schema": "meco-three-pass-provenance-v1",
-  "status": "no-scoped-transcript-records",
-  "scope": "The dashboard reads the candidate's planner, implementer, and reviewer workflow status from MECO_CAMPAIGN_PASSES.json. This candidate does not contain persisted scoped planner/reviewer transcript summaries, so no tranche-level three-pass approval evidence is asserted.",
+  "schema": "meco-three-pass-provenance-v2",
+  "status": "validated-summary-only",
+  "scope": "Candidate-local summaries record scoped planner intent, implementation scope, and independent reviewer approval for two exact commits. They are concise provenance summaries, not agent transcripts and not evidence of training or evaluation outcomes.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "743dba515c7a732bb65161302a62756fbb7306255c90b8d4da1f29f66fc9ba47",
-  "artifact_origin": "Candidate-specific availability record. No transcript evidence was carried forward from unrelated branches.",
-  "tranches": [],
+  "artifact_origin": "Only the two independently reviewed exact commits listed below are included. No evidence is inherited from unrelated branches or worktrees.",
+  "tranches": [
+    {
+      "tranche_id": "dashboard-three-pass-availability",
+      "title": "Truthful three-pass dashboard availability",
+      "commits": {
+        "feature_commit": "e7595e3232be842f0e0af219c200d58b868b62d0",
+        "reviewer_approved_commit": "e7595e3232be842f0e0af219c200d58b868b62d0"
+      },
+      "summaries": {
+        "planner": {
+          "path": "docs/implementation-provenance/dashboard-three-pass-availability-planner.md",
+          "sha256": "c3520578d46c4cdcca85a149eb94f7d58e5cbf7f863303d4ff293dafe25c92d9"
+        },
+        "implementer": {
+          "path": "docs/implementation-provenance/dashboard-three-pass-availability-implementer.md",
+          "sha256": "945331eb43d6370b6a4934749c3222d0b568b55174e0a44e2a637409b324bd6f"
+        },
+        "reviewer": {
+          "path": "docs/implementation-provenance/dashboard-three-pass-availability-reviewer.md",
+          "sha256": "c3c930d26170216bf72b2c04a1ea35e05d36295544e3adb74b94f49545c6540c"
+        }
+      }
+    },
+    {
+      "tranche_id": "bounded-multimodel-prediction",
+      "title": "Bounded multi-model opponent prediction",
+      "commits": {
+        "feature_commit": "b32597c26e87a2523d2929566cec4b100a6571ab",
+        "reviewer_approved_commit": "b32597c26e87a2523d2929566cec4b100a6571ab"
+      },
+      "summaries": {
+        "planner": {
+          "path": "docs/implementation-provenance/bounded-multimodel-prediction-planner.md",
+          "sha256": "243ca4493ba17576a443439f9246b7ee250bff63660344ca222e13594c3a7d86"
+        },
+        "implementer": {
+          "path": "docs/implementation-provenance/bounded-multimodel-prediction-implementer.md",
+          "sha256": "fa35b470f9f86abcffb0c004a553e459083114a33c9b47dd6b3434d07c1c53a3"
+        },
+        "reviewer": {
+          "path": "docs/implementation-provenance/bounded-multimodel-prediction-reviewer.md",
+          "sha256": "9766c7d8fc73e974381724d7c7dd78877eda782a0ef887ece2737f58f30f1db3"
+        }
+      }
+    }
+  ],
   "limits": [
-    "Campaign pass status is workflow metadata and does not prove agent liveness.",
-    "No scoped transcript summary or reviewer approval is asserted in this candidate.",
-    "This record does not claim whole-plan completion or approval."
+    "Summaries are not full planner, implementer, or reviewer transcripts.",
+    "Reviewer approval applies only to the exact feature commit named in each tranche.",
+    "This manifest does not prove agent liveness, training completion, runtime performance, held-out outcomes, simulator behavior, qualification, or whole-plan completion.",
+    "No D1/D2 matrix tranche is included."
   ]
 }

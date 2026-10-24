@@ -60,10 +60,12 @@ def test_fixed_checkout_roots_and_all_policy_rows(tmp_path):
 def test_three_pass_dashboard_reports_campaign_workflow_without_inventing_review_evidence():
     project = Path(__file__).resolve().parents[1]
     provenance = _three_pass_provenance(project)
-    assert provenance["status"] == "no_scoped_evidence"
-    assert provenance["tranches"] == []
-    assert "does not contain persisted" in provenance["message"]
-    assert "No scoped transcript summary" in " ".join(provenance["limits"])
+    assert provenance["status"] == "validated_summary_only"
+    assert [row["tranche_id"] for row in provenance["tranches"]] == [
+        "dashboard-three-pass-availability", "bounded-multimodel-prediction"]
+    assert all(row["commits"]["feature_commit"] == row["commits"]["reviewer_approved_commit"]
+               for row in provenance["tranches"])
+    assert "not full" in " ".join(provenance["limits"])
     source = (project / "frc_defense/dashboard_static/meco.js").read_text()
     assert "Campaign pass status" in source
     assert "does not report agent liveness" in source
@@ -251,3 +253,62 @@ def test_active_run_precedes_higher_update_completed_run(tmp_path):
                              process_probe=lambda _pid: False)
     policy = next(row for row in result["policies"] if row["policy_id"] == "A2")
     assert policy["run"]["run_id"] == "active"
+
+
+def test_three_pass_summary_manifest_rejects_artifact_tampering_and_unsafe_paths(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+    project = Path(__file__).resolve().parents[1]
+    docs = tmp_path / "docs"
+    shutil.copytree(project / "docs", docs)
+    manifest_path = docs / "MECO_THREE_PASS_PROVENANCE.json"
+    data = json.loads(manifest_path.read_text())
+
+    # A modified artifact is rejected even when the test pins the manifest digest.
+    record = data["tranches"][0]["summaries"]["planner"]
+    (tmp_path / record["path"]).write_text("tampered\n")
+    monkeypatch.setattr(dashboard, "_EXPECTED_THREE_PASS_PROVENANCE_SHA256",
+                        hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+    result = dashboard._three_pass_provenance(tmp_path)
+    assert result["status"] == "untrusted"
+    assert "hash mismatch" in result["untrusted_reason"]
+
+    # Re-pin a manifest containing a traversal path; it must fail closed.
+    shutil.copy(project / record["path"], tmp_path / record["path"])
+    data["tranches"][0]["summaries"]["planner"]["path"] = "../outside.md"
+    manifest_path.write_text(json.dumps(data, indent=2) + "\n")
+    monkeypatch.setattr(dashboard, "_EXPECTED_THREE_PASS_PROVENANCE_SHA256",
+                        hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+    result = dashboard._three_pass_provenance(tmp_path)
+    assert result["status"] == "untrusted"
+    assert "path or digest is invalid" in result["untrusted_reason"]
+
+
+def test_three_pass_summary_manifest_rejects_unmatched_reviewer_commit(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+    project = Path(__file__).resolve().parents[1]
+    shutil.copytree(project / "docs", tmp_path / "docs")
+    manifest_path = tmp_path / "docs/MECO_THREE_PASS_PROVENANCE.json"
+    data = json.loads(manifest_path.read_text())
+    data["tranches"][0]["commits"]["reviewer_approved_commit"] = "0" * 40
+    manifest_path.write_text(json.dumps(data, indent=2) + "\n")
+    monkeypatch.setattr(dashboard, "_EXPECTED_THREE_PASS_PROVENANCE_SHA256",
+                        hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+    result = dashboard._three_pass_provenance(tmp_path)
+    assert result["status"] == "untrusted"
+    assert "must match exact commit ids" in result["untrusted_reason"]
+
+
+def test_three_pass_summary_manifest_rejects_symlinked_artifact(tmp_path):
+    import frc_defense.meco_dashboard as dashboard
+    project = Path(__file__).resolve().parents[1]
+    shutil.copytree(project / "docs", tmp_path / "docs")
+    manifest = json.loads((tmp_path / "docs/MECO_THREE_PASS_PROVENANCE.json").read_text())
+    relpath = manifest["tranches"][0]["summaries"]["planner"]["path"]
+    artifact = tmp_path / relpath
+    target = tmp_path / "external-summary.md"
+    target.write_text(artifact.read_text())
+    artifact.unlink()
+    artifact.symlink_to(target)
+    result = dashboard._three_pass_provenance(tmp_path)
+    assert result["status"] == "untrusted"
+    assert "symlinked" in result["untrusted_reason"]
