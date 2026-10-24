@@ -70,6 +70,40 @@ In either mode these are diagnostic paired records; they do not replace the
 calibrated qualification gate and the matrix does not calculate promotion
 confidence intervals.
 
+## Optional dashboard replay capture
+
+Replay capture is opt-in and uses the same environment instance and decision
+loop that produced each scored evaluation record. Supply both
+`--replay-output-dir` and an explicit `--replay-seeds` subset of matrix seeds.
+Point the output directory at a dashboard run's `.scenario-progress`
+directory to publish `scenario-meco-*` result, metadata, gzip, compact view,
+and ready files. Each captured bundle includes initialization, policy macro
+boundaries, and the episode end, plus selected-policy decision annotations.
+It binds the exact score-row digest, frame ticks, route/outcome/safety digests,
+condition/evaluation IDs, checkpoint/source/protocol/config provenance,
+device/backend, qualification stratum, and checkout state. The evaluation
+JSON records a pointer and digest for each replay bundle.
+
+For example, capture only seed 20261024 from a matrix:
+
+```bash
+python3 scripts/run_meco_ablation_matrix.py \
+  --scenario SCENARIO_ID --categories CATEGORY_A,CATEGORY_B \
+  --episodes 20 --seed 20261024 \
+  --replay-seeds 20261024 \
+  --replay-output-dir /path/to/dashboard-run/.scenario-progress \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --a1-checkpoint PATH --a2-checkpoint PATH --a3-checkpoint PATH \
+  --c1-checkpoint PATH --c2-checkpoint PATH
+```
+
+Capture copies frame state to the host at each selected episode boundary, so
+leave it disabled for ordinary runs. The dashboard replay list marks a bundle
+outdated when its source checkout changed or its checkpoint source fingerprint
+does not match the evaluation source. This implementation adds capture support;
+it does not establish simulator behavior or current dashboard service
+verification. Those remain runtime gates after review.
+
 The matrix and each condition ID bind a normalized execution device and
 backend. For example, an unindexed `cuda` request resolves to its active CUDA
 ordinal before the protocol is frozen. Each evaluator protocol and report

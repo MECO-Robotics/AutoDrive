@@ -413,6 +413,101 @@ def _episode_id(run_id: str, episode: int) -> str:
     return f"{uuid.uuid4().hex}:{run_id}-episode-{episode:08d}"
 
 
+def _canonical_digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()).hexdigest()
+
+
+def _evaluation_record_digest(record: dict) -> str:
+    """Hash the scored row while excluding its later-added replay pointer."""
+    return _canonical_digest({key: value for key, value in record.items()
+                              if key != "dashboard_replay"})
+
+
+def _validate_replay_seed_selection(output_dir, replay_seeds, scored_seeds) -> set[int]:
+    if (output_dir is None) != (replay_seeds is None):
+        raise ValueError("replay_output_dir and explicit replay_seeds must be supplied together")
+    if replay_seeds is None:
+        return set()
+    if (not replay_seeds or len(set(replay_seeds)) != len(replay_seeds) or
+            any(type(seed) is not int or seed not in scored_seeds for seed in replay_seeds)):
+        raise ValueError("replay_seeds must be a nonempty unique subset of the exact scored seeds")
+    return set(replay_seeds)
+
+
+def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
+    """Capture renderer state from the evaluated environment without stepping it."""
+    active = env.piece_active[0].bool()
+    pieces = torch.cat((env.piece_pos[0], env.piece_owner[0, :, None]), -1)[active]
+    visible = env._current_fuel_visibility[0].bool()
+    tracked = env.track_mask[0].bool()
+    opponents = env.opponent_valid[0].bool()
+    path_lengths = env.planner.last_lengths.reshape(env.n, 6)[0].tolist()
+    path_values = env.planner.last_path.reshape(env.n, 6, -1, 2)[0]
+    sizes = torch.stack((env.sim.length[0], env.sim.width[0]), -1).flatten().tolist()
+    frame = {
+        "tick": int(tick),
+        "robots": env.sim.pose[0].tolist(),
+        "behavior_mode": "match",
+        "robot_teams": env.team_ids.tolist(),
+        "robot_control_modes": list(env.control_modes),
+        "robot_roles": list(env.robot_roles),
+        "robot_actions": env.last_actions[0].tolist(),
+        "robot_opponent_visible": opponents.tolist(),
+        "robot_detected_opponents": [
+            [*env.opponent_pose[0, robot, :2].tolist(),
+             float(env.opponent_age[0, robot].item())] if bool(opponents[robot]) else None
+            for robot in range(6)],
+        "robot_detected_fuel": [
+            env.track_pos[0, robot, visible[robot]].tolist() for robot in range(6)],
+        "robot_fuel_history": [torch.cat((env.track_pos[0, robot],
+            env.track_age[0, robot, :, None]), -1)[tracked[robot] & ~visible[robot]].tolist()
+            for robot in range(6)],
+        "perception_track_timeout_s": getattr(env, "perception_track_timeout", 2.),
+        "perception_fov_degrees": env.perception_fov_degrees,
+        "perception_range": env.perception_range,
+        "camera_layout": {"height_m": .508,
+            "horizontal_fov_degrees": env.perception_fov_degrees,
+            "stereo_baseline_m": getattr(env, "stereo_baseline_m", None),
+            "mounts": ["intake", "opposite"]},
+        "sizes": sizes,
+        "adstar_paths": [path[:int(length)].tolist()
+                         for path, length in zip(path_values, path_lengths)],
+        "fuel_pieces": pieces.tolist(),
+        "hub_centers": env.hub_centers.tolist(),
+        "hub_active": env.hub_active[0].tolist(),
+        "fuel_score_count": env.fuel_score_count[0].tolist(),
+        "fuel_acquisition_count": env.fuel_acquisition_count[0].tolist(),
+        "match_elapsed": float(env.match_elapsed[0].item()),
+        "match_remaining": float(env.match_remaining[0].item()),
+        "robot_targets": env._last_audit_targets[0].tolist(),
+        "robot_fuel_targets": env._last_audit_fuel_targets[0].tolist(),
+        "robot_route_goals": env.planner.last_goal.reshape(env.n, 6, 2)[0].tolist(),
+        "robot_collecting": env._target_collecting[0].tolist(),
+        "robot_cluster_counts": env._last_audit_cluster_count[0].tolist(),
+        "meco_policy_decision": decision,
+    }
+    return frame
+
+
+def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
+                                    final_tick: int) -> None:
+    if not frames or int(frames[0].get("tick", -1)) != 0:
+        raise ValueError("MECO replay must begin with the evaluation's initial state")
+    ticks = [frame.get("tick") for frame in frames]
+    if any(type(tick) is not int for tick in ticks) or any(
+            right <= left for left, right in zip(ticks, ticks[1:])):
+        raise ValueError("MECO replay frame ticks must be strictly increasing integers")
+    if ticks[-1] != final_tick or ticks[-1] > int(record["elapsed_ticks"]):
+        raise ValueError("MECO replay terminal frame does not align with the scored episode")
+    decisions = [frame.get("meco_policy_decision") for frame in frames[1:]]
+    if any(not isinstance(decision, dict) or
+           decision.get("policy") != record.get("policy") or
+           decision.get("macro_end_tick") != frame.get("tick")
+           for decision, frame in zip(decisions, frames[1:])):
+        raise ValueError("each post-initial replay frame must identify its scored policy decision")
+
+
 def _snapshot_tensors(snapshot, *, device):
     """Recover the exact six-channel/seven-scalar tensors bound by a snapshot."""
     raster = torch.tensor(snapshot.raster, device=device, dtype=torch.float32).reshape(
@@ -1955,7 +2050,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   candidate_k_override: int | None = None,
                   control_prediction_mode: str | None = None,
                   inference_disable_tick: int | None = None,
-                  phase4_factor: dict | None = None):
+                  phase4_factor: dict | None = None,
+                  replay_output_dir: str | Path | None = None,
+                  replay_seeds: tuple[int, ...] | None = None,
+                  condition_id: str | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -1966,6 +2064,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 or len(episode_seeds) != episodes
                 or len(set(episode_seeds)) != episodes):
             raise ValueError("episode_seeds must be a unique exact seed list matching episodes")
+    scored_seeds = (tuple(episode_seeds) if episode_seeds is not None else
+                    tuple(master_seed + index for index in range(episodes)))
+    replay_seed_set = _validate_replay_seed_selection(
+        replay_output_dir, replay_seeds, scored_seeds)
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     evaluation_binding = None
@@ -2002,6 +2104,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
     execution_device = normalized_device_info(device)
+    if condition_id is not None and (not isinstance(condition_id, str) or not condition_id):
+        raise ValueError("condition_id must be a nonempty string when provided")
     if qualification_case is not None:
         required_case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
         if not isinstance(qualification_case, dict) or set(qualification_case) != required_case_fields:
@@ -2240,6 +2344,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         status_last_written = current
         status_last_completed = completed
     records = []
+    replay_exports = []
+    replay_code_state_snapshot = None
+    write_replay_bundle = None
+    if replay_output_dir is not None:
+        from .dashboard_simulation import replay_code_state, write_dashboard_replay_bundle
+        replay_code_state_snapshot = replay_code_state()
+        write_replay_bundle = write_dashboard_replay_bundle
     component_timing_ms = {name: [] for name in (
         "legal_graph_build", "policy_decision_pipeline", "d1_fallback_pipeline",
         "simulator_macro_step")}
@@ -2277,6 +2388,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         phase4_factor=phase4_factor,
                         **(qualification_case or {}))
                     episode_metric_ledger = None
+                    replay_frames = []
                     try:
                         if (inference_disable_tick is not None and
                                 inference_disable_tick >= env.horizon):
@@ -2299,6 +2411,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         episode_metric_ledger = MecoEpisodeMetricLedger(
                             env, route_tracking_available=not is_production_d0,
                             goal_tracking_available=not is_production_d0)
+                        capture_replay = (replay_output_dir is not None and
+                                          seed in replay_seed_set)
+                        if capture_replay:
+                            replay_frames.append(_capture_meco_replay_frame(
+                                env, int(env.steps[0].item()), None))
                         commitment = None
                         actions_count = [0] * 8
                         routes_seen = []
@@ -2350,6 +2467,17 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 executed_action_trace.append(executed)
                                 actions_count[executed] += 1
                                 elapsed += 1
+                                if capture_replay and (elapsed % action_ticks == 0 or
+                                        bool(done[0].item()) or bool(truncated[0].item())):
+                                    decision = {"kind": "policy_decision", "policy": record_policy,
+                                        "action": executed, "action_source": "production_deterministic",
+                                        "macro_start_tick": elapsed - 1,
+                                        "macro_end_tick": int(env.steps[0].item()),
+                                        "executed_actions": [executed],
+                                        "candidate_k": candidate_k,
+                                        "prediction_mode": decision_prediction_mode}
+                                    replay_frames.append(_capture_meco_replay_frame(
+                                        env, int(env.steps[0].item()), decision))
                                 update_evaluation_status("running", len(records))
                                 if bool(done[0].item()) or bool(truncated[0].item()):
                                     break
@@ -2625,6 +2753,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             elif goal_complete and forced_eval_goal:
                                 pending_eval_goal = None
                             elapsed += action_ticks
+                            if capture_replay:
+                                decision = {"kind": "policy_decision", "policy": record_policy,
+                                    "action": int(action), "action_source": action_source,
+                                    "candidate_id": route_id,
+                                    "goal_xy_m": [float(goal_xy[0]), float(goal_xy[1])],
+                                    "goal_heading_rad": goal_heading,
+                                    "macro_start_tick": int(elapsed - action_ticks),
+                                    "macro_end_tick": int(env.steps[0].item()),
+                                    "executed_actions": list(actual_trace),
+                                    "candidate_k": candidate_k,
+                                    "prediction_mode": decision_prediction_mode,
+                                    "p_mode": ("p0" if policy.endswith("_P0") else
+                                               p_mode if policy in ("A1", "A2", "A3") else None),
+                                    "inference_disabled": bool(use_d1_fallback)}
+                                replay_frames.append(_capture_meco_replay_frame(
+                                    env, int(env.steps[0].item()), decision))
                             update_evaluation_status("running", len(records))
                             if ended or timeout:
                                 if pending_eval_goal is not None:
@@ -2668,7 +2812,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "split": split}, sort_keys=True).encode()).hexdigest()
                             if inference_disable_tick is not None and policy in selected
                             else None)
-                        records.append({"scenario_id": scenario_id, "category": category,
+                        record = {"scenario_id": scenario_id, "category": category,
                             "seed": seed, "policy": record_policy,
                             "paired_baseline_policy": policy if inference_fault_run else None,
                             "paired_record_policy": (policy if inference_fault_run else
@@ -2756,7 +2900,155 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "meco_metric_ledger": metric_ledger_record,
                             "route_trace": routes_seen,
                             "executed_planner_route_trace": executed_planner_route_trace,
-                            "episode_id": episode_id})
+                            "episode_id": episode_id}
+                        if capture_replay:
+                            final_tick = int(env.steps[0].item())
+                            if not replay_frames or replay_frames[-1]["tick"] != final_tick:
+                                replay_frames.append(_capture_meco_replay_frame(env,
+                                    final_tick, {"kind": "episode_end", "policy": record_policy,
+                                        "terminal": True, "action": None,
+                                        "macro_end_tick": final_tick}))
+                            _validate_meco_replay_alignment(record, replay_frames,
+                                final_tick=final_tick)
+                            record_digest = _evaluation_record_digest(record)
+                            route_digest = _canonical_digest({
+                                "route_trace": record["route_trace"],
+                                "executed_planner_route_trace":
+                                    record["executed_planner_route_trace"]})
+                            outcome_digest = _canonical_digest({
+                                "metrics": record["metrics"],
+                                "safety_metrics": record["meco_metric_ledger"].get(
+                                    "safety_metrics"),
+                                "execution_failures": record["execution_failures"]})
+                            replay_condition_id = condition_id or _canonical_digest({
+                                "scenario_id": scenario_id, "category": category,
+                                "split": split, "policy": record_policy,
+                                "candidate_k": candidate_k,
+                                "prediction_mode": decision_prediction_mode,
+                                "phase4_factor": phase4_factor,
+                                "inference_disable_tick": inference_disable_tick})
+                            replay_identity = _canonical_digest({
+                                "evaluation_id": eval_id, "condition_id": replay_condition_id,
+                                "record_digest": record_digest, "seed": seed,
+                                "policy": record_policy})
+                            simulation_id = f"scenario-meco-{replay_identity[:24]}"
+                            track = (policy[:2] if policy.endswith("_P0") else
+                                     policy if policy in MECO_TRACKS else None)
+                            manifest = policy_manifest[record_policy]
+                            training_source_hash = (manifest.get("source_identity_sha256")
+                                if track is not None else source_hash)
+                            source_checkpoint_outdated = (
+                                training_source_hash != record["source_identity_sha256"])
+                            code_state = replay_code_state_snapshot
+                            replay_record = {
+                                "simulation_id": simulation_id, "task": "3v3",
+                                "matchup": scenario_id, "scenario_id": scenario_id,
+                                "category": category, "seed": seed, "scenario_seed": seed,
+                                "split": split, "qualification_case": qualification_case,
+                                "behavior_mode": "match", "policy": record_policy,
+                                "policy_id": record["policy_id"],
+                                "evaluation_id": eval_id,
+                                "condition_id": replay_condition_id,
+                                "evaluation_report_path": (str(output_path.resolve())
+                                    if output_path is not None else None),
+                                "evaluation_record_index": len(records),
+                                "evaluation_record_digest": record_digest,
+                                "outcome_digest": outcome_digest,
+                                "safety_digest": _canonical_digest(
+                                    record["meco_metric_ledger"].get("safety_metrics")),
+                                "route_digest": route_digest,
+                                "checkpoint": (checkpoints.get(track) if track else None),
+                                "checkpoint_sha256": record["checkpoint_sha256"],
+                                "checkpoint_source_sha256": training_source_hash,
+                                "checkpoint_source_outdated": source_checkpoint_outdated,
+                                "replay_source_sha256": source_hash,
+                                "source_identity_sha256": source_hash,
+                                "protocol_id": record["protocol_id"],
+                                "qualification_protocol_id": qualification_protocol_id,
+                                "training_protocol_id": manifest.get("training_protocol_id"),
+                                "training_configuration_sha256": manifest.get(
+                                    "training_configuration_sha256"),
+                                "candidate_k": candidate_k,
+                                "prediction_mode": decision_prediction_mode,
+                                "p_mode": record["p_mode"],
+                                "device": execution_device,
+                                "simulation_device": device,
+                                "code_state": code_state,
+                                "evaluation_record": {"scenario_id": scenario_id,
+                                    "category": category, "seed": seed,
+                                    "policy": record_policy, "split": split,
+                                    "metrics": record["metrics"],
+                                    "safety_metrics": record["meco_metric_ledger"].get(
+                                        "safety_metrics"),
+                                    "elapsed_ticks": record["elapsed_ticks"],
+                                    "route_digest": route_digest,
+                                    "outcome_digest": outcome_digest},
+                                "field": {"length": env.sim.field_length,
+                                    "width": env.sim.field_width,
+                                    "alliance_zone_depth": env.alliance_zone_depth,
+                                    "elements": [box.as_dict() for box in env.field_boxes]},
+                                "robot_teams": env.team_ids.tolist(),
+                                "robot_count": 6, "robots_per_alliance": 3,
+                                "robot_types": list(env.robot_types),
+                                "control_modes": list(env.control_modes),
+                                "robot_roles": list(env.robot_roles),
+                                "simulation_ticks": final_tick,
+                                "simulated_seconds": final_tick * env.dt,
+                                "dt": env.dt, "capture_stride": action_ticks,
+                                "action_repeat": action_ticks,
+                                "perception_interval": env.perception_interval,
+                                "simulation_constraints": {"fuel_physics": True,
+                                    "perception_simulation": True,
+                                    "max_fuel_per_robot": list(
+                                        env.robot_fuel_capacity_values)},
+                                "replay_provenance": {"evaluation_id": eval_id,
+                                    "condition_id": replay_condition_id,
+                                    "evaluation_report_path": (str(output_path.resolve())
+                                        if output_path is not None else None),
+                                    "evaluation_record_index": len(records),
+                                    "evaluation_record_digest": record_digest,
+                                    "replay_source_sha256": source_hash,
+                                    "checkpoint_sha256": record["checkpoint_sha256"],
+                                    "checkpoint_source_sha256": training_source_hash,
+                                    "checkpoint_source_outdated": source_checkpoint_outdated,
+                                    "protocol_id": record["protocol_id"],
+                                    "qualification_protocol_id": qualification_protocol_id,
+                                    "training_protocol_id": manifest.get("training_protocol_id"),
+                                    "training_configuration_sha256": manifest.get(
+                                        "training_configuration_sha256"),
+                                    "scenario_id": scenario_id, "category": category,
+                                    "split": split, "seed": seed,
+                                    "qualification_case": qualification_case,
+                                    "policy": record_policy, "policy_id": record["policy_id"],
+                                    "candidate_k": candidate_k,
+                                    "prediction_mode": decision_prediction_mode,
+                                    "p_mode": record["p_mode"], "device": execution_device,
+                                    "route_digest": route_digest,
+                                    "outcome_digest": outcome_digest,
+                                    "safety_digest": _canonical_digest(
+                                        record["meco_metric_ledger"].get("safety_metrics"))},
+                                "checkpoint_source_outdated": source_checkpoint_outdated,
+                                "metrics": record["metrics"],
+                                "policy_decisions": [frame["meco_policy_decision"]
+                                    for frame in replay_frames[1:]],
+                                "scenarios": [{"id": scenario_id,
+                                    "label": (f"MECO {record_policy}: {scenario_id}/{category} "
+                                        f"{split} seed {seed}"),
+                                    "frames": replay_frames}],
+                                "frames": replay_frames}
+                            result_path = Path(replay_output_dir) / f"{simulation_id}.result.json"
+                            write_replay_bundle(result_path, replay_record)
+                            record["dashboard_replay"] = {
+                                "simulation_id": simulation_id,
+                                "result_path": str(result_path.resolve()),
+                                "evaluation_report_path": (str(output_path.resolve())
+                                    if output_path is not None else None),
+                                "evaluation_record_index": len(records),
+                                "evaluation_record_digest": record_digest,
+                                "frame_count": len(replay_frames),
+                                "checkpoint_source_outdated": source_checkpoint_outdated}
+                            replay_exports.append(record["dashboard_replay"])
+                        records.append(record)
                         update_evaluation_status("running", len(records))
                     finally:
                         if episode_metric_ledger is not None:
@@ -2902,6 +3194,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "diagnostic_boundary": "matched validation sample only; promotion requires separate held-out gates",
             "source_identity_sha256": source_hash,
             "dashboard_verified": False, "records": records,
+            "dashboard_replays": replay_exports,
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
             _atomic_json(Path(output), report)
@@ -2980,6 +3273,10 @@ def _parser():
         help="evaluation-only candidate K for C tracks and controls")
     ev.add_argument("--inference-disable-tick", type=int,
         help="also run same-seed learned-policy pairs that disable inference at the first macro boundary at or after this physics tick")
+    ev.add_argument("--replay-output-dir", type=Path,
+        help="opt-in dashboard replay directory, typically <run>/.scenario-progress")
+    ev.add_argument("--replay-seeds", type=int, nargs="+",
+        help="exact subset of evaluated seeds to export as dashboard replay bundles")
     ev.add_argument("--output", required=True)
     for track in MECO_TRACKS:
         ev.add_argument(f"--{track.lower()}-checkpoint", required=True)
@@ -3015,6 +3312,8 @@ def main(argv=None):
         print(json.dumps(result, indent=2))
         return
     checkpoints = {track: getattr(args, f"{track.lower()}_checkpoint") for track in MECO_TRACKS}
+    if (args.replay_output_dir is None) != (args.replay_seeds is None):
+        raise SystemExit("--replay-output-dir and explicit --replay-seeds must be supplied together")
     report = evaluate_meco(checkpoints, scenario_id=args.scenario,
         categories=tuple(item for item in args.categories.split(",") if item),
         episodes=args.episodes, master_seed=args.seed, device=args.device,
@@ -3027,7 +3326,9 @@ def main(argv=None):
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
         candidate_k_override=args.candidate_k_override,
-        inference_disable_tick=args.inference_disable_tick)
+        inference_disable_tick=args.inference_disable_tick,
+        replay_output_dir=args.replay_output_dir,
+        replay_seeds=(None if args.replay_seeds is None else tuple(args.replay_seeds)))
     print(json.dumps({"evaluation_id": report["evaluation_id"],
         "protocol_id": report["protocol_id"], "records": len(report["records"]),
         "output": args.output}, indent=2))

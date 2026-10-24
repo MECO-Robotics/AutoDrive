@@ -98,6 +98,7 @@ _PLAYBACK_FRAME_KEYS = frozenset({
     "adstar_paths", "fuel_pieces", "hub_centers", "hub_active", "fuel_score_count",
     "fuel_acquisition_count", "match_elapsed", "match_remaining", "predicted_intercept",
     "predicted_intercept_time",
+    "meco_policy_decision",
 })
 
 
@@ -105,7 +106,14 @@ def scenario_playback_view(record: dict, *, max_frames: int = 240) -> dict:
     """Return the renderer data without duplicated frames or excess samples."""
     top_level_keys=("task", "matchup", "architecture", "behavior_mode", "seed",
         "scenario_seed", "field", "robot_types", "simulation_constraints", "robot_teams",
-        "robot_count", "robots_per_alliance", "simulated_seconds", "simulation_ticks", "dt")
+        "robot_count", "robots_per_alliance", "simulated_seconds", "simulation_ticks", "dt",
+        "evaluation_id", "condition_id", "evaluation_record_digest",
+        "evaluation_report_path", "evaluation_record_index",
+        "checkpoint_sha256", "checkpoint_source_outdated", "replay_source_sha256",
+        "source_identity_sha256", "protocol_id", "qualification_protocol_id",
+        "training_protocol_id", "training_configuration_sha256", "candidate_k",
+        "prediction_mode", "p_mode", "split", "category", "policy",
+        "qualification_case", "replay_provenance")
     view={key:record[key] for key in top_level_keys if key in record}
     scenarios=[]
     for scenario in record.get("scenarios",[]) or []:
@@ -121,6 +129,44 @@ def scenario_playback_view(record: dict, *, max_frames: int = 240) -> dict:
                           if key in scenario} | {"frames":compact_frames})
     view["scenarios"]=scenarios
     return view
+
+
+def write_dashboard_replay_bundle(result_path: Path, record: dict) -> None:
+    """Atomically write the dashboard's full, compressed, view, metadata, and ready files."""
+    result_path = Path(result_path)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(record, separators=(",", ":"), allow_nan=False).encode()
+
+    def atomic_write(path: Path, content: bytes) -> None:
+        temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+
+    atomic_write(result_path, serialized)
+    metadata = {key: record.get(key) for key in (
+        "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state",
+        "evaluation_id", "condition_id", "evaluation_record_digest",
+        "evaluation_report_path", "evaluation_record_index",
+        "replay_source_sha256", "checkpoint_sha256", "checkpoint_source_outdated",
+        "scenario_id", "category", "split", "policy")}
+    scenarios = record.get("scenarios") or []
+    metadata["label"] = (scenarios[0].get("label") if scenarios else
+                         record.get("simulation_id"))
+    atomic_write(result_path.with_suffix(".meta.json"), json.dumps(
+        metadata, separators=(",", ":"), allow_nan=False).encode())
+    atomic_write(result_path.with_suffix(result_path.suffix + ".gz"),
+        gzip.compress(serialized, compresslevel=6, mtime=0))
+    view = json.dumps(scenario_playback_view(record), separators=(",", ":"),
+                      allow_nan=False).encode()
+    atomic_write(result_path.with_suffix(".view.json.gz"),
+        gzip.compress(view, compresslevel=1, mtime=0))
+    ticks = int(record.get("simulation_ticks", 0))
+    ready_path = result_path.with_name(
+        result_path.name.removesuffix(".result.json") + ".json")
+    atomic_write(ready_path, json.dumps({"status": "ready", "tick": ticks,
+        "total_ticks": ticks, "percent": 100, "simulated_seconds": record.get(
+            "simulated_seconds", 0), "updated_at": time.time()},
+        separators=(",", ":"), allow_nan=False).encode())
 
 
 def replay_commit_age(saved_commit: str | None, current_commit: str | None,

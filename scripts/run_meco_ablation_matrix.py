@@ -30,6 +30,10 @@ def _parser() -> argparse.ArgumentParser:
                         help="requested physics tick for the paired D1 fallback condition")
     parser.add_argument("--qualification-protocol", type=Path,
                         help="frozen protocol whose validation/test seeds the matrix must use")
+    parser.add_argument("--replay-output-dir", type=Path,
+                        help="opt-in dashboard replay directory, typically <run>/.scenario-progress")
+    parser.add_argument("--replay-seeds", type=int, nargs="+",
+                        help="exact subset of matrix seeds whose evaluated records get replay bundles")
     for track in MECO_TRACKS:
         parser.add_argument(f"--{track.lower()}-checkpoint", required=True, type=Path)
     return parser
@@ -39,6 +43,8 @@ def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     if args.episodes < 1 or args.seed < 0 or args.seed + args.episodes > 2**63:
         raise SystemExit("episodes and seed must define a valid signed-63-bit seed list")
+    if (args.replay_output_dir is None) != (args.replay_seeds is None):
+        raise SystemExit("--replay-output-dir and explicit --replay-seeds must be supplied together")
     categories = tuple(part for part in args.categories.split(",") if part)
     checkpoints = {track: str(getattr(args, f"{track.lower()}_checkpoint"))
                    for track in MECO_TRACKS}
@@ -47,7 +53,9 @@ def main(argv=None) -> int:
         seeds=tuple(args.seed + index for index in range(args.episodes)),
         device=args.device, output_dir=args.output_dir,
         inference_disable_tick=args.inference_disable_tick,
-        qualification_protocol=args.qualification_protocol)
+        qualification_protocol=args.qualification_protocol,
+        replay_output_dir=args.replay_output_dir,
+        replay_seeds=(None if args.replay_seeds is None else tuple(args.replay_seeds)))
     print(json.dumps({"matrix_id": report["matrix_id"],
         "conditions": len(report["conditions"]),
         "contrasts": len(report["contrasts"]),

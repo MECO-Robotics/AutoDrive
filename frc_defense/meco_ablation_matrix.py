@@ -399,7 +399,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                device: str, output_dir: str | Path,
                inference_disable_tick: int | None = None,
                qualification_protocol: str | Path | None = None,
-               qualification_case: dict | None = None) -> dict:
+               qualification_case: dict | None = None,
+               replay_output_dir: str | Path | None = None,
+               replay_seeds: tuple[int, ...] | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
     from .meco_track_training import evaluate_meco, load_evaluation_protocol
@@ -409,6 +411,11 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     if not seeds or len(set(seeds)) != len(seeds) or any(
             type(seed) is not int or seed < 0 or seed >= 2**63 for seed in seeds):
         raise ValueError("seeds must be a nonempty unique list of signed-63-bit integers")
+    if (replay_output_dir is None) != (replay_seeds is None):
+        raise ValueError("replay_output_dir and explicit replay_seeds must be supplied together")
+    if replay_seeds is not None and (not replay_seeds or len(set(replay_seeds)) != len(replay_seeds)
+            or any(type(seed) is not int or seed not in seeds for seed in replay_seeds)):
+        raise ValueError("replay_seeds must be a nonempty unique subset of matrix seeds")
     if not categories:
         raise ValueError("at least one scenario category is required")
     definition = get_scenario(scenario_id)
@@ -516,6 +523,9 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             control_prediction_mode=condition.control_prediction_mode,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
+            replay_output_dir=replay_output_dir,
+            replay_seeds=replay_seeds,
+            condition_id=condition_id,
             output=str(report_path))
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
@@ -545,6 +555,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         condition_records = _records_by_key(report)
         results[condition.condition_name] = {"condition_id": condition_id,
             "evaluation_id": report["evaluation_id"],
+            "dashboard_replay_count": len(report.get("dashboard_replays", [])),
             "protocol_id": report["protocol_id"],
             "qualification_protocol_id": report["qualification_protocol_id"],
             "evaluation_design": evaluation_design,
@@ -728,6 +739,10 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
+        "dashboard_replay_capture": ({"enabled": replay_output_dir is not None,
+            "output_dir": str(Path(replay_output_dir).resolve()),
+            "seed_list": list(replay_seeds or ())}
+            if replay_output_dir is not None else {"enabled": False}),
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
             track: results[architecture_name]["policy_manifest"][track][

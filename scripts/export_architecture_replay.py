@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -18,7 +15,9 @@ import torch
 from frc_defense.architecture_benchmark import ARCHITECTURES, distribution, metrics, source_provenance
 from frc_defense.architecture_inputs import PerceptionInputs
 from frc_defense.architecture_scenarios import SCENARIOS, make_env, reset_scenario
-from frc_defense.dashboard_simulation import replay_code_state, scenario_playback_view
+from frc_defense.dashboard_simulation import (
+    replay_code_state, write_dashboard_replay_bundle,
+)
 
 
 def capture_frame(env, tick):
@@ -61,31 +60,9 @@ def capture_frame(env, tick):
     }
 
 
-def atomic_write(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-    temporary.write_bytes(data)
-    temporary.replace(path)
-
-
 def write_bundle(result_path, record):
     """Use the dashboard's result, sidecar, compressed-view, and ready conventions."""
-    serialized = json.dumps(record, separators=(",", ":"), allow_nan=False).encode()
-    atomic_write(result_path, serialized)
-    metadata = {key: record[key] for key in (
-        "simulation_id", "task", "seed", "behavior_mode", "robot_types", "code_state")}
-    metadata.update(label=record["scenarios"][0]["label"],
-                    replay_source_sha256=record["replay_source_sha256"],
-                    checkpoint_source_outdated=record["checkpoint_source_outdated"])
-    atomic_write(result_path.with_suffix(".meta.json"), json.dumps(metadata).encode())
-    atomic_write(result_path.with_suffix(result_path.suffix + ".gz"),
-                 gzip.compress(serialized, compresslevel=6, mtime=0))
-    view = json.dumps(scenario_playback_view(record), separators=(",", ":"), allow_nan=False).encode()
-    atomic_write(result_path.with_suffix(".view.json.gz"), gzip.compress(view, compresslevel=1, mtime=0))
-    ready_path = result_path.with_name(result_path.name.removesuffix(".result.json") + ".json")
-    atomic_write(ready_path, json.dumps({"status": "ready", "tick": record["simulation_ticks"],
-        "total_ticks": record["simulation_ticks"], "percent": 100,
-        "simulated_seconds": record["simulated_seconds"], "updated_at": time.time()}).encode())
+    write_dashboard_replay_bundle(result_path, record)
 
 
 @torch.no_grad()

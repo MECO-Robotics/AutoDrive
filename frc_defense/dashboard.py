@@ -562,15 +562,19 @@ def create_handler(run_dir: Path, *, meco_data_root: Path | None = None,
                         saved_dirty=sorted(path for path in saved.get("dirty_files",[])
                             if Path(path).suffix in {".py", ".cpp", ".cu", ".hip", ".json"}
                             or path == "pyproject.toml")
-                        outdated=(bool(record.get("outdated")) or
+                        source_outdated=(bool(record.get("outdated")) or
                             saved.get("commit") != current.get("commit") or
                             saved_dirty != current.get("dirty_files",[]))
+                        checkpoint_source_outdated=bool(
+                            record.get("checkpoint_source_outdated", False))
+                        outdated=(source_outdated or checkpoint_source_outdated)
                         view_path=progress_dir/f"{simulation_id}.result.view.json.gz"
                         replays.append({"simulation_id":simulation_id,
                             "label":record.get("label") or simulation_id,
                             "seed":record.get("seed"),"behavior_mode":record.get("behavior_mode","match"),
                             "robot_types":record.get("robot_types",[]),"code_state":saved,
-                            "outdated":outdated,
+                            "outdated":outdated,"source_outdated":source_outdated,
+                            "checkpoint_source_outdated":checkpoint_source_outdated,
                             "playback_size_bytes":(view_path.stat().st_size if view_path.is_file()
                                 else (progress_dir/f"{simulation_id}.result.json.gz").stat().st_size
                                 if (progress_dir/f"{simulation_id}.result.json.gz").is_file() else 0),

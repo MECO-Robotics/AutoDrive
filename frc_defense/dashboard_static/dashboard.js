@@ -108,7 +108,7 @@ async function refreshScenarioReplays() {
     const deleteAllButton = $("deleteAllScenarioReplays");
     if (deleteAllButton) deleteAllButton.disabled = zoneLoading || scenarioReplays.length === 0;
     if (status) status.textContent = scenarioReplays.length
-      ? `${scenarioReplays.length} saved replay${scenarioReplays.length === 1 ? "" : "s"}. Outdated means the commit or dirty files differ from this checkout.`
+      ? `${scenarioReplays.length} saved replay${scenarioReplays.length === 1 ? "" : "s"}. Outdated means the source checkout changed or the checkpoint source does not match.`
       : "No saved replays yet. Generate one when you are ready.";
   } catch (error) {
     const status = $("scenarioReplayStatus");
@@ -1135,7 +1135,7 @@ async function loadSelectedScenarioReplay() {
     $("scenarioCount").textContent = `${record.behavior_mode || "match"} · seed ${record.seed ?? "—"} · ${frames.length.toLocaleString()} frames`;
     const state = scenarioReplays.find((item) => item.simulation_id === replay.simulation_id);
     $("scenarioReplayStatus").textContent = state?.outdated
-      ? `Outdated: created at commit ${state.code_state?.commit || "unknown"}; current code differs.`
+      ? `Outdated${state.checkpoint_source_outdated ? ": checkpoint source differs" : ""}${state.source_outdated ? ` · replay source ${state.code_state?.commit || "unknown"} differs from this checkout` : ""}.`
       : `Current code: ${state?.code_state?.commit || "unknown"}.`;
     if (!frames.length) throw new Error("This replay contains no playback frames.");
     if (!fromCache) {
