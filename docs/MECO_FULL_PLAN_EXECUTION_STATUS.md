@@ -22,6 +22,26 @@ training, or replay work was performed for these integrations.
 
 # MECO learning tracks plan: execution status
 
+## Manifest-driven supervisor and cross-process device leases — 2026-10-24
+
+Reviewed implementation commit `5d81713310e9400b12fead981f118913f83222f0`
+is integrated at candidate commit `55e988596`. The supervisor now consumes a
+validated five-track manifest, derives configurations and isolated roots from
+it, rejects CLI overrides, and requires explicit diagnostic-launch opt-in.
+Training and evaluation devices use stable sorted cross-process leases shared
+with the validation campaign runner. Fresh campaign and evaluation roots are
+claimed exclusively after lease acquisition; a concurrent-root race fails
+closed and removes only an empty partial claim. Thirty-five focused offline
+tests, compilation, and diff checks passed; independent exact-snapshot review
+approved after requiring the race fix.
+
+This is launch wiring, not Phase 2 completion. No dataset or warm-start
+artifacts were created, no simulator/GPU/training/replay was run, and the live
+legacy supervisor was not changed or retroactively leased. Phase 2 and
+qualification remain false. See tranche #46 in
+[`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json) and
+[`meco-supervisor-manifest-device-lease.md`](implementation-provenance/meco-supervisor-manifest-device-lease.md).
+
 ## Candidate dashboard verification — 2026-10-24 14:33 UTC
 
 After the provenance ledger and digest pin were integrated, user service
