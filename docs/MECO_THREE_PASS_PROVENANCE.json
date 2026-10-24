@@ -750,6 +750,48 @@
         "status": "approved-summary"
       },
       "limits": "Ten focused D0 tests, compile, CLI, and diff checks passed. No simulator/GPU/dashboard/training/shards were run. The 139,800-record calibration remains unrun."
+    },
+    {
+      "requirement_id": "plan-a-offline-oracle-audit",
+      "title": "Fail-closed offline audit of Plan A legal-node U/B labels and sampling",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-oracle-audit.md",
+          "sha256": "9984c7cf77d6b8ca60c1b27a7b9fbfcced1af714f8ace5c3d52937ba3807cb68",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "18faf13c42bb5e5d5168a0b24c4f48726ca14593",
+        "candidate_integration_commit": "6a709997aefcc15538dccc3180386f87c379fed7",
+        "initial_commit": "e7919370f053afaad68d2820aa36f7be131a47d3",
+        "followup_commits": [
+          "e8a3ac0d6d6ba91b33417048dd013e27c4b6bb55",
+          "5d84ba676b55857dc8a91d3a976cb97825875d5e",
+          "259c86d76e56cc28c81e823795ad6abe30fae5f0"
+        ],
+        "paths": [
+          "frc_defense/meco_plan_a_oracle_audit.py",
+          "tests/test_meco_plan_a_oracle_audit.py",
+          "docs/MECO_SUPERVISED_WARMSTART.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-oracle-audit.md",
+          "sha256": "9984c7cf77d6b8ca60c1b27a7b9fbfcced1af714f8ace5c3d52937ba3807cb68",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "18faf13c42bb5e5d5168a0b24c4f48726ca14593",
+        "verdict": "approved",
+        "verdict_detail": "Independent review requested four rounds of fixes, then approved the exact final head after deterministic-sampling, certainty-unit, label/pair coverage, and full-layout inventory adversarial checks.",
+        "status": "approved-summary"
+      },
+      "limits": "Thirteen focused tests, compile, and diff checks passed. No data collection, human-authored labels, independent oracle, simulator/replay, fit, GPU, training, or qualification evidence."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -761,6 +803,7 @@
     "The evaluation-device lease tranche has focused implementation and review evidence only; simulator, hardware, fresh dashboard replay, active-campaign, and qualification evidence are absent.",
     "The inference observability and decision-trace tranche has focused implementation/review evidence only; simulator, fresh replay, dashboard review, and qualification gates remain open.",
     "The D0 campaign orchestration tranche provides implementation and eight-test review evidence only; 139,800 planned D0 records remain unrun, with no GPU/simulator results, CI, or qualification claim.",
-    "The D0 offline schedule compiler reports work counts only; all 139,800 calibration records remain unrun."
+    "The D0 offline schedule compiler reports work counts only; all 139,800 calibration records remain unrun.",
+    "The Plan A offline oracle audit validates future artifacts; no Plan A labels, collected dataset, replay, fit, or warm-start evidence exists."
   ]
 }

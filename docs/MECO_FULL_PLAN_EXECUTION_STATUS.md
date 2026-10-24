@@ -1,5 +1,15 @@
 # MECO learning tracks plan: execution status
 
+> **Plan A offline oracle audit integrated — 2026-10-24.** Reviewed audit
+> `18faf13c42bb5e5d5168a0b24c4f48726ca14593` now validates source/protocol
+> bindings, recomputes stored U/B evidence and sampling weights, reproduces
+> the collector's deterministic node sample, and rejects feasible nodes
+> omitted from the full pair layout. Thirteen focused tests, compile, and diff
+> checks passed. No Plan A dataset, expert labels, simulator replay, fitting,
+> GPU, or training evidence was generated. Provenance now contains 21 scoped
+> tranches. Dashboard restart/endpoint verification is pending; no replay is
+> present.
+
 > **D0 offline schedule compiler integrated — 2026-10-24.** Reviewed commit
 > `b4dbaf4cc75e76fa5dc62471e96eda0373d8961b` adds an offline `describe`
 > command that reports the default full calibration schedule as 12 scenarios,
