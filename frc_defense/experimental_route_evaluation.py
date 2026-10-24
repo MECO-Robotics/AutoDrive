@@ -164,8 +164,8 @@ def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> 
     live = env.planner
     device = env.device
     count = len(query_rows)
-    starts = torch.stack([env.sim.pose[q.world, q.slot, :2] for q, _ in query_rows])
-    headings = torch.stack([env.sim.pose[q.world, q.slot, 2] for q, _ in query_rows])
+    starts = torch.stack([env.policy_pose[q.world, q.slot, :2] for q, _ in query_rows])
+    headings = torch.stack([env.policy_pose[q.world, q.slot, 2] for q, _ in query_rows])
     velocity = torch.stack([env.sim.velocity[q.world, q.slot] for q, _ in query_rows])
     sim = SimpleNamespace(
         pose=torch.cat((starts, headings[:, None]), dim=-1)[:, None, :],
@@ -201,8 +201,9 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
                     learned_cost_provenance: str = "caller_supplied") -> tuple[RouteResult, ...]:
     """Evaluate an ordered batch against current observed robot obstacles.
 
-    Starts, footprint and motion limits come from the live simulator state.
-    Dynamic geometry is taken from ``env._perceived_robot_obstacles()``, the
+    Starts use policy localization; footprint and motion limits come from
+    configured robot parameters. Dynamic geometry is taken from
+    ``env._perceived_robot_obstacles()``, the
     exact helper used by the controller. Teammates use its current localization
     feed and opponents use its observed track; hidden opponent truth is not read.
 
@@ -240,7 +241,7 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
     else:
         learned_map = torch.as_tensor(learned_traversal_cost,
                                       device=env.device,
-                                      dtype=env.sim.pose.dtype)
+                                      dtype=env.policy_pose.dtype)
         expected_shape = (env.planner.nx, env.planner.ny)
         if learned_map.shape != expected_shape:
             raise ValueError(f"learned_traversal_cost must have shape {expected_shape}")
@@ -307,12 +308,12 @@ def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
         planner_rows: list[tuple[RouteQuery, torch.Tensor]] = []
         for _, query in valid_rows:
             goal = torch.as_tensor(query.goal_xy, device=env.device,
-                                    dtype=env.sim.pose.dtype)
+                                    dtype=env.policy_pose.dtype)
             planner_rows.append((query, goal))
         device = env.device
-        starts = torch.stack([env.sim.pose[q.world, q.slot, :2]
+        starts = torch.stack([env.policy_pose[q.world, q.slot, :2]
                               for q, _ in planner_rows])
-        headings = torch.stack([env.sim.pose[q.world, q.slot, 2]
+        headings = torch.stack([env.policy_pose[q.world, q.slot, 2]
                                 for q, _ in planner_rows])
         goals = torch.stack([goal for _, goal in planner_rows])
         lengths = torch.stack([

@@ -52,7 +52,7 @@ class D1HandWeightedPolicy:
         slot = 3
         points = env.track_pos[:, slot].gather(
             1, indices[:, slot, :, None].expand(-1, -1, 2))
-        distances = (points - env.sim.pose[:, slot, None, :2]).norm(dim=-1)
+        distances = (points - env.policy_pose[:, slot, None, :2]).norm(dim=-1)
         confidence = env.track_confidence[:, slot].gather(1, indices[:, slot]).clamp(0., 1.)
         age = env.track_age[:, slot].gather(1, indices[:, slot]).clamp(0., 2.)
         track_points = env.track_pos[:, slot]
@@ -625,10 +625,17 @@ def _episode(policy, name, category, seed, device, horizon, action_ticks, *,
         if demonstration or decisions%stride == 0:
             frames[-1]['executed_action']=int(env.last_actions[0,3])
             frames[-1]['next_pose']=env.sim.pose[0,3].tolist()
+            frames[-1]['next_physical_truth_pose']=env.sim.pose[0,3].tolist()
+            frames[-1]['next_policy_pose_estimate']=env.policy_pose[0,3].tolist()
+            frames[-1]['pose_authority']='next_pose is physical_truth; next_policy_pose_estimate is learner localization'
         decisions+=1
         if bool(done[0] | truncated[0]): break
     terminal={'phase':'terminal','tick':int(env.steps[0]),'executed_action':int(env.last_actions[0,3]),
-              'pose':env.sim.pose[0,3].tolist(),'hub_active':bool(env.hub_active[0,1]),
+              'pose':env.sim.pose[0,3].tolist(),
+              'physical_truth_pose':env.sim.pose[0,3].tolist(),
+              'policy_pose_estimate':env.policy_pose[0,3].tolist(),
+              'pose_authority':'pose and physical_truth_pose are evaluator truth; policy_pose_estimate is learner localization',
+              'hub_active':bool(env.hub_active[0,1]),
               'metrics':{k:v.tolist() for k,v in env.curriculum_metrics.outcomes().items()}}
     if not demonstration: frames.append(terminal)
     return {'scenario_id':name,'scenario_version':SCENARIOS[name].version,'category':category,'seed':seed,

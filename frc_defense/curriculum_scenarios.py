@@ -15,6 +15,7 @@ from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
 _PHASE4_SENSOR_STATE_FIELDS = (
+    'policy_pose',
     'track_pos', 'track_vel', 'track_age', 'track_mask', 'track_confidence',
     'track_spatial_extent', 'track_angular_extent', 'track_merged',
     'perception_quality_state', 'opponent_pose', 'opponent_velocity',
@@ -106,7 +107,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     anchor = self.phase4_defender_anchor[:, slot, :2]
                     target = anchor.clone()
                     target[:, 1] += sign * float(factor['telegraph_distance_m'])
-                    commands[:, slot, :2] = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+                    commands[:, slot, :2] = (target - self.policy_pose[:, slot, :2]).clamp(-1., 1.)
                     if bool(after_switch.any()) and self.phase4_runtime_metrics['feint_reversal_tick'] is None:
                         self.phase4_runtime_metrics['feint_reversal_tick'] = int(tick)
                 else:
@@ -115,10 +116,10 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                         target = self.phase4_defender_anchor[:, slot, :2].clone()
                         target[:, 1] += torch.sin(phase) * .6
                         target[:, 0] += torch.cos(phase * .7 + slot) * .8
-                        behavior_a_commands = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+                        behavior_a_commands = (target - self.policy_pose[:, slot, :2]).clamp(-1., 1.)
                     else:
                         behavior_a_commands = torch.zeros_like(commands[:, slot, :2])
-                    delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
+                    delta = self.opponent_pose[:, slot, :2] - self.policy_pose[:, slot, :2]
                     valid = self.opponent_valid[:, slot]
                     behavior_b_commands = torch.where(valid[:, None], delta.clamp(-1.5, 1.5), 0.)
                     commands[:, slot, :2] = torch.where(after_switch[:, None],
@@ -128,14 +129,14 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                 continue
             if level == 2 or (level == 5 and slot == 0) or pressure['family'] == 'orbiting_interceptor':
                 phase = self.match_elapsed * 1.2 + pressure['phase']
-                target = self.sim.pose[:, slot, :2].clone()
+                target = self.policy_pose[:, slot, :2].clone()
                 target[:, 1] = pressure['anchor_y'] + torch.sin(phase) * .6
                 if pressure['family'] == 'orbiting_interceptor':
                     target[:, 0] = 10.8 + torch.cos(phase * .7 + slot) * .8
                     target[:, 1] += slot * .45
-                commands[:, slot, :2] = (target - self.sim.pose[:, slot, :2]).clamp(-1., 1.)
+                commands[:, slot, :2] = (target - self.policy_pose[:, slot, :2]).clamp(-1., 1.)
             elif pressure['family'] == 'split_chaser':
-                delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
+                delta = self.opponent_pose[:, slot, :2] - self.policy_pose[:, slot, :2]
                 valid = self.opponent_valid[:, slot]
                 phase = self.match_elapsed * .65 + pressure['phase']
                 offset = torch.stack((torch.cos(phase), torch.sin(phase)), -1) * .8
@@ -143,7 +144,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     (delta + offset).clamp(-1.5, 1.5), 0.)
             elif level == 4 or (level == 5 and slot == 1):
                 # Only the defender's simulated opponent observation is used.
-                delta = self.opponent_pose[:, slot, :2] - self.sim.pose[:, slot, :2]
+                delta = self.opponent_pose[:, slot, :2] - self.policy_pose[:, slot, :2]
                 valid = self.opponent_valid[:, slot]
                 commands[:, slot, :2] = torch.where(valid[:, None], delta.clamp(-1.5, 1.5), 0.)
         return torch.where(active[:, None, None], commands, 0.)
@@ -260,10 +261,11 @@ def _pressure_level(category):
 
 
 def _refresh(env):
+    env.synchronize_policy_pose()
     env.sim.velocity.zero_()
-    env._target_collect_heading.copy_(env.sim.pose[:, :, 2])
-    env._target_turn_anchor.copy_(env.sim.pose[:, :, :2])
-    env._raster_cursor.copy_(env._closest_raster_indices(env.sim.pose[:, :, :2]))
+    env._target_collect_heading.copy_(env.policy_pose[:, :, 2])
+    env._target_turn_anchor.copy_(env.policy_pose[:, :, :2])
+    env._raster_cursor.copy_(env._closest_raster_indices(env.policy_pose[:, :, :2]))
     env._raster_reanchor.fill_(True)
     for name in ('last_path', 'last_lengths', 'last_intercept', 'last_intercept_time',
                  'last_start', 'last_goal', 'last_heading', 'last_progress',
@@ -514,7 +516,7 @@ def reset_curriculum_scenario(env, seed):
         else:
             env._update_perception(torch.ones(env.n, device=env.device, dtype=torch.bool))
             env._last_obs = env.observe()
-    env.phase4_defender_anchor = env.sim.pose.clone()
+    env.phase4_defender_anchor = env.policy_pose.clone()
     env._reset_phase4_observation_buffer(env._last_obs)
     return env._last_obs
 
@@ -533,7 +535,7 @@ def teacher_actions(env, obs):
     candidate = valid[:, 3] & mask[:, 3, :4]
     active = env.hub_active[:, 1]
     candidate &= active[:, None] | (points[:, 3, :, 0] < env.field_length-env.alliance_zone_depth)
-    distances = (points[:, 3] - env.sim.pose[:, 3, None, :2]).norm(dim=-1)
+    distances = (points[:, 3] - env.policy_pose[:, 3, None, :2]).norm(dim=-1)
     choice = distances.masked_fill(~candidate, float('inf')).argmin(-1)
     choice = torch.where(candidate.any(-1), choice, 6)
     loaded = load[:, 3] >= min(4, env.robot_fuel_capacity_values[3])
@@ -544,7 +546,7 @@ def teacher_actions(env, obs):
     delivery = torch.where(active, 4, 6)
     delivery_legal = mask[:, 3].gather(1, delivery[:, None]).squeeze(1)
     choice = torch.where(env.curriculum_teacher_delivering & delivery_legal, delivery, choice)
-    at_home = env.sim.pose[:, 3, 0] >= env.field_length-env.alliance_zone_depth
+    at_home = env.policy_pose[:, 3, 0] >= env.field_length-env.alliance_zone_depth
     choice = torch.where(~active & at_home & (load[:, 3] > 0), 7, choice)
     chosen_legal = mask[:, 3].gather(1, choice[:, None]).squeeze(1)
     choice = torch.where(chosen_legal, choice, 7)

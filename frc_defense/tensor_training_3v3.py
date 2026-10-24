@@ -78,7 +78,7 @@ def _train_3v3_generation(task: str, generation: int, output: str | Path, *,
     if candidate_rank_accelerated:
         def _three_v_three_candidates():
             points=env.track_pos.reshape(-1,env.fuel_count,2)
-            robot_xy=env.sim.pose[:,:,:2].reshape(-1,2)
+            robot_xy=env.policy_pose[:,:,:2].reshape(-1,2)
             free=env.track_mask.reshape(-1,env.fuel_count)
             indices,valid,nearest=_fuel_candidate_rank.candidates(
                 points,robot_xy,free)

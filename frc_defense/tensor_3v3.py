@@ -256,6 +256,16 @@ class TensorThreeVsThreeEnv(
             obstacles=obstacles, field_colliders=colliders,
             bump_regions=bumps, contact_iterations=contact_iterations,
             field_sweep_spacing=field_sweep_spacing)
+        # Policy localization is an explicit state boundary.  Physics owns
+        # ``sim.pose``; observations, candidate construction, and controllers
+        # consume this estimate.  The default estimator starts localized and
+        # is advanced by wheel/gyro odometry below.  Scenario fixtures may
+        # deliberately perturb an estimate without changing physical pose.
+        self.estimated_pose = self.sim.pose.clone()
+        # This is the estimator frame delivered to the policy. Phase 4
+        # observation delay may temporarily restore an older captured value;
+        # ``estimated_pose`` continues to advance in the background.
+        self.policy_pose = self.estimated_pose.clone()
         self.raster_sweep_points=torch.tensor(
             self._build_raster_spline_points(),device=self.device,dtype=torch.float32)
         self._raster_cursor=torch.zeros((self.n,NUM_ROBOTS),device=self.device,
@@ -387,6 +397,7 @@ class TensorThreeVsThreeEnv(
         # AD* treats each robot slot as a batch row and shares the static field grid.
         from .tensor_adstar import TensorADStar
         proxy = SimpleNamespace(n=self.n * NUM_ROBOTS, device=self.device, sim=self.sim,
+                                policy_pose=self.policy_pose,
                                 field_boxes=self.field_boxes)
         self.planner = TensorADStar(proxy, avoid_bumps=True)
         self._planner_controller_mode_key=tuple(
@@ -431,6 +442,59 @@ class TensorThreeVsThreeEnv(
                                 face-support_x,face+support_x)
         return pose
 
+    @torch.no_grad()
+    def synchronize_policy_pose(self, mask=None):
+        """Initialize estimated localization from physical pose at a reset.
+
+        This is for episode/scenario setup only. Runtime decisions must read
+        ``policy_pose`` and runtime movement advances it through odometry.
+        """
+        if mask is None:
+            self.estimated_pose.copy_(self.sim.pose)
+            self.policy_pose.copy_(self.estimated_pose)
+            return
+        mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
+        reset = mask[:, None, None]
+        self.estimated_pose.copy_(torch.where(reset, self.sim.pose,
+                                              self.estimated_pose))
+        self.policy_pose.copy_(torch.where(reset, self.estimated_pose,
+                                           self.policy_pose))
+
+    @torch.no_grad()
+    def set_focal_pose_estimate(self, estimate, *, world=0, slot=3):
+        """Set one robot's estimated ``(x, y, heading)`` without moving it.
+
+        The helper is intentionally distinct from scenario placement, which
+        edits physical truth.  It is the supported hook for localization
+        errors and estimator recovery experiments.
+        """
+        if (type(world) is not int or not 0 <= world < self.n or
+                type(slot) is not int or not 0 <= slot < NUM_ROBOTS):
+            raise ValueError("world/slot is outside the policy-pose state")
+        value = torch.as_tensor(estimate, device=self.device,
+                                dtype=self.policy_pose.dtype).reshape(3)
+        if not bool(torch.isfinite(value).all()):
+            raise ValueError("pose estimate must be finite")
+        self.estimated_pose[world, slot].copy_(value)
+        self.policy_pose[world, slot].copy_(value)
+
+    @torch.no_grad()
+    def _advance_policy_pose_odometry(self, prior_velocity, active):
+        """Advance estimates from wheel/gyro motion, never from world pose."""
+        active = torch.as_tensor(active, device=self.device, dtype=torch.bool).reshape(self.n)
+        estimate = self.estimated_pose.clone()
+        linear_delta = .5 * (prior_velocity[..., :2] + self.sim.velocity[..., :2]) * self.dt
+        angular_delta = .5 * (prior_velocity[..., 2] + self.sim.velocity[..., 2]) * self.dt
+        estimate[..., :2] += linear_delta
+        estimate[..., 2] += angular_delta
+        estimate[..., 2] = torch.atan2(torch.sin(estimate[..., 2]),
+                                       torch.cos(estimate[..., 2]))
+        update = active[:, None] & self._controlled_mode_mask[None]
+        self.estimated_pose.copy_(torch.where(update[..., None], estimate,
+                                              self.estimated_pose))
+        self.policy_pose.copy_(torch.where(update[..., None], self.estimated_pose,
+                                           self.policy_pose))
+
     def reset(self, seed=None):
         if seed is not None:
             self.generator.manual_seed(int(seed))
@@ -443,21 +507,22 @@ class TensorThreeVsThreeEnv(
         pose=self._hub_line_spawn_poses()
         self.sim.pose.copy_(pose)
         self.sim._field_collision()
+        self.synchronize_policy_pose()
         self._prepare_score_grid()
         if self.dt > .1:
             # Playback batches physics coarsely to keep long matches responsive.
             # Bound physical yaw rate so a single coarse step cannot wrap the
             # chassis through a large angle before the controller can react.
             self.sim.omega_limit.clamp_(max=.3/self.dt)
-        self._target_collect_heading.copy_(self.sim.pose[:,:,2])
+        self._target_collect_heading.copy_(self.policy_pose[:,:,2])
         self._target_fuel_index.fill_(-1)
         self._target_fuel_selected_step.fill_(-1)
-        self._target_turn_anchor.copy_(self.sim.pose[:,:,:2])
+        self._target_turn_anchor.copy_(self.policy_pose[:,:,:2])
         self._target_collecting.zero_()
         self._intake_collecting.zero_()
         self._no_track_search_active.zero_()
         self._target_cluster_empty_ticks.zero_()
-        self._raster_cursor.copy_(self._closest_raster_indices(self.sim.pose[:,:,:2]))
+        self._raster_cursor.copy_(self._closest_raster_indices(self.policy_pose[:,:,:2]))
         self._raster_reanchor.fill_(True)
         self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
         self.steps.zero_(); self.planner_ticks.fill_(self.replan_interval-1)
@@ -500,19 +565,20 @@ class TensorThreeVsThreeEnv(
         pose=self._hub_line_spawn_poses()
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
+        self.synchronize_policy_pose(mask)
         self._prepare_score_grid()
         # Keep the counter monotonic across matches so counter-based sensor
         # noise does not repeat from the same episode tick on every reset.
         self._target_collect_heading.copy_(torch.where(
-            mask[:,None],self.sim.pose[:,:,2],self._target_collect_heading))
+            mask[:,None],self.policy_pose[:,:,2],self._target_collect_heading))
         self._target_fuel_index.masked_fill_(mask[:,None],-1)
         self._target_fuel_selected_step.masked_fill_(mask[:,None],-1)
         self._target_turn_anchor.copy_(torch.where(
-            mask[:,None,None],self.sim.pose[:,:,:2],self._target_turn_anchor))
+            mask[:,None,None],self.policy_pose[:,:,:2],self._target_turn_anchor))
         self._target_collecting.masked_fill_(mask[:,None],False)
         self._no_track_search_active.masked_fill_(mask[:,None],False)
         self._target_cluster_empty_ticks.masked_fill_(mask[:,None],0)
-        reset_cursor=self._closest_raster_indices(self.sim.pose[:,:,:2])
+        reset_cursor=self._closest_raster_indices(self.policy_pose[:,:,:2])
         self._raster_cursor.copy_(torch.where(mask[:,None],reset_cursor,self._raster_cursor))
         self._raster_reanchor.copy_(torch.where(
             mask[:,None],torch.ones_like(self._raster_reanchor),self._raster_reanchor))
@@ -616,8 +682,8 @@ class TensorThreeVsThreeEnv(
         # Each observer receives three known team slots and one anonymous enemy
         # track. The final two slots remain disabled, preserving planner shape.
         known_ids = torch.stack(self._team_robot_ids)[self.team_ids]
-        obstacles = self.sim.pose.new_zeros((self.n, NUM_ROBOTS, NUM_ROBOTS, 3))
-        obstacles[:, :, :3, :2] = self.sim.pose[:, known_ids, :2]
+        obstacles = self.policy_pose.new_zeros((self.n, NUM_ROBOTS, NUM_ROBOTS, 3))
+        obstacles[:, :, :3, :2] = self.policy_pose[:, known_ids, :2]
         radii = .5 * torch.minimum(self.sim.length, self.sim.width)
         own = known_ids == torch.arange(NUM_ROBOTS, device=self.device)[:, None]
         obstacles[:, :, :3, 2] = radii[:, known_ids].masked_fill(own[None], 0.)
@@ -672,7 +738,7 @@ class TensorThreeVsThreeEnv(
                 raise ValueError("planner collection target requires its snapshot XY")
             planner_target_source_xy = torch.as_tensor(
                 planner_goal_override_target_xy, device=self.device,
-                dtype=self.sim.pose.dtype).reshape(2)
+                dtype=self.policy_pose.dtype).reshape(2)
             if not bool(torch.isfinite(planner_target_source_xy).all()):
                 raise ValueError("planner collection target snapshot XY must be finite")
         elif planner_goal_override_target_xy is not None:
@@ -700,10 +766,10 @@ class TensorThreeVsThreeEnv(
                     target_valid[0].item())
                 self._last_planner_collection_action_match = bool(
                     action_match[0].item())
-            selected_target_delta = collection_target_xy - self.sim.pose[:, 3, :2]
+            selected_target_delta = collection_target_xy - self.policy_pose[:, 3, :2]
             selected_target_distance = selected_target_delta.norm(dim=-1, keepdim=True)
-            current_forward = torch.stack((self.sim.pose[:, 3, 2].cos(),
-                                           self.sim.pose[:, 3, 2].sin()), dim=-1)
+            current_forward = torch.stack((self.policy_pose[:, 3, 2].cos(),
+                                           self.policy_pose[:, 3, 2].sin()), dim=-1)
             selected_target_delta = torch.where(selected_target_distance > 1e-8,
                 selected_target_delta, current_forward)
             fuel_delta = fuel_delta.clone()
@@ -748,7 +814,7 @@ class TensorThreeVsThreeEnv(
                 target_distance = target_delta.norm(dim=-1)
                 selected_heading = torch.atan2(target_delta[:, 1], target_delta[:, 0])
                 selected_heading = torch.where(target_distance > 1e-8,
-                    selected_heading, self.sim.pose[:, 3, 2])
+                    selected_heading, self.policy_pose[:, 3, 2])
                 planner_goal_heading = selected_heading[0]
                 planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
                 if bool(planner_goal_heading_mask[0, 3]):
@@ -801,7 +867,7 @@ class TensorThreeVsThreeEnv(
                     "planner traversal cost scale must be finite and nonnegative")
             planner_traversal_cost = torch.as_tensor(
                 planner_traversal_cost_override, device=self.device,
-                dtype=self.sim.pose.dtype)
+                dtype=self.policy_pose.dtype)
             expected_cost_shape = (self.planner.nx, self.planner.ny)
             if planner_traversal_cost.shape != expected_cost_shape:
                 raise ValueError(
@@ -912,8 +978,8 @@ class TensorThreeVsThreeEnv(
             flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
                                     dtype=torch.bool)
             flat_active[3]=True
-        start=self.sim.pose[:,:,:2].reshape(-1,2); goal=targets.reshape(-1,2)
-        heading=self.sim.pose[:,:,2].reshape(-1)
+        start=self.policy_pose[:,:,:2].reshape(-1,2); goal=targets.reshape(-1,2)
+        heading=self.policy_pose[:,:,2].reshape(-1)
         # Plan with the intake extended whenever collection is requested,
         # including while the deployment guard keeps it retracted to clear a
         # nearby field element. This makes AD* route the escape safely.
@@ -1002,7 +1068,7 @@ class TensorThreeVsThreeEnv(
             depot_target &= (self.last_actions.reshape(self.n,NUM_ROBOTS)<4)
             failed=(self.planner.last_lengths.reshape(self.n,NUM_ROBOTS)<=2)
             far_goal=(goal.reshape(self.n,NUM_ROBOTS,2)-
-                      self.sim.pose[:,:,:2]).norm(dim=-1)>1.25
+                      self.policy_pose[:,:,:2]).norm(dim=-1)>1.25
             retry=(depot_target&failed&far_goal&planner_robot_mask[None])
             retry_flat=retry.reshape(-1)
             if getattr(self, "_capture_planner_retries", False):
@@ -1047,10 +1113,10 @@ class TensorThreeVsThreeEnv(
                 start,self.sim.velocity[:,:,:2].reshape(-1,2),speeds)
             adstar_tangent=adstar_tangent.reshape(self.n,NUM_ROBOTS,2)
         hub=self.hub_centers[self.team_ids][None]
-        hub_delta=hub-self.sim.pose[:,:,:2]
+        hub_delta=hub-self.policy_pose[:,:,:2]
         hub_bearing=torch.atan2(hub_delta[...,1],hub_delta[...,0])
-        angle_error=torch.atan2(torch.sin(hub_bearing-self.sim.pose[:,:,2]),
-                                torch.cos(hub_bearing-self.sim.pose[:,:,2]))
+        angle_error=torch.atan2(torch.sin(hub_bearing-self.policy_pose[:,:,2]),
+                                torch.cos(hub_bearing-self.policy_pose[:,:,2]))
         deterministic_offense=(self._deterministic_mode_mask &
                                 ~self._defense_role_mask)[None]
         robot_hub_active=self.hub_active[:,self.team_ids]
@@ -1068,11 +1134,11 @@ class TensorThreeVsThreeEnv(
         omega=torch.where(scoring_dumper,omega,torch.zeros_like(omega))
         from .fuel_physics_runtime import ferry_aim_targets
         home_zone_center=ferry_aim_targets(
-            self,self.sim.pose[:,:,:2],self.team_ids[None,:].expand(self.n,-1))
-        ferry_vector=home_zone_center-self.sim.pose[:,:,:2]
+            self,self.policy_pose[:,:,:2],self.team_ids[None,:].expand(self.n,-1))
+        ferry_vector=home_zone_center-self.policy_pose[:,:,:2]
         ferry_bearing=torch.atan2(ferry_vector[...,1],ferry_vector[...,0])
-        ferry_error=torch.atan2(torch.sin(ferry_bearing-self.sim.pose[:,:,2]),
-                                torch.cos(ferry_bearing-self.sim.pose[:,:,2]))
+        ferry_error=torch.atan2(torch.sin(ferry_bearing-self.policy_pose[:,:,2]),
+                                torch.cos(ferry_bearing-self.policy_pose[:,:,2]))
         ferrying=(action==6)&carrying&self._dumper_mask[None]
         collect_braking_to_ferry=((action==7)&carrying&self._dumper_mask[None]&
                                   ~robot_hub_active)
@@ -1091,14 +1157,14 @@ class TensorThreeVsThreeEnv(
                 collection_target_valid[:, None], collection_target_xy,
                 pickup_fuel_targets[:, 3])
         pickup_fuel_delta=(pickup_fuel_targets-
-                           self.sim.pose[:,:,:2])
+                           self.policy_pose[:,:,:2])
         pickup_fuel_distance=pickup_fuel_delta.norm(dim=-1)
         pickup_direction=fuel_delta
         if adstar_tangent is not None:
             target_based_picker=pickup_active & (not self.sweeping_enabled)
             tangent_norm=adstar_tangent.norm(dim=-1,keepdim=True)
             fallback_direction=torch.where((action<4)[...,None],fuel_delta,
-                targets-self.sim.pose[:,:,:2])
+                targets-self.policy_pose[:,:,:2])
             target_based_tangent=torch.where(tangent_norm>.5,adstar_tangent,
                 fallback_direction)
             # Follow AD* through the route, then aim the intake at its chosen
@@ -1108,8 +1174,8 @@ class TensorThreeVsThreeEnv(
             fuel_bearing=torch.atan2(pickup_fuel_delta[...,1],
                                      pickup_fuel_delta[...,0])
             fuel_turn_error=torch.atan2(
-                torch.sin(fuel_bearing-self.sim.pose[:,:,2]),
-                torch.cos(fuel_bearing-self.sim.pose[:,:,2])).abs()
+                torch.sin(fuel_bearing-self.policy_pose[:,:,2]),
+                torch.cos(fuel_bearing-self.policy_pose[:,:,2])).abs()
             turn_distance=(self.sim.speed*fuel_turn_error /
                            self.sim.omega_limit.clamp_min(.1))
             approach_distance=torch.maximum(torch.full_like(
@@ -1128,16 +1194,16 @@ class TensorThreeVsThreeEnv(
         # While tracing a cluster, fuel_delta can point toward its inward
         # normal; keep following the route tangent until entering final pickup.
         pickup_bearing=torch.atan2(pickup_direction[...,1],pickup_direction[...,0])
-        pickup_error=torch.atan2(torch.sin(pickup_bearing-self.sim.pose[:,:,2]),
-                                 torch.cos(pickup_bearing-self.sim.pose[:,:,2]))
+        pickup_error=torch.atan2(torch.sin(pickup_bearing-self.policy_pose[:,:,2]),
+                                 torch.cos(pickup_bearing-self.policy_pose[:,:,2]))
         pickup_omega=swerve_heading_rate(pickup_error,self.sim.omega_limit,self.sim.alpha,
                                          self.sim.velocity[:,:,2],self.dt)
         pickup_heading_active = pickup_active | selected_target_pickup_active
         omega=torch.where(pickup_heading_active,pickup_omega,omega)
         trench_alignment=self.planner.last_trench_alignment.reshape(self.n,6)
         trench_heading=self.planner.last_heading.reshape(self.n,6)
-        trench_error=torch.atan2(torch.sin(trench_heading-self.sim.pose[:,:,2]),
-                                 torch.cos(trench_heading-self.sim.pose[:,:,2]))
+        trench_error=torch.atan2(torch.sin(trench_heading-self.policy_pose[:,:,2]),
+                                 torch.cos(trench_heading-self.policy_pose[:,:,2]))
         trench_omega=swerve_heading_rate(trench_error,self.sim.omega_limit,self.sim.alpha,
                                          self.sim.velocity[:,:,2],self.dt)
         omega=torch.where(trench_alignment,trench_omega,omega)
@@ -1154,14 +1220,14 @@ class TensorThreeVsThreeEnv(
         command=command.reshape(self.n,6,2)
         command=torch.where((trench_alignment & (trench_error.abs()>.25))[...,None],
                             torch.zeros_like(command),command)
-        distance=(targets-self.sim.pose[:,:,:2]).norm(dim=-1,keepdim=True)
+        distance=(targets-self.policy_pose[:,:,:2]).norm(dim=-1,keepdim=True)
         # AD* can return a near-zero lookahead command at short intake staging
         # goals even when the straight chassis path is clear. Bridge that
         # final approach for every deterministic collector, not only audit
         # probes; retain planner routing whenever the direct path is blocked.
         offense_ids=self._deterministic_offense_robot_index
         offense_targets=targets.index_select(1,offense_ids)
-        offense_pose=self.sim.pose.index_select(1,offense_ids)
+        offense_pose=self.policy_pose.index_select(1,offense_ids)
         offense_distance=distance.index_select(1,offense_ids)
         offense_command=command.index_select(1,offense_ids)
         direct=(offense_targets-offense_pose[:,:,:2])
@@ -1186,10 +1252,10 @@ class TensorThreeVsThreeEnv(
         # Rotate into the AD* travel tangent before taking the last step to a
         # fuel target; this keeps lateral chassis motion out of the intake
         # approach while preserving efficient swerve travel between targets.
-        chassis_forward=torch.stack((torch.cos(self.sim.pose[:,:,2]),
-                                     torch.sin(self.sim.pose[:,:,2])),-1)
-        chassis_right=torch.stack((torch.sin(self.sim.pose[:,:,2]),
-                                   -torch.cos(self.sim.pose[:,:,2])),-1)
+        chassis_forward=torch.stack((torch.cos(self.policy_pose[:,:,2]),
+                                     torch.sin(self.policy_pose[:,:,2])),-1)
+        chassis_right=torch.stack((torch.sin(self.policy_pose[:,:,2]),
+                                   -torch.cos(self.policy_pose[:,:,2])),-1)
         forward_speed=(command*chassis_forward).sum(-1,keepdim=True)
         nonholonomic_command=chassis_forward*forward_speed
         lateral_velocity=(self.sim.velocity[:,:,:2]*chassis_right).sum(-1)
@@ -1203,12 +1269,12 @@ class TensorThreeVsThreeEnv(
         deterministic_scorer = ((self._deterministic_mode_mask &
                                  ~self._defense_role_mask)[None] &
                                 (action == 4) & carrying)
-        score_zone_x=self.sim.pose[:,:,0]
+        score_zone_x=self.policy_pose[:,:,0]
         in_score_zone=torch.where(self.team_ids[None,:]==0,
             score_zone_x<=self.alliance_zone_depth,
             score_zone_x>=self.field_length-self.alliance_zone_depth)
         score_staging=(deterministic_scorer & in_score_zone &
-                       self._robots_clear_of_bumps(self.sim.pose[:,:,:2]))
+                       self._robots_clear_of_bumps(self.policy_pose[:,:,:2]))
         # The scoring gate accepts any stationary, bump-clear pose in the
         # alliance zone. Stop at the first such pose along the AD* route so a
         # detour around a hub bump does not continue back across the zone.
@@ -1229,7 +1295,7 @@ class TensorThreeVsThreeEnv(
         trench_route_length=self.planner.last_lengths.reshape(self.n,6)
         trench_route_goal=self.planner.last_goal.reshape(self.n,6,2)
         trench_forward=torch.stack((trench_heading.cos(),trench_heading.sin()),-1)
-        trench_remaining=((trench_route_goal-self.sim.pose[:,:,:2]) *
+        trench_remaining=((trench_route_goal-self.policy_pose[:,:,:2]) *
                           trench_forward).sum(-1).clamp_min(0.)
         trench_cross_speed=torch.minimum(self.sim.speed,
                                           trench_remaining*6.)
@@ -1251,12 +1317,12 @@ class TensorThreeVsThreeEnv(
             # Before rotating, check the whole turn against static field
             # geometry at 22.5-degree samples and keep a conservative
             # circumscribed-radius clearance from observed robots.
-            current_heading = self.sim.pose[:, 3, 2]
+            current_heading = self.policy_pose[:, 3, 2]
             heading_delta = torch.atan2(
                 torch.sin(planner_goal_heading - current_heading),
                 torch.cos(planner_goal_heading - current_heading))
             fractions = torch.linspace(0., 1., 37, device=self.device,
-                                      dtype=self.sim.pose.dtype)
+                                      dtype=self.policy_pose.dtype)
             sweep_headings = current_heading[0] + heading_delta[0] * fractions
             sweep_lengths = planner_lengths[0, 3].expand_as(sweep_headings)
             sweep_widths = self.sim.width[0, 3].expand_as(sweep_headings)
@@ -1268,7 +1334,7 @@ class TensorThreeVsThreeEnv(
             # Robot 3 is on the blue alliance; use its three same-team robot
             # slots (including itself, which is marked invalid below).
             known_ids = torch.stack(self._team_robot_ids)[self.team_ids[3]]
-            known_xy = self.sim.pose[0, known_ids, :2]
+            known_xy = self.policy_pose[0, known_ids, :2]
             known_valid = known_ids != 3
             known_radius = .5 * torch.sqrt(
                 self.sim.length[0, known_ids].square() +
@@ -1324,11 +1390,13 @@ class TensorThreeVsThreeEnv(
         commands=torch.cat((command,omega[...,None]),-1)
         enabled=self._controlled_mode_mask
         commands=commands*enabled[None,:,None]
+        prior_velocity = self.sim.velocity.clone()
         stationary_pose=(self.sim.pose.clone() if "none" in self.control_modes else None)
         if hasattr(self, "_curriculum_commands"):
             commands = self._curriculum_commands(commands, active)
         advance_with_fuel(self,commands,None if full_batch else active,
                           active_nonempty=active_count>0)
+        self._advance_policy_pose_odometry(prior_velocity, active)
         if stationary_pose is not None:
             stationary=active[:,None]&~enabled[None,:]
             self.sim.pose.copy_(torch.where(

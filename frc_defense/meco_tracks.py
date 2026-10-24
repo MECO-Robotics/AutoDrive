@@ -1419,7 +1419,7 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
     track_indices = indices[world, slot]
     candidate_available = available[world, slot]
     points = env.track_pos[world, slot].index_select(0, track_indices)
-    pose = env.sim.pose[world, slot]
+    pose = env.policy_pose[world, slot]
     delta = points - pose[:2]
     distances = delta.norm(dim=-1)
     confidence = env.track_confidence[world, slot].index_select(0, track_indices).clamp(0., 1.)

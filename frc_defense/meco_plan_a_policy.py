@@ -128,7 +128,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     n = graph.node_count
     if n < 1:
         raise ValueError("Plan A legal-pose graph is empty")
-    pose = env.sim.pose[0, 3]
+    pose = env.policy_pose[0, 3]
     angle = torch.atan2(torch.sin(graph.heading - pose[2]),
                         torch.cos(graph.heading - pose[2])).abs()
     start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
@@ -191,7 +191,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     dumper_with_fuel = bool(env._dumper_mask[3]) and possession > 0
     ferry_target = env._ferry_targets_for_current_motion()[0, 3]
     opponent_valid = bool(env.opponent_valid[0, 3])
-    robot_xy = env.sim.pose[0, 3, :2]
+    robot_xy = env.policy_pose[0, 3, :2]
     opponent_target = env.opponent_pose[0, 3, :2]
     opponent_velocity = env.opponent_velocity[0, 3, :2]
     if opponent_valid:

@@ -250,6 +250,11 @@ class TensorADStar:
         self.dtype = env.sim.pose.dtype
         self.n = env.n
         self._sim = env.sim
+        # Some batched planner repair rows need to associate a route start
+        # with a robot's current motion state. Use the policy localization
+        # supplied by the environment instead of reaching through the
+        # simulator to physical ground truth.
+        self._pose_estimate = getattr(env, "policy_pose", env.sim.pose)
         self._all_active = torch.ones((self.n,), device=self.device,
                                       dtype=torch.bool)
         self.resolution = float(resolution)
@@ -598,7 +603,7 @@ class TensorADStar:
                 current=sim_velocity.reshape(-1,3)[row]
             elif sim_velocity is not None:
                 world=min(row,sim_velocity.shape[0]-1)
-                nearest=(self._sim.pose[world,:,:2]-path[row,0]).square().sum(-1).argmin()
+                nearest=(self._pose_estimate[world,:,:2]-path[row,0]).square().sum(-1).argmin()
                 current=sim_velocity[world,nearest]
             else:
                 current=None

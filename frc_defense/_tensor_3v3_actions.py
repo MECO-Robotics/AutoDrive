@@ -59,7 +59,7 @@ class TensorThreeVsThreeActionMixin:
         if self.teammate_coordination_enabled:
             return self.ferry_targets[None].expand(self.n,-1,-1)
 
-        position=self.sim.pose[:,:,:2]
+        position=self.policy_pose[:,:,:2]
         ferry_x=self.ferry_targets[None,:,0].expand(self.n,-1)
         midfield_distance=(ferry_x-position[...,0]).abs()
         forward_speed=self.sim.speed.clamp_min(.1)
@@ -73,7 +73,7 @@ class TensorThreeVsThreeActionMixin:
     def _intake_deployment_clear(self):
         """Return rows where a deployed dumper intake clears field geometry."""
         intake_length=.3048
-        pose=self.sim.pose
+        pose=self.policy_pose
         c,s=pose[:,:,2].cos(),pose[:,:,2].sin()
         center=pose[:,:,:2]+(self.sim.length*.5+intake_length*.5)[...,None]*torch.stack((c,s),-1)
         extent_x=.5*(intake_length*c.abs()+self.sim.width*s.abs())
@@ -139,7 +139,7 @@ class TensorThreeVsThreeActionMixin:
         self._score_grid_clear=~overlap.any(-1)
 
     def _target_for_actions(self, actions, active):
-        p = self.sim.pose
+        p = self.policy_pose
         defer_initial_candidates=(self._has_deterministic_offense and
                                   all(mode=="deterministic"
                                       for mode in self.control_modes))
@@ -885,7 +885,7 @@ class TensorThreeVsThreeActionMixin:
         controlled=self._controlled_mode_mask[None]
         command=torch.where(controlled[...,None],command,torch.zeros_like(command))
         pair_i, pair_j = self.sim._collision_pair_i, self.sim._collision_pair_j
-        position = self.sim.pose[:, :, :2]
+        position = self.policy_pose[:, :, :2]
         pos_i, pos_j = position[:, pair_i], position[:, pair_j]
         cmd_i, cmd_j = command[:, pair_i], command[:, pair_j]
         relative = pos_i - pos_j

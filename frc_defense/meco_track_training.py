@@ -464,7 +464,17 @@ def _capture_meco_replay_frame(env, tick: int, decision: dict | None) -> dict:
     sizes = torch.stack((env.sim.length[0], env.sim.width[0]), -1).flatten().tolist()
     frame = {
         "tick": int(tick),
+        # Keep the renderer's established `robots` field as physical output,
+        # and spell out its authority next to the policy-facing estimate so
+        # replay consumers cannot mistake hidden truth for a model input.
         "robots": env.sim.pose[0].tolist(),
+        "physical_truth_pose": env.sim.pose[0].tolist(),
+        "policy_pose_estimate": env.policy_pose[0].tolist(),
+        "pose_authority": {
+            "robots": "physical_truth_for_replay_rendering_only",
+            "physical_truth_pose": "evaluator_only",
+            "policy_pose_estimate": "learner_localization_input",
+        },
         "behavior_mode": "match",
         "robot_teams": env.team_ids.tolist(),
         "robot_control_modes": list(env.control_modes),

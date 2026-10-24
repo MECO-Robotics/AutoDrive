@@ -87,7 +87,7 @@ class TensorThreeVsThreeNavigationMixin:
         return distance.argmin(-1)
 
     def _prepare_raster_cursor(self, active):
-        positions=self.sim.pose[:,:,:2]
+        positions=self.policy_pose[:,:,:2]
         global_nearest=self._closest_raster_indices(positions)
         offsets=torch.arange(33,device=self.device,dtype=torch.long)
         forward_indices=(self._raster_cursor[:,:,None]+offsets[None,None]) % self.raster_sweep_points.shape[1]
@@ -101,7 +101,7 @@ class TensorThreeVsThreeNavigationMixin:
         self._raster_cursor.copy_(torch.where(active[:,None],next_cursor,self._raster_cursor))
 
     def _finish_raster_cursor(self, active, sweep_mask):
-        positions=self.sim.pose[:,:,:2]
+        positions=self.policy_pose[:,:,:2]
         offsets=torch.arange(33,device=self.device,dtype=torch.long)
         forward_indices=(self._raster_cursor[:,:,None]+offsets[None,None]) % self.raster_sweep_points.shape[1]
         points=self.raster_sweep_points[None].expand(self.n,-1,-1,-1)

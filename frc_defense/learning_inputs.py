@@ -63,11 +63,11 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     """Pack `[6,H,W]` tracks and the proposal's seven global scalars.
 
     Signed-time cells contain negative track age (seconds before this snapshot);
-    current ally telemetry has age zero. Ally positions come from the
-    simulator's explicit team telemetry channel (`sim.pose` for own-team slots),
-    which must be shared with every comparison policy. Hardware qualification
-    requires confirming an equivalent localization feed. Simulator truth is
-    used neither to fill FUEL cells nor to locate opponents.
+    current ally telemetry has age zero. Ally and focal positions come from the
+    explicit policy localization state (`policy_pose`), which must be shared
+    with every comparison policy. Physical simulator pose is reserved for
+    physics and evaluator outcomes; hardware qualification requires confirming
+    an equivalent localization feed.
     """
     capture_monotonic = time.monotonic()
     if not 0 <= world < env.n or not 0 <= slot < 6:
@@ -75,7 +75,7 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     height = math.ceil(float(env.sim.field_width) / RASTER_CELL_METERS)
     width = math.ceil(float(env.sim.field_length) / RASTER_CELL_METERS)
     raster = torch.zeros((1, 6, height, width), device=env.device,
-                         dtype=env.sim.pose.dtype)
+                         dtype=env.policy_pose.dtype)
     field_length = float(env.sim.field_length)
     field_width = float(env.sim.field_width)
 
@@ -89,7 +89,7 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
     ally_ids = torch.nonzero((team_ids == team_ids[slot]) &
                              (torch.arange(6, device=env.device) != slot),
                              as_tuple=False).flatten()
-    ally_positions = env.sim.pose[world, ally_ids, :2]
+    ally_positions = env.policy_pose[world, ally_ids, :2]
     in_field = ((ally_positions[:, 0] >= 0.) & (ally_positions[:, 0] < field_length) &
                 (ally_positions[:, 1] >= 0.) & (ally_positions[:, 1] < field_width))
     ally_positions = ally_positions[in_field]
@@ -106,7 +106,7 @@ def build_observation_snapshot(env, *, world: int = 0, slot: int = 3,
         _deposit(raster, 4, 0, env.opponent_pose[world, slot, :2].reshape(1, 2),
                  confidence, age, field_length=field_length, field_width=field_width)
 
-    pose = env.sim.pose[world, slot]
+    pose = env.policy_pose[world, slot]
     load = (env.piece_owner[world] == slot).sum().to(raster.dtype)
     globals_ = (float(pose[0].item()), float(pose[1].item()),
                 float(torch.sin(pose[2]).item()), float(torch.cos(pose[2]).item()),

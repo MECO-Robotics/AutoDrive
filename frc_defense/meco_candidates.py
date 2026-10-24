@@ -121,7 +121,7 @@ class RouteFeasibleCandidates:
 def _candidate_target(env, action: int, base: SafeActionCandidates, *,
                       target_row=None):
     slot = 3
-    pose = env.sim.pose[0, slot]
+    pose = env.policy_pose[0, slot]
     xy = pose[:2].clone()
     heading = float(pose[2].item())
     valid = bool(base.table.valid_mask[action])
@@ -342,7 +342,7 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     fallback_action = valid_collect_actions[0]
     points, _, sensed = _world_zero_perceived_fuel(env)
     sensed_ids = torch.nonzero(sensed, as_tuple=False).flatten().tolist()
-    pose_xy = env.sim.pose[0, 3, :2]
+    pose_xy = env.policy_pose[0, 3, :2]
     confidence = env.track_confidence[0, 3]
     ages = env.track_age[0, 3]
     opponent_distance = None
@@ -576,7 +576,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     result_by_id = {result.candidate_id: result for result in route_results}
     speed = max(float(env.sim.speed[0, 3]), .1)
     omega = max(float(env.sim.omega_limit[0, 3]), .1)
-    pose_heading = float(env.sim.pose[0, 3, 2])
+    pose_heading = float(env.policy_pose[0, 3, 2])
     rows = []
     valid_mask = []
     routes = []

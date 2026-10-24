@@ -112,6 +112,10 @@ class TensorThreeVsThreeObservationMixin:
 
     def _update_perception(self, active, active_count=None):
         """Update per-robot free-FUEL and nearest-opponent tracks."""
+        # This is the physical camera/chassis pose used only to render
+        # simulated measurements. Policy-visible localization is assembled
+        # later from ``policy_pose``; keep sensor generation and policy state
+        # as separate authorities.
         pose = self.sim.pose
         free = self.piece_active & (self.piece_owner < 0)
         from . import tensor_perception
@@ -473,6 +477,9 @@ class TensorThreeVsThreeObservationMixin:
                     # Evaluate all other chassis together; the old inner robot loop
                     # launched five separate GPU kernels per tracked FUEL row.
                     denom=delta.square().sum(-1).clamp_min(1e-8)
+                    # Physical peer positions only determine simulated camera
+                    # occlusion; the resulting detections are the sensor state
+                    # delivered to policy code.
                     peers=self.sim.pose[:,:,:2]
                     rel=peers-own[:,None,:2]
                     fraction=(rel[:,:,None,:]*delta[:,None,:,:]).sum(-1)/denom[:,None,:]
@@ -600,6 +607,8 @@ class TensorThreeVsThreeObservationMixin:
             # For each of the three enemy tracks, test all six possible robot
             # occluders together. Exclude the observing robot and the tracked
             # enemy chassis itself, matching the original visibility rule.
+            # Physical peer positions only determine simulated camera
+            # occlusion. Planner obstacles use the estimated team telemetry.
             peers=self.sim.pose[:,:,:2]
             peer_rel=peers-own[:,None,:2]
             denom=enemy_delta.square().sum(-1).clamp_min(1e-8)
@@ -698,7 +707,7 @@ class TensorThreeVsThreeObservationMixin:
                 self.n*active_count,self.fuel_count,2)
             track_mask=candidate_mask[:,rows].reshape(
                 self.n*active_count,self.fuel_count)
-            robot_pos=self.sim.pose[:,rows,:2].reshape(self.n*active_count,2)
+            robot_pos=self.policy_pose[:,rows,:2].reshape(self.n*active_count,2)
             if active_count:
                 if (_fuel_candidate_rank_hip is not None and
                         _fuel_candidate_rank_hip.integrated_available(self.device)):
@@ -727,12 +736,12 @@ class TensorThreeVsThreeObservationMixin:
                 _fuel_candidate_rank_hip.integrated_available(self.device)):
             indices, valid, nearest = _fuel_candidate_rank_hip.candidates(
                 self.track_pos.reshape(self.n * NUM_ROBOTS, self.fuel_count, 2),
-                self.sim.pose[:, :, :2].reshape(self.n * NUM_ROBOTS, 2),
+                self.policy_pose[:, :, :2].reshape(self.n * NUM_ROBOTS, 2),
                 candidate_mask.reshape(self.n * NUM_ROBOTS, self.fuel_count))
             return (indices.reshape(self.n, NUM_ROBOTS, 4),
                     valid.reshape(self.n, NUM_ROBOTS, 4),
                     nearest.reshape(self.n, NUM_ROBOTS, 4))
-        delta = self.track_pos - self.sim.pose[:, :, None, :2]
+        delta = self.track_pos - self.policy_pose[:, :, None, :2]
         distance = delta.norm(dim=-1).masked_fill(~candidate_mask, float("inf"))
         nearest, indices = distance.topk(4, dim=-1, largest=False)
         return indices, torch.isfinite(nearest), nearest
@@ -759,7 +768,7 @@ class TensorThreeVsThreeObservationMixin:
     def observe(self, active_mask=None):
         active = (torch.ones(self.n, device=self.device, dtype=torch.bool) if active_mask is None else
                   torch.as_tensor(active_mask, device=self.device, dtype=torch.bool).reshape(self.n))
-        p, v = self.sim.pose, self.sim.velocity
+        p, v = self.policy_pose, self.sim.velocity
         indices, valid, eta = self._candidates()
         action_mask, possession = self._action_mask(indices, valid)
         rows = self._world_indices[:, None]
