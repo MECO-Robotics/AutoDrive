@@ -278,9 +278,6 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
     scenario = get_scenario(result.scenario_id)
     failures = _failures(result) + [str(item) for item in additional_failures]
     if result.evaluation_id in state.seen_evaluation_ids:
-        state.consecutive_passes[result.scenario_id] = 0
-        state.consecutive_protocol.pop(result.scenario_id, None)
-        state.consecutive_checkpoint.pop(result.scenario_id, None)
         return PromotionDecision(False, False, ('duplicate evaluation ID',))
     if result.split != 'validation':
         return PromotionDecision(False, False, tuple(failures))
@@ -312,11 +309,13 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
         state.consecutive_checkpoint.pop(result.scenario_id, None)
         return PromotionDecision(False, False, tuple(failures))
     previous = state.consecutive_passes.get(result.scenario_id, 0)
-    if (state.consecutive_protocol.get(result.scenario_id) != result.protocol_id
-            or state.consecutive_checkpoint.get(result.scenario_id) != result.checkpoint_id):
+    if state.consecutive_protocol.get(result.scenario_id) != result.protocol_id:
         previous = 0
     streak = min(scenario.gate.consecutive_evaluations, previous + 1)
     state.consecutive_protocol[result.scenario_id] = result.protocol_id
+    # Record the newest passing round's bundle for reporting and final-test
+    # binding. Bundle identity is enforced within each round (target/retention),
+    # while the protocol defines comparability across the promotion streak.
     state.consecutive_checkpoint[result.scenario_id] = result.checkpoint_id
     state.consecutive_passes[result.scenario_id] = streak
     promoted = result.scenario_id not in state.qualified and streak >= scenario.gate.consecutive_evaluations

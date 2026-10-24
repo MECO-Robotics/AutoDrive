@@ -135,12 +135,13 @@ repeat variance. Existing v1 protocol files are never rewritten.
 ## Run validation under the frozen v2 protocol
 
 Validation requires at least 100 episodes per category and each frozen
-layout/family stratum. Use the exact same protocol and checkpoint bundle for
-the target and every transitive prerequisite. Run prerequisite scenarios as
-retention evidence, then run the target to advance its promotion streak. Each
-round pairs the selected policy with deterministic D0 on identical seeds and
-checks useful-throughput confidence intervals and all frozen safety metrics.
-Keep a separate state file for each candidate policy.
+layout/family stratum. Within each round, use the exact same protocol and
+checkpoint bundle for the target and every transitive prerequisite. Run
+prerequisite scenarios as retention evidence, then run the target to advance
+its promotion streak. Each round pairs the selected policy with deterministic
+D0 on identical seeds and checks useful-throughput confidence intervals and
+all frozen safety metrics. Keep a separate state file for each candidate
+policy.
 
 The continuous `MecoTaskScheduler` selects from the protocol's training seed
 pool by scenario and records the pool hash and selected seed on each assignment.
@@ -159,12 +160,16 @@ python -m frc_defense.meco_qualification run-validation \
   --device cuda:0
 ```
 
-Promotion requires three consecutive passing target rounds. A failed round,
-protocol change, or checkpoint-bundle change resets the streak. Promotion
-state is staged until the immutable round report is written and state is
-atomically saved. An aborted round restores prior qualification and evaluation
-history, resets only that scenario's streak, records the failure, and refreshes
-dashboard status. Per-episode coverage validation checks scenario identity.
+Promotion requires three consecutive passing target rounds under the same
+frozen protocol. Checkpoint bundles may advance between rounds as the candidate
+is updated; each round's target and every prerequisite retention report must
+still use the exact same bundle. The third passing round's bundle is recorded
+as the qualified checkpoint and is the one bound to final-test evaluation. A
+failed round or protocol change resets the streak. Promotion state is staged
+until the immutable round report is written and state is atomically saved. An
+aborted round restores prior qualification and evaluation history, resets only
+that scenario's streak, records the failure, and refreshes dashboard status.
+Per-episode coverage validation checks scenario identity.
 
 The held-out layouts shift bump and trench collision/observation geometry.
 Held-out defender families run distinct orbiting-interceptor and split-chaser

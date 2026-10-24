@@ -75,12 +75,15 @@ def test_seed_input_validation(args):
         seed_partition('pickup_simple', **kwargs)
 
 
-def test_three_consecutive_evaluations_duplicates_and_checkpoint():
+def test_three_consecutive_evaluations_allow_updated_checkpoints_and_ignore_duplicate():
     state = CurriculumState()
-    assert evaluate_promotion(state, result('pickup_simple', '1')).passed
+    assert evaluate_promotion(state, result('pickup_simple', '1', checkpoint_id='cp-initial')).passed
+    before_duplicate = state.to_dict()
     duplicate = evaluate_promotion(state, result('pickup_simple', '1'))
     assert not duplicate.passed
+    assert state.to_dict() == before_duplicate
     assert state.consecutive_passes['pickup_simple'] == 1
+    assert state.consecutive_checkpoint['pickup_simple'] == 'cp-initial'
     poor = result('pickup_simple', '2')
     poor = replace(poor, categories=(replace(poor.categories[0], successes=89),) + poor.categories[1:])
     assert not evaluate_promotion(state, poor).passed
@@ -89,7 +92,25 @@ def test_three_consecutive_evaluations_duplicates_and_checkpoint():
         decision = evaluate_promotion(state, result('pickup_simple', f'good-{i}', checkpoint_id=f'cp-{i}'))
         assert decision.promoted == (i == 2)
     assert state.last_qualified_checkpoint == {'pickup_simple': 'cp-2'}
+    assert state.consecutive_checkpoint['pickup_simple'] == 'cp-2'
     assert not evaluate_promotion(state, result('pickup_simple', 'again')).promoted
+
+
+def test_protocol_change_resets_streak_but_checkpoint_change_does_not():
+    state = CurriculumState()
+    assert evaluate_promotion(state, result('pickup_simple', 'round-1', checkpoint_id='policy-1')).passed
+    assert evaluate_promotion(state, result('pickup_simple', 'round-2', checkpoint_id='policy-2')).passed
+    assert state.consecutive_passes['pickup_simple'] == 2
+    assert state.consecutive_checkpoint['pickup_simple'] == 'policy-2'
+    assert evaluate_promotion(state, result('pickup_simple', 'round-3',
+        checkpoint_id='policy-3', protocol_id='protocol-v2')).passed
+    assert state.consecutive_passes['pickup_simple'] == 1
+    assert not evaluate_promotion(state, result('pickup_simple', 'round-4',
+        checkpoint_id='policy-4', protocol_id='protocol-v2')).promoted
+    decision = evaluate_promotion(state, result('pickup_simple', 'round-5',
+        checkpoint_id='policy-5', protocol_id='protocol-v2'))
+    assert decision.promoted
+    assert state.last_qualified_checkpoint['pickup_simple'] == 'policy-5'
 
 
 @pytest.mark.parametrize('split', ['train', 'test'])
@@ -171,13 +192,14 @@ def test_json_round_trip_is_independent_and_strict():
     state = qualified_state('pickup_simple')
     state.consecutive_passes['pickup_scattered'] = 2
     state.consecutive_protocol['pickup_scattered'] = 'protocol'
+    state.consecutive_checkpoint['pickup_scattered'] = 'latest-bundle'
     state.seen_evaluation_ids.add('round')
     serialized = json.loads(json.dumps(state.to_dict(), allow_nan=False))
     restored = CurriculumState.from_dict(serialized)
     assert restored == state
     serialized['qualified_throughput']['pickup_simple']['single'] = 100
     assert restored.qualified_throughput['pickup_simple']['single'] == 1
-    for key, value in [('curriculum_version', '2'), ('qualified', ['unknown']),
+    for key, value in [('curriculum_version', 'invalid-version'), ('qualified', ['unknown']),
                        ('consecutive_passes', {'pickup_simple': True}),
                        ('consecutive_passes', {'pickup_simple': 4}),
                        ('last_qualified_checkpoint', {}), ('qualified_throughput', {})]:
