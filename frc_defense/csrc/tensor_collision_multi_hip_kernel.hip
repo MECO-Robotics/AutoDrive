@@ -13,7 +13,12 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
     const float* length, const float* width, const float* mass,
     const float* yaw_mult, const float* friction, const bool* active,
     const int64_t* team_ids, bool* robot_contact, bool* opponent_contact,
-    bool* robot_contact_by_robot, int n) {
+    bool* robot_contact_by_robot, int64_t* pair_event_count,
+    int64_t* pair_solver_report_count, int64_t* pair_first_substep,
+    double* pair_first_time_s, int64_t* pair_last_substep,
+    double* pair_last_time_s, float* pair_impulse_sum,
+    const int64_t* physics_substep_index,
+    const double* physics_time_s, int n) {
   const int world = blockIdx.x * blockDim.x + threadIdx.x;
   if (world >= n || !active[world]) return;
 
@@ -69,6 +74,7 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
         if (overlap[k] < depth) { depth = overlap[k]; axis = k; }
       }
       const bool valid = depth > 0.f;
+      const int pair_slot = i * (11 - i) / 2 + (j - i - 1);
       contact_by_robot[i] |= valid;
       contact_by_robot[j] |= valid;
       const float sign = signed_axis[axis] >= 0.f ? 1.f : -1.f;
@@ -117,6 +123,23 @@ __global__ void robot_contacts_kernel(float* pose, float* velocity,
       jt = fminf(fmaxf(jt,-limit),limit);
       const float ix = jn * nx + jt * tx;
       const float iy = jn * ny + jt * ty;
+      if (valid) {
+        const int event = world * 15 + pair_slot;
+        if (pair_event_count[event] == 0) {
+          pair_first_substep[event] = physics_substep_index[world];
+          pair_first_time_s[event] = physics_time_s[world];
+        }
+        if (pair_last_substep[event] != physics_substep_index[world]) {
+          pair_event_count[event] += 1;
+          pair_last_substep[event] = physics_substep_index[world];
+          pair_last_time_s[event] = physics_time_s[world];
+        }
+        pair_solver_report_count[event] += 1;
+        pair_impulse_sum[event * 4] += jn;
+        pair_impulse_sum[event * 4 + 1] += jt;
+        pair_impulse_sum[event * 4 + 2] += ix;
+        pair_impulse_sum[event * 4 + 3] += iy;
+      }
       dvx[i] -= ix * ti; dvy[i] -= iy * ti;
       dvx[j] += ix * tj; dvy[j] += iy * tj;
       dw[i] -= (jn * rn_i + jt * rt_i) / ii;
@@ -145,7 +168,12 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     float* pose, float* velocity, const float* length, const float* width,
     const float* mass, const float* yaw_mult, const float* friction,
     const bool* active, const int64_t* team_ids, bool* robot_contact,
-    bool* opponent_contact, bool* robot_contact_by_robot) {
+    bool* opponent_contact, bool* robot_contact_by_robot,
+    int64_t* pair_event_count, int64_t* pair_solver_report_count,
+    int64_t* pair_first_substep, double* pair_first_time_s,
+    int64_t* pair_last_substep, double* pair_last_time_s,
+    float* pair_impulse_sum,
+    const int64_t* physics_substep_index, const double* physics_time_s) {
   const int lane = threadIdx.x;
   if (!active[0]) return;
   __shared__ float pair_delta[15][10];
@@ -187,6 +215,7 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     #pragma unroll
     for (int k=1;k<4;++k) if (overlap[k]<depth) { depth=overlap[k]; axis=k; }
     const bool valid=depth>0.f;
+    const int event=lane;
     if (valid) {
       atomicExch(&any_robot,1);
       atomicOr(&contact_mask, (1 << i) | (1 << j));
@@ -220,6 +249,22 @@ __global__ void robot_contacts_single_world_parallel_kernel(
     const float limit=sqrtf(fmaxf(friction[0],0.f))*jn;
     jt=fminf(fmaxf(jt,-limit),limit);
     const float ix=jn*nx+jt*tx, iy=jn*ny+jt*ty;
+    if (valid) {
+      if (pair_event_count[event] == 0) {
+        pair_first_substep[event] = physics_substep_index[0];
+        pair_first_time_s[event] = physics_time_s[0];
+      }
+      if (pair_last_substep[event] != physics_substep_index[0]) {
+        pair_event_count[event] += 1;
+        pair_last_substep[event] = physics_substep_index[0];
+        pair_last_time_s[event] = physics_time_s[0];
+      }
+      pair_solver_report_count[event] += 1;
+      pair_impulse_sum[event*4] += jn;
+      pair_impulse_sum[event*4+1] += jt;
+      pair_impulse_sum[event*4+2] += ix;
+      pair_impulse_sum[event*4+3] += iy;
+    }
     pair_delta[lane][0]=dxi; pair_delta[lane][1]=dyi;
     pair_delta[lane][2]=-ix*inv_i; pair_delta[lane][3]=-iy*inv_i;
     pair_delta[lane][4]=-(jn*rn_i+jt*rt_i)/inertia_i;
@@ -259,19 +304,29 @@ void robot_contacts_launch(float* pose, float* velocity, const float* length,
     const float* width, const float* mass, const float* yaw_mult,
     const float* friction, const bool* active, const int64_t* team_ids,
     bool* robot_contact, bool* opponent_contact,
-    bool* robot_contact_by_robot, int n,
-    bool parallel_single_world, hipStream_t stream) {
+    bool* robot_contact_by_robot, int64_t* pair_event_count,
+    int64_t* pair_solver_report_count, int64_t* pair_first_substep,
+    double* pair_first_time_s, int64_t* pair_last_substep,
+    double* pair_last_time_s, float* pair_impulse_sum,
+    const int64_t* physics_substep_index,
+    const double* physics_time_s, int n, bool parallel_single_world,
+    hipStream_t stream) {
   if (n == 1 && parallel_single_world) {
     hipLaunchKernelGGL(robot_contacts_single_world_parallel_kernel,
         dim3(1), dim3(32), 0, stream, pose, velocity, length, width, mass,
         yaw_mult, friction, active, team_ids, robot_contact, opponent_contact,
-        robot_contact_by_robot);
+        robot_contact_by_robot, pair_event_count, pair_solver_report_count,
+        pair_first_substep, pair_first_time_s, pair_last_substep,
+        pair_last_time_s, pair_impulse_sum, physics_substep_index, physics_time_s);
   } else {
     constexpr int threads = 128;
     const int blocks = (n + threads - 1) / threads;
     hipLaunchKernelGGL(robot_contacts_kernel, dim3(blocks), dim3(threads), 0, stream,
         pose, velocity, length, width, mass, yaw_mult, friction, active, team_ids,
-        robot_contact, opponent_contact, robot_contact_by_robot, n);
+        robot_contact, opponent_contact, robot_contact_by_robot, pair_event_count,
+        pair_solver_report_count, pair_first_substep, pair_first_time_s,
+        pair_last_substep, pair_last_time_s, pair_impulse_sum,
+        physics_substep_index, physics_time_s, n);
   }
 }
 

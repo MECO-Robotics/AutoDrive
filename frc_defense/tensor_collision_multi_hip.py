@@ -80,7 +80,12 @@ def robot_contacts(sim, active_mask):
     tensors = (sim.pose, sim.velocity, sim.length, sim.width, sim.mass,
                sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
                sim.robot_contact, sim.opponent_contact,
-               sim.robot_contact_by_robot)
+               sim.robot_contact_by_robot, sim.pair_contact_event_count,
+               sim.pair_contact_solver_report_count,
+               sim.pair_contact_first_substep, sim.pair_contact_first_time_s,
+               sim.pair_contact_last_substep, sim.pair_contact_last_time_s,
+               sim.pair_contact_impulse_sum, sim.physics_substep_index,
+               sim.physics_time_s)
     if any(t.device != sim.pose.device or not t.is_contiguous() for t in tensors):
         return False
     ext = _extension()
@@ -90,6 +95,14 @@ def robot_contacts(sim, active_mask):
                        sim.yaw_inertia_multiplier, sim.mu, active, sim.team_ids,
                        sim.robot_contact, sim.opponent_contact,
                        sim.robot_contact_by_robot,
+                       sim.pair_contact_event_count,
+                       sim.pair_contact_solver_report_count,
+                       sim.pair_contact_first_substep,
+                       sim.pair_contact_first_time_s,
+                       sim.pair_contact_last_substep,
+                       sim.pair_contact_last_time_s,
+                       sim.pair_contact_impulse_sum,
+                       sim.physics_substep_index, sim.physics_time_s,
                        PARALLEL_SINGLE_WORLD)
     return True
 

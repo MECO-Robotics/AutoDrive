@@ -164,6 +164,32 @@ class TensorPhysicsCollisionMixin:
         ], dim=1)
         cross_alliance=self.team_ids[pair_i] != self.team_ids[pair_j]
         self.opponent_contact |= (valid & cross_alliance[None,:]).any(-1)
+        self._record_pair_contact_events(valid, jn, jt, normal, tangent)
+
+    def _record_pair_contact_events(self, valid, normal_impulse, tangent_impulse,
+                                    normal, tangent):
+        """Accumulate solver-originated robot-pair contact and impulse evidence."""
+        if self.num_robots != 6:
+            return
+        first = valid & (self.pair_contact_event_count == 0)
+        substeps = self.physics_substep_index[:, None].expand_as(
+            self.pair_contact_event_count)
+        times = self.physics_time_s[:, None].expand_as(
+            self.pair_contact_first_time_s)
+        new_substep = valid & (self.pair_contact_last_substep != substeps)
+        self.pair_contact_first_substep.copy_(torch.where(
+            first, substeps, self.pair_contact_first_substep))
+        self.pair_contact_first_time_s.copy_(torch.where(
+            first, times, self.pair_contact_first_time_s))
+        self.pair_contact_last_substep.copy_(torch.where(
+            new_substep, substeps, self.pair_contact_last_substep))
+        self.pair_contact_last_time_s.copy_(torch.where(
+            new_substep, times, self.pair_contact_last_time_s))
+        self.pair_contact_event_count.add_(new_substep.long())
+        self.pair_contact_solver_report_count.add_(valid.long())
+        net = normal_impulse[..., None] * normal + tangent_impulse[..., None] * tangent
+        self.pair_contact_impulse_sum.add_(torch.cat((
+            normal_impulse[..., None], tangent_impulse[..., None], net), dim=-1))
 
     def _apply_static_contact_impulse(self,point,normal,active,friction):
         """Rigid-body normal and Coulomb-friction impulse against a fixed surface."""

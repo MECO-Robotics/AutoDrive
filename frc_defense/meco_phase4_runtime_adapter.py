@@ -94,12 +94,14 @@ PHASE4_REQUIREMENT_BINDINGS = {
         "limitations": ("switch event is captured, but required reaction/interception/route signals are unavailable",)},
     "bumps_and_contact": {**_COMMON,
         "factor_ids": ("contact.robot_bump",),
-        "runtime_event": None,
+        "runtime_event": "phase4_pair_contact_event",
+        "runtime_event_by_factor_id": {
+            "contact.robot_bump": "phase4_pair_contact_event"},
         "required_signals": ("safety_robot_contact_rate", "recovery_time_after_bump_s", "route_completion_rate"),
         # The schema has an aggregate robot-contact metric, but it is not
         # bump-specific, so it is not authoritative for this requirement.
         "authoritative_signals": (),
-        "limitations": ("contact geometry helper is not wired into validation reset", "pair impulse/contact timestamps and route-following recovery signal unavailable; proxy metrics do not qualify")},
+        "limitations": ("contact geometry helper is not wired into validation reset", "pair-contact summary is available only when contact.robot_bump is requested; full event stream, route-following recovery, and route completion signals remain unavailable; proxy metrics do not qualify")},
     "observation_only_focal_pose_mislocalization": {**_COMMON,
         "factor_ids": ("observation.focal_pose_offset",),
         "runtime_event": None,
@@ -127,6 +129,57 @@ def requirement_ids_for_factor(factor: dict | None) -> tuple[str, ...]:
         if row["runtime_factor_kind"] and kind in row["runtime_factor_kind"].split("|"):
             result.append(requirement_id)
     return tuple(result)
+
+
+def phase4_pair_contact_event_record(sim, *, factor_id: str = "contact.robot_bump",
+                                     pair_slots: tuple[int, int] = (2, 3)) -> dict:
+    """Read simulator-originated contact-pair events for the registered factor."""
+    if factor_id != "contact.robot_bump":
+        raise ValueError("pair-contact event reader requires contact.robot_bump")
+    if (getattr(sim, "num_robots", None) != 6 or pair_slots != (2, 3) or
+            not all(hasattr(sim, name) for name in (
+                "pair_contact_event_count", "pair_contact_first_substep",
+                "pair_contact_first_time_s", "pair_contact_last_substep",
+                "pair_contact_last_time_s", "pair_contact_solver_report_count",
+                "pair_contact_impulse_sum"))):
+        raise ValueError("simulator does not expose the registered six-robot contact pair")
+    pair_i, pair_j = sim._collision_pair_i.tolist(), sim._collision_pair_j.tolist()
+    try:
+        slot = next(index for index, pair in enumerate(zip(pair_i, pair_j))
+                    if pair == pair_slots)
+    except StopIteration as exc:
+        raise ValueError("registered robot pair is absent from simulator collision slots") from exc
+    counts = sim.pair_contact_event_count[:, slot].tolist()
+    reports = sim.pair_contact_solver_report_count[:, slot].tolist()
+    substeps = sim.pair_contact_first_substep[:, slot].tolist()
+    times = sim.pair_contact_first_time_s[:, slot].tolist()
+    last_substeps = sim.pair_contact_last_substep[:, slot].tolist()
+    last_times = sim.pair_contact_last_time_s[:, slot].tolist()
+    impulses = sim.pair_contact_impulse_sum[:, slot, :].tolist()
+    return {
+        "schema": "meco-phase4-pair-contact-event-v1",
+        "factor_id": factor_id,
+        "pair_slots": list(pair_slots),
+        "event_source": "simulator_robot_pair_sat_contact_solver",
+        "event_realized_by_world": [count > 0 for count in counts],
+        "distinct_contact_substeps_by_world": counts,
+        "contact_solver_reports_by_world": reports,
+        "first_contact_physics_substep_by_world": [
+            None if substep < 0 else substep for substep in substeps],
+        "first_contact_physics_time_s_by_world": [
+            None if count == 0 else time for count, time in zip(counts, times)],
+        "last_contact_physics_substep_by_world": [
+            None if substep < 0 else substep for substep in last_substeps],
+        "last_contact_physics_time_s_by_world": [
+            None if count == 0 else time for count, time in zip(counts, last_times)],
+        "accumulated_impulse_by_world": [
+            {"normal_n_s": value[0], "tangential_n_s": value[1],
+             "net_on_second_robot_n_s": value[2:4]} for value in impulses],
+        "recovery_time_after_bump_s": None,
+        "route_completion_rate": None,
+        "outcome_status": "contact_event_available_recovery_and_route_outcomes_unavailable",
+        "event_scope": "first_and_last_contact_substep_plus_distinct_substep_count_and_episode_impulse_sum; not a complete event stream",
+    }
 
 
 def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,

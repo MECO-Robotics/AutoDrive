@@ -50,7 +50,8 @@ from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
-from .meco_phase4_runtime_adapter import phase4_factor_exposure
+from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
+    phase4_pair_contact_event_record)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2173,6 +2174,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   control_prediction_mode: str | None = None,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None,
+                  phase4_contact_factor_id: str | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2241,6 +2243,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     from .fuel_physics_hip import prepare_native_fuel_extension
     prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
+    if phase4_contact_factor_id not in (None, "contact.robot_bump"):
+        raise ValueError("unsupported Phase 4 contact factor")
     execution_device = normalized_device_info(device)
     if condition_id is not None and (not isinstance(condition_id, str) or not condition_id):
         raise ValueError("condition_id must be a nonempty string when provided")
@@ -3116,6 +3120,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "tracking_loss_reset_count": tracking_loss_reset_count,
                             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
                             "phase4_factor": phase4_factor,
+                            "phase4_pair_contact_event": (
+                                phase4_pair_contact_event_record(env.sim,
+                                    factor_id=phase4_contact_factor_id)
+                                if phase4_contact_factor_id is not None else None),
                             "phase4_factor_runtime": ({
                                 **env.phase4_runtime_metrics,
                                 "fuel_track_confidence_mean": float(

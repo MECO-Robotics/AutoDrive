@@ -4,7 +4,9 @@
 
 void robot_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const bool*, const int64_t*,
-    bool*, bool*, bool*, int, bool, hipStream_t);
+    bool*, bool*, bool*, int64_t*, int64_t*, int64_t*, double*, int64_t*,
+    double*, float*,
+    const int64_t*, const double*, int, bool, hipStream_t);
 void field_contacts_launch(float*, float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const bool*,
     bool*, int, int, hipStream_t);
@@ -58,6 +60,15 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
     torch::Tensor active, torch::Tensor team_ids,
     torch::Tensor robot_contact, torch::Tensor opponent_contact,
     torch::Tensor robot_contact_by_robot,
+    torch::Tensor pair_contact_event_count,
+    torch::Tensor pair_contact_solver_report_count,
+    torch::Tensor pair_contact_first_substep,
+    torch::Tensor pair_contact_first_time_s,
+    torch::Tensor pair_contact_last_substep,
+    torch::Tensor pair_contact_last_time_s,
+    torch::Tensor pair_contact_impulse_sum,
+    torch::Tensor physics_substep_index,
+    torch::Tensor physics_time_s,
     bool parallel_single_world) {
   const auto n = pose.size(0);
   TORCH_CHECK(pose.is_cuda() && pose.scalar_type() == at::kFloat &&
@@ -74,11 +85,34 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
               robot_contact.sizes() == mu.sizes() && robot_contact.scalar_type() == at::kBool &&
               opponent_contact.sizes() == mu.sizes() && opponent_contact.scalar_type() == at::kBool &&
               robot_contact_by_robot.sizes() == torch::IntArrayRef({n, 6}) &&
-              robot_contact_by_robot.scalar_type() == at::kBool,
+              robot_contact_by_robot.scalar_type() == at::kBool &&
+              pair_contact_event_count.sizes() == torch::IntArrayRef({n, 15}) &&
+              pair_contact_event_count.scalar_type() == at::kLong &&
+              pair_contact_solver_report_count.sizes() == pair_contact_event_count.sizes() &&
+              pair_contact_solver_report_count.scalar_type() == at::kLong &&
+              pair_contact_first_substep.sizes() == pair_contact_event_count.sizes() &&
+              pair_contact_first_substep.scalar_type() == at::kLong &&
+              pair_contact_first_time_s.sizes() == pair_contact_event_count.sizes() &&
+              pair_contact_first_time_s.scalar_type() == at::kDouble &&
+              pair_contact_last_substep.sizes() == pair_contact_event_count.sizes() &&
+              pair_contact_last_substep.scalar_type() == at::kLong &&
+              pair_contact_last_time_s.sizes() == pair_contact_event_count.sizes() &&
+              pair_contact_last_time_s.scalar_type() == at::kDouble &&
+              pair_contact_impulse_sum.sizes() == torch::IntArrayRef({n, 15, 4}) &&
+              pair_contact_impulse_sum.scalar_type() == at::kFloat &&
+              physics_substep_index.sizes() == torch::IntArrayRef({n}) &&
+              physics_substep_index.scalar_type() == at::kLong &&
+              physics_time_s.sizes() == torch::IntArrayRef({n}) &&
+              physics_time_s.scalar_type() == at::kDouble,
               "six-robot collision shape or dtype mismatch");
   for (const auto& t : {pose, velocity, length, width, mass, yaw_inertia_multiplier,
                         mu, active, team_ids, robot_contact, opponent_contact,
-                        robot_contact_by_robot})
+                        robot_contact_by_robot, pair_contact_event_count,
+                        pair_contact_solver_report_count,
+                        pair_contact_first_substep, pair_contact_first_time_s,
+                        pair_contact_last_substep, pair_contact_last_time_s,
+                        pair_contact_impulse_sum, physics_substep_index,
+                        physics_time_s})
     TORCH_CHECK(t.is_cuda() && t.is_contiguous() && t.device() == pose.device(),
                 "collision tensors must be contiguous on the same HIP device");
   robot_contacts_launch(pose.data_ptr<float>(), velocity.data_ptr<float>(),
@@ -87,6 +121,14 @@ void robot_contacts(torch::Tensor pose, torch::Tensor velocity,
       active.data_ptr<bool>(), team_ids.data_ptr<int64_t>(),
       robot_contact.data_ptr<bool>(), opponent_contact.data_ptr<bool>(),
       robot_contact_by_robot.data_ptr<bool>(),
+      pair_contact_event_count.data_ptr<int64_t>(),
+      pair_contact_solver_report_count.data_ptr<int64_t>(),
+      pair_contact_first_substep.data_ptr<int64_t>(),
+      pair_contact_first_time_s.data_ptr<double>(),
+      pair_contact_last_substep.data_ptr<int64_t>(),
+      pair_contact_last_time_s.data_ptr<double>(),
+      pair_contact_impulse_sum.data_ptr<float>(),
+      physics_substep_index.data_ptr<int64_t>(), physics_time_s.data_ptr<double>(),
       static_cast<int>(n), parallel_single_world,
       c10::cuda::getCurrentCUDAStream(pose.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();

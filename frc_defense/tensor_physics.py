@@ -210,6 +210,16 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         # Per-robot contact flags are scoped to one low-level physics tick.
         # The legacy world-level robot_contact flag remains unchanged.
         self.robot_contact_by_robot=torch.zeros(robot_shape,device=self.device,dtype=torch.bool)
+        pair_shape=(self.n, self.num_robots*(self.num_robots-1)//2)
+        self.pair_contact_event_count=torch.zeros(pair_shape,device=self.device,dtype=torch.long)
+        self.pair_contact_solver_report_count=torch.zeros(pair_shape,device=self.device,dtype=torch.long)
+        self.pair_contact_first_substep=torch.full(pair_shape,-1,device=self.device,dtype=torch.long)
+        self.pair_contact_last_substep=torch.full(pair_shape,-1,device=self.device,dtype=torch.long)
+        self.pair_contact_first_time_s=torch.full(pair_shape,float('nan'),device=self.device,dtype=torch.float64)
+        self.pair_contact_last_time_s=torch.full(pair_shape,float('nan'),device=self.device,dtype=torch.float64)
+        self.pair_contact_impulse_sum=torch.zeros((*pair_shape,4),device=self.device,dtype=self.pose.dtype)
+        self.physics_substep_index=torch.zeros((self.n,),device=self.device,dtype=torch.long)
+        self.physics_time_s=torch.zeros((self.n,),device=self.device,dtype=torch.float64)
         self.opponent_contact=torch.zeros((self.n,),device=self.device,dtype=torch.bool)
         self.field_contact=torch.zeros(robot_shape,device=self.device,dtype=torch.bool)
         self.wall_contact=torch.zeros((self.n,self.num_robots,2),device=self.device,dtype=torch.bool)
@@ -234,6 +244,11 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.module_drive_speed.zero_(); self.module_current.zero_(); self.module_supply_current.zero_()
         self.robot_current.zero_(); self.robot_contact.zero_(); self.opponent_contact.zero_()
         self.robot_contact_by_robot.zero_()
+        self.pair_contact_event_count.zero_(); self.pair_contact_solver_report_count.zero_()
+        self.pair_contact_first_substep.fill_(-1); self.pair_contact_last_substep.fill_(-1)
+        self.pair_contact_first_time_s.fill_(float('nan'))
+        self.pair_contact_last_time_s.fill_(float('nan')); self.pair_contact_impulse_sum.zero_()
+        self.physics_substep_index.zero_(); self.physics_time_s.zero_()
         self.field_contact.zero_(); self.wall_contact.zero_()
         self.safety_active_physics_ticks.zero_()
         self.safety_robot_contact_ticks.zero_()
@@ -276,6 +291,15 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.robot_current=torch.where(mask[:,None],torch.zeros_like(self.robot_current),self.robot_current)
         self.robot_contact &= ~mask
         self.robot_contact_by_robot &= ~mask[:,None]
+        self.pair_contact_event_count.masked_fill_(mask[:,None], 0)
+        self.pair_contact_solver_report_count.masked_fill_(mask[:,None], 0)
+        self.pair_contact_first_substep.masked_fill_(mask[:,None], -1)
+        self.pair_contact_last_substep.masked_fill_(mask[:,None], -1)
+        self.pair_contact_first_time_s.masked_fill_(mask[:,None], float('nan'))
+        self.pair_contact_last_time_s.masked_fill_(mask[:,None], float('nan'))
+        self.pair_contact_impulse_sum.masked_fill_(mask[:,None,None], 0.)
+        self.physics_substep_index.masked_fill_(mask, 0)
+        self.physics_time_s.masked_fill_(mask, 0.)
         self.opponent_contact &= ~mask
         self.field_contact &= ~mask[:,None]
         self.wall_contact &= ~mask[:,None,None]
@@ -469,6 +493,8 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             (self.field_contact & active_robots).long())
         self.safety_wall_contact_ticks.add_(
             (self.wall_contact.any(-1) & active_robots).long())
+        self.physics_substep_index.add_(active_mask.long())
+        self.physics_time_s.add_(active_mask.to(torch.float64) * float(self.dt))
         return self.pose, self.velocity
 
     def _swerve(self,cmd,active_mask=None):

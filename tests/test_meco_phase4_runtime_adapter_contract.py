@@ -4,12 +4,14 @@ import hashlib
 from pathlib import Path
 
 import pytest
+import torch
 
 from frc_defense.meco_phase4 import phase4_factor_config
 from frc_defense.meco_phase4 import PHASE4_FACTORS
 from frc_defense.meco_phase4_runtime_adapter import (
     PHASE4_REQUIREMENT_BINDINGS,
     phase4_factor_exposure,
+    phase4_pair_contact_event_record,
     phase4_requirement_binding,
     validate_phase4_capture,
 )
@@ -30,11 +32,14 @@ def test_runtime_binding_covers_exact_registry_requirements_and_fails_closed():
         assert binding["factor_ids"] == row["factor_ids"]
         assert binding["required_signals"] == row["required_outcome_signals"]
         assert set(binding["runtime_factor_by_factor_id"]) <= set(binding["factor_ids"])
-        assert set(binding["runtime_event_by_factor_id"]) == set(
-            binding["runtime_factor_by_factor_id"])
+        assert set(binding["runtime_event_by_factor_id"]) <= set(binding["factor_ids"])
         assert set(binding["runtime_factor_by_factor_id"].values()) <= set(PHASE4_FACTORS)
         assert not set(binding["required_signals"]).issubset(
             binding["authoritative_signals"])
+    contact = phase4_requirement_binding("bumps_and_contact")
+    assert contact["runtime_event_by_factor_id"] == {
+        "contact.robot_bump": "phase4_pair_contact_event"}
+    assert contact["stimulus_supported"] is False
 
 
 @pytest.mark.parametrize("kind,event_field,event_value", [
@@ -157,3 +162,43 @@ def test_matrix_intake_rejects_unrealized_or_episode_mismatched_capture():
     with pytest.raises(ValueError, match="seed differs"):
         _validate_phase4_condition_records([wrong_seed], factor=factor,
             source_hash=source_hash, split="validation", qualification_case=case)
+
+
+def test_pair_contact_reader_binds_simulator_event_summary_to_contact_factor():
+    class ContractFixture:
+        num_robots = 6
+        _collision_pair_i = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4])
+        _collision_pair_j = torch.tensor([1, 2, 3, 4, 5, 2, 3, 4, 5, 3, 4, 5, 4, 5, 5])
+        pair_contact_event_count = torch.zeros((1, 15), dtype=torch.long)
+        pair_contact_solver_report_count = torch.zeros_like(pair_contact_event_count)
+        pair_contact_first_substep = torch.full_like(pair_contact_event_count, -1)
+        pair_contact_last_substep = torch.full_like(pair_contact_event_count, -1)
+        pair_contact_first_time_s = torch.full((1, 15), float("nan"), dtype=torch.float64)
+        pair_contact_last_time_s = torch.full_like(pair_contact_first_time_s, float("nan"))
+        pair_contact_impulse_sum = torch.zeros((1, 15, 4))
+
+    fixture = ContractFixture()
+    pair_slot = 9  # Lexicographic pair slot (2, 3).
+    fixture.pair_contact_event_count[0, pair_slot] = 2
+    fixture.pair_contact_solver_report_count[0, pair_slot] = 6
+    fixture.pair_contact_first_substep[0, pair_slot] = 8
+    fixture.pair_contact_last_substep[0, pair_slot] = 10
+    fixture.pair_contact_first_time_s[0, pair_slot] = .16
+    fixture.pair_contact_last_time_s[0, pair_slot] = .20
+    fixture.pair_contact_impulse_sum[0, pair_slot] = torch.tensor([3., -1., 2., 4.])
+    record = phase4_pair_contact_event_record(fixture)
+    assert record["factor_id"] == "contact.robot_bump"
+    assert record["pair_slots"] == [2, 3]
+    assert record["event_realized_by_world"] == [True]
+    assert record["distinct_contact_substeps_by_world"] == [2]
+    assert record["contact_solver_reports_by_world"] == [6]
+    assert record["first_contact_physics_substep_by_world"] == [8]
+    assert record["last_contact_physics_substep_by_world"] == [10]
+    assert record["accumulated_impulse_by_world"] == [{
+        "normal_n_s": 3., "tangential_n_s": -1.,
+        "net_on_second_robot_n_s": [2., 4.]}]
+    assert "not a complete event stream" in record["event_scope"]
+    assert record["recovery_time_after_bump_s"] is None
+    assert record["route_completion_rate"] is None
+    with pytest.raises(ValueError, match="requires contact.robot_bump"):
+        phase4_pair_contact_event_record(fixture, factor_id="contact.other")
