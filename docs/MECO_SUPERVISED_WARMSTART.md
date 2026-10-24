@@ -347,6 +347,32 @@ Every row must bind the exact trajectory-v3 replay, explicit-goal source,
 legal-node dataset, train split, frozen protocol and annotation-authority file
 hash. The loader rejects action-only or mismatched labels.
 
+`python -m frc_defense.meco_plan_a_annotations` packages a human-authored
+sidecar into that exact JSONL/manifest schema. The sidecar is JSONL keyed by
+`scenario_id`, `category`, `seed`, and `decision_index`; each row must explicitly
+provide `selected_goal` (`node_id`, `x_m`, `y_m`, `heading_bin`, and the
+replay-bound `descriptor_sha256`), `executed_action`, `selected_behavior_id`,
+`censored_feasible_behavior_ids`, and `u_status` (plus `u_target` only when U is
+available). It must cover every bound explicit-goal source row exactly once.
+The materializer binds the source and legal-node JSONL/manifests, frozen
+qualification protocol, and declared authority JSON by SHA-256. It rejects
+held-out seeds, unsupported fields, action-only or mismatched labels, infeasible
+goal/behavior pairs, incomplete U support, and non-finite U. It never creates
+labels from teacher actions, rules, simulator metrics, or default zero values.
+The authority JSON's `source_id` is a declaration only; it does not authenticate
+identity or prove expertise or optimality. Packaging is not replay acceptance:
+the strict annotation loader/fitter must still validate exact simulator replay.
+
+```sh
+python -m frc_defense.meco_plan_a_annotations \
+  --authored-rows evaluations/meco-supervised/expert-goal-human-rows.jsonl \
+  --source-dataset evaluations/meco-supervised/expert-goal-source.jsonl \
+  --legal-node-dataset evaluations/meco-supervised/legal-nodes.jsonl \
+  --qualification-protocol qualifications/meco/protocol.json \
+  --authority-json evaluations/meco-supervised/annotation-authority.json \
+  --output evaluations/meco-supervised/expert-goal-annotations.jsonl
+```
+
 Example after collecting the explicit-goal source and preparing the strict
 legal-node dataset and annotation manifest:
 
@@ -374,5 +400,6 @@ The fitter replays the exact legal support before training, emits model weights
 only, binds the annotation/source/legal data and manifest hashes, and validates
 the artifact before returning. It initializes and verifies the P head at p0;
 it does not turn the route-cost selection rule into U, P, or a global
-optimality claim. No expert-goal data or weights have been collected or fitted
-by this implementation change.
+optimality claim. No human annotation rows or weights are created by the
+materializer; externally authored rows still require replay validation before
+fitting and no expert-goal dataset or weights are implied to exist.
