@@ -44,9 +44,20 @@
 > disclosing their seeds, and describes 6,488 design cells / 10,380,800
 > theoretical paired episode rows. This is a plan only: runtime stimuli,
 > dispatch, outcome aggregation, simulator runs, replay inspection, and
-> qualification remain outstanding. The three-pass manifest has 27 entries and its digest/count pins now match.
+> qualification remain outstanding. The three-pass manifest had 27 entries at this historical point; a later runtime-capture tranche raises it to 28.
 > Dashboard currentness is
 > historical until restarted against the completed candidate state.
+
+> **Phase 4 realization capture integrated — 2026-10-24.** Candidate commits
+> `af6930800` and `e07016509` integrate reviewer-approved capture contract
+> `f9e53044d01688069dea54e2ea2d5438b76fafc8`. The matrix now rejects
+> unrealized or mismatched captures and validates source, factor, split,
+> episode seed handling, qualification case, and event evidence. Four existing
+> runtime stimuli can be captured; all eleven registry requirements remain
+> non-executable for qualification because required outcome signals are not
+> authoritative/available or their stimuli are not wired. The focused review
+> suite passed 33 tests. No simulator, GPU, training, or replay was run. The
+> dashboard has not been restarted against this candidate state.
 
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
