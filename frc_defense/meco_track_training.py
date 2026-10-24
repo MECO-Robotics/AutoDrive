@@ -506,6 +506,33 @@ def _validate_meco_replay_alignment(record: dict, frames: list[dict], *,
            decision.get("macro_end_tick") != frame.get("tick")
            for decision, frame in zip(decisions, frames[1:])):
         raise ValueError("each post-initial replay frame must identify its scored policy decision")
+    macro_decisions = [decision for decision in decisions
+        if decision.get("kind") == "policy_decision"]
+    route_rows = record.get("executed_planner_route_trace") or []
+    if route_rows:
+        if len(route_rows) != len(macro_decisions):
+            raise ValueError("replay macro count differs from evaluator route trace")
+        for decision, row in zip(macro_decisions, route_rows):
+            expected = (row.get("selected_action"), row.get("executed_action_trace"),
+                        row.get("start_tick"), row.get("end_tick"))
+            actual = (decision.get("action"), decision.get("executed_actions"),
+                      decision.get("macro_start_tick"), decision.get("macro_end_tick"))
+            if actual != expected:
+                raise ValueError("replay selected or executed actions differ from evaluator route trace")
+    else:
+        # Deterministic D0 is selected anew on every physics tick and therefore
+        # has no learned macro route rows. Bind each sampled replay boundary to
+        # the corresponding evaluator tick action instead.
+        executed = record.get("executed_action_trace")
+        if isinstance(executed, list) and executed:
+            for decision in macro_decisions:
+                end_tick = decision.get("macro_end_tick")
+                trace = decision.get("executed_actions")
+                if (type(end_tick) is not int or end_tick < 1 or
+                        end_tick > len(executed) or not isinstance(trace, list) or
+                        not trace or trace[-1] != executed[end_tick - 1] or
+                        decision.get("action") != executed[end_tick - 1]):
+                    raise ValueError("replay action differs from evaluator tick action trace")
 
 
 def _snapshot_tensors(snapshot, *, device):
