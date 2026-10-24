@@ -4,7 +4,7 @@
   "scope": "Known scoped implementation tranches only; this does not claim whole-plan or track-wide review.",
   "plan_path": "docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
   "plan_sha256": "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10",
-  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence. The validation-campaign-planner tranche was added on 2026-10-24 from scoped planner notes, implementer commits, the reviewer request-changes finding, and exact-head approval; it records validation-only planning and no final-test disclosure or runtime outcomes. The Phase 4 design-overlay tranche was added on 2026-10-24 from the exact implementer commit, planner pass, and independent exact-head reviewer approval; its ledger distinguishes design coverage from runtime and executed coverage. The Phase 4 design scope correction, opponent runtime API, and context runtime API were added on 2026-10-24 from scoped planner/implementer/reviewer records; all entries explicitly separate design/API evidence from wired or executed simulator behavior.",
+  "artifact_origin": "Concise summaries materialized from actual scoped reports and verdicts; original planner/reviewer artifact paths were not persisted for earlier tranches. New Phase 2 and C1 scoped summaries were added on 2026-10-23, and the async inference broker summary was added on 2026-10-24 from its planner, implementation, and independent review records. The qualification streak progression tranche was added on 2026-10-24 from its scoped planner, implementation, and independent review records. The Phase 5 production-input parity, WX9100 queue balancing, and dashboard queue reconciliation summaries were preserved from the reviewed candidate. Phase 2 preference-v2 and A/C input-provenance summaries were added from the scoped implementation notes and parent approval messages; original planner/reviewer messages were not persisted verbatim. The evaluator-device lease and execution-failure taxonomy summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records; it makes no simulator, hardware, fresh replay, or qualification claim. The inference observability and executed decision-trace summary was added on 2026-10-24 from its scoped planner, implementation, and independent review records; it claims no simulator evaluation, fresh dashboard replay, dashboard review, or qualification. The D0 campaign orchestration summary was added on 2026-10-24 from the scoped planner, implementation, and independent review records. It distinguishes 139,800 planned records from work not run and claims no GPU/simulator results, CI, or qualification. The matched-evaluation-controls tranche was added on 2026-10-24 from the scoped planner report, implementer commits, reviewer request-changes finding, and exact-head reviewer approval; the ledger explicitly distinguishes controls verification from simulator, held-out, qualification, and deployment evidence. The validation-campaign-planner tranche was added on 2026-10-24 from scoped planner notes, implementer commits, the reviewer request-changes finding, and exact-head approval; it records validation-only planning and no final-test disclosure or runtime outcomes. The Phase 4 design-overlay tranche was added on 2026-10-24 from the exact implementer commit, planner pass, and independent exact-head reviewer approval; its ledger distinguishes design coverage from runtime and executed coverage. The Phase 4 design scope correction, opponent runtime API, and context runtime API were added on 2026-10-24 from scoped planner/implementer/reviewer records; all entries explicitly separate design/API evidence from wired or executed simulator behavior. The Phase 4 policy-pose boundary tranche was added on 2026-10-24 from planner call-site audit, implementer commits, and exact-head reviewer approval; it records the unwired stimulus and pending simulator replay limits.",
   "tranches": [
     {
       "requirement_id": "phase4-pressure-domain",
@@ -942,6 +942,48 @@
         "status": "approved-summary"
       },
       "limits": "Sixteen focused tests, compilation, and diff checks passed. No simulator/GPU/replay; APIs are unwired, contact/recovery remain proxies/unavailable, and pose no-leak is incomplete."
+    },
+    {
+      "requirement_id": "phase4-policy-pose-boundary",
+      "title": "Phase 4 policy-pose truth boundary",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-policy-pose-boundary.md",
+          "sha256": "9192a745981ad7ef1a1d125b4a0fa0647026e81acc41af9eda3157b98bcf8bb1",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "original_commit": "172a665e9c5c2b317a8d87552f7063195266cfa5",
+        "commit": "7f8c567c0a2a712235a1e464c06b2b3adb1f86b1",
+        "candidate_integration_commit": "8fe3c9daf411a7914e0ee6bcf7f1fc89ae27b729",
+        "paths": [
+          "frc_defense/tensor_3v3.py",
+          "frc_defense/_tensor_3v3_observation.py",
+          "frc_defense/architecture_inputs.py",
+          "frc_defense/meco_candidates.py",
+          "frc_defense/meco_plan_a_policy.py",
+          "frc_defense/meco_track_training.py",
+          "tests/test_phase4_pose_policy_state.py",
+          "docs/implementation-provenance/meco-input-provenance-contract.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-policy-pose-boundary.md",
+          "sha256": "9192a745981ad7ef1a1d125b4a0fa0647026e81acc41af9eda3157b98bcf8bb1",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "7f8c567c0a2a712235a1e464c06b2b3adb1f86b1",
+        "verdict": "approved",
+        "verdict_detail": "Approved exact follow-up head after reviewing PerceptionInputs, delayed frames, truth-variance tests, policy decision callsites, and odometry limitations. No simulator/GPU evaluation was run.",
+        "status": "approved-summary"
+      },
+      "limits": "Seventeen focused tests, compilation, and diff checks passed. E2E simulator/replay is pending; pose-offset runtime stimulus is unwired, modeled odometry is idealized, and no hardware or qualification claim is made."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -957,6 +999,7 @@
     "The Plan A offline oracle audit validates future artifacts; no Plan A labels, collected dataset, replay, fit, or warm-start evidence exists.",
     "The validation campaign runner has not been executed; no matched matrix or scenario outcome results exist.",
     "The Phase 4 design overlay binds exact validation axes but is not runtime implementation or executed coverage; simulator stimuli, fresh replay, and outcomes remain outstanding.",
-    "Phase 4 opponent and context APIs are reviewed but unwired; no stimuli, outcome signals, campaign episodes, simulator replay, or qualification evidence are claimed. Pose-offset training remains explicitly no-leak incomplete."
+    "Phase 4 opponent and context APIs are reviewed but unwired; no stimuli, outcome signals, campaign episodes, simulator replay, or qualification evidence are claimed. Pose-offset training remains explicitly no-leak incomplete.",
+    "The policy-pose boundary has focused invariance tests but no required end-to-end simulator replay; pose mislocalization stimulus is not yet wired and modeled odometry is not hardware-qualified."
   ]
 }

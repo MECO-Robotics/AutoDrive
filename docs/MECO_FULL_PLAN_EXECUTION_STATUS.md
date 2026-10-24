@@ -11,6 +11,13 @@
 > `Could not read saved curriculum status.` No replay was generated because
 > the Phase 4 APIs remain unwired to the evaluator.
 
+> **Candidate advanced after dashboard verification — 2026-10-24 10:00 UTC.**
+> The policy-pose boundary is now integrated and the provenance manifest has
+> 26 entries with a new digest. Dashboard PID `1745889` has not yet been
+> restarted against this newer candidate, so the prior 09:52 verification is
+> historical and the loaded backend is not current for the policy-pose change.
+> Restart and reverify before any replay.
+
 > **Phase 4 contract and runtime APIs reviewed — 2026-10-24.** The contract
 > scope correction `4033acc8a2a67f0d206247363e6c98ca21ce7a97`, opponent API
 > `8a31ae2acaba9b0cb5ab842373f2796c271e65bc`, and context API
@@ -22,9 +29,14 @@
 > geometry, and pose-offset transforms, but they are not wired into
 > `CurriculumEnv` or campaign execution. Contact and recovery values remain
 > proxies/unavailable; pose no-leak remains explicitly incomplete. No
-> simulator/replay or GPU evaluation ran. Provenance now covers 25 scoped
-> tranches and its pin is updated; the dashboard must be restarted and verified
-> again before any replay work.
+> **Policy-pose boundary approved and integrated — 2026-10-24.** Exact follow-up
+> `7f8c567c0a2a712235a1e464c06b2b3adb1f86b1` passed independent review and is
+> integrated at `8fe3c9daf411a7914e0ee6bcf7f1fc89ae27b729`. The perception
+> encoder now consumes the policy pose and delayed observation; truth-variance
+> tests cover policy geometry and delayed frames. No simulator replay was run,
+> and the pose-offset stimulus is not wired. Provenance now covers 26 scoped
+> tranches; its dashboard pin is updated, but the service needs another restart
+> after this checkout change before replay.
 
 > **Dashboard verified on candidate — 2026-10-24 09:22 UTC.** After the 22nd
 > three-pass tranche was added, `frc-defense-dashboard.service` was restarted
