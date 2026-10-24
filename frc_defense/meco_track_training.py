@@ -943,6 +943,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         raise ValueError("scheduled task category is not registered for scenario")
     if type(task_seed) is not int or task_seed < 0:
         raise ValueError("scheduled task seed must be nonnegative")
+    from .meco_phase4 import (phase4_training_metadata,
+        validate_phase4_training_assignment)
+    phase4_factor = validate_phase4_training_assignment(task_assignment)
+    phase4_training = phase4_training_metadata(task_assignment)
     qualification_protocol_data = None
     qualification_protocol_id = None
     qualification_protocol_sha256 = None
@@ -1039,7 +1043,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         resume_rng_python = payload["rng_python"]
         resume_rng_device = payload["rng_device"]
     env = make_curriculum_env(task_scenario, task_category, 1,
-        config.device, task_seed)
+        config.device, task_seed, phase4_factor=phase4_factor)
     chunk_seed = task_seed
     _reset_episode(env, chunk_seed)
     if resume_rng_torch is not None:
@@ -1056,6 +1060,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         raise
     run_manifest = {"schema_version": 1, "run_id": run_id,
         "config": asdict(config), "task_assignment": task_assignment,
+        "phase4_training": phase4_training,
         "updates_semantics": "updates per invocation chunk",
         "protocol_id": protocol_id,
         "configuration_sha256": hashlib.sha256(json.dumps(
@@ -1419,6 +1424,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "protocol_id": protocol_id,
                 "initialization": run_manifest["initialization"],
                 "task_assignment": task_assignment,
+                "phase4_training": run_manifest["phase4_training"],
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),

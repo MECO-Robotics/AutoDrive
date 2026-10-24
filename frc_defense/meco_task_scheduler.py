@@ -15,6 +15,10 @@ import random
 from .training_curriculum import (CURRICULUM_VERSION, CurriculumState, SCENARIOS,
     _ancestors, eligible_scenarios, task_mixture)
 from .meco_qualification import TRAIN_SEED_POOL_SIZE, protocol_cases
+from .meco_phase4 import (PHASE4_FACTORS, PHASE4_TRAIN_EXPOSURE_VERSION,
+    phase4_factor_digest,
+    phase4_train_categories, phase4_train_protocol_id,
+    phase4_training_assignment_id, validate_phase4_training_assignment)
 
 
 SCHEDULER_VERSION = 1
@@ -30,6 +34,7 @@ class MecoTaskScheduler:
     master_seed: int
     exposure_chunks_per_scenario: int = 10
     state: dict | None = None
+    phase4_train_exposure: bool = False
 
     def __post_init__(self):
         if type(self.master_seed) is not int or self.master_seed < 0:
@@ -41,19 +46,26 @@ class MecoTaskScheduler:
                 "curriculum_version": CURRICULUM_VERSION,
                 "master_seed": self.master_seed,
                 "exposure_chunks_per_scenario": self.exposure_chunks_per_scenario,
+                "phase4_train_exposure": self.phase4_train_exposure,
                 "completed_cycle": 0, "pending_assignment": None,
                 "exposure_chunks": {}, "category_exposures": {},
-                "recovery_pressure": {}, "history": []}
+                "recovery_pressure": {}, "phase4_exposure_counts": {},
+                "history": []}
         self._validate_state()
 
     def _validate_state(self):
         state = self.state
+        if isinstance(state, dict):
+            state.setdefault("phase4_train_exposure", False)
+            state.setdefault("phase4_exposure_counts", {})
         if (not isinstance(state, dict) or state.get("schema_version") != SCHEDULER_VERSION
                 or state.get("curriculum_version") != CURRICULUM_VERSION
                 or state.get("master_seed") != self.master_seed
-                or state.get("exposure_chunks_per_scenario") != self.exposure_chunks_per_scenario):
+                or state.get("exposure_chunks_per_scenario") != self.exposure_chunks_per_scenario
+                or state.get("phase4_train_exposure", False) != self.phase4_train_exposure):
             raise ValueError("MECO task scheduler state/configuration mismatch")
-        for key in ("exposure_chunks", "category_exposures", "recovery_pressure"):
+        for key in ("exposure_chunks", "category_exposures", "recovery_pressure",
+                    "phase4_exposure_counts"):
             if not isinstance(state.get(key), dict):
                 raise ValueError(f"invalid scheduler {key}")
         if type(state.get("completed_cycle")) is not int or state["completed_cycle"] < 0:
@@ -70,21 +82,40 @@ class MecoTaskScheduler:
             raise ValueError("task assignment is not registered in the curriculum DAG")
         if type(assignment.get("seed")) is not int or assignment["seed"] < 0:
             raise ValueError("invalid task seed")
+        if type(assignment.get("cycle")) is not int or assignment["cycle"] < 1:
+            raise ValueError("invalid task cycle")
         train_case = protocol_cases(scenario_id, "train",
             episodes=TRAIN_SEED_POOL_SIZE, master_seed=self.master_seed)[0]
         pool_id = _digest({"scenario_id": scenario_id, "seeds": list(train_case.seeds)})
-        if assignment.get("training_seed_pool_id") != pool_id or assignment["seed"] not in train_case.seeds:
+        phase4_factor = assignment.get("phase4_factor")
+        expected_seed = train_case.seeds[(assignment["cycle"] - 1) % len(train_case.seeds)]
+        if (assignment.get("training_seed_pool_id") != pool_id
+                or assignment["seed"] not in train_case.seeds
+                or (phase4_factor is None and assignment["seed"] != expected_seed)):
             raise ValueError("task seed is not in the frozen training protocol pool")
-        if type(assignment.get("cycle")) is not int or assignment["cycle"] < 1:
-            raise ValueError("invalid task cycle")
         target = assignment.get("target_update")
         if target is not None and (type(target) is not int or target < 1):
             raise ValueError("invalid task update frontier")
         assignment_id = assignment.get("assignment_id")
-        expected_id = _digest({"cycle": assignment["cycle"],
+        expected_payload = {"cycle": assignment["cycle"],
             "scenario_id": scenario_id, "category": category,
             "seed": assignment["seed"], "master_seed": self.master_seed,
-            "training_seed_pool_id": pool_id})
+            "training_seed_pool_id": pool_id}
+        validated_phase4_factor = validate_phase4_training_assignment(assignment)
+        if validated_phase4_factor is not None:
+            if not self.phase4_train_exposure:
+                raise ValueError("Phase 4 assignment was not enabled by this scheduler protocol")
+            expected_exposure_key = _digest({"scenario_id": scenario_id,
+                "category": category, "seed": assignment["seed"],
+                "factor": phase4_factor["kind"]})
+            if assignment.get("phase4_exposure_key") != expected_exposure_key:
+                raise ValueError("Phase 4 exposure balance key mismatch")
+            expected_payload.update(phase4_factor=phase4_factor,
+                phase4_training_version=assignment["phase4_training_version"],
+                phase4_split=assignment["phase4_split"],
+                phase4_training_assignment_id=assignment["phase4_training_assignment_id"],
+                phase4_training_protocol_id=assignment["phase4_training_protocol_id"])
+        expected_id = _digest(expected_payload)
         if assignment_id != expected_id:
             raise ValueError("task assignment identity is invalid")
 
@@ -147,12 +178,45 @@ class MecoTaskScheduler:
         seed = train_case.seeds[(cycle - 1) % len(train_case.seeds)]
         training_seed_pool_id = _digest({"scenario_id": scenario_id,
                                           "seeds": list(train_case.seeds)})
+        phase4_factor = None
+        if self.phase4_train_exposure and phase4_train_categories(scenario_id):
+            choices = []
+            counts = self.state["phase4_exposure_counts"]
+            for factor_name, factor in sorted(PHASE4_FACTORS.items()):
+                for phase_category in phase4_train_categories(scenario_id):
+                    for phase_seed in train_case.seeds:
+                        exposure_key = _digest({"scenario_id": scenario_id,
+                            "category": phase_category, "seed": phase_seed,
+                            "factor": factor_name})
+                        count = counts.get(exposure_key, 0)
+                        tie = _digest({"master_seed": self.master_seed, "cycle": cycle,
+                            "scenario_id": scenario_id, "category": phase_category,
+                            "seed": phase_seed, "factor": factor_name})
+                        choices.append((count, tie, factor_name, factor,
+                                        phase_category, phase_seed, exposure_key))
+            _, _, factor_name, phase4_factor, category, seed, phase4_exposure_key = min(choices)
+            phase4_assignment_id = phase4_training_assignment_id(cycle=cycle,
+                scenario_id=scenario_id, category=category, seed=seed,
+                training_seed_pool_id=training_seed_pool_id, factor=phase4_factor)
+            phase4_fields = {"phase4_training_version": PHASE4_TRAIN_EXPOSURE_VERSION,
+                "phase4_factor": phase4_factor,
+                "phase4_split": "train",
+                "phase4_factor_sha256": phase4_factor_digest(phase4_factor),
+                "phase4_training_assignment_id": phase4_assignment_id,
+                "phase4_training_protocol_id": phase4_train_protocol_id(),
+                "phase4_exposure_key": phase4_exposure_key}
+        else:
+            phase4_fields = {}
         assignment = {"cycle": cycle, "scenario_id": scenario_id,
             "category": category, "seed": seed,
             "training_seed_pool_id": training_seed_pool_id,
             "assignment_id": _digest({"cycle": cycle, "scenario_id": scenario_id,
                 "category": category, "seed": seed, "master_seed": self.master_seed,
-                "training_seed_pool_id": training_seed_pool_id}),
+                "training_seed_pool_id": training_seed_pool_id,
+                **({key: phase4_fields[key] for key in (
+                    "phase4_training_version", "phase4_factor", "phase4_split",
+                    "phase4_training_assignment_id",
+                    "phase4_training_protocol_id")} if phase4_fields else {})}),
             "sampling_role": ("recovery" if selected_recovery
                 else "ancestor_retention" if recovery
                 else "stage_exposure" if scenario_id not in curriculum_state.qualified
@@ -163,6 +227,9 @@ class MecoTaskScheduler:
             "category_exposure_progress": dict(self.state["category_exposures"]),
             "recovery_pressure": dict(self.state["recovery_pressure"]),
             "promotion_status": "not_evaluated_by_exposure_scheduler"}
+        assignment.update(phase4_fields)
+        if phase4_factor is not None:
+            validate_phase4_training_assignment(assignment)
         if target_update is not None:
             if type(target_update) is not int or target_update < 1:
                 raise ValueError("target_update must be a positive integer")
@@ -181,6 +248,10 @@ class MecoTaskScheduler:
         category_key = f"{scenario_id}/{category}"
         self.state["category_exposures"][category_key] = (
             self.state["category_exposures"].get(category_key, 0) + 1)
+        if assignment.get("phase4_factor") is not None:
+            exposure_key = assignment["phase4_exposure_key"]
+            counts = self.state["phase4_exposure_counts"]
+            counts[exposure_key] = counts.get(exposure_key, 0) + 1
         successes = failures = 0
         for track, result in sorted(lane_results.items()):
             if not isinstance(result, dict):

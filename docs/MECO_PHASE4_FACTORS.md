@@ -4,6 +4,20 @@ This extension turns the four previously open Phase 4 conditions into frozen
 matrix factors. It is a static implementation and contract only; it does not
 claim runtime evaluation, qualification, or a robustness result.
 
+## Opt-in training exposure
+
+The supervisor accepts `--phase4-train-exposure` to schedule these registered
+factors during training. It waits until the ordinary curriculum DAG makes a
+supported pressure scenario eligible, then chooses the least-exposed
+factor/category/train-seed combination in that scenario. The selection and
+balance counts are deterministic and persist in scheduler state. Training
+assignments record the `train` split, frozen factor digest, assignment ID, and
+Phase 4 training protocol ID in task, run, and checkpoint manifests. The worker
+rejects Phase 4 assignments with any other split or outside the registered
+pressure domain. The flag is off by default, and factor exposure alone does not
+qualify or promote a track. Validation/test factor runs remain part of the
+separate paired robustness matrix described below.
+
 ## Supported evaluation domain
 
 Use `offense_vs_scripted_pressure` or `full_match_offense` with registered

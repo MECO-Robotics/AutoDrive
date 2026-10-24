@@ -29,6 +29,8 @@ from .curriculum_training import source_identity
 from .meco_candidates import CANDIDATE_BOUNDARY
 from .meco_track_training import CHUNK_RESET_POLICY, MecoTrainConfig, ROOT
 from .meco_task_scheduler import MecoTaskScheduler
+from .meco_phase4 import (phase4_train_protocol_id,
+    phase4_training_metadata)
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES, prediction_contract
 
 
@@ -174,7 +176,8 @@ class MecoSupervisor:
                  prediction_mode: str = "cv",
                  evaluation_prediction_mode: str | None = None,
                  warm_start_artifacts: dict[str, str] | None = None,
-                 qualification_protocol: str | None = None):
+                 qualification_protocol: str | None = None,
+                 phase4_train_exposure: bool = False):
         from .meco_device import require_indexed_cuda_device
         if not devices or len(set(devices)) != len(devices):
             raise ValueError("devices must be a nonempty list without duplicates")
@@ -229,6 +232,9 @@ class MecoSupervisor:
             raise ValueError(f"evaluation_prediction_mode must be one of {PREDICTION_MODES}")
         self.evaluation_prediction_mode = evaluation_prediction_mode
         self.stage_exposure_chunks = stage_exposure_chunks
+        if type(phase4_train_exposure) is not bool:
+            raise ValueError("phase4_train_exposure must be boolean")
+        self.phase4_train_exposure = phase4_train_exposure
         self.chunk_updates = chunk_updates
         self.evaluation_categories = evaluation_categories
         self.evaluation_episodes = evaluation_episodes
@@ -295,7 +301,10 @@ class MecoSupervisor:
             "chunk_reset_policy": CHUNK_RESET_POLICY,
             "task_scheduler": {"version": 1,
                 "stage_exposure_chunks": stage_exposure_chunks,
+                "phase4_train_exposure": self.phase4_train_exposure,
                 "semantics": "DAG exposure progression; not promotion qualification"},
+            "phase4_training_protocol_id": (phase4_train_protocol_id()
+                if self.phase4_train_exposure else None),
             "D0_control": "production deterministic slot-3 controller; native 20 ms cadence; outside candidate table"})
 
     def _lane_payload(self, track, statuses):
@@ -325,7 +334,7 @@ class MecoSupervisor:
         state = self.task_scheduler.state
         return {key: state[key] for key in (
             "completed_cycle", "pending_assignment", "exposure_chunks",
-            "category_exposures", "recovery_pressure")}
+            "category_exposures", "recovery_pressure", "phase4_exposure_counts")}
 
     def _refresh_progress(self, track):
         payload = _checkpoint_info(self.output / track / "latest.pt")
@@ -407,6 +416,10 @@ class MecoSupervisor:
                     raise ValueError(f"{track} checkpoint source differs from current source")
                 if payload.get("protocol_id") != self.protocol_id:
                     raise ValueError(f"{track} checkpoint protocol differs from supervisor configuration")
+                checkpoint_task = payload.get("task_assignment") or {}
+                expected_phase4 = phase4_training_metadata(checkpoint_task)
+                if payload.get("phase4_training") != expected_phase4:
+                    raise ValueError(f"{track} checkpoint Phase 4 training provenance mismatch")
                 saved = dict(payload.get("config", {}))
                 for key in ("updates",):
                     saved.pop(key, None)
@@ -440,17 +453,22 @@ class MecoSupervisor:
             "chunk_reset_policy": CHUNK_RESET_POLICY,
             "task_scheduler": {"version": 1,
                 "stage_exposure_chunks": self.stage_exposure_chunks,
+                "phase4_train_exposure": self.phase4_train_exposure,
                 "semantics": "DAG exposure progression; not promotion qualification"},
+            "phase4_training_protocol_id": (phase4_train_protocol_id()
+                if self.phase4_train_exposure else None),
             "candidate_boundary": CANDIDATE_BOUNDARY}
         self.configuration_hash = _hash(self.configuration)
         self.scheduler_path = self.output / "task-scheduler-state.json"
         if self.scheduler_path.is_file():
             scheduler_state = json.loads(self.scheduler_path.read_text())
             self.task_scheduler = MecoTaskScheduler(self.seed,
-                self.stage_exposure_chunks, scheduler_state)
+                self.stage_exposure_chunks, scheduler_state,
+                self.phase4_train_exposure)
         else:
             self.task_scheduler = MecoTaskScheduler(self.seed,
-                self.stage_exposure_chunks)
+                self.stage_exposure_chunks,
+                phase4_train_exposure=self.phase4_train_exposure)
             _atomic_json(self.scheduler_path, self.task_scheduler.state)
 
     def _task_for_cycle(self, cycle, target_update):
@@ -511,6 +529,7 @@ class MecoSupervisor:
         manifest.update(schema_version=1, run_id=checkpoint.get("run_id"),
             track=track, status="complete", completed_updates=target_update,
             task_assignment=assignment, task_outcomes=outcome,
+            phase4_training=phase4_training_metadata(assignment),
             recovered_task_outcome=True, recovered_utc=_utc())
         _atomic_json(manifest_path, manifest)
         return outcome
@@ -1031,6 +1050,8 @@ def _parser():
     parser.add_argument("--chunk-updates", type=int, default=100)
     parser.add_argument("--stage-exposure-chunks", type=int, default=10,
         help="chunks exposed per scenario before its dependants can enter training mixture")
+    parser.add_argument("--phase4-train-exposure", action="store_true",
+        help="opt in to balanced Phase 4 train-split adversarial assignments after DAG prerequisites")
     parser.add_argument("--rollout-steps", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--action-ticks", type=int, default=12)
@@ -1088,7 +1109,8 @@ def main(argv=None):
         cycles=args.cycles, stop_file=args.stop_file,
         stage_exposure_chunks=args.stage_exposure_chunks,
         qualification_protocol=args.qualification_protocol,
-        warm_start_artifacts=args.warm_start_artifacts)
+        warm_start_artifacts=args.warm_start_artifacts,
+        phase4_train_exposure=args.phase4_train_exposure)
     print(json.dumps(supervisor.run(), indent=2))
 
 
