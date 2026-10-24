@@ -161,6 +161,7 @@ def test_supervisor_status_keeps_training_and_evaluation_protocols_separate(
     supervisor = meco_supervisor.MecoSupervisor.__new__(meco_supervisor.MecoSupervisor)
     supervisor.queue_path = tmp_path / "queue.json"
     supervisor.status_path = tmp_path / "status.json"
+    supervisor.evaluation_output = tmp_path / "evaluations"
     supervisor.supervisor_id = "sup"
     supervisor.protocol_id = "run-protocol"
     supervisor.prediction_mode = "cv"
