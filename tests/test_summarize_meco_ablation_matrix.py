@@ -12,7 +12,8 @@ from frc_defense.meco_tracks import MECO_TRACKS
 from scripts.summarize_meco_ablation_matrix import (
     PHASE4_POLICIES, _canonical_hash, _cluster_bootstrap_ci,
     _content_bound_seed, _equal_category_summaries, _paired_finite_values,
-    _stratified_paired_ci, summarize_matrix,
+    _resolve_conditions, _stratified_paired_ci, phase4_teammate_behavior_record,
+    summarize_matrix,
     _validate_required_contrasts, summarize_matrices,
 )
 
@@ -427,15 +428,227 @@ def test_fails_closed_when_matrix_digest_is_wrong(tmp_path):
         summarize_matrix(path, replicates=100)
 
 
-def test_requires_matrix_schema_four(tmp_path):
+def test_rejects_unsupported_matrix_schema(tmp_path):
     path = _fixture(tmp_path)
     value = json.loads(path.read_text())
     value["schema_version"] = 3
     value.pop("report_sha256", None)
     value["report_sha256"] = _canonical_hash(value)
     _write_json(path, value)
-    with pytest.raises(ValueError, match="schema version 4"):
+    with pytest.raises(ValueError, match="supported schema version 4 through 7"):
         summarize_matrix(path, replicates=100)
+
+
+def test_rejects_schema_eight(tmp_path):
+    path = _fixture(tmp_path)
+    value = json.loads(path.read_text())
+    value["schema_version"] = 8
+    value["protocol"]["schema_version"] = 8
+    value.pop("report_sha256", None)
+    value["report_sha256"] = _canonical_hash(value)
+    _write_json(path, value)
+    with pytest.raises(ValueError, match="supported schema version 4 through 7"):
+        summarize_matrix(path, replicates=100)
+
+
+def _schema6_fixture(path):
+    from frc_defense.meco_phase4_context import phase4_start_profile_assignment
+    matrix = json.loads(path.read_text())
+    matrix["schema_version"] = matrix["protocol"]["schema_version"] = 6
+    matrix["protocol"]["scenario_id"] = "full_match_offense"
+    matrix["source_identity_sha256"] = matrix["protocol"]["source_identity_sha256"] = "b" * 64
+    matrix["evaluation_split"] = matrix["protocol"]["evaluation_split"] = "validation"
+    matrix["seed_split_assignments"] = matrix["protocol"]["seed_split_assignments"] = {
+        "single": {str(seed): "validation" for seed in matrix["protocol"]["seed_list"]}}
+    frozen = dict(matrix["qualification_protocol"])
+    frozen["protocol_sha256"] = "a" * 64
+    matrix["qualification_protocol"] = matrix["protocol"]["qualification_protocol"] = frozen
+    matrix["conditions"]["architecture_matched_cv_k16"]["qualification_protocol"] = frozen
+    assignment = phase4_start_profile_assignment("team_start_set_a",
+        scenario_id="full_match_offense", split="validation",
+        protocol_id=frozen["protocol_id"], protocol_sha256=frozen["protocol_sha256"],
+        qualification_case=matrix["qualification_case"], categories=["single"],
+        seeds=matrix["protocol"]["seed_list"])
+    matrix["phase4_start_profile_assignment"] = assignment
+    matrix["protocol"]["phase4_start_profile_assignment"] = assignment
+    condition = matrix["conditions"]["architecture_matched_cv_k16"]
+    condition["phase4_start_profile_assignment"] = assignment
+    condition["source_identity_sha256"] = "b" * 64
+    report_path = Path(condition["report_path"])
+    report = json.loads(report_path.read_text())
+    report["scenario_id"] = "full_match_offense"
+    report["source_identity_sha256"] = "b" * 64
+    report["split"] = "validation"
+    report["evaluation_case"].update({"scenario_id": "full_match_offense",
+        "split": "validation", "protocol_sha256": frozen["protocol_sha256"]})
+    for entry in report["policy_manifest"].values():
+        entry["source_identity_sha256"] = "b" * 64
+    condition["policy_manifest"] = report["policy_manifest"]
+    report["evaluation_protocol_sha256"] = frozen["protocol_sha256"]
+    report["experiment_matrix"].update({
+        "evaluation_split": "validation",
+        "seed_split_assignments": matrix["seed_split_assignments"],
+        "qualification_protocol": frozen,
+        "phase4_start_profile_assignment": assignment})
+    report["phase4_start_profile_assignment"] = assignment
+    _write_json(report_path, report)
+    condition["evaluation_report_sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    return matrix
+
+
+def test_schema6_accepts_and_binds_start_profile_assignment(tmp_path):
+    path = _fixture(tmp_path, schema_version=6)
+    _schema6_fixture(path)
+    matrix = json.loads(path.read_text())
+    loaded = _resolve_conditions(matrix, path)
+    assert loaded["common"]["evaluation_split"] == "validation"
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda m: m["protocol"].update(phase4_start_profile_assignment=None),
+     "matching start-profile assignment"),
+    (lambda m: (m["phase4_start_profile_assignment"].update(registry_profile_id="bogus"),
+                m["protocol"]["phase4_start_profile_assignment"].update(
+                    registry_profile_id="bogus")),
+     "unknown full-team start profile"),
+])
+def test_schema6_rejects_start_profile_assignment_tampering(tmp_path, mutate, match):
+    path = _fixture(tmp_path, schema_version=6)
+    _schema6_fixture(path)
+    matrix = json.loads(path.read_text())
+    mutate(matrix)
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    with pytest.raises(ValueError, match=match):
+        _resolve_conditions(matrix, path)
+
+
+def _schema7_fixture(path):
+    from frc_defense.meco_phase4_context import phase4_teammate_behavior_assignment
+    matrix = _schema6_fixture(path)
+    matrix["schema_version"] = matrix["protocol"]["schema_version"] = 7
+    frozen = matrix["qualification_protocol"]
+    case = matrix["qualification_case"]
+    seeds = matrix["protocol"]["seed_list"]
+    condition_name = "architecture_matched_cv_k16"
+    old = matrix["conditions"][condition_name]
+    old_report_path = Path(old["report_path"])
+    old_report = json.loads(old_report_path.read_text())
+    new_specs, new_conditions = [], {}
+    for arm in ("no_factor", "behavior_pool"):
+        name = f"phase4_teammate_behaviors_{arm}"
+        condition_id = f"condition-{arm}"
+        spec = {"condition_name": name, "prediction_mode": "cv",
+            "control_prediction_mode": "cv", "candidate_k": 16,
+            "teammate_behavior_arm": arm, "teammate_behavior_pool_seed": 2}
+        assignment = phase4_teammate_behavior_assignment(arm=arm,
+            scenario_id="full_match_offense", split="validation",
+            protocol_id=frozen["protocol_id"], protocol_sha256=frozen["protocol_sha256"],
+            qualification_case=case, categories=["single"], seeds=seeds,
+            pool_seed=2)
+        report = json.loads(json.dumps(old_report))
+        report.update(evaluation_id=f"eval-{arm}",
+                      phase4_teammate_behavior_assignment=assignment)
+        report["experiment_matrix"].update({"condition_id": condition_id,
+            "condition": spec,
+            "phase4_teammate_behavior_assignment": assignment})
+        for row in report["records"]:
+            row["episode_id"] = f"episode-{arm}-{row['policy']}-{row['seed']}"
+            if arm == "no_factor":
+                runtime = {"schema": "phase4-teammate-behavior-runtime-v1",
+                    "arm": arm, "assignments": None, "assignment_applied": False,
+                    "events": []}
+            else:
+                scheduled = assignment["behavior_schedule"][seeds.index(row["seed"])]["assignments"]
+                events = []
+                for tick in range(2):
+                    slots = []
+                    for slot, behavior in scheduled.items():
+                        action = {"collect": tick % 4, "score": 4, "defend": 5,
+                                  "ferry": 6, "hold_position": 7}[behavior]
+                        slots.append({"slot": slot, "requested_behavior_action": action,
+                            "helper_selected_action": action, "actually_applied_action": action,
+                            "requested_legal": True, "helper_fallback": False,
+                            "environment_remask_fallback": False, "active": True})
+                    events.append({"tick": tick, "slots": slots})
+                runtime = {"schema": "phase4-teammate-behavior-runtime-v1",
+                    "arm": arm,
+                    "assignments": {str(slot): behavior for slot, behavior in scheduled.items()},
+                    "assignment_applied": True, "events": events}
+            row["phase4_teammate_behavior"] = phase4_teammate_behavior_record(
+                assignment, runtime, episode_id=row["episode_id"],
+                scenario_id="full_match_offense", category=row["category"],
+                seed=row["seed"], policy_id=row["policy_id"],
+                condition_id=condition_id,
+                source_identity_sha256=report["source_identity_sha256"])
+        report_path = path.parent / f"{arm}.condition.json"
+        _write_json(report_path, report)
+        condition = dict(old)
+        condition.update(condition_id=condition_id, evaluation_id=report["evaluation_id"],
+            report_path=str(report_path), condition=spec,
+            phase4_teammate_behavior_assignment=assignment,
+            evaluation_report_sha256=hashlib.sha256(report_path.read_bytes()).hexdigest())
+        new_specs.append(spec)
+        new_conditions[name] = condition
+    matrix["conditions"] = new_conditions
+    matrix["protocol"]["conditions"] = new_specs
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+    return matrix
+
+
+def test_schema7_accepts_paired_teammate_runtime_assignments(tmp_path):
+    path = _fixture(tmp_path, schema_version=6)
+    matrix = _schema7_fixture(path)
+    loaded = _resolve_conditions(matrix, path)
+    assert set(loaded["conditions"]) == {
+        "phase4_teammate_behaviors_no_factor",
+        "phase4_teammate_behaviors_behavior_pool"}
+
+
+@pytest.mark.parametrize("damage,match", [
+    ("remove_arm", "exactly one of each arm"),
+    ("duplicate_arm", "exactly one of each arm"),
+    ("bad_schedule", "differs from frozen spec"),
+    ("bad_event", "runtime record differs"),
+])
+def test_schema7_rejects_arm_schedule_and_event_tampering(tmp_path, damage, match):
+    path = _fixture(tmp_path, schema_version=6)
+    matrix = _schema7_fixture(path)
+    if damage in ("remove_arm", "duplicate_arm"):
+        specs = matrix["protocol"]["conditions"]
+        if damage == "remove_arm":
+            specs.pop()
+            matrix["conditions"].pop("phase4_teammate_behaviors_behavior_pool")
+        else:
+            specs[-1]["teammate_behavior_arm"] = "no_factor"
+        matrix.pop("report_sha256", None)
+        matrix["report_sha256"] = _canonical_hash(matrix)
+        _write_json(path, matrix)
+    elif damage == "bad_schedule":
+        matrix["conditions"]["phase4_teammate_behaviors_behavior_pool"][
+                "phase4_teammate_behavior_assignment"]["behavior_schedule"][0][
+                    "assignments"][4] = "defend"
+        matrix.pop("report_sha256", None)
+        matrix["report_sha256"] = _canonical_hash(matrix)
+        _write_json(path, matrix)
+    else:
+        condition = matrix["conditions"]["phase4_teammate_behaviors_behavior_pool"]
+        report_path = Path(condition["report_path"])
+        report = json.loads(report_path.read_text())
+        report["records"][0]["phase4_teammate_behavior"]["assignment_pair_sha256"] = "0" * 64
+        _write_json(report_path, report)
+        condition["evaluation_report_sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        matrix.pop("report_sha256", None)
+        matrix["report_sha256"] = _canonical_hash(matrix)
+        _write_json(path, matrix)
+    with pytest.raises(ValueError, match=match):
+        _resolve_conditions(matrix, path)
 
 
 @pytest.mark.parametrize("field,value", [

@@ -24,19 +24,33 @@ if _PROJECT_ROOT not in sys.path:
 from frc_defense.meco_phase4 import PHASE4_FACTORS, phase4_factor_digest
 from frc_defense.meco_ablation_matrix import POLICY_CONTRASTS as NAMED_CONTRAST_PAIRS
 from frc_defense.meco_tracks import MECO_TRACKS
+from frc_defense.meco_phase4_context import (
+    phase4_start_profile_assignment, validate_phase4_start_profile_assignment,
+    phase4_teammate_behavior_assignment, phase4_teammate_behavior_record,
+)
 
 
 STRATUM_FIELDS = ("layout_id", "defender_family", "start_condition", "sensor_profile")
 DEFAULT_REPLICATES = 10_000
 DEFAULT_SEED = 20261024
 PHASE4_POLICIES = ("A1", "A2", "A3", "C1", "C2", "D0", "D1", "D2")
-MATRIX_SCHEMA_VERSION = 5
-SUPPORTED_MATRIX_SCHEMA_VERSIONS = (4, MATRIX_SCHEMA_VERSION)
+MATRIX_SCHEMA_VERSION = 7
+SUPPORTED_MATRIX_SCHEMA_VERSIONS = (4, 5, 6, 7)
 
 
 def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    """Compare parsed JSON data with native values after JSON key normalization."""
+    try:
+        return json.dumps(left, sort_keys=True, separators=(",", ":"),
+                          allow_nan=False) == json.dumps(
+            right, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return False
 
 
 def _file_sha256(path: Path) -> str:
@@ -54,6 +68,69 @@ def _load_json(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"JSON report must contain an object: {path}")
     return value
+
+
+def _validate_teammate_runtime_record(row: dict, assignment: dict, *,
+        report: dict, condition_id: str, scenario_id: str, where: str) -> None:
+    """Bind a per-episode runtime trace to its frozen arm and seed schedule."""
+    captured = row.get("phase4_teammate_behavior")
+    if not isinstance(captured, dict):
+        raise ValueError(f"{where} lacks its assigned teammate runtime record")
+    runtime = {key: captured.get(key) for key in (
+        "schema", "arm", "assignments", "assignment_applied", "events")}
+    try:
+        expected = phase4_teammate_behavior_record(assignment, runtime,
+            episode_id=row.get("episode_id"), scenario_id=scenario_id,
+            category=row.get("category"), seed=row.get("seed"),
+            policy_id=row.get("policy_id"), condition_id=condition_id,
+            source_identity_sha256=report.get("source_identity_sha256"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{where} teammate runtime binding is invalid: {exc}") from exc
+    if captured != expected:
+        raise ValueError(f"{where} teammate runtime record differs from its exact assignment binding")
+    events = captured.get("events")
+    if not isinstance(events, list):
+        raise ValueError(f"{where} teammate runtime trace has malformed events")
+    if assignment["arm"] == "no_factor":
+        if events:
+            raise ValueError(f"{where} no-factor control unexpectedly has behavior override events")
+        return
+    if not events:
+        raise ValueError(f"{where} teammate runtime trace has no action events")
+    schedule = (None if assignment["arm"] == "no_factor" else
+        assignment["behavior_schedule"][assignment["seeds"].index(row["seed"])]
+        ["assignments"])
+    for tick, event in enumerate(events):
+        if (not isinstance(event, dict) or event.get("tick") != tick or
+                not isinstance(event.get("slots"), list) or len(event["slots"]) != 2):
+            raise ValueError(f"{where} has malformed teammate runtime event sequence")
+        by_slot = {entry.get("slot"): entry for entry in event["slots"]
+                   if isinstance(entry, dict)}
+        if set(by_slot) != {4, 5}:
+            raise ValueError(f"{where} teammate runtime event omits or duplicates an assigned slot")
+        for slot, behavior in schedule.items():
+            entry = by_slot[slot]
+            requested = entry.get("requested_behavior_action")
+            if behavior == "collect":
+                if type(requested) is not int or requested not in (0, 1, 2, 3):
+                    raise ValueError(f"{where} collect event has invalid requested action")
+            else:
+                expected_action = {"score": 4, "defend": 5, "ferry": 6,
+                                   "hold_position": 7}[behavior]
+                if requested != expected_action:
+                    raise ValueError(f"{where} runtime action differs from scheduled behavior")
+            for field in ("helper_selected_action", "actually_applied_action"):
+                if type(entry.get(field)) is not int or entry[field] not in range(8):
+                    raise ValueError(f"{where} runtime event has invalid {field}")
+            if (type(entry.get("requested_legal")) is not bool or
+                    type(entry.get("helper_fallback")) is not bool or
+                    type(entry.get("environment_remask_fallback")) is not bool or
+                    type(entry.get("active")) is not bool or
+                    entry["helper_fallback"] !=
+                    (entry["helper_selected_action"] != requested) or
+                    entry["environment_remask_fallback"] !=
+                    (entry["actually_applied_action"] != entry["helper_selected_action"])):
+                raise ValueError(f"{where} runtime event has inconsistent action/fallback provenance")
 
 
 def _finite_number(value: Any, where: str) -> float:
@@ -271,7 +348,7 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
         raise ValueError("matrix report lacks protocol or condition mapping")
     if (matrix.get("schema_version") not in SUPPORTED_MATRIX_SCHEMA_VERSIONS or
             protocol.get("schema_version") != matrix.get("schema_version")):
-        raise ValueError("matrix report/protocol must use matching schema version 4 or 5")
+        raise ValueError("matrix report/protocol must use matching supported schema version 4 through 7")
     expected_matrix_hash = matrix.get("report_sha256")
     unhashed = dict(matrix)
     unhashed.pop("report_sha256", None)
@@ -324,8 +401,35 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
                    for seed in protocol["seed_list"]):
                 raise ValueError(f"matrix seed split differs for {category}")
 
+    schema_version = matrix["schema_version"]
+    start_assignment = None
+    if schema_version >= 6:
+        if ("phase4_start_profile_assignment" not in matrix or
+                "phase4_start_profile_assignment" not in protocol or
+                matrix.get("phase4_start_profile_assignment") !=
+                protocol.get("phase4_start_profile_assignment")):
+            raise ValueError("schema-6 matrix lacks matching start-profile assignment provenance")
+        start_assignment = matrix["phase4_start_profile_assignment"]
+        if start_assignment is not None:
+            validate_phase4_start_profile_assignment(start_assignment)
+            frozen = common["qualification_protocol"]
+            try:
+                expected_start = phase4_start_profile_assignment(
+                    start_assignment["registry_profile_id"],
+                    scenario_id=protocol["scenario_id"],
+                    split=common["evaluation_split"],
+                    protocol_id=frozen["protocol_id"],
+                    protocol_sha256=frozen["protocol_sha256"],
+                    qualification_case=common["qualification_case"],
+                    categories=protocol["categories"], seeds=protocol["seed_list"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"schema-6 start-profile assignment is not bound to matrix: {exc}") from exc
+            if start_assignment != expected_start:
+                raise ValueError("schema-6 start-profile assignment differs from protocol/case/seeds")
+
     reports, file_info = {}, {}
     by_id = {}
+    teammate_pair_assignments = {}
     condition_specs = protocol.get("conditions")
     if not isinstance(condition_specs, list) or any(not isinstance(spec, dict)
                                                     for spec in condition_specs):
@@ -334,6 +438,27 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
     if (len(specs) != len(condition_specs) or
             set(specs) != set(conditions)):
         raise ValueError("matrix condition names differ from frozen protocol specs")
+    if schema_version >= 7:
+        for spec in condition_specs:
+            if ("teammate_behavior_arm" not in spec or
+                    "teammate_behavior_pool_seed" not in spec):
+                raise ValueError("schema-7 condition spec omits teammate behavior arm/pool seed fields")
+            arm, pool_seed = (spec["teammate_behavior_arm"],
+                              spec["teammate_behavior_pool_seed"])
+            if arm is None:
+                if pool_seed is not None:
+                    raise ValueError("ordinary schema-7 condition has an unpaired teammate pool seed")
+            elif (arm not in ("no_factor", "behavior_pool") or
+                    type(pool_seed) is not int or pool_seed < 0):
+                raise ValueError("schema-7 teammate lane has an invalid arm/pool seed")
+        selected_arms = [spec for spec in condition_specs
+                         if spec["teammate_behavior_arm"] is not None]
+        if selected_arms:
+            if (len(selected_arms) != 2 or
+                    {spec["teammate_behavior_arm"] for spec in selected_arms} !=
+                    {"no_factor", "behavior_pool"} or
+                    len({spec["teammate_behavior_pool_seed"] for spec in selected_arms}) != 1):
+                raise ValueError("schema-7 teammate behavior pair must contain exactly one of each arm with one pool seed")
     base = matrix_path.parent
     for name, condition in conditions.items():
         if not isinstance(condition, dict) or not condition.get("condition_id"):
@@ -363,6 +488,57 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
                 experiment.get("condition_id") != condition_id or
                 experiment.get("condition") != spec):
             raise ValueError(f"condition report mapping mismatch: {name}")
+        expected_start_assignment = None
+        if schema_version >= 6 and start_assignment is not None:
+            condition_categories = spec.get("categories") or protocol["categories"]
+            condition_case = spec.get("qualification_case") or common["qualification_case"]
+            frozen = common["qualification_protocol"]
+            try:
+                expected_start_assignment = phase4_start_profile_assignment(
+                    start_assignment["registry_profile_id"],
+                    scenario_id=protocol["scenario_id"], split=common["evaluation_split"],
+                    protocol_id=frozen["protocol_id"],
+                    protocol_sha256=frozen["protocol_sha256"],
+                    qualification_case=condition_case,
+                    categories=condition_categories, seeds=protocol["seed_list"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"condition {name} has an invalid start-profile binding: {exc}") from exc
+        if schema_version >= 6:
+            if "phase4_start_profile_assignment" not in condition:
+                raise ValueError(f"{name} condition manifest omits start-profile assignment")
+            report_assignment = report.get("phase4_start_profile_assignment")
+            experiment_assignment = experiment.get("phase4_start_profile_assignment")
+            if (report_assignment != expected_start_assignment or
+                    experiment_assignment != expected_start_assignment):
+                raise ValueError(f"{name} report start-profile assignment differs from frozen matrix")
+        expected_teammate_assignment = None
+        if schema_version >= 7 and spec["teammate_behavior_arm"] is not None:
+            if (common["evaluation_split"] != "validation" or
+                    protocol["scenario_id"] != "full_match_offense" or
+                    not isinstance(common["qualification_protocol"], dict)):
+                raise ValueError("schema-7 teammate behavior assignment is restricted to full-match validation")
+            frozen = common["qualification_protocol"]
+            try:
+                expected_teammate_assignment = phase4_teammate_behavior_assignment(
+                    arm=spec["teammate_behavior_arm"],
+                    scenario_id=protocol["scenario_id"], split=common["evaluation_split"],
+                    protocol_id=frozen["protocol_id"],
+                    protocol_sha256=frozen["protocol_sha256"],
+                    qualification_case=spec.get("qualification_case") or common["qualification_case"],
+                    categories=spec.get("categories") or protocol["categories"],
+                    seeds=protocol["seed_list"],
+                    pool_seed=spec["teammate_behavior_pool_seed"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"condition {name} has invalid teammate behavior assignment: {exc}") from exc
+        if schema_version >= 7:
+            condition_assignment = condition.get("phase4_teammate_behavior_assignment")
+            report_assignment = report.get("phase4_teammate_behavior_assignment")
+            experiment_assignment = experiment.get("phase4_teammate_behavior_assignment")
+            if any(not _same_json_value(value, expected_teammate_assignment) for value in
+                   (condition_assignment, report_assignment, experiment_assignment)):
+                raise ValueError(f"condition {name} teammate behavior assignment differs from frozen spec")
+            if expected_teammate_assignment is not None:
+                teammate_pair_assignments[expected_teammate_assignment["arm"]] = expected_teammate_assignment
         for key in ("evaluation_design", "evaluation_split",
                     "qualification_protocol_id", "qualification_protocol",
                     "seed_split_assignments"):
@@ -461,10 +637,26 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
             stratum = {field: row.get(field) for field in STRATUM_FIELDS}
             if stratum != common["qualification_case"]:
                 raise ValueError(f"record stratum mismatch for {key} in {name}")
+            if schema_version >= 7:
+                if expected_teammate_assignment is None:
+                    if row.get("phase4_teammate_behavior") is not None:
+                        raise ValueError(f"ordinary condition unexpectedly carries teammate runtime data: {key}")
+                else:
+                    _validate_teammate_runtime_record(row,
+                        expected_teammate_assignment, report=report,
+                        condition_id=condition_id, scenario_id=protocol["scenario_id"],
+                        where=f"{name}/{key}")
             records[key] = row
         reports[condition_id] = (report, records)
         file_info[condition_id] = {"path": str(report_path), "sha256": digest,
                                    "evaluation_id": report["evaluation_id"]}
+    if schema_version >= 7 and teammate_pair_assignments:
+        if set(teammate_pair_assignments) != {"no_factor", "behavior_pool"}:
+            raise ValueError("schema-7 teammate behavior pair is missing an assignment arm")
+        pair_digests = {assignment["pair_sha256"]
+                        for assignment in teammate_pair_assignments.values()}
+        if len(pair_digests) != 1:
+            raise ValueError("schema-7 teammate behavior arms have different paired schedules")
     common["scenario_id"] = protocol.get("scenario_id")
     return {"common": common, "by_id": by_id, "specs": specs,
             "conditions": conditions, "reports": reports, "files": file_info}
