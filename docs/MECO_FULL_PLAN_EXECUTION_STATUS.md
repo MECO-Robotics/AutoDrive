@@ -1,8 +1,8 @@
 # MECO learning tracks plan: execution status
 
-**Snapshot:** 2026-10-24 01:14 UTC
+**Snapshot:** 2026-10-24 01:17 UTC
 **Plan:** [`MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`](MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md)
-**Candidate:** `codex/meco-c1-replay-integrated` at `f0871458a0ef2a6e7e79d460028f8f87c586a801`, based on reviewed staging `codex/meco-reviewed-plan-integrations` and reviewed C1 replay-integrity chain. The original integration and one-hash-per-update follow-up have scoped reviewer approval. A fresh all-five continuous campaign is active; the failed run remains unchanged.
+**Candidate:** `codex/meco-c1-replay-integrated` at `6fc6c1cb4` (training code at `f0871458a0ef2a6e7e79d460028f8f87c586a801`), based on reviewed staging `codex/meco-reviewed-plan-integrations` and reviewed C1 replay-integrity chain. The original integration and one-hash-per-update follow-up have scoped reviewer approval. A fresh all-five continuous campaign is active; the failed run remains unchanged.
 **Plan hash:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
 
 This ledger records implementation and evidence status against all nine plan sections. “Implemented” means code or an evaluation interface exists; it does not mean the behavior has passed representative simulation, qualification, or hardware validation.
@@ -48,5 +48,5 @@ The focused follow-up test command `PYTHONPATH=. python3 -m pytest -q tests/test
 ## Current integrated continuous campaign
 
 - Supervisor invocation `3ccef8583e0843bc92e2dbddbde6569c` is running from this candidate with `--devices cuda:0,cuda:1 --evaluation-device cuda:1 --cycles 0 --prediction-mode cv --evaluation-prediction-mode cv --phase4-train-exposure`. It uses the pinned fresh roots `checkpoints/meco-five` and `evaluations/meco-five`; the configuration SHA-256 is `3dbc4e07586c03c1230a44cc7c3d781969eb7a96515cccfad220604c3f9f8515`, source identity SHA-256 is `c56cc4001441e10e72b191025a97141033907aed40f42c0f3b61f7bacab3e8e2`, and protocol ID is `b4c4cbe7dbe56c72d831c148380407e01f41b1a538c133e3f1feda9b0dbe15fd`.
-- At the 2026-10-24 01:13:51 UTC heartbeat, cycle 1 was preparing its first 100-update frontier: A1 was running on `cuda:0`, A2 on `cuda:1`, and A3/C1/C2 were queued. No updates or matched cycle had completed yet. HIP extension compilation was still underway; no evaluation had run. The supervisor remains configured to continue until manually stopped.
+- At the 2026-10-24 01:17:35 UTC heartbeat, cycle 1 was progressing toward its first 100-update frontier: A1 had completed 1 update on `cuda:0`, A2 had completed 1 on `cuda:1`, and A3/C1/C2 were queued. The two WX9100s had sampled 96–100% utilization during rollout work. No matched cycle or evaluation had completed yet. The supervisor remains configured to continue until manually stopped.
 - Dashboard service was restarted from this integrated checkout against its `checkpoints/meco-five` data root. `/`, `/api/meco-status`, `/meco`, `/assets/meco.js`, `/assets/dashboard.js`, `/assets/dashboard.css`, and `/api/curriculum-status` returned HTTP 200. The MECO status payload identified the queue as fresh and reported `scoped-transcript-summaries` three-pass provenance. A fresh learned-policy replay has not yet been generated; it requires a completed matched checkpoint frontier and will be generated/reviewed after confirming the current service and assets.
