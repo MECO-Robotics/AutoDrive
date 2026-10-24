@@ -246,7 +246,10 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
 def _records_by_key(report: dict) -> dict[tuple[str, str, int], dict]:
     result = {}
     for row in report.get("records", ()):
-        key = (row.get("policy"), row.get("category"), row.get("seed"))
+        seed = row.get("seed")
+        if type(seed) is not int:
+            raise ValueError("evaluation record seed must be an integer")
+        key = (row.get("policy"), row.get("category"), seed)
         if key in result:
             raise ValueError(f"duplicate policy/category/seed record: {key}")
         result[key] = row

@@ -26,6 +26,26 @@ def test_multimodel_contract_is_explicit_and_versioned_for_matched_tracks():
     assert math.isclose(sum(row["weight"] for row in contract["hypotheses"]), 1.)
 
 
+@pytest.mark.parametrize("invalid_seed", [True, 1.0])
+def test_matrix_record_index_rejects_non_integer_seed_aliases(invalid_seed):
+    from frc_defense.meco_ablation_matrix import _records_by_key
+
+    with pytest.raises(ValueError, match="record seed must be an integer"):
+        _records_by_key({"records": [{"policy": "A1", "category": "single",
+                                      "seed": invalid_seed}]})
+
+
+def test_matrix_record_index_keeps_valid_integer_seed_pairing():
+    from frc_defense.meco_ablation_matrix import _records_by_key
+
+    candidate = {"policy": "A1", "category": "single", "seed": 1}
+    reference = {"policy": "D0", "category": "single", "seed": 1}
+    records = _records_by_key({"records": [candidate, reference]})
+
+    assert records[("A1", "single", 1)] is candidate
+    assert records[("D0", "single", 1)] is reference
+
+
 def test_multimodel_forecast_is_bounded_deterministic_and_risk_uses_mixture():
     kwargs = dict(mode="multi_model_v1", valid=True, position_xy=(1., 2.),
                   velocity_xy=(8., 0.), age_s=.1, horizon_s=4.,
