@@ -20,13 +20,15 @@ from typing import Any
 from .meco_tracks import MECO_TRACKS, PREDICTION_MODES
 from .meco_phase4 import PHASE4_FACTORS, phase4_factor_config, phase4_factor_digest
 from .meco_phase4_runtime_adapter import validate_phase4_capture
-from .meco_phase4_context import (CONTACT_GEOMETRIES, phase4_context_identity,
-    validate_contact_geometry_split)
+from .meco_phase4_context import (CONTACT_GEOMETRIES,
+    phase4_start_profile_assignment as build_start_profile_assignment,
+    phase4_context_identity, validate_contact_geometry_split,
+    validate_phase4_start_profile_assignment)
 from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 5
+MATRIX_SCHEMA_VERSION = 6
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -658,6 +660,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                replay_selection: dict | None = None,
                contact_geometries: tuple[str, ...] = (),
                phase4_opponent_schedule: dict | None = None,
+               start_profile_registry_id: str | None = None,
                condition_names: tuple[str, ...] | None = None) -> dict:
     """Execute all fixed comparisons on exact shared checkpoint/seed bundles."""
     from .curriculum_training import source_identity
@@ -733,6 +736,20 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             categories=categories, qualification_case=qualification_case,
             seeds=seeds, split=evaluation_split,
             factor_id=phase4_opponent_schedule.get("factor_id"))
+    start_profile_assignment = None
+    if start_profile_registry_id is not None:
+        if qualification_provenance is None:
+            raise ValueError("full-team start profile requires a frozen qualification protocol")
+        start_profile_assignment = build_start_profile_assignment(
+            start_profile_registry_id, scenario_id=scenario_id,
+            split=evaluation_split,
+            protocol_id=qualification_provenance["protocol_id"],
+            protocol_sha256=qualification_provenance["protocol_sha256"],
+            qualification_case=qualification_case, categories=categories,
+            seeds=seeds)
+        validate_phase4_start_profile_assignment(start_profile_assignment)
+        if contact_geometries:
+            raise ValueError("full-team start profiles cannot be combined with contact geometry resets")
     output_root = Path(output_dir)
     sealed_test_ledger = (final_test_ledger_path(qualification_protocol,
         qualification_provenance["protocol_id"])
@@ -798,6 +815,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "execution_device": execution_device,
         "qualification_case": qualification_case,
         "phase4_opponent_schedule": phase4_opponent_schedule,
+        "phase4_start_profile_assignment": start_profile_assignment,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
         "shared_training_configuration": frozen_shared_config,
@@ -840,6 +858,13 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "execution_device": execution_device})
         report_path = output_root / f"{condition_id}.evaluation.json"
         condition_categories = condition.categories or categories
+        condition_start_assignment = (None if start_profile_assignment is None else
+            build_start_profile_assignment(start_profile_registry_id,
+                scenario_id=scenario_id, split=evaluation_split,
+                protocol_id=qualification_provenance["protocol_id"],
+                protocol_sha256=qualification_provenance["protocol_sha256"],
+                qualification_case=(condition.qualification_case or qualification_case),
+                categories=condition_categories, seeds=seeds))
         condition_replay_selection = (replay_selection or {}).get(
             condition.condition_name)
         report = evaluate_meco(checkpoints, scenario_id=scenario_id,
@@ -862,6 +887,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 if condition.contact_geometry_id is not None else None),
             contact_geometry_id=condition.contact_geometry_id,
             contact_geometry_config=condition.contact_geometry_config,
+            phase4_start_profile_assignment=condition_start_assignment,
             replay_output_dir=(replay_output_dir if condition_replay_selection else None),
             replay_seeds=None,
             replay_selection=condition_replay_selection,
@@ -869,6 +895,8 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             output=str(report_path))
         if report.get("phase4_factor") != condition.phase4_factor:
             raise ValueError("evaluation report Phase 4 factor differs from the frozen condition")
+        if report.get("phase4_start_profile_assignment") != condition_start_assignment:
+            raise ValueError("evaluation report start profile differs from the frozen matrix assignment")
         if (report.get("contact_geometry_id") != condition.contact_geometry_id or
                 report.get("contact_geometry_config") != condition.contact_geometry_config):
             raise ValueError("evaluation report contact geometry differs from frozen condition")
@@ -939,6 +967,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "effective_candidate_k": report["candidate_k"],
             "prediction": report["prediction"],
             "phase4_factor": condition.phase4_factor,
+            "phase4_start_profile_assignment": condition_start_assignment,
             "contact_geometry_id": condition.contact_geometry_id,
             "contact_geometry_config": condition.contact_geometry_config,
             "contact_exposure_pairing": contact_pairing,
@@ -1104,6 +1133,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "qualification_eligible": False,
         "contact_geometry_ids": [condition.contact_geometry_id
             for condition in conditions if condition.contact_geometry_id is not None],
+        "phase4_start_profile_assignment": start_profile_assignment,
         "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
@@ -1131,6 +1161,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_identity_sha256": source_hash,
         "execution_device": execution_device,
+        "phase4_start_profile_assignment": start_profile_assignment,
         "dashboard_replay_capture": ({"enabled": replay_output_dir is not None,
             "output_dir": str(Path(replay_output_dir).resolve()),
             "selection": replay_selection or {}}

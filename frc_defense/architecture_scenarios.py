@@ -66,13 +66,20 @@ def make_env(scenario: str, num_envs: int, device: str, seed: int,
     return env
 
 
-def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int) -> torch.Tensor:
-    """Reset positions, physics, pickup indexing, and simulated perception."""
+def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int, *,
+                   refresh_perception: bool = True) -> torch.Tensor | None:
+    """Reset positions and physics, optionally deferring sensor exposure.
+
+    Curriculum resets defer perception so registered start stimuli can be
+    validated and applied before the first observation is generated.
+    """
     if scenario == "offense_vs_deterministic_defense":
         from .architecture_offense_scenario import reset_offense_scenario
+        if not refresh_perception:
+            raise ValueError("this scenario reset does not support deferred perception")
         return reset_offense_scenario(env, seed)
     SCENARIOS[scenario]
-    env.reset(seed=seed)
+    env.reset(seed=seed, defer_perception=not refresh_perception)
     generator = torch.Generator(device=env.device).manual_seed(int(seed))
 
     def uniform(shape):
@@ -162,6 +169,8 @@ def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int) -> torc
     env.opponent_age.fill_(float("inf"))
     env.opponent_size.zero_()
     env._perception_rng_ticks.zero_()
+    if not refresh_perception:
+        return None
     env._update_perception(torch.ones(env.n, device=env.device, dtype=torch.bool))
     env._last_obs = env.observe()
     return env._last_obs

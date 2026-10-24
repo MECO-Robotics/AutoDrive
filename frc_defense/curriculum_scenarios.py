@@ -14,7 +14,8 @@ from .meco_phase4 import validate_phase4_factor
 from .meco_phase4_opponents import POLICY_POOL, opponent_velocity_command
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     contact_exposure_actions, contact_exposure_profile,
-    phase4_context_identity)
+    apply_full_team_start_profile, phase4_context_identity,
+    validate_phase4_start_profile_assignment)
 from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
@@ -203,7 +204,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         defender_family='category_scripted', start_condition='scenario_defined',
                         sensor_profile='standard', phase4_factor=None,
                         contact_geometry_id=None, contact_geometry_config=None,
-                        phase4_opponent_policy_id=None):
+                        phase4_opponent_policy_id=None,
+                        phase4_start_profile_assignment=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -242,6 +244,16 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
                 or _pressure_level(category) not in (1, 2, 3, 4, 5)):
             raise ValueError('contact geometry is only registered for pressure/match scenarios')
+    if phase4_start_profile_assignment is None:
+        start_profile_assignment = None
+    else:
+        start_profile_assignment = validate_phase4_start_profile_assignment(
+            phase4_start_profile_assignment)
+        if (start_profile_assignment['scenario_id'] != scenario_id or
+                scenario_id != 'full_match_offense'):
+            raise ValueError('legal full-team start profiles require full_match_offense')
+        if contact_geometry_id is not None:
+            raise ValueError('start profile and contact geometry cannot both set full-team poses')
     pressure_level = _pressure_level(category)
     if phase4_factor is not None and (scenario_id not in (
             'offense_vs_scripted_pressure', 'full_match_offense')
@@ -274,6 +286,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         robot_roles=('defense', 'offense', 'offense', 'offense', 'offense', 'offense'),
         allow_nn_offense=True, dt=.02, horizon=horizon or math.ceil(definition.time_budget_s/.02),
         randomize=False, fuel_count=96, max_fuel_capacity=(30 if scenario_id.startswith('pickup_') else 6), fuel_physics=fuel_physics,
+        defer_initial_perception=True,
         perception_dropout=.04 if sensor_profile == 'noisy' else .02,
         position_noise=.03 if sensor_profile == 'noisy' else .015,
         velocity_noise=.10 if sensor_profile == 'noisy' else .05,
@@ -283,6 +296,10 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
     env.contact_geometry_id = contact_geometry_id
     env.contact_geometry_config = contact_geometry_config
+    env.phase4_start_profile_assignment = start_profile_assignment
+    env.phase4_start_profile_identity = (None if start_profile_assignment is None else
+        phase4_context_identity('legal_team_pose_sets',
+            start_profile_assignment['registry_profile_id']))
     env.contact_geometry_runtime = {
         'geometry_id': contact_geometry_id,
         'factor_id': 'contact.robot_bump' if contact_geometry_id is not None else None,
@@ -400,7 +417,10 @@ def reset_curriculum_scenario(env, seed):
     if hasattr(env, 'curriculum_metrics'):
         del env.curriculum_metrics
     env.curriculum_schedule = None
-    reset_scenario(env, 'pickup_scattered', seed)
+    # The curriculum reset performs its own final _refresh below. Defer the
+    # base reset's perception/observation so a registered full-team start
+    # profile can be applied before any policy-facing state is generated.
+    reset_scenario(env, 'pickup_scattered', seed, refresh_perception=False)
     env.architecture_pickup_only = False
     name, category, route = config['scenario_id'], config['category'], config['route']
     generator = torch.Generator(device=env.device).manual_seed(int(seed))
@@ -585,6 +605,20 @@ def reset_curriculum_scenario(env, seed):
     if env.contact_geometry_id is not None:
         env.sim.pose.copy_(contact_exposure_profile(env, env.contact_geometry_id))
         env.sim.velocity.zero_()
+    start_assignment = getattr(env, 'phase4_start_profile_assignment', None)
+    env.phase4_start_profile_applied = False
+    if start_assignment is not None:
+        start_assignment = validate_phase4_start_profile_assignment(start_assignment)
+        apply_full_team_start_profile(env,
+            start_assignment['runtime_profile_name'])
+        env.phase4_start_profile_applied = True
+        pressure['anchor_y'] = float(env.sim.pose[0, 3, 1])
+        config['phase4_start_profile'] = {
+            'factor_id': start_assignment['factor_id'],
+            'registry_profile_id': start_assignment['registry_profile_id'],
+            'runtime_profile_name': start_assignment['runtime_profile_name'],
+            'profile_config_sha256': start_assignment['profile_config_sha256'],
+            'assignment_sha256': start_assignment['assignment_sha256']}
     config['schedule'] = schedule
     env.curriculum_schedule = schedule
     env.match_elapsed.fill_(-env.dt)

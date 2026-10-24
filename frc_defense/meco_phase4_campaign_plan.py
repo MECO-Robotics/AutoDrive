@@ -26,6 +26,7 @@ from .meco_phase4_opponents import (POLICY_CONFIG, POLICY_FACTOR_IDS,
                                     opponent_policy_runtime_domain_supported,
                                     opponent_policy_runtime_slots, policy_assignment_identity,
                                     policy_pool_identity)
+from .meco_phase4_context import phase4_start_profile_assignment
 
 
 PLAN_SCHEMA = "meco-phase4-validation-campaign-plan-v1"
@@ -145,6 +146,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                 for product in design_products:
                     design_axes = dict(zip(names, product))
                     reactive_assignment = None
+                    start_profile_assignment = None
                     if req_id == "reactive_defenders_and_opponent_pools":
                         policy_id = design_axes.get("policy_pool")
                         if policy_id not in POLICY_CONFIG["policies"]:
@@ -201,8 +203,22 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             "executed": False,
                             "qualification_eligible": False,
                         }
+                    if req_id == "multiple_legal_team_start_states":
+                        registry_profile_id = design_axes.get("legal_team_pose_sets")
+                        start_profile_assignment = phase4_start_profile_assignment(
+                            registry_profile_id,
+                            scenario_id=case["scenario_id"], split="validation",
+                            protocol_id=protocol["protocol_id"],
+                            protocol_sha256=_sha256(protocol_raw),
+                            qualification_case={axis: case[axis] for axis in (
+                                "layout_id", "defender_family", "start_condition",
+                                "sensor_profile")},
+                            categories=(case["category"],),
+                            seeds=seed_info["_seed_values_internal"])
                     status = ("protocol_bound_policy_assignment_planned_not_executed"
                               if reactive_assignment is not None else
+                              "protocol_bound_start_profile_assignment_planned_not_executed"
+                              if start_profile_assignment is not None else
                               "design_only_unassigned_to_protocol_case" if design_axes else
                               "planned_validation_not_executed")
                     cell = {
@@ -222,8 +238,11 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "runtime_stimulus_supported": (
                             factor in runtime_binding["runtime_factor_by_factor_id"]
                             and runtime_binding["stimulus_supported"]),
-                        "scheduler_assignment_supported": reactive_assignment is not None,
+                        "scheduler_assignment_supported": (
+                            reactive_assignment is not None or
+                            start_profile_assignment is not None),
                         "opponent_schedule_assignment": reactive_assignment,
+                        "start_profile_assignment": start_profile_assignment,
                         "required_outcome_signals_complete": set(
                             runtime_binding["required_signals"]).issubset(
                                 runtime_binding["authoritative_signals"]),

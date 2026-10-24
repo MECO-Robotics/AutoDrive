@@ -140,6 +140,251 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         "executed": all(result == 0 for result in pair_results.values())}
 
 
+def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
+        protocol_path: str | Path, checkpoint_paths: dict[str, str],
+        matrix_script: str | Path, output_dir: str | Path, device: str,
+        runner: Callable[[list[str]], int] | None = None) -> dict:
+    """Run matched ordinary-reset/profile arms for one protocol-bound pose set.
+
+    The matrix itself covers every selected policy on identical validation
+    seeds. This diagnostic pairing compares the ordinary scenario reset with
+    the one frozen full-team profile and never claims qualification.
+    """
+    if (not isinstance(plan, dict) or plan.get("schema") !=
+            "meco-phase4-validation-campaign-plan-v1" or
+            plan.get("plan_id") != _sha({key: value for key, value in plan.items()
+                                         if key != "plan_id"})):
+        raise ValueError("invalid Phase 4 validation campaign plan")
+    requirement = next((row for row in plan.get("requirements", [])
+        if row.get("requirement_id") == "multiple_legal_team_start_states"), None)
+    if requirement is None:
+        raise ValueError("Phase 4 plan lacks the legal full-team start requirement")
+    matches = [row for row in requirement.get("cells", [])
+               if row.get("case_cell_key") == cell_key]
+    if len(matches) != 1:
+        raise ValueError("Phase 4 start-profile cell key is missing or duplicated")
+    cell = matches[0]
+    assignment = cell.get("start_profile_assignment")
+    if (cell.get("factor_id") != "start.legal_team_poses" or
+            cell.get("scheduler_assignment_supported") is not True or
+            not isinstance(assignment, dict) or
+            assignment.get("qualification_eligible") is not False):
+        raise ValueError("Phase 4 cell lacks a diagnostic legal-start assignment")
+    if (not isinstance(checkpoint_paths, dict) or
+            set(checkpoint_paths) != set(MECO_TRACKS)):
+        raise ValueError("Phase 4 start-profile dispatch requires all five checkpoints")
+
+    dispatch_binding = _capture_phase4_dispatch_binding(checkpoint_paths, device)
+
+    from .meco_phase4_design import CASE_AXES, _read_protocol_validation
+    from .meco_phase4_context import (phase4_start_profile_assignment,
+        validate_phase4_start_profile_assignment)
+    protocol, raw = _read_protocol_validation(protocol_path)
+    protocol_sha256 = hashlib.sha256(raw).hexdigest()
+    if protocol_sha256 != plan.get("protocol_binding", {}).get(
+            "protocol_raw_file_sha256"):
+        raise ValueError("Phase 4 dispatch protocol differs from the frozen plan")
+    case_axes = cell.get("case_axes")
+    if not isinstance(case_axes, dict) or set(case_axes) != set(CASE_AXES):
+        raise ValueError("Phase 4 start-profile cell has an invalid protocol case")
+    protocol_rows = [row for row in protocol.get("cases", [])
+        if all(row.get(axis) == case_axes[axis] for axis in CASE_AXES)]
+    if len(protocol_rows) != 1:
+        raise ValueError("Phase 4 start-profile case is not unique in validation protocol")
+    seeds = protocol_rows[0].get("seeds")
+    if (_sha(seeds) != cell.get("validation_seed_assignment_sha256") or
+            len(seeds) != cell.get("seed_count")):
+        raise ValueError("Phase 4 start-profile seeds differ from the protocol-bound cell")
+    qualification_case = {axis: case_axes[axis] for axis in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    expected_assignment = phase4_start_profile_assignment(
+        cell.get("design_axes", {}).get("legal_team_pose_sets"),
+        scenario_id=case_axes["scenario_id"], split="validation",
+        protocol_id=protocol["protocol_id"], protocol_sha256=protocol_sha256,
+        qualification_case=qualification_case,
+        categories=(case_axes["category"],), seeds=seeds)
+    validate_phase4_start_profile_assignment(assignment)
+    if assignment != expected_assignment:
+        raise ValueError("start-profile cell assignment differs from exact protocol/case/seeds")
+
+    case_dir = Path(output_dir).resolve()
+    case_dir.mkdir(parents=True, exist_ok=True)
+    seed_manifest = {"schema": "meco-exact-seed-manifest-v1",
+        "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": protocol_sha256,
+        "scenario_id": case_axes["scenario_id"],
+        "categories": [case_axes["category"]], "split": "validation",
+        "qualification_case": qualification_case, "seed_list": seeds}
+    seed_path = case_dir / "seed-manifest.json"
+    case_path = case_dir / "qualification-case.json"
+    _write_immutable(seed_path, seed_manifest)
+    _write_immutable(case_path, qualification_case)
+    base_argv = [sys.executable, str(Path(matrix_script).resolve()),
+        "--scenario", case_axes["scenario_id"], "--categories", case_axes["category"],
+        "--seed-manifest", str(seed_path), "--qualification-protocol",
+        str(Path(protocol_path).resolve()), "--qualification-case-json", str(case_path),
+        "--device", device, "--conditions", "architecture_matched_cv_k16"]
+    for track in MECO_TRACKS:
+        base_argv += [f"--{track.lower()}-checkpoint",
+                      str(Path(checkpoint_paths[track]).resolve())]
+    execute = runner or (lambda command: subprocess.run(command, check=False).returncode)
+    return_codes = {}
+    for arm in ("no_factor", "factor_treatment"):
+        argv = [*base_argv, "--output-dir", str(case_dir / arm)]
+        if arm == "factor_treatment":
+            argv += ["--phase4-start-profile", assignment["registry_profile_id"]]
+        return_codes[arm] = execute(argv)
+    pairing = None
+    if all(code == 0 for code in return_codes.values()):
+        pairing = _validate_phase4_start_profile_pair(case_dir, assignment,
+            categories=[case_axes["category"]], seeds=seeds,
+            expected_binding=dispatch_binding)
+        current_source_hash = _source_identity_sha256()
+        if current_source_hash != dispatch_binding["source_identity_sha256"]:
+            raise ValueError("Phase 4 start-profile source identity drifted during paired dispatch")
+        if _dispatch_checkpoint_hashes(checkpoint_paths) != dispatch_binding[
+                "checkpoint_sha256"]:
+            raise ValueError("Phase 4 start-profile checkpoint files drifted during paired dispatch")
+    return {"case_cell_key": cell_key,
+        "registry_profile_id": assignment["registry_profile_id"],
+        "profile_config_sha256": assignment["profile_config_sha256"],
+        "assignment_sha256": assignment["assignment_sha256"],
+        "dispatch_binding": dispatch_binding,
+        "runtime_status": "scheduled_not_simulator_validated",
+        "simulator_behavior_validated": False,
+        "legal_start_validation_rate": None,
+        "outcome_by_start_state": None,
+        "qualification_eligible": False,
+        "paired_coverage": pairing,
+        "dispatch_return_codes": return_codes,
+        "executed": all(code == 0 for code in return_codes.values())}
+
+
+def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
+        categories: list[str], seeds: list[int], expected_binding: dict) -> dict:
+    """Check only exact assignment/coverage metadata, not behavioral outcomes."""
+    from .meco_tracks import MECO_TRACKS
+    policies = set((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
+    expected_keys = {(policy, category, seed) for policy in policies
+                     for category in categories for seed in seeds}
+    arms = {}
+    for arm in ("no_factor", "factor_treatment"):
+        paths = sorted((case_dir / arm).glob("*.matrix.json"))
+        if len(paths) != 1:
+            raise ValueError(f"Phase 4 {arm} start-profile arm lacks exactly one matrix report")
+        matrix = _read_json(paths[0])
+        protocol = matrix.get("protocol", {})
+        if (matrix.get("qualification_eligible") is not False or
+                protocol.get("categories") != categories or
+                protocol.get("seed_list") != seeds or
+                protocol.get("qualification_case") != assignment["qualification_case"]):
+            raise ValueError(f"Phase 4 {arm} start-profile matrix differs from frozen paired case")
+        _validate_phase4_dispatch_report_binding(matrix, expected_binding,
+            context=f"{arm} matrix")
+        _validate_phase4_dispatch_report_binding(protocol, expected_binding,
+            context=f"{arm} matrix protocol")
+        expected_assignment = assignment if arm == "factor_treatment" else None
+        if (protocol.get("phase4_start_profile_assignment") != expected_assignment or
+                matrix.get("phase4_start_profile_assignment") != expected_assignment):
+            raise ValueError(f"Phase 4 {arm} start-profile matrix has a mismatched assignment")
+        conditions = matrix.get("conditions")
+        if not isinstance(conditions, dict) or set(conditions) != {
+                "architecture_matched_cv_k16"}:
+            raise ValueError(f"Phase 4 {arm} matrix has unexpected condition coverage")
+        report = _read_json(Path(conditions["architecture_matched_cv_k16"][
+            "report_path"]).resolve())
+        condition = conditions["architecture_matched_cv_k16"]
+        _validate_phase4_dispatch_report_binding(condition, expected_binding,
+            context=f"{arm} matrix condition")
+        _validate_phase4_dispatch_report_binding(report, expected_binding,
+            context=f"{arm} per-policy evaluation report")
+        rows = _records_by_key(report)
+        if (set(rows) != expected_keys or report.get("qualification_eligible") is not False or
+                report.get("phase4_start_profile_assignment") != expected_assignment):
+            raise ValueError(f"Phase 4 {arm} evaluation lacks exact profile/seed/policy coverage")
+        for key, row in rows.items():
+            policy = key[0]
+            track = policy[:-3] if policy.endswith("_P0") else policy
+            expected_checkpoint = expected_binding["checkpoint_sha256"].get(track)
+            if (row.get("checkpoint_sha256") != expected_checkpoint or
+                    row.get("source_identity_sha256") !=
+                        expected_binding["source_identity_sha256"] or
+                    row.get("execution_device") != expected_binding["execution_device"]):
+                raise ValueError(f"Phase 4 {arm} row has mismatched checkpoint/source/device binding: {key}")
+            captured = row.get("phase4_start_profile")
+            if arm == "no_factor":
+                if captured is not None:
+                    raise ValueError("no-factor start-profile control unexpectedly applied a profile")
+            elif (not isinstance(captured, dict) or
+                    captured.get("factor_id") != assignment["factor_id"] or
+                    captured.get("registry_profile_id") != assignment["registry_profile_id"] or
+                    captured.get("profile_config_sha256") != assignment["profile_config_sha256"] or
+                    captured.get("assignment_sha256") != assignment["assignment_sha256"] or
+                    captured.get("profile_applied_before_observation") is not True or
+                    captured.get("legal_start_validation_rate") is not None or
+                    captured.get("outcome_by_start_state") is not None or
+                    captured.get("qualification_eligible") is not False):
+                raise ValueError(f"Phase 4 treatment row lacks exact profile provenance: {key}")
+        manifest = report.get("policy_manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Phase 4 {arm} evaluation lacks per-policy provenance")
+        for policy in policies:
+            track = policy[:-3] if policy.endswith("_P0") else policy
+            expected_checkpoint = expected_binding["checkpoint_sha256"].get(track)
+            provenance = manifest.get(policy)
+            if (not isinstance(provenance, dict) or
+                    provenance.get("checkpoint_sha256") != expected_checkpoint or
+                    provenance.get("source_identity_sha256") !=
+                        expected_binding["source_identity_sha256"] or
+                    provenance.get("execution_device") != expected_binding["execution_device"]):
+                raise ValueError(f"Phase 4 {arm} policy manifest has mismatched binding: {policy}")
+        arms[arm] = rows
+    if set(arms["no_factor"]) != set(arms["factor_treatment"]):
+        raise ValueError("Phase 4 start-profile arms do not have exact paired rows")
+    return {"policies": sorted(policies), "categories": categories,
+        "condition_names": ["architecture_matched_cv_k16"],
+        "seed_count": len(seeds), "paired_row_count": len(expected_keys),
+        "paired_rows_per_condition": {
+            "architecture_matched_cv_k16": len(expected_keys)},
+        "paired_outcome_by_family": None,
+        "profile_config_sha256": assignment["profile_config_sha256"],
+        "assignment_sha256": assignment["assignment_sha256"],
+        "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+        "source_identity_sha256": expected_binding["source_identity_sha256"],
+        "execution_device": expected_binding["execution_device"],
+        "outcome_by_start_state": None, "qualification_eligible": False}
+
+
+def _dispatch_checkpoint_hashes(checkpoint_paths: dict[str, str]) -> dict[str, str]:
+    return {track: _file_sha(Path(checkpoint_paths[track]).resolve())
+            for track in sorted(checkpoint_paths)}
+
+
+def _source_identity_sha256() -> str:
+    from .curriculum_training import source_identity
+    return hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+
+
+def _capture_phase4_dispatch_binding(checkpoint_paths: dict[str, str], device: str) -> dict:
+    # Match matrix capture order: native runtime preparation precedes source identity.
+    from .fuel_physics_hip import prepare_native_fuel_extension
+    from .meco_device import normalized_device_info
+    prepare_native_fuel_extension(device)
+    return {"checkpoint_sha256": _dispatch_checkpoint_hashes(checkpoint_paths),
+        "source_identity_sha256": _source_identity_sha256(),
+        "execution_device": normalized_device_info(device)}
+
+
+def _validate_phase4_dispatch_report_binding(report: dict, expected: dict, *,
+        context: str) -> None:
+    if (not isinstance(report, dict) or
+            report.get("checkpoint_sha256") != expected["checkpoint_sha256"] or
+            report.get("source_identity_sha256") != expected["source_identity_sha256"] or
+            report.get("execution_device") != expected["execution_device"]):
+        raise ValueError(f"Phase 4 {context} checkpoint/source/device binding mismatch")
+
+
 def _read_json(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):

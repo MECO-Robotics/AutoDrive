@@ -38,13 +38,20 @@ def test_runtime_binding_covers_exact_registry_requirements_and_fails_closed():
         assert binding["required_signals"] == row["required_outcome_signals"]
         assert set(binding["runtime_factor_by_factor_id"]) <= set(binding["factor_ids"])
         assert set(binding["runtime_event_by_factor_id"]) <= set(binding["factor_ids"])
-        assert set(binding["runtime_factor_by_factor_id"].values()) <= set(PHASE4_FACTORS)
+        assert set(binding["runtime_factor_by_factor_id"].values()) <= (
+            set(PHASE4_FACTORS) | {"legal_team_start_profile"})
         assert not set(binding["required_signals"]).issubset(
             binding["authoritative_signals"])
     contact = phase4_requirement_binding("bumps_and_contact")
     assert contact["runtime_event_by_factor_id"] == {
         "contact.robot_bump": "phase4_pair_contact_event"}
     assert contact["stimulus_supported"] is False
+    starts = phase4_requirement_binding("multiple_legal_team_start_states")
+    assert starts["stimulus_supported"] is True
+    assert starts["runtime_event_by_factor_id"] == {
+        "start.legal_team_poses":
+            "phase4_start_profile.profile_applied_before_observation"}
+    assert starts["authoritative_signals"] == []
 
 
 @pytest.mark.parametrize("kind,event_field,event_value", [

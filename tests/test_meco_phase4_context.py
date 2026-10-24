@@ -11,7 +11,9 @@ from frc_defense.meco_phase4_context import (
     apply_full_team_start_profile, bump_contact_exposure_geometry,
     contact_exposure_actions, contact_exposure_profile,
     full_team_start_profile, phase4_context_identity,
-    teammate_behavior_actions, validate_full_team_start_profile, start_profile_identity,
+    phase4_start_profile_assignment, teammate_behavior_actions,
+    validate_full_team_start_profile, validate_phase4_start_profile_assignment,
+    start_profile_identity,
 )
 
 
@@ -131,6 +133,42 @@ def test_start_profile_validator_rejects_bounds_overlap_and_solid_obstacle():
     blocked[0, 0] = blocked.new_tensor((4.62534, 4.03479, 0.))
     with pytest.raises(ValueError, match="solid field geometry"):
         validate_full_team_start_profile(env, blocked)
+
+
+def test_start_profile_assignment_is_registry_protocol_case_and_seed_bound():
+    case = {"layout_id": "2026_rebuilt", "defender_family": "category_scripted",
+            "start_condition": "scenario_defined", "sensor_profile": "standard"}
+    assignment = phase4_start_profile_assignment("team_start_set_a",
+        scenario_id="full_match_offense", split="validation",
+        protocol_id="protocol-v1", protocol_sha256="a"*64,
+        qualification_case=case, categories=("level_1/open",), seeds=(7, 11))
+    assert validate_phase4_start_profile_assignment(assignment) == assignment
+    assert assignment["factor_id"] == "start.legal_team_poses"
+    assert assignment["seed_count"] == 2
+    assert assignment["profile_config_sha256"] == start_profile_identity(
+        "midfield_spread")["config_sha256"]
+    assert assignment["outcome_by_start_state"] is None
+    assert assignment["legal_start_validation_rate"] is None
+    assert assignment["qualification_eligible"] is False
+
+    changed_seed = phase4_start_profile_assignment("team_start_set_a",
+        scenario_id="full_match_offense", split="validation",
+        protocol_id="protocol-v1", protocol_sha256="a"*64,
+        qualification_case=case, categories=("level_1/open",), seeds=(7, 12))
+    changed_profile = phase4_start_profile_assignment("team_start_set_b",
+        scenario_id="full_match_offense", split="validation",
+        protocol_id="protocol-v1", protocol_sha256="a"*64,
+        qualification_case=case, categories=("level_1/open",), seeds=(7, 11))
+    assert changed_seed["assignment_sha256"] != assignment["assignment_sha256"]
+    assert changed_profile["profile_config_sha256"] != assignment["profile_config_sha256"]
+    with pytest.raises(ValueError, match="validation"):
+        phase4_start_profile_assignment("team_start_set_a",
+            scenario_id="full_match_offense", split="test",
+            protocol_id="protocol-v1", protocol_sha256="a"*64,
+            qualification_case=case, categories=("level_1/open",), seeds=(7, 11))
+    tampered = dict(assignment, outcome_by_start_state={"team_start_set_a": 1.})
+    with pytest.raises(ValueError, match="registry contract"):
+        validate_phase4_start_profile_assignment(tampered)
 
 
 def test_behavior_pool_is_reproducible_balanced_and_registry_bound():

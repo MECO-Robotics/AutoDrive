@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -11,7 +12,9 @@ from frc_defense.meco_phase4_campaign_plan import (
 )
 from frc_defense.meco_phase4_design import compile_phase4_design_overlay
 from frc_defense.meco_phase4_opponents import POLICY_POOL, compile_opponent_policy_schedule
-from frc_defense.meco_validation_campaign_runner import run_phase4_opponent_cell
+from frc_defense.meco_validation_campaign_runner import (
+    run_phase4_opponent_cell, run_phase4_start_profile_cell)
+import frc_defense.meco_validation_campaign_runner as campaign_runner
 from frc_defense.meco_tracks import MECO_TRACKS
 
 
@@ -19,6 +22,53 @@ ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "qualifications/meco/protocol.json"
 REGISTRY = ROOT / "qualifications/meco/phase4_design_registry.json"
 OVERLAY = ROOT / "qualifications/meco/phase4_design_overlay.json"
+
+
+def test_curriculum_constructor_defers_initial_perception_until_profile_attachment():
+    env_tree = ast.parse((ROOT / "frc_defense/tensor_3v3.py").read_text())
+    env_class = next(node for node in env_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "TensorThreeVsThreeEnv")
+    constructor = next(node for node in env_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    reset_call = next(node for node in ast.walk(constructor)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "reset")
+    assert any(keyword.arg == "defer_perception" and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "defer_initial_perception" for keyword in reset_call.keywords)
+
+    curriculum_tree = ast.parse((ROOT / "frc_defense/curriculum_scenarios.py").read_text())
+    factory = next(node for node in curriculum_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "make_curriculum_env")
+    env_call = next(node for node in ast.walk(factory)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "CurriculumEnv")
+    assert any(keyword.arg == "defer_initial_perception"
+        and isinstance(keyword.value, ast.Constant) and keyword.value.value is True
+        for keyword in env_call.keywords)
+    assignment_attach = next(index for index, node in enumerate(factory.body)
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Attribute) and target.attr ==
+            "phase4_start_profile_assignment" for target in node.targets))
+    assert assignment_attach > next(index for index, node in enumerate(factory.body)
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "env" for target in node.targets))
+    scenario_reset = next(index for index, node in enumerate(factory.body)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "reset_curriculum_scenario")
+    assert scenario_reset > assignment_attach
+
+
+@pytest.mark.parametrize("field", ["checkpoint_sha256", "source_identity_sha256",
+                                    "execution_device"])
+def test_phase4_dispatch_binding_rejects_report_drift(field):
+    expected = {"checkpoint_sha256": {"A1": "checkpoint"},
+        "source_identity_sha256": "source", "execution_device": {"device": "cuda:1"}}
+    observed = dict(expected)
+    observed[field] = "drifted"
+    with pytest.raises(ValueError, match="checkpoint/source/device binding mismatch"):
+        campaign_runner._validate_phase4_dispatch_report_binding(
+            observed, expected, context="test report")
 
 
 def _walk_keys(value):
@@ -85,6 +135,18 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
                     assert assignment["paired_control_category_seed_row_count"] == 1600
                     assert len(assignment["paired_control_category_seed_coverage_sha256"]) == 64
                     assert assignment["executed"] is False
+                    assert assignment["qualification_eligible"] is False
+                elif requirement["requirement_id"] == "multiple_legal_team_start_states":
+                    assignment = cell["start_profile_assignment"]
+                    assert cell["scheduler_assignment_supported"] is True
+                    assert cell["status"] == (
+                        "protocol_bound_start_profile_assignment_planned_not_executed")
+                    assert assignment["registry_profile_id"] == cell["design_axes"][
+                        "legal_team_pose_sets"]
+                    assert assignment["protocol_id"] == plan["protocol_binding"]["protocol_id"]
+                    assert assignment["protocol_sha256"] == plan["protocol_binding"][
+                        "protocol_raw_file_sha256"]
+                    assert assignment["outcome_by_start_state"] is None
                     assert assignment["qualification_eligible"] is False
                 else:
                     assert cell["status"] == "design_only_unassigned_to_protocol_case"
@@ -176,6 +238,113 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(tmp_
         "paired_outcome_by_family": None}
     assert result["paired_coverage"]["exact_policy_category_seed_pair_coverage"] is True
     assert result["paired_coverage"]["qualification_eligible"] is False
+
+
+def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_path, monkeypatch):
+    plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
+    requirement = next(row for row in plan["requirements"]
+                       if row["requirement_id"] == "multiple_legal_team_start_states")
+    cell = next(row for row in requirement["cells"]
+        if row["design_axes"].get("legal_team_pose_sets") == "team_start_set_b"
+        and row["case_axes"]["scenario_id"] == "full_match_offense"
+        and row["case_axes"]["start_condition"] == "offset_upper_lane")
+    checkpoints = {}
+    for track in MECO_TRACKS:
+        path = tmp_path / f"{track}.pt"
+        path.write_bytes(track.encode())
+        checkpoints[track] = str(path)
+    expected_binding = {"checkpoint_sha256": {
+        track: campaign_runner._file_sha(Path(path)) for track, path in checkpoints.items()},
+        "source_identity_sha256": "frozen-source-identity",
+        "execution_device": {"device": "cuda:1", "accelerator_backend": "ROCm"}}
+    monkeypatch.setattr(campaign_runner, "_capture_phase4_dispatch_binding",
+        lambda checkpoint_paths, device: expected_binding)
+    monkeypatch.setattr(campaign_runner, "_source_identity_sha256",
+        lambda: expected_binding["source_identity_sha256"])
+    observed = []
+
+    def fake_runner(argv):
+        output_dir = Path(argv[argv.index("--output-dir") + 1])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest = json.loads(Path(argv[argv.index("--seed-manifest") + 1]).read_text())
+        case_binding = json.loads(Path(argv[argv.index("--qualification-case-json") + 1]).read_text())
+        has_profile = "--phase4-start-profile" in argv
+        arm = "factor_treatment" if has_profile else "no_factor"
+        assert output_dir.name == arm
+        if has_profile:
+            assert argv[argv.index("--phase4-start-profile") + 1] == "team_start_set_b"
+        assert argv[argv.index("--conditions") + 1] == "architecture_matched_cv_k16"
+        assert manifest["seed_list"] and len(manifest["seed_list"]) == cell["seed_count"]
+        policies = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+        assignment = cell["start_profile_assignment"] if has_profile else None
+        rows = []
+        for policy in policies:
+            for category in manifest["categories"]:
+                for seed in manifest["seed_list"]:
+                    rows.append({"policy": policy, "category": category, "seed": seed,
+                        "checkpoint_sha256": (expected_binding["checkpoint_sha256"].get(
+                            policy[:-3] if policy.endswith("_P0") else policy)),
+                        "source_identity_sha256": expected_binding["source_identity_sha256"],
+                        "execution_device": expected_binding["execution_device"],
+                        "phase4_start_profile": (None if assignment is None else {
+                            "factor_id": assignment["factor_id"],
+                            "registry_profile_id": assignment["registry_profile_id"],
+                            "runtime_profile_name": assignment["runtime_profile_name"],
+                            "profile_config_sha256": assignment["profile_config_sha256"],
+                            "assignment_sha256": assignment["assignment_sha256"],
+                            "profile_applied_before_observation": True,
+                            "legal_start_validation_rate": None,
+                            "outcome_by_start_state": None,
+                            "qualification_eligible": False})})
+        report_path = output_dir / "condition.json"
+        policy_manifest = {}
+        for policy in policies:
+            track = policy[:-3] if policy.endswith("_P0") else policy
+            policy_manifest[policy] = {
+                "checkpoint_sha256": expected_binding["checkpoint_sha256"].get(track),
+                "source_identity_sha256": expected_binding["source_identity_sha256"],
+                "execution_device": expected_binding["execution_device"]}
+        report_path.write_text(json.dumps({"qualification_eligible": False,
+            "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+            "source_identity_sha256": expected_binding["source_identity_sha256"],
+            "execution_device": expected_binding["execution_device"],
+            "policy_manifest": policy_manifest,
+            "phase4_start_profile_assignment": assignment, "records": rows}))
+        matrix_payload = {"qualification_eligible": False,
+            "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+            "source_identity_sha256": expected_binding["source_identity_sha256"],
+            "execution_device": expected_binding["execution_device"],
+            "phase4_start_profile_assignment": assignment,
+            "protocol": {"qualification_case": case_binding,
+                "categories": manifest["categories"], "seed_list": manifest["seed_list"],
+                "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+                "source_identity_sha256": expected_binding["source_identity_sha256"],
+                "execution_device": expected_binding["execution_device"],
+                "phase4_start_profile_assignment": assignment},
+            "conditions": {"architecture_matched_cv_k16": {
+                "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+                "source_identity_sha256": expected_binding["source_identity_sha256"],
+                "execution_device": expected_binding["execution_device"],
+                "report_path": str(report_path)}}}
+        (output_dir / "mock.matrix.json").write_text(json.dumps(matrix_payload))
+        observed.append(argv)
+        return 0
+
+    result = run_phase4_start_profile_cell(plan, cell["case_cell_key"],
+        protocol_path=PROTOCOL, checkpoint_paths=checkpoints,
+        matrix_script=tmp_path / "matrix.py", output_dir=tmp_path / "dispatch",
+        device="cuda:1", runner=fake_runner)
+    assert result["executed"] is True
+    assert result["simulator_behavior_validated"] is False
+    assert result["qualification_eligible"] is False
+    assert result["legal_start_validation_rate"] is None
+    assert result["outcome_by_start_state"] is None
+    assert result["dispatch_return_codes"] == {"no_factor": 0, "factor_treatment": 0}
+    assert result["paired_coverage"]["paired_row_count"] == (
+        (len(MECO_TRACKS) + 3 + 3) * cell["seed_count"])
+    assert len(observed) == 2
+    assert all("--phase4-start-profile" not in argv for argv in observed[:1])
+    assert "--phase4-start-profile" in observed[1]
     assert result["paired_coverage"]["paired_outcome_by_family"] is None
     assert result["paired_coverage"]["condition_names"] == ["architecture_matched_cv_k16"]
     assert result["paired_coverage"]["paired_rows_per_condition"][

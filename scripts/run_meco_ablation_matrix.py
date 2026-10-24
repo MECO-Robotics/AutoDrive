@@ -39,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="JSON object with layout_id, defender_family, start_condition, sensor_profile")
     parser.add_argument("--phase4-opponent-schedule-json", type=Path,
                         help="protocol-bound validation opponent policy assignment")
+    parser.add_argument("--phase4-start-profile",
+                        choices=("team_start_set_a", "team_start_set_b", "team_start_set_c"),
+                        help="registry-bound full-team start profile for full-match validation")
     parser.add_argument("--conditions",
                         help="comma-separated exact condition names; diagnostic subset mode")
     parser.add_argument("--replay-output-dir", type=Path,
@@ -95,6 +98,7 @@ def main(argv=None) -> int:
         replay_selection=replay_selection,
         phase4_opponent_schedule=(json.loads(args.phase4_opponent_schedule_json.read_text(
             encoding="utf-8")) if args.phase4_opponent_schedule_json else None),
+        start_profile_registry_id=args.phase4_start_profile,
         condition_names=(None if args.conditions is None else tuple(
             part for part in args.conditions.split(",") if part)))
     print(json.dumps({"matrix_id": report["matrix_id"],

@@ -65,9 +65,16 @@ PHASE4_REQUIREMENT_BINDINGS = {
         "limitations": ("deterministic policy IDs and sensed-track command hook are bound to validation schedules, but no representative simulator run has validated slot application", "interception and paired policy-family outcome signals unavailable")},
     "multiple_legal_team_start_states": {**_COMMON,
         "factor_ids": ("start.legal_team_poses",),
-        "runtime_event": None,
+        "runtime_factor_kind": "legal_team_start_profile",
+        "runtime_factor_by_factor_id": {
+            "start.legal_team_poses": "legal_team_start_profile"},
+        "runtime_event": "phase4_start_profile.profile_applied_before_observation",
+        "runtime_event_by_factor_id": {
+            "start.legal_team_poses":
+                "phase4_start_profile.profile_applied_before_observation"},
+        "stimulus_supported": True,
         "required_signals": ("legal_start_validation_rate", "outcome_by_start_state"),
-        "limitations": ("legal start helpers are not applied by validation reset", "legal-start and stratified-outcome signals unavailable")},
+        "limitations": ("registered full-team poses are applied after reset and before perception; legal-start rate and stratified outcomes still lack authoritative simulator signals",)},
     "teammate_behaviors": {**_COMMON,
         "factor_ids": ("teammate.behavior_pool",),
         "runtime_event": None,

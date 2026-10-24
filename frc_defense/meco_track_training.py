@@ -2246,6 +2246,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_contact_factor_id: str | None = None,
                   contact_geometry_id: str | None = None,
                   contact_geometry_config: dict | None = None,
+                  phase4_start_profile_assignment: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2343,6 +2344,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         required_case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
         if not isinstance(qualification_case, dict) or set(qualification_case) != required_case_fields:
             raise ValueError("qualification_case must contain the four frozen stratum identifiers")
+    if phase4_start_profile_assignment is not None:
+        from .meco_phase4_context import (
+            phase4_start_profile_assignment as build_start_profile_assignment,
+            validate_phase4_start_profile_assignment)
+        captured_start_assignment = validate_phase4_start_profile_assignment(
+            phase4_start_profile_assignment)
+        if evaluation_binding is None or qualification_case is None:
+            raise ValueError("full-team start profiles require an exact validation protocol case")
+        expected_start_assignment = build_start_profile_assignment(
+            captured_start_assignment["registry_profile_id"],
+            scenario_id=scenario_id, split=split,
+            protocol_id=evaluation_binding["protocol_id"],
+            protocol_sha256=evaluation_binding["protocol_sha256"],
+            qualification_case=qualification_case, categories=categories,
+            seeds=scored_seeds)
+        if captured_start_assignment != expected_start_assignment:
+            raise ValueError("full-team start profile differs from the exact evaluation protocol/seeds")
     if qualification_protocol_id is not None and (
             split not in ("validation", "test") or
             not isinstance(qualification_protocol_id, str) or
@@ -2456,6 +2474,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             raise ValueError("paired checkpoints have different supervisor protocols")
         policy_manifest[track] = {"policy_id": _model_id(model),
             "checkpoint_sha256": checkpoint_digest,
+            "execution_device": execution_device,
             "input_contract_sha256": payload.get("input_contract_sha256"),
             "p_mode": track_p_mode if track in ("A1", "A2", "A3") else None,
             "p_cost_scale": track_p_scale if track in ("A1", "A2", "A3") else None,
@@ -2493,6 +2512,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                              "D1": "D1_hand_weighted",
                              "D2": "D2_kinematic_prediction"}[control]
         policy_manifest[control] = {"policy_id": control_policy_id, "checkpoint_sha256": None,
+            "execution_device": execution_device,
             "input_contract_sha256": input_contract_digest(),
             "prediction_mode": control_prediction_modes.get(control),
             "prediction_contract": (prediction_contract(control_prediction_modes[control])
@@ -2631,6 +2651,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         phase4_opponent_policy_id=phase4_opponent_policy_id,
                         contact_geometry_id=contact_geometry_id,
                         contact_geometry_config=contact_geometry_config,
+                        phase4_start_profile_assignment=phase4_start_profile_assignment,
                         **(qualification_case or {}))
                     episode_metric_ledger = None
                     replay_frames = []
@@ -3246,6 +3267,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                        else "selected_candidate_per_macro"),
                             "policy_id": policy_manifest[record_policy]["policy_id"],
                             "checkpoint_sha256": policy_manifest[record_policy]["checkpoint_sha256"],
+                            "execution_device": execution_device,
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
                             "prediction_mode": decision_prediction_mode,
@@ -3275,6 +3297,23 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "tracking_loss_reset_count": tracking_loss_reset_count,
                             "tracking_loss_reset_policy": TRACK_LOSS_RESET_POLICY,
                             "phase4_factor": phase4_factor,
+                            "phase4_start_profile": ({
+                                "factor_id": phase4_start_profile_assignment["factor_id"],
+                                "registry_profile_id": phase4_start_profile_assignment[
+                                    "registry_profile_id"],
+                                "runtime_profile_name": phase4_start_profile_assignment[
+                                    "runtime_profile_name"],
+                                "profile_config_sha256": phase4_start_profile_assignment[
+                                    "profile_config_sha256"],
+                                "assignment_sha256": phase4_start_profile_assignment[
+                                    "assignment_sha256"],
+                                "profile_applied_before_observation": bool(
+                                    env.phase4_start_profile_applied),
+                                "validated_pose_world_count": int(env.n),
+                                "legal_start_validation_rate": None,
+                                "outcome_by_start_state": None,
+                                "qualification_eligible": False,
+                            } if phase4_start_profile_assignment is not None else None),
                             "phase4_opponent_policy": ({
                                 "policy_id": phase4_opponent_policy_id,
                                 "factor_id": phase4_opponent_schedule["factor_id"],
@@ -3380,6 +3419,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "prediction_mode": decision_prediction_mode,
                                 "phase4_factor": phase4_factor,
                                 "contact_geometry_id": contact_geometry_id,
+                                "phase4_start_profile_assignment": phase4_start_profile_assignment,
                                 "contact_geometry_config": contact_geometry_config,
                                 "qualification_eligible": False,
                                 "inference_disable_tick": inference_disable_tick})
@@ -3533,6 +3573,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "safety_metrics_source_identity_sha256": source_hash,
             "contact_geometry_id": contact_geometry_id,
             "contact_geometry_config": contact_geometry_config,
+            "phase4_start_profile_assignment": phase4_start_profile_assignment,
             "qualification_eligible": False,
             "episode_metric_ledger_schema": {
                 "schema_version": 4,
@@ -3579,6 +3620,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "episodes_per_category": episodes, "master_seed": master_seed,
             "candidate_k": candidate_k,
             "execution_device": execution_device,
+            "checkpoint_sha256": {track: policy_manifest[track]["checkpoint_sha256"]
+                for track in selected},
             "candidate_k_checkpoint": checkpoint_candidate_k,
             "candidate_k_evaluation_override": candidate_k_override,
             "prediction": {"model": PREDICTION_MODEL_ID,

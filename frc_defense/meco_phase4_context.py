@@ -106,6 +106,113 @@ def start_profile_identity(runtime_profile: str) -> dict:
     return phase4_context_identity("legal_team_pose_sets", registry_id)
 
 
+def start_profile_runtime_name(registry_profile_id: str) -> str:
+    """Resolve a frozen legal-team-pose registry value to its runtime profile."""
+    try:
+        return next(name for name, registry_id in START_PROFILE_REGISTRY_IDS.items()
+                    if registry_id == registry_profile_id)
+    except StopIteration as exc:
+        raise ValueError(f"unknown full-team start profile registry ID: {registry_profile_id}") from exc
+
+
+def phase4_start_profile_assignment(registry_profile_id: str, *,
+        scenario_id: str, split: str, protocol_id: str,
+        protocol_sha256: str, qualification_case: dict,
+        categories: tuple[str, ...] | list[str], seeds: tuple[int, ...] | list[int]) -> dict:
+    """Bind one registered team pose set to an exact held-out protocol cell."""
+    if start_profile_runtime_name(registry_profile_id) not in START_PROFILE_NAMES:
+        raise ValueError("start profile is not registered")
+    if scenario_id != "full_match_offense" or split != "validation":
+        raise ValueError("legal full-team start profiles are restricted to full-match validation")
+    if (not isinstance(protocol_id, str) or not protocol_id or
+            not isinstance(protocol_sha256, str) or len(protocol_sha256) != 64 or
+            any(char not in "0123456789abcdef" for char in protocol_sha256)):
+        raise ValueError("start profile requires frozen protocol identity")
+    case_fields = {"layout_id", "defender_family", "start_condition", "sensor_profile"}
+    if (not isinstance(qualification_case, dict) or set(qualification_case) != case_fields or
+            any(not isinstance(value, str) or not value for value in qualification_case.values())):
+        raise ValueError("start profile requires the exact frozen qualification case")
+    if (not isinstance(categories, (tuple, list)) or not categories or
+            any(not isinstance(category, str) or not category for category in categories) or
+            len(set(categories)) != len(categories)):
+        raise ValueError("start profile categories must be unique nonempty strings")
+    if (not isinstance(seeds, (tuple, list)) or not seeds or
+            any(type(seed) is not int or seed < 0 or seed >= 2**63 for seed in seeds) or
+            len(set(seeds)) != len(seeds)):
+        raise ValueError("start profile seeds must be unique signed-63-bit integers")
+    profile = phase4_context_identity("legal_team_pose_sets", registry_profile_id)
+    seed_sha256 = hashlib.sha256(json.dumps(list(seeds), separators=(",", ":"),
+        allow_nan=False).encode()).hexdigest()
+    payload = {"schema": "meco-phase4-start-profile-assignment-v1",
+        "factor_id": "start.legal_team_poses",
+        "registry_profile_id": registry_profile_id,
+        "runtime_profile_name": start_profile_runtime_name(registry_profile_id),
+        "profile_config_sha256": profile["config_sha256"],
+        "scenario_id": scenario_id, "split": split,
+        "protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
+        "qualification_case": dict(qualification_case),
+        "categories": list(categories), "seed_count": len(seeds),
+        "seed_assignment_sha256": seed_sha256,
+        "legal_start_validation_rate": None,
+        "outcome_by_start_state": None,
+        "qualification_eligible": False}
+    assignment_sha256 = hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return {**payload, "assignment_sha256": assignment_sha256}
+
+
+def validate_phase4_start_profile_assignment(assignment: dict) -> dict:
+    """Validate the immutable assignment and its registry/config binding."""
+    if not isinstance(assignment, dict):
+        raise ValueError("start profile assignment must be an object")
+    profile_id = assignment.get("registry_profile_id")
+    runtime_name = start_profile_runtime_name(profile_id)
+    profile = phase4_context_identity("legal_team_pose_sets", profile_id)
+    if (assignment.get("schema") != "meco-phase4-start-profile-assignment-v1" or
+            assignment.get("factor_id") != "start.legal_team_poses" or
+            assignment.get("runtime_profile_name") != runtime_name or
+            assignment.get("profile_config_sha256") != profile["config_sha256"] or
+            assignment.get("scenario_id") != "full_match_offense" or
+            assignment.get("split") != "validation" or
+            assignment.get("qualification_eligible") is not False or
+            assignment.get("legal_start_validation_rate") is not None or
+            assignment.get("outcome_by_start_state") is not None):
+        raise ValueError("start profile assignment differs from its frozen registry contract")
+    digest = assignment.get("assignment_sha256")
+    if (not isinstance(digest, str) or len(digest) != 64 or
+            any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("start profile assignment digest is malformed")
+    payload = {key: value for key, value in assignment.items()
+               if key != "assignment_sha256"}
+    expected_digest = hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if digest != expected_digest:
+        raise ValueError("start profile assignment digest mismatch")
+    if (not isinstance(assignment.get("protocol_id"), str) or
+            not assignment["protocol_id"] or
+            not isinstance(assignment.get("protocol_sha256"), str) or
+            len(assignment["protocol_sha256"]) != 64 or
+            any(char not in "0123456789abcdef"
+                for char in assignment["protocol_sha256"]) or
+            type(assignment.get("seed_count")) is not int or assignment["seed_count"] < 1 or
+            not isinstance(assignment.get("seed_assignment_sha256"), str) or
+            len(assignment["seed_assignment_sha256"]) != 64 or
+            any(char not in "0123456789abcdef"
+                for char in assignment["seed_assignment_sha256"]) or
+            not isinstance(assignment.get("categories"), list) or
+            not assignment["categories"] or
+            any(not isinstance(category, str) or not category
+                for category in assignment["categories"]) or
+            len(set(assignment["categories"])) != len(assignment["categories"]) or
+            not isinstance(assignment.get("qualification_case"), dict) or
+            set(assignment["qualification_case"]) != {
+                "layout_id", "defender_family", "start_condition", "sensor_profile"} or
+            any(not isinstance(value, str) or not value
+                for value in assignment["qualification_case"].values())):
+        raise ValueError("start profile assignment has incomplete protocol binding")
+    return dict(assignment)
+
+
 def _context_config(axis_name: str, value_name: str) -> dict:
     if axis_name == "legal_team_pose_sets":
         runtime_name = next((name for name, registry_id in

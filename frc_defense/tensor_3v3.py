@@ -62,7 +62,7 @@ class TensorThreeVsThreeEnv(
                  random_gamepiece_placement=False,
                  field_length=16.54,
                  field_width=8.07, obstacles=(), fuel_physics=True,
-                 field_layout="2026_rebuilt"):
+                 field_layout="2026_rebuilt", defer_initial_perception=False):
         self.n = int(num_envs)
         if self.n < 1:
             raise ValueError("num_envs must be positive")
@@ -408,7 +408,7 @@ class TensorThreeVsThreeEnv(
         self._route_segment_indices=torch.arange(
             self.planner.max_points-1,device=self.device)
         self._last_obs = torch.zeros((self.n, NUM_ROBOTS, OBS_DIM), device=self.device)
-        self.reset(seed=seed)
+        self.reset(seed=seed, defer_perception=defer_initial_perception)
 
 
 
@@ -501,7 +501,9 @@ class TensorThreeVsThreeEnv(
         self.policy_pose.copy_(torch.where(update[..., None], self.estimated_pose,
                                            self.policy_pose))
 
-    def reset(self, seed=None):
+    def reset(self, seed=None, *, defer_perception=False):
+        if type(defer_perception) is not bool:
+            raise ValueError("defer_perception must be boolean")
         if seed is not None:
             self.generator.manual_seed(int(seed))
             self._perception_rng_seed = int(seed) & 0xffffffff
@@ -556,9 +558,12 @@ class TensorThreeVsThreeEnv(
         self._current_fuel_visibility.zero_()
         self.opponent_valid.zero_(); self.opponent_age.fill_(float("inf"))
         self.opponent_size.zero_()
-        self._update_perception(torch.ones(self.n, device=self.device, dtype=torch.bool))
         self.last_actions.fill_(7)
         self._last_score_intent.zero_()
+        if defer_perception:
+            self._last_obs = None
+            return None
+        self._update_perception(torch.ones(self.n, device=self.device, dtype=torch.bool))
         self._last_obs = self.observe()
         return self._last_obs, {"field_layout": self.field_layout_id, "robots": NUM_ROBOTS}
 
