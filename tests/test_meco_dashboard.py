@@ -192,6 +192,7 @@ def test_only_complete_matched_evaluation_is_exposed_with_category_uncertainty(t
     assert len(report["records"]) == 44
     assert group["record_count"] == 4
     assert group["control_definitions"]["D0"].startswith("production deterministic offense")
+    assert set(group["control_definitions"]) == {"D0"}
     assert group["policy_metrics"]["A1"]["open"]["success"]["n"] == 2
     assert group["policy_metrics"]["A1"]["open"]["success"]["normal_95_interval"] is not None
     assert next(row for row in result["policies"] if row["policy_id"] == "D2")["evaluation_state"] == "diagnostic matched"
