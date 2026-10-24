@@ -59,7 +59,7 @@
     ],
     "whole_family_holdout_verified": true
   },
-  "overlay_id": "df935d1f9c606cba32b5099084cc20a2652057ce8892c75a986fa093acd8bf2e",
+  "overlay_id": "25ec291b43d636921897612d144eb6a3a5533f3a2b93cb5a28631aae805ab476",
   "planned_pairing": {
     "conditions": [
       "no_factor",
@@ -86,6 +86,7 @@
     "no_runtime_stimulus_claim_from_design_only_entries"
   ],
   "protocol_binding": {
+    "binding_method": "protocol_id_metadata_plus_opaque_full_file_sha256_validation_only_json_parse",
     "protocol_id": "dec8964454769b01fa4d79fe5f1cb7919013d94b5076e3a99a20ba5a4181f6f2",
     "protocol_raw_file_sha256": "9314a1db838ead3e32db4ab8ed5a96f6944592fcedc162b2fe572c608afef35f"
   },

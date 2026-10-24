@@ -9,6 +9,7 @@ from frc_defense.meco_phase4_campaign_plan import (
     POLICIES,
     compile_phase4_campaign_plan,
 )
+from frc_defense.meco_phase4_design import compile_phase4_design_overlay
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,16 +83,14 @@ def test_rejects_unpaired_or_missing_policy_contract(tmp_path):
         compile_phase4_campaign_plan(PROTOCOL, registry, OVERLAY)
 
 
-def test_rejects_validation_seed_split_overlap(tmp_path):
+def test_rejects_case_reassigned_out_of_validation_split(tmp_path):
     protocol_value = json.loads(PROTOCOL.read_text())
-    train_seed = next(row["seeds"][0] for row in protocol_value["cases"]
-                      if row["split"] == "train")
     validation_row = next(row for row in protocol_value["cases"]
                           if row["split"] == "validation")
-    validation_row["seeds"][0] = train_seed
+    validation_row["split"] = "test"
     protocol = tmp_path / "protocol.json"
     protocol.write_text(json.dumps(protocol_value))
-    with pytest.raises(ValueError, match="protocol ID|overlaps training"):
+    with pytest.raises(ValueError, match="exactly match"):
         compile_phase4_campaign_plan(protocol, REGISTRY, OVERLAY)
 
 
@@ -102,3 +101,32 @@ def test_rejects_modified_overlay_even_if_case_rows_look_valid(tmp_path):
     overlay.write_text(json.dumps(overlay_value))
     with pytest.raises(ValueError, match="exactly match"):
         compile_phase4_campaign_plan(PROTOCOL, REGISTRY, overlay)
+
+
+def test_campaign_reader_never_decodes_or_serializes_final_test_sentinel(tmp_path, monkeypatch):
+    protocol_value = json.loads(PROTOCOL.read_text())
+    sentinel = "FINAL_TEST_SENTINEL_817263549"
+    protocol_value["final_test"]["seed_sentinel"] = sentinel
+    test_case = next(row for row in protocol_value["cases"] if row["split"] == "test")
+    test_case["seeds"] = [sentinel]
+    protocol_path = tmp_path / "protocol.json"
+    registry_path = tmp_path / "registry.json"
+    overlay_path = tmp_path / "overlay.json"
+    protocol_path.write_text(json.dumps(protocol_value))
+    registry_path.write_bytes(REGISTRY.read_bytes())
+    overlay = compile_phase4_design_overlay(protocol_path, registry_path)
+    overlay_path.write_text(json.dumps(overlay))
+
+    import frc_defense.meco_phase4_design as design_module
+    original_loads = design_module.json.loads
+    decoded_inputs = []
+
+    def recording_loads(value, *args, **kwargs):
+        decoded_inputs.append(value)
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(design_module.json, "loads", recording_loads)
+    plan = compile_phase4_campaign_plan(protocol_path, registry_path, overlay_path)
+    assert all(sentinel not in (value.decode("utf-8") if isinstance(value, bytes) else value)
+               for value in decoded_inputs)
+    assert sentinel not in json.dumps(plan, sort_keys=True)

@@ -8,7 +8,6 @@ stimuli and evaluator wiring are implemented and verified.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -18,6 +17,7 @@ from .meco_phase4_design import (
     CASE_AXES,
     _canonical_bytes,
     _read_json,
+    _read_protocol_validation,
     _sha256,
     compile_phase4_design_overlay,
 )
@@ -35,39 +35,22 @@ def _seed_digest(seeds: list[int]) -> str:
     return _sha256(_canonical_bytes(seeds))
 
 
-def _case_key(case: dict[str, Any]) -> str:
-    return _sha256(_canonical_bytes({axis: case[axis] for axis in CASE_AXES}))
-
-
 def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, Any]]:
-    """Validate validation assignments, without inspecting/exporting test seeds."""
+    """Validate selected assignments; protocol reader supplied validation rows only."""
     rows = protocol.get("cases")
     if not isinstance(rows, list):
         raise ValueError("protocol case table is missing")
     result: dict[tuple, dict[str, Any]] = {}
-    train_seeds: set[int] = set()
-    validation_seeds: set[int] = set()
     for row in rows:
-        if not isinstance(row, dict) or row.get("split") not in ("train", "validation", "test"):
-            raise ValueError("protocol contains a malformed split row")
-        if row["split"] == "test":
-            # Final-test seed values are intentionally not read or assigned.
-            continue
+        if not isinstance(row, dict) or row.get("split") != "validation":
+            raise ValueError("selective protocol reader returned a non-validation case")
         seeds = row.get("seeds")
         if (not isinstance(seeds, list) or not seeds or
                 any(type(seed) is not int or seed < 0 or seed >= 2**63 for seed in seeds) or
                 len(seeds) != len(set(seeds))):
-            raise ValueError(f"{row['split']} case has malformed or duplicate seeds")
-        owner = train_seeds if row["split"] == "train" else validation_seeds
-        # The same seed may be reused for different case axes within a split;
-        # only duplicates inside one case and cross-split reuse are errors.
-        owner.update(seeds)
-        if row["split"] != "validation":
-            continue
+            raise ValueError("validation case has malformed or duplicate seeds")
         if len(seeds) != VALIDATION_SEEDS_PER_CASE:
             raise ValueError("validation case does not have exactly 100 seeds")
-        if train_seeds.intersection(seeds):
-            raise ValueError("validation seed overlaps training assignment")
         if any(not isinstance(row.get(axis), str) or not row[axis] for axis in CASE_AXES):
             raise ValueError("validation case has incomplete case axes")
         key = tuple(row[axis] for axis in CASE_AXES)
@@ -75,8 +58,6 @@ def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, 
             raise ValueError("duplicate validation case axis identity")
         result[key] = {"case": {axis: row[axis] for axis in CASE_AXES},
                        "seed_count": len(seeds), "seed_sha256": _seed_digest(seeds)}
-    if validation_seeds.intersection(train_seeds):
-        raise ValueError("validation and training seed assignments overlap")
     return result
 
 
@@ -84,7 +65,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                                 registry_path: str | Path,
                                 overlay_path: str | Path) -> dict[str, Any]:
     """Return a compact, deterministic schedule plan, never episode rows."""
-    protocol, protocol_raw = _read_json(protocol_path)
+    protocol, protocol_raw = _read_protocol_validation(protocol_path)
     registry, registry_raw = _read_json(registry_path)
     overlay, overlay_raw = _read_json(overlay_path)
     expected_overlay = compile_phase4_design_overlay(protocol_path, registry_path)

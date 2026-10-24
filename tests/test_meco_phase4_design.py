@@ -78,6 +78,8 @@ def test_design_overlay_is_deterministic_bound_and_does_not_disclose_test_seeds(
     raw = protocol_path.read_bytes()
     assert first["protocol_binding"]["protocol_raw_file_sha256"] == hashlib.sha256(raw).hexdigest()
     assert first["protocol_binding"]["protocol_id"] == json.loads(raw)["protocol_id"]
+    assert first["protocol_binding"]["binding_method"].startswith(
+        "protocol_id_metadata_plus_opaque_full_file_sha256")
     serialized = json.dumps(first, sort_keys=True)
     assert "777777777777777777" not in serialized
     assert "888888888888888888" not in serialized
@@ -98,6 +100,29 @@ def test_design_overlay_is_deterministic_bound_and_does_not_disclose_test_seeds(
     assert all(req["planned_paired_protocol_condition_rows_per_factor"] ==
                2 * req["protocol_bound_case_count_per_factor"]
                for req in first["requirements"])
+
+
+def test_final_test_seed_sentinel_is_never_decoded_or_serialized(tmp_path, monkeypatch):
+    protocol_path, registry_path = _write_fixture(tmp_path)
+    sentinel = "FINAL_TEST_SENTINEL_817263549"
+    protocol = json.loads(protocol_path.read_text())
+    protocol["final_test"]["secret_seed"] = sentinel
+    protocol["cases"][-1]["seeds"] = [sentinel]
+    protocol_path.write_text(json.dumps(protocol, indent=2) + "\n")
+
+    import frc_defense.meco_phase4_design as design_module
+    original_loads = design_module.json.loads
+    decoded_inputs = []
+
+    def recording_loads(value, *args, **kwargs):
+        decoded_inputs.append(value)
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(design_module.json, "loads", recording_loads)
+    overlay = compile_phase4_design_overlay(protocol_path, registry_path)
+    assert all(sentinel not in (value.decode("utf-8") if isinstance(value, bytes) else value)
+               for value in decoded_inputs)
+    assert sentinel not in json.dumps(overlay, sort_keys=True)
 
 
 def test_design_overlay_rejects_any_train_validation_family_overlap(tmp_path):

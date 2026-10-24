@@ -136,6 +136,167 @@ def _read_json(path: str | Path) -> tuple[dict, bytes]:
     return value, raw
 
 
+def _skip_json_value(text: str, position: int) -> int:
+    """Advance over one JSON value without decoding any of its contents."""
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position >= len(text):
+        raise ValueError("truncated JSON value")
+    if text[position] == '"':
+        position += 1
+        escaped = False
+        while position < len(text):
+            char = text[position]
+            position += 1
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return position
+        raise ValueError("unterminated JSON string")
+    if text[position] in "[{":
+        opening = text[position]
+        closing = "]" if opening == "[" else "}"
+        stack = [closing]
+        position += 1
+        in_string = False
+        escaped = False
+        while position < len(text) and stack:
+            char = text[position]
+            position += 1
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "[":
+                stack.append("]")
+            elif char == "{":
+                stack.append("}")
+            elif char in "]}":
+                if char != stack[-1]:
+                    raise ValueError("mismatched JSON container while skipping value")
+                stack.pop()
+        if stack or in_string:
+            raise ValueError("unterminated JSON container")
+        return position
+    while position < len(text) and text[position] not in ",}] \t\r\n":
+        position += 1
+    return position
+
+
+def _parse_validation_cases(text: str, position: int) -> tuple[list[dict], int]:
+    """Read case objects while decoding only validation rows.
+
+    For non-validation rows, values are skipped lexically. Only the `split`
+    scalar is decoded to decide whether the row is retained; seed arrays and
+    all other row values are never passed to the JSON decoder.
+    """
+    decoder = json.JSONDecoder()
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position >= len(text) or text[position] != "[":
+        raise ValueError("protocol cases must be a JSON array")
+    position += 1
+    selected: list[dict] = []
+    while True:
+        while position < len(text) and (text[position].isspace() or text[position] == ","):
+            position += 1
+        if position >= len(text):
+            raise ValueError("unterminated protocol cases array")
+        if text[position] == "]":
+            return selected, position + 1
+        if text[position] != "{":
+            raise ValueError("protocol case row must be an object")
+        position += 1
+        fields: dict[str, tuple[int, int]] = {}
+        split_value = None
+        while True:
+            while position < len(text) and (text[position].isspace() or text[position] == ","):
+                position += 1
+            if position >= len(text):
+                raise ValueError("unterminated protocol case row")
+            if text[position] == "}":
+                position += 1
+                break
+            key, key_end = decoder.raw_decode(text, position)
+            if not isinstance(key, str):
+                raise ValueError("protocol case key must be a string")
+            position = key_end
+            while position < len(text) and text[position].isspace():
+                position += 1
+            if position >= len(text) or text[position] != ":":
+                raise ValueError("malformed protocol case property")
+            position += 1
+            while position < len(text) and text[position].isspace():
+                position += 1
+            value_start = position
+            value_end = _skip_json_value(text, position)
+            if key == "split":
+                # Classification is lexical so even a test row's split value
+                # is never decoded as part of its row.
+                token = text[value_start:value_end]
+                split_value = "validation" if token == '"validation"' else None
+            fields[key] = (value_start, value_end)
+            position = value_end
+        if split_value == "validation":
+            selected.append({key: json.loads(text[start:end])
+                             for key, (start, end) in fields.items()})
+
+
+def _read_protocol_validation(path: str | Path) -> tuple[dict, bytes]:
+    """Parse protocol metadata and validation cases, binding opaque full bytes.
+
+    Final-test JSON values are never decoded or traversed. The returned raw
+    bytes are used only as an opaque SHA-256 input for exact file binding.
+    """
+    raw = Path(path).expanduser().resolve().read_bytes()
+    text = raw.decode("utf-8")
+    decoder = json.JSONDecoder()
+    position = 0
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position >= len(text) or text[position] != "{":
+        raise ValueError("qualification protocol must be a JSON object")
+    position += 1
+    protocol: dict[str, Any] = {}
+    while True:
+        while position < len(text) and (text[position].isspace() or text[position] == ","):
+            position += 1
+        if position >= len(text):
+            raise ValueError("unterminated qualification protocol")
+        if text[position] == "}":
+            break
+        key, key_end = decoder.raw_decode(text, position)
+        if not isinstance(key, str):
+            raise ValueError("qualification protocol key must be a string")
+        position = key_end
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position >= len(text) or text[position] != ":":
+            raise ValueError("malformed qualification protocol property")
+        position += 1
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if key == "cases":
+            protocol[key], position = _parse_validation_cases(text, position)
+        elif key in {"protocol_id", "scenario_ids", "training", "validation",
+                     "start_conditions", "sensor_profiles"}:
+            protocol[key], position = decoder.raw_decode(text, position)
+        else:
+            # Unneeded protocol sections, including final_test, stay opaque.
+            position = _skip_json_value(text, position)
+    if not isinstance(protocol.get("protocol_id"), str) or not protocol["protocol_id"]:
+        raise ValueError("qualification protocol ID is missing")
+    return protocol, raw
+
+
 def compile_phase4_design_overlay(protocol_path: str | Path,
                                   registry_path: str | Path) -> dict:
     """Bind factor design and planned paired validation coverage to exact inputs.
@@ -143,12 +304,8 @@ def compile_phase4_design_overlay(protocol_path: str | Path,
     Only validation/train axis names and validation case identifiers leave this
     function. Seed values and final-test rows are intentionally never copied.
     """
-    protocol, protocol_raw = _read_json(protocol_path)
+    protocol, protocol_raw = _read_protocol_validation(protocol_path)
     registry, registry_raw = _read_json(registry_path)
-    expected_protocol_id = _sha256(_canonical_bytes({
-        key: value for key, value in protocol.items() if key != "protocol_id"}))
-    if protocol.get("protocol_id") != expected_protocol_id:
-        raise ValueError("qualification protocol ID does not match its contents")
     if registry.get("schema") != "meco-phase4-design-registry-v1":
         raise ValueError("unsupported Phase 4 design registry")
 
@@ -304,6 +461,7 @@ def compile_phase4_design_overlay(protocol_path: str | Path,
         "protocol_binding": {
             "protocol_id": protocol["protocol_id"],
             "protocol_raw_file_sha256": _sha256(protocol_raw),
+            "binding_method": "protocol_id_metadata_plus_opaque_full_file_sha256_validation_only_json_parse",
         },
         "factor_registry_binding": {
             "registry_schema": registry["schema"],

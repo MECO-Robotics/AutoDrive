@@ -15,6 +15,16 @@ remain non-executable until their simulator stimuli and evaluator handling are
 implemented and verified. This artifact is not an evaluation, replay,
 qualification result, or promotion approval.
 
+Protocol binding uses the parsed protocol ID as metadata plus SHA-256 over the
+complete raw protocol file as opaque bytes. The protocol reader decodes
+protocol metadata and validation case assignments only. It skips the
+`final_test` value and lexically skips non-validation case rows; final-test
+rows and seed values are never decoded, iterated, serialized, or logged. The
+seed digests bind each exact validation case assignment. Cross-split seed
+disjointness is inherited from the protocol's frozen raw-file identity; this
+compiler validates that every scheduled case remains assigned to validation
+and does not independently inspect training or final-test seed arrays.
+
 Runtime/evaluator wiring still required includes: applying each runtime factor
 to its intended validation case; implementing and verifying the policy-pool,
 team-pose, teammate, contact, and focal-pose design stimuli; evaluating exact
