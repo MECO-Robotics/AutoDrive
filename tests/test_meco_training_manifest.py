@@ -69,6 +69,7 @@ def test_describe_is_no_write_by_default_and_records_false_phase2(campaign):
     tmp_path, config = campaign
     result = manifest_api.describe_campaign(config, source_root=tmp_path)
     assert set(result["tracks"]) == set(MECO_TRACKS)
+    assert result["campaign"]["phase4_train_exposure"] is False
     assert result["readiness"]["implementation_ready"] is True
     assert result["readiness"]["hardware_ready"] is True
     assert result["readiness"]["phase2_ready"] is False
@@ -78,6 +79,51 @@ def test_describe_is_no_write_by_default_and_records_false_phase2(campaign):
     assert result["evaluation_protocol"]["qualification_eligible"] is False
     assert result["evaluation_protocol"]["gate_calibration"]["calibrated_and_reviewed"] is False
     assert not (tmp_path / "meco-five-fixture" / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_phase4_train_exposure_is_frozen_in_manifest_and_digest(campaign, enabled):
+    tmp_path, config = campaign
+    config = copy.deepcopy(config)
+    config["phase4_train_exposure"] = enabled
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    assert manifest["campaign"]["phase4_train_exposure"] is enabled
+    assert manifest_api.validate_campaign_manifest(
+        manifest, source_root=tmp_path)["valid"]
+
+
+def test_legacy_manifest_defaults_phase4_train_exposure_to_false(campaign):
+    tmp_path, config = campaign
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    del manifest["campaign"]["phase4_train_exposure"]
+    _seal(manifest)
+    assert manifest_api.validate_campaign_manifest(
+        manifest, source_root=tmp_path)["valid"]
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None, [], {}])
+def test_phase4_train_exposure_requires_strict_boolean(campaign, value):
+    tmp_path, config = campaign
+    bad = copy.deepcopy(config)
+    bad["phase4_train_exposure"] = value
+    with pytest.raises(ValueError, match="phase4_train_exposure.*boolean"):
+        manifest_api.describe_campaign(bad, source_root=tmp_path)
+
+
+def test_phase4_train_exposure_tampering_fails_digest_and_strict_validation(campaign):
+    tmp_path, config = campaign
+    config = copy.deepcopy(config)
+    config["phase4_train_exposure"] = True
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    tampered = copy.deepcopy(manifest)
+    tampered["campaign"]["phase4_train_exposure"] = False
+    with pytest.raises(ValueError, match="canonical digest mismatch"):
+        manifest_api.validate_campaign_manifest(tampered, source_root=tmp_path)
+    tampered = copy.deepcopy(manifest)
+    tampered["campaign"]["phase4_train_exposure"] = 1
+    _seal(tampered)
+    with pytest.raises(ValueError, match="phase4_train_exposure.*boolean"):
+        manifest_api.validate_campaign_manifest(tampered, source_root=tmp_path)
 
 
 def test_optional_evaluation_schedule_is_frozen_and_validated(campaign):

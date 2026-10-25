@@ -422,6 +422,9 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     if not isinstance(config, dict) or set(config.get("tracks", {})) != set(MECO_TRACKS):
         raise ValueError(f"config must define exactly these tracks: {list(MECO_TRACKS)}")
     campaign_id = config.get("campaign_id")
+    phase4_train_exposure = config.get("phase4_train_exposure", False)
+    if type(phase4_train_exposure) is not bool:
+        raise ValueError("phase4_train_exposure must be boolean")
     campaign_root = config.get("campaign_root")
     evaluation_output = config.get("evaluation_output")
     _validate_campaign_paths(campaign_id, campaign_root, config["tracks"], evaluation_output, output)
@@ -530,6 +533,7 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
             "qualification_eligible": False},
         "campaign": {"id": campaign_id, "root": str(Path(campaign_root).expanduser().resolve()),
             "evaluation_output": str(Path(evaluation_output).expanduser().resolve()),
+            "phase4_train_exposure": phase4_train_exposure,
             "manifest_output": (str(Path(output).expanduser().resolve()) if output is not None else None)},
         "device_inventory": inventory, "host_gpu_inventory": host_inventory,
         "seed": base_seed, "shared_training_fields": shared,
@@ -571,6 +575,11 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
     digest = data.pop("canonical_sha256", None)
     if digest != _sha(data):
         raise ValueError("campaign manifest canonical digest mismatch")
+    campaign_config = manifest.get("campaign")
+    if not isinstance(campaign_config, dict):
+        raise ValueError("campaign manifest campaign config is malformed")
+    if type(campaign_config.get("phase4_train_exposure", False)) is not bool:
+        raise ValueError("campaign phase4_train_exposure must be boolean")
     expected = _git_binding(Path(source_root).resolve())
     src = manifest.get("source", {})
     current_identity = source_identity_projection(source_identity())
@@ -697,7 +706,7 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
         raise ValueError("implementation readiness does not match clean source/config bindings")
     if readiness.get("hardware_ready") is not hardware_ready:
         raise ValueError("hardware readiness does not match byte-verified device inventory")
-    campaign = manifest.get("campaign", {})
+    campaign = campaign_config
     _validate_campaign_paths(campaign.get("id"), campaign.get("root"),
         {t: entries[t]["config"] for t in MECO_TRACKS},
         campaign.get("evaluation_output"), campaign.get("manifest_output"),

@@ -457,6 +457,47 @@ def test_manifest_mode_without_diagnostic_opt_in_is_read_only(tmp_path, monkeypa
     assert json.loads(capsys.readouterr().out)["phase2_complete"] is False
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_manifest_mode_propagates_phase4_train_exposure(tmp_path, monkeypatch,
+                                                       capsys, enabled):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {"campaign": {"id": "fixture", "root": str(tmp_path / "campaign"),
+        "evaluation_output": str(tmp_path / "evaluations"),
+        "phase4_train_exposure": enabled},
+        "tracks": {MECO_TRACKS[0]: {"config": {"scenario_id": "pickup_simple",
+            "category": "single", "seed": 17, "updates": 3,
+            "rollout_steps": 4, "epochs": 1, "action_ticks": 2,
+            "learning_rate": .001, "gamma": .99, "gae_lambda": .95,
+            "clip_coef": .2, "entropy_coef": .01, "value_coef": .5,
+            "max_grad_norm": .5, "route_cost_points_per_second": 0,
+            "p_mode": "learned", "p_cost_scale": 1,
+            "p_points_per_grid_edge": 1, "prediction_mode": "learned",
+            "candidate_k": 8}}},
+        "evaluation_protocol": {"split": "diagnostic", "category": "single",
+            "episode_seeds": [99]},
+        "devices": {"training_pool": ["cuda:0", "cuda:1"],
+            "evaluation": "cuda:1"},
+        "qualification_protocol": {"path": str(tmp_path / "protocol.json")}}
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr("frc_defense.meco_training_manifest.validate_campaign_manifest",
+        lambda _manifest: {"valid": True, "canonical_sha256": "a" * 64,
+            "phase2_ready": False, "phase2_complete": False,
+            "implementation_ready": True})
+    captured = {}
+    class FakeSupervisor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+        def run(self):
+            return {"status": "stub"}
+    monkeypatch.setattr(module, "MecoSupervisor", FakeSupervisor)
+    result = module.main(["--campaign-manifest", str(manifest_path),
+        "--diagnostic-launch"])
+    assert captured["phase4_train_exposure"] is enabled
+    assert captured["campaign_manifest"]["campaign"]["phase4_train_exposure"] is enabled
+    assert result == {"status": "stub"}
+    assert json.loads(capsys.readouterr().out) == {"status": "stub"}
+
+
 def _fresh_manifest_supervisor(output, evaluation_output):
     supervisor = MecoSupervisor.__new__(MecoSupervisor)
     supervisor.output = output

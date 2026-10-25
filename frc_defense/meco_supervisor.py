@@ -330,6 +330,11 @@ class MecoSupervisor:
             if not self.manifest_validation["valid"]:
                 raise ValueError("campaign manifest failed validation")
             self.manifest = campaign_manifest
+            # The frozen manifest is the sole authority in manifest mode.
+            # Older v2 manifests omit this field and retain the historical
+            # disabled behavior.
+            phase4_train_exposure = campaign_manifest["campaign"].get(
+                "phase4_train_exposure", False)
             self.manifest_digest = self.manifest_validation["canonical_sha256"]
             campaign = campaign_manifest["campaign"]
             output = campaign["root"]
@@ -636,6 +641,8 @@ class MecoSupervisor:
         manifest = self.manifest
         return {"canonical_sha256": self.manifest_digest,
             "campaign_id": manifest["campaign"]["id"],
+            "phase4_train_exposure": manifest["campaign"].get(
+                "phase4_train_exposure", False),
             "campaign_root": str(self.output),
             "evaluation_output": str(self.evaluation_output),
             "source": manifest["source"],
@@ -1611,6 +1618,7 @@ def main(argv=None):
         campaign = manifest["campaign"]
         status = {"valid": True, "manifest_sha256": validation["canonical_sha256"],
             "campaign_id": campaign["id"], "campaign_root": campaign["root"],
+            "phase4_train_exposure": campaign.get("phase4_train_exposure", False),
             "phase2_ready": validation["phase2_ready"], "phase2_complete": False,
             "qualification_eligible": False,
             "diagnostic_launch_requested": args.diagnostic_launch,
@@ -1645,7 +1653,9 @@ def main(argv=None):
             # diagnostic seed's declared split. Keep the artifact out of the
             # runtime evaluator binding for diagnostic runs.
             evaluation_protocol=(None if ev["split"] == "diagnostic" else ev["path"]),
-            evaluation_split=ev["split"], campaign_manifest=manifest)
+            evaluation_split=ev["split"],
+            phase4_train_exposure=campaign.get("phase4_train_exposure", False),
+            campaign_manifest=manifest)
         result = supervisor.run()
         print(json.dumps(result, indent=2))
         return result
