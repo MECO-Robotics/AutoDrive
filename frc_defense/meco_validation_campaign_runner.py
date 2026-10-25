@@ -733,6 +733,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                 legal_worlds = captured.get("per_world_legal")
                 world_count = captured.get("validated_pose_world_count")
                 world_indices = captured.get("validated_pose_world_indices")
+                legal_count = captured.get("validated_pose_legal_world_count")
                 rate = captured.get("legal_start_validation_rate")
                 if (type(world_count) is not int or world_count < 1 or
                         not isinstance(legal_worlds, list) or
@@ -741,9 +742,11 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                         captured.get("validated_pose_world_index_semantics") !=
                             "zero_based_simulator_batch_index" or
                         any(type(value) is not bool for value in legal_worlds) or
+                        type(legal_count) is not int or
+                        legal_count != sum(legal_worlds) or
                         type(rate) not in (int, float) or
                         not math.isfinite(float(rate)) or
-                        abs(float(rate) - sum(legal_worlds) / world_count) > 1e-12):
+                        float(rate) != sum(legal_worlds) / world_count):
                     raise ValueError(f"Phase 4 treatment row has missing or partial per-world legality: {key}")
                 outcome = captured.get("outcome_metrics")
                 metrics = row.get("metrics")
@@ -830,6 +833,8 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                 "validated_pose_world_index_semantics"],
             "world_indices": captured["validated_pose_world_indices"],
             "per_world_legal": captured["per_world_legal"],
+            "legal_world_count": captured[
+                "validated_pose_legal_world_count"],
             "legal_start_validation_rate": captured["legal_start_validation_rate"]})
     coverage_digest = _sha({"expected_keys": [list(key) for key in sorted(expected_keys)],
         "assignment_sha256": assignment["assignment_sha256"],

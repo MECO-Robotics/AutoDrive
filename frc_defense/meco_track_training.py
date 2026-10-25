@@ -3759,6 +3759,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     env.phase4_start_profile_applied),
                                 "validated_pose_world_count": int(
                                     env.phase4_start_profile_validated_world_count),
+                                "validated_pose_legal_world_count": int(sum(
+                                    env.phase4_start_profile_legality or ())),
                                 "validated_pose_world_indices": list(range(
                                     int(env.phase4_start_profile_validated_world_count))),
                                 "validated_pose_world_index_semantics":

@@ -372,8 +372,8 @@ def _robot_radii(env) -> torch.Tensor:
     return .5 * torch.sqrt(env.sim.length.square() + env.sim.width.square())
 
 
-def full_team_start_profile(env, profile: str) -> torch.Tensor:
-    """Return a legal ``[world, 6, 3]`` start pose tensor without mutation."""
+def full_team_start_profile(env, profile: str, *, validate: bool = True) -> torch.Tensor:
+    """Return a ``[world, 6, 3]`` start tensor, validating by default."""
     if profile not in START_PROFILE_NAMES:
         raise ValueError(f"unknown full-team start profile: {profile}")
     length, width = _dimensions(env)
@@ -382,23 +382,26 @@ def full_team_start_profile(env, profile: str) -> torch.Tensor:
     coords[:, 0] *= length / 16.54
     coords[:, 1] *= width / 8.07
     poses = coords.expand(env.n, -1, -1).clone()
-    validate_full_team_start_profile(env, poses)
+    if validate:
+        validate_full_team_start_profile(env, poses)
     return poses
 
 
 def apply_full_team_start_profile(env, profile: str) -> torch.Tensor:
     """Apply a checked profile at reset and clear stale physical velocities."""
-    poses = full_team_start_profile(env, profile)
+    # Capture per-world legality from the simulator's actual applied state;
+    # do not discard a mixed legal/illegal batch before it can be diagnosed.
+    poses = full_team_start_profile(env, profile, validate=False)
     env.sim.pose.copy_(poses)
     env.sim.velocity.zero_()
     # Validate the poses that actually landed in simulator state.  This is
     # sampled in reset before the caller builds/returns observations.
     legal = full_team_start_profile_legality(env, env.sim.pose)
     env.phase4_start_profile_legality = legal.detach().cpu().tolist()
-    env.phase4_start_profile_validation_rate = float(legal.float().mean().item())
+    legal_count = int(legal.sum().item())
     env.phase4_start_profile_validated_world_count = int(legal.numel())
-    if not bool(legal.all()):
-        raise ValueError("applied start profile is illegal in one or more worlds")
+    env.phase4_start_profile_validation_rate = (
+        legal_count / env.phase4_start_profile_validated_world_count)
     return poses
 
 
