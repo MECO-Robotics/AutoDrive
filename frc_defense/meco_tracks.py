@@ -60,6 +60,10 @@ def managed_meco_adapters():
 
 MECO_INFERENCE_SCHEMA = "meco-inference-v2"
 MECO_MAX_INFERENCE_AGE_S = 0.25
+MECO_INFERENCE_OUTCOME_CODES = MappingProxyType({
+    "accepted": 0,
+    "deterministic_fallback": 1,
+})
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
     "A2": ("node_features", "edges", "edge_mask", "region_ids", "globals_",
@@ -1453,12 +1457,26 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
     inference_valid = output.get("__inference_valid")
     if inference_valid is not None:
-        # A device-side producer validity bit avoids a scalar host read while
-        # retaining the adapter's deterministic failure behavior.
-        logits = torch.where(inference_valid.reshape(1, 1), logits, fallback_logits)
+        # Invalid numeric responses must be one-hot at the precomputed fallback
+        # index. Route-cost logits are not sufficient: stochastic sampling
+        # could otherwise select a different action after an inference fault.
+        fallback_index = (candidate_batch.fallback_index if candidate_batch is not None
+                          else torch.tensor(inference_request.fallback_index,
+                              device=utility.device, dtype=torch.long))
+        numeric_fallback_logits = torch.full_like(logits, -torch.inf)
+        numeric_fallback_logits.scatter_(1, fallback_index.reshape(1, 1), 0.)
+        logits = torch.where(inference_valid.reshape(1, 1), logits,
+                             numeric_fallback_logits)
         output_hidden = torch.where(inference_valid, output["hidden"], hidden)
+        inference_status_code = torch.where(inference_valid,
+            torch.zeros((), device=utility.device, dtype=torch.uint8),
+            torch.ones((), device=utility.device, dtype=torch.uint8))
+        inference_status = "device_validated"
     else:
         output_hidden = output["hidden"]
+        inference_status_code = None
+        inference_status = ("accepted" if isinstance(model, ProductionMecoAdapter)
+                            else "trainer_direct")
     provenance = ({"schema": MECO_INFERENCE_SCHEMA,
         "model_id": inference_request.model_id,
         "checkpoint_sha256": inference_request.checkpoint_sha256,
@@ -1476,7 +1494,9 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         if isinstance(model, ProductionMecoAdapter) else None)
     return {"logits": logits, "utility": utility, "hidden": output_hidden,
             "uncertainty": output.get("uncertainty"), "raw": output,
-            "inference_status": "accepted" if isinstance(model, ProductionMecoAdapter) else "trainer_direct",
+            "inference_status": inference_status,
+            "inference_status_code": inference_status_code,
+            "inference_status_codes": dict(MECO_INFERENCE_OUTCOME_CODES),
             "inference_provenance": provenance}
 
 

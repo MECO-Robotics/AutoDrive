@@ -17,11 +17,12 @@ import frc_defense.meco_candidates as meco_candidates
 from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
                                          _goal_nodes_batch)
 from frc_defense.meco_pose_graph import build_legal_pose_graph
-from frc_defense.meco_track_training import _d1_d2_scores
+from frc_defense.meco_track_training import _d1_d2_scores, _snapshot_tensors
 from types import SimpleNamespace
 from frc_defense.learning_contract import CandidateTable
 from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_WIDTH,
                                      SAFE_ACTION_FEATURES,
+                                     MecoInferenceResponse,
                                      ProductionMecoAdapter, SafeActionCandidates,
                                      candidate_feature_tensor,
                                      build_safe_action_candidates,
@@ -281,6 +282,71 @@ def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_supp
                     torch.zeros((1, 4), dtype=torch.bool)):
         masked = model(raster, globals_, features, candidate_mask=support)
         assert torch.equal(masked["hidden"], baseline["hidden"])
+
+
+def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback():
+    track = "C1"
+    ids = ("fallback", "invalid", "cheap")
+    names = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    rows = tuple(tuple(0. for _ in names) for _ in ids)
+    table = CandidateTable("guarded-sampler:1", ids, rows,
+                           (False, True, True), names)
+    raw = torch.zeros((1, len(ids), len(names)))
+    raw[0, :, 0] = torch.arange(len(ids), dtype=raw.dtype)
+    valid_mask = torch.tensor([[False, True, True]])
+    candidate_batch = SimpleNamespace(candidate_ids=ids, feature_names=names,
+        raw_features=raw, missing_mask=torch.zeros_like(raw),
+        candidate_features=torch.cat((raw, torch.zeros_like(raw)), dim=-1),
+        valid_mask=valid_mask, fallback_index=torch.tensor(1))
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.checkpoint_sha256 = "d" * 64
+    adapter.protocol_id = "guarded-sampler"
+    adapter._request_sequence = 0
+    adapter._generation_id = "guarded-sampler-generation"
+    adapter.next_request_identity = lambda: (1, adapter._generation_id)
+    adapter._broker = SimpleNamespace(counters=lambda: {})
+    submitted = {}
+    adapter.submit_inference = lambda request, inputs: submitted.update(
+        request=request, inputs=inputs) or object()
+
+    def invalid_response(request, _handle):
+        completed = max(time.monotonic(), request.dispatch_monotonic)
+        return MecoInferenceResponse(
+            schema="meco-inference-v2", track=track,
+            checkpoint_sha256=request.checkpoint_sha256,
+            protocol_id=request.protocol_id, model_id=request.model_id,
+            observation_timestamp=request.observation_timestamp,
+            capture_monotonic=request.capture_monotonic,
+            dispatch_monotonic=request.dispatch_monotonic,
+            completed_monotonic=completed,
+            expires_monotonic=request.expires_monotonic,
+            request_sequence=request.request_sequence,
+            generation_id=request.generation_id, snapshot_id=request.snapshot_id,
+            candidate_mask_digest=request.candidate_mask_digest,
+            legal_pose_order_digest=request.legal_pose_order_digest,
+            input_contract_sha256=request.input_contract_sha256,
+            outputs={"candidate_utility": torch.zeros((1, len(ids))),
+                "uncertainty": torch.zeros((1, len(ids))),
+                "hidden": torch.zeros((1, 64)),
+                "__inference_valid": torch.tensor(False)})
+    adapter.poll_inference = invalid_response
+
+    decision = score_candidates(track, adapter,
+        raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+        table=table, candidate_batch=candidate_batch,
+        route_cost=torch.tensor([[0., 4., 0.]]),
+        risk_cost=torch.zeros((1, 3)), observation_timestamp=1.,
+        capture_monotonic=time.monotonic() - .01)
+    assert decision["inference_status"] == "device_validated"
+    assert decision["inference_status_codes"]["deterministic_fallback"] == 1
+    assert decision["inference_status_code"].item() == 1
+    assert torch.isneginf(decision["logits"][0, 0])
+    assert torch.isfinite(decision["logits"][0, 1])
+    assert torch.isneginf(decision["logits"][0, 2])
+    sampled = [sample_candidate_action(decision["logits"], deterministic=False)[0].item()
+               for _ in range(32)]
+    assert sampled == [1] * 32
 
 
 @pytest.mark.parametrize("track", ("C1", "C2"))
@@ -612,17 +678,20 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
                     else torch.tensor((10., 4.)))
     queries = tuple(RouteQuery(item, "route-parity:1", world, 3, goal)
         for item, world, goal in (
-            ("clear", 0, (10.8, 4.)),
-            ("blocked", 0, tuple(blocked_goal.tolist())),
-            ("duplicate", 0, (11., 4.)),
-            ("duplicate", 0, (11.2, 4.)),
-            ("invalid-world", 9, (11., 4.)),
-            ("invalid-goal", 0, (float("nan"), 4.))))
+        ("clear", 0, (10.8, 4.)),
+        ("blocked", 0, tuple(blocked_goal.tolist())),
+        ("footprint-collision", 0, (.1, .1)),
+        ("endpoint-mismatch", 0, (10.73, 4.19)),
+        ("duplicate", 0, (11., 4.)),
+        ("duplicate", 0, (11.2, 4.)),
+        ("invalid-world", 9, (11., 4.)),
+        ("invalid-goal-nan", 0, (float("nan"), 4.)),
+        ("invalid-goal-inf", 0, (float("inf"), 4.))))
     device_queries = tuple(DeviceRouteQuery(query.candidate_id,
         query.snapshot_id, query.world, query.slot) for query in queries)
     goals = torch.tensor([query.goal_xy for query in queries], dtype=env.policy_pose.dtype)
-    learned_cost = torch.full((env.planner.nx, env.planner.ny), .2,
-                              dtype=env.policy_pose.dtype)
+    learned_cost = torch.arange(env.planner.nx, dtype=env.policy_pose.dtype)[:, None]
+    learned_cost = learned_cost.expand(env.planner.nx, env.planner.ny).clone() * .05
 
     # This guard spans the real evaluator, including TensorADStar planning,
     # endpoint/collision checks, and cost integration. Projection is allowed
@@ -630,10 +699,12 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
     with _NoHostTensorProjection(), _NoHostScalarSync():
         batch = evaluate_device_routes(env, device_queries, goals,
             learned_traversal_cost=learned_cost,
-            learned_cost_provenance="projection-guard-contract")
+            learned_cost_provenance="projection-guard-contract",
+            endpoint_tolerance_m=.01)
     device = batch.project_results()
     legacy = evaluate_routes(env, queries, learned_traversal_cost=learned_cost,
-        learned_cost_provenance="projection-guard-contract")
+        learned_cost_provenance="projection-guard-contract",
+        endpoint_tolerance_m=.01)
 
     assert [result.status for result in device] == [result.status for result in legacy]
     assert [result.feasible for result in device] == [result.feasible for result in legacy]
@@ -644,7 +715,9 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
             assert len(left.path_points_m) == len(right.path_points_m)
             for left_point, right_point in zip(left.path_points_m, right.path_points_m):
                 assert left_point == pytest.approx(right_point, abs=1e-6)
-        assert left.weighted_cost == pytest.approx(right.weighted_cost, abs=1e-6)
+        if left.weighted_cost is not None or right.weighted_cost is not None:
+            assert left.weighted_cost is not None and right.weighted_cost is not None
+            assert left.weighted_cost == pytest.approx(right.weighted_cost, abs=1e-6)
         assert left.cost_provenance.startswith("projection-guard-contract")
         assert right.cost_provenance.startswith("projection-guard-contract")
         assert left.cost_units == right.cost_units
@@ -654,6 +727,57 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
             expected_error = math.dist(endpoint, goal)
             assert batch.endpoint_error_m[index].item() == pytest.approx(
                 expected_error, abs=1e-6)
+    assert batch.path_xy.shape[1] == env.planner.max_points + 1
+
+    # Also check bump-only path integration without a learned raster.
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        bump_batch = evaluate_device_routes(env, device_queries[:2], goals[:2])
+    bump_device = bump_batch.project_results()
+    bump_legacy = evaluate_routes(env, queries[:2])
+    for left, right in zip(bump_device, bump_legacy):
+        assert left.status == right.status
+        assert left.feasible == right.feasible
+        if left.weighted_cost is not None and right.weighted_cost is not None:
+            assert left.weighted_cost == pytest.approx(right.weighted_cost, abs=1e-6)
+
+    # A synthetic observed circle over the robot start exercises the planner's
+    # blocked-start/escape contract and explicit endpoint collision checks.
+    obstacles = torch.zeros((6, 1, 3), dtype=env.policy_pose.dtype)
+    obstacles[3, 0, :2] = env.policy_pose[0, 3, :2]
+    obstacles[3, 0, 2] = .25
+    original_obstacles = env._perceived_robot_obstacles
+    env._perceived_robot_obstacles = lambda: obstacles
+    escape_query = RouteQuery("blocked-start-escape", "route-parity:escape",
+                              0, 3, (11.2, 4.))
+    escape_device_query = DeviceRouteQuery(escape_query.candidate_id,
+        escape_query.snapshot_id, escape_query.world, escape_query.slot)
+    escape_goal = torch.tensor([escape_query.goal_xy], dtype=env.policy_pose.dtype)
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        escape_batch = evaluate_device_routes(env, (escape_device_query,), escape_goal)
+    escape_device, = escape_batch.project_results()
+    escape_legacy, = evaluate_routes(env, (escape_query,))
+    env._perceived_robot_obstacles = original_obstacles
+    assert escape_device.status == escape_legacy.status
+    assert escape_device.feasible == escape_legacy.feasible
+    assert escape_device.path_points_m == escape_legacy.path_points_m
+    assert escape_device.weighted_cost == escape_legacy.weighted_cost
+
+    # Nonfinite robot state is rejected identically before route selection.
+    original_x = env.policy_pose[0, 3, 0].clone()
+    for nonfinite_x in (float("nan"), float("inf")):
+        env.policy_pose[0, 3, 0] = nonfinite_x
+        state_query = RouteQuery("nonfinite-start", "route-parity:state",
+                                 0, 3, (11.2, 4.))
+        state_device_query = DeviceRouteQuery(state_query.candidate_id,
+            state_query.snapshot_id, state_query.world, state_query.slot)
+        state_goal = torch.tensor([state_query.goal_xy], dtype=env.policy_pose.dtype)
+        with _NoHostTensorProjection(), _NoHostScalarSync():
+            state_batch = evaluate_device_routes(env, (state_device_query,), state_goal)
+        state_device, = state_batch.project_results()
+        state_legacy, = evaluate_routes(env, (state_query,))
+        assert state_device.status == state_legacy.status == "invalid"
+        assert not state_device.feasible and not state_legacy.feasible
+    env.policy_pose[0, 3, 0] = original_x
 
 
 def test_live_route_candidate_scorer_and_sampler_path_has_no_projection():
@@ -664,6 +788,7 @@ def test_live_route_candidate_scorer_and_sampler_path_has_no_projection():
     observation = env.observe()
     safe = build_safe_action_candidates(env, observation, world=0, slot=3,
                                         episode_id="live-device-route")
+    raster, globals_ = _snapshot_tensors(safe.observation, device=env.device)
     graph = build_legal_pose_graph(env, slot=3)
     target_rows = {int(safe.table.features[i][1]): safe.table.features[i]
                    for i in range(4) if safe.table.valid_mask[i]
@@ -679,7 +804,7 @@ def test_live_route_candidate_scorer_and_sampler_path_has_no_projection():
             continue_index=None, oracle_capacity=len(specs),
             learned_traversal_cost=None, learned_cost_scale=1.)
         result = score_candidates("C1", make_meco_track("C1").eval(),
-            raster=observation, globals_=torch.zeros((1, 7)),
+            raster=raster, globals_=globals_,
             table=candidate_set.table,
             candidate_batch=candidate_set.device_batch,
             route_cost=candidate_set.route_cost_points[None],
