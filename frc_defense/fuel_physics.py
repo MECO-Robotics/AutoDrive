@@ -85,6 +85,7 @@ class FuelPhysics:
     def __init__(self, sim, piece_pos, piece_vel, config=None):
         self.sim = sim
         self.config = FuelPhysicsConfig(**config) if isinstance(config, dict) else (config or FuelPhysicsConfig())
+        self._gpu_qualifying = bool(self.config.gpu_qualifying)
         self.piece_pos, self.piece_vel = piece_pos, piece_vel
         if piece_pos.ndim != 3 or piece_pos.shape[-1] != 2 or piece_vel.shape != piece_pos.shape:
             raise ValueError("piece positions and velocities must be [world,piece,2]")
@@ -137,7 +138,10 @@ class FuelPhysics:
 
     def _validate_qualifying_backend(self):
         """Keep the qualifying path pinned to native HIP after construction."""
-        if not self.config.gpu_qualifying:
+        if self.config.gpu_qualifying != self._gpu_qualifying:
+            raise RuntimeError(
+                "fuel physics qualification mode cannot change after construction")
+        if not self._gpu_qualifying:
             return
         if (self.device.type != "cuda" or self.device.index is None or
                 torch.version.hip is None or self.config.backend != "hip" or
@@ -285,7 +289,7 @@ class FuelPhysics:
         return changed
 
     def _build_pairs(self, free):
-        if self.config.gpu_qualifying:
+        if self._gpu_qualifying:
             raise RuntimeError(
                 "GPU-qualifying fuel physics cannot use Torch CPU pair generation")
         c = self.config
@@ -461,7 +465,7 @@ class FuelPhysics:
         s.velocity.add_(robot_delta)
 
     def _torch_substep(self, free, dt):
-        if self.config.gpu_qualifying:
+        if self._gpu_qualifying:
             raise RuntimeError(
                 "GPU-qualifying fuel physics cannot use the Torch reference solver")
         moving = (self.vel.norm(dim=-1)>=self.config.sleep_speed) | (self.angular.norm(dim=-1)>=self.config.sleep_angular_speed)
