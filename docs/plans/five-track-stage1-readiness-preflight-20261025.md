@@ -16,7 +16,15 @@ This tranche can be implemented and reviewed in a separate worktree while the li
 
 ## Exact implementation paths
 
-1. `frc_defense/meco_qualification.py`
+1. `frc_defense/meco_prediction_contract.py` (new pure metadata module)
+   - Move the canonical prediction-contract constants and `prediction_contract(mode, horizon_s=None)` metadata builder here. Use only Python standard-library imports; this module must not import Torch, `meco_tracks`, simulator code, or device/runtime adapters.
+   - Preserve the exact current return values, accepted modes, validation errors, horizon normalization, and model/prediction metadata for `current`, `cv`, and `multi_model_v1`. This is a code relocation only; do not change prediction behavior or protocol identity.
+
+2. `frc_defense/meco_tracks.py`
+   - Import/re-export the pure contract constants and builder from `meco_prediction_contract.py`; keep existing public names and call signature stable for training/evaluation callers.
+   - Remove the duplicate local `prediction_contract` definitions after confirming they encode the same canonical contract. Do not alter opponent prediction execution, model inference, or device behavior.
+
+3. `frc_defense/meco_qualification.py`
    - Add a `preflight-stage1` CLI operation that consumes explicit paths to the calibrated protocol, a validated Phase 0 evidence index, a qualification campaign manifest, and exactly five per-track checkpoint manifests (`A1`, `A2`, `A3`, `C1`, `C2`). Require caller-supplied `--protected-campaign-root` and `--protected-checkpoint-root` entries for every active/protected root; also add campaign/checkpoint roots declared by the validated campaign manifest to the protected set. The precise JSON fields should reuse existing canonical validators and schemas rather than introduce parallel definitions.
    - Validate the protocol with the existing `_validate_v2_protocol` contract for target `pickup_simple`; require the exact v5 GPU-bootstrap version and implementation ID. Reject v1-v4, wrong scenario, an unselected/invalid D1/D2 reference, malformed protocol digest, and source identity disagreement.
    - Verify the Phase 0 index refers to immutable, digest-valid effective freeze/partition evidence, the approved score-estimand review, complete D0 and matched-reference calibration bundles, and a reviewed margin decision bound to those exact digests. This command verifies supplied artifacts; it does not create or bless human approvals.
@@ -25,12 +33,12 @@ This tranche can be implemented and reviewed in a separate worktree while the li
    - Implement this as a metadata-only path over explicitly allowlisted immutable JSON evidence. Do not deserialize `.pt` checkpoints, initialize PyTorch/ROCm/CUDA, import simulator/runtime adapters, acquire device leases, or open checkpoint files. Checkpoint digests are metadata strings only: validate their syntax, uniqueness, and equality where manifests bind them, but do not claim the checkpoint bytes were opened or rehashed. The report must say `metadata_consistent_only` and distinguish declared checkpoint digests from byte-verified content.
    - Enforce filesystem isolation using canonical, resolved paths (resolve symlinks before every containment decision). Resolve all caller-supplied protected roots before opening any input; fail closed if a required protected root is missing or cannot be resolved. Then reject **every input path and any referenced evidence path** that resolves inside any campaign or checkpoint root, including the active r4 root and its checkpoint descendants. Parse only allowlisted manifests outside protected roots, add their declared campaign/checkpoint roots to the protected set, and check every referenced path against the expanded set before opening it. Reject an output path that resolves inside any campaign/checkpoint root, including via symlinked parent or destination. Also reject input/output aliasing and refuse an existing non-identical output. Do not open a path until its canonical resolved location has passed the relevant containment checks. Write only to an explicit destination outside all such roots.
 
-2. `docs/MECO_QUALIFICATION.md`
+4. `docs/MECO_QUALIFICATION.md`
    - Document the metadata-only command and its exact limits.
    - Correct the Stage 1 promotion instructions so the required protocol is explicitly v5 GPU-bootstrap with implementation ID `meco-v4-cluster-episode-device-percentile-v1`; retain v1-v4 as historical/diagnostic only for this gate.
    - State that preflight readiness is not evaluation, qualification, or permission to use GPUs while the current training campaign is active.
 
-3. `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md`
+5. `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md`
    - Record only the code capability after it is integrated and reviewed. Keep the campaign, Phase 0, simulator, five track qualification, matched outcomes, dashboard/replay, and whole-plan status open until their own evidence exists.
 
 ## Required behavior and invariants
@@ -52,8 +60,10 @@ This tranche can be implemented and reviewed in a separate worktree while the li
 3. Static review confirms an internally consistent metadata set can at most produce `ready: true` with the explicit `metadata_consistent_only` scope label; checkpoint digests are declarations only, and no checkpoint bytes, model execution, outcome, curriculum-state, or promotion claim can arise from the command.
 4. Static review confirms malformed digests, duplicate policy manifests, source/config/protocol mismatches, overlap in split seeds, a changed scenario version, and a non-frozen comparator all fail closed.
 5. Path review covers direct and symlinked input/output paths, symlinked parent directories, and referenced paths: any canonical path inside active or configured campaign/checkpoint roots is rejected before opening; outputs cannot resolve into those roots; unresolved roots fail closed; input/output aliases are rejected.
-6. The CLI documentation states all required inputs, output schema, side-effect boundary, and examples of blocked and metadata-ready outcomes without presenting example artifacts as real evidence.
-7. No tests, simulator, training, calibration, GPU, checkpoint byte access/deserialization, dashboard, or replay operation is run in this tranche. If a later implementation change modifies simulated behavior, follow project `AGENTS.md` and run its required seeded simulator evaluation and current-dashboard replay workflow in a separately authorized post-training window.
+6. Static import/call-site inspection confirms `meco_qualification.py` gets the prediction-contract builder from the pure module and no longer reaches `meco_tracks` for protocol metadata; `meco_tracks.py` delegates/re-exports the same implementation. The pure module's imports are limited to the standard library. Do not execute module imports to verify this boundary.
+7. Static inspection of the before/after definitions confirms the contract constants and builder semantics are relocated unchanged, with no prediction/runtime/device behavior change. No tests are run for this plan tranche.
+8. The CLI documentation states all required inputs, output schema, side-effect boundary, and examples of blocked and metadata-ready outcomes without presenting example artifacts as real evidence.
+9. No tests, simulator, training, calibration, GPU, checkpoint byte access/deserialization, dashboard, or replay operation is run in this tranche. If a later implementation change modifies simulated behavior, follow project `AGENTS.md` and run its required seeded simulator evaluation and current-dashboard replay workflow in a separately authorized post-training window.
 
 ## Explicit deferrals
 
