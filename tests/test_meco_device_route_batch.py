@@ -1,5 +1,6 @@
 import pytest
 import math
+import time
 import torch
 
 from frc_defense.experimental_route_evaluation import (
@@ -8,9 +9,16 @@ from frc_defense.experimental_route_evaluation import (
     MAX_ROUTE_QUERY_BATCH,
     evaluate_device_route_chunks,
 )
-from frc_defense.meco_candidates import DeviceCandidateBatch, _goal_nodes_batch
+import frc_defense.meco_candidates as meco_candidates
+from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
+                                         _goal_nodes_batch)
 from frc_defense.meco_track_training import _d1_d2_scores
 from types import SimpleNamespace
+from frc_defense.learning_contract import CandidateTable
+from frc_defense.meco_tracks import (EXTRA_FEATURES, SAFE_ACTION_FEATURES,
+                                     ProductionMecoAdapter, SafeActionCandidates,
+                                     make_meco_track,
+                                     score_candidates)
 
 
 def test_device_route_batch_keeps_a_fixed_tensor_contract():
@@ -107,6 +115,176 @@ def test_device_candidate_batch_gathers_one_compact_host_dispatch_payload():
     assert payload.shape == (1, 10)
     assert payload[0, :3].tolist() == [0.0, 4.0, -1.0]
     assert batch.candidate_features.shape == (1, 1, 40)
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+def test_production_adapter_consumes_device_candidates_without_host_mask_projection(track):
+    ids = ("candidate:valid", "candidate:masked")
+    queries = tuple(DeviceRouteQuery(item, "episode:4", 0, 3) for item in ids)
+    routes = DeviceRouteBatch(
+        queries=queries,
+        status_code=torch.tensor([DeviceRouteBatch.AT_GOAL, DeviceRouteBatch.NO_PATH]),
+        feasible=torch.tensor([True, False]),
+        path_xy=torch.tensor([[[1.0, 2.0]], [[0.0, 0.0]]]),
+        path_length=torch.tensor([1, 0]),
+        distance_m=torch.tensor([0.0, float("inf")]),
+        endpoint_error_m=torch.tensor([0.0, float("inf")]),
+        weighted_cost_grid_edges=torch.tensor([0.0, float("inf")]),
+        candidate_index=torch.tensor([0, 1]),
+    )
+    features = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    raw = torch.zeros((1, 2, len(features)))
+    batch = DeviceCandidateBatch(
+        candidate_ids=ids,
+        feature_names=features,
+        candidate_index=torch.tensor([0, 1]),
+        action_index=torch.tensor([4, 5]),
+        target_track_index=torch.tensor([-1, -1]),
+        target_xy=torch.zeros((2, 2)),
+        goal_xy=torch.zeros((2, 2)),
+        goal_heading=torch.zeros(2),
+        route_override_flags=torch.zeros((2, 2), dtype=torch.bool),
+        raw_features=raw,
+        missing_mask=torch.zeros_like(raw),
+        valid_mask=torch.tensor([[True, False]]),
+        eta_s=torch.tensor([[0.0, 0.0]]),
+        route_cost_points=torch.tensor([[0.0, 0.0]]),
+        risk_cost_points=torch.tensor([[0.0, 0.0]]),
+        route_batch=routes,
+        fallback_index=torch.tensor(0),
+    )
+    table = CandidateTable("episode:4", ids,
+        tuple(tuple(None for _ in features) for _ in ids), (True, True), features)
+
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.checkpoint_sha256 = "a" * 64
+    adapter.protocol_id = "contract-test"
+    adapter._request_sequence = 0
+    adapter._generation_id = "generation-contract-test"
+    adapter.next_request_identity = lambda: (1, adapter._generation_id)
+    adapter._broker = SimpleNamespace(counters=lambda: {})
+    submitted = {}
+    adapter.submit_inference = lambda request, inputs: submitted.update(
+        request=request, inputs=inputs) or object()
+    adapter.poll_inference = lambda request, handle: None
+
+    result = score_candidates(track, adapter,
+        raster=torch.zeros((1, 6, 4, 4)),
+        globals_=torch.zeros((1, 7)), table=table, candidate_batch=batch,
+        route_cost=batch.route_cost_points, risk_cost=batch.risk_cost_points,
+        observation_timestamp=1.0,
+        capture_monotonic=time.monotonic() - .01)
+
+    assert submitted["request"].candidate_support_mode == "device-mask"
+    assert submitted["request"].valid_mask == ()
+    assert torch.equal(submitted["inputs"]["candidate_features"], batch.candidate_features)
+    if track == "C2":
+        assert torch.equal(submitted["inputs"]["__candidate_valid_mask"], batch.valid_mask)
+    else:
+        assert "__candidate_valid_mask" not in submitted["inputs"]
+    assert result["inference_status"] == "deterministic_fallback"
+    assert torch.isfinite(result["logits"][0, 0])
+    assert torch.isneginf(result["logits"][0, 1])
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+def test_device_candidate_builder_feeds_scorer_without_materializing_feature_rows(
+        monkeypatch, track):
+    count = 8
+    candidate_count = count + 1
+    feature_names = tuple(SAFE_ACTION_FEATURES)
+    ids = tuple(f"action:{index}" for index in range(count))
+    feature_rows = []
+    for index in range(count):
+        row = [0.] * len(feature_names)
+        row[0] = float(index)
+        row[2], row[3] = float(index), 1.
+        row[4] = 0.
+        row[5] = float(index)
+        row[6], row[7] = 10., 6.
+        feature_rows.append(tuple(row))
+    table = CandidateTable("episode:builder", ids, tuple(feature_rows),
+        tuple(True for _ in ids), feature_names)
+    base = SafeActionCandidates(SimpleNamespace(snapshot_id="episode:builder"),
+        table, "action:7", tuple(range(count)))
+    env = SimpleNamespace(
+        device=torch.device("cpu"),
+        sim=SimpleNamespace(
+            pose=torch.zeros((1, 4, 3)), speed=torch.ones((1, 4)),
+            omega_limit=torch.ones((1, 4)),
+        ),
+        dt=.02,
+        track_pos=torch.zeros((1, 4, 2, 2)),
+        policy_pose=torch.zeros((1, 4, 3)),
+        track_confidence=torch.ones((1, 4, 2)),
+        track_age=torch.zeros((1, 4, 2)),
+        opponent_pose=torch.zeros((1, 4, 3)),
+        opponent_valid=torch.ones((1, 4), dtype=torch.bool),
+    )
+    env._perceived_fuel = lambda _slot: (
+        torch.zeros((1, 2, 2)), torch.zeros((1, 2, 2)),
+        torch.zeros((1, 2), dtype=torch.bool))
+
+    def fake_geometry(_env, _graph, _specs, fuel_xy, _available, _base_valid):
+        headings = torch.zeros(candidate_count)
+        return {"collect": torch.zeros(candidate_count, dtype=torch.bool),
+            "targets": torch.stack((torch.arange(candidate_count).float(),
+                                    torch.ones(candidate_count)), -1),
+            "headings": headings, "heading_bins": torch.zeros(candidate_count, dtype=torch.long),
+            "nodes": torch.arange(candidate_count),
+            "allowed": torch.ones(candidate_count, dtype=torch.bool),
+            "capture_inside": torch.ones(candidate_count, dtype=torch.bool)}
+
+    def fake_routes(_env, queries, _goals, **_kwargs):
+        route_count = len(queries)
+        feasible = torch.tensor([query.candidate_id not in
+            ("action:1", "continue:action:7") for query in queries])
+        return DeviceRouteBatch(
+            queries=tuple(queries),
+            status_code=torch.where(feasible,
+                torch.full((route_count,), DeviceRouteBatch.AT_GOAL),
+                torch.full((route_count,), DeviceRouteBatch.NO_PATH)),
+            feasible=feasible,
+            path_xy=torch.zeros((route_count, 1, 2)),
+            path_length=feasible.to(torch.long),
+            distance_m=torch.where(feasible, torch.ones(route_count), torch.zeros(route_count)),
+            endpoint_error_m=torch.zeros(route_count),
+            weighted_cost_grid_edges=torch.zeros(route_count),
+            candidate_index=torch.arange(route_count),
+        )
+
+    monkeypatch.setattr(meco_candidates, "_candidate_geometry_device", fake_geometry)
+    monkeypatch.setattr(meco_candidates, "evaluate_device_route_chunks", fake_routes)
+    monkeypatch.setattr(meco_candidates, "_forecast_risk_batch_device",
+        lambda _env, goals, _horizons, available, _mode: (
+            torch.zeros_like(goals), available,
+            torch.ones_like(available), torch.zeros(candidate_count)))
+    commitment = CandidateCommitment("action:7", 7, 0, None, 0, 20)
+    candidate_set = meco_candidates._build_device_candidate_set(env, base,
+        SimpleNamespace(resolution_m=.5),
+        [(index, 0, 0., 0., None) for index in range(count)] +
+        [(7, 0, 0., 0., None)], {},
+        candidate_k=count, action_ticks=1, prediction_mode="current",
+        active_commitment=commitment, continue_index=count, oracle_capacity=count,
+        learned_traversal_cost=None, learned_cost_scale=1.)
+
+    assert candidate_set.device_batch is not None
+    assert all(value is None for row in candidate_set.table.features for value in row)
+    assert candidate_set.table.valid_mask == tuple(True for _ in range(candidate_count))
+    assert candidate_set.device_batch.valid_mask.tolist() == [
+        [True, False] + [True] * 6 + [False]]
+    switch_column = candidate_set.table.feature_names.index("commitment_switch_cost")
+    assert candidate_set.device_batch.raw_features[0, :, switch_column].tolist() == [
+        0.] * candidate_count
+    model = make_meco_track(track).eval()
+    result = score_candidates(track, model,
+        raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+        table=candidate_set.table, candidate_batch=candidate_set.device_batch,
+        route_cost=candidate_set.route_cost_points[None],
+        risk_cost=candidate_set.risk_cost_points[None])
+    assert torch.isfinite(result["logits"][0, 0])
+    assert torch.isneginf(result["logits"][0, 1])
 
 
 def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
@@ -206,3 +384,64 @@ def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():
     assert centers[0].tolist() == [.5, .5]
     assert bins.tolist() == [2, 0]
     assert valid.tolist() == [True, False]
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+def test_c_track_scorer_consumes_device_candidate_features_and_mask(track):
+    feature_names = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    ids = ("collect:track:0", "hold")
+    route = DeviceRouteBatch(
+        queries=tuple(DeviceRouteQuery(item, "ep:1", 0, 3) for item in ids),
+        status_code=torch.tensor([3, 2]), feasible=torch.tensor([True, False]),
+        path_xy=torch.zeros((2, 1, 2)), path_length=torch.tensor([1, 0]),
+        distance_m=torch.tensor([1., 0.]), endpoint_error_m=torch.zeros(2),
+        weighted_cost_grid_edges=torch.zeros(2), candidate_index=torch.arange(2))
+    batch = DeviceCandidateBatch(
+        candidate_ids=ids, feature_names=feature_names,
+        candidate_index=torch.arange(2), action_index=torch.tensor([0, 7]),
+        target_track_index=torch.tensor([0, -1]), target_xy=torch.zeros((2, 2)),
+        goal_xy=torch.zeros((2, 2)), goal_heading=torch.zeros(2),
+        route_override_flags=torch.zeros((2, 2), dtype=torch.bool),
+        raw_features=torch.zeros((1, 2, 20)), missing_mask=torch.zeros((1, 2, 20)),
+        valid_mask=torch.tensor([[True, False]]), eta_s=torch.tensor([[.2, 0.]]),
+        route_cost_points=torch.tensor([[.01, 0.]]),
+        risk_cost_points=torch.zeros((1, 2)), route_batch=route,
+        fallback_index=torch.tensor(0))
+    table = CandidateTable("ep:1", ids,
+        (tuple(None for _ in feature_names), tuple(None for _ in feature_names)),
+        (True, True), feature_names)
+    model = make_meco_track(track)
+    raster = torch.zeros((1, 6, 16, 16))
+    globals_ = torch.zeros((1, 7))
+
+    result = score_candidates(track, model, raster=raster, globals_=globals_,
+        table=table, candidate_batch=batch,
+        route_cost=torch.zeros((1, 2)), risk_cost=torch.zeros((1, 2)))
+
+    assert result["logits"].shape == (1, 2)
+    assert torch.isfinite(result["logits"][0, 0])
+    assert torch.isneginf(result["logits"][0, 1])
+
+
+def test_c2_context_reduction_uses_exact_candidate_mask_and_tolerates_empty_support():
+    torch.manual_seed(17)
+    model = make_meco_track("C2").eval()
+    raster = torch.randn((1, 6, 16, 16))
+    globals_ = torch.randn((1, 7))
+    hidden = torch.randn((1, 64))
+    one = torch.randn((1, 1, 40))
+    with_two = torch.cat((one, torch.randn((1, 1, 40))), dim=1)
+    single_output = model(raster, globals_, one, hidden)
+    masked_output = model(raster, globals_, with_two, hidden,
+                          candidate_mask=torch.tensor([[True, False]]))
+    empty_output = model(raster, globals_, with_two, hidden,
+                         candidate_mask=torch.tensor([[False, False]]))
+
+    torch.testing.assert_close(masked_output["hidden"], single_output["hidden"])
+    torch.testing.assert_close(masked_output["candidate_utility"][:, :1],
+                               single_output["candidate_utility"])
+    assert torch.isfinite(empty_output["hidden"]).all()
+    assert torch.isfinite(empty_output["candidate_utility"]).all()
+    with pytest.raises(ValueError, match="candidate mask"):
+        model(raster, globals_, with_two, hidden,
+              candidate_mask=torch.ones((1, 2)))

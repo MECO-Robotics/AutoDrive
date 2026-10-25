@@ -17,12 +17,18 @@ import math
 import torch
 
 from .experimental_route_evaluation import (MAX_ROUTE_QUERY_BATCH, RouteQuery,
-    DeviceRouteBatch, DeviceRouteQuery, evaluate_device_routes, evaluate_routes)
+    DeviceRouteBatch, DeviceRouteQuery, evaluate_device_routes,
+    evaluate_device_route_chunks, evaluate_routes)
 from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
     opponent_forecast, opponent_risk_penalty, prediction_contract, PREDICTION_MODES,
-    SAFE_ACTION_FEATURES, EXTRA_FEATURES)
+    candidate_feature_tensor,
+    SAFE_ACTION_FEATURES, EXTRA_FEATURES, PREDICTION_MAX_AGE_S,
+    PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_PENALTY_POINTS,
+    PREDICTION_THREAT_RADIUS_M, MULTIMODEL_MAX_HORIZON_S,
+    MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
+    MULTIMODEL_DAMPING_PER_S, MULTIMODEL_HYPOTHESES)
 
 
 ROUTE_COST_POINTS_PER_SECOND = 0.05
@@ -139,6 +145,9 @@ class DeviceCandidateBatch:
     risk_cost_points: torch.Tensor
     route_batch: DeviceRouteBatch
     fallback_index: torch.Tensor
+    forecast_xy: torch.Tensor | None = None
+    forecast_valid: torch.Tensor | None = None
+    capture_inside: torch.Tensor | None = None
 
     def __post_init__(self):
         count = len(self.candidate_ids)
@@ -176,11 +185,25 @@ class DeviceCandidateBatch:
                 raise ValueError(f"{name} must be floating [1,K]")
         if self.fallback_index.shape != () or self.fallback_index.dtype != torch.long:
             raise ValueError("fallback_index must be a scalar int64 tensor")
+        if self.forecast_xy is not None and self.forecast_xy.shape != (1, count, 2):
+            raise ValueError("forecast_xy must have shape [1,K,2]")
+        if self.forecast_valid is not None and (self.forecast_valid.shape != (1, count)
+                or self.forecast_valid.dtype != torch.bool):
+            raise ValueError("forecast_valid must be bool [1,K]")
+        if self.capture_inside is not None and (self.capture_inside.shape != (1, count)
+                or self.capture_inside.dtype != torch.bool):
+            raise ValueError("capture_inside must be bool [1,K]")
         tensors = (self.candidate_index, self.action_index,
             self.target_track_index, self.target_xy, self.goal_xy,
             self.goal_heading, self.route_override_flags, self.raw_features,
             self.missing_mask, self.valid_mask, self.eta_s,
             self.route_cost_points, self.risk_cost_points, self.fallback_index)
+        if self.forecast_xy is not None:
+            tensors += (self.forecast_xy,)
+        if self.forecast_valid is not None:
+            tensors += (self.forecast_valid,)
+        if self.capture_inside is not None:
+            tensors += (self.capture_inside,)
         if any(tensor.device != device for tensor in tensors):
             raise ValueError("all device candidate tensors must share one device")
         if (self.route_batch.device != device or len(self.route_batch.queries) != count or
@@ -463,6 +486,389 @@ def _candidate_geometry_device(env, graph, specs, fuel_xy, fuel_available,
         "capture_inside": capture}
 
 
+def _forecast_risk_batch_device(env, goals, horizons, route_available, mode):
+    """Tensor form of the shared bounded opponent forecast and risk contract."""
+    slot = 3
+    position = env.opponent_pose[0, slot, :2].to(torch.float64)
+    velocity = env.opponent_velocity[0, slot, :2].to(torch.float64)
+    age = env.opponent_age[0, slot].to(torch.float64)
+    omega = (env.opponent_velocity[0, slot, 2].to(torch.float64)
+             if env.opponent_velocity.shape[-1] > 2 else position.new_zeros(()))
+    goals = goals.to(torch.float64)
+    horizons = horizons.to(torch.float64)
+    route_available = route_available.to(device=goals.device, dtype=torch.bool)
+    pose_valid = env.opponent_valid[0, slot] & torch.isfinite(position).all()
+    horizon = torch.nan_to_num(horizons, nan=0., posinf=0., neginf=0.).clamp_min(0.)
+    fresh = (pose_valid & torch.isfinite(age) & (age >= 0.) &
+             (age <= PREDICTION_MAX_AGE_S) & torch.isfinite(velocity).all())
+    safe_position = torch.nan_to_num(position)
+    safe_velocity = torch.nan_to_num(velocity)
+    speed = torch.linalg.vector_norm(safe_velocity).clamp_min(1e-8)
+    velocity = safe_velocity * torch.clamp(PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+    if mode == "multi_model_v1":
+        t = horizon.clamp(max=MULTIMODEL_MAX_HORIZON_S)
+        rate = torch.nan_to_num(omega, nan=0., posinf=0., neginf=0.).abs().clamp(
+            MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S)
+        theta = rate * t
+        damped_t = -torch.expm1(-MULTIMODEL_DAMPING_PER_S * t) / MULTIMODEL_DAMPING_PER_S
+        vx, vy = velocity.unbind()
+        endpoints = [safe_position[None, :] + t[:, None] * velocity[None, :]]
+        for sign in (1., -1.):
+            angle = theta * sign
+            sin_a, cos_a = torch.sin(angle), torch.cos(angle)
+            dx = (vx * sin_a + vy * (cos_a - 1.)) / (rate * sign)
+            dy = (vx * (1. - cos_a) + vy * sin_a) / (rate * sign)
+            endpoints.append(safe_position[None, :] + torch.stack((dx, dy), -1))
+        endpoints.append(safe_position[None, :] + damped_t[:, None] * velocity[None, :])
+        hypotheses = torch.stack(endpoints, dim=1)
+        weights = goals.new_tensor([weight for _, weight in MULTIMODEL_HYPOTHESES])
+        hypotheses = torch.where(fresh, hypotheses,
+            safe_position[None, None, :].expand_as(hypotheses))
+        prediction = (hypotheses * weights[None, :, None]).sum(-2)
+        distance = torch.linalg.vector_norm(hypotheses - goals[:, None, :], dim=-1)
+        penalty = PREDICTION_MAX_PENALTY_POINTS * (
+            (PREDICTION_THREAT_RADIUS_M - distance) /
+            PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+        risk = (penalty * weights[None, :]).sum(-1)
+    else:
+        prediction = (safe_position[None, :] if mode == "current" else
+                      safe_position[None, :] + horizon[:, None] * velocity[None, :])
+        prediction = prediction.expand_as(goals)
+        if mode != "current":
+            prediction = torch.where(fresh & route_available, prediction,
+                                     safe_position[None, :])
+        distance = torch.linalg.vector_norm(prediction - goals, dim=-1)
+        risk = PREDICTION_MAX_PENALTY_POINTS * (
+            (PREDICTION_THREAT_RADIUS_M - distance) /
+            PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    forecast_valid = pose_valid & route_available
+    risk = torch.where(forecast_valid, risk, torch.zeros_like(risk))
+    return prediction, forecast_valid, fresh.expand_as(route_available), risk
+
+
+def _device_candidate_ids(base, specs, continue_index, active_commitment):
+    base_tracks = {int(base.table.features[i][1]) for i in range(4)
+                   if base.table.features[i][1] is not None}
+    ids = []
+    for row_index, (action, variant, _forward, _lateral, target_track) in enumerate(specs):
+        is_continue = continue_index is not None and row_index == continue_index
+        if is_continue:
+            ids.append("continue:" + active_commitment.candidate_id)
+        elif target_track is not None:
+            ids.append(base.table.candidate_ids[action] if not variant and
+                target_track in base_tracks else
+                f"collect:track:{target_track}" if not variant else
+                f"collect:track:{target_track}:approach:{variant}")
+        else:
+            ids.append(base.table.candidate_ids[action] if not variant else
+                       f"{base.table.candidate_ids[action]}:approach:{variant}")
+    if len(set(ids)) != len(ids):
+        raise ValueError("device candidate specification produced duplicate IDs")
+    return tuple(ids)
+
+
+@torch.no_grad()
+def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
+        candidate_k, action_ticks, prediction_mode, active_commitment,
+        continue_index,
+        oracle_capacity, learned_traversal_cost, learned_cost_scale):
+    """Build Plan C policy tensors on env.device from stable host spec IDs."""
+    device = torch.device(env.device)
+    dtype = env.sim.pose.dtype
+    ids = _device_candidate_ids(base, specs, continue_index, active_commitment)
+    count = len(specs)
+    actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
+    track_values = [(-1 if row[4] is None else int(row[4])) for row in specs]
+    track_indices = torch.tensor(track_values, device=device, dtype=torch.long)
+    target_available = ((track_indices >= 0) &
+                        (track_indices < env.track_pos.shape[2]))
+    safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
+    base_track_ids = {int(base.table.features[i][1]) for i in range(4)
+                      if base.table.features[i][1] is not None}
+    extra_flags = torch.tensor([value >= 0 and value not in base_track_ids
+                                for value in track_values],
+                               device=device, dtype=torch.bool)
+    fuel_xy = env.track_pos[0, 3].index_select(0, safe_tracks)
+    sensed_points, _, sensed_mask = env._perceived_fuel(3)
+    sensed_points, sensed_mask = sensed_points[0], sensed_mask[0]
+    if sensed_points.shape[0]:
+        sensed_indices = track_indices.clamp(0, sensed_points.shape[0] - 1)
+        sensed_xy = sensed_points.index_select(0, sensed_indices)
+        sensed_available = sensed_mask.index_select(0, sensed_indices)
+        fuel_xy = torch.where(extra_flags[:, None], sensed_xy, fuel_xy)
+        target_available = torch.where(extra_flags, sensed_available,
+                                       target_available)
+    else:
+        target_available &= ~extra_flags
+    fuel_xy = torch.where(target_available[:, None], fuel_xy,
+                          torch.full_like(fuel_xy, float("nan")))
+    base_valid = torch.tensor(base.table.valid_mask, device=device, dtype=torch.bool)
+    geometry = _candidate_geometry_device(env, graph, specs, fuel_xy,
+                                          target_available, base_valid)
+    query_rows = tuple(DeviceRouteQuery(ids[index], base.observation.snapshot_id,
+        0, 3, bool(specs[index][0] < 4)) for index in range(count))
+    route_goals = torch.where(geometry["allowed"][:, None], geometry["targets"],
+                              torch.full_like(geometry["targets"], float("nan")))
+    route_full = evaluate_device_route_chunks(env, query_rows, route_goals,
+        goal_tolerance_m=graph.resolution_m * .72,
+        endpoint_tolerance_m=graph.resolution_m * .72,
+        learned_traversal_cost=learned_traversal_cost,
+        learned_cost_scale=learned_cost_scale,
+        learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
+    route_available = geometry["allowed"] & route_full.feasible
+    distance = torch.where(route_available, route_full.distance_m.to(dtype),
+                           torch.zeros(count, device=device, dtype=dtype))
+    heading_delta = geometry["headings"] - env.policy_pose[0, 3, 2]
+    turn = torch.atan2(torch.sin(heading_delta), torch.cos(heading_delta)).abs()
+    speed = env.sim.speed[0, 3].to(dtype).clamp_min(.1)
+    omega = env.sim.omega_limit[0, 3].to(dtype).clamp_min(.1)
+    eta_raw = distance / speed + turn.to(dtype) / omega + action_ticks * float(env.dt)
+    eta = torch.where(route_available, eta_raw, torch.zeros_like(eta_raw))
+    prediction, forecast_valid, _fresh, risk_raw = _forecast_risk_batch_device(
+        env, geometry["targets"], eta, route_available, prediction_mode)
+    risk = torch.where(forecast_valid, risk_raw.to(dtype), torch.zeros_like(eta))
+
+    base_values, base_missing = candidate_feature_tensor(base.table,
+        device=device, dtype=dtype)
+    raw = base_values.index_select(0, actions).clone()
+    missing = base_missing.index_select(0, actions).clone()
+    extra = extra_flags & geometry["collect"]
+    if sensed_points.shape[0]:
+        safe_points = torch.nan_to_num(sensed_points)
+        nearby = (((safe_points[:, None, :] - safe_points[None, :, :]).norm(dim=-1) < 1.25)
+                  & sensed_mask[None, :]).sum(-1).to(dtype)
+        distances = torch.linalg.vector_norm(fuel_xy - env.policy_pose[0, 3, :2], dim=-1)
+        confidence = env.track_confidence[0, 3].index_select(0, safe_tracks).clamp(0., 1.)
+        ages = env.track_age[0, 3].index_select(0, safe_tracks).clamp_min(0.)
+        nearby_value = nearby.index_select(0, track_indices.clamp(0, nearby.numel() - 1))
+        opponent_xy = torch.nan_to_num(env.opponent_pose[0, 3, :2])
+        opponent_gap = torch.linalg.vector_norm(fuel_xy - opponent_xy, dim=-1)
+        extra_missing_opponent = ~env.opponent_valid[0, 3]
+        raw[:, 1] = torch.where(extra, track_indices.to(dtype), raw[:, 1])
+        raw[:, 2:4] = torch.where(extra[:, None], fuel_xy, raw[:, 2:4])
+        target_delta = fuel_xy - env.policy_pose[0, 3, :2]
+        target_heading_bin = torch.round(torch.remainder(torch.atan2(
+            target_delta[:, 1], target_delta[:, 0]), 2. * math.pi) *
+            (8. / (2. * math.pi))).remainder(8).to(dtype)
+        raw[:, 4] = torch.where(extra, target_heading_bin, raw[:, 4])
+        raw[:, 8] = torch.where(extra, distances, raw[:, 8])
+        raw[:, 9] = torch.where(extra, nearby_value, raw[:, 9])
+        raw[:, 10] = torch.where(extra, confidence, raw[:, 10])
+        raw[:, 11] = torch.where(extra, ages, raw[:, 11])
+        raw[:, 12] = torch.where(extra & ~extra_missing_opponent, opponent_gap, raw[:, 12])
+        missing[:, 1] = torch.where(extra, torch.zeros_like(missing[:, 1]), missing[:, 1])
+        missing[:, 2:5] = torch.where(extra[:, None], torch.zeros_like(missing[:, 2:5]), missing[:, 2:5])
+        missing[:, 8:12] = torch.where(extra[:, None], torch.zeros_like(missing[:, 8:12]), missing[:, 8:12])
+        missing[:, 12] = torch.where(extra, extra_missing_opponent.to(dtype), missing[:, 12])
+    raw[:, 2:4] = geometry["targets"]
+    raw[:, 4] = geometry["heading_bins"].to(dtype)
+    raw[:, 13] = eta
+    missing[:, 13] = (~route_available).to(dtype)
+    continue_mask = torch.tensor([continue_index == i for i in range(count)],
+                                 device=device, dtype=torch.bool)
+    commitment_live = (route_available[continue_index] if continue_index is not None
+                       else torch.zeros((), device=device, dtype=torch.bool))
+    switch_cost = (commitment_live & ~continue_mask).to(dtype)
+    raw = torch.cat((raw, torch.stack((geometry["nodes"].clamp_min(0).to(dtype),
+        distance, risk, geometry["headings"].to(dtype),
+        continue_mask.to(dtype), switch_cost), dim=-1)), dim=-1)
+    extra_missing = torch.stack((geometry["nodes"] < 0, ~route_available,
+        ~forecast_valid, torch.zeros_like(route_available),
+        torch.zeros_like(route_available), torch.zeros_like(route_available)), dim=-1)
+    missing = torch.cat((missing, extra_missing.to(dtype)), dim=-1)
+    raw = torch.nan_to_num(raw, nan=0., posinf=0., neginf=0.)
+    policy_indices = list(range(candidate_k))
+    if continue_index is not None:
+        policy_indices.append(continue_index)
+    selected = torch.tensor(policy_indices, device=device, dtype=torch.long)
+    policy_ids = tuple(ids[index] for index in policy_indices)
+    policy_queries = tuple(query_rows[index] for index in policy_indices)
+    policy_routes = DeviceRouteBatch(policy_queries,
+        route_full.status_code.index_select(0, selected),
+        route_full.feasible.index_select(0, selected),
+        route_full.path_xy.index_select(0, selected),
+        route_full.path_length.index_select(0, selected),
+        route_full.distance_m.index_select(0, selected),
+        route_full.endpoint_error_m.index_select(0, selected),
+        route_full.weighted_cost_grid_edges.index_select(0, selected),
+        torch.arange(len(policy_indices), device=device, dtype=torch.long),
+        cost_provenance=route_full.cost_provenance)
+    valid = route_available.index_select(0, selected)[None]
+    policy_raw = raw.index_select(0, selected)[None]
+    policy_missing = missing.index_select(0, selected)[None]
+    route_points = (eta.index_select(0, selected) * ROUTE_COST_POINTS_PER_SECOND)[None]
+    risk_points = risk.index_select(0, selected)[None]
+    route_cost_for_fallback = route_points[0] + risk_points[0]
+    fallback_index = next((i for i, candidate_id in enumerate(policy_ids)
+                           if candidate_id == base.fallback_candidate_id), -1)
+    if fallback_index < 0:
+        fallback_index = next((i for i, candidate_id in enumerate(policy_ids)
+                               if candidate_id == "hold"), 0)
+    fallback = torch.tensor(fallback_index, device=device, dtype=torch.long)
+    fallback_valid = valid[0, fallback]
+    valid_cost = route_cost_for_fallback.masked_fill(~valid[0], float("inf"))
+    cheapest = valid_cost.argmin()
+    hold_index = next((i for i, candidate_id in enumerate(policy_ids)
+                       if candidate_id == "hold"), fallback_index)
+    fallback = torch.where(fallback_valid, fallback,
+        torch.where(valid[0, hold_index], torch.tensor(hold_index, device=device), cheapest))
+    feature_names = tuple(base.table.feature_names) + tuple(EXTRA_FEATURES)
+    placeholders = tuple(tuple(None for _ in feature_names) for _ in policy_ids)
+    table = CandidateTable(base.observation.snapshot_id, policy_ids, placeholders,
+        tuple(True for _ in policy_ids), feature_names,
+        route_costs=tuple(None for _ in policy_ids),
+        schema_version=base.table.schema_version,
+        context_digest=(hashlib.sha256(json.dumps({
+            "candidate_id": active_commitment.candidate_id,
+            "action_index": active_commitment.action_index,
+            "goal_variant": active_commitment.goal_variant,
+            "source_xy_m": active_commitment.source_xy_m,
+            "created_sequence": active_commitment.created_sequence,
+            "expires_sequence": active_commitment.expires_sequence},
+            sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            if active_commitment is not None else ""))
+    device_batch = DeviceCandidateBatch(policy_ids, feature_names,
+        torch.arange(len(policy_indices), device=device, dtype=torch.long),
+        actions.index_select(0, selected), track_indices.index_select(0, selected),
+        torch.nan_to_num(fuel_xy.index_select(0, selected)),
+        geometry["targets"].index_select(0, selected),
+        geometry["headings"].index_select(0, selected).to(dtype),
+        torch.stack((torch.tensor([bool(specs[i][1]) for i in policy_indices],
+                                  device=device),
+                     torch.tensor([continue_index == i for i in policy_indices],
+                                  device=device)), dim=-1),
+        policy_raw, policy_missing, valid, eta.index_select(0, selected)[None],
+        route_points, risk_points, policy_routes, fallback,
+        prediction.index_select(0, selected)[None],
+        forecast_valid.index_select(0, selected)[None],
+        geometry["capture_inside"].index_select(0, selected)[None])
+    oracle_mask = route_available & ~continue_mask
+    oracle_count = oracle_mask.sum()
+    requested_mask = route_available[:candidate_k]
+    requested_count = requested_mask.sum()
+    total_cost = eta * ROUTE_COST_POINTS_PER_SECOND + risk
+    oracle_cost_sum = torch.where(oracle_mask, total_cost,
+                                  torch.zeros_like(total_cost)).sum()
+    oracle_mean = oracle_cost_sum / oracle_count.clamp_min(1)
+    oracle_min = total_cost.masked_fill(~oracle_mask, float("inf")).amin()
+    selected_cost = total_cost[:candidate_k]
+    selected_cost_sum = torch.where(requested_mask, selected_cost,
+                                    torch.zeros_like(selected_cost)).sum()
+    selected_mean = selected_cost_sum / requested_count.clamp_min(1)
+    selected_min = selected_cost.masked_fill(~requested_mask, float("inf")).amin()
+    candidate_recall = {"candidate_capacity": candidate_k,
+        "prediction_mode": prediction_mode,
+        "reference_pool_capacity": oracle_capacity,
+        "valid_executable_candidates": requested_count,
+        "reference_scope": "independent_expanded_goal_oracle",
+        "within_candidate_pool_recall_measured": False,
+        "route_feasible_rows_in_reference_pool": oracle_count,
+        "oracle_route_evaluated": True,
+        "candidate_recall": torch.where(oracle_count > 0,
+            requested_count.to(dtype) / oracle_count.clamp_min(1).to(dtype),
+            torch.ones((), device=device, dtype=dtype)),
+        "oracle_min_route_cost_points": torch.where(oracle_count > 0,
+            oracle_min, torch.zeros_like(oracle_min)),
+        "oracle_mean_route_cost_points": oracle_mean,
+        "selected_min_route_cost_points": torch.where(requested_count > 0,
+            selected_min, torch.zeros_like(selected_min)),
+        "selected_mean_route_cost_points": selected_mean,
+        "recall_limitation": "bounded deterministic expanded-goal oracle; not a simulator-optimality oracle"}
+    route_records = tuple({"candidate_id": item, "candidate_row": index,
+                           "action_index": int(specs[policy_indices[index]][0]),
+                           "goal_variant": int(specs[policy_indices[index]][1])}
+                          for index, item in enumerate(policy_ids))
+    return RouteFeasibleCandidates(base.observation, table,
+        policy_ids[fallback_index] if fallback_index >= 0 else "hold",
+        tuple(int(specs[i][0]) for i in policy_indices), route_points[0],
+        risk_points[0], route_records, candidate_recall,
+        active_commitment, device_batch)
+
+
+def materialize_device_candidate_evidence(candidate_set: RouteFeasibleCandidates):
+    """Project candidate reports only after an action has been selected."""
+    batch = candidate_set.device_batch
+    if batch is None:
+        return candidate_set
+    raw = batch.raw_features[0].detach().to(device="cpu").tolist()
+    missing = batch.missing_mask[0].detach().to(device="cpu").tolist()
+    valid = batch.valid_mask[0].detach().to(device="cpu").tolist()
+    route_costs = batch.route_cost_points[0].detach().to(device="cpu").tolist()
+    rows = tuple(tuple(None if missing[i][j] > .5 else float(raw[i][j])
+                       for j in range(len(batch.feature_names)))
+                 for i in range(len(batch.candidate_ids)))
+    table = CandidateTable(candidate_set.table.snapshot_id, batch.candidate_ids,
+        rows, tuple(bool(value) for value in valid), batch.feature_names,
+        route_costs=tuple(float(value) for value in route_costs),
+        schema_version=candidate_set.table.schema_version,
+        context_digest=candidate_set.table.context_digest)
+    projected = batch.route_batch.project_results()
+    target_tracks = batch.target_track_index.detach().to(device="cpu").tolist()
+    target_xy = batch.target_xy.detach().to(device="cpu").tolist()
+    goal_xy = batch.goal_xy.detach().to(device="cpu").tolist()
+    headings = batch.goal_heading.detach().to(device="cpu").tolist()
+    eta = batch.eta_s[0].detach().to(device="cpu").tolist()
+    risk = batch.risk_cost_points[0].detach().to(device="cpu").tolist()
+    forecast_xy = (None if batch.forecast_xy is None else
+        batch.forecast_xy[0].detach().to(device="cpu").tolist())
+    forecast_valid = (None if batch.forecast_valid is None else
+        batch.forecast_valid[0].detach().to(device="cpu").tolist())
+    capture = (None if batch.capture_inside is None else
+        batch.capture_inside[0].detach().to(device="cpu").tolist())
+    old_records = candidate_set.route_records
+    records = []
+    for index, result in enumerate(projected):
+        old = old_records[index]
+        target_track = int(target_tracks[index])
+        valid_forecast = (forecast_valid is not None and bool(forecast_valid[index]))
+        source_xy = (tuple(float(value) for value in target_xy[index])
+                     if target_track >= 0 else None)
+        risk_value = float(risk[index]) if valid_forecast else None
+        records.append({**old,
+            "route_status": result.status,
+            "feasible": bool(valid[index]),
+            "route_feasible": bool(result.feasible),
+            "capture_estimate": {"status": ("inside_estimate" if capture is not None and capture[index]
+                else "outside_estimate" if capture is not None and target_track >= 0
+                else "not_applicable" if target_track < 0 else "unavailable"),
+                "basis": "device_candidate_geometry_contract",
+                "feasible": (True if target_track < 0 else
+                             bool(capture[index]) if capture is not None else False)},
+            "goal_xy_m": [float(value) for value in goal_xy[index]],
+            "source_fuel_xy_m": (None if source_xy is None else list(source_xy)),
+            "sensor_track_buffer_index": (target_track if target_track >= 0 else None),
+            "target_identity_execution": ("slot3_revalidated_track_terminal_bearing_with_native_geometric_capture"
+                if target_track >= 0 else "native_action_target"),
+            "target_track_snapshot_tolerance_m": 1.0 if target_track >= 0 else None,
+            "goal_heading_rad": float(headings[index]),
+            "legal_node_index": (None if rows[index][14] is None else
+                                 int(rows[index][14])),
+            "distance_m": result.distance_m,
+            "eta_s": float(eta[index]) if valid[index] else None,
+            "predicted_opponent_xy_m": (forecast_xy[index] if valid_forecast else None),
+            "opponent_prediction": {"xy": (forecast_xy[index] if valid_forecast else None),
+                "mode": candidate_set.candidate_recall.get("prediction_mode"),
+                "horizon_s": float(eta[index]) if valid[index] else None,
+                "fallback": None if valid_forecast else "no_finite_opponent_forecast"},
+            "endpoint_separation_m": (None if not valid_forecast else
+                math.hypot(goal_xy[index][0] - forecast_xy[index][0],
+                           goal_xy[index][1] - forecast_xy[index][1])),
+            "risk_penalty_points": risk_value,
+            "path_points_m": result.path_points_m,
+            "weighted_route_cost_grid_edges": result.weighted_cost,
+            "route_cost_units": result.cost_units,
+            "route_cost_provenance": result.cost_provenance})
+    recall = {}
+    for key, value in candidate_set.candidate_recall.items():
+        if isinstance(value, torch.Tensor):
+            value = value.detach().to(device="cpu").item()
+            if key in ("valid_executable_candidates", "route_feasible_rows_in_reference_pool"):
+                value = int(value)
+        recall[key] = value
+    return replace(candidate_set, table=table, route_records=tuple(records),
+                   candidate_recall=recall)
+
+
 def _endpoint_clear(env, xy, heading: float, *, intake_extended: bool):
     slot = 3
     length = env.sim.length[0, slot].clone()
@@ -664,6 +1070,28 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
     return result
 
 
+def _additional_sensed_target_specs(env, base: SafeActionCandidates):
+    """Return stable action/track identities without host feature-row building."""
+    base_track_ids = {int(base.table.features[i][1]) for i in range(4)
+                      if base.table.valid_mask[i] and
+                      base.table.features[i][1] is not None}
+    valid_collect = [i for i in range(4) if base.table.valid_mask[i]]
+    if not valid_collect:
+        return []
+    points, _, sensed = _world_zero_perceived_fuel(env)
+    distances = torch.linalg.vector_norm(points - env.policy_pose[0, 3, :2], dim=-1)
+    eligible = sensed.clone()
+    if base_track_ids:
+        ids = torch.tensor(sorted(base_track_ids), device=points.device, dtype=torch.long)
+        eligible[ids] = False
+    order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
+    # Track indices are host identity metadata for stable candidate IDs; all
+    # candidate coordinates and features remain tensors in the device path.
+    ordered = order[eligible[order]].detach().to(device="cpu").tolist()
+    action = valid_collect[0]
+    return [(action, None, int(track)) for track in ordered]
+
+
 @torch.no_grad()
 def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     graph: LegalPoseGraph, *, episode_id: str,
@@ -672,7 +1100,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                                     prediction_mode: str = "cv",
                                     learned_traversal_cost=None,
                                     learned_cost_scale: float = 1.0,
-                                    commitment: CandidateCommitment | None = None) -> RouteFeasibleCandidates:
+                                    commitment: CandidateCommitment | None = None,
+                                    device_resident: bool = False) -> RouteFeasibleCandidates:
     """Build the current bounded decision table and qualify every route row.
 
     Route feasibility uses a fresh uncached TensorADStar workspace over current
@@ -711,9 +1140,12 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
               (int(base.table.features[action][1])
                if action < 4 and base.table.features[action][1] is not None else None))
              for action in range(8)]
-    additional_targets = _additional_sensed_target_rows(env, base)
+    additional_targets = (_additional_sensed_target_specs(env, base)
+                          if device_resident else
+                          _additional_sensed_target_rows(env, base))
     for action, row, track in additional_targets:
-        target_rows[track] = row
+        if row is not None or device_resident:
+            target_rows[track] = row
         specs.append((action, 0, 0., 0., track))
     offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
                (.34, 0.), (-.34, 0.))
@@ -770,6 +1202,16 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             action = next((i for i in range(4) if base.table.valid_mask[i]), None)
             if action is not None:
                 specs.append((action, variant, forward, lateral, track))
+    if device_resident:
+        oracle_capacity = (8 + len(additional_targets) + 4 * len(offsets) +
+                           len(oracle_track_ids) * len(oracle_offsets))
+        return _build_device_candidate_set(env, base, graph, specs, target_rows,
+            candidate_k=candidate_k, action_ticks=action_ticks,
+            prediction_mode=prediction_mode, active_commitment=active_commitment,
+            continue_index=continue_index,
+            oracle_capacity=oracle_capacity,
+            learned_traversal_cost=learned_traversal_cost,
+            learned_cost_scale=learned_cost_scale)
     targets, headings, route_queries, goal_nodes = [], [], [], []
     capture_estimates = []
     hbins, requested, ids = [], [], []

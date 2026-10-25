@@ -94,6 +94,7 @@ class MecoInferenceRequest:
     input_contract_sha256: str = ""
     model_id: str = ""
     schema: str = MECO_INFERENCE_SCHEMA
+    candidate_support_mode: str = "table-mask"
 
     def __post_init__(self):
         if (self.schema != MECO_INFERENCE_SCHEMA or self.track not in MECO_TRACKS
@@ -117,13 +118,21 @@ class MecoInferenceRequest:
         if (not self.candidate_ids or any(not isinstance(item, str) or not item for item in self.candidate_ids)
                 or len(set(self.candidate_ids)) != len(self.candidate_ids)
                 or any(not shape or any(type(size) is not int or size <= 0 for size in shape)
-                       for shape in self.input_shapes)
-                or len(self.candidate_ids) != len(self.valid_mask)
-                or any(type(v) is not bool for v in self.valid_mask)
-                or not 0 <= self.fallback_index < len(self.candidate_ids)
-                or not self.valid_mask[self.fallback_index]):
+                       for shape in self.input_shapes)):
             raise ValueError("candidate ordering, mask, or deterministic fallback is invalid")
-        expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
+        if self.candidate_support_mode == "table-mask":
+            if (len(self.candidate_ids) != len(self.valid_mask)
+                    or any(type(v) is not bool for v in self.valid_mask)
+                    or not 0 <= self.fallback_index < len(self.candidate_ids)
+                    or not self.valid_mask[self.fallback_index]):
+                raise ValueError("candidate ordering, mask, or deterministic fallback is invalid")
+            expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
+        elif self.candidate_support_mode == "device-mask":
+            if self.valid_mask or self.fallback_index != -1:
+                raise ValueError("device candidate support cannot contain a host mask or fallback")
+            expected_mask_digest = ordered_candidate_order_digest(self.candidate_ids)
+        else:
+            raise ValueError("unsupported candidate support mode")
         if self.candidate_mask_digest != expected_mask_digest:
             raise ValueError("candidate IDs/mask digest does not match request ordering")
         from .meco_input_provenance import input_contract_digest
@@ -164,12 +173,21 @@ def ordered_candidate_mask_digest(candidate_ids, valid_mask):
                            ensure_ascii=False).encode()).hexdigest()
 
 
+def ordered_candidate_order_digest(candidate_ids):
+    """Digest stable row identity when the authoritative mask stays on device."""
+    payload = {"candidate_ids": tuple(candidate_ids),
+               "support_mode": "device-mask"}
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":"),
+                           ensure_ascii=False).encode()).hexdigest()
+
+
 def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
                                 table: CandidateTable,
                                 observation_timestamp: float,
                                 capture_monotonic: float,
                                 inputs: Mapping[str, torch.Tensor],
-                                legal_pose_order_digest: str = "") -> MecoInferenceRequest:
+                                legal_pose_order_digest: str = "",
+                                candidate_batch=None) -> MecoInferenceRequest:
     """Freeze request identity/order/shapes from current planner tensors."""
     names = MECO_INPUT_NAMES[adapter.track]
     if tuple(inputs) != names:
@@ -178,6 +196,15 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
     contract_digest = validate_serialized_inputs(adapter.track, inputs)
     dispatch = time.monotonic()
     sequence, generation = adapter.next_request_identity()
+    device_support = candidate_batch is not None
+    if device_support and (adapter.track not in ("C1", "C2") or
+            tuple(candidate_batch.candidate_ids) != tuple(table.candidate_ids)):
+        raise ValueError("device candidate support requires aligned C1/C2 candidate rows")
+    request_mask = () if device_support else table.valid_mask
+    request_fallback = -1 if device_support else next(
+        (i for i, valid in enumerate(table.valid_mask) if valid), -1)
+    if not device_support and request_fallback < 0:
+        raise ValueError("request requires a valid deterministic fallback")
     return MecoInferenceRequest(track=adapter.track, snapshot_id=table.snapshot_id,
         checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
         observation_schema=1, observation_timestamp=float(observation_timestamp),
@@ -185,12 +212,14 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
         expires_monotonic=float(capture_monotonic) + MECO_MAX_INFERENCE_AGE_S,
         input_names=names,
         input_shapes=tuple(tuple(inputs[name].shape) for name in names),
-        candidate_ids=table.candidate_ids, valid_mask=table.valid_mask,
-        fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1),
+        candidate_ids=table.candidate_ids, valid_mask=request_mask,
+        fallback_index=request_fallback,
         request_sequence=sequence, generation_id=generation,
-        candidate_mask_digest=ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask),
+        candidate_mask_digest=(ordered_candidate_order_digest(table.candidate_ids)
+            if device_support else ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask)),
         legal_pose_order_digest=legal_pose_order_digest,
-        input_contract_sha256=contract_digest, model_id=f"meco:{adapter.track}")
+        input_contract_sha256=contract_digest, model_id=f"meco:{adapter.track}",
+        candidate_support_mode=("device-mask" if device_support else "table-mask"))
 
 
 class ProductionMecoAdapter:
@@ -244,7 +273,9 @@ class ProductionMecoAdapter:
         if "MECO_REQUEST_CAPTURE_DIR" in os.environ or "MECO_REQUEST_CAPTURE_MAX" in os.environ:
             try:
                 from .meco_request_capture import capture_request
-                capture_request(request, inputs,
+                capture_inputs = {name: inputs[name] for name in request.input_names
+                                  if name in inputs}
+                capture_request(request, capture_inputs,
                     source_snapshot_sha256=self.source_snapshot_sha256)
             except Exception as exc:
                 warnings.warn(f"MECO production request capture failed: {type(exc).__name__}: {exc}",
@@ -262,6 +293,10 @@ class ProductionMecoAdapter:
         self._last_inference_exception_type = None
         try:
             from .meco_input_provenance import input_contract_digest
+            support_key = "__candidate_valid_mask"
+            candidate_mask = inputs.get(support_key)
+            model_inputs = {name: inputs[name] for name in request.input_names
+                            if name in inputs}
             if (request.track != self.track or request.model_id != f"meco:{self.track}"
                     or request.checkpoint_sha256 != self.checkpoint_sha256
                     or request.protocol_id != self.protocol_id or request.observation_schema != 1
@@ -269,9 +304,14 @@ class ProductionMecoAdapter:
                     or now - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or now > request.expires_monotonic
                     or request.input_contract_sha256 != input_contract_digest()
-                    or tuple(inputs) != request.input_names):
+                    or tuple(model_inputs) != request.input_names
+                    or set(inputs) != (set(request.input_names) |
+                        ({support_key} if candidate_mask is not None else set()))):
                 return None
-            tensors = tuple(inputs[name] for name in request.input_names)
+            if (request.candidate_support_mode == "device-mask" and
+                    (self.track != "C2" or candidate_mask is None)):
+                return None
+            tensors = tuple(model_inputs[name] for name in request.input_names)
             if tuple(tuple(t.shape) for t in tensors) != request.input_shapes:
                 return None
             if any(not isinstance(t, torch.Tensor) for t in tensors):
@@ -285,7 +325,15 @@ class ProductionMecoAdapter:
                     return None
                 if name in ("edges", "coarse_edges", "region_ids") and tensor.dtype != torch.long:
                     return None
-            by_name = dict(inputs)
+            by_name = dict(model_inputs)
+            if candidate_mask is not None:
+                if (self.track != "C2" or request.candidate_support_mode != "device-mask"
+                        or not isinstance(candidate_mask, torch.Tensor)
+                        or candidate_mask.dtype != torch.bool
+                        or candidate_mask.device != self.device
+                        or candidate_mask.shape != (1, len(request.candidate_ids))):
+                    return None
+                by_name["candidate_mask"] = candidate_mask
             batch = tensors[0].shape[0]
             if by_name["globals_"].shape != (batch, 7):
                 return None
@@ -312,7 +360,7 @@ class ProductionMecoAdapter:
             if "coarse_edges" in by_name and (by_name["coarse_edges"].ndim != 3
                     or by_name["coarse_edge_mask"].shape != by_name["coarse_edges"].shape):
                 return None
-            outputs = self.model(**dict(inputs))
+            outputs = self.model(**by_name)
             expected = (("utility", "penalty", "behavior_logits", "hidden") if self.track.startswith("A")
                         else ("candidate_utility", "uncertainty", "hidden"))
             if not isinstance(outputs, Mapping) or any(name not in outputs for name in expected):
@@ -1011,14 +1059,25 @@ class C2MapCrossAttentionGRU(nn.Module):
         self.scorer = nn.Sequential(nn.Linear(HIDDEN * 3, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, 1))
         self.uncertainty = nn.Linear(HIDDEN * 3, 1)
 
-    def forward(self, raster, globals_, candidate_features, hidden=None, **_):
+    def forward(self, raster, globals_, candidate_features, hidden=None,
+                candidate_mask=None, **_):
         map_tokens = self.map_encoder(raster).flatten(2).transpose(1, 2)
         if map_tokens.shape[1] > self.tokens:
             map_tokens = F.adaptive_avg_pool1d(map_tokens.transpose(1, 2), self.tokens).transpose(1, 2)
         global_state = self.global_encoder(globals_)
         candidate = self.candidate_encoder(candidate_features)
         queried, _ = self.cross_attention(candidate, map_tokens, map_tokens, need_weights=False)
-        state = self.context(global_state + queried.mean(1), hidden)
+        if candidate_mask is None:
+            candidate_mask = torch.ones(candidate_features.shape[:2],
+                device=candidate_features.device, dtype=torch.bool)
+        if (candidate_mask.shape != candidate_features.shape[:2]
+                or candidate_mask.dtype != torch.bool
+                or candidate_mask.device != candidate_features.device):
+            raise ValueError("C2 candidate mask must be bool [B,C] on the candidate device")
+        candidate_weights = candidate_mask.to(queried.dtype)[..., None]
+        candidate_context = ((queried * candidate_weights).sum(1) /
+                             candidate_weights.sum(1).clamp_min(1.))
+        state = self.context(global_state + candidate_context, hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
         scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
         utility = _fixed_order_candidate_linear(scored, self.scorer[2]).squeeze(-1)
@@ -1220,8 +1279,6 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         valid_candidates = torch.tensor(table.valid_mask, device=raster.device,
                                         dtype=torch.bool)[None]
     else:
-        if isinstance(model, ProductionMecoAdapter):
-            raise RuntimeError("device candidate masks are not supported by the bound production request API")
         if (tuple(candidate_batch.candidate_ids) != tuple(table.candidate_ids) or
                 tuple(candidate_batch.feature_names) != tuple(table.feature_names)):
             raise ValueError("device candidate metadata differs from CandidateTable order/schema")
@@ -1266,20 +1323,28 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 try:
                     inference_request = make_meco_inference_request(model, table=table,
                         observation_timestamp=observation_timestamp,
-                        capture_monotonic=capture_monotonic, inputs=ordered_inputs)
+                        capture_monotonic=capture_monotonic, inputs=ordered_inputs,
+                        candidate_batch=candidate_batch)
                 except Exception:
                     inference_request = None
+        expected_support_mode = ("device-mask" if candidate_batch is not None else "table-mask")
+        expected_candidate_digest = (ordered_candidate_order_digest(table.candidate_ids)
+            if candidate_batch is not None else
+            ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask))
         request_matches = (inference_request is not None and track == model.track
             and inference_request.track == track
             and inference_request.snapshot_id == table.snapshot_id
             and inference_request.candidate_ids == table.candidate_ids
-            and inference_request.valid_mask == table.valid_mask
-            and inference_request.candidate_mask_digest ==
-                ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask))
+            and inference_request.candidate_support_mode == expected_support_mode
+            and (candidate_batch is not None or inference_request.valid_mask == table.valid_mask)
+            and inference_request.candidate_mask_digest == expected_candidate_digest)
         if request_matches:
             ordered_inputs = {name: inputs[name] for name in inference_request.input_names
                               if name in inputs}
-            broker_handle = model.submit_inference(inference_request, ordered_inputs)
+            broker_inputs = dict(ordered_inputs)
+            if track == "C2" and candidate_batch is not None:
+                broker_inputs["__candidate_valid_mask"] = valid_candidates
+            broker_handle = model.submit_inference(inference_request, broker_inputs)
 
         # Compute the complete deterministic decision while accelerator
         # inference is in flight. A missing result uses this exact fallback.
@@ -1293,9 +1358,13 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                         next((i for i, ok in enumerate(table.valid_mask) if ok), -1))
             fallback_logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
                                          device=utility.device, dtype=utility.dtype)
-            if fallback < 0 or not table.valid_mask[fallback]:
+            if candidate_batch is not None:
+                fallback = candidate_batch.fallback_index
+                fallback_logits.scatter_(1, fallback.reshape(1, 1), 0.)
+            elif fallback < 0 or not table.valid_mask[fallback]:
                 raise ValueError("invalid deterministic fallback for failed inference")
-            fallback_logits[0, fallback] = 0.
+            else:
+                fallback_logits[0, fallback] = 0.
 
         if request_matches:
             response = model.poll_inference(inference_request, broker_handle)
@@ -1347,7 +1416,10 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                     "inference_provenance": provenance}
         output = response.outputs
     else:
-        output = model(**inputs)
+        if track == "C2" and candidate_batch is not None:
+            output = model(**inputs, candidate_mask=valid_candidates)
+        else:
+            output = model(**inputs)
     if track in ("C1", "C2"):
         utility = output["candidate_utility"][0]
     elif track == "A1":
