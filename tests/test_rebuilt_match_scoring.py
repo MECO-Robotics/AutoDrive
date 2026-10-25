@@ -139,6 +139,9 @@ def test_fms_tie_uses_reported_selection_and_tower_values_caps():
                      for i in range(3)]
     with pytest.raises(ValueError, match="capped"):
         build(too_many_auto, ctx=ctx)
+    cross_alliance = tower("cross", "blue", "B1", "red-0", "teleop", 1, 100, 160)
+    with pytest.raises(ValueError, match="match lineup|active slot"):
+        build([cross_alliance], ctx=ctx)
     with pytest.raises(ValueError, match="one TOWER award"):
         build([tower("t1", "red", "R1", "red-0", "teleop", 1, 100, 160),
                tower("t2", "red", "R1", "red-0", "teleop", 2, 101, 160)], ctx=ctx)

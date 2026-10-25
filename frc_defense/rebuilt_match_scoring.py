@@ -218,7 +218,6 @@ def _normalize_events(events: Sequence[Mapping[str, Any]], context: dict[str, An
                       auto_counts: Mapping[str, int]) -> list[dict[str, Any]]:
     if not isinstance(events, (list, tuple)):
         raise ValueError("events must be an ordered list")
-    roster = {alliance: set(context["alliance_rosters"][alliance]) for alliance in ALLIANCES}
     slot_by_robot = {row["robot_id"]: row for row in context["robot_slots"]}
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -296,10 +295,11 @@ def _normalize_events(events: Sequence[Mapping[str, Any]], context: dict[str, An
             team = _require_text(event["team_id"], "team_id")
             robot = _require_text(event["robot_id"], "robot_id")
             phase, level = event["phase"], event["level"]
-            if alliance not in ALLIANCES or team not in roster[alliance]:
-                raise ValueError("TOWER award must identify an alliance roster team")
-            if robot not in slot_by_robot or slot_by_robot[robot]["team_id"] != team:
-                raise ValueError("TOWER award robot is outside the active robot slots")
+            if alliance not in ALLIANCES or team not in context["active_lineups"][alliance]:
+                raise ValueError("TOWER award must identify a team in the active match lineup")
+            slot = slot_by_robot.get(robot)
+            if (slot is None or slot["alliance"] != alliance or slot["team_id"] != team):
+                raise ValueError("TOWER alliance, team, and robot must match one active slot")
             if type(level) is not int:
                 raise ValueError("TOWER level must be an integer")
             if phase == "auto":
