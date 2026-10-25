@@ -4549,6 +4549,8 @@ def _parser():
         help="override learned A/C prediction mode; default preserves checkpoint mode")
     ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,
         help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--control-prediction-modes", type=json.loads,
+        help='JSON mapping for per-control modes, e.g. \'{"D1":"current","D2":"multi_model_v1"}\'; cannot combine with --control-prediction-mode')
     ev.add_argument("--candidate-k-override", type=int, choices=(8, 16, 32),
         help="evaluation-only candidate K for C tracks and controls")
     ev.add_argument("--inference-disable-tick", type=int,
@@ -4616,6 +4618,7 @@ def main(argv=None):
         simulated_score_estimand=args.simulated_score_estimand,
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
+        control_prediction_modes=args.control_prediction_modes,
         candidate_k_override=args.candidate_k_override,
         inference_disable_tick=args.inference_disable_tick,
         replay_output_dir=args.replay_output_dir,

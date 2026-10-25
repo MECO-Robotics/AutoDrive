@@ -140,3 +140,31 @@ def test_candidate_opponent_batch_seam_passes_heading_rate_to_canonical_predicto
         assert actual_hypothesis["id"] == expected_hypothesis["id"]
         assert actual_hypothesis["xy"] == pytest.approx(expected_hypothesis["xy"], abs=1e-6)
     assert opponent_risk_penalty((4., 2.), result) is not None
+
+
+def test_explicit_paired_matrix_condition_and_evaluator_override_preserve_defaults():
+    from frc_defense.meco_ablation_matrix import MatrixCondition, default_conditions
+    from frc_defense.meco_track_training import _parser, evaluate_meco
+
+    conditions = {row.condition_name: row for row in default_conditions("pickup_simple")}
+    default = conditions["controls_default_d1_current_d2_cv_k16"]
+    multimodel = conditions["controls_d1_current_d2_multimodel_v1_k16"]
+    assert default.control_prediction_mode is None
+    assert default.control_prediction_modes is None
+    assert multimodel.control_prediction_mode is None
+    assert multimodel.control_prediction_modes == {
+        "D1": "current", "D2": "multi_model_v1"}
+    multimodel.validate()
+    with pytest.raises(ValueError, match="cannot be combined"):
+        MatrixCondition("invalid", "cv", "cv", 16,
+            control_prediction_modes={"D2": "multi_model_v1"}).validate()
+
+    args = _parser().parse_args(["evaluate", "--device", "cuda:0", "--output", "report.json",
+        "--control-prediction-modes", '{"D1":"current","D2":"multi_model_v1"}',
+        "--a1-checkpoint", "a1.pt", "--a2-checkpoint", "a2.pt",
+        "--a3-checkpoint", "a3.pt", "--c1-checkpoint", "c1.pt", "--c2-checkpoint", "c2.pt"])
+    assert args.control_prediction_modes == multimodel.control_prediction_modes
+    with pytest.raises(ValueError, match="must map D1 and D2"):
+        evaluate_meco({}, scenario_id="pickup_simple", categories=("single",),
+            episodes=1, master_seed=1, device="cpu",
+            control_prediction_modes={"D3": "multi_model_v1"})

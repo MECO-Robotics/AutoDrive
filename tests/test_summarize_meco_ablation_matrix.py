@@ -435,19 +435,19 @@ def test_rejects_unsupported_matrix_schema(tmp_path):
     value.pop("report_sha256", None)
     value["report_sha256"] = _canonical_hash(value)
     _write_json(path, value)
-    with pytest.raises(ValueError, match="supported schema version 4 through 7"):
+    with pytest.raises(ValueError, match="supported schema version 4 through 8"):
         summarize_matrix(path, replicates=100)
 
 
-def test_rejects_schema_eight(tmp_path):
+def test_rejects_schema_nine(tmp_path):
     path = _fixture(tmp_path)
     value = json.loads(path.read_text())
-    value["schema_version"] = 8
-    value["protocol"]["schema_version"] = 8
+    value["schema_version"] = 9
+    value["protocol"]["schema_version"] = 9
     value.pop("report_sha256", None)
     value["report_sha256"] = _canonical_hash(value)
     _write_json(path, value)
-    with pytest.raises(ValueError, match="supported schema version 4 through 7"):
+    with pytest.raises(ValueError, match="supported schema version 4 through 8"):
         summarize_matrix(path, replicates=100)
 
 
@@ -624,6 +624,19 @@ def _schema7_fixture(path):
 def test_schema7_accepts_paired_teammate_runtime_assignments(tmp_path):
     path = _fixture(tmp_path, schema_version=6)
     matrix = _schema7_fixture(path)
+    loaded = _resolve_conditions(matrix, path)
+    assert set(loaded["conditions"]) == {
+        "phase4_teammate_behaviors_no_factor",
+        "phase4_teammate_behaviors_behavior_pool"}
+
+
+def test_schema8_accepts_paired_teammate_runtime_assignments(tmp_path):
+    path = _fixture(tmp_path, schema_version=6)
+    matrix = _schema7_fixture(path)
+    matrix["schema_version"] = matrix["protocol"]["schema_version"] = 8
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
     loaded = _resolve_conditions(matrix, path)
     assert set(loaded["conditions"]) == {
         "phase4_teammate_behaviors_no_factor",

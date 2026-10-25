@@ -34,8 +34,8 @@ STRATUM_FIELDS = ("layout_id", "defender_family", "start_condition", "sensor_pro
 DEFAULT_REPLICATES = 10_000
 DEFAULT_SEED = 20261024
 PHASE4_POLICIES = ("A1", "A2", "A3", "C1", "C2", "D0", "D1", "D2")
-MATRIX_SCHEMA_VERSION = 7
-SUPPORTED_MATRIX_SCHEMA_VERSIONS = (4, 5, 6, 7)
+MATRIX_SCHEMA_VERSION = 8
+SUPPORTED_MATRIX_SCHEMA_VERSIONS = (4, 5, 6, 7, 8)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -353,7 +353,7 @@ def _resolve_conditions(matrix: dict, matrix_path: Path) -> tuple[dict, dict]:
         raise ValueError("matrix report lacks protocol or condition mapping")
     if (matrix.get("schema_version") not in SUPPORTED_MATRIX_SCHEMA_VERSIONS or
             protocol.get("schema_version") != matrix.get("schema_version")):
-        raise ValueError("matrix report/protocol must use matching supported schema version 4 through 7")
+        raise ValueError("matrix report/protocol must use matching supported schema version 4 through 8")
     expected_matrix_hash = matrix.get("report_sha256")
     unhashed = dict(matrix)
     unhashed.pop("report_sha256", None)

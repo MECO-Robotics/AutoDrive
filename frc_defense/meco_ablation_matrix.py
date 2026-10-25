@@ -34,7 +34,7 @@ from .meco_device import normalized_device_info
 from .training_curriculum import get_scenario
 
 
-MATRIX_SCHEMA_VERSION = 7
+MATRIX_SCHEMA_VERSION = 8
 POLICY_CONTRASTS = {
     "A1_vs_C2": (("A1", "C2"),),
     "C1_vs_C2": (("C1", "C2"),),
@@ -66,6 +66,7 @@ class MatrixCondition:
     focal_pose_offset: str | None = None
     teammate_behavior_arm: str | None = None
     teammate_behavior_pool_seed: int | None = None
+    control_prediction_modes: dict[str, str] | None = None
 
     def validate(self):
         if self.prediction_mode not in PREDICTION_MODES:
@@ -73,6 +74,14 @@ class MatrixCondition:
         if (self.control_prediction_mode is not None and
                 self.control_prediction_mode not in PREDICTION_MODES):
             raise ValueError("unknown control prediction mode")
+        if self.control_prediction_modes is not None:
+            if (self.control_prediction_mode is not None
+                    or not isinstance(self.control_prediction_modes, dict)
+                    or not self.control_prediction_modes
+                    or set(self.control_prediction_modes) - {"D1", "D2"}
+                    or any(mode not in PREDICTION_MODES
+                           for mode in self.control_prediction_modes.values())):
+                raise ValueError("per-control prediction modes must map D1 and/or D2 to known modes and cannot be combined with the scalar override")
         if self.candidate_k not in (8, 16, 32):
             raise ValueError("candidate K must be 8, 16, or 32")
         if (self.inference_disable_tick is not None and
@@ -360,6 +369,8 @@ def default_conditions(scenario_id: str, *, categories: tuple[str, ...] | None =
     conditions = (
         MatrixCondition("architecture_matched_cv_k16", "cv", "cv", 16),
         MatrixCondition("controls_default_d1_current_d2_cv_k16", "cv", None, 16),
+        MatrixCondition("controls_d1_current_d2_multimodel_v1_k16", "cv", None, 16,
+            control_prediction_modes={"D1": "current", "D2": "multi_model_v1"}),
         MatrixCondition("matched_prediction_current_k16", "current", "current", 16),
         MatrixCondition("candidate_recall_k8_cv", "cv", "cv", 8),
         MatrixCondition("candidate_recall_k32_cv", "cv", "cv", 32),
@@ -1131,6 +1142,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             candidate_k_override=condition.candidate_k,
             prediction_mode=condition.prediction_mode,
             control_prediction_mode=condition.control_prediction_mode,
+            control_prediction_modes=condition.control_prediction_modes,
             inference_disable_tick=condition.inference_disable_tick,
             phase4_factor=condition.phase4_factor,
             phase4_opponent_schedule=phase4_opponent_schedule,
@@ -1449,6 +1461,13 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                     report=selected_report["report"],
                     records=selected_report["records"],
                     candidate_policy=candidate, reference_policy=reference))
+        multimodel_controls = evaluation_reports[
+            "controls_d1_current_d2_multimodel_v1_k16"]
+        contrasts.append(_contrast_pair(name="D1_vs_D2_multi_model_v1",
+            condition_id=multimodel_controls["condition_id"],
+            report=multimodel_controls["report"],
+            records=multimodel_controls["records"],
+            candidate_policy="D1", reference_policy="D2"))
         # Architecture-condition outcomes: all five learned tracks against D0 on
         # exact common category/seed records. D0 keeps its production behavior.
         for track in MECO_TRACKS:

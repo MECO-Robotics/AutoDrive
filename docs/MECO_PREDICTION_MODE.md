@@ -1,11 +1,14 @@
 # MECO opponent prediction mode
 
-MECO Plan A, Plan C, D1, and D2 now use the shared `current|cv` prediction contract in `frc_defense/meco_tracks.py`.
+MECO Plan A, Plan C, D1, and D2 use one canonical prediction contract in `frc_defense/meco_tracks.py`: `current`, `cv`, or `multi_model_v1`. Existing learned-track defaults remain `cv`; control defaults remain D1=`current`, D2=`cv`.
 
 - Learned A/C training defaults to `cv`, preserving its prior route-arrival forecast. `current` uses the finite sensed opponent pose. `cv` uses the observed velocity capped at 3 m/s when the track age is at most 0.5 seconds; otherwise it falls back to the finite sensed pose. A missing or nonfinite pose adds no risk penalty.
 - Candidate-based policies forecast to each candidate's route ETA. Plan A forecasts separately to each graph node's route ETA. Those horizons, observed age, forecast use, and fallback are retained in candidate route metadata or the selected Plan A route record.
-- D1 defaults to `current`; D2 defaults to `cv`. The MECO evaluator accepts `--prediction-mode current|cv` to run both controls with the same mode. Without that override, the historical D1/D2 control mapping is preserved.
+- `multi_model_v1` is the versioned diagnostic predictor `meco_opponent_kinematics_mm_v1`. For fresh motion (age at most 0.5 seconds), it speed-caps velocity at 3 m/s and evaluates ordered endpoint hypotheses: constant velocity (0.40), left turn (0.15), right turn (0.15), and exponentially damped velocity (0.30). Turn rates use the observed angular-rate magnitude clamped to 0.6–1.5 rad/s; prediction ETA is capped at 2.5 seconds. Candidate and Plan A risk is the weighted expected proximity penalty across the four endpoints, not the penalty at their weighted-mean endpoint. Stale or invalid motion falls back to a finite observed pose; missing or nonfinite pose adds no risk. The complete constants, equations, fallback and risk semantics are bound in the serialized prediction contract.
+- D1 defaults to `current`; D2 defaults to `cv`. The MECO evaluator accepts `--control-prediction-modes '{"D1":"current","D2":"multi_model_v1"}'` for the paired multi-model control comparison. The existing scalar `--control-prediction-mode MODE` remains available for setting both controls to one mode. Without an override, the historical D1/D2 mapping is preserved.
 - The mode, forecast contract, and training configuration digest are stored with each checkpoint/run; evaluation records include control and learned modes. These additions do not alter the frozen qualification protocol artifact.
+
+The predictor implementation is a deterministic kinematic diagnostic. It is not calibrated against held-out opponent trajectories and has not established improved match outcomes or qualification. Device-dependent paired calibration and seeded simulation evidence remain separate gates.
 
 Example: `python3 -m frc_defense.meco_track_training evaluate ... --prediction-mode current`.
 
