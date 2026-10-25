@@ -281,7 +281,9 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         phase4_opponent_schedule=None, phase4_opponent_seed=None,
                         phase4_start_profile_assignment=None,
                         phase4_focal_pose_assignment=None,
-                        phase4_teammate_behavior_assignment=None):
+                        phase4_teammate_behavior_assignment=None,
+                        fuel_proxy_enabled=False, simulation_episode_id=None,
+                        simulation_match_id=None, simulation_seed=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -394,6 +396,10 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         robot_roles=('defense', 'offense', 'offense', 'offense', 'offense', 'offense'),
         allow_nn_offense=True, dt=.02, horizon=horizon or math.ceil(definition.time_budget_s/.02),
         randomize=False, fuel_count=96, max_fuel_capacity=(30 if scenario_id.startswith('pickup_') else 6), fuel_physics=fuel_physics,
+        fuel_proxy_enabled=fuel_proxy_enabled,
+        simulation_episode_id=simulation_episode_id,
+        simulation_match_id=simulation_match_id,
+        simulation_seed=simulation_seed,
         defer_initial_perception=True,
         perception_dropout=.04 if sensor_profile == 'noisy' else .02,
         position_noise=.03 if sensor_profile == 'noisy' else .015,

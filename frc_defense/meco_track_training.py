@@ -2982,6 +2982,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
+                        fuel_proxy_enabled=True,
+                        simulation_episode_id=episode_id,
+                        simulation_match_id=(
+                            f"eval-{eval_id}:{scenario_id}:{category}:seed-{int(seed)}"),
+                        simulation_seed=int(seed),
                         phase4_factor=phase4_factor,
                         phase4_opponent_policy_id=phase4_opponent_policy_id,
                         phase4_opponent_schedule=phase4_opponent_schedule,
@@ -3926,6 +3931,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "executed_policy_decision_trace": (
                                 executed_policy_decision_trace if policy in MECO_TRACKS else None),
                             "episode_id": episode_id}
+                        record["rebuilt_active_hub_fuel_proxy_v1"] = (
+                            env.build_fuel_proxy_ledgers()[0])
+                        record["official_match_points"] = None
+                        record["qualification_eligible"] = False
                         if capture_replay:
                             final_tick = int(env.steps[0].item())
                             if not replay_frames or replay_frames[-1]["tick"] != final_tick:
