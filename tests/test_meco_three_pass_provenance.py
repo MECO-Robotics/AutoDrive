@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 63
+    assert len(result["tranches"]) == 64
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -57,6 +57,15 @@ def test_current_manifest_is_validated_as_summary_only():
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
     assert plan_a_hip["reviewer"]["approved_commit"] == (
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
+    durable_schedule = next(t for t in result["tranches"]
+        if t["requirement_id"] == "meco-durable-evaluation-schedule")
+    assert durable_schedule["implementer"]["commit"] == (
+        "d6bcab27637dbc2b39240e95ca994224d8809f31")
+    assert durable_schedule["implementer"]["candidate_integration_commit"] == (
+        "53157b4f81807126a38b6e2832e0eced745bcbd4")
+    assert durable_schedule["reviewer"]["approved_commit"] == (
+        durable_schedule["implementer"]["commit"])
+    assert "No GPU, simulator, or replay" in durable_schedule["limits"]
     trace = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-inference-observability-decision-trace")
     assert trace["implementer"]["commit"] == "7cfe3d07696167d931ced416780435c4f13ddfc1"

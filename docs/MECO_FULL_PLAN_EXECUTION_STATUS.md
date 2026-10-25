@@ -1,5 +1,29 @@
 # MECO learning tracks plan: execution status
 
+> **Live r4 and durable-evaluation update — 2026-10-25 03:19 UTC.** The
+> `meco-five-continuous-20261025.service` remains active (PID `2750253`) on the
+> two WX9100s. Its latest queue heartbeat is `2026-10-25T03:19:02Z`: A1, A2,
+> and C1 are complete at 100/100; A3 is 90/100 on `cuda:0`; C2 is queued at
+> 0/100. Cycle 1 has zero completed matched cycles and no evaluation. This is
+> still the older one-scenario `pickup_simple/cluster` diagnostic, without an
+> evaluation binding, warm starts, or Phase 4 exposure.
+>
+> The durable manifest evaluation schedule is integrated on `main` as
+> `30367daa9`, `e28da846c`, `708c31033`, and `53157b4f8`. Independent exact-head
+> review approved feature commit `d6bcab27637dbc2b39240e95ca994224d8809f31`.
+> The queue retains exact scheduled cases and five-checkpoint snapshots,
+> retries the same index after failed or interrupted evaluation, and advances
+> only after verified report/status/history. The integrated focused suite
+> passed 115 tests and 5 subtests, with 3 lease-acquiring tests deselected.
+> No simulator evaluation or replay was run. A replacement r5 manifest was
+> generated and validated offline at source
+> `53157b4f81807126a38b6e2832e0eced745bcbd4`, digest
+> `9d35652c97ea10f488fe4938fb5951a8dbabb7506f7a65dec0b5c4d94cd3a7c2`.
+> It binds all 466 validation cases and 46,600 exact seeds; both campaign
+> output roots are absent. Launch, Phase 2, validation, qualification, and
+> warm-start readiness remain false. It is not launched while r4 holds both
+> WX9100 leases. r4 was not changed or interrupted.
+
 > **Live five-track campaign recheck — 2026-10-25 03:00 UTC.** The user
 > systemd service `meco-five-continuous-20261025.service` is active (PID
 > `2750253`). A1, A2, and C1 have each completed 100/100 updates. A3 is at

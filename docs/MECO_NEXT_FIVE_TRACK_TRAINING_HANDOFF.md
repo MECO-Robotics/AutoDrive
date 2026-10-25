@@ -2,9 +2,14 @@
 
 An offline r5 manifest and config are prepared at
 `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/manifests/`
-for source commit `b02db09f330642ad5498b6e76752d1df582c9089`. The clean source
-worktree is `/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-full-curriculum`.
-Do not launch this campaign while r4 owns the two WX9100 leases. The integrated source includes the
+The earlier r5 manifest bound to `b02db09f3` is stale. A replacement config
+and manifest are now saved as
+`meco-five-continuous-20261025-r5-durable-eval.config.json` and
+`meco-five-continuous-20261025-r5-durable-eval.json` in that directory,
+generated from clean source commit `53157b4f81807126a38b6e2832e0eced745bcbd4`.
+The clean source worktree is
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-durable-eval`.
+Do not launch a new campaign while r4 owns the two WX9100 leases. The integrated source includes the
 reviewed A1/A2/A3 action/log-probability fix, Plan A P-map propagation into
 focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
 factors, and Phase 5 scorer-timing correction. The current active workers
@@ -21,17 +26,20 @@ Phase 2 coverage stays false until bound dataset/replay evidence is validated.
 See `frc_defense.meco_training_manifest`, `frc_defense.meco_supervisor`, and
 provenance tranches #44 and #46.
 
-The prepared config enables Phase 4 training exposure and freezes all 466
-protocol validation cases, each with its full exact 100-seed list. Its
-canonical manifest digest is
-`cbc18e88e7d967cf3770bec3335fa6f8963a11e58d0b2d3364684f3ffe98cb1f` and offline
-validation passed. Launch readiness, Phase 2 coverage, validation readiness,
-qualification readiness, and warm starts remain false. The evaluation queue
-currently replaces pending jobs when it falls behind and may advance past a
-failed or incomplete evaluation. A reviewed durable no-loss dispatch/recovery
-change is required before claiming all 466 scheduled cases will execute. An
-independent reviewer confirmed the manifest's internal bindings but rejected
-it as a full-coverage execution guarantee until this is fixed.
+The replacement manifest enables Phase 4 training exposure and freezes all 466
+protocol validation cases, each with its exact 100-seed list. Its canonical
+manifest digest is
+`9d35652c97ea10f488fe4938fb5951a8dbabb7506f7a65dec0b5c4d94cd3a7c2`.
+Offline manifest validation passed. Both campaign output roots are absent.
+Launch readiness, Phase 2 coverage, validation readiness, qualification
+readiness, and warm starts remain false.
+The reviewed durable queue is now integrated at `53157b4f8`: it preserves the
+ordered schedule, five-checkpoint snapshots, and exact case across failure or
+restart; it verifies report/status/history before advancing and applies a
+persisted failure-time retry delay. The no-loss dispatcher blocker is resolved
+in code, but the full 466-case schedule has not run. Hold launch until r4
+releases both device leases. The replacement manifest is pinned to current
+source and must be revalidated at launch time.
 
 The current runtime also does not meet the user's CPU-free request. The two
 WX9100s run the model and much tensor state, but Plan A graph routing moves
