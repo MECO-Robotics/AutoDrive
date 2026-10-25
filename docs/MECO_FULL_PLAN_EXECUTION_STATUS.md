@@ -1,10 +1,10 @@
 # MECO learning tracks plan: execution status
 
-> **Live five-track campaign recheck — 2026-10-25 02:41 UTC.** The user
+> **Live five-track campaign recheck — 2026-10-25 02:50 UTC.** The user
 > systemd service `meco-five-continuous-20261025.service` is active (PID
-> `2750253`). A1 and A2 are each at 100/100 updates; A3 is at 44/100 on
-> `cuda:0`, C1 at 62/100 on `cuda:1`, and C2 is queued. The status heartbeat
-> is `2026-10-25T02:41:33Z`; cycle 1 has two completed chunks, zero completed
+> `2750253`). A1 and A2 are each at 100/100 updates; A3 is at 55/100 on
+> `cuda:0`, C1 at 81/100 on `cuda:1`, and C2 is queued. The status heartbeat
+> is `2026-10-25T02:50:30Z`; cycle 1 has two completed chunks, zero completed
 > cycles, and no evaluation yet. This is still the pinned older-source
 > diagnostic campaign, using only `pickup_simple/cluster`, without evaluation
 > protocol binding, warm starts, or Phase 4 training exposure. The first two
@@ -19,11 +19,30 @@
 > and verify exactly one correctly pathed and hashed snapshot per track.
 > Independent exact-head review approved the feature head before integration.
 > Twenty-five focused CPU checks across the history/transition/scheduler/eval
-> suites, compilation, and diff checks passed. The dashboard provenance ledger
-> is now updated to 62 scoped summaries; dashboard restart/currentness
-> verification is pending. The active r4 manifest and workers were not changed.
-> No simulator evaluation, replay, GPU check, outcome run, or qualification was
-> performed.
+> suites, compilation, and diff checks passed. A follow-up integrated run of
+> continual-evaluation, manifest, Phase 4 exposure, and provenance suites passed
+> 64 tests; supervisor dispatch tests were not run because their device-lease
+> tests conflict with the active two-GPU campaign. The dashboard provenance
+> ledger validates as 62 scoped summaries. After restarting
+> `frc-defense-dashboard.service` (PID `2854687`), `/`, both status APIs, and
+> both frontend assets returned HTTP 200; served JS hashes match this checkout.
+> The active r4 manifest and workers were not changed. No simulator evaluation,
+> replay, GPU check, outcome run, or qualification was performed.
+
+> **Prepared r5 handoff — 2026-10-25.** An offline manifest and source config
+> are saved under the Campaigns manifest directory for a fresh
+> `meco-five-continuous-20261025-r5` root. The clean source worktree is pinned
+> to `b02db09f330642ad5498b6e76752d1df582c9089`; the manifest digest is
+> `cbc18e88e7d967cf3770bec3335fa6f8963a11e58d0b2d3364684f3ffe98cb1f`.
+> It binds A1/A2/A3/C1/C2, two WX9100s, Phase 4 training exposure, and all 466
+> protocol validation cases (46,600 exact seeds). Offline manifest validation
+> passed, while launch, Phase 2, validation, qualification, and warm-start
+> readiness remain false. It is not launched: r4 still owns the two device
+> leases. Planner review also found that the current evaluator replaces pending
+> jobs and advances past failed or incomplete cases; a durable no-loss schedule
+> dispatcher/recovery tranche is required before claiming the 466 cases will
+> execute. No r5 training, simulation, GPU evaluation, or qualification has
+> occurred.
 
 > **R4 live training snapshot — 2026-10-25 02:10 UTC.** The service remains
 > active (PID `2750253`). A1 completed its first 100-update chunk; A2 reached

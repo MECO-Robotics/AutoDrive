@@ -1,7 +1,10 @@
 # Next MECO five-track campaign handoff
 
-Use this checkout as the source for the next matched five-track campaign after
-the active run is deliberately stopped. The integrated source includes the
+An offline r5 manifest and config are prepared at
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/manifests/`
+for source commit `b02db09f330642ad5498b6e76752d1df582c9089`. The clean source
+worktree is `/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-full-curriculum`.
+Do not launch this campaign while r4 owns the two WX9100 leases. The integrated source includes the
 reviewed A1/A2/A3 action/log-probability fix, Plan A P-map propagation into
 focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
 factors, and Phase 5 scorer-timing correction. The current active workers
@@ -17,6 +20,16 @@ manifest mode claims fresh roots only; it cannot resume an existing campaign.
 Phase 2 coverage stays false until bound dataset/replay evidence is validated.
 See `frc_defense.meco_training_manifest`, `frc_defense.meco_supervisor`, and
 provenance tranches #44 and #46.
+
+The prepared config enables Phase 4 training exposure and freezes all 466
+protocol validation cases, each with its full exact 100-seed list. Its
+canonical manifest digest is
+`cbc18e88e7d967cf3770bec3335fa6f8963a11e58d0b2d3364684f3ffe98cb1f` and offline
+validation passed. Launch readiness, Phase 2 coverage, validation readiness,
+qualification readiness, and warm starts remain false. The evaluation queue
+currently replaces pending jobs when it falls behind and may advance past a
+failed or incomplete evaluation. A reviewed durable no-loss dispatch/recovery
+change is required before claiming all 466 scheduled cases will execute.
 
 - Create one frozen supervisor configuration for A1, A2, A3, C1, and C2; bind
   the training protocol, qualification protocol, source identity, runtime and
