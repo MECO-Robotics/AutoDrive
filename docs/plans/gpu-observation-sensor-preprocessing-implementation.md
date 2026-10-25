@@ -61,8 +61,12 @@ early host break on those status masks and may run masked no-op ticks through
 the requested macro horizon. Runtime parity and throughput are unverified.
 
 All 3v3 planner calls set `static_active_mask=True`, avoiding `TensorADStar`
-caller-mask `nonzero` compaction. `frc_defense/tensor_adstar.py` remains outside
-this tranche: its route extraction still checks an internal progress mask with
-`.any().item()` every 16 iterations, and learned-cost validation also has
-`.item()` predicates. These are explicit residuals for the separately reviewed
-planner addendum; the native route algorithm was not changed here.
+caller-mask `nonzero` compaction. The Pass 3 tranche also removes host
+predicates from endpoint projection and route extraction, validates GPU
+learned-cost maps with device assertions, and uses fixed-shape device draws for
+defender placement. These changes alter random-number consumption for inactive
+reset rows; seeded parity is not claimed. GPU local path repair now fails closed
+to the existing one-point stop route; the CPU local repair path remains intact.
+Route extraction runs its fixed iteration count rather than stopping early
+from a host reduction. Static checks only; runtime parity and throughput remain
+unverified.
