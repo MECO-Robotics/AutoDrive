@@ -653,14 +653,50 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
                         captured.get("arm") != expected_assignment["arm"] or
                         captured.get("assignments") != expected_behaviors or
                         captured.get("assignment_applied") != (expected_behaviors is not None) or
+                        captured.get("action_event_coverage", {}).get("complete") is not True or
+                        captured.get("whole_team_episode_outcome_metrics") != {
+                            name: row.get("metrics", {}).get(name) for name in (
+                                "success", "scores", "useful_throughput",
+                                "completed_cycles")} or
+                        captured.get("teammate_collision_rate") is not None or
+                        captured.get("score_contribution") is not None or
                         captured.get("qualification_eligible") is not False):
                     raise ValueError(f"Phase 4 context row lacks exact teammate-behavior evidence: {key}")
-                for field in outcome_fields:
-                    if captured.get(field) is not None:
-                        raise ValueError(f"Phase 4 teammate outcome {field} must remain unavailable")
+                if arm == "factor_treatment" and (
+                        captured["action_event_coverage"].get("observed_action_ticks") !=
+                        captured["action_event_coverage"].get("expected_action_ticks") or
+                        captured.get("outcome_semantics") !=
+                        "whole-team paired episode outcome while this behavior assignment was active; not an individual causal contribution"):
+                    raise ValueError(f"Phase 4 teammate treatment action coverage is incomplete: {key}")
         rows_by_arm[arm] = rows
     if set(rows_by_arm["no_factor"]) != set(rows_by_arm["factor_treatment"]):
         raise ValueError("Phase 4 context arms have missing or unexpected paired rows")
+    paired_behavior_outcomes = None
+    if factor == "teammate_behavior":
+        paired_behavior_outcomes = {}
+        for key in sorted(expected_keys):
+            treatment = rows_by_arm["factor_treatment"][key][
+                "phase4_teammate_behavior"]
+            control_metrics = rows_by_arm["no_factor"][key].get("metrics", {})
+            for slot_text, behavior in treatment["assignments"].items():
+                paired_behavior_outcomes.setdefault(behavior, []).append({
+                    "policy_id": key[0], "category": key[1], "seed": key[2],
+                    "slot": int(slot_text),
+                    "control_whole_team_outcome": {name: control_metrics.get(name)
+                        for name in ("success", "scores", "useful_throughput",
+                                     "completed_cycles")},
+                    "treatment_whole_team_outcome": treatment[
+                        "whole_team_episode_outcome_metrics"],
+                    "outcome_semantics": "paired whole-team episode outcomes while this behavior was present; concurrent behavior slots prevent individual score attribution"})
+        paired_behavior_outcomes = {"outcome_by_teammate_behavior":
+            paired_behavior_outcomes, "teammate_collision_rate": None,
+            "score_contribution": None, "unavailable_signal_sources": {
+                "teammate_collision_rate":
+                    "no slot-pair-specific simulator collision ledger is exposed",
+                "score_contribution":
+                    "simulator reports team-level FUEL metrics without robot-slot attribution"}}
+    else:
+        paired_behavior_outcomes = {field: None for field in outcome_fields}
     return {"schema": "meco-phase4-context-pair-coverage-v1", "factor": factor,
         "condition_names": condition_names, "categories": categories,
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
@@ -671,8 +707,8 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
         "matrix_sha256": _file_sha(paths[0]), "checkpoint_sha256":
             expected_binding["checkpoint_sha256"], "source_identity_sha256":
             expected_binding["source_identity_sha256"], "execution_device":
-            expected_binding["execution_device"], "outcomes": {
-                field: None for field in outcome_fields}, "qualification_eligible": False}
+            expected_binding["execution_device"], "outcomes":
+            paired_behavior_outcomes, "qualification_eligible": False}
 
 
 def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,

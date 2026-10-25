@@ -783,7 +783,8 @@ def validate_phase4_teammate_behavior_assignment(assignment: dict) -> dict:
 def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         episode_id: str, scenario_id: str, category: str, seed: int,
         policy_id: str, condition_id: str | None,
-        source_identity_sha256: str) -> dict:
+        source_identity_sha256: str, outcome_metrics: dict | None = None,
+        expected_action_ticks: int | None = None) -> dict:
     """Bind evaluator action trace to its exact assignment and provenance."""
     assignment = validate_phase4_teammate_behavior_assignment(assignment)
     if (not isinstance(runtime, dict) or
@@ -804,10 +805,52 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
     if (runtime.get("assignments") != expected_assignments or
             runtime.get("assignment_applied") != (expected_assignments is not None)):
         raise ValueError("teammate behavior runtime does not match its assigned seed/arm")
+    events = runtime["events"]
+    if expected_action_ticks is not None and (type(expected_action_ticks) is not int or
+            expected_action_ticks < 0):
+        raise ValueError("teammate behavior expected action ticks are invalid")
+    if expected_assignments is None:
+        if events:
+            raise ValueError("no-factor teammate behavior row contains applied action events")
+        action_coverage = {"complete": True, "expected_action_ticks": 0,
+            "observed_action_ticks": 0}
+    else:
+        if expected_action_ticks is None or len(events) != expected_action_ticks:
+            raise ValueError("teammate behavior action trace does not cover exact episode exposure")
+        expected_slots = sorted(int(slot) for slot in expected_assignments)
+        for tick, event in enumerate(events):
+            if (not isinstance(event, dict) or event.get("tick") != tick or
+                    not isinstance(event.get("slots"), list) or
+                    [row.get("slot") for row in event["slots"]] != expected_slots):
+                raise ValueError("teammate behavior action trace has missing/duplicate/reordered slots")
+            for row in event["slots"]:
+                if (row.get("requested_behavior_action") not in range(8) or
+                        row.get("helper_selected_action") not in range(8) or
+                        row.get("actually_applied_action") not in range(8) or
+                        type(row.get("requested_legal")) is not bool or
+                        type(row.get("helper_fallback")) is not bool or
+                        type(row.get("environment_remask_fallback")) is not bool or
+                        type(row.get("active")) is not bool):
+                    raise ValueError("teammate behavior action trace has malformed action evidence")
+                behavior = expected_assignments[str(row["slot"])]
+                fixed_action = {"score": 4, "defend": 5, "ferry": 6,
+                    "hold_position": 7}.get(behavior)
+                if (fixed_action is not None and
+                        row["requested_behavior_action"] != fixed_action) or (
+                        behavior == "collect" and
+                        row["requested_behavior_action"] not in range(4)):
+                    raise ValueError("teammate action trace differs from assigned behavior")
+        action_coverage = {"complete": True,
+            "expected_action_ticks": expected_action_ticks,
+            "observed_action_ticks": len(events),
+            "assigned_slots": expected_slots}
+    if outcome_metrics is not None and not isinstance(outcome_metrics, dict):
+        raise ValueError("teammate behavior outcome metrics must be a mapping")
     return {"schema": "phase4-teammate-behavior-runtime-v1",
         "assignments": runtime["assignments"],
         "assignment_applied": runtime["assignment_applied"],
-        "events": runtime["events"],
+        "events": events,
+        "action_event_coverage": action_coverage,
         "assignment_pair_sha256": assignment["pair_sha256"],
         "episode_id": episode_id, "scenario_id": scenario_id,
         "category": category, "seed": seed, "policy_id": policy_id,
@@ -817,6 +860,10 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         "protocol_sha256": assignment["protocol_sha256"],
         "qualification_case": assignment["qualification_case"],
         "arm": assignment["arm"],
+        "whole_team_episode_outcome_metrics": ({name: outcome_metrics.get(name)
+            for name in ("success", "scores", "useful_throughput", "completed_cycles")}
+            if outcome_metrics is not None else None),
+        "outcome_semantics": "whole-team paired episode outcome while this behavior assignment was active; not an individual causal contribution",
         "outcome_by_teammate_behavior": None,
         "teammate_collision_rate": None, "score_contribution": None,
         "qualification_eligible": False}

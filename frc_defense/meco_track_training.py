@@ -3786,7 +3786,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     episode_id=episode_id, scenario_id=scenario_id,
                                     category=category, seed=seed,
                                     policy_id=record_policy, condition_id=condition_id,
-                                    source_identity_sha256=source_hash)
+                                    source_identity_sha256=source_hash,
+                                    outcome_metrics=metrics,
+                                    expected_action_ticks=int(
+                                        env.sim.physics_substep_index[0].item()))
                                 if phase4_teammate_behavior_assignment is not None else None),
                             "phase4_opponent_policy": ({
                                 "policy_id": phase4_opponent_policy_id,

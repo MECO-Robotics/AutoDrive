@@ -597,7 +597,9 @@ def _schema7_fixture(path):
                 scenario_id="full_match_offense", category=row["category"],
                 seed=row["seed"], policy_id=row["policy_id"],
                 condition_id=condition_id,
-                source_identity_sha256=report["source_identity_sha256"])
+                source_identity_sha256=report["source_identity_sha256"],
+                outcome_metrics=row.get("metrics"),
+                expected_action_ticks=len(runtime["events"]))
         report_path = path.parent / f"{arm}.condition.json"
         _write_json(report_path, report)
         condition = dict(old)
