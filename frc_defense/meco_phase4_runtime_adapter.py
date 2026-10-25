@@ -1057,6 +1057,7 @@ def phase4_factor_exposure(factor: dict | None, runtime_metrics: dict | None,
         "qualification_case": qualification_case,
         "episode_id": episode_id,
         "policy_id": policy_id,
+        "contact_factor_id": contact_factor_id,
         "seed": seed if split != "test" else None,
         "seed_redacted": split == "test",
         "source_identity": source_identity,
@@ -1119,7 +1120,8 @@ def _phase4_route_completion_observation(record: dict | None, *,
                     "evaluator_terminal_slot3_truth_after_executed_macro"):
                 return None
         elif (not isinstance(event, dict) or event.get("schema") !=
-                "meco-registered-route-objective-failure-v1"):
+                "meco-registered-route-objective-failure-v1" or event.get("source") !=
+                "registered_route_objective_failure_event"):
             return None
     return {"schema": "meco-phase4-route-outcome-observation-v1",
         "factor_id": expected_binding["factor_id"],
@@ -1217,7 +1219,8 @@ def validate_phase4_capture(capture: dict, *,
         if route_factor_id is None:
             raise ValueError("Phase 4 route outcome is unsupported for this factor")
         expected_condition = phase4_route_condition(route_factor_id,
-            phase4_factor=factor, contact_factor_id=None)
+            phase4_factor=factor,
+            contact_factor_id=capture.get("contact_factor_id"))
         expected_binding = {"episode_id": capture.get("episode_id"),
             "policy_id": capture.get("policy_id"), "factor_id": route_factor_id,
             "condition": expected_condition,
