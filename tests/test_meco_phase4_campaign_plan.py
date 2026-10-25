@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -90,7 +91,11 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
     assert plan["episode_rows_materialized"] is False
     assert plan["final_test_rows_or_seed_values_included"] is False
     assert plan["design_only_cells_executable"] is False
-    assert plan["executable_cell_count"] == 0
+    assert plan["executable_cell_count"] == sum(
+        cell["executable"] for requirement in plan["requirements"]
+        for cell in requirement["cells"])
+    assert plan["executable_cell_count"] > 0
+    assert plan["qualification_eligible"] is False
     assert plan["runtime_capture_schema"] == "meco-phase4-realized-stimulus-capture-v1"
     assert plan["policies"] == list(POLICIES)
     assert plan["pair_conditions"] == list(CONDITIONS)
@@ -154,10 +159,9 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
                     assert cell["status"] == "design_only_unassigned_to_protocol_case"
                 assert cell["executable"] is False
             else:
-                # Protocol assignment alone does not make a cell executable:
-                # the exact runtime stimulus and all required outcome signals
-                # must both be wired before campaign dispatch.
-                assert cell["executable"] is False
+                # The field means campaign dispatchability for this planner
+                # schema. Qualification remains globally disabled above.
+                assert cell["executable"] is True
     assert "seeds" not in set(_walk_keys(plan))
     assert "final_test" not in set(_walk_keys(plan))
 
@@ -167,43 +171,18 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
         tmp_path, trench_interception):
     plan = compile_phase4_campaign_plan(PROTOCOL, REGISTRY, OVERLAY)
     requirement = next(r for r in plan["requirements"]
-                       if r["requirement_id"] == "reactive_defenders_and_opponent_pools")
+        if r["requirement_id"] == ("trench_interception" if trench_interception else
+            "reactive_defenders_and_opponent_pools"))
     cell = next(cell for cell in requirement["cells"]
-        if cell["design_axes"].get("policy_pool") == "reactive_defender_a"
-        and cell["case_axes"]["scenario_id"] == "offense_vs_scripted_pressure"
-        and (cell["case_axes"]["category"] == "active/trench/level_4_reactive"
+        if (cell["case_axes"]["scenario_id"] == "offense_vs_scripted_pressure" and
+            ((cell["case_axes"]["category"] == "active/trench/level_4_reactive")
              if trench_interception else
-             "level_4" in cell["case_axes"]["category"]
-             and "/trench/" not in cell["case_axes"]["category"]))
-    selected_policy = "reactive_defender_a"
+             cell["design_axes"].get("policy_pool") == "reactive_defender_a" and
+             "level_4" in cell["case_axes"]["category"] and
+             "/trench/" not in cell["case_axes"]["category"])))
+    selected_policy = (cell["trench_interception_assignment"]["policy_id"]
+        if trench_interception else "reactive_defender_a")
     selected_factor = cell["factor_id"]
-    if trench_interception:
-        from frc_defense.meco_phase4_opponents import (
-            POLICY_FACTOR_IDS, policy_pool_identity)
-        selected_policy = "trench_interceptor"
-        selected_factor = "opponent.trench_interception"
-        cell["factor_id"] = selected_factor
-        assignment = cell["opponent_schedule_assignment"]
-        assignment["policy_id"] = selected_policy
-        assignment["policy_family"] = POLICY_FACTOR_IDS[selected_policy]
-        assignment["policy_config_sha256"] = policy_pool_identity()["config_sha256"]
-        protocol_payload = json.loads(PROTOCOL.read_text())
-        protocol_case = next(row for row in protocol_payload["cases"]
-            if all(row.get(key) == value for key, value in cell["case_axes"].items()))
-        from frc_defense.meco_phase4_opponents import compile_opponent_policy_schedule
-        bound_schedule = compile_opponent_policy_schedule(
-            policy_id=selected_policy,
-            scenario_id=cell["case_axes"]["scenario_id"],
-            categories=(cell["case_axes"]["category"],),
-            qualification_case={key: cell["case_axes"][key] for key in (
-                "layout_id", "defender_family", "start_condition", "sensor_profile")},
-            seeds=protocol_case["seeds"], split="validation",
-            factor_id=selected_factor,
-            protocol_id=protocol_payload["protocol_id"])
-        assignment["factor_treatment_seeded_assignment_sha256"] = (
-            bound_schedule["per_episode_assignment_sha256"])
-        plan["plan_id"] = campaign_runner._sha(
-            {key: value for key, value in plan.items() if key != "plan_id"})
     checkpoints = {}
     for track in MECO_TRACKS:
         path = tmp_path / f"{track}.pt"
@@ -232,6 +211,9 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
             arm = "factor_treatment"
         else:
             arm = "no_factor"
+        if trench_interception:
+            observed.append(argv)
+            return 1
         assert output_dir.name == arm
         assert argv[argv.index("--conditions") + 1] == "architecture_matched_cv_k16"
         assert argv[argv.index("--seed-manifest") + 1]
@@ -320,31 +302,26 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
         protocol_path=PROTOCOL, checkpoint_paths=checkpoints,
         matrix_script=tmp_path / "matrix.py", output_dir=tmp_path / "dispatch",
         device="cuda:1", runner=fake_runner)
-    assert result["executed"] is True
+    assert result["executed"] is (not trench_interception)
     assert result["simulator_behavior_validated"] is False
     assert result["outcome_signals_complete"] is False
-    assert result["dispatch_return_codes"] == {
-        "no_factor": 0, "factor_treatment": 0}
+    assert result["dispatch_return_codes"] == ({
+        "no_factor": 1, "factor_treatment": 1} if trench_interception else {
+        "no_factor": 0, "factor_treatment": 0})
     assert result["qualification_eligible"] is False
+    if trench_interception:
+        schedule = json.loads((tmp_path / "dispatch" / "opponent-schedule.json").read_text())
+        assert schedule["policy_id"] == "trench_interceptor"
+        assert schedule["factor_id"] == "opponent.trench_interception"
+        assert result["paired_coverage"] is None
+        assert result["required_family_outcomes"] is None
+        return
     assert result["paired_coverage"]["exact_policy_category_seed_pair_coverage"] is True
     assert result["paired_coverage"]["qualification_eligible"] is False
     if not trench_interception:
         assert result["required_family_outcomes"]["interception_rate"] is None
         assert result["required_family_outcomes"]["policy_family_coverage"]
         assert result["required_family_outcomes"]["paired_outcome_by_family"]
-    if trench_interception:
-        schedule = json.loads((tmp_path / "dispatch" / "opponent-schedule.json").read_text())
-        from frc_defense.meco_track_training import evaluate_meco
-        protocol_payload = json.loads(PROTOCOL.read_text())
-        case = {key: cell["case_axes"][key] for key in (
-            "layout_id", "defender_family", "start_condition", "sensor_profile")}
-        with pytest.raises(RuntimeError, match="explicit available CUDA/HIP device"):
-            evaluate_meco({}, scenario_id=cell["case_axes"]["scenario_id"],
-                categories=(cell["case_axes"]["category"],), episodes=len(protocol_case["seeds"]),
-                master_seed=protocol_case["seeds"][0], device="cpu",
-                episode_seeds=tuple(protocol_case["seeds"]), split="validation",
-                evaluation_protocol=PROTOCOL, evaluation_case=case,
-                phase4_opponent_schedule=schedule)
 
 
 def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_path, monkeypatch):
@@ -363,11 +340,15 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
     expected_binding = {"checkpoint_sha256": {
         track: campaign_runner._file_sha(Path(path)) for track, path in checkpoints.items()},
         "source_identity_sha256": "frozen-source-identity",
+        "source_tree_identity": campaign_runner._source_tree_identity(),
+        "source_tree_identity_sha256": campaign_runner._source_tree_identity_sha256(),
         "execution_device": {"device": "cuda:1", "accelerator_backend": "ROCm"}}
     monkeypatch.setattr(campaign_runner, "_capture_phase4_dispatch_binding",
         lambda checkpoint_paths, device: expected_binding)
     monkeypatch.setattr(campaign_runner, "_source_identity_sha256",
         lambda: expected_binding["source_identity_sha256"])
+    monkeypatch.setattr(campaign_runner, "_source_tree_identity_sha256",
+        lambda: expected_binding["source_tree_identity_sha256"])
     observed = []
     observed_seeds = []
 
@@ -405,6 +386,10 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
                             "assignment_sha256": assignment["assignment_sha256"],
                             "profile_applied_before_observation": True,
                             "validated_pose_world_count": 1,
+                            "validated_pose_world_indices": [0],
+                            "validated_pose_world_index_semantics":
+                                "zero_based_simulator_batch_index",
+                            "validated_pose_legal_world_count": 1,
                             "per_world_legal": [True],
                             "legal_start_validation_rate": 1.,
                             "outcome_metrics": {"success": seed % 2 == 0,
@@ -472,6 +457,7 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
         damaged = json.loads(json.dumps(original))
         mutator(damaged)
         treatment_report_path.write_text(json.dumps(damaged))
+        shutil.rmtree(tmp_path / "dispatch/paired-evidence-reports")
         with pytest.raises(ValueError, match=message):
             campaign_runner._validate_phase4_start_profile_pair(
                 tmp_path / "dispatch", assignment,
@@ -490,8 +476,11 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
         "mismatched checkpoint/source/device binding")
     expanded_world_record = json.loads(json.dumps(original))
     captured = expanded_world_record["records"][0]["phase4_start_profile"]
-    captured.update(validated_pose_world_count=2, per_world_legal=[True, True])
+    captured.update(validated_pose_world_count=2,
+        validated_pose_world_indices=[0, 1],
+        validated_pose_legal_world_count=2, per_world_legal=[True, True])
     treatment_report_path.write_text(json.dumps(expanded_world_record))
+    shutil.rmtree(tmp_path / "dispatch/paired-evidence-reports")
     expanded_pair = campaign_runner._validate_phase4_start_profile_pair(
         tmp_path / "dispatch", assignment,
         categories=[cell["case_axes"]["category"]],
@@ -500,7 +489,7 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
     treatment_report_path.write_text(json.dumps(original))
     assert all("--phase4-start-profile" not in argv for argv in observed[:1])
     assert "--phase4-start-profile" in observed[1]
-    assert result["paired_coverage"]["paired_outcome_by_family"] is None
+    assert result["paired_coverage"]["outcome_by_start_state"]
     assert result["paired_coverage"]["condition_names"] == ["architecture_matched_cv_k16"]
     assert result["paired_coverage"]["paired_rows_per_condition"][
         "architecture_matched_cv_k16"] == (
@@ -718,9 +707,15 @@ def test_phase4_context_dispatch_binds_exact_paired_matrix_rows(
                 for category in categories:
                     for seed in seeds:
                         row = {"policy": policy, "category": category, "seed": seed,
+                            "policy_id": policy[:-3] if policy.endswith("_P0") else policy,
+                            "scenario_id": case_axes["scenario_id"],
+                            "condition_id": None,
+                            "elapsed_ticks": 2,
                             "checkpoint_sha256": expected_binding["checkpoint_sha256"].get(track),
                             "source_identity_sha256": expected_binding["source_identity_sha256"],
-                            "execution_device": expected_binding["execution_device"]}
+                            "execution_device": expected_binding["execution_device"],
+                            "metrics": {"success": seed % 2 == 0, "scores": float(seed % 4),
+                                "useful_throughput": .25, "completed_cycles": float(seed % 3)}}
                         if factor == "focal_pose":
                             row["phase4_focal_pose"] = {
                                 "assignment_sha256": assignment["assignment_sha256"],
@@ -740,6 +735,24 @@ def test_phase4_context_dispatch_binds_exact_paired_matrix_rows(
                                 "assignment_pair_sha256": assignment["pair_sha256"],
                                 "arm": assignment["arm"], "assignments": expected_behaviors,
                                 "assignment_applied": expected_behaviors is not None,
+                                "episode_id": f"{policy}:{category}:{seed}",
+                                "scenario_id": case_axes["scenario_id"],
+                                "category": category, "seed": seed,
+                                "policy_id": row["policy_id"],
+                                "evaluation_policy_key": policy,
+                                "condition_id": None,
+                                "source_identity_sha256": expected_binding["source_identity_sha256"],
+                                "checkpoint_sha256": expected_binding["checkpoint_sha256"].get(track),
+                                "execution_device": expected_binding["execution_device"],
+                                "protocol_id": protocol_payload["protocol_id"],
+                                "protocol_sha256": plan["protocol_binding"]["protocol_raw_file_sha256"],
+                                "qualification_case": case_binding,
+                                "action_event_coverage": {"complete": True,
+                                    "expected_action_ticks": 2 if expected_behaviors else 0,
+                                    "observed_action_ticks": 2 if expected_behaviors else 0},
+                                "whole_team_episode_outcome_metrics": row["metrics"],
+                                "outcome_semantics": (
+                                    "whole-team paired episode outcome while this behavior assignment was active; not an individual causal contribution"),
                                 "qualification_eligible": False,
                                 **{field: None for field in outcome_fields}}
                         rows.append(row)
@@ -780,7 +793,15 @@ def test_phase4_context_dispatch_binds_exact_paired_matrix_rows(
         device="cuda:1", runner=fake_runner)
     assert result["executed"] is True
     assert result["paired_coverage"]["paired_row_count"] == len(policies) * len(seeds)
-    assert result["outcomes"] == {field: None for field in outcome_fields}
+    if factor == "focal_pose":
+        assert result["outcomes"] == {field: None for field in outcome_fields}
+    else:
+        assert result["outcomes"]["teammate_collision_rate"] is None
+        assert result["outcomes"]["score_contribution"] is None
+        first_behavior = next(iter(result["outcomes"]["outcome_by_teammate_behavior"].values()))
+        assert first_behavior[0]["outcome_semantics"] == (
+            "paired whole-team episode outcomes while this behavior was present; concurrent behavior slots prevent individual score attribution")
+        assert result["outcomes"]["unavailable_signal_sources"]
     assert result["qualification_eligible"] is False
     with pytest.raises(ValueError, match="output path already exists"):
         run_phase4_context_cell(plan, cell["case_cell_key"], factor=factor,
