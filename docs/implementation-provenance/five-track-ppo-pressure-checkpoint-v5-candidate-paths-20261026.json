@@ -1,0 +1,204 @@
+{
+  "schema": "meco-candidate-path-manifest-v1",
+  "candidate_commit": "54bd1dc4651b039e2924e602c2ddf13a165536af",
+  "comparison": "origin/main...54bd1dc4651b039e2924e602c2ddf13a165536af",
+  "complete_name_status_output": "A\tdocs/plans/five-track-ppo-batch-v2-schema-20261026.md\nM\tdocs/plans/gpu-five-track-ppo-batched-residency-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-focal-pose-reset-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-phase4-reset-profile-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-pressure-anchor-reset-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-pressure-anchor-snapshot-v2-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-rollout-candidate-residency-expansion-20261026.md\nA\tdocs/plans/gpu-five-track-ppo-selected-row-reset-residency-expansion-20261026.md\nM\tfrc_defense/_tensor_3v3_actions.py\nM\tfrc_defense/_tensor_3v3_gamepieces.py\nM\tfrc_defense/_tensor_3v3_observation.py\nM\tfrc_defense/architecture_scenarios.py\nM\tfrc_defense/curriculum_metrics.py\nM\tfrc_defense/curriculum_scenarios.py\nM\tfrc_defense/meco_baseline_freeze.py\nM\tfrc_defense/meco_phase4_context.py\nM\tfrc_defense/meco_plan_a_policy.py\nA\tfrc_defense/meco_ppo_batch.py\nM\tfrc_defense/meco_track_training.py\nM\tfrc_defense/meco_tracks.py\nM\tfrc_defense/tensor_3v3.py\nM\tfrc_defense/tensor_defense_gamepieces.py\nM\tfrc_defense/tensor_defense_observation.py\nM\tfrc_defense/tensor_defense_opponent.py\nM\tfrc_defense/tensor_defense_reset.py\nM\tfrc_defense/tensor_defense_step.py\nM\tfrc_defense/tensor_physics.py\nM\ttests/test_meco_phase4_context.py",
+  "paths": [
+    {
+      "status": "A",
+      "path": "docs/plans/five-track-ppo-batch-v2-schema-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "d5bb6d695bcf815025184fc0e943372a92e0b7c9",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "M",
+      "path": "docs/plans/gpu-five-track-ppo-batched-residency-expansion-20261026.md",
+      "base_blob_sha1": "e22a0de41e99dc4732d1f49ed04be29a959de9a1",
+      "candidate_blob_sha1": "fc52ca01d2f378ce1d1e7cae0764d1b81eae61c0",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-focal-pose-reset-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "f32b231d7c0d734f9301d10fb7bf4273d62da01c",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-phase4-reset-profile-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "132eb14ff63815bda1ffa3f69a7a663906ab7dbb",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-pressure-anchor-reset-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "70c2cde4549968c9554dd9c5bb6b368c8dd6a86b",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-pressure-anchor-snapshot-v2-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "53ead6f683b2a5a48af7107686a30a1e65e0e731",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-rollout-candidate-residency-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "8c45b236ab4113287df3dc2eb6b3c632023d4436",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "A",
+      "path": "docs/plans/gpu-five-track-ppo-selected-row-reset-residency-expansion-20261026.md",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "36f703fefb1693883f1882f4a514ee7d24545acb",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/_tensor_3v3_actions.py",
+      "base_blob_sha1": "eab6ef10e764ecfda6a2023b8306de95cc7a0c9c",
+      "candidate_blob_sha1": "f9fdeb3f9fba5dabec41921fdd07b2013343d2c1",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/_tensor_3v3_gamepieces.py",
+      "base_blob_sha1": "66792b5b3c22889ff02a28e663f8f5a4501be44e",
+      "candidate_blob_sha1": "716aa84bd79c64417a6cc137c54927deed4d9f7d",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/_tensor_3v3_observation.py",
+      "base_blob_sha1": "ccafdc9f40d4304b8f1d30b0c0a5de486055f19c",
+      "candidate_blob_sha1": "de5ce82013d0b65d09adcb3d551bd6aaa0ecfc23",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/architecture_scenarios.py",
+      "base_blob_sha1": "c66b72ae7f10cddf80f1b03c21a63537d500fcd6",
+      "candidate_blob_sha1": "fef0df4c7f96512e4ba2c3811a88836f192e9c00",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/curriculum_metrics.py",
+      "base_blob_sha1": "7501d21d0f49ca1bf7a91eb85cce45cfcd15d6c8",
+      "candidate_blob_sha1": "d9c7a4a786ca0bacdb68cc2bfbbe587dce570eef",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/curriculum_scenarios.py",
+      "base_blob_sha1": "81ea7778ada65640d45003c007f23481e20c0e3a",
+      "candidate_blob_sha1": "ebb06b524393025127d0b8596024e2e25970c24f",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/meco_baseline_freeze.py",
+      "base_blob_sha1": "bfb587e7d4d9cbd5ae3d19a68d3eadf840a908d0",
+      "candidate_blob_sha1": "cc81a9b72412d03a6eb9b2a4a8b6f8ab4ff2cba8",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/meco_phase4_context.py",
+      "base_blob_sha1": "96a28d5555ae93d4efa88c9de6dbb90119c07c8e",
+      "candidate_blob_sha1": "317737a30a0971692f3fc9d2ccb6a7f1a95562a7",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/meco_plan_a_policy.py",
+      "base_blob_sha1": "24de6230eaf401231345045258bb7f403b944595",
+      "candidate_blob_sha1": "998df1325872d09b696fb44b953beede13c04839",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "A",
+      "path": "frc_defense/meco_ppo_batch.py",
+      "base_blob_sha1": "absent",
+      "candidate_blob_sha1": "ff2a6d9c8eb30771fcbb05c7cacb68a9a5ad5d0f",
+      "checkout_status": "candidate-only"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/meco_track_training.py",
+      "base_blob_sha1": "824d76b51b37f2d6b17a6ecbfe7b8c0e956e9262",
+      "candidate_blob_sha1": "6a03b416c1ba78773681f411ca02d5283c0eb996",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/meco_tracks.py",
+      "base_blob_sha1": "eac13bf153edd8243c8e8df65baf3d2976a8820d",
+      "candidate_blob_sha1": "d3e2b4fb3f4341081b768d9412df978ea7ba7660",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_3v3.py",
+      "base_blob_sha1": "5e1962d5aeafbea46dbbbd312cedd0e4e570bdac",
+      "candidate_blob_sha1": "ba50cb5f5f9c5d14d5922fa308ab5f6f6366bfca",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_defense_gamepieces.py",
+      "base_blob_sha1": "33f21b4242a100f2c517d1ebc7e358a25466bd75",
+      "candidate_blob_sha1": "8702527912f86709c0ee5f1a6194c0fca907ebd5",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_defense_observation.py",
+      "base_blob_sha1": "5ac71651d85d31b1dc87e980a50380febf337c65",
+      "candidate_blob_sha1": "6bf5cc9fcf73f7921897a8b7759e1e3551529c82",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_defense_opponent.py",
+      "base_blob_sha1": "9f69d231e86fdc05978a4a656b39835e2fdc7df4",
+      "candidate_blob_sha1": "819b9fd068921908c9b1ff2c868c967e3090fec0",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_defense_reset.py",
+      "base_blob_sha1": "acf2f3b94632ecc81175a0dd5a780d7e74e7e3c7",
+      "candidate_blob_sha1": "f10072402fe5f10e8fa387dcfe24a3cc08954543",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_defense_step.py",
+      "base_blob_sha1": "2cbeb6a5088f2a5724ab1480417ed75cb8b02ccd",
+      "candidate_blob_sha1": "cc833900f4bb428ff946c3f89f6f982287c8d1fc",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "frc_defense/tensor_physics.py",
+      "base_blob_sha1": "bd4335ef18f6eeef168585333e6f95a8e19ac2f8",
+      "candidate_blob_sha1": "ca0b36aa49947cb8382abfb5b72daf140d2daab3",
+      "checkout_status": "checkout-present"
+    },
+    {
+      "status": "M",
+      "path": "tests/test_meco_phase4_context.py",
+      "base_blob_sha1": "1d8116ac4e662b27b0484d513badee10d74f98a5",
+      "candidate_blob_sha1": "8515ed8d08c15597c99a03979ff272398176df67",
+      "checkout_status": "checkout-present"
+    }
+  ]
+}
