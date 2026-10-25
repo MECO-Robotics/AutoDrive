@@ -59,6 +59,60 @@ def _queue_lane_directory(root, value):
     return directory
 
 
+def _queue_track_directory(root, track):
+    """Resolve one supported track layout, rejecting symlinks and escapes."""
+    if (not isinstance(track, str) or not track or Path(track).is_absolute()
+            or len(Path(track).parts) != 1 or Path(track).parts[0] in ('.', '..')
+            or '/' in track or '\\' in track):
+        raise ValueError('queue track must be one safe path component')
+    candidates = {}
+    for name, lexical in (('checkpoint', root / 'checkpoints' / track),
+                          ('legacy', root / track)):
+        if not lexical.exists() and not lexical.is_symlink():
+            continue
+        candidates[name] = _queue_lane_directory(root, str(lexical))
+    if not candidates:
+        raise ValueError('queue track directory does not exist')
+    return candidates
+
+
+def _select_queue_track_directory(root, lane, by_path):
+    run_directory = lane.get('run_directory')
+    track = lane.get('track')
+    if run_directory is not None and run_directory != track:
+        raise ValueError('queue run_directory must name its track directory')
+    if run_directory is None and track is None:
+        raise ValueError('queue lane has no valid directory')
+    if run_directory is not None and (not isinstance(run_directory, str)
+            or Path(run_directory).is_absolute() or len(Path(run_directory).parts) != 1
+            or Path(run_directory).parts[0] in ('.', '..')):
+        raise ValueError('queue run_directory must name its track directory')
+    candidates = _queue_track_directory(root, track)
+    supplied = None
+    if 'directory' in lane:
+        supplied = _queue_lane_directory(root, lane['directory'])
+        if supplied not in candidates.values():
+            raise ValueError('queue directory is not a supported track path')
+    stats_backed = [path for path in candidates.values() if path in by_path]
+    if len(set(stats_backed)) > 1:
+        if supplied is None:
+            raise ValueError('queue track resolves to ambiguous saved runs')
+        chosen = supplied
+    elif stats_backed:
+        chosen = stats_backed[0]
+        if supplied is not None and supplied != chosen:
+            raise ValueError('queue directory conflicts with saved track run')
+    elif supplied is not None:
+        chosen = supplied
+    else:
+        # Pending lanes remain status-only. Prefer the current layout when both
+        # directories exist but neither has saved stats yet.
+        chosen = candidates.get('checkpoint', candidates.get('legacy'))
+    if supplied is not None and supplied != chosen:
+        raise ValueError('queue directory conflicts with run_directory')
+    return chosen
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -271,38 +325,23 @@ def summarize(root, cache_dir=None):
             try:
                 if not isinstance(lane, dict):
                     raise ValueError('queue lane is malformed')
-                directory = None
-                if 'run_directory' in lane:
-                    run_directory = lane['run_directory']
-                    track = lane.get('track')
-                    path = Path(run_directory) if isinstance(run_directory, str) else Path()
-                    if (not isinstance(run_directory, str) or path.is_absolute()
-                            or len(path.parts) != 1 or path.parts[0] in ('.', '..')
-                            or not isinstance(track, str) or run_directory != track):
-                        raise ValueError('queue run_directory must name its track directory')
-                    directory = _queue_lane_directory(root, run_directory)
-                if 'directory' in lane:
-                    legacy_directory = _queue_lane_directory(root, lane['directory'])
-                    if directory is not None and legacy_directory != directory:
-                        raise ValueError('queue directory conflicts with run_directory')
-                    directory = legacy_directory
-                if directory is None:
-                    raise ValueError('queue lane has no valid directory')
+                directory = _select_queue_track_directory(root, lane, by_path)
                 run = by_path.get(directory)
                 if run is None:
                     run = {'run': str(directory.relative_to(root)), 'path': str(directory),
                            'algorithm': lane.get('algorithm', 'ppo'),
                            'architecture': lane.get('architecture', 'unknown'),
                            'updates': lane.get('completed_updates', 0),
-                           'current': lane.get('current'), 'qualified': lane.get('qualified', []),
-                           'consecutive_passes': {}, 'last_promotion': None, 'diagnostic': False,
-                           'latest_evaluations': []}
+                           'current': lane.get('current'), 'qualified': [],
+                           'consecutive_passes': {}, 'last_promotion': None, 'diagnostic': True,
+                           'latest_evaluations': [], 'evaluation_history': [],
+                           'qualification_evidence': [], 'evaluation_history_incomplete': True}
                     runs.append(run)
                 run['queue_status'] = lane.get('status', 'unknown')
                 run['device'] = lane.get('device')
                 run['training_seed'] = lane.get('seed')
                 queue_lanes.append({key: lane.get(key) for key in
-                                    ('track', 'status', 'completed_updates', 'device', 'current', 'evaluation')})
+                                    ('track', 'status', 'completed_updates', 'device', 'current')})
                 if lane.get('current'):
                     run['current'] = lane['current']
             except (KeyError, TypeError, ValueError, OSError) as exc:

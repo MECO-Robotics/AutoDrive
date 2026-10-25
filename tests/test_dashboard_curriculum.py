@@ -255,26 +255,35 @@ def test_dashboard_requires_explicit_curriculum_root_when_run_dir_is_not_one(tmp
 
 
 def test_queued_only_lane_is_pending_and_stale_queue_is_reported(tmp_path):
-    lane = {"architecture": "fixture", "directory": "runs/queued", "status": "queued",
-            "current": "pickup_simple", "completed_updates": 0}
-    (tmp_path / "runs" / "queued").mkdir(parents=True)
+    lane = {"track": "A1", "architecture": "fixture", "directory": "A1", "status": "queued",
+            "current": "pickup_simple", "completed_updates": 0,
+            "qualified": ["forged"], "evaluation": {"success": True}}
+    (tmp_path / "A1").mkdir()
     queue = tmp_path / "queue-status.json"
     queue.write_text(json.dumps({"lanes": [lane]}))
+    summary = summarize(tmp_path)
+    assert summary["queue_lanes"] == [{"track": "A1", "status": "queued",
+                                       "completed_updates": 0, "device": None,
+                                       "current": "pickup_simple"}]
+    assert summary["runs"][0]["evaluation_history"] == []
     data = _payload(tmp_path)
     assert len(data["runs"]) == 1
     assert data["runs"][0]["status"] == "queued"
     assert data["runs"][0]["current"] == "pickup_simple"
+    assert data["runs"][0]["qualified"] == []
+    assert data["runs"][0]["latest_evaluations"] == []
+    assert "qualification_evidence" not in data["runs"][0]
     import os, time
     os.utime(queue, (time.time() - 200, time.time() - 200))
     assert _payload(tmp_path)["runs"][0]["status"] == "stale"
 
 
-def test_current_five_track_run_directory_queue_resolves_in_root(tmp_path):
+def test_current_five_track_run_directory_queue_resolves_checkpoint_root(tmp_path):
     tracks = ("A1", "A2", "A3", "C1", "C2")
     lanes = []
     for track in tracks:
-        run = tmp_path / track
-        run.mkdir()
+        run = tmp_path / "checkpoints" / track
+        run.mkdir(parents=True)
         (run / "stats.json").write_text(json.dumps({
             "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
         lanes.append({"track": track, "run_directory": track,
@@ -284,26 +293,35 @@ def test_current_five_track_run_directory_queue_resolves_in_root(tmp_path):
     report = summarize(tmp_path)
 
     assert report["errors"] == []
-    assert {run["run"] for run in report["runs"]} == set(tracks)
+    assert {run["run"] for run in report["runs"]} == {
+        f"checkpoints/{track}" for track in tracks}
     assert {lane["track"] for lane in report["queue_lanes"]} == set(tracks)
     assert {Path(run["path"]).resolve() for run in report["runs"]} == {
-        (tmp_path / track).resolve() for track in tracks}
+        (tmp_path / "checkpoints" / track).resolve() for track in tracks}
 
 
 def test_queue_directory_conflicts_and_unsafe_paths_fail_closed(tmp_path):
     for name in ("A1", "other"):
-        (tmp_path / name).mkdir()
+        (tmp_path / "checkpoints" / name).mkdir(parents=True, exist_ok=True)
     (tmp_path / "linked").symlink_to(tmp_path / "other", target_is_directory=True)
+    (tmp_path / "checkpoints" / "A3").symlink_to(
+        tmp_path / "checkpoints" / "other", target_is_directory=True)
+    (tmp_path / "checkpoints" / "A2").write_text("not a directory")
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     queue = tmp_path / "queue-status.json"
 
     invalid_lanes = [
-        {"track": "A1", "run_directory": "A1", "directory": "other"},
+        {"track": "A1", "run_directory": "A1", "directory": "checkpoints/other"},
         {"track": "A1", "run_directory": "../other"},
         {"track": "A1", "run_directory": "A1", "directory": "linked"},
         {"track": "A1", "run_directory": "A1", "directory": str(outside)},
-        {"track": "A1", "run_directory": "missing"},
+        {"track": "missing", "run_directory": "missing"},
+        {"track": "A1", "run_directory": "A1", "directory": "checkpoints/A1/child"},
+        {"track": "A1", "run_directory": "A1", "directory": "checkpoints-link/A1"},
+        {"track": "A2", "run_directory": "A2"},
+        {"track": "A3", "run_directory": "A3"},
+        {"track": "A1/child", "run_directory": "A1/child"},
     ]
     for lane in invalid_lanes:
         queue.write_text(json.dumps({"lanes": [lane]}))
@@ -325,6 +343,78 @@ def test_matching_legacy_and_current_queue_directories_are_unambiguous(tmp_path)
 
     assert report["errors"] == []
     assert [lane["track"] for lane in report["queue_lanes"]] == ["A1"]
+
+
+def test_legacy_track_root_and_absolute_directory_remain_supported(tmp_path):
+    run = tmp_path / "A1"
+    run.mkdir()
+    (run / "stats.json").write_text(json.dumps({
+        "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "track": "A1", "directory": str(run.resolve()),
+        "status": "running", "completed_updates": 3}]}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert len(report["runs"]) == 1
+    assert report["runs"][0]["path"] == str(run.resolve())
+    assert report["queue_lanes"][0]["track"] == "A1"
+
+
+def test_two_stats_backed_track_layouts_are_ambiguous_without_disambiguator(tmp_path):
+    for run in (tmp_path / "checkpoints" / "A1", tmp_path / "A1"):
+        run.mkdir(parents=True)
+        (run / "stats.json").write_text(json.dumps({
+            "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "track": "A1", "run_directory": "A1", "status": "running"}]}))
+
+    report = summarize(tmp_path)
+
+    assert any("ambiguous" in error["error"] for error in report["errors"])
+    assert report["queue_lanes"] == []
+    assert len(report["runs"]) == 2
+
+
+def test_directory_disambiguates_two_stats_backed_layouts_only_by_exact_candidate(tmp_path):
+    checkpoint = tmp_path / "checkpoints" / "A1"
+    legacy = tmp_path / "A1"
+    for run in (checkpoint, legacy):
+        run.mkdir(parents=True)
+        (run / "stats.json").write_text(json.dumps({
+            "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "track": "A1", "run_directory": "A1", "directory": str(legacy.resolve()),
+        "status": "running"}]}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert report["queue_lanes"][0]["track"] == "A1"
+    selected = next(run for run in report["runs"] if run.get("queue_status") == "running")
+    assert selected["path"] == str(legacy.resolve())
+
+
+def test_same_basename_elsewhere_under_root_never_matches_queue_track(tmp_path):
+    expected = tmp_path / "checkpoints" / "A1"
+    unrelated = tmp_path / "other" / "A1"
+    unrelated.mkdir(parents=True)
+    (unrelated / "stats.json").write_text(json.dumps({
+        "curriculum_state": {"qualified": ["forged"]}, "stats": [],
+        "config": {"eval_every": 1}}))
+    expected.mkdir(parents=True)
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "track": "A1", "run_directory": "A1", "status": "queued",
+        "qualified": ["forged"]}]}))
+
+    report = summarize(tmp_path)
+
+    queued = next(run for run in report["runs"] if run["run"] == "checkpoints/A1")
+    assert queued["qualified"] == []
+    assert queued["latest_evaluations"] == []
+    assert queued["evaluation_history"] == []
+    assert queued["qualification_evidence"] == []
 
 
 def test_only_valid_paired_nondiagnostic_reference_qualified_evidence_qualifies(tmp_path):
@@ -416,11 +506,11 @@ def test_duplicate_scenario_results_cannot_prove_qualification(tmp_path):
 
 
 def test_malformed_and_out_of_root_queue_lanes_are_isolated(tmp_path):
-    (tmp_path / "runs" / "unknown").mkdir(parents=True)
+    (tmp_path / "A1").mkdir()
     queue = tmp_path / "orchestration.json"
     queue.write_text(json.dumps({"lanes": [None,
         {"directory": str(tmp_path.parent / "outside"), "status": "running"},
-        {"directory": "runs/unknown", "architecture": "fixture"}]}))
+        {"track": "A1", "directory": "A1", "architecture": "fixture"}]}))
     data = _payload(tmp_path)
     assert len(data["runs"]) == 1
     assert data["runs"][0]["status"] == "unknown"
