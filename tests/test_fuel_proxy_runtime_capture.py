@@ -35,8 +35,10 @@ def _make_meco_env(worlds=1, horizon=8):
 
 
 def _prepare_score_piece(env, world, piece_id, event_time_s):
-    env.sim.pose[world, 0] = torch.tensor(
+    scorer_pose = torch.tensor(
         [2.0, 1.0, 0.0], device=env.device, dtype=env.sim.pose.dtype)
+    env.sim.pose[world, 0] = scorer_pose
+    env.policy_pose[world, 0] = scorer_pose
     env.sim.velocity[world, 0].zero_()
     env.piece_active[world].zero_()
     env.piece_owner[world].fill_(-1)
@@ -57,10 +59,16 @@ def _run_scorer_tick(env, active):
     _capture_fuel_proxy_step_events(env, active)
 
 
+def _run_scoring_action_step(env):
+    actions = torch.full((env.n, 6), 7, device=env.device, dtype=torch.long)
+    actions[:, 0] = 4
+    return env.step(actions)
+
+
 @pytest.mark.parametrize(("event_time_s", "expected_auto"), [
     (19.98, 1), (20.0, 0), (20.02, 0),
 ])
-def test_cuda_meco_scorer_emits_ledger_row_with_pinned_auto_boundary(
+def test_cuda_meco_scorer_uses_pinned_half_open_auto_boundary(
         event_time_s, expected_auto):
     event_tick = round(event_time_s / .02)
     env = _make_meco_env(horizon=max(8, event_tick + 1))
@@ -77,6 +85,8 @@ def test_cuda_meco_scorer_emits_ledger_row_with_pinned_auto_boundary(
     assert env.fuel_scored_event[0, 0].item() == 1
     assert env.fuel_score_count[0, 0].item() == score_before[0, 0].item() + 1
     assert env.auto_fuel_scores[0, 0].item() == auto_before[0, 0].item() + expected_auto
+    score_after_scorer = env.fuel_score_count.clone()
+    auto_after_scorer = env.auto_fuel_scores.clone()
     ledger = validate_fuel_proxy_ledger(env.build_fuel_proxy_ledgers()[0])
     assert len(ledger["events"]) == 1
     event = ledger["events"][0]
@@ -88,24 +98,29 @@ def test_cuda_meco_scorer_emits_ledger_row_with_pinned_auto_boundary(
     assert event["event_time_s"] == event_time_s
     assert ledger["qualification_eligible"] is False
     assert "official_match_points" not in ledger
-
-    score_after_scorer = env.fuel_score_count.clone()
-    auto_after_scorer = env.auto_fuel_scores.clone()
-    scored_events_after_scorer = env.fuel_scored_event.clone()
-    rewards_after_scorer = torch.where(
-        env.team_ids[None] == 0,
-        env.fuel_scored_event[:, :3].sum(-1, keepdim=True),
-        -env.fuel_scored_event[:, :3].sum(-1, keepdim=True),
-    ).expand(-1, 6)
-    rewards_after_ledger = torch.where(
-        env.team_ids[None] == 0,
-        env.fuel_scored_event[:, :3].sum(-1, keepdim=True),
-        -env.fuel_scored_event[:, :3].sum(-1, keepdim=True),
-    ).expand(-1, 6)
     torch.testing.assert_close(env.fuel_score_count, score_after_scorer)
     torch.testing.assert_close(env.auto_fuel_scores, auto_after_scorer)
-    torch.testing.assert_close(env.fuel_scored_event, scored_events_after_scorer)
-    torch.testing.assert_close(rewards_after_ledger, rewards_after_scorer)
+
+
+def test_cuda_meco_step_reward_and_scores_are_unchanged_by_ledger_export():
+    env = _make_meco_env()
+    _prepare_score_piece(env, 0, 11, .02)
+    _, reward, _, _, _ = _run_scoring_action_step(env)
+
+    assert env.fuel_scored_event[0, 0].item() == 1
+    assert reward[0].tolist() == [1., 1., 1., -1., -1., -1.]
+    score_after_step = env.fuel_score_count.clone()
+    auto_after_step = env.auto_fuel_scores.clone()
+    events_after_step = env.fuel_scored_event.clone()
+    reward_after_step = reward.clone()
+
+    ledger = validate_fuel_proxy_ledger(env.build_fuel_proxy_ledgers()[0])
+    assert [row["event_id"] for row in ledger["events"]] == [
+        "fuel-score:gpu-score-episode:w0:g0:t0:r0:p11"]
+    torch.testing.assert_close(env.fuel_score_count, score_after_step)
+    torch.testing.assert_close(env.auto_fuel_scores, auto_after_step)
+    torch.testing.assert_close(env.fuel_scored_event, events_after_step)
+    torch.testing.assert_close(reward, reward_after_step)
 
 
 def test_cuda_mask_and_partial_reset_preserve_ledger_rows_and_refresh_ids():
