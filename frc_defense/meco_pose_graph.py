@@ -209,29 +209,41 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
     edge_mask = torch.zeros((total, degree), device=device, dtype=torch.bool)
     edges[src, slots] = dst
     edge_mask[src, slots] = edge_clear
-    edge_rows = edges.cpu().tolist()
-    mask_rows = edge_mask.cpu().tolist()
-    regions = _connected_region_ids(edge_rows, mask_rows, node_grid, region_count)
-    coarse_adj = [set() for _ in range(region_count)]
-    region_tensor = torch.tensor(regions, device=device, dtype=torch.long)
-    for src_node, row in enumerate(edge_rows):
-        if not any(mask_rows[src_node]):
-            continue
-        src_region = regions[src_node]
-        for dst_node, allowed in zip(row, mask_rows[src_node]):
-            if allowed:
-                dst_region = regions[dst_node]
-                if src_region != dst_region:
-                    coarse_adj[src_region].add(dst_region)
-    coarse_degree = max(1, max((len(row) for row in coarse_adj), default=0))
-    coarse_edges = torch.zeros((region_count, coarse_degree), device=device,
-                               dtype=torch.long)
-    coarse_mask = torch.zeros_like(coarse_edges, dtype=torch.bool)
-    for region, neighbors in enumerate(coarse_adj):
-        ordered = sorted(neighbors)
-        if ordered:
-            coarse_edges[region, :len(ordered)] = torch.tensor(ordered, device=device)
-            coarse_mask[region, :len(ordered)] = True
+    if device.type == "cuda" and torch.version.hip is not None:
+        # Preserve the historical ordered directed-BFS partition exactly on
+        # device. The fixed 64-wide coarse row is padding-inert for the graph
+        # message block and avoids a D2H maximum-degree read.
+        from .meco_plan_a_shortest_path_hip import extension
+        region_tensor, coarse_edges, coarse_mask, region_status = \
+            extension().pose_regions(edges.contiguous(), edge_mask.contiguous(),
+                                     int(region_count))
+        torch._assert_async(region_status == 0,
+            "invalid edge or too many components in Plan A pose graph")
+        coarse_degree = region_count
+    else:
+        edge_rows = edges.cpu().tolist()
+        mask_rows = edge_mask.cpu().tolist()
+        regions = _connected_region_ids(edge_rows, mask_rows, node_grid, region_count)
+        coarse_adj = [set() for _ in range(region_count)]
+        region_tensor = torch.tensor(regions, device=device, dtype=torch.long)
+        for src_node, row in enumerate(edge_rows):
+            if not any(mask_rows[src_node]):
+                continue
+            src_region = regions[src_node]
+            for dst_node, allowed in zip(row, mask_rows[src_node]):
+                if allowed:
+                    dst_region = regions[dst_node]
+                    if src_region != dst_region:
+                        coarse_adj[src_region].add(dst_region)
+        coarse_degree = max(1, max((len(row) for row in coarse_adj), default=0))
+        coarse_edges = torch.zeros((region_count, coarse_degree), device=device,
+                                   dtype=torch.long)
+        coarse_mask = torch.zeros_like(coarse_edges, dtype=torch.bool)
+        for region, neighbors in enumerate(coarse_adj):
+            ordered = sorted(neighbors)
+            if ordered:
+                coarse_edges[region, :len(ordered)] = torch.tensor(ordered, device=device)
+                coarse_mask[region, :len(ordered)] = True
     return LegalPoseGraph(
         xy=node_grid, heading_bin=heading_bins, heading=headings,
         edges=edges[None],

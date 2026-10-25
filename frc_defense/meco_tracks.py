@@ -1461,8 +1461,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 "counters": model.inference_counters}
             return {"logits": fallback_logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
-                    "inference_status": ("device_outcome" if candidate_batch is not None
-                                         else "deterministic_fallback"),
+                    "inference_status": "deterministic_fallback",
                     "inference_status_code": torch.where(fallback_available,
                         torch.ones((), device=utility.device, dtype=torch.uint8),
                         torch.full((), 2, device=utility.device, dtype=torch.uint8)),

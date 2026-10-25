@@ -52,7 +52,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     MULTIMODEL_DAMPING_PER_S)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
-    PlanAEmptySupportError, SUPPORT_ORDER)
+    plan_a_support_order_digest, PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
@@ -1147,9 +1147,25 @@ def _plan_a_route_support(env, graph, support, snapshot_id, penalty_map, config)
     fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
     fallback_pair = fallback_node * valid_matrix.shape[1] + fallback_slot
     updated = replace(support, valid_mask=pair_mask,
-        fallback_pair_tensor=fallback_pair.reshape(()), support_digest="")
-    updated = replace(updated, support_digest=plan_a_support_digest(updated, graph))
+        fallback_pair_tensor=fallback_pair.reshape(()), support_digest="",
+        order_digest=plan_a_support_order_digest(support, graph))
     return updated, routes
+
+
+def _plan_a_selection_logits(logits, valid_mask, fallback_index, decision_valid):
+    """Apply route support and the canonical fallback without host scalar reads."""
+    if (logits.ndim != 1 or valid_mask.shape != logits.shape or
+            valid_mask.dtype != torch.bool or valid_mask.device != logits.device or
+            fallback_index.numel() != 1 or fallback_index.device != logits.device):
+        raise ValueError("Plan A selector inputs do not match the frozen support")
+    masked = logits.masked_fill(~valid_mask, -torch.inf)
+    fallback_available = valid_mask.gather(0, fallback_index.reshape(1)).reshape(())
+    fallback_logits = torch.full_like(logits, -torch.inf).scatter(0,
+        fallback_index.reshape(1), torch.zeros((1,), device=logits.device,
+        dtype=logits.dtype))
+    fallback_logits = torch.where(fallback_available, fallback_logits,
+                                  torch.full_like(fallback_logits, -torch.inf))
+    return torch.where(decision_valid, masked, fallback_logits)
 
 
 def _plan_a_prediction_risk(env, support, eta, prediction_mode):
@@ -1158,6 +1174,8 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if eta.ndim != 1 or eta.shape[0] != support.goal_xy.shape[0]:
         raise ValueError("Plan A ETA must contain one value per legal graph node")
+    if eta.device.type == "cuda":
+        return _plan_a_prediction_risk_device(env, support, eta, prediction_mode)
     pair_valid = support.valid_mask.reshape(-1, 8)
     valid_nodes = pair_valid.any(dim=-1)
     finite_nonnegative_eta = torch.isfinite(eta) & (eta >= 0.)
@@ -1253,6 +1271,124 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         "horizon_max_s": horizon_max}
 
 
+def _plan_a_prediction_risk_device(env, support, eta, prediction_mode):
+    """GPU path: keep opponent validity, age, ETA and forecast predicates on-device."""
+    pair_valid = support.valid_mask.reshape(-1, 8)
+    valid_nodes = pair_valid.any(dim=-1)
+    eta_valid = torch.isfinite(eta) & (eta >= 0.)
+    safe_eta = torch.where(eta_valid, eta, torch.zeros_like(eta))
+    position = env.opponent_pose[0, 3, :2]
+    velocity = env.opponent_velocity[0, 3, :2]
+    age = env.opponent_age[0, 3]
+    observed_valid = (env.opponent_valid[0, 3].bool() &
+        torch.isfinite(position).all())
+    motion_fresh = (observed_valid & torch.isfinite(velocity).all() &
+        torch.isfinite(age) & (age >= 0.) & (age <= PREDICTION_MAX_AGE_S))
+    safe_position = torch.nan_to_num(position, nan=0., posinf=0., neginf=0.)
+    safe_velocity = torch.nan_to_num(velocity, nan=0., posinf=0., neginf=0.)
+    speed = safe_velocity.norm().clamp_min(1e-8)
+    bounded_velocity = safe_velocity * torch.clamp(
+        PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+    current_endpoint = safe_position[None].expand(support.goal_xy.shape[0], -1)
+    cv_endpoint = current_endpoint + safe_eta[:, None] * bounded_velocity[None]
+    if prediction_mode == "current":
+        risk = _endpoint_risk(support.goal_xy, current_endpoint, valid_nodes,
+                              observed_valid)
+        used_cv = torch.zeros((), device=eta.device, dtype=torch.bool)
+        used_multimodel = torch.zeros_like(used_cv)
+    elif prediction_mode == "cv":
+        use_cv = motion_fresh
+        endpoint = torch.where(use_cv, cv_endpoint, current_endpoint)
+        risk = _endpoint_risk(support.goal_xy, endpoint, valid_nodes,
+                              observed_valid)
+        used_cv = use_cv
+        used_multimodel = torch.zeros((), device=eta.device, dtype=torch.bool)
+    else:
+        t = safe_eta.clamp_max(MULTIMODEL_MAX_HORIZON_S)
+        turn_observed = (env.opponent_velocity[0, 3, 2]
+            if env.opponent_velocity.shape[-1] > 2 else
+            torch.zeros((), device=eta.device, dtype=eta.dtype))
+        turn_rate = torch.nan_to_num(turn_observed, nan=0., posinf=0., neginf=0.).abs().clamp(
+            MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S)
+        weighted = torch.zeros_like(eta)
+        for name, weight in MULTIMODEL_HYPOTHESES:
+            if name == "constant_velocity":
+                endpoint = current_endpoint + t[:, None] * bounded_velocity[None]
+            elif name == "damped_velocity":
+                distance_time = -torch.expm1(-MULTIMODEL_DAMPING_PER_S * t) / MULTIMODEL_DAMPING_PER_S
+                endpoint = current_endpoint + distance_time[:, None] * bounded_velocity[None]
+            else:
+                omega = turn_rate * (1. if name == "turn_left" else -1.)
+                angle = omega * t
+                sin_angle, cos_angle = torch.sin(angle), torch.cos(angle)
+                dx = (bounded_velocity[0] * sin_angle + bounded_velocity[1] *
+                      (cos_angle - 1.)) / omega
+                dy = (bounded_velocity[0] * (1. - cos_angle) + bounded_velocity[1] *
+                      sin_angle) / omega
+                endpoint = current_endpoint + torch.stack((dx, dy), dim=-1)
+            weighted = weighted + float(weight) * _endpoint_risk(
+                support.goal_xy, endpoint, valid_nodes, observed_valid)
+        single = _endpoint_risk(support.goal_xy, current_endpoint, valid_nodes,
+                                observed_valid)
+        risk = torch.where(motion_fresh, weighted, single)
+        used_cv = torch.zeros((), device=eta.device, dtype=torch.bool)
+        used_multimodel = motion_fresh
+    valid_eta = valid_nodes & eta_valid
+    has_endpoint = valid_eta.any()
+    horizon_min = torch.where(has_endpoint,
+        eta.masked_fill(~valid_eta, torch.inf).amin(), eta.new_zeros(()))
+    horizon_max = torch.where(has_endpoint,
+        eta.masked_fill(~valid_eta, -torch.inf).amax(), eta.new_zeros(()))
+    fallback_code = (torch.where(observed_valid, torch.zeros((), device=eta.device,
+        dtype=torch.long), torch.ones((), device=eta.device, dtype=torch.long))
+        if prediction_mode == "current" else
+        torch.where(~observed_valid, torch.ones((), device=eta.device,
+        dtype=torch.long), torch.where(motion_fresh, torch.zeros((), device=eta.device,
+        dtype=torch.long), torch.full((), 2, device=eta.device, dtype=torch.long))))
+    report_age = torch.where(torch.isfinite(age) & (age >= 0.), age,
+                             torch.full_like(age, torch.nan))
+    metadata = {**prediction_contract(prediction_mode, horizon_s=None),
+        "horizon_semantics": ("observed_current_pose" if prediction_mode == "current" else
+            "per_support_node_eta_clamped_to_multi_model_max_horizon" if
+            prediction_mode == "multi_model_v1" else
+            "maximum_eta_over_support_valid_pair_nodes; unreachable_and_masked_nodes_excluded"),
+        "risk_semantics": ("weighted_expected_penalty_over_hypothesis_endpoints"
+            if prediction_mode == "multi_model_v1" else "single_endpoint_penalty"),
+        "_device_report": torch.stack((horizon_min, horizon_max,
+            has_endpoint.to(eta.dtype), used_cv.to(eta.dtype),
+            used_multimodel.to(eta.dtype), fallback_code.to(eta.dtype),
+            report_age.to(eta.dtype)))}
+    return risk, metadata
+
+
+def _endpoint_risk(goals, endpoints, valid_nodes, observed_valid):
+    separation = torch.linalg.vector_norm(goals - endpoints, dim=-1)
+    penalty = PREDICTION_MAX_PENALTY_POINTS * (
+        (PREDICTION_THREAT_RADIUS_M - separation) /
+        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+    return torch.where(valid_nodes & observed_valid, penalty,
+                       torch.zeros_like(penalty))
+
+
+def _materialize_plan_a_prediction_metadata(metadata):
+    """Copy the small forecast summary once, after action selection."""
+    values = metadata.pop("_device_report", None)
+    if values is None:
+        return metadata
+    minimum, maximum, has_endpoint, used_cv, used_multi, fallback_code, age = (
+        values.detach().to(device="cpu").tolist())
+    metadata.update(horizon_min_s=minimum if has_endpoint else None,
+        horizon_max_s=maximum if has_endpoint else None,
+        horizon_s=maximum if has_endpoint else None,
+        observed_age_s=age if math.isfinite(age) else None,
+        used_cv=bool(used_cv),
+        used_multimodel=bool(used_multi),
+        fallback=(None if int(fallback_code) == 0 else
+                  "none_no_valid_observation" if int(fallback_code) == 1 else
+                  "observed_current_pose"))
+    return metadata
+
+
 def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
@@ -1309,7 +1445,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     request_sequence=request_sequence, generation_id=generation_id,
                     candidate_mask_digest=ordered_candidate_order_digest(candidate_ids),
                     input_contract_sha256=input_contract_sha256,
-                    legal_pose_order_digest=support.support_digest,
+                    legal_pose_order_digest=support.order_digest,
                     model_id=f"meco:{track}",
                     candidate_support_mode="device-mask")
             except Exception:
@@ -1365,8 +1501,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             and response.generation_id == request.generation_id
             and response.snapshot_id == request.snapshot_id == safe.observation.snapshot_id
             and response.candidate_mask_digest == request.candidate_mask_digest
-            and response.legal_pose_order_digest == support.support_digest
-            and request.legal_pose_order_digest == support.support_digest
+            and response.legal_pose_order_digest == support.order_digest
+            and request.legal_pose_order_digest == support.order_digest
             and response.observation_timestamp == safe.observation.timestamp
             and response.capture_monotonic == safe.observation.capture_monotonic
             and response.dispatch_monotonic == request.dispatch_monotonic
@@ -1410,7 +1546,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             "generation_id": request.generation_id if request else None,
             "snapshot_id": safe.observation.snapshot_id,
             "candidate_mask_digest": request.candidate_mask_digest if request else None,
-            "legal_pose_order_digest": support.support_digest,
+            "legal_pose_order_digest": support.order_digest,
             "captured_monotonic": safe.observation.capture_monotonic,
             "dispatch_monotonic": request.dispatch_monotonic if request else None,
             "completed_monotonic": response.completed_monotonic if response_valid else None,
@@ -1420,13 +1556,21 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     decision_valid = torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all()
     if inference_valid_device is not None:
         decision_valid = decision_valid & inference_valid_device.reshape(()).bool()
-    fallback_logits = torch.full_like(logits, -torch.inf)
-    fallback_logits = fallback_logits.scatter(0,
-        support.fallback_pair_tensor.reshape(1), torch.zeros((1,),
-        device=env.device, dtype=logits.dtype))
-    selection_logits = torch.where(decision_valid, logits, fallback_logits)
+    if production_inference_failed:
+        decision_valid = decision_valid & torch.zeros((), device=env.device,
+                                                       dtype=torch.bool)
+    fallback_available = support.valid_mask.gather(0,
+        support.fallback_pair_tensor.reshape(1)).reshape(())
+    torch._assert_async(fallback_available,
+        "Plan A route support has no feasible deterministic fallback")
+    selection_logits = _plan_a_selection_logits(logits, support.valid_mask,
+        support.fallback_pair_tensor, decision_valid)
     action, logprob, entropy = sample_candidate_action(selection_logits[None],
         deterministic=(True if production_inference_failed else deterministic))
+    prediction_metadata = _materialize_plan_a_prediction_metadata(
+        prediction_metadata)
+    support = replace(support,
+        support_digest=plan_a_support_digest(support, graph))
     selected_index = action.reshape(())
     selected_node = support.pair_node_ids.index_select(0,
         selected_index.reshape(1)).reshape(())
@@ -2277,6 +2421,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     action_index = int(dispatch_payload[0])
                     if len(dispatch_payload) >= 12:
                         prepared["fallback_used"] = bool(dispatch_payload[11])
+                        if prepared["fallback_used"]:
+                            prepared["fallback_reason"] = (prepared.get("fallback_reason")
+                                or "device_selection_fallback")
                 hidden_before = (None if prepared["hidden_before"] is None else
                                  prepared["hidden_before"].detach().clone())
                 tracking_was_available = prepared["tracking_available"]
@@ -3810,6 +3957,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                             len(device_dispatch_payload) >= 12):
                                         prepared["fallback_used"] = bool(
                                             device_dispatch_payload[11])
+                                        if prepared["fallback_used"]:
+                                            prepared["fallback_reason"] = (
+                                                prepared.get("fallback_reason") or
+                                                "device_selection_fallback")
                                     policy_fallback_count += int(bool(
                                         prepared.get("fallback_used")))
                                 hidden = prepared["hidden_next"]
@@ -3907,7 +4058,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                             for i in parent_chain],
                                     "graph_path_heading_rad": [float(support.goal_heading[i].item())
                                                                for i in parent_chain],
-                                    "root_connector_distance_m": support.root_connector_m,
+                                    "root_connector_distance_m": float(support.root_connector_m.item())
+                                        if torch.is_tensor(support.root_connector_m) else
+                                        float(support.root_connector_m),
                                     "graph_route_distance_m": float(support.distances_m[node].item()),
                                     "graph_route_cost_m_equivalent": float(support.route_cost[node].item()),
                                     "eta_s": float(prepared["route_cost_nodes"][node].item()) /

@@ -10,9 +10,11 @@ void plan_a_dijkstra_launch(const int64_t*, const double*, const double*,
     int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
     hipStream_t);
 void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
-    const bool*, double*, double*, int64_t*, double*, int64_t*, int64_t,
-    int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
-    hipStream_t);
+    const bool*, const int64_t*, const double*, const double*, double*, double*,
+    int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
+    int64_t*, hipStream_t);
+void plan_a_pose_regions_launch(const int64_t*, const bool*, int64_t*, int64_t*,
+    bool*, int64_t*, int64_t, int64_t, int64_t, hipStream_t);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor> dijkstra(torch::Tensor edge_dst,
@@ -66,9 +68,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor> dijkstra_graph(torch::Tensor xy,
+           torch::Tensor, torch::Tensor> dijkstra_graph(torch::Tensor xy,
     torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
-    int64_t root, double root_start_cost, double root_connector_m) {
+    torch::Tensor root, torch::Tensor root_start_cost,
+    torch::Tensor root_connector_m) {
   TORCH_CHECK(xy.is_cuda() && xy.dim() == 2 && xy.size(1) == 2 &&
       (xy.scalar_type() == at::kFloat || xy.scalar_type() == at::kDouble),
       "xy must be HIP float32/float64 [N,2]");
@@ -84,13 +87,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
       edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
       edge_allowed.device() == xy.device(), "edge_allowed must be HIP bool [N,S]");
   const auto n = edge_dst.size(0), slots = edge_dst.size(1);
-  TORCH_CHECK(n > 0 && slots > 0 && root >= 0 && root < n,
-      "invalid graph shape or root");
+  TORCH_CHECK(n > 0 && slots > 0, "invalid graph shape");
   TORCH_CHECK(n <= (std::numeric_limits<int64_t>::max() - 1) / slots,
       "graph edge count overflows the HIP heap capacity");
-  TORCH_CHECK(std::isfinite(root_start_cost) && std::isfinite(root_connector_m) &&
-      root_start_cost >= 0. && root_connector_m >= 0.,
-      "root costs must be finite and nonnegative");
+  TORCH_CHECK(root.is_cuda() && root.dim() == 0 &&
+      root.scalar_type() == at::kLong && root.device() == xy.device(),
+      "root must be a scalar HIP int64 tensor");
+  TORCH_CHECK(root_start_cost.is_cuda() && root_start_cost.dim() == 0 &&
+      root_start_cost.scalar_type() == at::kDouble &&
+      root_start_cost.device() == xy.device(),
+      "root_start_cost must be a scalar HIP float64 tensor");
+  TORCH_CHECK(root_connector_m.is_cuda() && root_connector_m.dim() == 0 &&
+      root_connector_m.scalar_type() == at::kDouble &&
+      root_connector_m.device() == xy.device(),
+      "root_connector_m must be a scalar HIP float64 tensor");
   c10::cuda::CUDAGuard guard(xy.device());
   // Conversion stays on the selected device. The kernel promotes each stored
   // coordinate to double before applying the Python math geometry contract.
@@ -108,21 +118,48 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto status = torch::zeros({}, edge_dst.options());
   plan_a_dijkstra_graph_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
+      root.data_ptr<int64_t>(), root_start_cost.data_ptr<double>(),
+      root_connector_m.data_ptr<double>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),
       parent_length.data_ptr<double>(), traversal.data_ptr<int64_t>(), n, slots,
-      heap_capacity, root, root_start_cost, root_connector_m,
+      heap_capacity,
       heap_distance.data_ptr<double>(), heap_node.data_ptr<int64_t>(),
       status.data_ptr<int64_t>(), c10::cuda::getCurrentCUDAStream(xy.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  const auto device_status = status.item<int64_t>();
-  TORCH_CHECK(device_status == 0,
-      device_status == 1 ? "invalid active edge in Plan A HIP graph" :
-      "Plan A HIP heap capacity exceeded");
-  return {route, physical, parent, parent_length, traversal};
+  return {route, physical, parent, parent_length, traversal, status};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+pose_regions(torch::Tensor edge_dst, torch::Tensor edge_allowed,
+             int64_t region_count) {
+  TORCH_CHECK(edge_dst.is_cuda() && edge_dst.scalar_type() == at::kLong &&
+      edge_dst.dim() == 2 && edge_dst.is_contiguous(),
+      "edge_dst must be contiguous HIP int64 [N,D]");
+  TORCH_CHECK(edge_allowed.is_cuda() && edge_allowed.scalar_type() == at::kBool &&
+      edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
+      edge_allowed.device() == edge_dst.device(),
+      "edge_allowed must be matching contiguous HIP bool [N,D]");
+  const auto n = edge_dst.size(0), degree = edge_dst.size(1);
+  TORCH_CHECK(n > 0 && degree > 0 && region_count > 0,
+      "pose region graph dimensions must be positive");
+  c10::cuda::CUDAGuard guard(edge_dst.device());
+  auto region = torch::full({n}, -1, edge_dst.options());
+  auto coarse_edges = torch::zeros({region_count, region_count}, edge_dst.options());
+  auto coarse_mask = torch::zeros({region_count, region_count}, edge_allowed.options());
+  auto status = torch::zeros({}, edge_dst.options());
+  plan_a_pose_regions_launch(edge_dst.data_ptr<int64_t>(),
+      edge_allowed.data_ptr<bool>(), region.data_ptr<int64_t>(),
+      coarse_edges.data_ptr<int64_t>(), coarse_mask.data_ptr<bool>(),
+      status.data_ptr<int64_t>(), n, degree, region_count,
+      c10::cuda::getCurrentCUDAStream(edge_dst.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {region, coarse_edges, coarse_mask, status};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("dijkstra", &dijkstra, "Plan A deterministic float64 heap Dijkstra prototype");
   module.def("dijkstra_graph", &dijkstra_graph,
       "Plan A device-resident graph geometry and deterministic Dijkstra prototype");
+  module.def("pose_regions", &pose_regions,
+      "Exact ordered Plan A connected-region partition on HIP");
 }

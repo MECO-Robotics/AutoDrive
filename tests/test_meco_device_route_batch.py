@@ -16,6 +16,7 @@ from frc_defense.experimental_route_evaluation import (
     RouteQuery,
 )
 import frc_defense.meco_candidates as meco_candidates
+import frc_defense.experimental_route_evaluation as route_evaluation
 from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
                                          _goal_nodes_batch)
 from frc_defense.meco_pose_graph import build_legal_pose_graph
@@ -53,6 +54,74 @@ def test_plan_a_route_chunk_map_keeps_empty_support_explicit():
     with pytest.raises(ValueError, match="contiguous"):
         type(mapping)(1, ((1, 1),), torch.tensor([0]), torch.tensor([0]),
                       torch.tensor([0]))
+
+
+def _synthetic_route_batch(queries, *, device="cpu", nonfinite_row=None):
+    count = len(queries)
+    route_device = torch.device(device)
+    status = torch.full((count,), DeviceRouteBatch.FEASIBLE,
+                        device=route_device, dtype=torch.long)
+    feasible = torch.ones((count,), device=route_device, dtype=torch.bool)
+    path_xy = torch.zeros((count, 1, 2), device=route_device)
+    lengths = torch.ones((count,), device=route_device, dtype=torch.long)
+    distances = torch.ones((count,), device=route_device, dtype=torch.float64)
+    endpoint = torch.zeros_like(distances)
+    cost = torch.ones_like(distances)
+    if nonfinite_row is not None:
+        cost[nonfinite_row] = torch.nan
+    return DeviceRouteBatch(tuple(queries), status, feasible, path_xy, lengths,
+        distances, endpoint, cost,
+        torch.arange(count, device=route_device, dtype=torch.long),
+        bump_cost_grid_edges=torch.zeros_like(cost),
+        learned_cost_grid_edges=torch.zeros_like(cost))
+
+
+def test_device_route_chunks_reassemble_130_rows_in_canonical_order(monkeypatch):
+    calls = []
+    def fake_evaluate(env, queries, goals, **kwargs):
+        calls.append((tuple(queries), goals.detach().clone()))
+        return _synthetic_route_batch(queries)
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(130))
+    goals = torch.arange(260, dtype=torch.float32).reshape(130, 2)
+    result = evaluate_device_route_chunks(env, queries, goals)
+    assert [len(items) for items, _ in calls] == [64, 64, 2]
+    assert [items[0].candidate_id for items, _ in calls] == ["node:0", "node:64", "node:128"]
+    assert result.queries == queries
+    assert result.candidate_index.tolist() == list(range(130))
+    assert torch.equal(result.distance_m, torch.ones(130, dtype=torch.float64))
+
+
+def test_device_route_chunks_fail_closed_as_a_whole_on_nonfinite_chunk(monkeypatch):
+    call_index = 0
+    def fake_evaluate(env, queries, goals, **kwargs):
+        nonlocal call_index
+        index = call_index
+        call_index += 1
+        return _synthetic_route_batch(queries,
+            nonfinite_row=0 if index == 1 else None)
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(130))
+    result = evaluate_device_route_chunks(env, queries,
+        torch.zeros((130, 2), dtype=torch.float32))
+    assert not result.feasible.any()
+    assert (result.status_code == DeviceRouteBatch.INVALID).all()
+
+
+def test_device_route_chunks_reject_missing_or_permuted_chunk_identity(monkeypatch):
+    def fake_evaluate(env, queries, goals, **kwargs):
+        return _synthetic_route_batch(tuple(reversed(queries)))
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(65))
+    with pytest.raises(ValueError, match="identity/order"):
+        evaluate_device_route_chunks(env, queries,
+            torch.zeros((65, 2), dtype=torch.float32))
 
 
 @pytest.mark.parametrize("track", ("A1", "A2", "A3"))

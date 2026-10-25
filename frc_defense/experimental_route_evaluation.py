@@ -606,10 +606,13 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
                                  endpoint_error)
     bump_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
                                            None, 1.)
-    weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
-                                               learned_map, learned_cost_scale)
-    learned_cost = (weighted_cost - bump_cost if learned_map is not None else
-                    torch.zeros_like(weighted_cost))
+    if learned_map is not None:
+        weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
+                                                   learned_map, learned_cost_scale)
+        learned_cost = weighted_cost - bump_cost
+    else:
+        weighted_cost = bump_cost
+        learned_cost = torch.zeros_like(weighted_cost)
     return DeviceRouteBatch(items, status, feasible, path_xy, path_length,
         distance.to(torch.float64), endpoint_error.to(torch.float64),
         weighted_cost, torch.arange(count, device=device, dtype=torch.long),
@@ -651,17 +654,24 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         chunks.append(chunk)
     if not chunks:
         return evaluate_device_routes(env, (), goal_xy, **kwargs)
+    def concatenate_optional(name):
+        values = [getattr(batch, name) for batch in chunks]
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise ValueError(f"route chunks disagree on optional {name} output")
+        return torch.cat(values)
     result = DeviceRouteBatch(items,
         torch.cat([batch.status_code for batch in chunks]),
         torch.cat([batch.feasible for batch in chunks]),
         torch.cat([batch.path_xy for batch in chunks]),
         torch.cat([batch.path_length for batch in chunks]),
         torch.cat([batch.distance_m for batch in chunks]),
-        torch.cat([batch.endpoint_error_m for batch in chunks]),
-        torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
-        mapping.global_row, cost_provenance=chunks[0].cost_provenance,
-        bump_cost_grid_edges=torch.cat([batch.bump_cost_grid_edges for batch in chunks]),
-        learned_cost_grid_edges=torch.cat([batch.learned_cost_grid_edges for batch in chunks]))
+            torch.cat([batch.endpoint_error_m for batch in chunks]),
+            torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
+            mapping.global_row, cost_provenance=chunks[0].cost_provenance,
+            bump_cost_grid_edges=concatenate_optional("bump_cost_grid_edges"),
+            learned_cost_grid_edges=concatenate_optional("learned_cost_grid_edges"))
     result_contract_ok = validate_device_route_batch(result, items,
                                                       device=goal_xy.device)
     return DeviceRouteBatch(result.queries,
