@@ -28,6 +28,8 @@ WORKER_STALL_SECONDS = 600
 QUEUE_STALE_SECONDS = 180
 EVALUATION_HEARTBEAT_STALE_SECONDS = 90
 MAX_STATUS_FILE_BYTES = 32 * 1024 * 1024
+DIAGNOSTIC_MONITOR_ERROR_LIMIT = 300
+DIAGNOSTIC_MONITOR_FRONTIER_LIMIT = 100
 
 
 def _read_json(path: Path):
@@ -451,6 +453,22 @@ def _queue_state(root: Path, now: float, data_root: Path):
                     "unconfirmed" if active_lanes else
                     "queued" if any(lane.get("status") in ("queued", "deferred_for_evaluation")
                                      for lane in lanes.values()) else "idle")
+    raw_evaluation = (payload.get("evaluation")
+        if isinstance(payload.get("evaluation"), dict) else None)
+    monitor = payload.get("diagnostic_monitor")
+    if monitor is None and raw_evaluation is not None:
+        monitor = raw_evaluation.get("diagnostic_monitor")
+    monitor_error = payload.get("diagnostic_monitor_error")
+    if monitor_error is None and raw_evaluation is not None:
+        monitor_error = raw_evaluation.get("diagnostic_monitor_error")
+    # The monitor is exposed through its dedicated allowlisted projection;
+    # do not also leak its nested checkpoint paths through evaluator status.
+    evaluation = dict(raw_evaluation) if raw_evaluation is not None else None
+    if evaluation is not None:
+        evaluation.pop("diagnostic_monitor", None)
+        evaluation.pop("diagnostic_monitor_error", None)
+    diagnostic_monitor = _diagnostic_monitor_projection(monitor, monitor_error,
+                                                         fresh=fresh)
     return {"state": "fresh" if fresh else "stale", "worker_state": worker_state,
             "age_seconds": age,
             "lanes": lanes,
@@ -458,12 +476,150 @@ def _queue_state(root: Path, now: float, data_root: Path):
                 root, payload, "fresh" if fresh else "stale", data_root),
             "phase": payload.get("phase") if isinstance(payload.get("phase"), str) else None,
             "cycle": payload.get("cycle") if type(payload.get("cycle")) is int else None,
-            "evaluation": payload.get("evaluation") if isinstance(payload.get("evaluation"), dict) else None,
+            "evaluation": evaluation,
             "evaluation_schedule": payload.get("evaluation_schedule")
                 if isinstance(payload.get("evaluation_schedule"), dict) else None,
+            "diagnostic_monitor": diagnostic_monitor,
             "supervisor_id": payload.get("supervisor_id")
                 if isinstance(payload.get("supervisor_id"), str) else None,
             "error": error if not fresh else None}
+
+
+def _diagnostic_monitor_projection(raw, raw_error, *, fresh):
+    """Return an allowlisted view of the diagnostic-only monitor journal summary."""
+    error = (raw_error[:DIAGNOSTIC_MONITOR_ERROR_LIMIT]
+             if isinstance(raw_error, str) else None)
+    safe_base = {"configured": False, "enabled": False,
+        "diagnostic_only": True, "qualification_eligible": False,
+        "state": "not_configured", "fresh": False, "journal_sha256": None,
+        "journal_events": None, "completed_count": 0, "active_frontier": None,
+        "queued_frontier": None, "pending_frontier": None,
+        "skipped_frontiers": [], "missed_frontiers": [], "skipped_count": 0,
+        "missed_count": 0, "error": error}
+    if raw is None:
+        return safe_base
+    safe_base["configured"] = True
+    if not isinstance(raw, dict):
+        safe_base.update(state="untrusted", error=error or "monitor summary is malformed")
+        return safe_base
+
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+
+    def frontier(value, *, skipped=False):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("frontier summary is malformed")
+        result = {}
+        frontier_id = value.get("frontier_id")
+        if not isinstance(frontier_id, str) or not frontier_id or len(frontier_id) > 160:
+            raise ValueError("frontier identity is malformed")
+        result["frontier_id"] = frontier_id
+        for key, minimum in (("cycle", 1), ("update", 0)):
+            numeric = value.get(key)
+            if type(numeric) is not int or numeric < minimum:
+                raise ValueError("frontier identity is malformed")
+            result[key] = numeric
+        status = "skipped" if skipped else value.get("status")
+        if not isinstance(status, str) or status not in {
+                "queued", "running", "failed", "verified", "complete", "skipped"}:
+            raise ValueError("frontier status is malformed")
+        result["status"] = status
+        attempts = value.get("attempts")
+        if attempts is not None:
+            if not isinstance(attempts, list) or any(not isinstance(row, dict) for row in attempts):
+                raise ValueError("frontier attempts are malformed")
+            if attempts:
+                last = attempts[-1]
+                attempt_number = last.get("attempt")
+                if type(attempt_number) is not int or attempt_number < 1:
+                    raise ValueError("frontier attempt is malformed")
+                result["attempt"] = attempt_number
+        elif "attempt" in value:
+            attempt_number = value.get("attempt")
+            if type(attempt_number) is not int or attempt_number < 1:
+                raise ValueError("frontier attempt is malformed")
+            result["attempt"] = attempt_number
+        raw_result = value.get("result")
+        if raw_result is not None:
+            if not isinstance(raw_result, dict):
+                raise ValueError("frontier result is malformed")
+            result_summary = {}
+            evaluation_id = raw_result.get("evaluation_id")
+            if evaluation_id is not None:
+                if not isinstance(evaluation_id, str) or not evaluation_id or len(evaluation_id) > 160:
+                    raise ValueError("frontier result identity is malformed")
+                result_summary["evaluation_id"] = evaluation_id
+            for hash_field in ("report_sha256", "status_sha256"):
+                hash_value = raw_result.get(hash_field)
+                if hash_value is not None:
+                    if not isinstance(hash_value, str) or not re.fullmatch(r"[0-9a-f]{64}", hash_value):
+                        raise ValueError("frontier result hash is malformed")
+                    result_summary[hash_field] = hash_value
+            for flag in ("diagnostic_only", "qualification_eligible"):
+                flag_value = raw_result.get(flag)
+                if flag_value is not None:
+                    if type(flag_value) is not bool or (flag == "qualification_eligible" and flag_value):
+                        raise ValueError("frontier result flags are malformed")
+                    result_summary[flag] = flag_value
+            result["result"] = result_summary
+        return result
+
+    try:
+        enabled = raw.get("enabled")
+        if enabled is not True or raw.get("diagnostic_only") is not True or raw.get(
+                "qualification_eligible") is not False:
+            raise ValueError("monitor flags do not confirm diagnostic-only status")
+        journal = raw.get("journal_sha256")
+        if not isinstance(journal, str) or not re.fullmatch(r"[0-9a-f]{64}", journal):
+            raise ValueError("monitor journal hash is malformed")
+        journal_events = count(raw.get("journal_events"))
+        completed = count(raw.get("completed_count"))
+        if journal_events is None or completed is None:
+            raise ValueError("monitor counts are malformed")
+        skipped = raw.get("skipped_frontiers")
+        missed = raw.get("missed_frontiers")
+        if not isinstance(skipped, list) or not isinstance(missed, list):
+            raise ValueError("monitor frontier history is malformed")
+        skipped_rows = [frontier(row, skipped=True)
+                        for row in skipped[-DIAGNOSTIC_MONITOR_FRONTIER_LIMIT:]]
+        missed_rows = []
+        for row in missed[-DIAGNOSTIC_MONITOR_FRONTIER_LIMIT:]:
+            if not isinstance(row, dict) or type(row.get("cycle")) is not int or row["cycle"] < 1 or \
+                    type(row.get("update")) is not int or row["update"] < 0 or \
+                    not isinstance(row.get("reason"), str) or not row["reason"]:
+                raise ValueError("missed frontier summary is malformed")
+            missed_rows.append({"cycle": row["cycle"], "update": row["update"],
+                "reason": row["reason"][:DIAGNOSTIC_MONITOR_ERROR_LIMIT]})
+        active = frontier(raw.get("active_frontier"))
+        queued = frontier(raw.get("queued_frontier"))
+        pending = frontier(raw.get("pending_frontier"))
+        if active is not None and active["status"] == "queued":
+            raise ValueError("active frontier status is malformed")
+        if queued is not None and queued["status"] != "queued":
+            raise ValueError("queued frontier status is malformed")
+        if pending is not None and pending["status"] not in {"queued", "running", "failed", "verified"}:
+            raise ValueError("pending frontier status is malformed")
+        if pending != (active or queued):
+            raise ValueError("pending frontier does not match the active or queued frontier")
+    except ValueError as exc:
+        safe_base.update(state="untrusted", error=error or str(exc))
+        return safe_base
+
+    state = "fresh" if fresh else "stale"
+    safe_base.update(configured=True, enabled=True, diagnostic_only=True,
+        qualification_eligible=False, state=state, fresh=bool(fresh),
+        journal_sha256=journal, journal_events=journal_events,
+        completed_count=completed, skipped_frontiers=skipped_rows,
+        missed_frontiers=missed_rows, skipped_count=len(skipped),
+        missed_count=len(missed), error=error)
+    # A stale queue may retain historical counts, but must never present a saved
+    # pending frontier as current work.
+    if fresh:
+        safe_base.update(active_frontier=active, queued_frontier=queued,
+                         pending_frontier=pending)
+    return safe_base
 
 
 def _worker_stalled(*, manifest, heartbeat, stats, latest, lane, queue, now):

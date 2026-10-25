@@ -49,6 +49,22 @@
       ` (queue is separate from worker liveness)`;
     document.querySelector("#lane-queue").textContent = laneSummary.length
       ? `Tracks: ${laneSummary.join(" · ")}` : "No track queue data";
+    const monitor = data.queue?.diagnostic_monitor;
+    const monitorLine = document.querySelector("#diagnostic-monitor");
+    if (!monitor || monitor.state === "not_configured" || !monitor.configured) {
+      monitorLine.textContent = "Not configured. Diagnostic monitor output is diagnostic-only and never qualification eligible.";
+    } else if (monitor.state !== "fresh" && monitor.state !== "stale") {
+      monitorLine.textContent = `Configured, but its saved summary is untrusted. Qualification eligibility is never granted by this monitor. Error: ${monitor.error || "summary could not be validated"}`;
+    } else {
+      const confirmed = data.queue?.state === "fresh" && monitor.state === "fresh" && monitor.fresh === true;
+      const pending = confirmed ? monitor.pending_frontier : null;
+      const pendingText = pending
+        ? `pending ${pending.frontier_id} · cycle ${pending.cycle} · ${pending.status}${Number.isInteger(pending.attempt) ? ` · attempt ${pending.attempt}` : ""}`
+        : confirmed ? "no pending frontier" : "pending frontier unconfirmed";
+      const freshnessText = confirmed ? "Current queue snapshot" : "Last saved snapshot is stale; progress is unconfirmed";
+      const errorText = monitor.error ? ` · Error: ${monitor.error}` : "";
+      monitorLine.textContent = `${monitor.configured ? "Configured" : "Not configured"} · ${freshnessText} · diagnostic-only · never qualification eligible · completed ${monitor.completed_count ?? "unknown"} · ${pendingText} · skipped ${monitor.skipped_count ?? 0} · missed ${monitor.missed_count ?? 0}${errorText}`;
+    }
     document.querySelector("#policies").innerHTML = (data.policies || []).map(p => {
       const run = p.run || {}, evidence = p.latest_evidence || {};
       return `<tr><td><strong>${esc(p.policy_id)}</strong><small>${esc(p.kind)}</small></td>`+

@@ -457,13 +457,123 @@ def _queue_lane(track):
         "pid": None, "completed_updates": 0, "chunk_updates": 100}
 
 
-def _read_queue_for_lanes(tmp_path, lanes):
+def _read_queue_for_lanes(tmp_path, lanes, *, updated_utc=None, **extra):
     now = datetime.now(timezone.utc)
     root = tmp_path / "checkpoints"
     root.mkdir(parents=True)
     (root / "queue-status.json").write_text(json.dumps({
-        "schema_version": 1, "updated_utc": now.isoformat(), "lanes": lanes}))
+        "schema_version": 1, "updated_utc": updated_utc or now.isoformat(),
+        "lanes": lanes, **extra}))
     return _queue_state(root, now.timestamp(), tmp_path)
+
+
+def _diagnostic_monitor_summary():
+    pending = {"frontier_id": "cycle-4-update-400", "cycle": 4, "update": 400,
+        "status": "running", "checkpoint_snapshots": [{"path": "/private/A1.pt"}],
+        "attempts": [{"attempt": 2, "status": "running",
+                      "output_path": "/private/report.json"}],
+        "result": {"evaluation_id": "diag-eval-4", "report_sha256": "c" * 64,
+            "status_sha256": "d" * 64, "diagnostic_only": True,
+            "qualification_eligible": False, "status_path": "/private/status.json"}}
+    return {"enabled": True, "diagnostic_only": True,
+        "qualification_eligible": False, "journal_sha256": "b" * 64,
+        "journal_events": 12, "completed_count": 3,
+        "active_frontier": pending, "queued_frontier": None,
+        "pending_frontier": pending,
+        "skipped_frontiers": [{"frontier_id": "old-frontier", "cycle": 2,
+            "update": 200, "superseded_by": "new-frontier"}],
+        "missed_frontiers": [{"cycle": 1, "update": 100, "reason": "frontier unavailable"}]}
+
+
+def test_queue_projects_fresh_diagnostic_monitor_with_allowlisted_frontiers(tmp_path):
+    monitor = _diagnostic_monitor_summary()
+    schedule = {"schedule_count": 5, "completed_count": 1,
+        "pending_count": 2, "failed_count": 0}
+    result = _read_queue_for_lanes(tmp_path, [_queue_lane(t) for t in TRACKS],
+        diagnostic_monitor=monitor, evaluation_schedule=schedule,
+        evaluation={"status": "running", "pid": 41,
+            "diagnostic_monitor": monitor,
+            "diagnostic_monitor_error": "nested monitor failure"})
+
+    projected = result["diagnostic_monitor"]
+    assert result["state"] == "fresh"
+    assert projected["state"] == "fresh"
+    assert projected["configured"] is True and projected["enabled"] is True
+    assert projected["diagnostic_only"] is True
+    assert projected["qualification_eligible"] is False
+    assert projected["completed_count"] == 3
+    assert projected["pending_frontier"] == {
+        "frontier_id": "cycle-4-update-400", "cycle": 4,
+        "update": 400, "status": "running", "attempt": 2,
+        "result": {"evaluation_id": "diag-eval-4", "report_sha256": "c" * 64,
+            "status_sha256": "d" * 64, "diagnostic_only": True,
+            "qualification_eligible": False}}
+    assert projected["skipped_count"] == 1
+    assert projected["skipped_frontiers"][0]["status"] == "skipped"
+    assert projected["missed_count"] == 1
+    assert "checkpoint_snapshots" not in json.dumps(projected)
+    assert "/private" not in json.dumps(projected)
+    assert result["evaluation_schedule"] == schedule
+    assert result["evaluation"] == {"status": "running", "pid": 41}
+
+
+def test_queue_absent_diagnostic_monitor_is_not_configured(tmp_path):
+    result = _read_queue_for_lanes(tmp_path, [_queue_lane(t) for t in TRACKS])
+
+    projected = result["diagnostic_monitor"]
+    assert projected["state"] == "not_configured"
+    assert projected["configured"] is False
+    assert projected["pending_frontier"] is None
+    assert projected["diagnostic_only"] is True
+    assert projected["qualification_eligible"] is False
+
+
+def test_queue_malformed_diagnostic_monitor_fails_closed_and_bounds_error(tmp_path):
+    error = "E" * 500
+    result = _read_queue_for_lanes(tmp_path, [_queue_lane(t) for t in TRACKS],
+        diagnostic_monitor={"enabled": True, "diagnostic_only": False,
+                            "qualification_eligible": True},
+        evaluation={"diagnostic_monitor_error": error})
+
+    projected = result["diagnostic_monitor"]
+    assert projected["state"] == "untrusted"
+    assert projected["enabled"] is False
+    assert projected["diagnostic_only"] is True
+    assert projected["qualification_eligible"] is False
+    assert projected["pending_frontier"] is None
+    assert len(projected["error"]) == 300
+
+
+def test_stale_queue_diagnostic_monitor_does_not_expose_pending_progress(tmp_path):
+    stale_stamp = "2000-01-01T00:00:00+00:00"
+    result = _read_queue_for_lanes(tmp_path, [_queue_lane(t) for t in TRACKS],
+        updated_utc=stale_stamp, diagnostic_monitor=_diagnostic_monitor_summary())
+
+    projected = result["diagnostic_monitor"]
+    assert result["state"] == "stale"
+    assert projected["state"] == "stale"
+    assert projected["fresh"] is False
+    assert projected["pending_frontier"] is None
+    assert projected["active_frontier"] is None
+    assert projected["completed_count"] == 3
+    assert projected["qualification_eligible"] is False
+
+
+def test_diagnostic_monitor_frontend_contract_uses_text_content_and_keeps_schedule():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "frc_defense/dashboard_static/meco.html").read_text()
+    source = (root / "frc_defense/dashboard_static/meco.js").read_text()
+    start = source.index("const monitor = data.queue?.diagnostic_monitor;")
+    end = source.index('document.querySelector("#policies")', start)
+    rendering = source[start:end]
+
+    assert 'id="diagnostic-monitor"' in html
+    assert 'document.querySelector("#diagnostic-monitor")' in rendering
+    assert "monitorLine.textContent" in rendering
+    assert "innerHTML" not in rendering
+    assert "never qualification eligible" in rendering
+    assert "pending frontier unconfirmed" in rendering
+    assert "evaluation_schedule" in source
 
 
 def test_native_queue_list_requires_exactly_one_lane_per_track(tmp_path):
