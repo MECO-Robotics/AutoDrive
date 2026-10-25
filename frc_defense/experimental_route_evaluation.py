@@ -95,10 +95,16 @@ def validate_device_route_batch(batch: "DeviceRouteBatch", queries, *, device):
               torch.isfinite(batch.distance_m).all() &
               torch.isfinite(batch.endpoint_error_m).all() &
               torch.isfinite(batch.weighted_cost_grid_edges).all())
+    for optional in (batch.bump_cost_grid_edges, batch.learned_cost_grid_edges):
+        if optional is not None:
+            finite = finite & torch.isfinite(optional).all()
     indices_ok = (batch.candidate_index == rows).all()
     status_ok = ((batch.status_code >= DeviceRouteBatch.INVALID) &
                  (batch.status_code <= DeviceRouteBatch.FEASIBLE)).all()
-    return lengths_ok.all() & finite & indices_ok & status_ok
+    feasibility_ok = (batch.feasible ==
+                      ((batch.status_code == DeviceRouteBatch.AT_GOAL) |
+                       (batch.status_code == DeviceRouteBatch.FEASIBLE))).all()
+    return lengths_ok.all() & finite & indices_ok & status_ok & feasibility_ok
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,20 +637,28 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         raise ValueError("goal_xy must be floating on env.device")
     mapping = make_device_route_chunk_map(len(items), device=goal_xy.device)
     chunks = []
+    all_chunks_valid = torch.ones((), device=goal_xy.device, dtype=torch.bool)
+    common_metadata = None
     for start, stop in mapping.spans:
         chunk_queries = items[start:stop]
         chunk = evaluate_device_routes(env, chunk_queries,
             goal_xy[start:stop], **kwargs)
         contract_ok = validate_device_route_batch(chunk, chunk_queries,
                                                   device=goal_xy.device)
-        # Do not synchronize to inspect this predicate. If any numeric row is
-        # malformed/non-finite, mark the complete chunk invalid on device; its
-        # callers intersect the result with support and therefore cannot select
-        # from a partially accepted chunk.
+        metadata = (chunk.cost_units, chunk.cost_provenance,
+                    chunk.bump_cost_grid_edges is not None,
+                    chunk.learned_cost_grid_edges is not None)
+        if common_metadata is None:
+            common_metadata = metadata
+        elif metadata != common_metadata:
+            contract_ok = torch.zeros_like(contract_ok)
+        all_chunks_valid = all_chunks_valid & contract_ok
+        # A malformed or non-finite chunk invalidates the complete route batch.
+        # Keep that decision on device so no good chunk can remain selectable.
         chunk = DeviceRouteBatch(chunk.queries,
-            torch.where(contract_ok, chunk.status_code,
+            torch.where(all_chunks_valid, chunk.status_code,
                         torch.full_like(chunk.status_code, DeviceRouteBatch.INVALID)),
-            chunk.feasible & contract_ok, chunk.path_xy, chunk.path_length,
+            chunk.feasible & all_chunks_valid, chunk.path_xy, chunk.path_length,
             chunk.distance_m, chunk.endpoint_error_m,
             chunk.weighted_cost_grid_edges,
             torch.arange(stop - start, device=goal_xy.device, dtype=torch.long),
@@ -674,10 +688,11 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
             learned_cost_grid_edges=concatenate_optional("learned_cost_grid_edges"))
     result_contract_ok = validate_device_route_batch(result, items,
                                                       device=goal_xy.device)
+    batch_valid = all_chunks_valid & result_contract_ok
     return DeviceRouteBatch(result.queries,
-        torch.where(result_contract_ok, result.status_code,
+        torch.where(batch_valid, result.status_code,
                     torch.full_like(result.status_code, DeviceRouteBatch.INVALID)),
-        result.feasible & result_contract_ok, result.path_xy,
+        result.feasible & batch_valid, result.path_xy,
         result.path_length, result.distance_m, result.endpoint_error_m,
         result.weighted_cost_grid_edges, result.candidate_index,
         cost_provenance=result.cost_provenance,

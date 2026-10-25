@@ -222,6 +222,52 @@ def _candidate_replay_digest(table, route_cost, risk_cost):
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _plan_a_route_evidence_digest(route_batch, source_identity_sha256,
+                                  route_cost_nodes, risk_cost_nodes):
+    """Bind the selected decision's route rows and scoring costs to source.
+
+    This evidence is materialized only after Plan A has selected its action.
+    PPO replay recomputes it before using the frozen route and risk costs.
+    """
+    if (not isinstance(source_identity_sha256, str) or
+            len(source_identity_sha256) != 64 or
+            any(char not in "0123456789abcdef" for char in source_identity_sha256)):
+        raise ValueError("Plan A route evidence requires a lowercase source SHA-256")
+    if route_batch is None:
+        raise ValueError("Plan A route evidence requires a route batch")
+    queries = []
+    for query in route_batch.queries:
+        queries.append({"candidate_id": query.candidate_id,
+            "snapshot_id": query.snapshot_id, "world": query.world,
+            "slot": query.slot, "intake_extended": query.intake_extended})
+    header = {"schema": "meco-plan-a-route-evidence-v1",
+        "source_identity_sha256": source_identity_sha256,
+        "route_source": "shared-device-xy-route-evaluation-v1",
+        "query_order": queries, "cost_units": route_batch.cost_units,
+        "cost_provenance": route_batch.cost_provenance}
+    digest = hashlib.sha256(json.dumps(header, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode())
+    for name in ("status_code", "feasible", "path_xy", "path_length",
+                 "distance_m", "endpoint_error_m",
+                 "weighted_cost_grid_edges", "candidate_index",
+                 "bump_cost_grid_edges", "learned_cost_grid_edges"):
+        tensor = getattr(route_batch, name)
+        if tensor is None:
+            digest.update(f"{name}=none\n".encode())
+            continue
+        value = tensor.detach().to(device="cpu").contiguous()
+        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}\n".encode())
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    for name, tensor in (("route_cost_nodes", route_cost_nodes),
+                         ("risk_cost_nodes", risk_cost_nodes)):
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"Plan A route evidence is missing {name}")
+        value = tensor.detach().to(device="cpu").contiguous()
+        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}\n".encode())
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
 def _tensor_evidence(tensor):
     """Return stable identity and runtime metadata for a saved policy tensor."""
     if not isinstance(tensor, torch.Tensor):
@@ -2001,7 +2047,8 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
 
 
 def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
-                *, update_number, diagnostic_output):
+                *, update_number, diagnostic_output,
+                source_identity_sha256):
     rewards = torch.stack([row["reward"] for row in rows])
     dones = torch.tensor([row["done"] for row in rows], device=rewards.device,
                          dtype=rewards.dtype)
@@ -2017,6 +2064,19 @@ def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_val
             support = row.get("support")
             if support is None:
                 continue
+            expected_route_evidence = row.get("route_evidence_sha256")
+            source_route_evidence = row.get(
+                "route_evidence_source_identity_sha256")
+            if source_route_evidence != source_identity_sha256:
+                raise RuntimeError(
+                    "Plan A route evidence is bound to a different training source")
+            actual_route_evidence = _plan_a_route_evidence_digest(
+                row.get("route_batch"), source_route_evidence,
+                row.get("route_cost_nodes"), row.get("risk_cost_nodes"))
+            if (not expected_route_evidence or
+                    expected_route_evidence != actual_route_evidence):
+                raise RuntimeError(
+                    "Plan A route batch/source evidence changed before PPO replay")
             expected_digest = row.get("support_digest")
             actual_digest = plan_a_support_digest(support, row["graph_object"])
             if (not expected_digest or expected_digest != support.support_digest or
@@ -2544,6 +2604,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     failure_reasons.append("native_goal_preempted")
                 if selected_target_lost:
                     failure_reasons.append("selected_target_lost")
+                route_evidence = None
+                if "support" in prepared:
+                    route_evidence = _plan_a_route_evidence_digest(
+                        prepared["route_batch"], source_sha256,
+                        prepared["route_cost_nodes"],
+                        prepared["risk_cost_nodes"])
                 row = {"episode_id": episode_generation,
                     "raster": prepared["raster"].detach(),
                     "globals": prepared["globals"].detach(),
@@ -2581,6 +2647,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                               else asdict(candidate.commitment)),
                     **({"support": prepared["support"],
                         "support_digest": prepared["support"].support_digest,
+                        "route_batch": prepared["route_batch"],
+                        "route_evidence_sha256": route_evidence,
+                        "route_evidence_source_identity_sha256": source_sha256,
                         "route_cost_nodes": prepared["route_cost_nodes"].detach(),
                         "risk_cost_nodes": prepared["risk_cost_nodes"].detach(),
                         "graph_object": prepared["graph_object"],
@@ -2684,7 +2753,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     bootstrap_value = torch.zeros_like(rows[-1]["value"])
             stats = _ppo_update(config.track, model, value_head, optimizer, rows,
                                 config, bootstrap_value, update_number=update,
-                                diagnostic_output=output)
+                                diagnostic_output=output,
+                                source_identity_sha256=source_sha256)
             update += 1
             update_heartbeat()
             stats.update(update=update, episode=episode, track=config.track,
