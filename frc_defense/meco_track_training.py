@@ -1455,20 +1455,29 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             candidate_set, route_cost, risk_cost, graph.lookup, path_geometry,
             p_config, record=record_path_penalty)
     else:
-        route_cost = _route_cost_tensor(candidate_set,
-            route_cost_points_per_second, device=env.device)
-        risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
+        device_batch = candidate_set.device_batch
+        if device_batch is None:
+            route_cost = _route_cost_tensor(candidate_set,
+                route_cost_points_per_second, device=env.device)
+            risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
+        else:
+            route_cost = (device_batch.eta_s *
+                float(route_cost_points_per_second))
+            risk_cost = device_batch.risk_cost_points
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden_before, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost,
+            candidate_batch=device_batch,
             observation_timestamp=candidate_set.observation.timestamp,
             capture_monotonic=candidate_set.observation.capture_monotonic)
         decision["logits"] = _apply_candidate_hysteresis(
-            decision["logits"], candidate_set.table)
+            decision["logits"], candidate_set.table, candidate_batch=device_batch)
         path_cost = None
     action, logprob, entropy = sample_candidate_action(decision["logits"],
         deterministic=(True if decision.get("inference_status") ==
                        "deterministic_fallback" else deterministic))
+    selected_action_payload = (None if candidate_set.device_batch is None else
+        candidate_set.device_batch.gather_action_payload(action))
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
@@ -1483,6 +1492,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             "entropy": entropy, "hidden_next": decision["hidden"],
             "value": value, "route_cost": route_cost, "risk_cost": risk_cost,
             "path_cost": path_cost, "legal_lookup": graph.lookup,
+            "selected_action_payload": selected_action_payload,
             "path_geometry": path_geometry}
 
 
@@ -1490,11 +1500,15 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
-def _apply_candidate_hysteresis(logits, table):
+def _apply_candidate_hysteresis(logits, table, candidate_batch=None):
     """Apply the shared committed-task switch cost without changing feasibility."""
     if "commitment_switch_cost" not in table.feature_names:
         return logits
     column = table.feature_names.index("commitment_switch_cost")
+    if candidate_batch is not None:
+        switch = candidate_batch.raw_features[..., column]
+        return logits - switch.to(dtype=logits.dtype) * CANDIDATE_BOUNDARY[
+            "commitment_switch_cost_points"]
     switch = torch.tensor([float(row[column] or 0.) for row in table.features],
                           device=logits.device, dtype=logits.dtype)[None]
     return logits - switch * CANDIDATE_BOUNDARY["commitment_switch_cost_points"]
@@ -2152,7 +2166,16 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 except PlanAEmptySupportError as exc:
                     abort_empty_support(exc, rows, update, update_empty_support_events)
                     continue
-                action_index = int(prepared["action"][0].item())
+                selected_payload = prepared.get("selected_action_payload")
+                if selected_payload is None:
+                    action_index = int(prepared["action"][0].item())
+                    dispatch_payload = None
+                else:
+                    # This is the sole device-to-host numeric transfer on the
+                    # device-resident Plan C dispatch path.
+                    dispatch_payload = selected_payload.detach().to(
+                        device="cpu").reshape(-1).tolist()
+                    action_index = int(dispatch_payload[0])
                 hidden_before = (None if prepared["hidden_before"] is None else
                                  prepared["hidden_before"].detach().clone())
                 tracking_was_available = prepared["tracking_available"]
@@ -2162,7 +2185,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 candidate = prepared["candidate_set"]
                 selected_target_track = None
                 selected_target_xy = None
-                if "support" in prepared:
+                if dispatch_payload is not None:
+                    action = int(dispatch_payload[1])
+                    selected_target_track = (None if dispatch_payload[2] < 0 else
+                                             int(dispatch_payload[2]))
+                    selected_target_xy = (None if selected_target_track is None else
+                                          (dispatch_payload[3], dispatch_payload[4]))
+                    goal_xy = (dispatch_payload[5], dispatch_payload[6])
+                    goal_heading = dispatch_payload[7]
+                elif "support" in prepared:
                     support = prepared["support"]
                     action = int(support.action_ids[action_index].item())
                     node = int(support.pair_node_ids[action_index].item())
@@ -2444,6 +2475,45 @@ def _validate_supervisor_training_binding(sources, loaded_native_identity,
 def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
                   prediction_mode: str | None = None,
                   route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND):
+    device_batch = getattr(candidate_set, "device_batch", None)
+    if device_batch is not None:
+        if policy not in ("D1", "D2"):
+            raise ValueError("deterministic comparator policy must be D1 or D2")
+        names = tuple(device_batch.feature_names)
+        columns = {name: index for index, name in enumerate(names)}
+        required = ("action_index", "track_confidence", "track_age_s",
+                    "nearby_sensed_track_count")
+        if any(name not in columns for name in required):
+            raise ValueError("device candidate features lack the D1/D2 score schema")
+        raw = device_batch.raw_features[0]
+        finite_raw = torch.isfinite(raw).all(dim=-1)
+        safe_raw = torch.where(torch.isfinite(raw), raw, torch.zeros_like(raw))
+        action = device_batch.action_index
+        collect = action < 4
+        utility = (1. + .2 * safe_raw[:, columns["nearby_sensed_track_count"]]
+                   + .25 * safe_raw[:, columns["track_confidence"]]
+                   - .04 * safe_raw[:, columns["track_age_s"]])
+        fixed = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}
+        noncollect = torch.tensor([fixed.get(name.split(":", 1)[0], 0.)
+                                   for name in device_batch.candidate_ids],
+                                  device=device_batch.device, dtype=raw.dtype)
+        utility = torch.where(collect, utility, noncollect)
+        route_raw = device_batch.route_cost_points[0]
+        risk_raw = device_batch.risk_cost_points[0]
+        finite_costs = torch.isfinite(route_raw) & torch.isfinite(risk_raw)
+        route = (torch.where(torch.isfinite(route_raw), route_raw,
+                             torch.zeros_like(route_raw)) /
+                 ROUTE_COST_POINTS_PER_SECOND * route_cost_points_per_second)
+        risk = torch.where(torch.isfinite(risk_raw), risk_raw,
+                           torch.zeros_like(risk_raw))
+        scores = utility - route - risk
+        switch_column = columns.get("commitment_switch_cost")
+        if switch_column is not None:
+            scores = scores - safe_raw[:, switch_column] * CANDIDATE_BOUNDARY[
+                "commitment_switch_cost_points"]
+        valid = device_batch.valid_mask[0] & finite_raw & finite_costs
+        scores = scores.masked_fill(~valid | ~torch.isfinite(scores), -torch.inf)
+        return scores[None]
     table = candidate_set.table
     cols = {name: i for i, name in enumerate(table.feature_names)}
     values = []

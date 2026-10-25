@@ -115,6 +115,7 @@ class RouteFeasibleCandidates:
     route_records: tuple[dict, ...]
     candidate_recall: dict
     commitment: CandidateCommitment | None = None
+    device_batch: "DeviceCandidateBatch | None" = None
 
 
 @dataclass(frozen=True)
