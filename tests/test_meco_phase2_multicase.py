@@ -358,12 +358,24 @@ def test_default_native_composite_fit_adapter_routes_all_five_tracks(tmp_path, m
             "descriptor_sha256": "d" * 64})
     paths = {track: tmp_path / f"{track}.pt" for track in multi.MECO_TRACKS}
     combined = {name: {"path": f"/{name}", "sha256": name, "manifest_path": f"/{name}.m",
-        "manifest_sha256": name + "m"} for name in ("trajectory", "ub", "p")}
+        "manifest_sha256": name + "m", "record_count": 1,
+        "case_coverage": {"s::c": {"observed_seeds": [1]}},
+        **({"source_dataset_sha256": "trajectory", "source_manifest_sha256": "trajectorym"}
+            if name in ("ub", "p") else {})}
+        for name in ("trajectory", "ub", "p")}
     receipt = {"case_key": ["s", "c"], "seeds": [1], "datasets": {
         family: {"path": f"/{family}"} for family in ("trajectory", "ub", "p")}}
     result = multi.fit_multicase_warm_starts(combined, paths, descriptor=descriptor,
         shard_receipts=[receipt])
-    assert result["combined_inputs"] == combined
+    canonical = {family: {key: value[key] for key in
+        ("path", "sha256", "manifest_path", "manifest_sha256")}
+        for family, value in combined.items()}
+    assert result["combined_inputs"] == canonical
+    assert next(call for call in calls if call[1] == "C")[3]["combined_inputs"] == canonical["trajectory"]
+    assert next(call for call in calls if call[1] == "A")[3]["composite_combined_inputs"] == canonical
     assert [call[0] for call in calls] == list(multi.MECO_TRACKS)
     assert [call[1] for call in calls] == ["A", "A", "A", "C", "C"]
     assert result["case_shard_bindings"][0]["case_key"] == ["s", "c"]
+    validation = multi.validate_multicase_warm_start_track("A1", paths["A1"], combined,
+        descriptor=descriptor)
+    assert validation["combined_inputs"] == canonical

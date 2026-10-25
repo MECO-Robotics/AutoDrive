@@ -583,6 +583,7 @@ def fit_multicase_warm_starts(combined, artifact_paths, *, descriptor, shard_rec
     from . import meco_supervised
     from .curriculum_training import source_identity
     validate_multicase_descriptor(descriptor)
+    combined = _canonical_combined_inputs(combined)
     if not isinstance(shard_receipts, list) or len(shard_receipts) != len(descriptor["ordered_cases"]):
         raise ValueError("composite fitter requires every ordered case receipt")
     c_shards, a_shards = [], []
@@ -638,6 +639,7 @@ def validate_multicase_warm_start_track(track, artifact_path, combined, *, descr
     """Validate one concrete composite artifact and seal a five-track receipt."""
     from . import meco_supervised
     from .curriculum_training import source_identity
+    combined = _canonical_combined_inputs(combined)
     if track not in MECO_TRACKS:
         raise ValueError("unknown MECO track")
     payload = meco_supervised.validate_warm_start_artifact(track, Path(artifact_path),
@@ -655,6 +657,22 @@ def validate_multicase_warm_start_track(track, artifact_path, combined, *, descr
         "artifact_schema": payload.get("schema"),
         "phase2_ready": False, "phase2_complete": False,
         "qualification_eligible": False}
+
+
+def _canonical_combined_inputs(combined):
+    """Project production combiner records to the immutable four-field contract."""
+    if not isinstance(combined, dict) or set(combined) != {"trajectory", "ub", "p"}:
+        raise ValueError("combined inputs must contain trajectory, U+B and P families")
+    result = {}
+    for family, item in combined.items():
+        if not isinstance(item, dict):
+            raise ValueError(f"combined {family} input is malformed")
+        required = ("path", "sha256", "manifest_path", "manifest_sha256")
+        projected = {key: item.get(key) for key in required}
+        if any(not isinstance(projected[key], str) or not projected[key] for key in required):
+            raise ValueError(f"combined {family} input lacks its exact data/manifest hash binding")
+        result[family] = projected
+    return result
 
 
 def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=None,
@@ -794,24 +812,21 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
             combined[family]["case_coverage"] = pooled_manifest["case_coverage"]
             if family == "trajectory":
                 combined[family]["manifest_sha256"] = _sha(manifest_path.read_bytes())
-        expected_combined = {family: {"path": combined[family]["path"],
-            "sha256": combined[family]["sha256"], "manifest_path": combined[family].get("manifest_path"),
-            "manifest_sha256": combined[family].get("manifest_sha256")}
-            for family in combined}
+        expected_combined = _canonical_combined_inputs(combined)
         target_coverage = {family: combined[family]["case_coverage"] for family in combined}
         if combined["ub"].get("source_dataset_sha256") != combined["trajectory"]["sha256"] or combined["p"].get("source_dataset_sha256") != combined["trajectory"]["sha256"]:
             raise ValueError("combined U+B and P targets do not bind pooled trajectory bytes")
         artifact_paths = {track: Path(descriptor["outputs"]["bundle"][track]) for track in MECO_TRACKS}
         for path in artifact_paths.values():
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fit_receipt = (fit_combined(combined, artifact_paths, descriptor=descriptor,
+        fit_receipt = (fit_combined(expected_combined, artifact_paths, descriptor=descriptor,
             shard_receipts=shard_receipts) if production_fitter else
-            fit_combined(combined, artifact_paths, descriptor=descriptor))
+            fit_combined(expected_combined, artifact_paths, descriptor=descriptor))
         if not isinstance(fit_receipt, dict) or fit_receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or fit_receipt.get("combined_inputs") != expected_combined:
             raise ValueError("combined fitter receipt is not bound to current pooled target bytes")
         validator_receipts = {}
         for track in MECO_TRACKS:
-            validation = validate_track(track, artifact_paths[track], combined, descriptor=descriptor)
+            validation = validate_track(track, artifact_paths[track], expected_combined, descriptor=descriptor)
             if (not isinstance(validation, dict) or validation.get("track") != track or
                     validation.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
                     validation.get("case_set_sha256") != descriptor["case_set_sha256"] or
