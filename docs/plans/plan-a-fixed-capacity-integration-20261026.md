@@ -34,7 +34,7 @@ This tranche records code/review/currentness evidence only. It does not establis
 - The integrated candidate contains the complete reviewed Plan A source increment and retains newer Plan C/main provenance without unrelated changes.
 - The primary checkout's pre-existing HIP edit remains byte-identical.
 - The ledger contains exactly one new accurately attributed scoped entry; old entries and the plan digest pin are preserved.
-- Exact-head review approves the integration and separately approves the API pin finalizer.
+- Pass 1 approves this plan; exact-head Pass 3 separately approves the code-only integration candidate, ledger candidate, and API pin finalizer.
 - The post-restart dashboard evidence proves the backend and all eight served assets correspond to the final checkout; it separately proves API ledger validation/entry visibility and the local ledger-byte digest equals the source pin.
 - Claims remain limited to source integration, static checks, exact-head scoped review, ledger validity, and dashboard currentness. No runtime/qualification or first-stage training passage is implied.
 
