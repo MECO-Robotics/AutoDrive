@@ -21,6 +21,16 @@ executed or qualified episode.
 | bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event`, `first_route_progress_interval`, `selected_goal_endpoint_completion_rate` | robot contact rate, recovery time, route completion | Three registered geometries flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate exposure, solver-confirmed pair (2,3) contact, route crossing, an outer-tick interval-censored route-progress observation, and an episode-wide selected-goal endpoint diagnostic. Neither diagnostic is contact-caused recovery or registry route completion; D0 has no selected-goal ledger, and qualification stays disabled. |
 | observation-only focal pose mislocalization | `observation.focal_pose_offset` | none | relocalization time, pose-error recovery, safety contact | Observation-boundary helper exists, but validation reset/observation application is not wired; signals unavailable |
 
+The generic factor capture also retains the existing route-goal lifecycle
+outcome diagnostic for stationary blockage, feint reversal, and abrupt policy
+change when every route attempt has a fully observed, valid completion or
+registered failure and exact episode/source/policy/factor/condition binding.
+The validator reconciles aggregate counts against each attempt row. This signal
+remains non-authoritative for the registry and qualification-ineligible;
+contact remains on its separate capture path. See
+`docs/implementation-provenance/phase4-route-factor-capture.md`. No simulator
+replay was run for this wiring tranche.
+
 The existing four factor configurations (`feinting_opponent`,
 `observation_delay`, `independent_low_confidence`, and
 `abrupt_opponent_policy_change`) are accepted by the matched evaluator and emit
