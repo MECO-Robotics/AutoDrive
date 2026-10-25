@@ -561,6 +561,17 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
     return {key: binding[key] for key in sorted(binding)}
 
 
+def _require_current_phase0_multicase_binding(binding, phase0_binding):
+    """A current Phase 0 campaign cannot carry an archival v1 multicase binding."""
+    if binding is None:
+        return
+    if (not isinstance(binding, dict) or
+            binding.get("schema") !=
+                "meco-phase2-multi-case-five-track-v1.training-binding-phase0-v2" or
+            binding.get("phase0_binding") != phase0_binding):
+        raise ValueError("current Phase 0 campaigns require a matching production Phase 0 multi-case binding")
+
+
 def describe_campaign(config, *, source_root=ROOT, output=None, legacy_diagnostic=False):
     """Describe a campaign from explicit config; write only when output is passed."""
     source_root = Path(source_root).resolve()
@@ -688,10 +699,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None, legacy_diagnosti
         raise ValueError("new five-track manifests require Phase 0 materialization; use the explicit legacy diagnostic path only for archival diagnostics")
     if phase0_binding is not None and legacy_diagnostic:
         raise ValueError("Phase 0 current manifests cannot use the legacy diagnostic path")
-    if (multicase_binding is not None and
-            multicase_binding["schema"].endswith("phase0-v2") and
-            multicase_binding["phase0_binding"] != phase0_binding):
-        raise ValueError("training manifest Phase 0 freeze/partition differs from its five-track bundle")
+    if phase0_binding is not None:
+        _require_current_phase0_multicase_binding(multicase_binding, phase0_binding)
     manifest = {"schema": PHASE0_SCHEMA if phase0_binding is not None else SCHEMA,
         "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
@@ -769,9 +778,7 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT, allow_legacy_v2=Fa
         if manifest.get("phase0_binding") != binding:
             raise ValueError("campaign manifest Phase 0 freeze/partition binding mismatch")
         multicase = manifest.get("multicase_warm_start_binding")
-        if (isinstance(multicase, dict) and multicase.get("schema", "").endswith("phase0-v2")
-                and multicase.get("phase0_binding") != binding):
-            raise ValueError("campaign manifest Phase 0 differs from its five-track binding")
+        _require_current_phase0_multicase_binding(multicase, binding)
     else:
         if not allow_legacy_v2:
             raise ValueError("legacy v2 manifests are read-only; pass allow_legacy_v2=True for archival validation")

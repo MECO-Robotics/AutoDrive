@@ -639,3 +639,34 @@ def test_phase0_multicase_binding_preserves_freeze_approval_crosswalk_and_envelo
     with pytest.raises(ValueError, match="Phase 0 digests"):
         manifest_api._validate_multicase_warm_start_binding(bad,
             {track: str(path) for track, path in artifacts.items()}, starts)
+
+
+def test_current_phase0_campaign_rejects_archival_multicase_binding():
+    phase0_binding = {"partition_sha256": "p" * 64}
+    legacy_binding = {"schema": "meco-phase2-multi-case-five-track-v1.training-binding",
+        "descriptor": {"schema": "meco-phase2-multi-case-five-track-v1"}}
+    with pytest.raises(ValueError, match="require a matching production Phase 0"):
+        manifest_api._require_current_phase0_multicase_binding(legacy_binding, phase0_binding)
+    production_binding = {"schema": "meco-phase2-multi-case-five-track-v1.training-binding-phase0-v2",
+        "descriptor": {"schema": "meco-phase2-multi-case-five-track-phase0-v2"},
+        "phase0_binding": phase0_binding}
+    manifest_api._require_current_phase0_multicase_binding(production_binding, phase0_binding)
+    production_binding["phase0_binding"] = {"partition_sha256": "x" * 64}
+    with pytest.raises(ValueError, match="require a matching production Phase 0"):
+        manifest_api._require_current_phase0_multicase_binding(production_binding, phase0_binding)
+
+
+def test_phase0_manifest_builder_rejects_v1_multicase_binding(campaign, monkeypatch):
+    tmp_path, config = campaign
+    phase0_binding = {"partition_sha256": "p" * 64}
+    legacy_binding = {"schema": "meco-phase2-multi-case-five-track-v1.training-binding",
+        "descriptor": {"schema": "meco-phase2-multi-case-five-track-v1"}}
+    config = copy.deepcopy(config)
+    config.update({"phase0_materialization": {"fixture": True},
+        "multicase_warm_start_binding": legacy_binding})
+    monkeypatch.setattr(manifest_api, "validate_effective_phase0_bundle",
+        lambda *_args: phase0_binding)
+    monkeypatch.setattr(manifest_api, "_validate_multicase_warm_start_binding",
+        lambda binding, *_args: binding)
+    with pytest.raises(ValueError, match="require a matching production Phase 0"):
+        manifest_api.describe_campaign(config, source_root=tmp_path)
