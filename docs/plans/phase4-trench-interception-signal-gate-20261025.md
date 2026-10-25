@@ -79,12 +79,17 @@ proxy-derived values.
 1. **Interception rate.** Define an interception episode as at least one
    simulator-confirmed collision-solver contact between focal slot 3 and the
    assigned trench-interceptor slot 0, with participant IDs and physics
-   substep/timestamp provenance. Count episodes with any such event over all
-   fully observed treatment episodes. Retain pair-contact events, exposure
-   bounds, and denominator. Do not use distance-to-target or an aggregate
-   contact metric. If the collision system cannot provide pair identity and
-   time, keep the signal unavailable and scope the smallest simulator record
-   extension first.
+   substep/timestamp provenance. This is treatment-only: the no-factor control
+   has no assigned trench interceptor, so it has no denominator for this
+   required signal. Count episodes with any such event over all fully observed
+   treatment episodes (1,100 assigned policy/seed episodes; denominator is
+   the number of valid treatment rows, required to be 1,100 at promotion).
+   Retain pair-contact events, exposure bounds, and denominator. Do not use
+   distance-to-target or an aggregate contact metric. If the collision system
+   cannot provide pair identity and time, keep the signal unavailable and
+   scope the smallest simulator record extension first. Any optional control
+   slot-0 contacts must be named as a separate descriptive signal and must not
+   be pooled with or substituted for trench-interceptor incidence.
 2. **Alternate crossing success.** At reset, freeze the initial executable
    route's designated trench opening from the actual selected route and the
    pinned field geometry. From simulator-truth slot-3 pose samples, detect
@@ -98,44 +103,53 @@ proxy-derived values.
    censor the episode and are retained with explicit reason; report censor
    counts and never silently remove them. Do not equate an alternate planned
    route or a route-goal endpoint with a physical crossing.
-3. **Trench crossing time.** Record continuous-time interpolated entry and
-   exit across the trench obstacle band from truth pose and pinned geometry;
-   crossing time is exit minus entry for a complete physical crossing. For
-   non-crossers observed through the fixed horizon, retain a right-censored
-   interval at the horizon and report restricted mean crossing time through
-   that horizon with its event/censor counts. Invalid observation/clock or
-   reset censors the row as invalid, separately from an ordinary horizon
-   censor. Do not report a completion-only mean as the population crossing
-   time.
+3. **Trench crossing time.** Record continuous-time interpolated completion
+   of a physical crossing from truth pose and pinned geometry. The event time
+   is `t_exit - t_reset`: elapsed time from scenario reset to the first
+   complete crossing of the trench obstacle band. Here, `H` is the registered
+   episode horizon expressed as elapsed time from reset. For episodes with no
+   completed crossing by `H`, retain a right-censored duration of `H`. Invalid
+   observation/clock or reset censors the row as
+   invalid, separately from an ordinary horizon censor. Do not report a
+   completion-only mean as the population crossing time. The within-band
+   traversal duration `t_exit - t_entry` is not this required signal and is
+   omitted from this tranche.
 
 ### Denominators, pair validity, and promotion gate
 
 The assignment denominator is exactly 1,100 policy/seed episodes per arm
 (eleven policy IDs times 100 seeds). For each arm and metric, publish the
 assigned count (1,100), full-horizon-valid count, invalid/censored count by
-reason, and metric denominator. Interception incidence and alternate crossing
-success use the full-horizon-valid count in that arm; a fully observed
-non-crosser remains in the alternate-crossing denominator as a zero. RMST uses
-the full-horizon-valid count in that arm. Report these per-arm denominators
-even when they are equal.
+reason, and metric denominator. Treatment interception incidence uses the
+full-horizon-valid treatment count only; the control interception denominator
+is not applicable because it has no assigned trench interceptor. Alternate
+crossing success and RMST use the full-horizon-valid count separately in each
+arm; a fully observed non-crosser remains in the alternate-crossing
+denominator as a zero. Report these per-arm denominators even when they are
+equal.
 
 Define a valid policy/seed pair as the same exact policy ID and seed present
 once in each arm, with both rows matching the frozen case, schedule/source,
-checkpoint, device and slot bindings, and both records carrying continuous
-finite full-horizon physics-clock and focal-pose coverage plus complete contact
-event coverage. A normal episode reaching the registered horizon without
-crossing is valid (crossing success zero; crossing time censored at the
-horizon). A missing/duplicate row, invalid or discontinuous clock, missing
-pose/contact coverage, early reset/termination, or provenance mismatch makes
-that arm row invalid and its policy/seed pair invalid. Keep invalid rows and
+checkpoint, device and arm-specific slot bindings, and both records carrying
+continuous finite full-horizon physics-clock and focal-pose coverage. A normal
+episode reaching the registered horizon without crossing is valid (crossing
+success zero; crossing time censored at the horizon). A missing/duplicate row,
+invalid or discontinuous clock, missing pose coverage, early reset/termination,
+or provenance mismatch makes that arm row invalid and its policy/seed pair
+invalid. Separately, complete treatment pair-contact event coverage is required
+to validate treatment interception; missing or ambiguous treatment contact
+coverage invalidates that treatment interception row and fails the promotion
+gate. Keep invalid rows and
 reasons in the artifacts; never drop them and silently shrink the paired
 denominator. Per-arm metric rates may be described over their full-horizon-
 valid rows, but paired deltas include only exact valid pairs and must report
 their count.
 
-The minimum promotion validity is all 1,100 valid pairs for every required
-outcome and exactly 1,100 valid rows in each arm, with zero invalid pairs and
-zero unaccounted assignments. Any invalid row or pair fails the candidate
+The minimum promotion validity is all 1,100 valid control/treatment pairs for
+the two paired crossing outcomes (alternate crossing and RMST), exactly 1,100
+valid rows in each arm for those outcomes, and 1,100 valid treatment rows for
+treatment-only interception incidence, with zero invalid pairs and zero
+unaccounted assignments. Any invalid row or pair fails the candidate
 executability/review gate; it does not get repaired by excluding the seed,
 substituting another seed, imputing an outcome, or weakening the denominator.
 The campaign may retain diagnostic aggregates with their explicit smaller
@@ -152,7 +166,10 @@ episodes)) / N_full_horizon_valid`. Thus every valid episode contributes once;
 completion-only averaging is prohibited. Invalid rows are outside
 `N_full_horizon_valid`, are reported separately, and force the promotion gate
 to fail. Publish arm-specific RMST/event/censor counts and same-policy,
-same-seed paired differences only across the 1,100 valid pairs.
+same-seed paired differences for the two crossing outcomes only, across the
+1,100 valid control/treatment pairs. Do not compute a paired treatment-control
+delta for interception incidence; the control has no trench-interceptor
+exposure.
 
 Reconcile each aggregate to its row-level outcomes. Keep physical interception
 incidence separate from number of contact substeps. A missed horizon crossing
