@@ -1,6 +1,9 @@
 """Pure manifest contracts for the resumable paired Phase 0 calibration."""
 
 import copy
+import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -80,6 +83,11 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
     assert all(controls == {"D0", pair["paired_control_id"]}
                for pair_id, controls in pairs.items()
                for pair in [next(unit for unit in units if unit["pair_id"] == pair_id)])
+    shard_for_pair = {}
+    for shard in campaign["shards"]:
+        for unit in shard["work_units"]:
+            previous = shard_for_pair.setdefault(unit["pair_id"], shard["shard_index"])
+            assert previous == shard["shard_index"]
     assert len(campaign["shards"]) == 2
     assert {shard["worker_id"] for shard in campaign["shards"]} == {"wx-a", "wx-b"}
     assert q.paired_calibration_execution_blockers(campaign) == ["D2/multi_model_v1"]
@@ -126,6 +134,51 @@ def test_paired_worker_selection_rejects_duplicate_or_mixed_runtime():
     workers[1]["backend_version"] = "different"
     with pytest.raises(ValueError, match="mixed runtime"):
         q._paired_worker_assignments(workers)
+
+
+def test_gate_artifact_reader_binds_exact_bytes_and_rejects_symlinks(tmp_path):
+    path = tmp_path / "freeze.json"
+    raw = json.dumps({"freeze_sha256": "a" * 64}, sort_keys=True).encode()
+    path.write_bytes(raw)
+    binding = {"path": "freeze.json", "artifact_sha256": hashlib.sha256(raw).hexdigest()}
+    assert q._read_paired_bound_json(tmp_path, binding, kind="baseline freeze")[
+        "freeze_sha256"] == "a" * 64
+
+    path.write_bytes(raw + b" ")
+    with pytest.raises(ValueError, match="bytes changed"):
+        q._read_paired_bound_json(tmp_path, binding, kind="baseline freeze")
+
+    outside = tmp_path.parent / "outside-freeze.json"
+    outside.write_bytes(raw)
+    link = tmp_path / "linked.json"
+    link.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        q._paired_repo_json_file(tmp_path, "linked.json", kind="baseline freeze")
+
+    with pytest.raises(ValueError, match="unsafe"):
+        q._paired_repo_json_file(tmp_path, "../outside-freeze.json", kind="baseline freeze")
+
+
+@pytest.mark.parametrize("source_key,value", [
+    ("tree", "4" * 40), ("dependency_lock_sha256", "5" * 64),
+])
+def test_campaign_rejects_source_tree_and_runtime_lock_drift(monkeypatch, source_key, value):
+    campaign = _campaign(monkeypatch)
+    campaign["source"][source_key] = value
+    with pytest.raises(ValueError, match="source/runtime binding"):
+        q.validate_paired_calibration_campaign(campaign)
+
+
+def test_campaign_rejects_partition_leakage_and_semantic_approval_drift(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    campaign["partition"]["baseline_freeze_sha256"] = "6" * 64
+    with pytest.raises(ValueError, match="not bound"):
+        q.validate_paired_calibration_campaign(campaign)
+
+    campaign = _campaign(monkeypatch)
+    campaign["estimand_approval"]["approval_sha256"] = "7" * 64
+    with pytest.raises(ValueError, match="score/replay/approval contract"):
+        q.validate_paired_calibration_campaign(campaign)
 
 
 def test_paired_campaign_rejects_unsafe_artifact_paths_and_bad_repetition(monkeypatch):

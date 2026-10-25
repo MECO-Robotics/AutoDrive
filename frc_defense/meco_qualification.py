@@ -1968,11 +1968,18 @@ def _paired_shard_assignments(units, shard_count, campaign_identity):
         raise ValueError("paired calibration needs at least two shards")
     if shard_count > len(units):
         raise ValueError("paired calibration shard count exceeds work-unit count")
-    ranked = sorted(units, key=lambda unit: _canonical_sha256({
-        "campaign": campaign_identity, "unit": unit}))
+    pair_groups = {}
+    for unit in units:
+        pair_groups.setdefault(unit["pair_id"], []).append(unit)
+    if any({unit["control_id"] for unit in group} != {"D0", group[0]["paired_control_id"]}
+            or len(group) != 2 for group in pair_groups.values()):
+        raise ValueError("paired calibration schedule has an incomplete control pair")
+    ranked = sorted(pair_groups.values(), key=lambda group: _canonical_sha256({
+        "campaign": campaign_identity, "pair_id": group[0]["pair_id"]}))
     buckets = [[] for _ in range(shard_count)]
-    for index, unit in enumerate(ranked):
-        buckets[index % shard_count].append(unit)
+    for index, group in enumerate(ranked):
+        buckets[index % shard_count].extend(sorted(group,
+            key=lambda unit: unit["control_id"]))
     return buckets
 
 
@@ -2135,8 +2142,15 @@ def paired_calibration_execution_blockers(campaign):
 
 
 def _read_paired_bound_json(repo_root, binding, *, kind):
+    resolved, raw, value = _paired_repo_json_file(repo_root, binding["path"], kind=kind)
+    if hashlib.sha256(raw).hexdigest() != binding["artifact_sha256"]:
+        raise ValueError(f"paired calibration {kind} artifact bytes changed")
+    return value
+
+
+def _paired_repo_json_file(repo_root, relative_path, *, kind):
     root = Path(repo_root).resolve()
-    relative = Path(binding["path"])
+    relative = Path(relative_path)
     if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
         raise ValueError(f"paired calibration {kind} path is unsafe")
     candidate = root / relative
@@ -2146,15 +2160,74 @@ def _read_paired_bound_json(repo_root, binding, *, kind):
     if root not in resolved.parents or not resolved.is_file():
         raise ValueError(f"paired calibration {kind} artifact is missing or outside checkout")
     raw = resolved.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != binding["artifact_sha256"]:
-        raise ValueError(f"paired calibration {kind} artifact bytes changed")
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"paired calibration {kind} artifact is invalid JSON") from exc
     if not isinstance(value, dict):
         raise ValueError(f"paired calibration {kind} artifact must contain an object")
-    return value
+    return resolved, raw, value
+
+
+def prepare_paired_calibration_gate_bindings(*, repo_root, baseline_freeze_path,
+        partition_path, estimand_approval_path, configuration_artifacts):
+    """Load and validate real Pass 1 gate artifacts before manifest creation."""
+    freeze_path, freeze_raw, freeze = _paired_repo_json_file(
+        repo_root, baseline_freeze_path, kind="baseline freeze")
+    partition_file, partition_raw, partition = _paired_repo_json_file(
+        repo_root, partition_path, kind="partition")
+    approval_path, approval_raw, _ = _paired_repo_json_file(
+        repo_root, estimand_approval_path, kind="estimand approval")
+    from .curriculum_training import source_identity, source_tree_identity
+    source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    source_tree_hash = hashlib.sha256(json.dumps(source_tree_identity(), sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    root = Path(repo_root).resolve()
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        tree = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"],
+            check=True, capture_output=True, text=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError("paired calibration cannot inspect source commit/tree") from exc
+    from .meco_baseline_freeze import validate_baseline_freeze, validate_partition_contract
+    validated_freeze = validate_baseline_freeze(freeze, root,
+        configuration_artifacts=configuration_artifacts)
+    validated_partition = validate_partition_contract(partition,
+        baseline_freeze_sha256=validated_freeze["freeze_sha256"])
+    from .meco_simulated_score_ledger import (load_estimand_approval,
+        estimand_approval_digest)
+    approval, approval_raw_sha = load_estimand_approval(approval_path,
+        source_identity_sha256=source_hash)
+    if approval_raw_sha != hashlib.sha256(approval_raw).hexdigest():
+        raise ValueError("paired calibration approval bytes changed while loading")
+    if (freeze["source"]["commit"] != commit or freeze["source"]["tree"] != tree
+            or freeze["runtime"]["dependency_lock_sha256"] == ""):
+        raise ValueError("paired calibration baseline source/runtime binding is stale")
+    if source_hash != _calibration_source_identity_sha256():
+        raise ValueError("paired calibration source identity helpers disagree")
+    source = {"commit": commit, "tree": tree,
+        "source_identity_sha256": source_hash,
+        "source_tree_identity_sha256": source_tree_hash,
+        "dependency_lock_sha256": freeze["runtime"]["dependency_lock_sha256"]}
+    freeze_binding = {"path": freeze_path.relative_to(root).as_posix(),
+        "artifact_sha256": hashlib.sha256(freeze_raw).hexdigest(),
+        "schema": freeze["schema"], "freeze_sha256": freeze["freeze_sha256"],
+        "source_commit": commit, "source_tree": tree,
+        "dependency_lock_sha256": source["dependency_lock_sha256"]}
+    partition_binding = {"path": partition_file.relative_to(root).as_posix(),
+        "artifact_sha256": hashlib.sha256(partition_raw).hexdigest(),
+        "schema": partition["schema"],
+        "partition_sha256": partition["partition_sha256"],
+        "baseline_freeze_sha256": validated_freeze["freeze_sha256"]}
+    approval_binding = {"path": approval_path.relative_to(root).as_posix(),
+        "artifact_sha256": approval_raw_sha,
+        "schema": approval["schema"],
+        "approval_sha256": estimand_approval_digest(approval)}
+    return {"source_binding": source, "baseline_freeze_binding": freeze_binding,
+        "partition_binding": partition_binding,
+        "estimand_approval_binding": approval_binding}
 
 
 def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
@@ -2196,6 +2269,14 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
             or freeze.get("runtime", {}).get("dependency_lock_sha256")
                 != campaign["source"]["dependency_lock_sha256"]):
         raise ValueError("paired calibration baseline source/runtime lock differs from campaign")
+    expected_backend = str(freeze["runtime"]["backend"]).lower()
+    if expected_backend in ("rocm", "amd", "hip"):
+        expected_backend = "hip"
+    if any(worker["backend"] != expected_backend
+            or worker["backend_version"] != freeze["runtime"]["backend_version"]
+            or worker["torch_version"] != freeze["runtime"]["torch_version"]
+            for worker in campaign["worker_assignments"]):
+        raise ValueError("paired calibration worker runtime differs from baseline freeze")
     from .meco_baseline_freeze import validate_baseline_freeze, validate_partition_contract
     validated_freeze = validate_baseline_freeze(freeze, repo_root,
         configuration_artifacts=configuration_artifacts)
@@ -2214,9 +2295,8 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
         if any(unit[field] not in values for field, values in axes.items()):
             raise ValueError("paired calibration schedule leaks outside the frozen calibration partition")
     approval_binding = campaign["estimand_approval"]
+    _read_paired_bound_json(repo_root, approval_binding, kind="estimand approval")
     approval_path = Path(repo_root).resolve() / approval_binding["path"]
-    if any(part.is_symlink() for part in (approval_path, *approval_path.parents)):
-        raise ValueError("paired calibration estimand approval path uses a symlink")
     from .meco_simulated_score_ledger import (load_estimand_approval,
         estimand_approval_digest)
     approval, raw_sha256 = load_estimand_approval(approval_path,
