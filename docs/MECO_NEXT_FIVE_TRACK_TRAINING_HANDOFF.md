@@ -1,14 +1,16 @@
 # Next MECO five-track campaign handoff
 
-An offline r5 manifest and config are prepared at
-`/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/manifests/`
-The earlier r5 manifest bound to `b02db09f3` is stale. A replacement config
-and manifest are now saved as
-`meco-five-continuous-20261025-r5-durable-eval.config.json` and
-`meco-five-continuous-20261025-r5-durable-eval.json` in that directory,
-generated from clean source commit `9830c2647bce05bea01d59eed0c569d6b9e15550`.
-The clean source worktree is
-`/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-durable-eval`.
+An offline r5 config and manifest are prepared at
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/manifests/`.
+The earlier r5 manifests bound to `b02db09f3` and `9830c2647` are stale after
+the reviewed Plan A device-route source update. The current files are
+`meco-five-continuous-20261025-r5-device-route-856.config.json` and
+`meco-five-continuous-20261025-r5-device-route-856.json`, generated and
+validated against clean source commit
+`85618385dee59dc2676c2b80a6ce7a5797c5c05d` in worktree
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-current-source-856`.
+The canonical manifest digest is
+`d55e22d9cc2d2d099d17ee25d63f129f9132583c988e6aea9718e795fe7ee507`.
 Do not launch a new campaign while r4 owns the two WX9100 leases. The integrated source includes the
 reviewed A1/A2/A3 action/log-probability fix, Plan A P-map propagation into
 focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
@@ -28,11 +30,10 @@ until bound dataset/replay evidence is validated.
 See `frc_defense.meco_training_manifest`, `frc_defense.meco_supervisor`, and
 provenance tranches #44 and #46.
 
-The replacement manifest enables Phase 4 training exposure and freezes all 466
-protocol validation cases, each with its exact 100-seed list. Its canonical
-manifest digest is
-`8b044475e4e96d5bedac081c1eea584d48f2915d4cf6076aef1d07da805ad45a`.
-Offline manifest validation passed. Both campaign output roots are absent.
+The current replacement manifest enables Phase 4 training exposure and freezes
+all 466 protocol validation cases, each with its exact 100-seed list. Its
+canonical manifest digest is recorded above. Offline manifest validation
+passed against the pinned source worktree. Both campaign output roots are absent.
 Launch readiness, Phase 2 coverage, validation readiness, qualification
 readiness, and warm starts remain false.
 The reviewed durable queue is now integrated at `53157b4f8`: it preserves the

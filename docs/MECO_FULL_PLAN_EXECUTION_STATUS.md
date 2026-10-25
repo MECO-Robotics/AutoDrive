@@ -23,19 +23,22 @@
 > focused CPU source-contract tests passed; runtime support construction still
 > uses the CPU oracle, and the WX9100 parity/profile gate remains closed. No
 > HIP compile, device parity/profile, or simulator replay has been completed.
-> No simulator evaluation or replay was run. A replacement r5 manifest was
-> generated and validated offline at source
-> `9830c2647bce05bea01d59eed0c569d6b9e15550`, digest
-> `8b044475e4e96d5bedac081c1eea584d48f2915d4cf6076aef1d07da805ad45a`.
-> It binds all 466 validation cases and 46,600 exact seeds; both campaign
-> output roots are absent. Launch, Phase 2, validation, qualification, and
-> warm-start readiness remain false. It is not launched while r4 holds both
-> WX9100 leases. r4 was not changed or interrupted.
+> No simulator evaluation or replay was run. After the route-prototype source
+> update, the r5 manifest was regenerated and validated offline at clean source
+> `85618385dee59dc2676c2b80a6ce7a5797c5c05d`, canonical digest
+> `d55e22d9cc2d2d099d17ee25d63f129f9132583c988e6aea9718e795fe7ee507`.
+> The current config/manifest are
+> `meco-five-continuous-20261025-r5-device-route-856.config.json` and
+> `meco-five-continuous-20261025-r5-device-route-856.json`. The manifest binds
+> all 466 validation cases and 46,600 exact seeds; both campaign output roots
+> are absent. Launch, Phase 2, validation, qualification, and warm-start
+> readiness remain false. It is not launched while r4 holds both WX9100 leases.
+> r4 was not changed or interrupted.
 >
-> The user dashboard was restarted on the integrated checkout at 03:21:38 UTC
-> (PID `2894274`). `/`, `/api/meco-status`, `/api/curriculum-status`,
+> The user dashboard was restarted on the integrated checkout at 03:33 UTC
+> (PID `2907164`). `/`, `/api/meco-status`, `/api/curriculum-status`,
 > `/assets/meco.js`, and `/assets/dashboard.js` returned HTTP 200. The
-> curriculum API reports `validated_summary_only` with 64 scoped tranches.
+> curriculum API reports `validated_summary_only` with 65 scoped tranches.
 > Served asset hashes match the checkout: `meco.js`
 > `203e4c2d680d0c30465e2e868dc82a3b5cbf63511e4cb6273ae3650fbd91f7ba` and
 > `dashboard.js`
