@@ -1768,9 +1768,15 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         decision["logits"] = _apply_candidate_hysteresis(
             decision["logits"], candidate_set.table, candidate_batch=device_batch)
         path_cost = None
-    action, logprob, entropy = sample_candidate_action(decision["logits"],
+    selection_order = (candidate_set.device_batch.selection_rank.argsort(
+        stable=True) if candidate_set.device_batch is not None else None)
+    sampling_logits = (decision["logits"].index_select(-1, selection_order)
+        if selection_order is not None else decision["logits"])
+    action_order_index, logprob, entropy = sample_candidate_action(sampling_logits,
         deterministic=(True if decision.get("inference_status") ==
                        "deterministic_fallback" else deterministic))
+    action = (selection_order.index_select(0, action_order_index.reshape(-1)).reshape(
+        action_order_index.shape) if selection_order is not None else action_order_index)
     selected_action_payload = (None if candidate_set.device_batch is None else
         candidate_set.device_batch.gather_action_payload(action))
     device_evidence_pending = candidate_set.device_batch is not None
@@ -2860,7 +2866,7 @@ def _require_device_candidate_batch(candidate_set, env, policy):
         raise RuntimeError(f"{policy} requires a device-resident candidate batch")
     expected = torch.device(env.device)
     tensors = (batch.candidate_index, batch.action_index,
-        batch.target_track_index, batch.target_xy, batch.goal_xy,
+        batch.selection_rank, batch.target_track_index, batch.target_xy, batch.goal_xy,
         batch.goal_heading, batch.raw_features, batch.missing_mask,
         batch.valid_mask, batch.eta_s, batch.route_cost_points,
         batch.risk_cost_points, batch.fallback_index)
@@ -4093,7 +4099,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "D1" if use_d1_fallback else policy)
                                 if logits.device != torch.device(env.device):
                                     raise RuntimeError("D1/D2 selector logits left the assigned GPU")
-                                choice_tensor = logits.argmax(-1)
+                                priority_order = candidate_set.device_batch.selection_rank.argsort(
+                                    stable=True)
+                                priority_logits = logits.index_select(-1, priority_order)
+                                priority_choice = priority_logits.argmax(-1)
+                                choice_tensor = priority_order.index_select(
+                                    0, priority_choice.reshape(-1)).reshape(
+                                        priority_choice.shape)
                                 device_dispatch_payload = candidate_set.device_batch.gather_action_payload(
                                     choice_tensor).detach().to(device="cpu").reshape(-1).tolist()
                                 choice = int(device_dispatch_payload[0])

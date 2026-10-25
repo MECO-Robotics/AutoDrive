@@ -148,6 +148,7 @@ class DeviceCandidateBatch:
     forecast_xy: torch.Tensor | None = None
     forecast_valid: torch.Tensor | None = None
     capture_inside: torch.Tensor | None = None
+    selection_rank: torch.Tensor | None = None
 
     def __post_init__(self):
         count = len(self.candidate_ids)
@@ -157,6 +158,12 @@ class DeviceCandidateBatch:
         if not self.feature_names or len(set(self.feature_names)) != len(self.feature_names):
             raise ValueError("candidate feature names must be unique and ordered")
         device = self.valid_mask.device
+        if self.selection_rank is None:
+            object.__setattr__(self, "selection_rank",
+                torch.arange(count, device=device, dtype=torch.long))
+        if (self.selection_rank.shape != (count,) or
+                self.selection_rank.dtype != torch.long):
+            raise ValueError("selection_rank must be int64 [K]")
         if self.candidate_index.shape != (count,) or self.candidate_index.dtype != torch.long:
             raise ValueError("candidate_index must be int64 [K]")
         if self.action_index.shape != (count,) or self.action_index.dtype != torch.long:
@@ -197,7 +204,8 @@ class DeviceCandidateBatch:
             self.target_track_index, self.target_xy, self.goal_xy,
             self.goal_heading, self.route_override_flags, self.raw_features,
             self.missing_mask, self.valid_mask, self.eta_s,
-            self.route_cost_points, self.risk_cost_points, self.fallback_index)
+            self.route_cost_points, self.risk_cost_points, self.fallback_index,
+            self.selection_rank)
         if self.forecast_xy is not None:
             tensors += (self.forecast_xy,)
         if self.forecast_valid is not None:
@@ -770,17 +778,37 @@ def _build_device_candidate_set(env, base, graph, specs, *,
     if (extra_candidate_mask is None or policy_offset_start is None
             or extra_track_start is None or extra_track_indices is None):
         raise RuntimeError("fixed-capacity policy ordering requires device expansion masks and offsets")
-    # Keep policy metadata in fixed spec order: base actions, distance-sorted
-    # extra target slots, then approach offsets. Device eligibility masks extra
-    # rows and never decides a host-side prefix or candidate index list.
+    # Keep metadata in fixed spec order while a device priority tensor defines
+    # the canonical decision order: base actions, eligible extras by distance,
+    # then offsets. This preserves the K-prefix without host synchronization.
     extra_count = extra_track_indices.numel()
     offset_count = 4 * 6
-    policy_indices = (list(range(8)) +
-        list(range(extra_track_start, extra_track_start + extra_count)) +
-        list(range(policy_offset_start, policy_offset_start + offset_count)))[:candidate_k]
-    selected_policy = torch.tensor(policy_indices, device=device, dtype=torch.long)
+    policy_stop = policy_offset_start + offset_count
+    policy_indices = list(range(policy_stop))
+    selected_policy = torch.arange(policy_stop, device=device, dtype=torch.long)
+    selection_rank = torch.full((policy_stop,), 2**60,
+                                device=device, dtype=torch.long)
+    selection_rank[:8] = torch.arange(8, device=device, dtype=torch.long)
+    extra_distances = torch.linalg.vector_norm(
+        torch.nan_to_num(fuel_xy[extra_track_start:extra_track_start + extra_count]) -
+        env.policy_pose[0, 3, :2], dim=-1)
+    extra_order = torch.argsort(
+        extra_distances.masked_fill(~extra_candidate_mask, float("inf")),
+        stable=True)
+    ordered_extra_mask = extra_candidate_mask.index_select(0, extra_order)
+    ordered_extra_rank = torch.where(ordered_extra_mask,
+        8 + ordered_extra_mask.to(torch.long).cumsum(0) - 1,
+        2**50 + torch.arange(extra_count, device=device, dtype=torch.long))
+    extra_ranks = torch.empty_like(extra_order)
+    extra_ranks.scatter_(0, extra_order, ordered_extra_rank)
+    selection_rank[extra_track_start:extra_track_start + extra_count] = extra_ranks
+    selection_rank[policy_offset_start:policy_stop] = (
+        8 + extra_candidate_mask.sum().to(torch.long) +
+        torch.arange(offset_count, device=device, dtype=torch.long))
     policy_indices.append(continue_index)
     selected = torch.tensor(policy_indices, device=device, dtype=torch.long)
+    selection_rank = torch.cat((selection_rank,
+        torch.full((1,), 2**60, device=device, dtype=torch.long)))
     policy_ids = tuple(ids[index] for index in policy_indices)
     policy_queries = tuple(query_rows[index] for index in policy_indices)
     policy_routes = DeviceRouteBatch(policy_queries,
@@ -793,7 +821,11 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         route_full.weighted_cost_grid_edges.index_select(0, selected),
         torch.arange(len(policy_indices), device=device, dtype=torch.long),
         cost_provenance=route_full.cost_provenance)
-    valid = route_available.index_select(0, selected)[None]
+    active_policy = selection_rank[:policy_stop] < candidate_k
+    candidate_policy_mask = torch.cat((active_policy,
+        torch.ones((1,), device=device, dtype=torch.bool)))
+    valid = (route_available.index_select(0, selected) &
+             candidate_policy_mask)[None]
     policy_raw = raw.index_select(0, selected)[None]
     policy_missing = missing.index_select(0, selected)[None]
     route_points = (eta.index_select(0, selected) * ROUTE_COST_POINTS_PER_SECOND)[None]
@@ -841,11 +873,12 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         route_points, risk_points, policy_routes, fallback,
         prediction.index_select(0, selected)[None],
         forecast_valid.index_select(0, selected)[None],
-        geometry["capture_inside"].index_select(0, selected)[None])
+        geometry["capture_inside"].index_select(0, selected)[None],
+        selection_rank)
     oracle_mask = route_available & ~continue_mask
     oracle_count = oracle_mask.sum()
-    requested_rows = torch.zeros(count, device=device, dtype=torch.bool).scatter(
-        0, selected_policy, True)
+    requested_rows = torch.zeros(count, device=device, dtype=torch.bool)
+    requested_rows[:policy_stop] = active_policy
     requested_mask = route_available & requested_rows
     requested_count = requested_mask.sum()
     total_cost = eta * ROUTE_COST_POINTS_PER_SECOND + risk
@@ -1189,27 +1222,15 @@ def _additional_sensed_target_specs(env, base: SafeActionCandidates):
     if base.device_track_indices.shape != (4,) or base.device_valid_mask.shape != (8,):
         raise RuntimeError("device base action table has an invalid fixed-capacity shape")
     points, _, sensed = _world_zero_perceived_fuel(env)
-    distances = torch.linalg.vector_norm(points - env.policy_pose[0, 3, :2], dim=-1)
     eligible = sensed & torch.isfinite(points).all(dim=-1)
     buffer_ids = torch.arange(points.shape[0], device=points.device, dtype=torch.long)
     in_base = ((buffer_ids[:, None] == base.device_track_indices[:4][None, :]) &
                (base.device_missing_mask[:4, 1] < .5)[None, :]).any(dim=-1)
     eligible &= ~in_base
-    # Keep a fixed row for every sensor slot. Device eligibility sorts valid
-    # rows first and carries invalid/base rows as masked capacity; the host
-    # copy below is only stable identity metadata after order is fixed.
-    order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
-    ordered_indices = order
-    # The source plan allows ordered host candidate identities/specs. This
-    # transfer maps stable row identities only; route/features/cost values and
-    # eligibility remain on the selected device.
-    ordered = ordered_indices.detach().to(device="cpu").tolist()
-    ordered_eligible = eligible.index_select(0, order)
-    # This host projection binds deterministic candidate-spec identities to
-    # route-query metadata. Numeric features, eligibility, and route scores
-    # remain tensors; the source plan explicitly allows ordered host identities.
-    return ([(0, None, int(track)) for track in ordered], ordered_indices,
-            ordered_eligible)
+    # Candidate-spec metadata stays in fixed sensor-buffer identity order.
+    # Distance ranking and eligibility compaction happen later on-device.
+    return ([(0, None, int(track)) for track in range(points.shape[0])],
+            buffer_ids, eligible)
 
 
 @torch.no_grad()
