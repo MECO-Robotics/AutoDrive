@@ -26,7 +26,9 @@ from .meco_phase4_runtime_adapter import phase4_requirement_binding
 from .meco_phase4_opponents import (POLICY_CONFIG, POLICY_FACTOR_IDS,
                                     opponent_policy_runtime_domain_supported,
                                     opponent_policy_runtime_slots, policy_assignment_identity,
-                                    policy_pool_identity)
+                                    policy_pool_identity,
+                                    trench_interception_runtime_domain_supported,
+                                    compile_opponent_policy_schedule)
 from .meco_phase4_context import phase4_start_profile_assignment
 
 
@@ -36,6 +38,232 @@ DIRECT_PURSUIT_POLICY_IDS = tuple(sorted((*POLICIES, "A1_P0", "A2_P0", "A3_P0"))
 CONDITIONS = ("no_factor", "factor_treatment")
 EXPECTED_FACTOR_CASE_AXIS_CELLS = 6488
 VALIDATION_SEEDS_PER_CASE = 100
+TRENCH_POLICY_IDS = tuple(sorted((*POLICIES, "A1_P0", "A2_P0", "A3_P0")))
+
+
+def _read_bound_trench_artifact(root: Path, row: dict, *, path_key: str,
+        sha_key: str) -> tuple[dict, str] | None:
+    relative = row.get(path_key)
+    if not isinstance(relative, str) or not relative:
+        return None
+    path_value = Path(relative)
+    if path_value.is_absolute() or ".." in path_value.parts:
+        return None
+    root = root.resolve()
+    target = (root / path_value).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return None
+    raw = target.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if row.get(sha_key) != digest:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return (payload, digest) if isinstance(payload, dict) else None
+
+
+def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
+        protocol_sha256: str, registry_sha256: str, case: dict,
+        seed_sha256: str, assignment_sha256: str,
+        expected_schedule_sha256: str, seed_values: list[int],
+        evidence_root: Path) -> dict | None:
+    """Accept only a complete, independently reviewed paired trench evidence row."""
+    matches = [row for row in rows if isinstance(row, dict) and
+        row.get("scenario_id") == case["scenario_id"] and
+        row.get("category") == case["category"] and
+        row.get("qualification_case") == {axis: case[axis] for axis in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("trench-interception review evidence duplicates a protocol case")
+    row = matches[0]
+    outcome_artifact = _read_bound_trench_artifact(evidence_root, row,
+        path_key="paired_outcomes_artifact_path",
+        sha_key="paired_outcomes_artifact_sha256")
+    review_artifact = _read_bound_trench_artifact(evidence_root, row,
+        path_key="replay_review_artifact_path",
+        sha_key="replay_review_artifact_sha256")
+    if outcome_artifact is None or review_artifact is None:
+        return {"accepted": False,
+            "reason": "paired outcomes or independent replay review artifact is missing or hash-mismatched"}
+    outcome_payload, outcome_sha256 = outcome_artifact
+    replay, review_sha256 = review_artifact
+    outcome_body = dict(outcome_payload)
+    recorded_pairing_sha = outcome_body.pop("pairing_sha256", None)
+    expected_keys = {(policy, seed) for policy in TRENCH_POLICY_IDS for seed in seed_values}
+    paired_outcomes = outcome_payload.get("paired_outcomes")
+    valid_outcome_items = (isinstance(paired_outcomes, list) and all(
+        isinstance(item, dict) and item.get("policy_id") in TRENCH_POLICY_IDS and
+        type(item.get("seed")) is int for item in paired_outcomes))
+    outcome_keys = ({(item["policy_id"], item["seed"]) for item in paired_outcomes}
+        if valid_outcome_items else set())
+    outcome_valid = (outcome_payload.get("schema") ==
+        "meco-phase4-trench-interception-pair-outcomes-v1"
+        and outcome_payload.get("factor_id") == "opponent.trench_interception"
+        and outcome_payload.get("policy_id") == "trench_interceptor"
+        and outcome_payload.get("protocol_id") == protocol.get("protocol_id")
+        and outcome_payload.get("protocol_sha256") == protocol_sha256
+        and outcome_payload.get("scenario_id") == case["scenario_id"]
+        and outcome_payload.get("category") == case["category"]
+        and outcome_payload.get("qualification_case") == {axis: case[axis] for axis in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}
+        and outcome_payload.get("split") == "validation"
+        and recorded_pairing_sha == _sha256(_canonical_bytes(outcome_body))
+        and outcome_payload.get("schedule_sha256") == expected_schedule_sha256
+        and outcome_payload.get("validation_seed_assignment_sha256") == seed_sha256
+        and outcome_payload.get("policy_ids") == list(TRENCH_POLICY_IDS)
+        and outcome_payload.get("assigned_pressure_slots") == [0]
+        and outcome_payload.get("control_policy_ids") == list(TRENCH_POLICY_IDS)
+        and outcome_payload.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and outcome_payload.get("seed_manifest_sha256") == row.get("seed_manifest_sha256")
+        and outcome_payload.get("seed_count") == len(seed_values) == VALIDATION_SEEDS_PER_CASE
+        and outcome_payload.get("assigned_rows_per_condition") == {
+            "no_factor": len(expected_keys), "factor_treatment": len(expected_keys)}
+        and outcome_payload.get("paired_rows_per_condition") == {
+            "no_factor": len(expected_keys), "factor_treatment": len(expected_keys)}
+        and outcome_keys == expected_keys and len(paired_outcomes) == len(expected_keys)
+        and outcome_payload.get("exact_pair_coverage") is True
+        and outcome_payload.get("all_pairs_full_horizon_valid") is True
+        and outcome_payload.get("outcome_signals_complete") is True
+        and outcome_payload.get("invalid_pair_count") == 0
+        and outcome_payload.get("unaccounted_assignments") == 0
+        and outcome_payload.get("treatment_interception_valid_count") == len(expected_keys)
+        and outcome_payload.get("treatment_interception_invalid_count") == 0
+        and outcome_payload.get("source_identity_sha256") == row.get("source_identity_sha256")
+        and outcome_payload.get("checkpoint_bundle_sha256") == row.get("checkpoint_bundle_sha256")
+        and outcome_payload.get("execution_device") == row.get("execution_device"))
+    per_arm = outcome_payload.get("per_arm_outcomes")
+    outcome_valid = outcome_valid and isinstance(per_arm, dict) and all(
+        isinstance(per_arm.get(arm), dict) and
+        per_arm[arm].get("assigned_count") == len(expected_keys) and
+        per_arm[arm].get("full_horizon_valid_count") == len(expected_keys) and
+        per_arm[arm].get("alternate_crossing_success_denominator") == len(expected_keys) and
+        per_arm[arm].get("crossing_time_rmst_denominator") == len(expected_keys)
+        for arm in CONDITIONS)
+    outcome_valid = outcome_valid and per_arm["factor_treatment"].get(
+        "interception_denominator") == len(expected_keys)
+    reviewer = replay.get("reviewer_identity") if isinstance(replay, dict) else None
+    if not outcome_valid:
+        return {"accepted": False, "reason": "retained paired outcomes fail exact assignment reconciliation"}
+    exact = (row.get("schema") == "meco-phase4-trench-interception-review-evidence-v1"
+        and row.get("protocol_id") == protocol.get("protocol_id")
+        and row.get("protocol_sha256") == protocol_sha256
+        and row.get("registry_sha256") == registry_sha256
+        and row.get("factor_id") == "opponent.trench_interception"
+        and row.get("policy_id") == "trench_interceptor"
+        and row.get("split") == "validation"
+        and row.get("validation_seed_assignment_sha256") == seed_sha256
+        and row.get("assignment_identity_sha256") == assignment_sha256
+        and row.get("control_policy_ids") == list(TRENCH_POLICY_IDS)
+        and row.get("assigned_pressure_slots") == [0]
+        and row.get("paired_rows_per_condition") == {
+            "no_factor": len(TRENCH_POLICY_IDS) * VALIDATION_SEEDS_PER_CASE,
+            "factor_treatment": len(TRENCH_POLICY_IDS) * VALIDATION_SEEDS_PER_CASE}
+        and row.get("exact_pair_coverage") is True
+        and row.get("all_pairs_full_horizon_valid") is True
+        and row.get("outcome_signals_complete") is True
+        and row.get("treatment_interception_valid_count") ==
+            len(TRENCH_POLICY_IDS) * VALIDATION_SEEDS_PER_CASE
+        and row.get("treatment_interception_invalid_count") == 0
+        and row.get("unaccounted_assignments") == 0
+        and row.get("invalid_pair_count") == 0
+        and row.get("qualification_eligible") is False
+        and isinstance(row.get("source_identity_sha256"), str)
+        and bool(row["source_identity_sha256"])
+        and isinstance(row.get("checkpoint_bundle_sha256"), dict)
+        and bool(row["checkpoint_bundle_sha256"])
+        and isinstance(row.get("execution_device"), dict)
+        and bool(row["execution_device"])
+        and row.get("schedule_sha256") == expected_schedule_sha256
+        and isinstance(row.get("seed_manifest_sha256"), str)
+        and bool(row["seed_manifest_sha256"])
+        and row.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and isinstance(row.get("frontend_asset_manifest_sha256"), str)
+        and bool(row["frontend_asset_manifest_sha256"])
+        and row.get("paired_outcomes_artifact_sha256") == outcome_sha256
+        and row.get("replay_review_artifact_sha256") == review_sha256)
+    replays = replay.get("paired_replays") if isinstance(replay, dict) else None
+    exact = (exact and isinstance(replay, dict) and replay.get("schema") ==
+        "meco-phase4-trench-interception-replay-review-v1" and
+        replay.get("accepted") is True)
+    exact = exact and isinstance(reviewer, dict) and all(
+        isinstance(reviewer.get(key), str) and reviewer.get(key)
+        for key in ("subject_id", "identity_provider", "review_record_id"))
+    exact = exact and replay.get("paired_outcomes_artifact_sha256") == outcome_sha256
+    exact = exact and replay.get("protocol_id") == protocol.get("protocol_id")
+    exact = exact and replay.get("protocol_sha256") == protocol_sha256
+    exact = exact and replay.get("factor_id") == "opponent.trench_interception"
+    exact = exact and replay.get("policy_id") == "trench_interceptor"
+    exact = exact and replay.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+    exact = exact and replay.get("assignment_identity_sha256") == assignment_sha256
+    exact = exact and replay.get("schedule_sha256") == expected_schedule_sha256
+    exact = exact and replay.get("scenario_id") == case["scenario_id"]
+    exact = exact and replay.get("category") == case["category"]
+    exact = exact and replay.get("qualification_case") == {axis: case[axis] for axis in (
+        "layout_id", "defender_family", "start_condition", "sensor_profile")}
+    exact = exact and replay.get("split") == "validation"
+    exact = exact and all(replay.get(flag) is True for flag in (
+        "dashboard_backend_current", "dashboard_frontend_current", "endpoint_healthy",
+        "replay_current_checkout", "replay_seed_is_in_exact_validation_manifest"))
+    exact = exact and replay.get("backend_source_identity_sha256") == row.get(
+        "source_identity_sha256")
+    exact = exact and replay.get("frontend_asset_manifest_sha256") == row.get(
+        "frontend_asset_manifest_sha256")
+    exact = exact and replay.get("seed_manifest_sha256") == row.get("seed_manifest_sha256")
+    exact = exact and type(replay.get("replay_seed")) is int
+    exact = exact and replay.get("replay_seed") == next(iter(
+        {item.get("seed") for item in replays if isinstance(item, dict)}), None)
+    exact = exact and isinstance(replays, list) and len(replays) == 2
+    if not isinstance(replays, list):
+        exact = False
+    elif any(not isinstance(item, dict) or type(item.get("seed")) is not int
+            for item in replays):
+        exact = False
+    exact = exact and {item.get("condition") for item in replays if isinstance(item, dict)} == set(CONDITIONS)
+    exact = exact and len({item.get("seed") for item in replays if isinstance(item, dict)}) == 1
+    exact = exact and all(isinstance(item, dict)
+        and item.get("scenario_id") == case["scenario_id"]
+        and item.get("category") == case["category"]
+        and item.get("qualification_case") == {axis: case[axis] for axis in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}
+        and item.get("split") == "validation"
+        and item.get("seed_manifest_sha256") == row.get("seed_manifest_sha256")
+        and item.get("source_identity_sha256") == row.get("source_identity_sha256")
+        and item.get("checkpoint_bundle_sha256") == row.get("checkpoint_bundle_sha256")
+        and item.get("execution_device") == row.get("execution_device")
+        and item.get("source_identity_sha256") == row.get("source_identity_sha256")
+        and item.get("frontend_asset_manifest_sha256") == row.get(
+            "frontend_asset_manifest_sha256")
+        and item.get("policy_id") == "trench_interceptor"
+        and item.get("schedule_sha256") == row.get("schedule_sha256")
+        and item.get("assignment_identity_sha256") == assignment_sha256
+        and item.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and item.get("seed") == replay.get("replay_seed")
+        and item.get("seed_manifest_sha256") == replay.get("seed_manifest_sha256")
+        and item.get("backend_source_identity_sha256") == row.get("source_identity_sha256")
+        and item.get("assigned_pressure_slots") == [0]
+        and item.get("applied_slots") == ([] if item.get("condition") == "no_factor" else [0])
+        and isinstance(item.get("replay_id"), str) and bool(item["replay_id"])
+        and isinstance(item.get("replay_sha256"), str) and bool(item["replay_sha256"])
+        for item in replays)
+    exact = exact and len({item.get("replay_id") for item in replays if isinstance(item, dict)}) == 2
+    exact = exact and isinstance(reviewer, dict) and all(
+        isinstance(reviewer.get(key), str) and reviewer.get(key)
+        for key in ("subject_id", "identity_provider", "review_record_id"))
+    if not exact:
+        return {"accepted": False, "reason": "trench review evidence is incomplete or mismatched"}
+    return {"accepted": True, "evidence_sha256": _sha256(_canonical_bytes(row)),
+        "source_identity_sha256": row["source_identity_sha256"],
+        "checkpoint_bundle_sha256": row["checkpoint_bundle_sha256"],
+        "execution_device": row["execution_device"],
+        "schedule_sha256": row["schedule_sha256"],
+        "frontend_asset_manifest_sha256": row["frontend_asset_manifest_sha256"],
+        "paired_outcomes_artifact_sha256": row["paired_outcomes_artifact_sha256"],
+        "replay_review_artifact_sha256": row["replay_review_artifact_sha256"],
+        "reviewer_identity": reviewer}
 
 
 def _seed_digest(seeds: list[int]) -> str:
@@ -209,7 +437,8 @@ def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, 
 def compile_phase4_campaign_plan(protocol_path: str | Path,
                                 registry_path: str | Path,
                                 overlay_path: str | Path,
-                                direct_pursuit_review_evidence_path: str | Path | None = None
+                                direct_pursuit_review_evidence_path: str | Path | None = None,
+                                trench_interception_review_evidence_path: str | Path | None = None
                                 ) -> dict[str, Any]:
     """Return a compact, deterministic schedule plan, never episode rows."""
     protocol, protocol_raw = _read_protocol_validation(protocol_path)
@@ -217,6 +446,9 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
     overlay, overlay_raw = _read_json(overlay_path)
     direct_review_rows = []
     direct_review_raw_sha256 = None
+    trench_review_rows = []
+    trench_review_raw_sha256 = None
+    trench_review_root = None
     if direct_pursuit_review_evidence_path is not None:
         review_path = Path(direct_pursuit_review_evidence_path)
         review_raw = review_path.read_bytes()
@@ -227,6 +459,17 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
             raise ValueError("invalid direct-pursuit replay-review evidence bundle")
         direct_review_rows = review_payload["cases"]
         direct_review_raw_sha256 = _sha256(review_raw)
+    if trench_interception_review_evidence_path is not None:
+        review_path = Path(trench_interception_review_evidence_path)
+        review_raw = review_path.read_bytes()
+        review_payload = json.loads(review_raw)
+        if (not isinstance(review_payload, dict) or review_payload.get("schema") !=
+                "meco-phase4-trench-interception-review-evidence-bundle-v1" or
+                not isinstance(review_payload.get("cases"), list)):
+            raise ValueError("invalid trench-interception replay-review evidence bundle")
+        trench_review_rows = review_payload["cases"]
+        trench_review_raw_sha256 = _sha256(review_raw)
+        trench_review_root = review_path.resolve().parent
     expected_overlay = compile_phase4_design_overlay(protocol_path, registry_path)
     if overlay != expected_overlay:
         raise ValueError("Phase 4 overlay does not exactly match the bound protocol and registry")
@@ -300,6 +543,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                     reactive_assignment = None
                     direct_pursuit_assignment = None
                     direct_review_gate = None
+                    trench_interception_assignment = None
+                    trench_review_gate = None
                     start_profile_assignment = None
                     if req_id == "reactive_defenders_and_opponent_pools":
                         policy_id = design_axes.get("policy_pool")
@@ -418,6 +663,60 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                                 seed_count=seed_info["seed_count"],
                                 configured_pressure_slots=direct_pursuit_assignment[
                                     "configured_pressure_slots"])
+                    if (req_id == "trench_interception" and
+                            factor == "opponent.trench_interception" and
+                            case["scenario_id"] == "offense_vs_scripted_pressure" and
+                            case["category"] == "active/trench/level_4_reactive" and
+                            case["layout_id"] == "2026_rebuilt_shifted_structures_v1" and
+                            case["defender_family"] == "orbiting_interceptor" and
+                            case["start_condition"] == "offset_upper_lane" and
+                            case["sensor_profile"] == "noisy" and
+                            seed_info["seed_count"] == VALIDATION_SEEDS_PER_CASE):
+                        if not trench_interception_runtime_domain_supported(
+                                case["scenario_id"], case["category"]):
+                            raise ValueError("frozen trench candidate is outside runtime domain")
+                        case_payload = {"scenario_id": case["scenario_id"],
+                            "category": case["category"], "qualification_case": {
+                                axis: case[axis] for axis in ("layout_id", "defender_family",
+                                    "start_condition", "sensor_profile")},
+                            "split": "validation",
+                            "validation_seed_assignment_sha256": seed_info["seed_sha256"]}
+                        schedule = compile_opponent_policy_schedule(
+                            policy_id="trench_interceptor", scenario_id=case["scenario_id"],
+                            categories=(case["category"],),
+                            qualification_case=case_payload["qualification_case"],
+                            seeds=seed_info["_seed_values_internal"], split="validation",
+                            factor_id=factor, protocol_id=protocol["protocol_id"])
+                        if schedule["configured_pressure_slots"][case["category"]] != [0]:
+                            raise ValueError("frozen trench candidate must replace only slot 0")
+                        trench_interception_assignment = {
+                            "schema": "meco-phase4-trench-interception-assignment-v1",
+                            "policy_id": "trench_interceptor", "factor_id": factor,
+                            "policy_family": schedule["policy_family"],
+                            "policy_config_sha256": schedule["policy_config_sha256"],
+                            "configured_pressure_slots": [0],
+                            "control_policy_ids": list(TRENCH_POLICY_IDS),
+                            "schedule": schedule,
+                            "schedule_sha256": schedule["schedule_sha256"],
+                            "protocol_bound_evaluation_case": case_payload,
+                            "factor_treatment_seeded_assignment_sha256":
+                                schedule["per_episode_assignment_sha256"],
+                            "paired_condition_semantics": {
+                                "no_factor": "registered level-4 reactive slot-0 script",
+                                "factor_treatment": "trench_interceptor replaces slot 0"},
+                            "paired_rows_per_condition": len(TRENCH_POLICY_IDS) * seed_info["seed_count"],
+                            "exact_pair_coverage_required": True,
+                            "runtime_domain_supported": True,
+                            "executed": False, "qualification_eligible": False}
+                        trench_review_gate = _trench_interception_review_gate(
+                            trench_review_rows, protocol=protocol,
+                            protocol_sha256=_sha256(protocol_raw),
+                            registry_sha256=_sha256(registry_raw), case=case,
+                            seed_sha256=seed_info["seed_sha256"],
+                            assignment_sha256=schedule["per_episode_assignment_sha256"],
+                            expected_schedule_sha256=schedule["schedule_sha256"],
+                            seed_values=seed_info["_seed_values_internal"],
+                            evidence_root=trench_review_root)
                     if req_id == "multiple_legal_team_start_states":
                         registry_profile_id = design_axes.get("legal_team_pose_sets")
                         start_profile_assignment = phase4_start_profile_assignment(
@@ -431,7 +730,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             categories=(case["category"],),
                             seeds=seed_info["_seed_values_internal"])
                     status = ("protocol_bound_policy_assignment_planned_not_executed"
-                              if reactive_assignment is not None or direct_pursuit_assignment is not None else
+                              if reactive_assignment is not None or direct_pursuit_assignment is not None or
+                                trench_interception_assignment is not None else
                               "protocol_bound_start_profile_assignment_planned_not_executed"
                               if start_profile_assignment is not None else
                               "design_only_unassigned_to_protocol_case" if design_axes else
@@ -456,9 +756,11 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "scheduler_assignment_supported": (
                             reactive_assignment is not None or
                             direct_pursuit_assignment is not None or
+                            trench_interception_assignment is not None or
                             start_profile_assignment is not None),
                         "opponent_schedule_assignment": reactive_assignment,
                         "direct_pursuit_assignment": direct_pursuit_assignment,
+                        "trench_interception_assignment": trench_interception_assignment,
                         "start_profile_assignment": start_profile_assignment,
                         "required_outcome_signals_complete": set(
                             runtime_binding["required_signals"]).issubset(
@@ -466,14 +768,25 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         "executable": (not bool(design_axes)
                             and (req_id != "direct_pursuit" or
                                 bool(direct_review_gate and direct_review_gate.get("accepted")))
+                            and (req_id != "trench_interception" or
+                                bool(trench_interception_assignment and trench_review_gate and
+                                    trench_review_gate.get("accepted")))
                             and factor in runtime_binding["runtime_factor_by_factor_id"]
                             and runtime_binding["stimulus_supported"]
                             and set(runtime_binding["required_signals"]).issubset(
                                 runtime_binding["authoritative_signals"])),
                         "executed": False,
                         "simulator_behavior_validated": bool(
-                            direct_review_gate and direct_review_gate.get("accepted")),
+                            (direct_review_gate and direct_review_gate.get("accepted")) or
+                            (trench_review_gate and trench_review_gate.get("accepted"))),
                         "direct_pursuit_review_gate": direct_review_gate,
+                        "trench_interception_review_gate": trench_review_gate,
+                        "trench_interception_tranche_status": (
+                            "review_accepted_candidate_cell_only" if
+                            trench_review_gate and trench_review_gate.get("accepted") and
+                                bool(trench_interception_assignment) else
+                            "planned_not_executed_or_reviewed" if
+                            trench_interception_assignment else None),
                     }
                     schedule_identity = {"factor_id": factor, "case_axes": case,
                                         "design_axes": design_axes}
@@ -533,6 +846,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
         "requirements": plan_requirements,
         "runtime_and_evaluator_wiring_required": True,
         "direct_pursuit_review_evidence_sha256": direct_review_raw_sha256,
+        "trench_interception_review_evidence_sha256": trench_review_raw_sha256,
     }
     plan["plan_id"] = _sha256(_canonical_bytes(plan))
     return plan
@@ -541,10 +855,12 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
 def write_phase4_campaign_plan(protocol_path: str | Path, registry_path: str | Path,
                                overlay_path: str | Path,
                                output_path: str | Path,
-                               direct_pursuit_review_evidence_path: str | Path | None = None
+                               direct_pursuit_review_evidence_path: str | Path | None = None,
+                               trench_interception_review_evidence_path: str | Path | None = None
                                ) -> dict[str, Any]:
     plan = compile_phase4_campaign_plan(protocol_path, registry_path, overlay_path,
-        direct_pursuit_review_evidence_path=direct_pursuit_review_evidence_path)
+        direct_pursuit_review_evidence_path=direct_pursuit_review_evidence_path,
+        trench_interception_review_evidence_path=trench_interception_review_evidence_path)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(plan, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -560,9 +876,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--direct-pursuit-review-evidence", type=Path,
         help="reviewed held-out simulator/replay evidence required to open direct-pursuit executability")
+    parser.add_argument("--trench-interception-review-evidence", type=Path,
+        help="reviewed held-out paired trench evidence required to open the candidate cell gate")
     args = parser.parse_args(argv)
     plan = write_phase4_campaign_plan(args.protocol, args.registry, args.overlay, args.output,
-        direct_pursuit_review_evidence_path=args.direct_pursuit_review_evidence)
+        direct_pursuit_review_evidence_path=args.direct_pursuit_review_evidence,
+        trench_interception_review_evidence_path=args.trench_interception_review_evidence)
     print(json.dumps({"plan_id": plan["plan_id"],
                       "factor_case_axis_cell_count": plan["factor_case_axis_cell_count"],
                       "scheduled_row_count_theoretical": plan["scheduled_row_count_theoretical"],
