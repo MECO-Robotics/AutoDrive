@@ -9,6 +9,9 @@ from frc_defense.experimental_route_evaluation import (
     DeviceRouteQuery,
     MAX_ROUTE_QUERY_BATCH,
     evaluate_device_route_chunks,
+    evaluate_device_routes,
+    evaluate_routes,
+    RouteQuery,
 )
 import frc_defense.meco_candidates as meco_candidates
 from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
@@ -20,7 +23,8 @@ from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_
                                      SAFE_ACTION_FEATURES,
                                      ProductionMecoAdapter, SafeActionCandidates,
                                      make_meco_track, sample_candidate_action,
-                                     score_candidates)
+                                     make_meco_inference_request, score_candidates)
+from frc_defense.curriculum_scenarios import make_curriculum_env
 
 
 class _NoHostScalarSync(TorchDispatchMode):
@@ -28,6 +32,28 @@ class _NoHostScalarSync(TorchDispatchMode):
         if func._schema.name == "aten::_local_scalar_dense":
             raise AssertionError("numeric device value synchronized to host before selection")
         return func(*args, **(kwargs or {}))
+
+
+class _NoHostTensorProjection:
+    def __enter__(self):
+        self.originals = {name: getattr(torch.Tensor, name)
+                          for name in ("cpu", "tolist", "numpy", "item")}
+        def reject(*_args, **_kwargs):
+            raise AssertionError("device numeric projection before action selection")
+        for name in self.originals:
+            setattr(torch.Tensor, name, reject)
+        return self
+
+    def __exit__(self, *_exc):
+        for name, original in self.originals.items():
+            setattr(torch.Tensor, name, original)
+
+
+class _CudaContractTensor(torch.Tensor):
+    """CPU-backed tensor exposing the CUDA device contract for adapter tests."""
+    @property
+    def device(self):
+        return torch.device("cuda:0")
 
 
 def test_device_route_batch_keeps_a_fixed_tensor_contract():
@@ -194,6 +220,42 @@ def test_production_adapter_consumes_device_candidates_without_host_mask_project
     assert torch.isneginf(result["logits"][0, 1])
 
 
+def test_c1_production_worker_accepts_device_mask_and_returns_model_response():
+    track = "C1"
+    ids = ("candidate:valid", "candidate:masked")
+    features = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    table = CandidateTable("worker:1", ids,
+        tuple(tuple(None for _ in features) for _ in ids), (True, True), features)
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.device = torch.device("cuda:0")
+    adapter.model = make_meco_track(track).eval()
+    adapter.checkpoint_sha256 = "b" * 64
+    adapter.protocol_id = "worker-contract"
+    adapter._last_inference_exception_type = None
+    adapter.next_request_identity = lambda: (1, "worker-generation")
+    fake = lambda value: value.as_subclass(_CudaContractTensor)
+    inputs = {
+        "globals_": fake(torch.zeros((1, 7))),
+        "candidate_features": fake(torch.zeros((1, 2, MECO_CANDIDATE_MODEL_INPUT_WIDTH))),
+        "hidden": fake(torch.zeros((1, 64))),
+    }
+    candidate_batch = SimpleNamespace(candidate_ids=ids)
+    capture = time.monotonic() - .01
+    request = make_meco_inference_request(adapter, table=table,
+        observation_timestamp=1., capture_monotonic=capture,
+        inputs=inputs, candidate_batch=candidate_batch)
+    mask = fake(torch.tensor([[True, False]]))
+
+    response = adapter._infer_sync(request,
+        {**inputs, "__candidate_valid_mask": mask}, now=time.monotonic())
+
+    assert response is not None
+    assert response.track == "C1"
+    assert response.candidate_mask_digest == request.candidate_mask_digest
+    assert response.outputs["candidate_utility"].shape == (1, 2)
+
+
 def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_support():
     model = make_meco_track("C2").eval()
     raster = torch.randn((1, 6, 16, 16))
@@ -279,7 +341,8 @@ def test_device_candidate_builder_feeds_scorer_without_materializing_feature_row
             torch.zeros_like(goals), available,
             torch.ones_like(available), torch.zeros(candidate_count)))
     commitment = CandidateCommitment("action:7", 7, 0, None, 0, 20)
-    with _NoHostScalarSync():
+    model = make_meco_track(track).eval()
+    with _NoHostTensorProjection(), _NoHostScalarSync():
         candidate_set = meco_candidates._build_device_candidate_set(env, base,
             SimpleNamespace(resolution_m=.5),
             [(index, 0, 0., 0., None) for index in range(count)] +
@@ -287,7 +350,12 @@ def test_device_candidate_builder_feeds_scorer_without_materializing_feature_row
             candidate_k=count, action_ticks=1, prediction_mode="current",
             active_commitment=commitment, continue_index=count, oracle_capacity=count,
             learned_traversal_cost=None, learned_cost_scale=1.)
-
+        result = score_candidates(track, model,
+            raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+            table=candidate_set.table, candidate_batch=candidate_set.device_batch,
+            route_cost=candidate_set.route_cost_points[None],
+            risk_cost=candidate_set.risk_cost_points[None])
+        selected = sample_candidate_action(result["logits"], deterministic=True)
     assert candidate_set.device_batch is not None
     assert all(value is None for row in candidate_set.table.features for value in row)
     assert candidate_set.table.valid_mask == tuple(True for _ in range(candidate_count))
@@ -296,17 +364,84 @@ def test_device_candidate_builder_feeds_scorer_without_materializing_feature_row
     switch_column = candidate_set.table.feature_names.index("commitment_switch_cost")
     assert candidate_set.device_batch.raw_features[0, :, switch_column].tolist() == [
         0.] * candidate_count
-    model = make_meco_track(track).eval()
-    with _NoHostScalarSync():
-        result = score_candidates(track, model,
-            raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
-            table=candidate_set.table, candidate_batch=candidate_set.device_batch,
-            route_cost=candidate_set.route_cost_points[None],
-            risk_cost=candidate_set.risk_cost_points[None])
-        selected = sample_candidate_action(result["logits"], deterministic=True)
     assert torch.isfinite(result["logits"][0, 0])
     assert torch.isneginf(result["logits"][0, 1])
     assert selected[0].shape == (1,)
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+@pytest.mark.parametrize("candidate_k", (8, 16, 32))
+def test_c1_c2_device_candidate_scores_and_logprob_match_legacy_with_continue(
+        track, candidate_k):
+    torch.manual_seed(43)
+    names = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    count = candidate_k + 1
+    ids = tuple([f"collect:track:{index}" for index in range(candidate_k)] +
+                ["continue:collect:track:0"])
+    raw = torch.randn((1, count, len(names)))
+    raw[:, :, 0] = torch.arange(count, dtype=raw.dtype)
+    raw[:, -1, names.index("is_continue")] = 1.
+    missing = torch.zeros_like(raw)
+    valid = torch.ones((1, count), dtype=torch.bool)
+    valid[0, 1] = False
+    rows = tuple(tuple(value for value in row) for row in raw[0].tolist())
+    table = CandidateTable("parity:device", ids, rows,
+        tuple(bool(value) for value in valid[0].tolist()), names)
+    queries = tuple(DeviceRouteQuery(item, "parity:device", 0, 3) for item in ids)
+    route = DeviceRouteBatch(queries, torch.full((count,), DeviceRouteBatch.FEASIBLE,
+        dtype=torch.long), valid[0], torch.zeros((count, 1, 2)),
+        torch.ones(count, dtype=torch.long), torch.zeros(count), torch.zeros(count),
+        torch.zeros(count), torch.arange(count))
+    route_cost = torch.linspace(0., .02, count)[None]
+    risk_cost = torch.linspace(.1, .2, count)[None]
+    batch = DeviceCandidateBatch(ids, names, torch.arange(count),
+        torch.zeros(count, dtype=torch.long), torch.full((count,), -1),
+        torch.zeros((count, 2)), torch.zeros((count, 2)), torch.zeros(count),
+        torch.zeros((count, 2), dtype=torch.bool), raw, missing, valid,
+        torch.zeros((1, count)), route_cost, risk_cost, route,
+        torch.tensor(0))
+    model = make_meco_track(track).eval()
+    raster = torch.randn((1, 6, 16, 16))
+    globals_ = torch.randn((1, 7))
+    hidden = torch.randn((1, 64))
+
+    legacy = score_candidates(track, model, raster=raster, globals_=globals_,
+        table=table, hidden=hidden, route_cost=route_cost, risk_cost=risk_cost)
+    device = score_candidates(track, model, raster=raster, globals_=globals_,
+        table=table, candidate_batch=batch, hidden=hidden,
+        route_cost=route_cost, risk_cost=risk_cost)
+    torch.testing.assert_close(device["logits"], legacy["logits"])
+    torch.testing.assert_close(device["hidden"], legacy["hidden"])
+    device_action, device_logprob, _ = sample_candidate_action(
+        device["logits"], deterministic=True)
+    legacy_action, legacy_logprob, _ = sample_candidate_action(
+        legacy["logits"], deterministic=True)
+    assert torch.equal(device_action, legacy_action)
+    torch.testing.assert_close(device_logprob, legacy_logprob)
+
+    def failed_adapter():
+        adapter = object.__new__(ProductionMecoAdapter)
+        adapter.track = track
+        adapter.checkpoint_sha256 = "c" * 64
+        adapter.protocol_id = "fallback-parity"
+        adapter._request_sequence = 0
+        adapter._generation_id = "fallback-generation"
+        adapter.next_request_identity = lambda: (1, adapter._generation_id)
+        adapter._broker = SimpleNamespace(counters=lambda: {})
+        adapter.submit_inference = lambda _request, _inputs: object()
+        adapter.poll_inference = lambda _request, _handle: None
+        return adapter
+
+    capture = time.monotonic() - .01
+    fallback_legacy = score_candidates(track, failed_adapter(), raster=raster,
+        globals_=globals_, table=table, hidden=hidden,
+        observation_timestamp=1., capture_monotonic=capture)
+    fallback_device = score_candidates(track, failed_adapter(), raster=raster,
+        globals_=globals_, table=table, candidate_batch=batch, hidden=hidden,
+        observation_timestamp=1., capture_monotonic=capture)
+    assert fallback_legacy["inference_status"] == "deterministic_fallback"
+    assert fallback_device["inference_status"] == "deterministic_fallback"
+    torch.testing.assert_close(fallback_device["logits"], fallback_legacy["logits"])
 
 
 def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
@@ -347,6 +482,65 @@ def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
     assert torch.isneginf(invalid_scores[0, 1])
 
 
+@pytest.mark.parametrize("policy", ("D1", "D2"))
+@pytest.mark.parametrize("count", (8, 16, 32))
+def test_d1_d2_device_scoring_matches_legacy_rows_across_capacities(policy, count):
+    names = [f"f{i}" for i in range(20)]
+    names[0], names[10], names[11], names[12] = (
+        "action_index", "nearby_sensed_track_count", "track_confidence", "track_age_s")
+    ids = tuple([f"collect:track:{i}" for i in range(4)] +
+                ["score", "intercept", "ferry", "hold"] +
+                [f"collect:track:{i}" for i in range(4, count - 4)])
+    rows = []
+    for i in range(count):
+        row = [0.] * len(names)
+        row[0] = float(i if i < 8 else 0)
+        row[10], row[11], row[12] = .5, .75, .25
+        rows.append(tuple(row))
+    raw = torch.tensor(rows, dtype=torch.float32)[None]
+    valid = torch.ones((1, count), dtype=torch.bool)
+    valid[0, -1] = False
+    route_cost = torch.linspace(0., .03, count)
+    goals = torch.stack((torch.linspace(.1, 1., count),
+                         torch.full((count,), .25)), dim=-1)
+    forecast_env = SimpleNamespace(
+        opponent_pose=torch.zeros((1, 4, 3)),
+        opponent_velocity=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                          [0., 0., 0.], [.8, .1, .4]]]),
+        opponent_age=torch.zeros((1, 4)),
+        opponent_valid=torch.tensor([[False, False, False, True]]))
+    forecast, forecast_valid, fresh, risk_cost = (
+        meco_candidates._forecast_risk_batch_device(forecast_env, goals,
+            torch.ones(count), valid[0], "multi_model_v1"))
+    assert forecast_valid.any() and fresh.all() and risk_cost.sum() > 0.
+    queries = tuple(DeviceRouteQuery(item, "parity:1", 0, 3) for item in ids)
+    route = DeviceRouteBatch(queries, torch.full((count,), 3, dtype=torch.long), valid[0],
+        torch.zeros((count, 1, 2)), torch.ones(count, dtype=torch.long),
+        torch.zeros(count), torch.zeros(count), torch.zeros(count),
+        torch.arange(count))
+    batch = DeviceCandidateBatch(ids, tuple(names), torch.arange(count),
+        torch.tensor([int(row[0]) for row in rows]),
+        torch.full((count,), -1), torch.zeros((count, 2)), goals,
+        torch.zeros(count), torch.zeros((count, 2), dtype=torch.bool), raw,
+        torch.zeros_like(raw), valid, torch.zeros((1, count)), route_cost[None],
+        risk_cost[None], route, torch.tensor(0), forecast_xy=forecast[None],
+        forecast_valid=forecast_valid[None])
+    table = CandidateTable("parity:1", ids, tuple(rows),
+        tuple(bool(value) for value in valid[0].tolist()), tuple(names))
+    candidate_set = SimpleNamespace(device_batch=batch, table=table,
+        route_cost_points=route_cost, risk_cost_points=risk_cost)
+
+    device_scores = _d1_d2_scores(candidate_set, None, policy,
+                                  route_cost_points_per_second=10.)
+    legacy_scores = _d1_d2_scores(SimpleNamespace(device_batch=None,
+        table=table, route_cost_points=route_cost, risk_cost_points=risk_cost),
+        SimpleNamespace(device="cpu"), policy, route_cost_points_per_second=10.)
+
+    torch.testing.assert_close(device_scores, legacy_scores)
+    assert device_scores.argmax(-1).item() == legacy_scores.argmax(-1).item()
+    assert torch.isneginf(device_scores[0, -1])
+
+
 def test_device_route_chunks_keep_query_order_without_host_projection(monkeypatch):
     calls = []
 
@@ -374,6 +568,35 @@ def test_device_route_chunks_keep_query_order_without_host_projection(monkeypatc
     assert batch.queries == queries
     assert torch.equal(batch.distance_m, goals[:, 0].to(torch.float64))
     assert torch.equal(batch.candidate_index, torch.arange(count))
+
+
+def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
+    env = make_curriculum_env("pickup_simple", "single", 1, "cpu", 71,
+                              horizon=10, fuel_physics=False)
+    env.set_focal_pose_estimate((10., 4., 0.))
+    obstacles = env._perceived_robot_obstacles()[3]
+    blocked_goal = (obstacles[0, :2].clone() if obstacles.shape[0]
+                    else torch.tensor((10., 4.)))
+    queries = tuple(RouteQuery(item, "route-parity:1", world, 3, goal)
+        for item, world, goal in (
+            ("clear", 0, (10.8, 4.)),
+            ("blocked", 0, tuple(blocked_goal.tolist())),
+            ("duplicate", 0, (11., 4.)),
+            ("duplicate", 0, (11.2, 4.)),
+            ("invalid-world", 9, (11., 4.)),
+            ("invalid-goal", 0, (float("nan"), 4.))))
+    device_queries = tuple(DeviceRouteQuery(query.candidate_id,
+        query.snapshot_id, query.world, query.slot) for query in queries)
+    goals = torch.tensor([query.goal_xy for query in queries], dtype=env.policy_pose.dtype)
+
+    legacy = evaluate_routes(env, queries)
+    device = evaluate_device_routes(env, device_queries, goals).project_results()
+
+    assert [result.status for result in device] == [result.status for result in legacy]
+    assert [result.feasible for result in device] == [result.feasible for result in legacy]
+    for left, right in zip(device, legacy):
+        if left.distance_m is not None or right.distance_m is not None:
+            assert left.distance_m == pytest.approx(right.distance_m, abs=1e-6)
 
 
 def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():

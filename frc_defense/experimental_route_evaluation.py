@@ -84,7 +84,7 @@ class DeviceRouteBatch:
     def __post_init__(self):
         count = len(self.queries)
         if self.status_code.shape != (count,) or self.status_code.dtype != torch.long:
-            raise ValueError("status_code must be int64 [Q]")
+            raise ValueError(f"status_code must be int64 [Q], got {self.status_code.shape} {self.status_code.dtype}")
         if self.feasible.shape != (count,) or self.feasible.dtype != torch.bool:
             raise ValueError("feasible must be bool [Q]")
         if self.path_xy.ndim != 3 or self.path_xy.shape[0] != count or self.path_xy.shape[2] != 2:
@@ -428,7 +428,11 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
     safe_obstacles = torch.nan_to_num(obstacles, nan=0., posinf=0., neginf=0.)
     goal_distance = torch.linalg.vector_norm(safe_goal - safe_start, dim=-1)
     at_goal = active & (goal_distance <= goal_tolerance_m)
-    query_rows = [(query, safe_goal[index]) for index, query in enumerate(items)]
+    safe_queries = tuple(DeviceRouteQuery(query.candidate_id, query.snapshot_id,
+        worlds[index], slots[index], intake[index])
+        for index, query in enumerate(items))
+    query_rows = [(query, safe_goal[index])
+                  for index, query in enumerate(safe_queries)]
     scratch = _scratch_planner(env, query_rows)
     gx, gy = scratch._indices(safe_goal)
     blocked = scratch._blocked(safe_heading, safe_length, safe_width)
@@ -485,7 +489,7 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
         safe_length, safe_width)
     endpoint_circles = torch.cat((scratch._extra_circles.reshape(1, -1, 3).expand(
         count, -1, -1), safe_obstacles), dim=1)
-    circle_clear = _pose_clear_of_circles(endpoint[:, None, :],
+    circle_clear = _pose_clear_of_circles(endpoint,
         safe_heading, safe_length, safe_width, endpoint_circles)
     segment_lengths = torch.linalg.vector_norm(path_xy[:, 1:] - path_xy[:, :-1], dim=-1)
     segment_mask = (torch.arange(path_xy.shape[1] - 1, device=device)[None, :] <

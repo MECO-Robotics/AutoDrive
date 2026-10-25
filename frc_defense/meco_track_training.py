@@ -2507,8 +2507,11 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
                                    for name in device_batch.candidate_ids],
                                   device=device_batch.device, dtype=raw.dtype)
         utility = torch.where(collect, utility, noncollect)
-        route_raw = device_batch.route_cost_points[0]
-        risk_raw = device_batch.risk_cost_points[0]
+        # Keep the score dtype identical to the legacy feature-table path.
+        # Risk forecasts may carry a wider dtype due to geometric constants;
+        # promoting scores here changes downstream tie behavior needlessly.
+        route_raw = device_batch.route_cost_points[0].to(dtype=raw.dtype)
+        risk_raw = device_batch.risk_cost_points[0].to(dtype=raw.dtype)
         finite_costs = torch.isfinite(route_raw) & torch.isfinite(risk_raw)
         route = (torch.where(torch.isfinite(route_raw), route_raw,
                              torch.zeros_like(route_raw)) /
