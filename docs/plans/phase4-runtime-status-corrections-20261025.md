@@ -82,7 +82,8 @@ and all other rows unchanged.
    remains unvalidated, and the three required registry outcomes remain
    non-authoritative/unavailable for qualification.
 2. **Direct pursuit, row 17:** replace `none` with
-   `phase4_opponent_schedule` / applied-slot provenance and
+   `phase4_opponent_schedule`, the exact applied-slot event
+   `records[].phase4_direct_pursuit.applied_slots`, and
    `records[].phase4_direct_pursuit.contact_events + objective_route.progress_intervals`.
    Replace “validation slot assignment is not wired; signals unavailable” with
    the bounded source fact: the validation-bound slot assignment, simulator
@@ -90,7 +91,8 @@ and all other rows unchanged.
    no held-out simulator/replay/dashboard review has been accepted, so
    executable promotion remains fail-closed.
 3. **Trench interception, row 18:** replace `none` with
-   `phase4_opponent_schedule` / applied slots and
+   `phase4_opponent_schedule`, the exact applied-slot event
+   `records[].phase4_opponent_policy.runtime.applied_slots`, and
    `records[].phase4_trench_interception.contact_events + crossing_events`.
    State that the slot-0 schedule, slot-0/3 contact and full-horizon crossing
    records, validators, and paired reducer are implemented. Preserve the
