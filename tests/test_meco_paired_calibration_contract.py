@@ -89,6 +89,13 @@ def _campaign(monkeypatch, **overrides):
 
 
 def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
+    shard_index = next(shard["shard_index"] for shard in campaign["shards"]
+        if unit in shard["work_units"])
+    worker = campaign["worker_assignments"][shard_index %
+        len(campaign["worker_assignments"])]
+    unit_id = q._canonical_sha256(unit)
+    simulation_id = f"sim-{unit_id[:16]}"
+    device = worker["device"]
     control = next(row for row in campaign["controls"]
         if row["control_id"] == unit["control_id"])
     source_hash = campaign["source"]["source_identity_sha256"]
@@ -110,7 +117,7 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
         "score_intent_source": "effective policy action trace passed to update_fuel_actions",
         "score_rules_id": RULES_ID, "robot_team_slots": [0, 0, 0, 1, 1, 1],
         "fuel_count": 32}
-    context = {"episode_id": "paired-fixture-episode", "seed": unit["seed"],
+    context = {"episode_id": f"paired-fixture-{unit_id[:16]}", "seed": unit["seed"],
         "scenario_id": unit["scenario_id"], "robot_team_slots": [0, 0, 0, 1, 1, 1],
         "world_count": 1, "source_identity_sha256": source_hash,
         "effective_scoring_configuration": scoring_configuration,
@@ -141,29 +148,28 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
         "metrics": metrics, "score_terminal_counters": [1, 0],
         "fuel_score_count": [1, 0], "official_match_points": None,
         "qualification_eligible": False,
-        "execution_device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
+        "execution_device": {"device": device, "accelerator_backend": "ROCm"},
         "execution_failures": [],
         "simulated_score_ledger": ledger,
         "simulated_match_score": ledger["simulated_match_score"]}
     replay_digest = q._canonical_sha256(evaluation)
-    replay_ref = {"simulation_id": "sim-001",
-        "result_path": "sim-001.result.json",
+    replay_ref = {"simulation_id": simulation_id,
+        "result_path": f"{simulation_id}.result.json",
         "evaluation_record_digest": replay_digest}
-    worker = campaign["worker_assignments"][0]
     outcome_digest = q._canonical_sha256({"metrics": metrics,
         "safety_metrics": evaluation["meco_metric_ledger"]["safety_metrics"],
         "execution_failures": []})
-    replay = {"simulation_id": "sim-001", "evaluation_record_digest": replay_digest,
+    replay = {"simulation_id": simulation_id, "evaluation_record_digest": replay_digest,
         "replay_contract_schema": q.PAIRED_CALIBRATION_REPLAY_CONTRACT,
         "paired_calibration_binding": q.paired_calibration_replay_binding(
-            campaign, 0, unit),
+            campaign, shard_index, unit),
         "source_identity_sha256": source_hash,
         "condition_id": q.paired_calibration_condition_id(
-            q.paired_calibration_replay_binding(campaign, 0, unit)),
+            q.paired_calibration_replay_binding(campaign, shard_index, unit)),
         "paired_calibration_worker_identity": worker,
-        "device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
-        "execution_device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
-        "simulation_device": "cuda:0", "outcome_digest": outcome_digest,
+        "device": {"device": device, "accelerator_backend": "ROCm"},
+        "execution_device": {"device": device, "accelerator_backend": "ROCm"},
+        "simulation_device": device, "outcome_digest": outcome_digest,
         "safety_digest": q._canonical_sha256(evaluation["meco_metric_ledger"]["safety_metrics"]),
         "scenario_id": unit["scenario_id"], "category": unit["category"],
         "seed": unit["seed"], "split": unit["split"],
@@ -186,7 +192,7 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
     validate_estimand_approval(approval, source_identity_sha256=source_hash)
     assert estimand_approval_digest(approval) == campaign["estimand_approval"]["approval_sha256"]
     validate_replay_score_binding(replay, evaluation, [1, 0], approval)
-    row = q.build_paired_calibration_outcome_row(campaign, 0, unit, evaluation,
+    row = q.build_paired_calibration_outcome_row(campaign, shard_index, unit, evaluation,
         replay_raw, replay_ref, approval)
     return row, approval, ledger, replay_raw, evaluation, replay_ref
 
@@ -205,9 +211,10 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
             if key != "control_binding_sha256"})
     multi_model = next(row for row in campaign["controls"]
         if row["control_id"] == "D2/multi_model_v1")
-    assert multi_model["execution_supported"] is False
-    assert "independent review" in multi_model["support_limit"]
-    assert multi_model["prediction_contract"]
+    assert multi_model["execution_supported"] is True
+    assert multi_model["support_limit"] is None
+    assert multi_model["prediction_contract"]["model"] == "meco_opponent_kinematics_mm_v1"
+    assert multi_model["prediction_contract"]["mode"] == "multi_model_v1"
     assert multi_model["prediction_contract_sha256"] == q._canonical_sha256(
         multi_model["prediction_contract"])
     for shard in campaign["shards"]:
@@ -231,7 +238,7 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
             assert previous == shard["shard_index"]
     assert len(campaign["shards"]) == 2
     assert {shard["worker_id"] for shard in campaign["shards"]} == {"wx-a", "wx-b"}
-    assert q.paired_calibration_execution_blockers(campaign) == ["D2/multi_model_v1"]
+    assert q.paired_calibration_execution_blockers(campaign) == []
     assert q.validate_paired_calibration_campaign(campaign) is campaign
 
 
@@ -258,7 +265,7 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
         q.validate_paired_calibration_campaign(altered)
 
 
-def test_paired_runner_groups_exact_case_seed_tuples_and_stays_blocked(monkeypatch):
+def test_paired_runner_groups_exact_case_seed_tuples_and_revalidates_gate_before_eval(monkeypatch):
     campaign = _campaign(monkeypatch)
     shard = campaign["shards"][0]
     groups = q._paired_calibration_evaluation_groups(shard)
@@ -268,7 +275,9 @@ def test_paired_runner_groups_exact_case_seed_tuples_and_stays_blocked(monkeypat
         assert set(group["controls"]) == {"D0", group["key"][-1]}
         for control_id, units in group["controls"].items():
             assert [unit["seed"] for unit in units] == group["seeds"]
-    with pytest.raises(ValueError, match="execution blocked by controls: D2/multi_model_v1"):
+    monkeypatch.setattr(q, "validate_paired_calibration_gate_artifacts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("gate validation reached")))
+    with pytest.raises(ValueError, match="gate validation reached"):
         q.run_paired_calibration_shard(campaign, 0, repo_root="unavailable",
             replay_root="unavailable", output_root="unavailable",
             configuration_artifacts={})
@@ -313,7 +322,7 @@ def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch,
         q.validate_paired_calibration_progress(campaign, 0, altered,
             replay_root=tmp_path, approval=approval)
 
-    with pytest.raises(ValueError, match="blocked by controls: D2/multi_model_v1"):
+    with pytest.raises(ValueError, match="progress is incomplete"):
         q.build_paired_calibration_final_shard(campaign, 0, progress,
             replay_root=tmp_path, approval=approval)
 
@@ -354,9 +363,10 @@ def test_progress_writer_is_atomic_monotonic_and_compare_and_swap(tmp_path):
             expected_previous_progress_id=second["progress_id"])
 
 
-def test_paired_merge_stays_blocked_until_every_registered_control_is_executable(monkeypatch):
+def test_paired_merge_requires_exact_shard_set_after_registered_controls_enable(monkeypatch):
     campaign = _campaign(monkeypatch)
-    with pytest.raises(ValueError, match="merge blocked by controls: D2/multi_model_v1"):
+    assert q.paired_calibration_execution_blockers(campaign) == []
+    with pytest.raises(ValueError, match="exactly one final artifact per shard"):
         q.build_paired_calibration_merged_report(campaign, [], replay_root="unused",
             approval={})
 
@@ -430,7 +440,6 @@ def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_p
     assert row["qualification_eligible"] is False
     assert q.validate_paired_calibration_outcome_row(campaign, 0, row,
         replay_root=tmp_path, approval=approval) == row
-
     replay_path = tmp_path / replay_ref["result_path"]
     replay_path.write_bytes(replay_path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="artifact bytes changed"):
@@ -452,6 +461,66 @@ def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_p
             replay_raw, changed, {"approved": True})
 
 
+def test_multimodel_control_identity_survives_outcome_and_progress_validation(monkeypatch, tmp_path):
+    campaign = _campaign(monkeypatch)
+    unit = next(unit for unit in campaign["shards"][0]["work_units"]
+        if unit["control_id"] == "D2/multi_model_v1")
+    shard_index = 0
+    row, approval, _, replay_raw, evaluation, replay_ref = _outcome_fixture(
+        monkeypatch, campaign, unit, tmp_path)
+    control = next(control for control in campaign["controls"]
+        if control["control_id"] == "D2/multi_model_v1")
+    assert evaluation["prediction_mode"] == "multi_model_v1"
+    assert evaluation["prediction_contract"] == control["prediction_contract"]
+    assert row["control_binding_sha256"] == control["control_binding_sha256"]
+    assert q.validate_paired_calibration_outcome_row(campaign, shard_index, row,
+        replay_root=tmp_path, approval=approval) == row
+    progress = q.build_paired_calibration_progress(campaign, shard_index, [row],
+        replay_root=tmp_path, approval=approval)
+    assert progress["completed_rows"] == [row]
+
+    changed = copy.deepcopy(row)
+    changed["control_binding"]["prediction_contract"]["max_horizon_s"] = 99.0
+    body = {key: value for key, value in changed.items() if key != "outcome_row_sha256"}
+    changed["outcome_row_sha256"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match="predictor/control identity changed"):
+        q.validate_paired_calibration_outcome_row(campaign, shard_index, changed,
+            replay_root=tmp_path, approval=approval)
+
+
+def test_multimodel_contract_digest_survives_final_shard_and_merged_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(q, "BOOTSTRAP_REPLICATES", 25)
+    monkeypatch.setattr(q, "PAIRED_CALIBRATION_CONTROLS",
+        ("D0", "D2/multi_model_v1"))
+    campaign = _campaign(monkeypatch)
+    approval = _approval()
+    finals = []
+    for shard in campaign["shards"]:
+        rows = [_outcome_fixture(monkeypatch, campaign, unit, tmp_path)[0]
+            for unit in shard["work_units"]]
+        progress = q.build_paired_calibration_progress(campaign,
+            shard["shard_index"], rows, replay_root=tmp_path, approval=approval)
+        final = q.build_paired_calibration_final_shard(campaign,
+            shard["shard_index"], progress, replay_root=tmp_path, approval=approval)
+        expected_binding = next(control["control_binding_sha256"]
+            for control in campaign["controls"]
+            if control["control_id"] == "D2/multi_model_v1")
+        assert final["control_bindings"]["D2/multi_model_v1"] == expected_binding
+        assert all(row["control_binding_sha256"] == expected_binding
+            for row in final["completed_rows"]
+            if row["control_id"] == "D2/multi_model_v1")
+        finals.append(json.dumps(final, sort_keys=True, separators=(",", ":")).encode())
+
+    report = q.build_paired_calibration_merged_report(campaign, finals,
+        replay_root=tmp_path, approval=approval)
+    bundle = next(bundle for bundle in report["_control_bundle_artifacts"]
+        if bundle["control_id"] == "D2/multi_model_v1")
+    assert bundle["control_binding_sha256"] == expected_binding
+    assert bundle["qualification_eligible"] is False
+    assert report["official_match_points"] is None
+    assert any(ref["bundle_id"] == bundle["bundle_id"]
+        for ref in report["control_bundles"])
+
 @pytest.mark.parametrize("mutation,message", [
     ("qualification_case", "outcome/case/safety digest differs"),
     ("metrics", "outcome/case/safety digest differs"),
@@ -464,7 +533,7 @@ def test_paired_outcome_rejects_replay_tuple_metrics_safety_and_device_drift(
     unit = campaign["shards"][0]["work_units"][0]
     case_root = tmp_path / mutation
     case_root.mkdir()
-    row, approval, _, replay_raw, _, _ = _outcome_fixture(
+    row, approval, _, replay_raw, _, replay_ref = _outcome_fixture(
         monkeypatch, campaign, unit, case_root)
     replay = json.loads(replay_raw)
     if mutation == "qualification_case":
@@ -477,7 +546,7 @@ def test_paired_outcome_rejects_replay_tuple_metrics_safety_and_device_drift(
     else:
         replay["paired_calibration_worker_identity"]["device_uuid"] = "other-gpu"
     changed_raw = json.dumps(replay, sort_keys=True).encode()
-    (case_root / "sim-001.result.json").write_bytes(changed_raw)
+    (case_root / replay_ref["result_path"]).write_bytes(changed_raw)
     row["replay_sha256"] = hashlib.sha256(changed_raw).hexdigest()
     body = {key: value for key, value in row.items() if key != "outcome_row_sha256"}
     row["outcome_row_sha256"] = q._canonical_sha256(body)

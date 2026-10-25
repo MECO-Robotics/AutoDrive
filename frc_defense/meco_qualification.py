@@ -1897,16 +1897,13 @@ def _paired_control_specs():
         "execution_supported": True, "support_limit": None}]
     for variant in PAIRED_CALIBRATION_CONTROLS[1:]:
         identity = _matched_reference_identity(variant)
-        supported = variant != "D2/multi_model_v1"
         body = {"control_id": variant, "policy": identity["policy"],
             "policy_id": identity["policy_id"],
             "prediction_mode": identity["prediction_mode"],
             "prediction_contract": identity["prediction_contract"],
             "prediction_contract_sha256": _canonical_sha256(identity["prediction_contract"]),
             "candidate_configuration": candidate, "execution_supported": True,
-            "support_limit": None if supported else
-                "awaiting exact-head independent review of the multi-model predictor"}
-        body["execution_supported"] = supported
+            "support_limit": None}
         body["control_binding_sha256"] = _canonical_sha256(body)
         rows.append(body)
     rows[0]["control_binding_sha256"] = _canonical_sha256(rows[0])
@@ -2620,11 +2617,14 @@ def _paired_control_summary(campaign, control_id, pairs):
 
 
 def _build_paired_control_bundle(campaign, summary, final_shard_sha256):
+    control = next((row for row in campaign["controls"]
+        if row["control_id"] == summary["control_id"]), None)
+    if control is None or not isinstance(control.get("control_binding_sha256"), str):
+        raise ValueError("paired control bundle lacks its exact frozen control binding")
     body = {"schema": "meco-paired-calibration-control-bundle-v1",
         "campaign_id": campaign["campaign_id"],
         "control_id": summary["control_id"],
-        "control_binding_sha256": _canonical_sha256(
-            _paired_shard_control_bindings(campaign["controls"])),
+        "control_binding_sha256": control["control_binding_sha256"],
         "final_shard_sha256": list(final_shard_sha256),
         "summary": summary, "official_match_points": None,
         "qualification_eligible": False,
