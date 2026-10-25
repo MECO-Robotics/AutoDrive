@@ -156,8 +156,7 @@ the stale r5 config and manifest are settings inputs, not launchable artifacts.
 
 ```bash
 set -euo pipefail
-# Set REPO to the exact clean source worktree bound by the Phase 2 descriptor.
-REPO='/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/<clean-current-source>'
+REPO='/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive'
 CAMPAIGNS='/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns'
 PHASE2="$CAMPAIGNS/meco-phase2-five-track-20261025"
 ATTEMPT="$PHASE2/attempt-0001"
@@ -171,13 +170,16 @@ python3 -m frc_defense.meco_phase2_complete_set validate "$DESCRIPTOR"
 TEMPLATE="$CAMPAIGNS/manifests/meco-five-continuous-20261025-r5-plan-c-audit-5389.config.json"
 CONFIG="$PHASE2/five-track-r6.config.json"
 R6_ROOT="$CAMPAIGNS/meco-five-continuous-20261025-r6-phase2"
-MANIFEST="$R6_ROOT/campaign-manifest.json"
+# Keep the manifest outside the campaign root: the supervisor requires that
+# fresh output roots remain absent until its post-lease claim.
+MANIFEST="$PHASE2/five-track-r6.manifest.json"
 R4_ROOT="$CAMPAIGNS/meco-five-continuous-20261025-r4"
 # Run only after natural completion or an explicit user stop.
 python3 - <<'PY' "$R4_ROOT/supervisor-status.json"
 import json, pathlib, sys
 status = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert status.get("status") in {"stopped", "complete", "failed"}, status.get("status")
+assert status.get("status") in {"stopped", "complete"}, status.get("status")
+assert status.get("error") is None, status.get("error")
 assert all(not lane.get("pid") for lane in status.get("lanes", []))
 PY
 python3 - <<'PY'
@@ -242,6 +244,8 @@ assert all(m["warm_starts"][t]["sha256"] == c["artifacts"][t]["sha256"] and
 assert m["readiness"]["hardware_ready"] and m["readiness"]["implementation_ready"]
 print("fresh manifest binds five validated warm starts:", m["canonical_sha256"])
 PY
+test ! -e "$R6_ROOT"
+test ! -e "$R6_ROOT/evaluations"
 python3 -m frc_defense.meco_supervisor \
   --campaign-manifest "$MANIFEST" --diagnostic-launch
 ```
