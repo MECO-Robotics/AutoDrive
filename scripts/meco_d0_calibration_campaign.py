@@ -334,21 +334,30 @@ def _load_config_artifact_bytes(index_path):
     return artifacts
 
 
-def plan_paired_campaign(*, repo_root, freeze_path, partition_path,
+def _load_phase0_bundle(repo_root, relative_path):
+    """Load the bundle only from a regular, in-checkout, non-symlink path."""
+    _, raw, bundle = q._paired_repo_json_file(repo_root, relative_path,
+        kind="effective Phase 0 bundle")
+    if raw != json.dumps(bundle, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8"):
+        raise ValueError("effective Phase 0 bundle bytes are not canonical JSON")
+    return bundle
+
+
+def plan_paired_campaign(*, repo_root, phase0_bundle_path,
         approval_path, configuration_artifact_index, worker_assignments_path,
-        episodes, repetitions, master_seed, shard_count, output):
-    """Compile a paired manifest only from the real Phase 0 gate artifacts."""
+        shard_count, output):
+    """Compile a paired manifest from one validated Phase 0 bundle."""
+    phase0_bundle = _load_phase0_bundle(repo_root, phase0_bundle_path)
     config_bytes = _load_config_artifact_bytes(configuration_artifact_index)
     bindings = q.prepare_paired_calibration_gate_bindings(repo_root=repo_root,
-        baseline_freeze_path=freeze_path, partition_path=partition_path,
-        estimand_approval_path=approval_path,
+        phase0_bundle=phase0_bundle, estimand_approval_path=approval_path,
         configuration_artifacts=config_bytes)
     assignments = q._load_json(worker_assignments_path)
-    campaign = q.build_paired_calibration_campaign(episodes=episodes,
-        repetitions=repetitions, master_seed=master_seed,
-        shard_count=shard_count, worker_assignments=assignments, **bindings)
+    campaign = q.build_paired_calibration_campaign(shard_count=shard_count,
+        worker_assignments=assignments, **bindings)
     q.validate_paired_calibration_gate_artifacts(campaign, repo_root=repo_root,
-        configuration_artifacts=config_bytes)
+        phase0_bundle=phase0_bundle, configuration_artifacts=config_bytes)
     digest = q.write_paired_calibration_artifact_immutable(output, campaign)
     return {"campaign_id": campaign["campaign_id"], "artifact_sha256": digest,
         "work_unit_count": campaign["work_unit_count"],
@@ -356,15 +365,18 @@ def plan_paired_campaign(*, repo_root, freeze_path, partition_path,
         "execution_blockers": q.paired_calibration_execution_blockers(campaign)}
 
 
-def merge_paired_campaign(*, repo_root, campaign_path, final_shard_root,
-        replay_root, approval_path, configuration_artifact_index, output):
+def merge_paired_campaign(*, repo_root, campaign_path, phase0_bundle_path,
+        final_shard_root, replay_root, approval_path,
+        configuration_artifact_index, output):
     """Validate exact gate bytes and canonical final shards before strict merge."""
     campaign = q._load_json(campaign_path)
     if Path(approval_path).as_posix() != campaign.get("estimand_approval", {}).get("path"):
         raise ValueError("requested estimand approval path differs from campaign binding")
+    phase0_bundle = _load_phase0_bundle(repo_root, phase0_bundle_path)
     config_bytes = _load_config_artifact_bytes(configuration_artifact_index)
     gate = q.validate_paired_calibration_gate_artifacts(campaign,
-        repo_root=repo_root, configuration_artifacts=config_bytes)
+        repo_root=repo_root, phase0_bundle=phase0_bundle,
+        configuration_artifacts=config_bytes)
     final_root = Path(final_shard_root)
     raws = []
     for shard in campaign["shards"]:
@@ -429,22 +441,18 @@ def main(argv=None):
     paired_plan = sub.add_parser("paired-plan",
         help="compile a paired calibration manifest from actual Pass 1 gate artifacts")
     paired_plan.add_argument("--repo-root", default=str(ROOT))
-    paired_plan.add_argument("--baseline-freeze", required=True)
-    paired_plan.add_argument("--partition", required=True)
+    paired_plan.add_argument("--phase0-bundle", required=True)
     paired_plan.add_argument("--estimand-approval", required=True)
-    paired_plan.add_argument("--configuration-artifact-index", required=True,
-        help="JSON mapping every required logical config ID to its source file")
+    paired_plan.add_argument("--configuration-artifact-index", required=True)
     paired_plan.add_argument("--worker-assignments", required=True,
         help="JSON array with the two exact indexed WX9100 worker identities")
-    paired_plan.add_argument("--episodes", type=int, default=100)
-    paired_plan.add_argument("--repetitions", type=int, default=3)
-    paired_plan.add_argument("--master-seed", type=int, default=20261024)
     paired_plan.add_argument("--shard-count", type=int, default=2)
     paired_plan.add_argument("--output", required=True)
     paired_merge = sub.add_parser("paired-merge",
         help="validate frozen gates and strictly merge paired final shard artifacts")
     paired_merge.add_argument("--repo-root", default=str(ROOT))
     paired_merge.add_argument("--campaign", required=True)
+    paired_merge.add_argument("--phase0-bundle", required=True)
     paired_merge.add_argument("--final-shard-root", required=True)
     paired_merge.add_argument("--replay-root", required=True)
     paired_merge.add_argument("--estimand-approval", required=True)
@@ -454,6 +462,7 @@ def main(argv=None):
         help="run or resume one paired shard after exact gate/device checks")
     paired_run.add_argument("--repo-root", default=str(ROOT))
     paired_run.add_argument("--campaign", required=True)
+    paired_run.add_argument("--phase0-bundle", required=True)
     paired_run.add_argument("--shard-index", type=int, required=True)
     paired_run.add_argument("--replay-root", required=True)
     paired_run.add_argument("--output-root", required=True)
@@ -485,26 +494,27 @@ def main(argv=None):
                                         args.report_root), indent=2))
     elif args.command == "paired-plan":
         print(json.dumps(plan_paired_campaign(repo_root=args.repo_root,
-            freeze_path=args.baseline_freeze, partition_path=args.partition,
+            phase0_bundle_path=args.phase0_bundle,
             approval_path=args.estimand_approval,
             configuration_artifact_index=args.configuration_artifact_index,
             worker_assignments_path=args.worker_assignments,
-            episodes=args.episodes, repetitions=args.repetitions,
-            master_seed=args.master_seed, shard_count=args.shard_count,
-            output=args.output), indent=2))
+            shard_count=args.shard_count, output=args.output), indent=2))
     elif args.command == "paired-merge":
         print(json.dumps(merge_paired_campaign(repo_root=args.repo_root,
             campaign_path=args.campaign, final_shard_root=args.final_shard_root,
+            phase0_bundle_path=args.phase0_bundle,
             replay_root=args.replay_root, approval_path=args.estimand_approval,
             configuration_artifact_index=args.configuration_artifact_index,
             output=args.output), indent=2))
     else:
+        phase0_bundle = _load_phase0_bundle(args.repo_root, args.phase0_bundle)
         configuration_artifacts = _load_config_artifact_bytes(
             args.configuration_artifact_index)
         campaign = q._load_json(args.campaign)
         print(json.dumps(q.run_paired_calibration_shard(campaign,
             args.shard_index, repo_root=args.repo_root,
             replay_root=args.replay_root, output_root=args.output_root,
+            phase0_bundle=phase0_bundle,
             configuration_artifacts=configuration_artifacts), indent=2))
 
 

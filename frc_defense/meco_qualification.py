@@ -1806,13 +1806,19 @@ def run_matched_reference_variance_calibration(*, scenario_id: str, episodes: in
 
 # Versioned extension used by the resumable paired D0/D1/D2 campaign. The
 # historical D0-only and single-reference artifacts above remain readable.
-PAIRED_CALIBRATION_VERSION = "meco-paired-d0-d2-calibration-v1"
-PAIRED_CALIBRATION_CAMPAIGN = "meco-paired-calibration-campaign-v1"
-PAIRED_CALIBRATION_SHARD = "meco-paired-calibration-shard-manifest-v1"
-PAIRED_CALIBRATION_ARTIFACT = "meco-paired-calibration-shard-v1"
-PAIRED_CALIBRATION_PROGRESS = "meco-paired-calibration-shard-progress-v1"
-PAIRED_CALIBRATION_FINAL_SHARD = "meco-paired-calibration-shard-final-v1"
+PAIRED_CALIBRATION_VERSION = "meco-paired-d0-d2-calibration-v2"
+PAIRED_CALIBRATION_CAMPAIGN = "meco-paired-calibration-campaign-v2"
+PAIRED_CALIBRATION_SHARD = "meco-paired-calibration-shard-manifest-v2"
+PAIRED_CALIBRATION_ARTIFACT = "meco-paired-calibration-shard-v2"
+PAIRED_CALIBRATION_PROGRESS = "meco-paired-calibration-shard-progress-v2"
+PAIRED_CALIBRATION_FINAL_SHARD = "meco-paired-calibration-shard-final-v2"
 PAIRED_CALIBRATION_REPLAY_CONTRACT = "dashboard-replay-generation-v1"
+PAIRED_CALIBRATION_TUPLE_FIELDS = (
+    "scenario_id", "case_id", "category", "defender_family", "layout_id",
+    "start_condition", "sensor_profile", "seed", "repetition", "evaluation_phase")
+PAIRED_CALIBRATION_PHASE0_DIGEST_FIELDS = frozenset({
+    "capture_receipt_sha256", "baseline_freeze_sha256", "partition_sha256",
+    "tuple_registry_sha256", "assignment_table_sha256"})
 PAIRED_CALIBRATION_CONTROLS = (
     "D0", "D1/current", "D2/cv", "D2/multi_model_v1",
 )
@@ -1916,36 +1922,125 @@ def _paired_shard_control_bindings(controls):
         for control in controls}
 
 
-def _paired_calibration_work_units(*, episodes, repetitions, master_seed):
-    if type(episodes) is not int or episodes < MIN_EPISODES:
-        raise ValueError(f"paired calibration requires at least {MIN_EPISODES} episodes per stratum")
-    if type(repetitions) is not int or repetitions < 2:
-        raise ValueError("paired calibration requires at least two repetitions")
-    if type(master_seed) is not int or master_seed < 0:
-        raise ValueError("paired calibration master seed must be nonnegative")
+def _validate_effective_phase0_bundle(bundle, repo_root):
+    """Narrow dependency boundary for the separately reviewed effective-freeze API."""
+    try:
+        from .meco_baseline_freeze import validate_effective_phase0_bundle
+    except ImportError as exc:
+        raise RuntimeError("effective Phase 0 bundle validator is not integrated") from exc
+    digests = validate_effective_phase0_bundle(bundle, repo_root)
+    if not isinstance(digests, dict) or set(digests) != PAIRED_CALIBRATION_PHASE0_DIGEST_FIELDS:
+        raise ValueError("effective Phase 0 bundle validator returned an incomplete digest map")
+    for name, digest in digests.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"effective Phase 0 digest is malformed: {name}")
+    return digests
+
+
+def _paired_calibration_registered_tuples(bundle):
+    """Select only eligible tuple IDs assigned to calibration by the closed bundle."""
+    if not isinstance(bundle, dict):
+        raise ValueError("effective Phase 0 bundle is malformed")
+    materialization = bundle.get("partition_materialization")
+    if not isinstance(materialization, dict):
+        raise ValueError("effective Phase 0 tuple partition materialization is missing")
+    partitions = materialization.get("partitions")
+    registry = materialization.get("tuple_registry")
+    assignment_table = materialization.get("assignment_table")
+    if (not isinstance(partitions, dict) or "calibration" not in partitions
+            or not isinstance(registry, dict) or not isinstance(registry.get("tuples"), list)
+            or not isinstance(assignment_table, dict)
+            or not isinstance(assignment_table.get("assignments"), dict)):
+        raise ValueError("effective Phase 0 calibration tuple registry is malformed")
+    calibration_ids = partitions["calibration"].get("tuple_ids")
+    assignments = assignment_table["assignments"]
+    if (not isinstance(calibration_ids, list) or not calibration_ids
+            or len(calibration_ids) != len(set(calibration_ids))):
+        raise ValueError("effective Phase 0 calibration tuple IDs are empty or duplicated")
+    by_id = {}
+    for row in registry["tuples"]:
+        if not isinstance(row, dict):
+            raise ValueError("effective Phase 0 tuple registry row is malformed")
+        fields = {key: row.get(key) for key in PAIRED_CALIBRATION_TUPLE_FIELDS}
+        tuple_id = row.get("tuple_id")
+        if (not isinstance(tuple_id, str) or tuple_id != _canonical_sha256(fields)
+                or tuple_id in by_id or type(row.get("eligible")) is not bool):
+            raise ValueError("effective Phase 0 tuple ID does not bind its registered tuple")
+        by_id[tuple_id] = row
+    selected = []
+    for tuple_id in calibration_ids:
+        row = by_id.get(tuple_id)
+        if (row is None or row.get("eligible") is not True
+                or assignments.get(tuple_id) != "calibration"
+                or row.get("evaluation_phase") != "calibration"):
+            raise ValueError("paired schedule contains a non-calibration or excluded tuple")
+        selected.append({key: row[key] for key in PAIRED_CALIBRATION_TUPLE_FIELDS}
+            | {"tuple_id": tuple_id})
+    if set(calibration_ids) != {tuple_id for tuple_id, row in by_id.items()
+            if row.get("eligible") is True and assignments.get(tuple_id) == "calibration"}:
+        raise ValueError("paired schedule omits an eligible registered calibration tuple")
+    return sorted(selected, key=lambda row: row["tuple_id"])
+
+
+def _paired_phase0_bundle_binding(bundle, digest_map):
+    receipt = bundle.get("capture_receipt") if isinstance(bundle, dict) else None
+    freeze = bundle.get("baseline_freeze") if isinstance(bundle, dict) else None
+    if (not isinstance(receipt, dict) or not isinstance(receipt.get("source"), dict)
+            or not isinstance(receipt.get("runtime"), dict)
+            or not isinstance(freeze, dict) or not isinstance(freeze.get("source"), dict)):
+        raise ValueError("effective Phase 0 bundle lacks source/runtime-bound receipt and freeze")
+    source = receipt["source"]
+    runtime = receipt["runtime"]
+    if (freeze.get("source") != source
+            or freeze.get("runtime") != runtime
+            or not isinstance(source.get("commit"), str)
+            or not isinstance(source.get("tree"), str)
+            or not isinstance(runtime.get("dependency_lock_sha256"), str)):
+        raise ValueError("effective Phase 0 bundle source/runtime identities disagree")
+    binding = {**digest_map,
+        "bundle_sha256": _canonical_sha256(bundle),
+        "source_commit": source["commit"], "source_tree": source["tree"],
+        "dependency_lock_sha256": runtime["dependency_lock_sha256"]}
+    return binding
+
+
+def _validate_paired_phase0_binding(binding):
+    expected = set(PAIRED_CALIBRATION_PHASE0_DIGEST_FIELDS) | {
+        "bundle_sha256", "source_commit", "source_tree", "dependency_lock_sha256"}
+    if not isinstance(binding, dict) or set(binding) != expected:
+        raise ValueError("paired calibration effective Phase 0 binding is incomplete")
+    for key in PAIRED_CALIBRATION_PHASE0_DIGEST_FIELDS | {
+            "bundle_sha256", "dependency_lock_sha256"}:
+        if not isinstance(binding.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", binding[key]) is None:
+            raise ValueError(f"paired calibration Phase 0 digest is invalid: {key}")
+    for key in ("source_commit", "source_tree"):
+        if not isinstance(binding.get(key), str) or re.fullmatch(r"[0-9a-f]{40}", binding[key]) is None:
+            raise ValueError(f"paired calibration Phase 0 source {key} is invalid")
+    return dict(binding)
+
+
+def _paired_calibration_work_units(registered_tuples):
+    """Expand only preregistered calibration tuple IDs across matched controls."""
+    if not isinstance(registered_tuples, list) or not registered_tuples:
+        raise ValueError("paired calibration requires registered calibration tuples")
     units = []
-    for scenario_id in SCENARIOS:
-        for case in protocol_cases(scenario_id, "calibration", episodes=episodes,
-                                   master_seed=master_seed):
-            if any(seed % 4 != 3 for seed in case.seeds):
-                raise ValueError("paired calibration schedule contains a non-calibration seed")
-            tuple_fields = {"scenario_id": scenario_id,
-                "category": case.category, "layout_id": case.layout_id,
-                "defender_family": case.defender_family,
-                "start_condition": case.start_condition,
-                "sensor_profile": case.sensor_profile}
-            for repetition in range(repetitions):
-                for seed in case.seeds:
-                    pair = {**tuple_fields, "seed": seed,
-                        "repetition": repetition, "split": "calibration"}
-                    for control_id in PAIRED_CALIBRATION_CONTROLS[1:]:
-                        pair_id = _canonical_sha256({**pair,
-                            "paired_control_id": control_id})
-                        for policy_control_id in ("D0", control_id):
-                            units.append({**pair, "control_id": policy_control_id,
-                                "paired_control_id": control_id,
-                                "pair_id": pair_id})
-    return units
+    for item in registered_tuples:
+        if (not isinstance(item, dict) or set(item) !=
+                set(PAIRED_CALIBRATION_TUPLE_FIELDS) | {"tuple_id"}
+                or item.get("evaluation_phase") != "calibration"
+                or item.get("tuple_id") != _canonical_sha256({key: item[key]
+                    for key in PAIRED_CALIBRATION_TUPLE_FIELDS})):
+            raise ValueError("paired calibration tuple is not bound to the registered ID")
+        pair = {key: item[key] for key in PAIRED_CALIBRATION_TUPLE_FIELDS}
+        pair["split"] = "calibration"
+        for control_id in PAIRED_CALIBRATION_CONTROLS[1:]:
+            pair_id = _canonical_sha256({"tuple_id": item["tuple_id"],
+                "paired_control_id": control_id})
+            for policy_control_id in ("D0", control_id):
+                units.append({**pair, "tuple_id": item["tuple_id"],
+                    "control_id": policy_control_id,
+                    "paired_control_id": control_id, "pair_id": pair_id})
+    return sorted(units, key=lambda unit: (unit["tuple_id"], unit["control_id"]))
 
 
 def _paired_source_binding(value):
@@ -1980,8 +2075,9 @@ def _paired_shard_assignments(units, shard_count, campaign_identity):
             or len(group) != 2 for group in pair_groups.values()):
         raise ValueError("paired calibration schedule has an incomplete control pair")
     evaluation_groups = {}
-    case_fields = ("scenario_id", "category", "layout_id", "defender_family",
-        "start_condition", "sensor_profile", "repetition", "paired_control_id")
+    case_fields = ("scenario_id", "case_id", "category", "layout_id",
+        "defender_family", "start_condition", "sensor_profile", "repetition",
+        "evaluation_phase", "paired_control_id")
     for pair_group in pair_groups.values():
         representative = pair_group[0]
         evaluation_key = _canonical_sha256({field: representative[field]
@@ -1994,32 +2090,30 @@ def _paired_shard_assignments(units, shard_count, campaign_identity):
     buckets = [[] for _ in range(shard_count)]
     for index, (_, group) in enumerate(ranked):
         buckets[index % shard_count].extend(sorted(group,
-            key=lambda unit: (unit["seed"], unit["control_id"])))
+            key=lambda unit: (unit["seed"], unit["tuple_id"], unit["control_id"])))
     return buckets
 
 
-def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
-        shard_count, source_binding, baseline_freeze_binding,
-        partition_binding, estimand_approval_binding, worker_assignments):
-    """Build an immutable paired schedule after callers validate gate artifacts.
-
-    This pure compiler accepts identities only. Execution must separately call
-    ``validate_paired_calibration_gate_artifacts`` to validate their exact bytes.
-    """
+def build_paired_calibration_campaign(*, shard_count, source_binding,
+        phase0_binding, calibration_tuples, evaluation_budget,
+        estimand_approval_binding, worker_assignments):
+    """Build an immutable schedule from the pre-registered Phase 0 tuple set."""
     source = _paired_source_binding(source_binding)
-    freeze = _paired_artifact_binding(baseline_freeze_binding, kind="baseline freeze")
-    partition = _paired_artifact_binding(partition_binding, kind="partition")
+    phase0 = _validate_paired_phase0_binding(phase0_binding)
     approval = _paired_artifact_binding(estimand_approval_binding, kind="estimand approval")
-    if (freeze["schema"] != "meco-baseline-freeze-v2"
-            or partition["schema"] != "meco-heldout-partitions-v1"
-            or approval["schema"] != "meco-simulated-score-estimand-review-v1"):
+    if approval["schema"] != "meco-simulated-score-estimand-review-v1":
         raise ValueError("paired calibration gate artifact schema is unsupported")
-    if partition["baseline_freeze_sha256"] != freeze["freeze_sha256"]:
-        raise ValueError("paired calibration partition is not bound to the selected baseline freeze")
-    if any(source[key] != freeze[freeze_key] for key, freeze_key in (
+    if any(source[key] != phase0[phase_key] for key, phase_key in (
             ("commit", "source_commit"), ("tree", "source_tree"),
             ("dependency_lock_sha256", "dependency_lock_sha256"))):
         raise ValueError("paired calibration source/runtime binding differs from baseline freeze")
+    if type(shard_count) is not int or shard_count < 2:
+        raise ValueError("paired calibration needs at least two shards")
+    if (not isinstance(evaluation_budget, dict)
+            or set(evaluation_budget) != {"episodes_per_tuple", "repetitions"}
+            or any(type(value) is not int or value < 1
+                for value in evaluation_budget.values())):
+        raise ValueError("paired calibration budget must come from the effective tuple partition")
     worker_rows = _paired_worker_assignments(worker_assignments)
     from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
         RULES_ID, RULES_SHA256, OUTCOME_NAME, RULES)
@@ -2032,22 +2126,21 @@ def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
         "outcome_name": OUTCOME_NAME, "unit": RULES["unit"],
         "official_match_points": None}
     controls = _paired_control_specs()
-    units = _paired_calibration_work_units(episodes=episodes,
-        repetitions=repetitions, master_seed=master_seed)
+    tuple_rows = sorted(calibration_tuples, key=lambda row: row.get("tuple_id", ""))
+    units = _paired_calibration_work_units(tuple_rows)
     if shard_count < len(worker_rows):
         raise ValueError("each paired calibration worker must receive a shard")
-    config = {"split": "calibration", "episodes_per_category_stratum": episodes,
-        "repetitions": repetitions, "master_seed": master_seed,
+    config = {"split": "calibration", "evaluation_budget": evaluation_budget,
         "shard_count": shard_count, "control_ids": list(PAIRED_CALIBRATION_CONTROLS),
-        "repeat_semantics": "identical frozen tuple and seed, independently repeated",
+        "repeat_semantics": "exact registered tuple ID, seed, and repetition",
         "summary_method": "paired_seed_cluster_bootstrap_v1",
         "bootstrap_replicates": BOOTSTRAP_REPLICATES}
     schedule_sha = _canonical_sha256(units)
     registry = _scenario_registry_binding()
-    body = {"schema_version": 1, "campaign_type": PAIRED_CALIBRATION_VERSION,
+    body = {"schema_version": 2, "campaign_type": PAIRED_CALIBRATION_VERSION,
         "artifact_type": PAIRED_CALIBRATION_CAMPAIGN, "config": config,
         "source": source, "scenario_registry": registry,
-        "baseline_freeze": freeze, "partition": partition,
+        "phase0_binding": phase0, "calibration_tuples": tuple_rows,
         "estimand_approval": approval, "scoring": scoring,
         "controls": controls, "worker_assignments": worker_rows,
         "work_unit_count": len(units), "schedule_sha256": schedule_sha}
@@ -2056,10 +2149,15 @@ def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
     shards = []
     for index, assigned in enumerate(buckets):
         worker = worker_rows[index % len(worker_rows)]
-        shard_body = {"schema_version": 1,
+        phase0_binding_sha256 = _canonical_sha256(phase0)
+        shard_body = {"schema_version": 2,
             "artifact_type": PAIRED_CALIBRATION_SHARD,
             "campaign_id": campaign_identity, "shard_index": index,
             "shard_count": shard_count, "worker_id": worker["worker_id"],
+            "phase0_binding_sha256": phase0_binding_sha256,
+            "tuple_registry_sha256": phase0["tuple_registry_sha256"],
+            "assignment_table_sha256": phase0["assignment_table_sha256"],
+            "tuple_ids": sorted({unit["tuple_id"] for unit in assigned}),
             "worker_assignment_sha256": _canonical_sha256(worker),
             "control_binding_sha256": _canonical_sha256(
                 _paired_shard_control_bindings(controls)),
@@ -2073,22 +2171,37 @@ def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
 def validate_paired_calibration_campaign(campaign):
     if (not isinstance(campaign, dict)
             or campaign.get("artifact_type") != PAIRED_CALIBRATION_CAMPAIGN
-            or campaign.get("campaign_type") != PAIRED_CALIBRATION_VERSION):
+            or campaign.get("campaign_type") != PAIRED_CALIBRATION_VERSION
+            or campaign.get("schema_version") != 2):
         raise ValueError("unsupported paired calibration campaign schema")
     config = campaign.get("config")
-    expected_config_keys = {"split", "episodes_per_category_stratum", "repetitions",
-        "master_seed", "shard_count", "control_ids", "repeat_semantics",
+    expected_config_keys = {"split", "evaluation_budget", "shard_count",
+        "control_ids", "repeat_semantics",
         "summary_method", "bootstrap_replicates"}
     if (not isinstance(config, dict) or set(config) != expected_config_keys
             or config.get("split") != "calibration"
             or config.get("control_ids") != list(PAIRED_CALIBRATION_CONTROLS)
-            or config.get("repeat_semantics") != "identical frozen tuple and seed, independently repeated"
+            or config.get("repeat_semantics") != "exact registered tuple ID, seed, and repetition"
             or config.get("summary_method") != "paired_seed_cluster_bootstrap_v1"
             or config.get("bootstrap_replicates") != BOOTSTRAP_REPLICATES):
         raise ValueError("paired calibration campaign config is invalid")
-    units = _paired_calibration_work_units(
-        episodes=config.get("episodes_per_category_stratum"),
-        repetitions=config.get("repetitions"), master_seed=config.get("master_seed"))
+    budget = config.get("evaluation_budget")
+    if (not isinstance(budget, dict) or set(budget) != {"episodes_per_tuple", "repetitions"}
+            or any(type(value) is not int or value < 1 for value in budget.values())):
+        raise ValueError("paired calibration evaluation budget is invalid")
+    tuples = campaign.get("calibration_tuples")
+    if (not isinstance(tuples, list) or not tuples
+            or tuples != sorted(tuples, key=lambda row: row.get("tuple_id", ""))
+            or len({row.get("tuple_id") for row in tuples if isinstance(row, dict)}) != len(tuples)):
+        raise ValueError("paired calibration registered tuple set is empty, duplicated, or unordered")
+    for row in tuples:
+        if (not isinstance(row, dict) or set(row) !=
+                set(PAIRED_CALIBRATION_TUPLE_FIELDS) | {"tuple_id"}
+                or row.get("evaluation_phase") != "calibration"
+                or row.get("tuple_id") != _canonical_sha256({key: row[key]
+                    for key in PAIRED_CALIBRATION_TUPLE_FIELDS})):
+            raise ValueError("paired calibration campaign contains an invalid registered tuple")
+    units = _paired_calibration_work_units(tuples)
     if (campaign.get("work_unit_count") != len(units)
             or campaign.get("schedule_sha256") != _canonical_sha256(units)):
         raise ValueError("paired calibration frozen schedule is incomplete or altered")
@@ -2098,19 +2211,13 @@ def validate_paired_calibration_campaign(campaign):
     workers = _paired_worker_assignments(campaign.get("worker_assignments"))
     if workers != campaign["worker_assignments"]:
         raise ValueError("paired calibration worker assignments are not canonical")
-    for key, schema in (("baseline_freeze", "meco-baseline-freeze-v2"),
-                        ("partition", "meco-heldout-partitions-v1"),
-                        ("estimand_approval", "meco-simulated-score-estimand-review-v1")):
-        kind = {"baseline_freeze": "baseline freeze",
-                "estimand_approval": "estimand approval"}.get(key, key)
-        binding = _paired_artifact_binding(campaign.get(key), kind=kind)
-        if binding["schema"] != schema:
-            raise ValueError(f"paired calibration {key} schema changed")
-    if (campaign["partition"].get("baseline_freeze_sha256")
-            != campaign["baseline_freeze"].get("freeze_sha256")):
-        raise ValueError("paired calibration partition is not bound to the selected baseline freeze")
+    phase0 = _validate_paired_phase0_binding(campaign.get("phase0_binding"))
+    approval = _paired_artifact_binding(campaign.get("estimand_approval"),
+        kind="estimand approval")
+    if approval["schema"] != "meco-simulated-score-estimand-review-v1":
+        raise ValueError("paired calibration estimand approval schema changed")
     source = _paired_source_binding(campaign.get("source"))
-    if any(source[key] != campaign["baseline_freeze"][freeze_key] for key, freeze_key in (
+    if any(source[key] != phase0[phase_key] for key, phase_key in (
             ("commit", "source_commit"), ("tree", "source_tree"),
             ("dependency_lock_sha256", "dependency_lock_sha256"))):
         raise ValueError("paired calibration source/runtime binding differs from baseline freeze")
@@ -2145,6 +2252,11 @@ def validate_paired_calibration_campaign(campaign):
                 or shard.get("campaign_id") != identity
                 or shard.get("shard_index") != index
                 or shard.get("shard_count") != shard_count
+                or shard.get("schema_version") != 2
+                or shard.get("phase0_binding_sha256") != _canonical_sha256(phase0)
+                or shard.get("tuple_registry_sha256") != phase0["tuple_registry_sha256"]
+                or shard.get("assignment_table_sha256") != phase0["assignment_table_sha256"]
+                or shard.get("tuple_ids") != sorted({unit["tuple_id"] for unit in expected_units})
                 or shard.get("work_units") != expected_units
                 or shard.get("control_bindings") != expected_control_bindings
                 or shard.get("control_binding_sha256")
@@ -2192,8 +2304,9 @@ def paired_calibration_replay_binding(campaign, shard_index, work_unit):
         "work_unit_id": _canonical_sha256(work_unit), "work_unit": work_unit,
         "pair_id": work_unit["pair_id"], "control_id": work_unit["control_id"],
         "source_binding": campaign["source"],
-        "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
-        "partition_sha256": campaign["partition"]["partition_sha256"],
+        "phase0_binding": campaign["phase0_binding"],
+        "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
+        "tuple_id": work_unit["tuple_id"],
         "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
         "control_binding": control,
         "control_binding_sha256": control["control_binding_sha256"],
@@ -2218,8 +2331,9 @@ def _paired_calibration_evaluation_groups(shard):
     if not isinstance(shard, dict) or not isinstance(shard.get("work_units"), list):
         raise ValueError("paired calibration shard work units are malformed")
     groups = {}
-    fields = ("scenario_id", "category", "layout_id", "defender_family",
-        "start_condition", "sensor_profile", "repetition", "paired_control_id")
+    fields = ("scenario_id", "case_id", "category", "layout_id", "defender_family",
+        "start_condition", "sensor_profile", "repetition", "evaluation_phase",
+        "paired_control_id")
     for unit in shard["work_units"]:
         key = tuple(unit.get(field) for field in fields)
         groups.setdefault(key, {}).setdefault(unit.get("control_id"), []).append(unit)
@@ -2253,7 +2367,7 @@ def _paired_prepare_output_directory(path):
 
 
 def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
-        replay_root, output_root, configuration_artifacts):
+        replay_root, output_root, phase0_bundle, configuration_artifacts):
     """Run/resume one shard after every actual Pass 1 gate is revalidated.
 
     The coordinator refuses work while any preregistered control lacks a
@@ -2270,7 +2384,8 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
     from .meco_external_release_gate import verify_external_release_before_paired_run
     release_observation = verify_external_release_before_paired_run(campaign)
     gate = validate_paired_calibration_gate_artifacts(campaign,
-        repo_root=repo_root, configuration_artifacts=configuration_artifacts)
+        repo_root=repo_root, phase0_bundle=phase0_bundle,
+        configuration_artifacts=configuration_artifacts)
     shard = _paired_shard_for_index(campaign, shard_index)
     worker = campaign["worker_assignments"][shard_index %
         len(campaign["worker_assignments"])]
@@ -2301,11 +2416,19 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
         comparator = control_by_id[comparator_id]
         if comparator.get("execution_supported") is not True:
             raise ValueError(f"paired calibration control is not executable: {comparator_id}")
-        if len(group["seeds"]) != campaign["config"]["episodes_per_category_stratum"]:
-            raise ValueError("paired calibration group differs from frozen case seed count")
+        group_fields = ("scenario_id", "case_id", "category", "defender_family",
+            "layout_id", "start_condition", "sensor_profile", "repetition",
+            "evaluation_phase")
+        group_values = (group["key"][0], group["key"][1], group["key"][2],
+            group["key"][4], group["key"][5], group["key"][6],
+            group["key"][7], group["key"][8], group["key"][9])
+        expected_seeds = sorted(row["seed"] for row in campaign["calibration_tuples"]
+            if tuple(row[field] for field in group_fields) == group_values)
+        if group["seeds"] != expected_seeds:
+            raise ValueError("paired calibration group differs from registered tuple seed set")
         qualification_case = dict(zip(("layout_id", "defender_family",
-            "start_condition", "sensor_profile"), group["key"][2:6]))
-        scenario_id, category = group["key"][:2]
+            "start_condition", "sensor_profile"), group["key"][3:7]))
+        scenario_id, _, category = group["key"][:3]
         for selected_control_id in ("D0", comparator_id):
             selected = control_by_id[selected_control_id]
             units = group["controls"][selected_control_id]
@@ -2328,7 +2451,7 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
             replay_dir = _paired_prepare_output_directory(replay_dir / attempt_id)
             result = evaluate_meco({}, scenario_id=scenario_id,
                 categories=(category,), episodes=len(group["seeds"]),
-                master_seed=campaign["config"]["master_seed"],
+                master_seed=min(group["seeds"]),
                 episode_seeds=tuple(group["seeds"]), device=worker["device"],
                 split="calibration", include_controls=True, output=str(eval_path),
                 qualification_case=qualification_case, evaluation_policies=(),
@@ -2495,8 +2618,9 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         "worker_id": shard["worker_id"],
         "worker_assignment_sha256": shard["worker_assignment_sha256"],
         "source_binding": campaign["source"],
-        "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
-        "partition_sha256": campaign["partition"]["partition_sha256"],
+        "phase0_binding": campaign["phase0_binding"],
+        "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
+        "tuple_ids": shard["tuple_ids"],
         "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
         "scoring": campaign["scoring"],
         "control_bindings": shard["control_bindings"],
@@ -2633,8 +2757,11 @@ def _build_paired_control_bundle(campaign, summary, final_shard_sha256):
         if row["control_id"] == summary["control_id"]), None)
     if control is None or not isinstance(control.get("control_binding_sha256"), str):
         raise ValueError("paired control bundle lacks its exact frozen control binding")
-    body = {"schema": "meco-paired-calibration-control-bundle-v1",
+    body = {"schema": "meco-paired-calibration-control-bundle-v2",
         "campaign_id": campaign["campaign_id"],
+        "phase0_binding": campaign["phase0_binding"],
+        "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
+        "tuple_ids": sorted({row["tuple_id"] for row in campaign["calibration_tuples"]}),
         "control_id": summary["control_id"],
         "control_binding_sha256": control["control_binding_sha256"],
         "final_shard_sha256": list(final_shard_sha256),
@@ -2677,7 +2804,7 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         body = {key: value for key, value in artifact.items() if key != "final_shard_id"}
         expected_fields = {"schema", "campaign_id", "shard_index",
             "shard_manifest_id", "worker_id", "worker_assignment_sha256",
-            "source_binding", "baseline_freeze_sha256", "partition_sha256",
+            "source_binding", "phase0_binding", "phase0_binding_sha256", "tuple_ids",
             "estimand_approval_sha256", "scoring", "control_bindings",
             "control_binding_sha256", "progress_id",
             "release_observation", "release_observation_sha256",
@@ -2696,8 +2823,9 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
                 or artifact.get("worker_id") != shard["worker_id"]
                 or artifact.get("worker_assignment_sha256") != shard["worker_assignment_sha256"]
                 or artifact.get("source_binding") != campaign["source"]
-                or artifact.get("baseline_freeze_sha256") != campaign["baseline_freeze"]["freeze_sha256"]
-                or artifact.get("partition_sha256") != campaign["partition"]["partition_sha256"]
+                or artifact.get("phase0_binding") != campaign["phase0_binding"]
+                or artifact.get("phase0_binding_sha256") != _canonical_sha256(campaign["phase0_binding"])
+                or artifact.get("tuple_ids") != shard["tuple_ids"]
                 or artifact.get("estimand_approval_sha256") != campaign["estimand_approval"]["approval_sha256"]
                 or artifact.get("scoring") != campaign["scoring"]
                 or artifact.get("control_bindings") != shard["control_bindings"]
@@ -2749,8 +2877,11 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         bundle_refs.append({"control_id": summary["control_id"],
             "bundle_id": bundle["bundle_id"],
             "artifact_sha256": artifact_sha256})
-    body = {"schema": "meco-paired-calibration-merged-report-v1",
+    body = {"schema": "meco-paired-calibration-merged-report-v2",
         "campaign_id": campaign["campaign_id"],
+        "phase0_binding": campaign["phase0_binding"],
+        "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
+        "tuple_ids": sorted({unit["tuple_id"] for unit in expected_units}),
         "control_binding_sha256": _canonical_sha256(
             _paired_shard_control_bindings(campaign["controls"])),
         "final_shard_sha256": [final_hashes[index]
@@ -2997,7 +3128,9 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
     body = {"schema": PAIRED_CALIBRATION_ARTIFACT,
         "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
         "shard_manifest_id": shard["manifest_id"], "work_unit_id": unit_id,
-        "work_unit": work_unit, "pair_id": work_unit["pair_id"],
+        "work_unit": work_unit, "tuple_id": work_unit["tuple_id"],
+        "phase0_binding_sha256": _canonical_sha256(campaign["phase0_binding"]),
+        "pair_id": work_unit["pair_id"],
         "control_id": work_unit["control_id"], "replay_id": replay_id,
         "replay_path": replay_path,
         "replay_sha256": hashlib.sha256(replay_raw).hexdigest(),
@@ -3042,7 +3175,8 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
     """Fail closed unless row schema, worker, exact replay bytes, and score agree."""
     shard = _paired_shard_for_index(campaign, shard_index)
     expected_fields = {"schema", "campaign_id", "shard_index", "shard_manifest_id",
-        "work_unit_id", "work_unit", "pair_id", "control_id", "replay_id",
+        "work_unit_id", "work_unit", "tuple_id", "phase0_binding_sha256",
+        "pair_id", "control_id", "replay_id",
         "replay_path", "replay_sha256", "evaluation_record_sha256",
         "worker_assignment", "worker_assignment_sha256", "control_binding",
         "control_binding_sha256", "ledger_schema", "rules_id",
@@ -3069,6 +3203,8 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
             or row.get("shard_manifest_id") != shard["manifest_id"]
             or not isinstance(unit, dict) or unit not in shard["work_units"]
             or unit_id != _canonical_sha256(unit)
+            or row.get("tuple_id") != unit.get("tuple_id")
+            or row.get("phase0_binding_sha256") != _canonical_sha256(campaign["phase0_binding"])
             or row.get("pair_id") != unit["pair_id"]
             or row.get("control_id") != unit["control_id"]):
         raise ValueError("paired calibration outcome row is foreign to its manifest/work unit")
@@ -3200,15 +3336,22 @@ def _paired_repo_json_file(repo_root, relative_path, *, kind):
     return resolved, raw, value
 
 
-def prepare_paired_calibration_gate_bindings(*, repo_root, baseline_freeze_path,
-        partition_path, estimand_approval_path, configuration_artifacts):
-    """Load and validate real Pass 1 gate artifacts before manifest creation."""
-    freeze_path, freeze_raw, freeze = _paired_repo_json_file(
-        repo_root, baseline_freeze_path, kind="baseline freeze")
-    partition_file, partition_raw, partition = _paired_repo_json_file(
-        repo_root, partition_path, kind="partition")
+def prepare_paired_calibration_gate_bindings(*, repo_root, phase0_bundle,
+        estimand_approval_path, configuration_artifacts):
+    """Validate effective Phase 0 intake and the separate human score approval."""
     approval_path, approval_raw, _ = _paired_repo_json_file(
         repo_root, estimand_approval_path, kind="estimand approval")
+    phase0_digests = _validate_effective_phase0_bundle(phase0_bundle, repo_root)
+    phase0 = _paired_phase0_bundle_binding(phase0_bundle, phase0_digests)
+    from .meco_baseline_freeze import validate_baseline_freeze
+    validate_baseline_freeze(phase0_bundle["baseline_freeze"], repo_root,
+        configuration_artifacts=configuration_artifacts)
+    registered_tuples = _paired_calibration_registered_tuples(phase0_bundle)
+    materialization = phase0_bundle["partition_materialization"]
+    budget = materialization.get("evaluation_budget")
+    if (not isinstance(budget, dict) or set(budget) != {"episodes_per_tuple", "repetitions"}
+            or any(type(value) is not int or value < 1 for value in budget.values())):
+        raise ValueError("effective Phase 0 bundle evaluation budget is invalid")
     from .curriculum_training import source_identity, source_tree_identity
     source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
         allow_nan=False).encode()).hexdigest()
@@ -3222,53 +3365,34 @@ def prepare_paired_calibration_gate_bindings(*, repo_root, baseline_freeze_path,
             check=True, capture_output=True, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ValueError("paired calibration cannot inspect source commit/tree") from exc
-    from .meco_baseline_freeze import validate_baseline_freeze, validate_partition_contract
-    validated_freeze = validate_baseline_freeze(freeze, root,
-        configuration_artifacts=configuration_artifacts)
-    validated_partition = validate_partition_contract(partition,
-        baseline_freeze_sha256=validated_freeze["freeze_sha256"])
     from .meco_simulated_score_ledger import (load_estimand_approval,
         estimand_approval_digest)
     approval, approval_raw_sha = load_estimand_approval(approval_path,
         source_identity_sha256=source_hash)
     if approval_raw_sha != hashlib.sha256(approval_raw).hexdigest():
         raise ValueError("paired calibration approval bytes changed while loading")
-    if (freeze["source"]["commit"] != commit or freeze["source"]["tree"] != tree
-            or freeze["runtime"]["dependency_lock_sha256"] == ""):
+    if (phase0["source_commit"] != commit or phase0["source_tree"] != tree
+            or phase0["dependency_lock_sha256"] == ""):
         raise ValueError("paired calibration baseline source/runtime binding is stale")
     if source_hash != _calibration_source_identity_sha256():
         raise ValueError("paired calibration source identity helpers disagree")
     source = {"commit": commit, "tree": tree,
         "source_identity_sha256": source_hash,
         "source_tree_identity_sha256": source_tree_hash,
-        "dependency_lock_sha256": freeze["runtime"]["dependency_lock_sha256"]}
-    freeze_binding = {"path": freeze_path.relative_to(root).as_posix(),
-        "artifact_sha256": hashlib.sha256(freeze_raw).hexdigest(),
-        "schema": freeze["schema"], "freeze_sha256": freeze["freeze_sha256"],
-        "source_commit": commit, "source_tree": tree,
-        "dependency_lock_sha256": source["dependency_lock_sha256"]}
-    partition_binding = {"path": partition_file.relative_to(root).as_posix(),
-        "artifact_sha256": hashlib.sha256(partition_raw).hexdigest(),
-        "schema": partition["schema"],
-        "partition_sha256": partition["partition_sha256"],
-        "baseline_freeze_sha256": validated_freeze["freeze_sha256"]}
+        "dependency_lock_sha256": phase0["dependency_lock_sha256"]}
     approval_binding = {"path": approval_path.relative_to(root).as_posix(),
         "artifact_sha256": approval_raw_sha,
         "schema": approval["schema"],
         "approval_sha256": estimand_approval_digest(approval)}
-    return {"source_binding": source, "baseline_freeze_binding": freeze_binding,
-        "partition_binding": partition_binding,
+    return {"source_binding": source, "phase0_binding": phase0,
+        "calibration_tuples": registered_tuples,
+        "evaluation_budget": dict(budget),
         "estimand_approval_binding": approval_binding}
 
 
-def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
+def validate_paired_calibration_gate_artifacts(campaign, *, repo_root, phase0_bundle,
         configuration_artifacts):
-    """Validate the actual freeze, partition and human approval bytes.
-
-    No generated or placeholder gate artifact is accepted. The full effective
-    configuration contents are supplied to the baseline-freeze validator;
-    paths in the campaign remain relative logical references.
-    """
+    """Revalidate effective Phase 0 bundle bytes and the separate human approval."""
     validate_paired_calibration_campaign(campaign)
     source_hash = _calibration_source_identity_sha256()
     if campaign["source"]["source_identity_sha256"] != source_hash:
@@ -3291,10 +3415,14 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
             or current_commit != campaign["source"]["commit"]
             or current_tree != campaign["source"]["tree"]):
         raise ValueError("paired calibration source commit/tree/runtime identity changed")
-    freeze = _read_paired_bound_json(repo_root, campaign["baseline_freeze"],
-        kind="baseline freeze")
-    if freeze.get("freeze_sha256") != campaign["baseline_freeze"]["freeze_sha256"]:
-        raise ValueError("paired calibration baseline freeze identity changed")
+    phase0_digests = _validate_effective_phase0_bundle(phase0_bundle, root)
+    actual_phase0 = _paired_phase0_bundle_binding(phase0_bundle, phase0_digests)
+    if actual_phase0 != campaign["phase0_binding"]:
+        raise ValueError("paired calibration effective Phase 0 bundle bytes or digests changed")
+    freeze = phase0_bundle["baseline_freeze"]
+    from .meco_baseline_freeze import validate_baseline_freeze
+    freeze = validate_baseline_freeze(freeze, root,
+        configuration_artifacts=configuration_artifacts)
     if (freeze.get("source", {}).get("commit") != campaign["source"]["commit"]
             or freeze.get("source", {}).get("tree") != campaign["source"]["tree"]
             or freeze.get("runtime", {}).get("dependency_lock_sha256")
@@ -3308,23 +3436,17 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
             or worker["torch_version"] != freeze["runtime"]["torch_version"]
             for worker in campaign["worker_assignments"]):
         raise ValueError("paired calibration worker runtime differs from baseline freeze")
-    from .meco_baseline_freeze import validate_baseline_freeze, validate_partition_contract
-    validated_freeze = validate_baseline_freeze(freeze, repo_root,
-        configuration_artifacts=configuration_artifacts)
-    partition = _read_paired_bound_json(repo_root, campaign["partition"],
-        kind="partition")
-    if partition.get("partition_sha256") != campaign["partition"]["partition_sha256"]:
-        raise ValueError("paired calibration partition identity changed")
-    validated_partition = validate_partition_contract(partition,
-        baseline_freeze_sha256=validated_freeze["freeze_sha256"])
-    calibration = validated_partition["partitions"]["calibration"]
-    axes = {"seed": set(calibration["seeds"]),
-        "defender_family": set(calibration["defender_families"]),
-        "layout_id": set(calibration["layouts"]),
-        "start_condition": set(calibration["start_conditions"])}
-    for unit in (unit for shard in campaign["shards"] for unit in shard["work_units"]):
-        if any(unit[field] not in values for field, values in axes.items()):
-            raise ValueError("paired calibration schedule leaks outside the frozen calibration partition")
+    validated_tuples = _paired_calibration_registered_tuples(phase0_bundle)
+    if validated_tuples != campaign["calibration_tuples"]:
+        raise ValueError("paired calibration tuple registry differs from frozen Phase 0 materialization")
+    materialization = phase0_bundle["partition_materialization"]
+    ledger = materialization.get("final_test_access_ledger")
+    if (not isinstance(ledger, dict) or ledger.get("status") != "locked"
+            or ledger.get("authorization_count") != 0
+            or ledger.get("outcomes_read") is not False
+            or ledger.get("outcomes_included") is not False
+            or ledger.get("consumption_receipts") != []):
+        raise ValueError("paired calibration requires the final-test access ledger to remain locked")
     approval_binding = campaign["estimand_approval"]
     _read_paired_bound_json(repo_root, approval_binding, kind="estimand approval")
     approval_path = Path(repo_root).resolve() / approval_binding["path"]
@@ -3335,8 +3457,9 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root,
     if (raw_sha256 != approval_binding["artifact_sha256"]
             or estimand_approval_digest(approval) != approval_binding["approval_sha256"]):
         raise ValueError("paired calibration human approval bytes or semantic digest changed")
-    return {"baseline_freeze": validated_freeze,
-        "partition": validated_partition, "approval": approval,
+    return {"baseline_freeze": freeze,
+        "partition": materialization, "phase0_binding": actual_phase0,
+        "approval": approval,
         "source_identity_sha256": source_hash}
 
 

@@ -60,7 +60,9 @@ def test_paired_cli_rejects_symlinked_config_artifact_source(tmp_path):
 def test_paired_merge_publishes_each_control_bundle_before_report(tmp_path, monkeypatch):
     from frc_defense import meco_qualification as q
 
-    campaign = {"campaign_id": "campaign", "controls": [{
+    campaign = {"campaign_id": "campaign", "phase0_binding": {
+        "partition_sha256": "p" * 64}, "calibration_tuples": [{"tuple_id": "t" * 64}],
+        "controls": [{
         "control_id": "D1/current", "control_binding_sha256": "c" * 64}]}
     summary = {"control_id": "D1/current", "pair_count": 1}
     bundle, digest = q._build_paired_control_bundle(campaign, summary, ["a" * 64])

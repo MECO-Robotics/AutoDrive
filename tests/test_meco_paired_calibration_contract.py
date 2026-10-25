@@ -30,19 +30,8 @@ def _workers():
 
 
 def _bindings():
-    freeze_sha = "b" * 64
     approval_sha = estimand_approval_digest(_approval())
-    return ({"path": "artifacts/baseline-freeze.json",
-             "artifact_sha256": "a" * 64,
-             "schema": "meco-baseline-freeze-v2",
-             "freeze_sha256": freeze_sha, "source_commit": "1" * 40,
-             "source_tree": "2" * 40, "dependency_lock_sha256": "3" * 64},
-            {"path": "artifacts/partitions.json",
-             "artifact_sha256": "c" * 64,
-             "schema": "meco-heldout-partitions-v1",
-             "partition_sha256": "d" * 64,
-             "baseline_freeze_sha256": freeze_sha},
-            {"path": "approvals/estimand.json",
+    return ({"path": "approvals/estimand.json",
              "artifact_sha256": "e" * 64,
              "schema": "meco-simulated-score-estimand-review-v1",
              "approval_sha256": approval_sha})
@@ -64,25 +53,61 @@ def _approval():
         "intended_use": "Descriptive simulator outcome research only."}
 
 
-def _cases(monkeypatch):
-    def fake_cases(scenario_id, split, *, episodes, master_seed):
-        assert split == "calibration"
-        assert episodes == 100
-        assert master_seed == 123
-        return (q.QualificationCase(scenario_id, "category-a", "calibration",
-            "layout-a", "family-a", "start-a", "sensor-a", (3, 7)),)
-    monkeypatch.setattr(q, "protocol_cases", fake_cases)
+def _phase0_bundle():
+    source = {"commit": "1" * 40, "tree": "2" * 40}
+    runtime = {"dependency_lock_sha256": "3" * 64,
+        "backend": "hip", "backend_version": "rocm-test",
+        "torch_version": "torch-test"}
+    rows = []
+    assignments = {}
+    for case_id in ("case-a", "case-b"):
+        for seed in (3, 7):
+            fields = {"scenario_id": "scenario-a", "case_id": case_id,
+                "category": "category-a", "defender_family": "family-a",
+                "layout_id": "layout-a", "start_condition": "start-a",
+                "sensor_profile": "sensor-a", "seed": seed, "repetition": 0,
+                "evaluation_phase": "calibration"}
+            tuple_id = q._canonical_sha256(fields)
+            rows.append({**fields, "tuple_id": tuple_id, "eligible": True})
+            assignments[tuple_id] = "calibration"
+    final_test_fields = {**{key: value for key, value in rows[0].items()
+        if key in q.PAIRED_CALIBRATION_TUPLE_FIELDS},
+        "evaluation_phase": "final_test", "seed": 101}
+    final_test_id = q._canonical_sha256(final_test_fields)
+    rows.append({**final_test_fields, "tuple_id": final_test_id, "eligible": True})
+    assignments[final_test_id] = "final_test"
+    return {"capture_receipt": {"source": source, "runtime": runtime},
+        "baseline_freeze": {"source": source, "runtime": runtime},
+        "partition_materialization": {
+            "evaluation_budget": {"episodes_per_tuple": 2, "repetitions": 1},
+            "tuple_registry": {"schema": "test-only", "tuples": rows},
+            "assignment_table": {"assignments": assignments},
+            "partitions": {"calibration": {"tuple_ids": sorted(
+                tuple_id for tuple_id, split in assignments.items()
+                if split == "calibration")},
+                "final_test": {"tuple_ids": [final_test_id]}},
+            "final_test_access_ledger": {"status": "locked",
+                "authorization_count": 0, "outcomes_read": False,
+                "outcomes_included": False, "consumption_receipts": []}}}
 
 
 def _campaign(monkeypatch, **overrides):
-    _cases(monkeypatch)
-    freeze, partition, approval = _bindings()
-    values = {"episodes": 100, "repetitions": 2, "master_seed": 123,
-        "shard_count": 2, "source_binding": {"commit": "1" * 40,
+    bundle = _phase0_bundle()
+    digest_map = {key: value * 64 for key, value in (
+        ("capture_receipt_sha256", "a"), ("baseline_freeze_sha256", "b"),
+        ("partition_sha256", "c"), ("tuple_registry_sha256", "d"),
+        ("assignment_table_sha256", "e"))}
+    monkeypatch.setattr(q, "_validate_effective_phase0_bundle",
+        lambda received, root: digest_map if received == bundle else (_ for _ in ()).throw(ValueError("bundle mismatch")))
+    phase0 = q._paired_phase0_bundle_binding(bundle, digest_map)
+    tuples = q._paired_calibration_registered_tuples(bundle)
+    approval = _bindings()
+    values = {"shard_count": 2, "source_binding": {"commit": "1" * 40,
             "tree": "2" * 40, "source_identity_sha256": "9" * 64,
             "source_tree_identity_sha256": "8" * 64,
             "dependency_lock_sha256": "3" * 64},
-        "baseline_freeze_binding": freeze, "partition_binding": partition,
+        "phase0_binding": phase0, "calibration_tuples": tuples,
+        "evaluation_budget": {"episodes_per_tuple": 2, "repetitions": 1},
         "estimand_approval_binding": approval,
         "worker_assignments": _workers()}
     values.update(overrides)
@@ -146,7 +171,7 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
         terminal_score_counts=[1, 0])
     ledger = captured["ledger"]
     evaluation = {**{key: unit[key] for key in (
-        "scenario_id", "category", "layout_id", "defender_family",
+        "scenario_id", "case_id", "category", "layout_id", "defender_family",
         "start_condition", "sensor_profile", "split", "seed")},
         "policy": control["policy"], "policy_id": control["policy_id"],
         "prediction_mode": control["prediction_mode"],
@@ -234,7 +259,9 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
         assert shard["control_binding_sha256"] == q._canonical_sha256(
             shard["control_bindings"])
     assert {unit["control_id"] for unit in units} == set(q.PAIRED_CALIBRATION_CONTROLS)
-    assert len(units) == campaign["work_unit_count"] == 12 * 2 * 2 * 3 * 2
+    assert len(units) == campaign["work_unit_count"] == 4 * 2 * 3
+    assert {unit["tuple_id"] for unit in units} == {
+        row["tuple_id"] for row in campaign["calibration_tuples"]}
     assert {unit["split"] for unit in units} == {"calibration"}
     pairs = {}
     for unit in units:
@@ -266,8 +293,8 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
         q.validate_paired_calibration_campaign(altered)
 
     altered = copy.deepcopy(campaign)
-    altered["partition"]["baseline_freeze_sha256"] = "2" * 64
-    with pytest.raises(ValueError, match="not bound"):
+    altered["phase0_binding"]["partition_sha256"] = "2" * 64
+    with pytest.raises(ValueError, match="campaign digest"):
         q.validate_paired_calibration_campaign(altered)
 
     altered = copy.deepcopy(campaign)
@@ -296,7 +323,7 @@ def test_paired_runner_groups_exact_case_seed_tuples_and_revalidates_gate_before
     with pytest.raises(ValueError, match="gate validation reached"):
         q.run_paired_calibration_shard(campaign, 0, repo_root="unavailable",
             replay_root="unavailable", output_root="unavailable",
-            configuration_artifacts={})
+            phase0_bundle=_phase0_bundle(), configuration_artifacts={})
     assert ordering == ["release", "artifacts"]
 
 
@@ -453,11 +480,20 @@ def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_p
         monkeypatch, campaign, unit, tmp_path)
     assert row["replay_sha256"] == hashlib.sha256(replay_raw).hexdigest()
     assert row["ledger_sha256"] == ledger["ledger_sha256"]
+    assert row["tuple_id"] == unit["tuple_id"]
+    assert row["phase0_binding_sha256"] == q._canonical_sha256(campaign["phase0_binding"])
     assert row["simulated_match_score"] == ledger["simulated_match_score"]
     assert row["official_match_points"] is None
     assert row["qualification_eligible"] is False
     assert q.validate_paired_calibration_outcome_row(campaign, 0, row,
         replay_root=tmp_path, approval=approval) == row
+    mutated = copy.deepcopy(row)
+    mutated["tuple_id"] = "0" * 64
+    body = {key: value for key, value in mutated.items() if key != "outcome_row_sha256"}
+    mutated["outcome_row_sha256"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match="foreign to its manifest"):
+        q.validate_paired_calibration_outcome_row(campaign, 0, mutated,
+            replay_root=tmp_path, approval=approval)
     replay_path = tmp_path / replay_ref["result_path"]
     replay_path.write_bytes(replay_path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="artifact bytes changed"):
@@ -539,6 +575,13 @@ def test_multimodel_contract_digest_survives_final_shard_and_merged_bundle(monke
     bundle = next(bundle for bundle in report["_control_bundle_artifacts"]
         if bundle["control_id"] == "D2/multi_model_v1")
     assert bundle["control_binding_sha256"] == expected_binding
+    expected_tuple_ids = sorted(row["tuple_id"] for row in campaign["calibration_tuples"])
+    assert report["tuple_ids"] == expected_tuple_ids
+    assert bundle["tuple_ids"] == expected_tuple_ids
+    assert report["phase0_binding"] == campaign["phase0_binding"]
+    assert all(final_artifact["phase0_binding_sha256"] ==
+        q._canonical_sha256(campaign["phase0_binding"])
+        for final_artifact in map(json.loads, finals))
     assert bundle["qualification_eligible"] is False
     assert report["official_match_points"] is None
     assert any(ref["bundle_id"] == bundle["bundle_id"]
@@ -626,15 +669,24 @@ def test_gate_artifact_reader_binds_exact_bytes_and_rejects_symlinks(tmp_path):
 
 
 def test_gate_binding_reports_git_lookup_failure_without_name_error(monkeypatch, tmp_path):
-    for name in ("freeze.json", "partition.json", "approval.json"):
-        (tmp_path / name).write_text("{}")
+    (tmp_path / "approval.json").write_text("{}")
+    bundle = _phase0_bundle()
+    digest_map = {key: value * 64 for key, value in (
+        ("capture_receipt_sha256", "a"), ("baseline_freeze_sha256", "b"),
+        ("partition_sha256", "c"), ("tuple_registry_sha256", "d"),
+        ("assignment_table_sha256", "e"))}
+    monkeypatch.setattr(q, "_validate_effective_phase0_bundle",
+        lambda received, root: digest_map)
+    from frc_defense import meco_baseline_freeze
+    monkeypatch.setattr(meco_baseline_freeze, "validate_baseline_freeze",
+        lambda freeze, root, configuration_artifacts: freeze)
     def fail_git(*args, **kwargs):
         raise q.subprocess.CalledProcessError(128, args[0], stderr="not a git checkout")
     monkeypatch.setattr(q.subprocess, "run", fail_git)
     with pytest.raises(ValueError, match="cannot inspect source commit/tree"):
         q.prepare_paired_calibration_gate_bindings(repo_root=tmp_path,
-            baseline_freeze_path="freeze.json", partition_path="partition.json",
-            estimand_approval_path="approval.json", configuration_artifacts={})
+            phase0_bundle=bundle, estimand_approval_path="approval.json",
+            configuration_artifacts={})
 
 
 @pytest.mark.parametrize("source_key,value", [
@@ -647,10 +699,10 @@ def test_campaign_rejects_source_tree_and_runtime_lock_drift(monkeypatch, source
         q.validate_paired_calibration_campaign(campaign)
 
 
-def test_campaign_rejects_partition_leakage_and_semantic_approval_drift(monkeypatch):
+def test_campaign_rejects_phase0_digest_tampering_and_semantic_approval_drift(monkeypatch):
     campaign = _campaign(monkeypatch)
-    campaign["partition"]["baseline_freeze_sha256"] = "6" * 64
-    with pytest.raises(ValueError, match="not bound"):
+    campaign["phase0_binding"]["partition_sha256"] = "6" * 64
+    with pytest.raises(ValueError, match="campaign digest"):
         q.validate_paired_calibration_campaign(campaign)
 
     campaign = _campaign(monkeypatch)
@@ -659,10 +711,35 @@ def test_campaign_rejects_partition_leakage_and_semantic_approval_drift(monkeypa
         q.validate_paired_calibration_campaign(campaign)
 
 
-def test_paired_campaign_rejects_unsafe_artifact_paths_and_bad_repetition(monkeypatch):
-    freeze, partition, approval = _bindings()
-    freeze["path"] = "../outside/freeze.json"
-    with pytest.raises(ValueError, match="path is unsafe"):
-        _campaign(monkeypatch, baseline_freeze_binding=freeze)
-    with pytest.raises(ValueError, match="at least two repetitions"):
-        _campaign(monkeypatch, repetitions=1)
+def test_paired_campaign_rejects_bad_registered_budget(monkeypatch):
+    with pytest.raises(ValueError, match="budget"):
+        _campaign(monkeypatch,
+            evaluation_budget={"episodes_per_tuple": 2, "repetitions": 0})
+
+
+def test_phase0_schedule_uses_only_exact_registered_calibration_tuple_ids():
+    bundle = _phase0_bundle()
+    tuples = q._paired_calibration_registered_tuples(bundle)
+    assert {row["evaluation_phase"] for row in tuples} == {"calibration"}
+    assert len(tuples) == 4
+    assert all(row["tuple_id"] != bundle["partition_materialization"]
+        ["partitions"]["final_test"]["tuple_ids"][0] for row in tuples)
+
+    altered = copy.deepcopy(bundle)
+    calibration_ids = altered["partition_materialization"]["partitions"]["calibration"]["tuple_ids"]
+    calibration_ids.pop()
+    with pytest.raises(ValueError, match="omits an eligible"):
+        q._paired_calibration_registered_tuples(altered)
+
+    altered = copy.deepcopy(bundle)
+    altered["partition_materialization"]["tuple_registry"]["tuples"][0]["seed"] = 999
+    with pytest.raises(ValueError, match="does not bind"):
+        q._paired_calibration_registered_tuples(altered)
+
+
+def test_phase0_validator_boundary_rejects_incomplete_digest_contract(monkeypatch):
+    from frc_defense import meco_baseline_freeze
+    monkeypatch.setattr(meco_baseline_freeze, "validate_effective_phase0_bundle",
+        lambda bundle, root: {"baseline_freeze_sha256": "b" * 64}, raising=False)
+    with pytest.raises(ValueError, match="incomplete digest map"):
+        q._validate_effective_phase0_bundle({}, ".")
