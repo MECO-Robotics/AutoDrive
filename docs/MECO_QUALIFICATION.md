@@ -320,8 +320,10 @@ has been validated outside all known protected roots. Paths deliberately not
 opened have a null evidence digest. Unresolvable protected roots and unsafe
 output paths fail closed without writing a report.
 `ready: true` means only `metadata_consistent_only`: it does not open, stat,
-hash, or deserialize checkpoint bytes, execute models, read held-out outcomes,
-advance curriculum state, qualify a track, or authorize GPU work. Checkpoint
+hash, or deserialize checkpoint bytes, execute models, read validation or
+final-test outcomes, advance curriculum state, qualify a track, or authorize
+GPU work. It does read calibration metric records to revalidate the D0 and
+matched-reference Phase 0 reports. Checkpoint
 SHA-256 values are declarations in the manifests and are explicitly unverified
 against file bytes. Diagnostic campaign manifests, including the active r4
 campaign, remain blocked. The preflight is read-only with respect to campaign
@@ -329,9 +331,13 @@ and checkpoint data and does not imply permission to interrupt or compete with
 the currently active training campaign.
 
 The output schema is `meco-stage1-readiness-preflight-v1`; it contains
-`status`, `ready`, `scope`, `checkpoint_digest_semantics`, explicit false
-side-effect/outcome flags, `current_source_factory_reproduction`, five separate
-`tracks` rows, per-check evidence paths and digests, and stable `blocker_codes`.
+`status`, `ready`, `scope`, `checkpoint_digest_semantics`, explicit checkpoint,
+validation, and final-test read flags, calibration outcome read/may-have-been-read
+flags, `current_source_factory_reproduction`, five separate `tracks` rows,
+per-check evidence paths and digests, and stable `blocker_codes`. Early blocked
+reports say calibration outcomes were not read; blocked reports that reach
+calibration validation set `calibration_outcomes_may_be_read`, and successful
+calibration validation also sets `calibration_outcomes_read`.
 Illustrative output fragments (not evidence):
 
 ```json
