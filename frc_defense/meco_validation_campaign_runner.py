@@ -349,6 +349,7 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
             "condition_report_paths": pairing["condition_report_paths"],
             "condition_matrix_sha256": pairing["condition_matrix_sha256"],
             "condition_matrix_paths": pairing["condition_matrix_paths"],
+            "condition_ids": pairing["condition_ids"],
             "paired_keys": pairing["paired_keys"],
             "per_world_legality_records": pairing[
                 "per_world_legality_records"],
@@ -686,6 +687,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
     condition_report_paths = {}
     condition_matrix_sha256 = {}
     condition_matrix_paths = {}
+    condition_ids = {}
     for arm in ("no_factor", "factor_treatment"):
         paths = sorted((case_dir / arm).glob("*.matrix.json"))
         if len(paths) != 1:
@@ -716,6 +718,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                 "architecture_matched_cv_k16"}:
             raise ValueError(f"Phase 4 {arm} matrix has unexpected condition coverage")
         condition = conditions["architecture_matched_cv_k16"]
+        condition_ids[arm] = condition.get("condition_id")
         report_path = Path(condition["report_path"]).resolve()
         report_bytes = report_path.read_bytes()
         condition_report_sha256[arm] = hashlib.sha256(report_bytes).hexdigest()
@@ -889,6 +892,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "condition_report_paths": condition_report_paths,
         "condition_matrix_sha256": condition_matrix_sha256,
         "condition_matrix_paths": condition_matrix_paths,
+        "condition_ids": condition_ids,
         "paired_keys": [list(key) for key in sorted(expected_keys)],
         "per_world_legality_records": per_world_legality_records,
         "exact_pair_coverage": True,
@@ -909,13 +913,27 @@ def _source_identity_sha256() -> str:
         allow_nan=False).encode()).hexdigest()
 
 
+def _source_tree_identity() -> dict:
+    from .curriculum_training import source_tree_identity
+    return source_tree_identity()
+
+
+def _source_tree_identity_sha256(identity: dict | None = None) -> str:
+    identity = _source_tree_identity() if identity is None else identity
+    return hashlib.sha256(json.dumps(identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+
+
 def _capture_phase4_dispatch_binding(checkpoint_paths: dict[str, str], device: str) -> dict:
     # Match matrix capture order: native runtime preparation precedes source identity.
     from .fuel_physics_hip import prepare_native_fuel_extension
     from .meco_device import normalized_device_info
     prepare_native_fuel_extension(device)
+    source_tree = _source_tree_identity()
     return {"checkpoint_sha256": _dispatch_checkpoint_hashes(checkpoint_paths),
         "source_identity_sha256": _source_identity_sha256(),
+        "source_tree_identity": source_tree,
+        "source_tree_identity_sha256": _source_tree_identity_sha256(source_tree),
         "execution_device": normalized_device_info(device)}
 
 

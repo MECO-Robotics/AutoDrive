@@ -103,13 +103,18 @@ def _parse_http_capture(raw: bytes) -> tuple[int, dict[str, str], bytes] | None:
             if not separator or not name or name.lower() in headers:
                 return None
             headers[name.lower()] = value.strip()
-        return int(match.group(1)), headers, raw[marker + 4:]
+        body = raw[marker + 4:]
+        content_length = headers.get("content-length")
+        if (content_length is None or not content_length.isdecimal() or
+                int(content_length) != len(body)):
+            return None
+        return int(match.group(1)), headers, body
     except (UnicodeDecodeError, ValueError):
         return None
 
 
-def _checkout_matches_source_identity(service: dict, expected_sha256: str
-        ) -> bool:
+def _checkout_matches_source_identity(service: dict, expected_tree: dict,
+        expected_tree_sha256: str) -> bool:
     """Rehash source files under the declared checkout and verify its Git head."""
     root_text = service.get("checkout_root")
     identity = service.get("checkout_source_identity")
@@ -128,7 +133,14 @@ def _checkout_matches_source_identity(service: dict, expected_sha256: str
         return False
     source_digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
         allow_nan=False).encode()).hexdigest()
-    if source_digest != expected_sha256:
+    if service.get("checkout_source_identity_sha256") != source_digest:
+        return False
+    tree_identity = {"source_files": {key: value for key, value in identity.items()
+            if not key.startswith("_")},
+        "drivetrain_config_sha256": identity.get("_drivetrain_config_sha256")}
+    tree_digest = hashlib.sha256(json.dumps(tree_identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    if (tree_identity != expected_tree or tree_digest != expected_tree_sha256):
         return False
     for relative, expected in identity.items():
         if relative.startswith("_"):
@@ -577,6 +589,8 @@ def _reconcile_start_profile_outcomes(outcomes: dict, evidence_root: Path, *,
                 report.get("execution_device") != outcomes.get("execution_device")):
             return False
         if (matrix_condition.get("evaluation_report_sha256") != hashes.get(arm) or
+                outcomes.get("condition_ids", {}).get(arm) !=
+                    matrix_condition.get("condition_id") or
                 matrix_condition.get("qualification_case") !=
                     outcomes.get("qualification_case") or
                 matrix_condition.get("evaluation_split") != "validation" or
@@ -816,8 +830,16 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         normalized_keys == expected_keys and len(keys) == len(expected_keys) and
         outcomes.get("qualification_eligible") is False and
         outcomes.get("state_ids") == ["scenario_defined", assignment["registry_profile_id"]] and
+        isinstance(outcomes.get("condition_ids"), dict) and
+        set(outcomes["condition_ids"]) == set(CONDITIONS) and
+        all(isinstance(value, str) and value for value in
+            outcomes["condition_ids"].values()) and
         isinstance(outcomes.get("source_identity_sha256"), str) and
         bool(outcomes.get("source_identity_sha256")) and
+        isinstance(outcomes.get("source_tree_identity"), dict) and
+        isinstance(outcomes.get("source_tree_identity_sha256"), str) and
+        re.fullmatch(r"[0-9a-f]{64}", outcomes[
+            "source_tree_identity_sha256"]) is not None and
         isinstance(outcomes.get("checkpoint_sha256"), dict) and
         set(outcomes["checkpoint_sha256"]) == set(START_PROFILE_TRACK_IDS) and
         all(isinstance(value, str) and value for value in
@@ -846,7 +868,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
     if not exact_outcomes:
         return {"accepted": False,
             "reason": "paired outcomes fail exact single-profile coverage or binding reconciliation"}
-    dashboard_source = outcomes.get("source_identity_sha256")
+    dashboard_tree = outcomes.get("source_tree_identity_sha256")
     endpoints = dashboard.get("endpoint_evidence") if isinstance(dashboard, dict) else None
     asset_manifest = dashboard.get("frontend_asset_manifest") if isinstance(
         dashboard, dict) else None
@@ -891,7 +913,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             urlsplit(endpoints[path]["url"]).path == path
             for path in required_endpoint_paths) and
         all(endpoints[path].get("backend_source_identity_sha256") ==
-                dashboard_source for path in
+                dashboard.get("backend_source_identity_sha256") for path in
             ("/api/meco-status", "/api/curriculum-status")) and
         all(endpoints[path].get("response_sha256") == next(
                 item["served_sha256"] for item in asset_manifest
@@ -899,7 +921,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         if assets_well_formed else False)
     service = dashboard.get("service") if isinstance(dashboard, dict) else None
     checkout_exact = (isinstance(service, dict) and
-        _checkout_matches_source_identity(service, dashboard_source))
+        _checkout_matches_source_identity(service,
+            outcomes.get("source_tree_identity"), dashboard_tree))
     endpoint_capture_records = []
     if endpoint_evidence_exact:
         for path in required_endpoint_paths:
@@ -913,7 +936,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         all(parsed is not None and parsed[0] == 200 and parsed[2] and
             hashlib.sha256(parsed[2]).hexdigest() ==
                 endpoints[path]["response_sha256"] and
-            parsed[1].get("x-autodrive-source-identity-sha256") == dashboard_source and
+            parsed[1].get("x-autodrive-source-identity-sha256") ==
+                dashboard.get("backend_source_identity_sha256") and
+            parsed[1].get("x-autodrive-source-tree-identity-sha256") == dashboard_tree and
             (path not in asset_paths or hashlib.sha256(parsed[2]).hexdigest() ==
                 next(asset["served_sha256"] for asset in asset_manifest
                      if asset["path"] == path))
@@ -933,9 +958,16 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
     dashboard_valid = (isinstance(dashboard, dict) and
         dashboard.get("schema") ==
             "meco-phase4-start-profile-dashboard-evidence-v1" and
-        dashboard.get("backend_source_identity_sha256") == dashboard_source and
-        dashboard.get("checkout_source_identity_sha256") == dashboard_source and
         isinstance(service, dict) and
+        isinstance(dashboard.get("backend_source_identity_sha256"), str) and
+        re.fullmatch(r"[0-9a-f]{64}", dashboard[
+            "backend_source_identity_sha256"]) is not None and
+        dashboard.get("backend_source_identity_sha256") == service.get(
+            "checkout_source_identity_sha256") and
+        dashboard.get("checkout_source_identity_sha256") == service.get(
+            "checkout_source_identity_sha256") and
+        dashboard.get("backend_source_tree_identity_sha256") == dashboard_tree and
+        dashboard.get("checkout_source_tree_identity_sha256") == dashboard_tree and
         service.get("name") == "frc-defense-dashboard.service" and
         service.get("active") is True and type(service.get("main_pid")) is int and
         service["main_pid"] > 1 and
@@ -946,7 +978,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         Path(service["checkout_root"]).is_absolute() and
         isinstance(service.get("checkout_commit"), str) and
         re.fullmatch(r"[0-9a-f]{40}", service["checkout_commit"]) is not None and
-        service.get("checkout_source_identity_sha256") == dashboard_source and
+        isinstance(service.get("checkout_source_identity_sha256"), str) and
         checkout_exact and assets_bytes_exact and endpoint_captures_exact and
         assets_well_formed and dashboard.get(
             "frontend_asset_manifest_sha256") == manifest_sha and
@@ -974,19 +1006,28 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             for item in replay_payloads) and
             len({item.get("simulation_id") for item in replay_payloads
                  if isinstance(item, dict)}) == 2 and
-            all(isinstance(item.get("simulation_id"), str) and
+            all(isinstance(review_item, dict) and
+                isinstance(item.get("simulation_id"), str) and
                 item.get("simulation_id") == review_item.get("replay_id") and
                 item.get("scenario_id") == case["scenario_id"] and
                 item.get("category") == case["category"] and
+                item.get("qualification_case") == case_axes and
                 item.get("split") == "validation" and
-                item.get("condition") in CONDITIONS and
+                review_item.get("condition") in CONDITIONS and
+                item.get("condition_id") == outcomes.get("condition_ids", {}).get(
+                    review_item.get("condition")) and
                 item.get("seed") == review_item.get("seed") ==
                     replay.get("replay_seed") and
                 item.get("phase4_start_profile_assignment") ==
-                    (assignment if item.get("condition") == "factor_treatment" else None) and
+                    (assignment if review_item.get("condition") ==
+                        "factor_treatment" else None) and
                 item.get("source_identity_sha256") == outcomes.get(
                     "source_identity_sha256") and
-                item.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256") and
+                item.get("source_tree_identity_sha256") == outcomes.get(
+                    "source_tree_identity_sha256") and
+                item.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256", {}).get(
+                    item.get("policy", "").removesuffix("_P0")) and
+                item.get("device") == outcomes.get("execution_device") and
                 item.get("execution_device") == outcomes.get("execution_device")
                 for review_item, item in zip(replays, replay_payloads)))
     exact_review = (row.get("schema") ==
@@ -1006,7 +1047,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         row.get("condition_report_sha256") == outcomes.get("condition_report_sha256") and
         row.get("qualification_eligible") is False and
         row.get("dashboard_evidence_artifact_sha256") == dashboard_sha and
-        row.get("dashboard_backend_source_identity_sha256") == dashboard_source and
+        row.get("dashboard_backend_source_identity_sha256") == dashboard.get(
+            "backend_source_identity_sha256") and
+        row.get("dashboard_backend_source_tree_identity_sha256") == dashboard_tree and
         row.get("endpoint_evidence_sha256") == endpoint_sha and
         isinstance(row.get("seed_manifest_sha256"), str) and
         len(row["seed_manifest_sha256"]) == 64 and
@@ -1031,12 +1074,14 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         replay.get("execution_device") == outcomes.get("execution_device") and
         replay.get("condition_report_sha256") == outcomes.get("condition_report_sha256") and
         replay.get("dashboard_evidence_artifact_sha256") == dashboard_sha and
-        replay.get("dashboard_backend_source_identity_sha256") == dashboard_source and
+        replay.get("dashboard_backend_source_identity_sha256") == dashboard.get(
+            "backend_source_identity_sha256") and
+        replay.get("dashboard_backend_source_tree_identity_sha256") == dashboard_tree and
         replay.get("endpoint_evidence_sha256") == endpoint_sha and
         replay.get("seed_manifest_sha256") == row.get("seed_manifest_sha256") and
         replay.get("frontend_asset_manifest_sha256") ==
             manifest_sha and
-        replay.get("replay_checkout_source_identity_sha256") == dashboard_source and
+        replay.get("replay_checkout_source_identity_sha256") == dashboard_tree and
         type(replay.get("replay_seed")) is int and
         replay.get("replay_seed") in seed_values and
         isinstance(replays, list) and len(replays) == 2 and
@@ -1057,11 +1102,13 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             item.get("execution_device") == outcomes.get("execution_device") and
             item.get("condition_report_sha256") == outcomes.get("condition_report_sha256") and
             item.get("dashboard_evidence_artifact_sha256") == dashboard_sha and
-            item.get("dashboard_backend_source_identity_sha256") == dashboard_source and
+            item.get("dashboard_backend_source_identity_sha256") == dashboard.get(
+                "backend_source_identity_sha256") and
+            item.get("dashboard_backend_source_tree_identity_sha256") == dashboard_tree and
             item.get("endpoint_evidence_sha256") == endpoint_sha and
             item.get("seed_manifest_sha256") == row.get("seed_manifest_sha256") and
             item.get("frontend_asset_manifest_sha256") == manifest_sha and
-            item.get("replay_checkout_source_identity_sha256") == dashboard_source and
+            item.get("replay_checkout_source_identity_sha256") == dashboard_tree and
             item.get("seed") == replay.get("replay_seed") and
             isinstance(item.get("replay_id"), str) and bool(item["replay_id"]) and
             isinstance(item.get("replay_sha256"), str) and
@@ -1077,7 +1124,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         "paired_outcomes_artifact_sha256": outcome_sha,
         "replay_review_artifact_sha256": review_sha,
         "dashboard_evidence_artifact_sha256": dashboard_sha,
-        "dashboard_backend_source_identity_sha256": dashboard_source,
+        "dashboard_backend_source_identity_sha256": dashboard.get(
+            "backend_source_identity_sha256"),
+        "dashboard_backend_source_tree_identity_sha256": dashboard_tree,
         "endpoint_evidence_sha256": endpoint_sha,
         "frontend_asset_manifest_sha256": manifest_sha,
         "registry_profile_id": assignment["registry_profile_id"],
