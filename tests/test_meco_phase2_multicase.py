@@ -191,3 +191,63 @@ def test_case_receipt_recomputes_cross_target_bindings(tmp_path):
     files["p"]["manifest_sha256"] = multi._sha(p_manifest_path.read_bytes())
     with pytest.raises(ValueError, match="trajectory shard"):
         multi.validate_case_receipt(receipt, shard, descriptor)
+    with pytest.raises(ValueError, match="complete-set validator evidence"):
+        multi.validate_case_receipt(receipt, shard, descriptor, require_complete_set=True)
+
+
+def test_combined_plan_a_manifest_retains_each_source_triplet(tmp_path):
+    descriptor = {"descriptor_sha256": "d" * 64, "case_set_sha256": "k" * 64,
+        "source": {"commit": "c" * 40, "source_tree_sha256": "t" * 64},
+        "qualification_protocol": {"path": "protocol.json", "id": "p" * 64,
+            "sha256": "q" * 64}, "runtime_source_identity": {"r": "s"},
+        "device": "cuda:0", "prediction_mode": "cv"}
+    cases = [{"scenario_id": "s1", "category": "single", "seeds": [1]},
+        {"scenario_id": "s2", "category": "pair", "seeds": [2]}]
+    source_shards = []
+    target_shards = []
+    for index, case in enumerate(cases):
+        source = tmp_path / f"source-{index}.jsonl"
+        source.write_text(json.dumps({**case, "seed": case["seeds"][0],
+            "decision_index": 0}) + "\n")
+        source_manifest = {"schema": "source-v1", "target_schema": "source-target-v1",
+            "split": "train", **case, "protocol_id": "p" * 64,
+            "qualification_protocol_sha256": "q" * 64,
+            "sources": descriptor["runtime_source_identity"],
+            "source_identity_sha256": multi._digest(descriptor["runtime_source_identity"]),
+            "device": {"device": "cuda:0"}, "prediction_mode": "cv",
+            "prediction_contract": {"mode": "cv"}, "record_count": 1,
+            "dataset_sha256": multi._sha(source.read_bytes())}
+        source_sidecar = source.with_suffix(".jsonl.manifest.json")
+        source_sidecar.write_text(json.dumps(source_manifest))
+        source_shards.append({"path": str(source), "manifest_path": str(source_sidecar)})
+        target = tmp_path / f"ub-{index}.jsonl"
+        target.write_text(json.dumps({**case, "seed": case["seeds"][0],
+            "decision_index": 0}) + "\n")
+        target_manifest = {"schema": "ub-v1", "target_schema": "ub-target-v1",
+            "split": "train", **case, "protocol_id": "p" * 64,
+            "qualification_protocol_sha256": "q" * 64,
+            "sources": descriptor["runtime_source_identity"],
+            "source_identity_sha256": multi._digest(descriptor["runtime_source_identity"]),
+            "device": {"device": "cuda:0"}, "prediction_mode": "cv",
+            "prediction_contract": {"mode": "cv"}, "record_count": 1,
+            "dataset_sha256": multi._sha(target.read_bytes()),
+            "source_dataset_sha256": multi._sha(source.read_bytes()),
+            "source_manifest_sha256": multi._sha(source_sidecar.read_bytes())}
+        target_sidecar = target.with_suffix(".jsonl.manifest.json")
+        target_sidecar.write_text(json.dumps(target_manifest))
+        target_shards.append(target)
+    trajectory = tmp_path / "combined-trajectory.jsonl"
+    trajectory.write_text("pooled trajectory\n")
+    trajectory_manifest = trajectory.with_suffix(".jsonl.manifest.json")
+    trajectory_manifest.write_text("pooled manifest\n")
+    result = multi.combine_target_shards("ub", target_shards, tmp_path / "combined-ub.jsonl",
+        expected_cases=cases, descriptor=descriptor,
+        source_binding={"path": str(trajectory), "sha256": multi._sha(trajectory.read_bytes()),
+            "manifest_sha256": multi._sha(trajectory_manifest.read_bytes())},
+        source_shards=source_shards)
+    pooled = json.loads(Path(result["manifest_path"]).read_text())
+    assert [row["source_dataset_sha256"] for row in pooled["case_source_bindings"]] == [
+        multi._sha(Path(row["path"]).read_bytes()) for row in source_shards]
+    assert [row["source_manifest_sha256"] for row in pooled["case_source_bindings"]] == [
+        multi._sha(Path(row["manifest_path"]).read_bytes()) for row in source_shards]
+    assert pooled["source_dataset_sha256"] == multi._sha(trajectory.read_bytes())

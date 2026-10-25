@@ -12,17 +12,20 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from contextlib import nullcontext
 
 from .meco_phase2_campaign import (_protocol, _source_snapshot, _sha,
     _canonical, _safe_device, FIXED as C_FIXED)
 from .curriculum_training import source_identity
-from .meco_tracks import MECO_TRACKS
+from .meco_tracks import MECO_TRACKS, prediction_contract
 
 SCHEMA = "meco-phase2-multi-case-five-track-v1"
 PREDICTION_MODE = C_FIXED["prediction_mode"]
 ACTION_TICKS = C_FIXED["action_ticks"]
 HORIZON_TICKS = C_FIXED["horizon_ticks"]
 CANDIDATE_K = C_FIXED["candidate_k"]
+A_SETTINGS = {"p_cost_scale": 1.0, "intervention_maps": 3,
+    "updates": 10, "learning_rate": 1e-4}
 
 
 def _digest(value) -> str:
@@ -115,6 +118,13 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
             "seeds": list(seeds), "protocol_seeds": list(allowed),
             "full_case_coverage": seeds == allowed})
     device = _safe_device(device)
+    from .meco_gpu_attestation import EXPECTED_IDENTITIES
+    from .meco_training_manifest import HOST_GPU_INVENTORY, HOST_GPU_INVENTORY_SHA256
+    if device not in EXPECTED_IDENTITIES:
+        raise ValueError("multi-case Phase 2 requires a pinned indexed WX9100 device")
+    inventory_sha = _sha(HOST_GPU_INVENTORY.read_bytes())
+    if inventory_sha != HOST_GPU_INVENTORY_SHA256:
+        raise ValueError("pinned WX9100 inventory digest differs from the reviewed value")
     root = Path(output_root).expanduser().absolute()
     _check_output_namespace(root, (repo, protocol_file),
         allow_existing=_allow_existing_output)
@@ -144,9 +154,16 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
             for item in normalized]), "coverage": {"status": coverage,
             "requested_case_count": len(normalized), "protocol_train_case_count": len(indexed),
             "full_train_protocol_closure": coverage == "full_train_protocol_closure"},
-        "prediction_mode": PREDICTION_MODE, "candidate_k": CANDIDATE_K,
+        "prediction_mode": PREDICTION_MODE,
+        "prediction_contract": prediction_contract(PREDICTION_MODE),
+        "c_settings": C_FIXED,
+        "candidate_k": CANDIDATE_K,
         "action_ticks": ACTION_TICKS, "horizon_ticks": HORIZON_TICKS,
-        "device": device, "tracks": list(MECO_TRACKS), "shards": shards,
+        "a_settings": A_SETTINGS, "device": device,
+        "device_identity_requirement": {**EXPECTED_IDENTITIES[device],
+            "inventory_path": str(HOST_GPU_INVENTORY),
+            "inventory_sha256": inventory_sha},
+        "tracks": list(MECO_TRACKS), "shards": shards,
         "outputs": outputs, "phase2_ready": False, "phase2_complete": False,
         "qualification_eligible": False}
     body["descriptor_sha256"] = _digest(body)
@@ -165,6 +182,11 @@ def validate_multicase_descriptor(descriptor: dict, *, repo_root: Path | None = 
         raise ValueError("multi-case source identity is stale")
     if descriptor.get("runtime_source_identity") != source_identity():
         raise ValueError("multi-case runtime source identity is stale")
+    from .meco_gpu_attestation import EXPECTED_IDENTITIES
+    from .meco_training_manifest import HOST_GPU_INVENTORY, HOST_GPU_INVENTORY_SHA256
+    inventory_sha = _sha(HOST_GPU_INVENTORY.read_bytes())
+    if descriptor.get("device") not in EXPECTED_IDENTITIES:
+        raise ValueError("multi-case Phase 2 requires a pinned indexed WX9100 device")
     protocol_file, protocol, protocol_id, protocol_sha = _protocol(
         Path(descriptor["qualification_protocol"]["path"]))
     if descriptor.get("qualification_protocol") != {"path": str(protocol_file),
@@ -175,6 +197,12 @@ def validate_multicase_descriptor(descriptor: dict, *, repo_root: Path | None = 
             descriptor.get("candidate_k") != CANDIDATE_K or
             descriptor.get("action_ticks") != ACTION_TICKS or
             descriptor.get("horizon_ticks") != HORIZON_TICKS or
+            descriptor.get("prediction_contract") != prediction_contract(PREDICTION_MODE) or
+            descriptor.get("c_settings") != C_FIXED or
+            descriptor.get("a_settings") != A_SETTINGS or
+            descriptor.get("device_identity_requirement") != {**EXPECTED_IDENTITIES.get(descriptor.get("device"), {}),
+                "inventory_path": str(HOST_GPU_INVENTORY), "inventory_sha256": inventory_sha} or
+            inventory_sha != HOST_GPU_INVENTORY_SHA256 or
             _safe_device(descriptor.get("device")) != descriptor.get("device")):
         raise ValueError("multi-case common training contract changed")
     expected = describe_multicase(protocol_path=protocol_file,
@@ -265,11 +293,17 @@ def combine_jsonl_shards(shards: list[dict], output: Path, *, expected_cases: li
     case_coverage(expected_cases, records,
         seed_field="seed" if "seed" in records[0] else "episode_seed")
     output = Path(output).absolute()
-    if output.exists() or output.is_symlink():
-        raise ValueError("combined target output already exists")
+    if output.is_symlink():
+        raise ValueError("combined target output is a symlink")
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = b"".join((json.dumps(row, sort_keys=True, separators=(",", ":"),
         allow_nan=False) + "\n").encode() for row in records)
+    if output.exists():
+        if not output.is_file() or output.read_bytes() != payload:
+            raise ValueError("existing combined target bytes differ from rederived shard contents")
+        return {"path": str(output), "sha256": _sha(payload),
+            "record_count": len(records), "case_coverage": case_coverage(expected_cases, records,
+                seed_field="seed" if "seed" in records[0] else "episode_seed")}
     fd, temp_name = tempfile.mkstemp(prefix="." + output.name + ".", dir=output.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -285,8 +319,127 @@ def combine_jsonl_shards(shards: list[dict], output: Path, *, expected_cases: li
             seed_field="seed" if "seed" in records[0] else "episode_seed")}
 
 
+def combine_target_shards(family: str, shards: list[Path], output: Path, *,
+        expected_cases: list[dict], descriptor: dict, source_binding=None,
+        source_shards=None) -> dict:
+    """Pool one validated target family and seal a case-level sidecar manifest."""
+    if family not in ("trajectory", "ub", "p") or len(shards) != len(expected_cases):
+        raise ValueError("unsupported target family or incomplete shard list")
+    if family in ("ub", "p") and (not isinstance(source_shards, list) or
+            len(source_shards) != len(expected_cases)):
+        raise ValueError("Plan A pooled targets require ordered per-case source shard bindings")
+    shard_manifests = []
+    case_source_bindings = []
+    for index, (case, path) in enumerate(zip(expected_cases, shards)):
+        path = Path(path)
+        manifest_path = path.with_suffix(path.suffix + ".manifest.json")
+        if path.is_symlink() or manifest_path.is_symlink():
+            raise ValueError("target shard or sidecar is a symlink")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        key = (case["scenario_id"], case["category"])
+        if (manifest.get("split") != "train" or
+                (family != "ub" and (manifest.get("scenario_id"), manifest.get("category")) != key) or
+                (family != "ub" and manifest.get("seeds") != case["seeds"]) or
+                manifest.get("protocol_id") != descriptor["qualification_protocol"]["id"] or
+                manifest.get("qualification_protocol_sha256") != descriptor["qualification_protocol"]["sha256"] or
+                manifest.get("sources") != descriptor["runtime_source_identity"] or
+                manifest.get("source_identity_sha256") != _digest(descriptor["runtime_source_identity"]) or
+                (manifest.get("device", {}).get("device") if isinstance(manifest.get("device"), dict)
+                 else manifest.get("device")) != descriptor["device"] or
+                manifest.get("prediction_mode") != descriptor["prediction_mode"] or
+                manifest.get("dataset_sha256") != _sha(path.read_bytes())):
+            raise ValueError(f"{family} shard manifest differs from its descriptor or bytes")
+        if family in ("ub", "p"):
+            source_entry = source_shards[index]
+            source_path = Path(source_entry["path"])
+            source_manifest_path = Path(source_entry["manifest_path"])
+            source_sha = _sha(source_path.read_bytes())
+            source_manifest_sha = _sha(source_manifest_path.read_bytes())
+            if (manifest.get("source_dataset_sha256",
+                    manifest.get("source_counterfactual_dataset_sha256")) != source_sha or
+                    manifest.get("source_manifest_sha256",
+                    manifest.get("source_counterfactual_manifest_sha256")) != source_manifest_sha):
+                raise ValueError(f"{family} shard no longer binds its exact per-case trajectory bytes")
+            case_source_bindings.append({"case_key": [case["scenario_id"], case["category"]],
+                "source_dataset_path": str(source_path), "source_dataset_sha256": source_sha,
+                "source_manifest_path": str(source_manifest_path),
+                "source_manifest_sha256": source_manifest_sha})
+        shard_manifests.append({"case_key": list(key), "seeds": case["seeds"],
+            "path": str(path), "manifest_path": str(manifest_path),
+            "dataset_sha256": _sha(path.read_bytes()),
+            "manifest_sha256": _sha(manifest_path.read_bytes()),
+            "record_count": manifest.get("record_count"),
+            "schema": manifest.get("schema"), "target_schema": manifest.get("target_schema")})
+    common_fields = ("schema", "target_schema", "protocol_id",
+        "qualification_protocol_sha256", "sources", "source_identity_sha256",
+        "device", "prediction_mode", "prediction_contract")
+    reference = json.loads(Path(shards[0]).with_suffix(Path(shards[0]).suffix + ".manifest.json").read_text())
+    for path in shards[1:]:
+        current = json.loads(Path(path).with_suffix(Path(path).suffix + ".manifest.json").read_text())
+        if any(current.get(key) != reference.get(key) for key in common_fields):
+            raise ValueError(f"{family} shards have incompatible target/source contracts")
+    combined = combine_jsonl_shards(shards, output, expected_cases=expected_cases)
+    manifest = {"schema": SCHEMA + ".combined-target",
+        "target_family": family, "dataset_schema": reference["schema"],
+        "target_schema": reference["target_schema"], "split": "train",
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "case_set_sha256": descriptor["case_set_sha256"],
+        "source": descriptor["source"],
+        "qualification_protocol": descriptor["qualification_protocol"],
+        "sources": reference["sources"],
+        "source_identity_sha256": reference["source_identity_sha256"],
+        "device": reference["device"], "prediction_mode": reference["prediction_mode"],
+        "prediction_contract": reference["prediction_contract"],
+        "case_coverage": combined["case_coverage"],
+        "record_count": combined["record_count"], "dataset_sha256": combined["sha256"],
+        "shard_manifests": shard_manifests}
+    if family in ("ub", "p"):
+        if not isinstance(source_binding, dict) or not source_binding.get("path"):
+            raise ValueError("Plan A pooled target requires the exact combined trajectory binding")
+        manifest.update({"source_dataset_path": source_binding["path"],
+            "source_dataset_sha256": source_binding["sha256"],
+            "source_manifest_sha256": source_binding["manifest_sha256"],
+            "case_source_bindings": case_source_bindings})
+    # Keep shared family settings only when every shard agrees. This preserves
+    # repeat protocols, P scale/oracle version and target policies verbatim.
+    for key in sorted(set.intersection(*(set(json.loads(Path(path).with_suffix(
+            Path(path).suffix + ".manifest.json").read_text())) for path in shards))):
+        if key not in manifest and all(json.loads(Path(path).with_suffix(
+                Path(path).suffix + ".manifest.json").read_text()).get(key) ==
+                reference.get(key) for path in shards):
+            manifest[key] = reference[key]
+    manifest_path = Path(output).with_suffix(Path(output).suffix + ".manifest.json")
+    if manifest_path.exists():
+        if manifest_path.is_symlink() or json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
+            raise ValueError(f"existing combined {family} manifest differs from recomputed provenance")
+    else:
+        _write_private_json(manifest_path, manifest)
+    return {"path": str(output), "sha256": combined["sha256"],
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha(manifest_path.read_bytes()),
+        "record_count": combined["record_count"],
+        "case_coverage": combined["case_coverage"],
+        "source_dataset_sha256": manifest.get("source_dataset_sha256"),
+        "source_manifest_sha256": manifest.get("source_manifest_sha256")}
+
+
+def _validate_case_coverage_summary(summary: dict, cases: list[dict]) -> None:
+    if not isinstance(summary, dict) or set(summary) != {
+            f"{case['scenario_id']}::{case['category']}" for case in cases}:
+        raise ValueError("combined target sidecar omits or adds a declared case")
+    for case in cases:
+        value = summary[f"{case['scenario_id']}::{case['category']}"]
+        if (value.get("expected_seeds") != sorted(case["seeds"]) or
+                value.get("observed_seeds") != sorted(case["seeds"]) or
+                value.get("expected_seed_count") != len(case["seeds"]) or
+                value.get("observed_seed_count") != len(case["seeds"]) or
+                type(value.get("row_count")) is not int or value["row_count"] < 1):
+            raise ValueError("combined target per-case seed or row coverage is incomplete")
+
+
 def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
-        *, target_validators: dict[str, callable] | None = None) -> dict:
+        *, target_validators: dict[str, callable] | None = None,
+        require_complete_set=False) -> dict:
     """Recompute case-shard evidence before a resume may adopt it."""
     if not isinstance(receipt, dict) or receipt.get("schema") != SCHEMA + ".case-receipt":
         raise ValueError("case shard has no recognized validation receipt")
@@ -297,10 +450,37 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
             receipt.get("qualification_protocol") != descriptor["qualification_protocol"] or
             receipt.get("device") != descriptor["device"]):
         raise ValueError("case receipt does not bind the frozen descriptor")
+    expected_key = tuple(shard["case_key"])
+    if require_complete_set:
+        from .meco_phase2_complete_set import validate_complete_set_manifest
+        one_case = receipt.get("one_case_descriptor")
+        manifest_value = receipt.get("complete_set_manifest_path")
+        attempt_value = receipt.get("attempt_root")
+        if (not isinstance(one_case, dict) or not isinstance(manifest_value, str) or
+                not manifest_value or not isinstance(attempt_value, str) or not attempt_value):
+            raise ValueError("case receipt lacks the existing complete-set validator evidence")
+        manifest_path = Path(manifest_value)
+        attempt_root = Path(attempt_value).absolute()
+        expected_attempt_parent = Path(descriptor["outputs"]["root"]) / "shards" / f"case-{shard['case_index']:04d}"
+        if (not manifest_path.is_file() or manifest_path.is_symlink() or
+                one_case.get("outputs", {}).get("root") != str(attempt_root) or
+                attempt_root.parent != expected_attempt_parent or
+                re.fullmatch(r"attempt-[0-9]{4,}", attempt_root.name) is None or
+                one_case.get("outputs", {}).get("manifest") != str(manifest_path) or
+                _sha(manifest_path.read_bytes()) != receipt.get("complete_set_manifest_sha256") or
+                one_case.get("scenario_id") != expected_key[0] or
+                one_case.get("category") != expected_key[1] or
+                one_case.get("seeds") != shard["seeds"] or one_case.get("device") != descriptor["device"] or
+                one_case.get("source") != descriptor["source"] or
+                one_case.get("qualification_protocol") != descriptor["qualification_protocol"]):
+            raise ValueError("case receipt lacks the existing complete-set validator evidence")
+        complete_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if receipt.get("complete_set_manifest") != complete_manifest:
+            raise ValueError("case receipt summary differs from the current complete-set manifest")
+        validate_complete_set_manifest(complete_manifest, one_case)
     datasets = receipt.get("datasets")
     if not isinstance(datasets, dict) or set(datasets) != {"trajectory", "ub", "p"}:
         raise ValueError("case receipt must bind C trajectory, U+B, and P target datasets")
-    expected_key = tuple(shard["case_key"])
     cross_source = None
     target_validators = target_validators or {}
     for family in ("trajectory", "ub", "p"):
@@ -358,6 +538,43 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
     return receipt
 
 
+def collect_case_complete_set(case: dict, output_root: Path, *, lease_attestation=None) -> dict:
+    """Use the reviewed one-case coordinator to collect and validate a shard."""
+    from .meco_phase2_complete_set import describe_complete_set, execute_complete_set
+    protocol = case["qualification_protocol"]
+    one_case = describe_complete_set(protocol_path=Path(protocol["path"]),
+        scenario_id=case["case_key"][0], category=case["case_key"][1],
+        seeds=list(case["seeds"]), device=case["device"],
+        output_root=Path(output_root))
+    attestation = lease_attestation or case["device_identity_attestation"]
+    execute_complete_set(one_case,
+        lease_factory=lambda *_args, **_kwargs: nullcontext(),
+        device_identity_verifier=lambda _lease, _devices: attestation)
+    outputs = one_case["outputs"]
+    manifest_path = Path(outputs["manifest"])
+    complete_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    datasets = {
+        "trajectory": Path(outputs["source_dataset"]),
+        "ub": Path(one_case["plan_a_ubp"]["output_dir"]) / "plan-a-ub-legal-nodes.jsonl",
+        "p": Path(one_case["plan_a_ubp"]["output_dir"]) / "plan-a-p-routes-oracle-v3.jsonl"}
+    record = {"schema": SCHEMA + ".case-receipt",
+        "descriptor_sha256": case["descriptor_sha256"],
+        "case_key": list(case["case_key"]), "seeds": list(case["seeds"]),
+        "source": case["source"], "qualification_protocol": case["qualification_protocol"],
+        "device": case["device"], "one_case_descriptor": one_case,
+        "attempt_root": str(output_root),
+        "complete_set_manifest_path": str(manifest_path),
+        "complete_set_manifest_sha256": _sha(manifest_path.read_bytes()),
+        "complete_set_manifest": complete_manifest,
+        "datasets": {}}
+    for family, path in datasets.items():
+        sidecar = path.with_suffix(path.suffix + ".manifest.json")
+        record["datasets"][family] = {"path": str(path),
+            "sha256": _sha(path.read_bytes()), "manifest_path": str(sidecar),
+            "manifest_sha256": _sha(sidecar.read_bytes())}
+    return record
+
+
 def execute_multicase(descriptor: dict, *, collect_case, combine_target,
         fit_combined, validate_track, target_validators=None,
         lease_factory=None, device_identity_verifier=None) -> dict:
@@ -374,6 +591,8 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
         device_identity_verifier = verify_post_lease_wx9100
     if not callable(lease_factory) or not callable(device_identity_verifier):
         raise ValueError("exclusive lease and indexed WX9100 identity verifier are required")
+    if collect_case is None:
+        collect_case = collect_case_complete_set
     if root.exists() and (root.is_symlink() or not root.is_dir()):
         raise ValueError("multi-case campaign root is not a safe directory")
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -397,7 +616,7 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
             if descriptor_path.is_symlink() or descriptor_path.read_text(encoding="utf-8") != encoded_descriptor:
                 raise ValueError("existing descriptor marker differs from the current descriptor")
         else:
-            descriptor_path.write_text(encoded_descriptor, encoding="utf-8")
+            _write_private_json(descriptor_path, descriptor)
         attempt_root = root / "shards"
         attempt_root.mkdir(mode=0o700, exist_ok=True)
         if attempt_root.stat(follow_symlinks=False).st_mode & 0o077:
@@ -425,7 +644,7 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
                 try:
                     candidate = json.loads(receipt_path.read_text(encoding="utf-8"))
                     validate_case_receipt(candidate, shard, descriptor,
-                        target_validators=target_validators)
+                        target_validators=target_validators, require_complete_set=True)
                     adopted = candidate
                 except (OSError, ValueError, json.JSONDecodeError):
                     continue
@@ -435,7 +654,6 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
                 continue
             next_number = max([int(item.name.split("-")[1]) for item in attempts] + [0]) + 1
             case_root = case_dir / f"attempt-{next_number:04d}"
-            case_root.mkdir(mode=0o700)
             one_case = {key: value for key, value in shard.items()
                 if key in ("case_index", "case_key", "seeds", "full_case_coverage")}
             one_case.update({"source": descriptor["source"],
@@ -447,62 +665,92 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
                 "device_identity_attestation": attestation, "output_root": str(case_root)})
             receipt = collect_case(one_case, case_root)
             validate_case_receipt(receipt, shard, descriptor,
-                target_validators=target_validators)
+                target_validators=target_validators, require_complete_set=True)
             receipt_path = case_root / "case-receipt.json"
             if receipt_path.exists() or receipt_path.is_symlink():
                 raise ValueError("case runner pre-created coordinator receipt path")
             _write_private_json(receipt_path, receipt)
             shard_receipts.append(receipt)
 
-    combined = {}
-    for family in ("trajectory", "ub", "p"):
-        target_paths = [receipt["datasets"][family]["path"] for receipt in shard_receipts]
-        target_path = Path(descriptor["outputs"]["combined"][family])
-        combined[family] = combine_target(family, target_paths, target_path,
-            expected_cases=expected_cases, descriptor=descriptor)
-        path = Path(combined[family]["path"])
-        if not path.is_file() or path.is_symlink() or _sha(path.read_bytes()) != combined[family].get("sha256"):
-            raise ValueError(f"combined {family} corpus does not match returned digest")
-    expected_combined = {family: {"path": combined[family]["path"],
-        "sha256": combined[family]["sha256"], "manifest_sha256": combined[family].get("manifest_sha256")}
-        for family in combined}
-    if combined["ub"].get("source_dataset_sha256") != combined["trajectory"]["sha256"] or combined["p"].get("source_dataset_sha256") != combined["trajectory"]["sha256"]:
-        raise ValueError("combined U+B and P targets do not bind pooled trajectory bytes")
-    artifact_paths = {track: Path(descriptor["outputs"]["bundle"][track]) for track in MECO_TRACKS}
-    fit_receipt = fit_combined(combined, artifact_paths, descriptor=descriptor)
-    if not isinstance(fit_receipt, dict) or fit_receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or fit_receipt.get("combined_inputs") != expected_combined:
-        raise ValueError("combined fitter receipt is not bound to current pooled target bytes")
-    validator_receipts = {}
-    for track in MECO_TRACKS:
-        validation = validate_track(track, artifact_paths[track], combined, descriptor=descriptor)
-        if (not isinstance(validation, dict) or validation.get("track") != track or
-                validation.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
-                validation.get("case_set_sha256") != descriptor["case_set_sha256"] or
-                validation.get("combined_inputs") != expected_combined):
-            raise ValueError(f"{track} validator did not bind pooled data and case set")
-        validator_receipts[track] = validation
-    manifest = {"schema": SCHEMA + ".bundle",
-        "descriptor_sha256": descriptor["descriptor_sha256"],
-        "case_set_sha256": descriptor["case_set_sha256"],
-        "source": descriptor["source"],
-        "qualification_protocol": descriptor["qualification_protocol"],
-        "coverage": descriptor["coverage"], "combined_inputs": expected_combined,
-        "shard_receipts": [{"case_key": receipt["case_key"], "seeds": receipt["seeds"],
-            "receipt_sha256": _digest(receipt)} for receipt in shard_receipts],
-        "artifacts": {track: {"track": track, "path": str(artifact_paths[track]),
-            "sha256": _sha(artifact_paths[track].read_bytes())} for track in MECO_TRACKS},
-        "validator_receipts": validator_receipts,
-        "phase2_ready": False, "phase2_complete": False,
-        "qualification_eligible": False}
-    validate_five_track_manifest(manifest, descriptor,
-        validator_receipts=validator_receipts, artifact_paths=artifact_paths)
-    manifest_path = Path(descriptor["outputs"]["manifest"])
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    temp = manifest_path.with_name("." + manifest_path.name + ".tmp")
-    temp.write_text(json.dumps(manifest, indent=2, sort_keys=True,
-        allow_nan=False) + "\n", encoding="utf-8")
-    os.replace(temp, manifest_path)
-    return manifest
+        combined = {}
+        for family in ("trajectory", "ub", "p"):
+            target_paths = [receipt["datasets"][family]["path"] for receipt in shard_receipts]
+            target_path = Path(descriptor["outputs"]["combined"][family])
+            source_binding = (None if family == "trajectory" else {
+                "path": combined["trajectory"]["path"],
+                "sha256": combined["trajectory"]["sha256"],
+                "manifest_sha256": combined["trajectory"]["manifest_sha256"]})
+            runner = combine_target or combine_target_shards
+            combined[family] = runner(family, target_paths, target_path,
+                expected_cases=expected_cases, descriptor=descriptor,
+                source_binding=source_binding,
+                source_shards=(None if family == "trajectory" else [
+                    receipt["datasets"]["trajectory"] for receipt in shard_receipts]))
+            path = Path(combined[family]["path"])
+            if not path.is_file() or path.is_symlink() or _sha(path.read_bytes()) != combined[family].get("sha256"):
+                raise ValueError(f"combined {family} corpus does not match returned digest")
+            manifest_path = Path(combined[family].get("manifest_path", ""))
+            if (not manifest_path.is_file() or manifest_path.is_symlink() or
+                    _sha(manifest_path.read_bytes()) != combined[family].get("manifest_sha256")):
+                raise ValueError(f"combined {family} corpus manifest is missing or stale")
+            pooled_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (pooled_manifest.get("schema") != SCHEMA + ".combined-target" or
+                    pooled_manifest.get("target_family") != family or
+                    pooled_manifest.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
+                    pooled_manifest.get("case_set_sha256") != descriptor["case_set_sha256"] or
+                    pooled_manifest.get("dataset_sha256") != combined[family]["sha256"] or
+                    pooled_manifest.get("record_count") != combined[family].get("record_count") or
+                    pooled_manifest.get("qualification_protocol") != descriptor["qualification_protocol"]):
+                raise ValueError(f"combined {family} corpus manifest is not descriptor-bound")
+            _validate_case_coverage_summary(pooled_manifest.get("case_coverage"), expected_cases)
+            combined[family]["case_coverage"] = pooled_manifest["case_coverage"]
+            if family == "trajectory":
+                combined[family]["manifest_sha256"] = _sha(manifest_path.read_bytes())
+        expected_combined = {family: {"path": combined[family]["path"],
+            "sha256": combined[family]["sha256"], "manifest_path": combined[family].get("manifest_path"),
+            "manifest_sha256": combined[family].get("manifest_sha256")}
+            for family in combined}
+        target_coverage = {family: combined[family]["case_coverage"] for family in combined}
+        if combined["ub"].get("source_dataset_sha256") != combined["trajectory"]["sha256"] or combined["p"].get("source_dataset_sha256") != combined["trajectory"]["sha256"]:
+            raise ValueError("combined U+B and P targets do not bind pooled trajectory bytes")
+        artifact_paths = {track: Path(descriptor["outputs"]["bundle"][track]) for track in MECO_TRACKS}
+        for path in artifact_paths.values():
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fit_receipt = fit_combined(combined, artifact_paths, descriptor=descriptor)
+        if not isinstance(fit_receipt, dict) or fit_receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or fit_receipt.get("combined_inputs") != expected_combined:
+            raise ValueError("combined fitter receipt is not bound to current pooled target bytes")
+        validator_receipts = {}
+        for track in MECO_TRACKS:
+            validation = validate_track(track, artifact_paths[track], combined, descriptor=descriptor)
+            if (not isinstance(validation, dict) or validation.get("track") != track or
+                    validation.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
+                    validation.get("case_set_sha256") != descriptor["case_set_sha256"] or
+                    validation.get("combined_inputs") != expected_combined):
+                raise ValueError(f"{track} validator did not bind pooled data and case set")
+            validator_receipts[track] = validation
+        manifest = {"schema": SCHEMA + ".bundle",
+            "descriptor_sha256": descriptor["descriptor_sha256"],
+            "case_set_sha256": descriptor["case_set_sha256"],
+            "source": descriptor["source"],
+            "qualification_protocol": descriptor["qualification_protocol"],
+            "coverage": descriptor["coverage"], "combined_inputs": expected_combined,
+            "target_coverage": target_coverage,
+            "shard_receipts": [{"case_key": receipt["case_key"], "seeds": receipt["seeds"],
+                "receipt_sha256": _digest(receipt)} for receipt in shard_receipts],
+            "artifacts": {track: {"track": track, "path": str(artifact_paths[track]),
+                "sha256": _sha(artifact_paths[track].read_bytes())} for track in MECO_TRACKS},
+            "validator_receipts": validator_receipts,
+            "phase2_ready": False, "phase2_complete": False,
+            "qualification_eligible": False}
+        validate_five_track_manifest(manifest, descriptor,
+            validator_receipts=validator_receipts, artifact_paths=artifact_paths)
+        manifest_path = Path(descriptor["outputs"]["manifest"])
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = manifest_path.with_name("." + manifest_path.name + ".tmp")
+        temp.write_text(json.dumps(manifest, indent=2, sort_keys=True,
+            allow_nan=False) + "\n", encoding="utf-8")
+        os.replace(temp, manifest_path)
+        return manifest
 
 
 def validate_five_track_manifest(manifest: dict, descriptor: dict,
@@ -513,6 +761,45 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
         raise ValueError("multi-case bundle descriptor/case-set binding mismatch")
     if manifest.get("coverage") != descriptor["coverage"] or manifest.get("qualification_protocol") != descriptor["qualification_protocol"]:
         raise ValueError("multi-case bundle coverage or protocol binding mismatch")
+    combined = manifest.get("combined_inputs")
+    target_coverage = manifest.get("target_coverage")
+    if (not isinstance(combined, dict) or set(combined) != {"trajectory", "ub", "p"} or
+            not isinstance(target_coverage, dict) or set(target_coverage) != {"trajectory", "ub", "p"}):
+        raise ValueError("multi-case manifest omits a combined target family or coverage table")
+    pooled_manifests = {}
+    for family in ("trajectory", "ub", "p"):
+        item = combined[family]
+        data_path, sidecar_path = Path(item["path"]), Path(item["manifest_path"])
+        if (data_path.is_symlink() or sidecar_path.is_symlink() or
+                not data_path.is_file() or not sidecar_path.is_file() or
+                _sha(data_path.read_bytes()) != item.get("sha256") or
+                _sha(sidecar_path.read_bytes()) != item.get("manifest_sha256")):
+            raise ValueError(f"combined {family} bytes changed after bundle publication")
+        pooled = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if (pooled.get("schema") != SCHEMA + ".combined-target" or
+                pooled.get("target_family") != family or
+                pooled.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
+                pooled.get("case_set_sha256") != descriptor["case_set_sha256"] or
+                pooled.get("dataset_sha256") != item["sha256"] or
+                pooled.get("qualification_protocol") != descriptor["qualification_protocol"] or
+                pooled.get("case_coverage") != target_coverage[family]):
+            raise ValueError(f"combined {family} manifest binding or coverage changed")
+        _validate_case_coverage_summary(target_coverage[family], descriptor["ordered_cases"])
+        pooled_manifests[family] = pooled
+    trajectory_shards = pooled_manifests["trajectory"].get("shard_manifests")
+    if not isinstance(trajectory_shards, list) or len(trajectory_shards) != len(descriptor["ordered_cases"]):
+        raise ValueError("pooled trajectory manifest lost ordered source shard identities")
+    expected_source_links = [{"case_key": shard["case_key"],
+        "source_dataset_path": shard["path"],
+        "source_dataset_sha256": shard["dataset_sha256"],
+        "source_manifest_path": shard["manifest_path"],
+        "source_manifest_sha256": shard["manifest_sha256"]} for shard in trajectory_shards]
+    for family in ("ub", "p"):
+        pooled = pooled_manifests[family]
+        if (pooled.get("case_source_bindings") != expected_source_links or
+                pooled.get("source_dataset_sha256") != combined["trajectory"]["sha256"] or
+                pooled.get("source_manifest_sha256") != combined["trajectory"]["manifest_sha256"]):
+            raise ValueError(f"combined {family} source links differ from ordered trajectory shards")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(MECO_TRACKS) or set(validator_receipts) != set(MECO_TRACKS) or set(artifact_paths) != set(MECO_TRACKS):
         raise ValueError("multi-case bundle must contain exactly five validated tracks")
@@ -538,7 +825,6 @@ def export_training_manifest_warm_starts(manifest: dict, descriptor: dict) -> di
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(MECO_TRACKS):
         raise ValueError("training manifest export requires all five tracks")
-    result = {track: artifacts[track]["path"] for track in MECO_TRACKS}
-    result["_case_set_sha256"] = descriptor["case_set_sha256"]
-    result["_coverage_status"] = descriptor["coverage"]["status"]
-    return result
+    # This mapping is directly accepted by the training manifest's exact-five
+    # path field. Case-set binding stays in the bundle manifest, not this map.
+    return {track: artifacts[track]["path"] for track in MECO_TRACKS}
