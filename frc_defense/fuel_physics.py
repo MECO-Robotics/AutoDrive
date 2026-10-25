@@ -86,6 +86,8 @@ class FuelPhysics:
         self.sim = sim
         self.config = FuelPhysicsConfig(**config) if isinstance(config, dict) else (config or FuelPhysicsConfig())
         self._gpu_qualifying = bool(self.config.gpu_qualifying)
+        self._gpu_config_snapshot = (
+            tuple(self.config.__dict__.items()) if self._gpu_qualifying else None)
         self.piece_pos, self.piece_vel = piece_pos, piece_vel
         if piece_pos.ndim != 3 or piece_pos.shape[-1] != 2 or piece_vel.shape != piece_pos.shape:
             raise ValueError("piece positions and velocities must be [world,piece,2]")
@@ -148,19 +150,27 @@ class FuelPhysics:
                 self._hip is None):
             raise RuntimeError(
                 "GPU-qualifying fuel physics cannot select the Torch fallback")
-        supported_options = {
-            "broadphase": ("grid", "all_pairs"),
-            "robot_broadphase": ("grid", "all_pairs"),
-            "contact_mode": ("compact", "fused"),
-            "compact_capacity": ("bounded", "full"),
-            "solver": ("jacobi", "colored"),
+        if tuple(self.config.__dict__.items()) != self._gpu_config_snapshot:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics configuration cannot change "
+                "after construction")
+        supported = {
+            "broadphase": "grid",
+            "robot_broadphase": "all_pairs",
+            "contact_mode": "fused",
+            "compact_capacity": "bounded",
+            "solver": "jacobi",
         }
-        for name, choices in supported_options.items():
-            if getattr(self.config, name) not in choices:
-                raise RuntimeError(
-                    f"GPU-qualifying fuel physics does not support {name}="
-                    f"{getattr(self.config, name)!r}")
-        if self.config.sleep and self.config.sleep_islands:
+        unsupported = [name for name, value in supported.items()
+                       if getattr(self.config, name) != value]
+        if unsupported:
+            details = ", ".join(
+                f"{name}={getattr(self.config, name)!r}"
+                for name in unsupported)
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires the statically "
+                f"supported HIP configuration ({details})")
+        if self.config.sleep_islands:
             raise RuntimeError(
                 "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
 
@@ -575,6 +585,7 @@ class FuelPhysics:
 
     def required_substeps(self, dt=None, base=None, active_mask=None, piece_active=None, piece_owner=None):
         """Use a fixed Python loop bound and assert stability capacity on device."""
+        self._validate_qualifying_backend()
         duration=float(self.sim.dt if dt is None else dt)
         count=self.config.substeps if base is None else int(base)
         if not self.config.adaptive_substeps:
