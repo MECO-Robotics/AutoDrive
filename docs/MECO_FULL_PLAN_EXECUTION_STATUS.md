@@ -1,5 +1,21 @@
 # MECO learning tracks plan: execution status
 
+> **r4 cycle/evaluation configuration audit — 2026-10-25 01:00 UTC.** The
+> service is active in cycle 1 with A1 at 15/100, A2 at 13/100, and A3/C1/C2
+> queued; no evaluation file exists yet. The manifest-mode supervisor uses
+> `cycles=0`, meaning it repeats until stopped, and matches all five tracks at
+> 100 updates per scheduled cycle across two exclusive WX9100 lanes. It queues
+> evaluation only after all five checkpoints reach the matched cycle frontier.
+> Each automatic evaluation is one diagnostic `pickup_simple/cluster` episode
+> on the same seed `61720261025`; it is not a held-out result, and the manifest
+> has no runtime evaluation protocol binding. Only one pending evaluation is
+> retained, so a slow evaluator may supersede an older pending cycle. Phase 4
+> adversarial training exposure is disabled in this manifest; ordinary
+> curriculum assignments can still vary between cycles. No warm-start
+> artifacts are supplied. This confirms that five-track training is running
+> continuously, but the current campaign alone does not satisfy the plan's
+> held-out, adversarial, or qualification gates.
+
 > **Dashboard direct-root verification — 2026-10-25 00:58 UTC.** The
 > `frc-defense-dashboard.service` was restarted against this `main` checkout at
 > 00:57:14 UTC after integrating the reviewed direct-campaign-root resolver.
