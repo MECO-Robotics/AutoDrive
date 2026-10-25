@@ -20,12 +20,25 @@ status from the selected data root. It reads `docs/MECO_CAMPAIGN_PASSES.json`
 from the dashboard code checkout, so the planner/implementer/reviewer cards and
 Phase 4 factor cards describe the code being served.
 
-`--meco-data-root` must resolve to an existing directory. MECO checkpoint and
-evaluation roots are fixed to its `checkpoints/meco-five` and
-`evaluations/meco-five` children. Every nested status, run, heartbeat, stats,
-evaluator, report, and qualification JSON path is resolved and checked against
-that root before it is read, so symlinked status inputs outside the selected
-data root are rejected. The campaign ledger remains checkout-local.
+`--meco-data-root` must resolve to an existing directory. The dashboard supports
+two layouts:
+
+- **Legacy:** `checkpoints/meco-five/` and `evaluations/meco-five/`, with the
+  queue and scheduler files under `checkpoints/meco-five/`.
+- **Direct campaign root:** `checkpoints/{A1,A2,A3,C1,C2}/` and
+  `evaluations/`, with `queue-status.json` and
+  `task-scheduler-state.json` directly under the selected data root.
+
+The direct layout is selected when its track directories are present, and all
+five must be real directories (not symlinks, including symlinks to in-root
+targets). Partial track layouts and roots that contain both legacy and direct
+layouts are rejected as ambiguous. With neither layout present, the dashboard
+uses the legacy paths so an empty checkout reports its normal not-started
+state. Every resolved status root must remain inside the selected data root.
+Nested run, heartbeat, stats, evaluator, report, and qualification JSON paths
+are resolved and checked against that root before they are read, so symlinked
+status inputs outside the selected data root are rejected. The campaign ledger
+remains checkout-local.
 The default, when the option is omitted, keeps both live data and campaign
 ledger checkout-local. An explicit `--curriculum-root` may point inside this
 dashboard checkout or inside the configured `--meco-data-root`. When omitted,

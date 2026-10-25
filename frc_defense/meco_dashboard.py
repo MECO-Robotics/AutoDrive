@@ -1245,8 +1245,9 @@ def meco_status_payload(project_root: Path | str, *, data_root: Path | str | Non
     if direct_layout_present and legacy_layout_present:
         raise ValueError("MECO data root contains ambiguous legacy and direct campaign layouts")
     if direct_layout_present:
-        if not all(path.is_dir() and _inside(path, data_project) for path in direct_tracks):
-            raise ValueError("direct MECO campaign layout must contain all five in-root track directories")
+        if not all(path.is_dir() and not path.is_symlink()
+                   and _inside(path, data_project) for path in direct_tracks):
+            raise ValueError("direct MECO campaign layout must contain five real, non-symlink in-root track directories")
         checkpoint_root = direct_checkpoint_root.resolve()
         evaluation_root = (data_project / "evaluations").resolve()
         queue_root = data_project

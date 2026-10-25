@@ -171,7 +171,19 @@ def test_direct_campaign_root_reads_track_runs_queue_scheduler_and_evaluations(t
 def test_direct_campaign_layout_rejects_partial_track_directories(tmp_path):
     (tmp_path / "checkpoints" / "A1").mkdir(parents=True)
 
-    with pytest.raises(ValueError, match="all five in-root track directories"):
+    with pytest.raises(ValueError, match="real, non-symlink in-root track directories"):
+        meco_status_payload(tmp_path)
+
+
+def test_direct_campaign_layout_rejects_in_root_track_symlink(tmp_path):
+    direct_root = tmp_path / "checkpoints"
+    direct_root.mkdir()
+    (direct_root / "A1-target").mkdir()
+    (direct_root / "A1").symlink_to(direct_root / "A1-target", target_is_directory=True)
+    for track in TRACKS[1:]:
+        (direct_root / track).mkdir()
+
+    with pytest.raises(ValueError, match="real, non-symlink in-root"):
         meco_status_payload(tmp_path)
 
 
