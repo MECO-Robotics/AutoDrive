@@ -1,3 +1,12 @@
+> **Phase 5 provenance dashboard reverified — 2026-10-25 06:09 UTC.** After
+> integrating the 72-entry three-pass ledger and digest pin at
+> `577584417`, `frc-defense-dashboard.service` restarted on current `main`
+> (PID `3073791`). `/`, both status APIs, and both JavaScript assets returned
+> HTTP 200. The curriculum API reported `scoped-transcript-summaries` with 72
+> tranches, and served `meco.js`/`dashboard.js` SHA-256 hashes matched this
+> checkout. No replay was generated. No simulator behavior or qualification
+> is claimed.
+>
 > **Phase 5 capture-bound scorer profiling implemented — 2026-10-25.** The
 > reviewed software tranche is integrated at
 > `7f374320011ce2579893b23adf190610e1a6740d`. It validates five track captures
@@ -6,7 +15,7 @@
 > record distinct model-source and profiler-source identity and publish
 > without overwriting existing paths. Contract tests were added but not run;
 > Python compilation and diff checks passed. The dashboard three-pass ledger
-> now contains 72 summaries, but its digest pin must be revalidated after the
+> now contains 72 summaries, and its digest pin was revalidated after the
 > ledger update. No production captures, trained five-checkpoint bundle, GPU
 > profile, simulator/replay, Hailo, or qualification evidence exists. The
 > r4 training campaign was not interrupted.
