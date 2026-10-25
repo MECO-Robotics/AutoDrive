@@ -301,6 +301,12 @@ is subject to the same check. The output is written only to the explicit
 destination, and an existing non-identical report is never replaced.
 
 The report is deterministic for the same inputs and uses stable blocker codes.
+Expected input-readiness failures (for example, a missing campaign manifest,
+missing or malformed campaign root declarations, protected input paths, or
+protected referenced evidence) produce a `blocked` report when the output path
+has been validated outside all known protected roots. Paths deliberately not
+opened have a null evidence digest. Unresolvable protected roots and unsafe
+output paths fail closed without writing a report.
 `ready: true` means only `metadata_consistent_only`: it does not open, stat,
 hash, or deserialize checkpoint bytes, execute models, read held-out outcomes,
 advance curriculum state, qualify a track, or authorize GPU work. Checkpoint
