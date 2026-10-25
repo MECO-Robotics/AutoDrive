@@ -24,7 +24,8 @@ import uuid
 import torch
 from torch import nn
 
-from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
+from .curriculum_scenarios import (make_curriculum_env, reset_curriculum_scenario,
+    PRESSURE_ANCHOR_SCHEMA)
 from .curriculum_training import source_identity, source_tree_identity
 from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
@@ -49,7 +50,12 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
     PREDICTION_MODEL_ID, MULTIMODEL_HYPOTHESES, MULTIMODEL_MAX_HORIZON_S,
     MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
-    MULTIMODEL_DAMPING_PER_S)
+    MULTIMODEL_DAMPING_PER_S, score_five_track_ppo_batch)
+from .meco_ppo_batch import (FiveTrackPpoBatchV2, MaskedSequentialAdamV1,
+    DevicePpoRngV1, write_common_slot, write_plan_a_slot, write_plan_c_slot,
+    write_slot_digest, validate_slot_digests, gae_v2,
+    normalized_actor_advantage, PPO_BATCH_SCHEMA_ID,
+    PPO_OPTIMIZER_SCHEMA_ID, PPO_RNG_SCHEMA_ID)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     plan_a_support_order_digest, PlanAEmptySupportError, SUPPORT_ORDER)
@@ -80,7 +86,10 @@ class PlanADeviceSelectionOutcome:
 
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
     "shared scheduled task seed initializes the episode; subsequent episode seeds "
-    "are task seed + global episode index")
+    "are task seed + global episode index; selected rows use "
+    "meco-3v3-per-world-rng-v2 and meco-per-world-reset-rng-v2")
+PRESSURE_ANCHOR_RESET_CHECKPOINT_SCHEMA = "meco-pressure-anchor-reset-checkpoint-v2"
+PRESSURE_ANCHOR_REPORT_SCHEMA = "meco-phase4-pressure-anchor-report-v2"
 TRACK_LOSS_RESET_POLICY = {
     "id": "opponent-track-loss-v1",
     "signal": "opponent-confidence-and-signed-time observation raster channels 4 and 5",
@@ -448,6 +457,154 @@ def _episode_id(run_id: str, episode: int) -> str:
 def _canonical_digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode()).hexdigest()
+
+
+def _pressure_anchor_reset_state(env, *, reset_seed, episode_index, source_hash):
+    """Capture passive, row-complete identity for the deterministic episode reset."""
+    pressure = dict(env.curriculum.get("pressure", {}))
+    factor = getattr(env, "phase4_factor_config", None)
+    profile_assignment = getattr(env, "phase4_start_profile_assignment", None)
+    focal_assignment = getattr(env, "phase4_focal_pose_assignment", None)
+    contact_config = getattr(env, "contact_geometry_config", None)
+    config_identity = {
+        "scenario_id": env.curriculum.get("scenario_id"),
+        "category": env.curriculum.get("category"),
+        "pressure": pressure,
+        "phase4_factor": factor,
+        "contact_geometry_id": getattr(env, "contact_geometry_id", None),
+        "contact_geometry_config": contact_config,
+        "start_profile_identity": getattr(env, "phase4_start_profile_identity", None),
+        "focal_pose_assignment": focal_assignment,
+    }
+    blocker_slots = set(int(slot) for slot in pressure.get("slots", ()))
+    if factor is not None and factor.get("kind") == "stationary_blockage":
+        blocker_slots.add(int(factor["blocker_slot"]))
+    assigned_poses = {}
+    for slot in sorted(blocker_slots):
+        pose = env.sim.pose[:, slot]
+        saved_poses = getattr(env, "phase4_pressure_assigned_blocker_pose", None)
+        saved_mask = getattr(env, "phase4_pressure_assigned_blocker_mask", None)
+        if (isinstance(saved_poses, torch.Tensor) and
+                tuple(saved_poses.shape) == tuple(env.sim.pose.shape) and
+                isinstance(saved_mask, torch.Tensor) and
+                tuple(saved_mask.shape) == (env.n, 6)):
+            pose = torch.where(saved_mask[:, slot, None], saved_poses[:, slot], pose)
+        elif (factor is not None and factor.get("kind") == "stationary_blockage"
+                and slot == int(factor["blocker_slot"])):
+            saved_pose = getattr(env, "stationary_blockage_assigned_pose", None)
+            if isinstance(saved_pose, torch.Tensor):
+                pose = saved_pose
+        assigned_poses[str(slot)] = pose.detach().cpu().reshape(env.n, 3).tolist()
+    def rows(name, default, *, dtype=None):
+        value = getattr(env, name, None)
+        if not isinstance(value, torch.Tensor) or tuple(value.shape) != (env.n,):
+            value = torch.full((env.n,), default, device=env.device, dtype=dtype)
+        return value.detach().cpu().tolist()
+    return {
+        "schema": PRESSURE_ANCHOR_RESET_CHECKPOINT_SCHEMA,
+        "anchor_schema": PRESSURE_ANCHOR_SCHEMA,
+        "reset_seed": int(reset_seed),
+        "episode_index": int(episode_index),
+        "world_indices": list(range(env.n)),
+        "capture_stage": env.phase4_pressure_anchor_capture_stage,
+        "world_reset_seeds": env.phase4_pressure_reset_seed.detach().cpu().reshape(-1).tolist(),
+        "world_values_m": env.phase4_pressure_anchor_y_m.detach().cpu().reshape(-1).tolist(),
+        "pressure_phase_rad": env.phase4_pressure_phase.detach().cpu().reshape(-1).tolist(),
+        "reset_generation": env.curriculum_episode_generation.detach().cpu().reshape(-1).tolist(),
+        "pressure_config_sha256": _canonical_digest(config_identity),
+        "assigned_blocker_slots": sorted(blocker_slots),
+        "assigned_blocker_poses_m": assigned_poses,
+        "contact_geometry_id": getattr(env, "contact_geometry_id", None),
+        "contact_geometry_config_sha256": (None if contact_config is None else
+            _canonical_digest(contact_config)),
+        "start_profile_assignment_sha256": (None if profile_assignment is None else
+            _canonical_digest(profile_assignment)),
+        "focal_pose_assignment_sha256": (None if focal_assignment is None else
+            _canonical_digest(focal_assignment)),
+        "start_profile_applied": rows("phase4_start_profile_applied", False,
+            dtype=torch.bool),
+        "start_profile_legality": rows("phase4_start_profile_legality", False,
+            dtype=torch.bool),
+        "contact_profile_legality": rows("phase4_contact_profile_legality", False,
+            dtype=torch.bool),
+        "focal_pose_applied": rows("phase4_focal_pose_reset_applied", False,
+            dtype=torch.bool),
+        "reset_failure_mask": rows("phase4_reset_failure_mask", False,
+            dtype=torch.bool),
+        "source_identity_sha256": source_hash,
+    }
+
+
+def _validate_pressure_anchor_reset_state(state, *, source_hash):
+    """Validate checkpoint pressure/reset structure without touching live state."""
+    expected = {"schema", "anchor_schema", "reset_seed", "episode_index",
+        "world_indices", "capture_stage", "world_reset_seeds", "world_values_m", "pressure_phase_rad",
+        "reset_generation", "pressure_config_sha256", "assigned_blocker_slots",
+        "assigned_blocker_poses_m", "contact_geometry_id",
+        "contact_geometry_config_sha256", "start_profile_assignment_sha256",
+        "focal_pose_assignment_sha256", "start_profile_applied",
+        "start_profile_legality", "contact_profile_legality",
+        "focal_pose_applied", "reset_failure_mask", "source_identity_sha256"}
+    if (not isinstance(state, dict) or set(state) != expected or
+            state.get("schema") != PRESSURE_ANCHOR_RESET_CHECKPOINT_SCHEMA or
+            state.get("anchor_schema") != PRESSURE_ANCHOR_SCHEMA or
+            state.get("capture_stage") not in ("pre_blocker_pose", "post_start_profile_pose") or
+            state.get("source_identity_sha256") != source_hash):
+        raise ValueError("MECO checkpoint pressure-anchor reset contract is missing or incompatible")
+    rows = state["world_values_m"]
+    phases = state["pressure_phase_rad"]
+    reset_seeds = state["world_reset_seeds"]
+    generations = state["reset_generation"]
+    worlds = state["world_indices"]
+    if (type(state["reset_seed"]) is not int or type(state["episode_index"]) is not int or
+            state["episode_index"] < 0 or not isinstance(worlds, list) or not worlds or
+            any(type(world) is not int or world < 0 for world in worlds) or
+            worlds != list(range(len(worlds))) or not isinstance(reset_seeds, list) or
+            len(reset_seeds) != len(worlds) or
+            any(type(value) is not int for value in reset_seeds) or
+            not isinstance(rows, list) or
+            not isinstance(phases, list) or not isinstance(generations, list) or
+            len(rows) != len(worlds) or len(phases) != len(worlds) or
+            len(generations) != len(worlds) or
+            any(type(value) not in (int, float) or not math.isfinite(value)
+                for value in (*rows, *phases)) or
+            any(type(value) is not int or value < 0 for value in generations)):
+        raise ValueError("MECO checkpoint pressure-anchor world rows are malformed")
+    for name in ("pressure_config_sha256",):
+        digest = state[name]
+        if not isinstance(digest, str) or len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest):
+            raise ValueError("MECO checkpoint pressure configuration digest is malformed")
+    for name in ("contact_geometry_config_sha256", "start_profile_assignment_sha256",
+                 "focal_pose_assignment_sha256"):
+        digest = state[name]
+        if digest is not None and (not isinstance(digest, str) or len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest)):
+            raise ValueError("MECO checkpoint Phase 4 assignment digest is malformed")
+    slots = state["assigned_blocker_slots"]
+    poses = state["assigned_blocker_poses_m"]
+    if (not isinstance(slots, list) or
+            any(type(slot) is not int or not 0 <= slot < 6 for slot in slots) or
+            slots != sorted(set(slots)) or
+            not isinstance(poses, dict) or set(poses) != {str(slot) for slot in slots}):
+        raise ValueError("MECO checkpoint assigned blocker identities are malformed")
+    for pose_rows in poses.values():
+        if (not isinstance(pose_rows, list) or len(pose_rows) != len(worlds) or
+                any(not isinstance(pose, list) or len(pose) != 3 or
+                    any(type(value) not in (int, float) or not math.isfinite(value)
+                        for value in pose) for pose in pose_rows)):
+            raise ValueError("MECO checkpoint assigned blocker poses are malformed")
+    for name in ("start_profile_applied", "start_profile_legality",
+                 "contact_profile_legality", "focal_pose_applied",
+                 "reset_failure_mask"):
+        values = state[name]
+        if (not isinstance(values, list) or len(values) != len(worlds) or
+                any(type(value) is not bool for value in values)):
+            raise ValueError("MECO checkpoint Phase 4 profile rows are malformed")
+    if state["contact_geometry_id"] is not None and not isinstance(
+            state["contact_geometry_id"], str):
+        raise ValueError("MECO checkpoint contact geometry identity is malformed")
+    return state
 
 
 def _validate_paired_calibration_replay_binding(binding, worker, *, device,
@@ -1407,7 +1564,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
                              p_mode, p_cost_scale, p_points_per_grid_edge,
-                             prediction_mode="cv", tracking_was_available=None):
+                             prediction_mode="cv", tracking_was_available=None,
+                             action_generator=None):
     """Build stable full-pose support and sample from its exact masked softmax."""
     # Plan A needs the canonical observation provenance, but has no candidate
     # table, teacher action, or candidate feature rows. Capture only that
@@ -1588,7 +1746,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     categorical_logits = torch.where(has_legal_support, selection_logits,
                                       torch.zeros_like(selection_logits))
     action, logprob, entropy = sample_candidate_action(categorical_logits[None],
-        deterministic=(True if production_inference_failed else deterministic))
+        deterministic=(True if production_inference_failed else deterministic),
+        generator=action_generator)
     selected_index = torch.where(has_legal_support, action.reshape(()),
                                  torch.full((), -1, device=action.device,
                                             dtype=action.dtype))
@@ -1698,7 +1857,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
                       prediction_mode="cv",
                       commitment: CandidateCommitment | None = None,
-                      tracking_was_available=None):
+                      tracking_was_available=None, action_generator=None):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
         return _prepare_plan_a_decision(track, model, env, graph, episode_id,
@@ -1708,7 +1867,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
             p_points_per_grid_edge=p_points_per_grid_edge,
             prediction_mode=prediction_mode,
-            tracking_was_available=tracking_was_available)
+            tracking_was_available=tracking_was_available,
+            action_generator=action_generator)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
@@ -1770,7 +1930,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         path_cost = None
     action, logprob, entropy = sample_candidate_action(decision["logits"],
         deterministic=(True if decision.get("inference_status") ==
-                       "deterministic_fallback" else deterministic))
+                       "deterministic_fallback" else deterministic),
+        generator=action_generator)
     selected_action_payload = (None if candidate_set.device_batch is None else
         candidate_set.device_batch.gather_action_payload(action))
     candidate_set = materialize_device_candidate_evidence(candidate_set)
@@ -1794,6 +1955,42 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
 
 def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
+
+
+def _validate_module_checkpoint_state(module, state, *, label):
+    expected = module.state_dict()
+    if not isinstance(state, dict) or set(state) != set(expected):
+        raise ValueError(f"{label} checkpoint keys do not match the live architecture")
+    for name, target in expected.items():
+        value = state[name]
+        if (not isinstance(value, torch.Tensor) or value.shape != target.shape or
+                value.dtype != target.dtype):
+            raise ValueError(f"{label} checkpoint tensor contract mismatch at {name}")
+        if (value.is_floating_point() or value.is_complex()) and not bool(
+                torch.isfinite(value).all()):
+            raise ValueError(f"{label} checkpoint tensor is non-finite at {name}")
+
+
+def _validate_global_rng_checkpoint(payload, device):
+    cpu_state = payload.get("rng_torch")
+    python_state = payload.get("rng_python")
+    if not isinstance(cpu_state, torch.Tensor):
+        raise ValueError("MECO checkpoint CPU RNG state is missing or malformed")
+    try:
+        torch.Generator(device="cpu").set_state(cpu_state)
+        random.Random().setstate(python_state)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("MECO checkpoint CPU/Python RNG state is malformed") from exc
+    device_state = payload.get("rng_device")
+    if str(device).startswith("cuda"):
+        if not isinstance(device_state, torch.Tensor):
+            raise ValueError("MECO checkpoint device RNG state is missing or malformed")
+        try:
+            torch.Generator(device=torch.device(device)).set_state(device_state)
+        except (RuntimeError, TypeError) as exc:
+            raise ValueError("MECO checkpoint device RNG state is malformed") from exc
+    elif device_state is not None:
+        raise ValueError("MECO checkpoint has unexpected device RNG state")
 
 
 def _apply_candidate_hysteresis(logits, table, candidate_batch=None):
@@ -2012,133 +2209,165 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
     return decision
 
 
-def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
-                *, update_number, diagnostic_output):
-    rewards = torch.stack([row["reward"] for row in rows])
-    dones = torch.tensor([row["done"] for row in rows], device=rewards.device,
-                         dtype=rewards.dtype)
-    old_logprob = torch.stack([row["logprob"] for row in rows]).detach()
-    old_value = torch.stack([row["value"] for row in rows]).detach()
-    # Validate exact rollout/replay identity for Plan A before any optimizer
-    # step. The support tensors are shared by each row, so digesting catches
-    # accidental in-place mutation of pair IDs, descriptors, mask, or paths.
+def _pack_five_track_ppo_batch(track, rows, config, bootstrap_value):
+    """Pack one fixed-capacity rollout into its typed device contract."""
+    if not rows:
+        raise RuntimeError("cannot pack an empty PPO rollout")
+    graph = rows[0].get("graph_object")
+    if graph is None:
+        raise RuntimeError("PPO rollout lacks its frozen legal pose graph")
+    batch = FiveTrackPpoBatchV2.allocate(track=track,
+        capacity=config.rollout_steps, device=config.device,
+        raster_shape=tuple(rows[0]["raster"].shape[-2:]),
+        node_capacity=graph.node_capacity, nx=graph.nx, ny=graph.ny,
+        feature_count=(MECO_CANDIDATE_RAW_FEATURE_COUNT
+                       if track in ("C1", "C2") else 0),
+        dtype=rows[0]["raster"].dtype)
+    if len(rows) > batch.capacity:
+        raise RuntimeError("PPO rollout exceeds its fixed device batch capacity")
+    device = batch.device
+    for slot, row in enumerate(rows):
+        next_value = (rows[slot + 1]["value"] if slot + 1 < len(rows)
+                      else bootstrap_value)
+        rollout_probs = categorical_from_candidate_logits(
+            row["rollout_logits"]).probs.detach().reshape(-1)
+        write_common_slot(batch, slot,
+            raster=row["raster"], globals_=row["globals"],
+            hidden_before=row["hidden_before"], action=row["action"],
+            old_logprob=row["logprob"], old_value=row["value"],
+            next_value=next_value, reward=row["reward"],
+            episode_boundary=torch.as_tensor(row["done"], device=device,
+                dtype=torch.bool),
+            execution_failure=torch.as_tensor(row["execution_failure"],
+                device=device, dtype=torch.bool))
+        if track in ("A1", "A2", "A3"):
+            graph_features = (row["graph"].get("node_features")
+                if isinstance(row.get("graph"), dict) else None)
+            if graph_features is None:
+                graph_features = batch.plan_a.node_features[slot]
+            write_plan_a_slot(batch, slot, graph=graph,
+                support=row["support"], graph_node_features=graph_features,
+                route_cost=row["route_cost_nodes"],
+                risk_cost=row["risk_cost_nodes"],
+                old_action_probs=rollout_probs)
+        else:
+            candidate_set = row.get("candidate_set")
+            device_batch = (None if candidate_set is None else
+                            candidate_set.device_batch)
+            if device_batch is None:
+                raise RuntimeError(f"{track} rollout lacks its frozen device candidate batch")
+            write_plan_c_slot(batch, slot, device_batch=device_batch,
+                route_cost=row["route_cost"], risk_cost=row["risk_cost"],
+                old_action_probs=rollout_probs)
+    # Padding duplicates a valid schema row so every model forward remains
+    # finite. The slot-valid mask makes these rows optimizer no-ops.
+    source = len(rows) - 1
+    for slot in range(source + 1, batch.capacity):
+        for group in (batch.common, batch.plan_a, batch.plan_c):
+            if group is None:
+                continue
+            for field in fields(group):
+                value = getattr(group, field.name)
+                value[slot].copy_(value[source])
+        batch.common.slot_valid[slot] = False
+        batch.common.actor_valid[slot] = False
+        batch.common.critic_valid[slot] = False
+    for slot in range(len(rows)):
+        write_slot_digest(batch, slot)
+    verdict = batch.device_contract_status() & validate_slot_digests(batch)
+    assert_async = getattr(torch, "_assert_async", None)
+    if assert_async is None:
+        raise RuntimeError("device-side PPO batch validation is unavailable")
+    assert_async(verdict, "fixed five-track PPO batch contract/replay digest failed")
+    return batch
+
+
+def _ppo_update(track, model, value_head, optimizer, batch, config,
+                *, rollout_steps, geometry, ppo_rng):
+    common = batch.common
+    assert_async = getattr(torch, "_assert_async", None)
+    if assert_async is None:
+        raise RuntimeError("device-side PPO replay validation is unavailable")
+
+    def score_batch():
+        return score_five_track_ppo_batch(track, model, batch,
+            value_head=value_head,
+            field_length=float(geometry["field_length_m"]),
+            field_width=float(geometry["field_width_m"]),
+            resolution_m=float(geometry["resolution_m"]),
+            p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
+            p_points_per_grid_edge=config.p_points_per_grid_edge,
+            commitment_switch_column=(MECO_CANDIDATE_RAW_FEATURE_COUNT - 1
+                if track in ("C1", "C2") else None))
+
+    # Validate packed policy replay and row digests in one device-side check.
     with torch.no_grad():
-        current_model_parameters_sha256 = (
-            _model_id(model) if track in ("C1", "C2") else None)
-        for row_index, row in enumerate(rows):
-            support = row.get("support")
-            if support is None:
-                continue
-            expected_digest = row.get("support_digest")
-            actual_digest = plan_a_support_digest(support, row["graph_object"])
-            if (not expected_digest or expected_digest != support.support_digest or
-                    actual_digest != expected_digest):
-                raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
-            if row.get("execution_failure", False):
-                continue
-            replay = _policy_inputs_for_row(track, model, row,
-                                            row["hidden_before"], config)
-            replay_logprob = categorical_from_candidate_logits(
-                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
-            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
-                                  atol=5e-5, rtol=5e-5):
-                raise _logprob_replay_error(
-                    "Plan A rollout log-probability does not replay under frozen support",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output)
-        for row_index, row in enumerate(rows):
-            if track not in ("C1", "C2") or row.get("candidate_set") is None:
-                continue
-            expected = row.get("candidate_digest")
-            actual = candidate_digest(row["candidate_set"].table)
-            if not expected or expected != actual:
-                raise RuntimeError("Plan C immutable candidate table changed between rollout and PPO update")
-            replay_digest = _candidate_replay_digest(row["candidate_set"].table,
-                row["route_cost"], row["risk_cost"])
-            if replay_digest != row.get("candidate_replay_digest"):
-                raise RuntimeError("Plan C candidate route/risk costs changed between rollout and PPO update")
-            replay = _policy_inputs_for_row(track, model, row,
-                                            row["hidden_before"], config)
-            replay_logprob = categorical_from_candidate_logits(
-                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
-            rollout_fingerprints = row.get("replay_fingerprints")
-            replay_fingerprints = _candidate_replay_fingerprints(row, model,
-                model_parameters_sha256=current_model_parameters_sha256)
-            if (not isinstance(rollout_fingerprints, dict) or
-                    rollout_fingerprints != replay_fingerprints):
-                raise _logprob_replay_error(
-                    "Plan C frozen rollout inputs changed before PPO replay",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output,
-                    model_parameters_sha256=current_model_parameters_sha256)
-            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
-                                  atol=5e-5, rtol=5e-5):
-                raise _logprob_replay_error(
-                    "Plan C rollout log-probability does not replay under frozen candidate table",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output,
-                    model_parameters_sha256=current_model_parameters_sha256)
-    with torch.no_grad():
-        next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
-                      else bootstrap_value.reshape(()))
-    advantage, returns = _gae(rewards, dones, old_value, next_value,
-                              config.gamma, config.gae_lambda)
-    actor_rows = torch.tensor([not row.get("execution_failure", False) for row in rows],
-                              device=advantage.device, dtype=torch.bool)
-    actor_advantage = torch.zeros_like(advantage)
-    if bool(actor_rows.any()):
-        eligible_advantage = advantage[actor_rows]
-        actor_advantage[actor_rows] = (eligible_advantage - eligible_advantage.mean()) / \
-            eligible_advantage.std(unbiased=False).clamp_min(1e-8)
-    policy_losses = []; value_losses = []; entropies = []
-    count = len(rows)
+        replay = score_batch()
+        replay_logprob = categorical_from_candidate_logits(
+            replay["logits"]).log_prob(common.action)
+        replay_matches = ((replay_logprob - common.old_logprob).abs() <= 5e-5)
+        replay_probs = categorical_from_candidate_logits(replay["logits"]).probs
+        if batch.plan_a is not None:
+            frozen_probs = batch.plan_a.old_action_probs
+            action_mask = batch.plan_a.support_valid
+        else:
+            frozen_probs = batch.plan_c.old_action_probs
+            action_mask = batch.plan_c.candidate_valid
+        distribution_matches = ((replay_probs - frozen_probs).abs() <= 5e-5)
+        distribution_matches = (distribution_matches | ~action_mask).all(dim=-1)
+        replay_matches = (replay_matches & distribution_matches | ~common.slot_valid).all()
+        assert_async(replay["status"] & replay_matches,
+            "batched five-track PPO scorer/replay identity failed")
+    advantage, returns = gae_v2(batch, gamma=config.gamma,
+                               gae_lambda=config.gae_lambda)
+    actor_advantage = normalized_actor_advantage(batch, advantage)
+    policy_loss_sum = torch.zeros((), device=batch.device, dtype=common.reward.dtype)
+    value_loss_sum = torch.zeros_like(policy_loss_sum)
+    entropy_sum = torch.zeros_like(policy_loss_sum)
+    valid_count = common.slot_valid.to(common.reward.dtype).sum().clamp_min(1.)
     for _ in range(config.epochs):
-        order = torch.randperm(count, device=rewards.device)
-        for idx in order.tolist():
-            row = rows[idx]
-            current = _policy_inputs_for_row(track, model, row,
-                                             row["hidden_before"], config)
-            logits = current["logits"]
-            value = _value(value_head, row["globals"], current["hidden"]).reshape(())
-            value_loss = .5 * (value - returns[idx]).square()
-            if row.get("execution_failure", False):
-                # Do not credit a safely remasked fallback as the sampled PPO
-                # action. Keep the transition for critic learning and audit.
-                loss = config.value_coef * value_loss
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
-                                         config.max_grad_norm)
-                optimizer.step()
-                policy_losses.append(0.)
-                value_losses.append(float(value_loss.detach()))
-                entropies.append(0.)
-                continue
-            dist = categorical_from_candidate_logits(logits)
-            action = row["action"].reshape(1)
-            logprob = dist.log_prob(action).reshape(())
-            entropy = dist.entropy().mean()
-            ratio = (logprob - old_logprob[idx]).exp()
-            unclipped = ratio * actor_advantage[idx]
-            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * actor_advantage[idx]
+        order = ppo_rng.permutation_indices(batch.capacity)
+        for position in range(batch.capacity):
+            index = order[position].reshape(1)
+            current = score_batch()
+            assert_async(current["status"],
+                "batched five-track PPO scorer rejected a replay row")
+            dist = categorical_from_candidate_logits(current["logits"])
+            logprob = dist.log_prob(common.action)
+            entropy = dist.entropy()
+            ratio = (logprob - common.old_logprob).exp()
+            unclipped = ratio * actor_advantage
+            clipped = ratio.clamp(1. - config.clip_coef,
+                                  1. + config.clip_coef) * actor_advantage
             policy_loss = -torch.minimum(unclipped, clipped)
-            loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
-            optimizer.zero_grad(set_to_none=True)
+            value_loss = .5 * (current["value"] - returns).square()
+            actor = common.actor_valid & common.slot_valid
+            critic = common.critic_valid & common.slot_valid
+            row_actor = policy_loss.index_select(0, index).reshape(())
+            row_value = value_loss.index_select(0, index).reshape(())
+            row_entropy = entropy.index_select(0, index).reshape(())
+            actor_enabled = actor.index_select(0, index).reshape(())
+            critic_enabled = critic.index_select(0, index).reshape(())
+            active = common.slot_valid.index_select(0, index).reshape(())
+            loss = (torch.where(actor_enabled,
+                row_actor - config.entropy_coef * row_entropy,
+                torch.zeros_like(row_actor)) +
+                config.value_coef * row_value * critic_enabled.to(row_value.dtype))
+            optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
-                                     config.max_grad_norm)
-            optimizer.step()
-            policy_losses.append(float(policy_loss.detach()))
-            value_losses.append(float(value_loss.detach()))
-            entropies.append(float(entropy.detach()))
-    return {"policy_loss": sum(policy_losses) / max(1, len(policy_losses)),
-            "value_loss": sum(value_losses) / max(1, len(value_losses)),
-            "entropy": sum(entropies) / max(1, len(entropies)),
-            "rollout_return": float(rewards.sum().detach()),
-            "rollout_steps": count}
+            optimizer.step(active, max_grad_norm=config.max_grad_norm)
+            policy_loss_sum += torch.where(actor_enabled, row_actor,
+                                            torch.zeros_like(row_actor))
+            value_loss_sum += torch.where(critic_enabled, row_value,
+                                           torch.zeros_like(row_value))
+            entropy_sum += torch.where(actor_enabled, row_entropy,
+                                        torch.zeros_like(row_entropy))
+    denominator = valid_count * config.epochs
+    return {"policy_loss": float((policy_loss_sum / denominator).detach()),
+            "value_loss": float((value_loss_sum / denominator).detach()),
+            "entropy": float((entropy_sum / denominator).detach()),
+            "rollout_return": float((common.reward * common.slot_valid).sum().detach()),
+            "rollout_steps": rollout_steps}
 
 
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
@@ -2247,8 +2476,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "qualification_protocol_id": warm_start_provenance.get("protocol_id"),
             "qualification_protocol_sha256": warm_start_provenance.get("qualification_protocol_sha256")}
     value_head = ValueHead().to(config.device)
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(value_head.parameters()),
-                                 lr=config.learning_rate)
+    optimizer = MaskedSequentialAdamV1(
+        list(model.parameters()) + list(value_head.parameters()),
+        device=config.device, learning_rate=config.learning_rate)
+    ppo_rng = DevicePpoRngV1.from_seed(config.seed, device=config.device)
     update = 0
     episode = 0
     history = []
@@ -2256,9 +2487,15 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     resume_rng_python = None
     resume_rng_device = None
     resume_task_progress = None
+    resume_payload = None
+    resume_pressure_anchor_state = None
+    resume_reset_rng_state = None
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
-        if payload.get("schema_version") != 1 or payload.get("sources") != sources:
+        if (payload.get("schema_version") != 5 or payload.get("sources") != sources or
+                payload.get("ppo_batch_schema_id") != PPO_BATCH_SCHEMA_ID or
+                payload.get("ppo_optimizer_schema_id") != PPO_OPTIMIZER_SCHEMA_ID or
+                payload.get("ppo_rng_schema_id") != PPO_RNG_SCHEMA_ID):
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
         if payload.get("protocol_id") != protocol_id:
             raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
@@ -2270,10 +2507,30 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         requested_config.pop("updates", None)
         if saved_config != requested_config:
             raise ValueError("MECO immutable run configuration mismatch")
-        model.load_state_dict(payload["model"])
-        initialization_record = payload.get("initialization") or {"mode": "random_initialization"}
-        value_head.load_state_dict(payload["value_head"])
-        optimizer.load_state_dict(payload["optimizer"])
+        anchor_state = _validate_pressure_anchor_reset_state(
+            payload.get("pressure_anchor_reset_state"), source_hash=source_hash)
+        saved_episode = payload.get("episode")
+        if (type(saved_episode) is not int or saved_episode < 0 or
+                anchor_state["episode_index"] != saved_episode or
+                anchor_state["reset_seed"] != task_seed + saved_episode or
+                anchor_state["world_reset_seeds"] !=
+                    [anchor_state["reset_seed"]] * len(anchor_state["world_indices"]) or
+                anchor_state["reset_generation"] !=
+                    [saved_episode + 2] * len(anchor_state["world_indices"])):
+            raise ValueError("MECO checkpoint pressure-anchor reset episode identity mismatch")
+        resume_payload = payload
+        resume_pressure_anchor_state = anchor_state
+        resume_reset_rng_state = payload.get("reset_rng_state")
+        if (not isinstance(resume_reset_rng_state, dict) or
+                resume_reset_rng_state.get("schema_id") != "meco-3v3-per-world-rng-v2"):
+            raise ValueError("MECO checkpoint reset RNG schema is missing or incompatible")
+        _validate_module_checkpoint_state(model, payload.get("model"),
+                                          label="policy model")
+        _validate_module_checkpoint_state(value_head, payload.get("value_head"),
+                                          label="value head")
+        optimizer.validate_state_dict(payload.get("optimizer"))
+        ppo_rng.validate_state_dict(payload.get("ppo_rng"))
+        _validate_global_rng_checkpoint(payload, config.device)
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         prior_task = payload.get("task_assignment") or {}
         if (task_assignment.get("assignment_id") is not None
@@ -2289,8 +2546,31 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         resume_rng_device = payload["rng_device"]
     env = make_curriculum_env(task_scenario, task_category, 1,
         config.device, task_seed, phase4_factor=phase4_factor)
-    chunk_seed = task_seed
+    if resume_payload is not None:
+        # Validate every saved per-world counter and generator before the
+        # deterministic chunk reset or any checkpoint state is applied.
+        env.validate_reset_rng_state_dict(resume_reset_rng_state)
+    chunk_seed = (resume_pressure_anchor_state["reset_seed"]
+                  if resume_pressure_anchor_state is not None else task_seed + episode)
     _reset_episode(env, chunk_seed)
+    chunk_pressure_anchor_state = _pressure_anchor_reset_state(env,
+        reset_seed=chunk_seed, episode_index=episode, source_hash=source_hash)
+    if resume_payload is not None:
+        observed_state = dict(chunk_pressure_anchor_state)
+        observed_state["reset_generation"] = resume_pressure_anchor_state["reset_generation"]
+        if resume_pressure_anchor_state != observed_state:
+            raise ValueError("MECO checkpoint pressure-anchor reset state differs from deterministic chunk reset")
+        env.curriculum_episode_generation.copy_(torch.as_tensor(
+            resume_pressure_anchor_state["reset_generation"], device=env.device,
+            dtype=env.curriculum_episode_generation.dtype))
+        chunk_pressure_anchor_state = resume_pressure_anchor_state
+        env.load_reset_rng_state_dict(resume_reset_rng_state)
+        model.load_state_dict(resume_payload["model"])
+        initialization_record = (resume_payload.get("initialization") or
+                                 {"mode": "random_initialization"})
+        value_head.load_state_dict(resume_payload["value_head"])
+        optimizer.load_state_dict(resume_payload["optimizer"])
+        ppo_rng.load_state_dict(resume_payload["ppo_rng"])
     if resume_rng_torch is not None:
         torch.set_rng_state(resume_rng_torch)
         random.setstate(resume_rng_python)
@@ -2414,7 +2694,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
 
     def abort_empty_support(exc, rows, update_number, update_events):
         nonlocal episode, task_aborts, hidden, commitment, episode_generation
-        nonlocal tracking_was_available
+        nonlocal tracking_was_available, chunk_pressure_anchor_state
         aborted_episode_id = episode_generation
         retained = [row for row in rows if row.get("episode_id") != aborted_episode_id]
         discarded_count = len(rows) - len(retained)
@@ -2442,7 +2722,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "schema_version": 1, "run_id": run_id,
             "events": empty_support_diagnostics})
         episode = next_episode
-        _reset_episode(env, task_seed + episode)
+        episode_seed = task_seed + episode
+        _reset_episode(env, episode_seed)
+        chunk_pressure_anchor_state = _pressure_anchor_reset_state(env,
+            reset_seed=episode_seed, episode_index=episode, source_hash=source_hash)
         hidden = None
         tracking_was_available = None
         commitment = None
@@ -2469,6 +2752,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
+                            action_generator=ppo_rng.action,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
                             value_head=value_head)
@@ -2655,6 +2939,9 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     episode += 1
                     episode_seed = task_seed + episode
                     _reset_episode(env, episode_seed)
+                    chunk_pressure_anchor_state = _pressure_anchor_reset_state(env,
+                        reset_seed=episode_seed, episode_index=episode,
+                        source_hash=source_hash)
                     hidden = None
                     tracking_was_available = None
                     episode_generation = _episode_id(run_id, episode)
@@ -2673,6 +2960,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
+                            action_generator=ppo_rng.action,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
                             deterministic=True,
@@ -2694,9 +2982,14 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         raise RuntimeError(
                             "empty-support bootstrap discarded the rollout to preserve episode boundaries") from exc
                     bootstrap_value = torch.zeros_like(rows[-1]["value"])
-            stats = _ppo_update(config.track, model, value_head, optimizer, rows,
-                                config, bootstrap_value, update_number=update,
-                                diagnostic_output=output)
+            ppo_batch = _pack_five_track_ppo_batch(
+                config.track, rows, config, bootstrap_value)
+            stats = _ppo_update(config.track, model, value_head, optimizer,
+                ppo_batch, config, rollout_steps=len(rows),
+                geometry={"field_length_m": float(env.sim.field_length),
+                    "field_width_m": float(env.sim.field_width),
+                    "resolution_m": float(env.planner.resolution)},
+                ppo_rng=ppo_rng)
             update += 1
             update_heartbeat()
             stats.update(update=update, episode=episode, track=config.track,
@@ -2726,7 +3019,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     row["candidate_recall"]["candidate_recall"]
                     for row in rows) / len(rows)
             history.append(stats)
-            payload = {"schema_version": 1, "config": asdict(config),
+            payload = {"schema_version": 5, "config": asdict(config),
+                "ppo_batch_schema_id": PPO_BATCH_SCHEMA_ID,
+                "ppo_optimizer_schema_id": PPO_OPTIMIZER_SCHEMA_ID,
+                "ppo_rng_schema_id": PPO_RNG_SCHEMA_ID,
                 "prediction_contract": prediction_contract(config.prediction_mode),
                 "qualification_protocol_id": qualification_protocol_id,
                 "qualification_protocol_sha256": qualification_protocol_sha256,
@@ -2736,10 +3032,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "task_assignment": task_assignment,
                 "phase4_training": run_manifest["phase4_training"],
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
+                "pressure_anchor_reset_state": chunk_pressure_anchor_state,
+                "reset_rng_state": env.reset_rng_state_dict(),
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),
                 "task_progress": task_progress_payload(),
                 "value_head": value_head.state_dict(), "optimizer": optimizer.state_dict(),
+                "ppo_rng": ppo_rng.state_dict(),
                 "rng_torch": torch.get_rng_state(), "rng_python": random.getstate(),
                 "rng_device": torch.cuda.get_rng_state(torch.device(config.device)) if config.device.startswith("cuda") else None,
                 "history": history}
@@ -3875,8 +4174,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     phase4_focal_pose_record = None
                     if phase4_focal_pose_assignment is not None:
                         from .meco_phase4_context import phase4_focal_pose_evaluator_diagnostics
+                        focal_assignment = env.phase4_focal_pose_assignment
+                        focal_applied = env.phase4_focal_pose_reset_applied.detach().cpu().tolist()
+                        focal_truth_preserved = env.phase4_focal_pose_truth_preserved.detach().cpu().tolist()
+                        focal_event = {
+                            "assignment_sha256": focal_assignment["assignment_sha256"],
+                            "pair_assignment_sha256": focal_assignment["pair_assignment_sha256"],
+                            "arm": focal_assignment["arm"],
+                            "requested_offset_name": focal_assignment["requested_offset_name"],
+                            "requested_offset_config_sha256": focal_assignment[
+                                "requested_offset_config_sha256"],
+                            "applied_before_policy_observation": focal_applied,
+                            "physical_truth_unchanged": focal_truth_preserved,
+                            "relocalization_time_s": None,
+                            "pose_error_recovery_rate": None,
+                            "safety_contact_rate": None,
+                            "qualification_eligible": False,
+                        }
                         phase4_focal_pose_record = phase4_focal_pose_evaluator_diagnostics(
-                            env, env.phase4_focal_pose_runtime)
+                            env, focal_event)
                     episode_metric_ledger = None
                     replay_frames = []
                     try:
@@ -4503,6 +4819,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         metric_ledger_record = episode_metric_ledger.to_record()
                         metrics.update(metric_ledger_record["safety_metrics"])
                         phase4_runtime_record = dict(env.phase4_runtime_metrics)
+                        pressure_anchor_record = _pressure_anchor_reset_state(env,
+                            reset_seed=seed, episode_index=episode_index,
+                            source_hash=source_hash)
+                        pressure_anchor_record["values_m"] = pressure_anchor_record.pop(
+                            "world_values_m")
+                        pressure_anchor_record["schema"] = PRESSURE_ANCHOR_REPORT_SCHEMA
+                        pressure_anchor_record["world_coverage"] = "all_environment_rows"
                         if (phase4_factor and phase4_factor.get("kind") ==
                                 "stationary_blockage"):
                             slot = phase4_factor["blocker_slot"]
@@ -4590,6 +4913,33 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                             "goal_attempt_coverage_available") is True})
                             for factor_id in phase4_route_outcome_factor_ids
                         } if phase4_route_outcome_factor_ids else None)
+                        phase4_start_profile_report = None
+                        if phase4_start_profile_assignment is not None:
+                            legal_rows = env.phase4_start_profile_legality.detach().cpu().tolist()
+                            applied_rows = env.phase4_start_profile_applied.detach().cpu().tolist()
+                            validated_rows = env.phase4_start_profile_validated_world_count.detach().cpu().tolist()
+                            legal_world_count = sum(int(legal and validated)
+                                for legal, validated in zip(legal_rows, validated_rows))
+                            validated_world_count = sum(int(value) for value in validated_rows)
+                            phase4_start_profile_report = {
+                                "schema": "meco-phase4-start-profile-report-v2",
+                                "profile_applied_before_observation": bool(all(applied_rows)),
+                                "validated_pose_world_count": validated_world_count,
+                                "validated_pose_legal_world_count": legal_world_count,
+                                "validated_pose_world_indices": [index for index, value
+                                    in enumerate(validated_rows) if value],
+                                "validated_pose_world_index_semantics":
+                                    "zero_based_simulator_batch_index",
+                                "per_world_legal": legal_rows,
+                                "legal_start_validation_rate": (
+                                    legal_world_count / validated_world_count
+                                    if validated_world_count else None),
+                                "outcome_metrics": {
+                                    name: metrics[name] for name in (
+                                        "success", "scores", "useful_throughput",
+                                        "completed_cycles")},
+                                "qualification_eligible": False,
+                            }
                         fuel_physics = getattr(env, "fuel_physics", None)
                         physics_config = (vars(fuel_physics.config)
                                           if fuel_physics is not None else None)
@@ -4692,27 +5042,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "profile_config_sha256"],
                                 "assignment_sha256": phase4_start_profile_assignment[
                                     "assignment_sha256"],
-                                "profile_applied_before_observation": bool(
-                                    env.phase4_start_profile_applied),
-                                "validated_pose_world_count": int(
-                                    env.phase4_start_profile_validated_world_count),
-                                "validated_pose_legal_world_count": int(sum(
-                                    env.phase4_start_profile_legality or ())),
-                                "validated_pose_world_indices": list(range(
-                                    int(env.phase4_start_profile_validated_world_count))),
-                                "validated_pose_world_index_semantics":
-                                    "zero_based_simulator_batch_index",
-                                "per_world_legal": list(
-                                    env.phase4_start_profile_legality or ()),
-                                "legal_start_validation_rate": float(
-                                    env.phase4_start_profile_validation_rate),
-                                "outcome_metrics": {
-                                    name: metrics[name] for name in (
-                                        "success", "scores", "useful_throughput",
-                                        "completed_cycles")},
-                                "qualification_eligible": False,
-                            } if phase4_start_profile_assignment is not None else None),
+                                **phase4_start_profile_report,
+                            } if phase4_start_profile_report is not None else None),
                             "phase4_focal_pose": phase4_focal_pose_record,
+                            "phase4_pressure_anchor": pressure_anchor_record,
                             "phase4_teammate_behavior": (
                                 phase4_teammate_behavior_record(
                                     phase4_teammate_behavior_assignment,

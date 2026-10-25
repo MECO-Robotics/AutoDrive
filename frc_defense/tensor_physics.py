@@ -25,6 +25,46 @@ def _require_torch():
         raise RuntimeError("Tensor simulation requires PyTorch; install torch first")
 
 
+RESET_RNG_SCHEMA_ID = "meco-per-world-reset-rng-v2"
+
+
+def counter_uniform(world_seed, counter, active, tail_shape, *, dtype=None):
+    """Counter-based per-world uniform draws with no inactive-row state advance."""
+    shape = tuple(int(size) for size in tail_shape)
+    count = math.prod(shape) if shape else 1
+    offsets = torch.arange(count, device=world_seed.device, dtype=torch.long)
+    values = (world_seed[:, None] + counter[:, None] * 0x9E3779B1 +
+              offsets[None, :] * 0x85EBCA77) & 0xffffffff
+    values = (values ^ (values >> 16)) * 0x7FEB352D & 0xffffffff
+    values = (values ^ (values >> 15)) * 0x846CA68B & 0xffffffff
+    values = (values ^ (values >> 16)) & 0xffffffff
+    sample = (values.to(torch.float64) + .5) * (1. / 4294967296.)
+    sample = sample.to(dtype=dtype or torch.float32)
+    if shape:
+        sample = sample.reshape((world_seed.shape[0], *shape))
+    else:
+        sample = sample[:, 0]
+    return torch.where(active.reshape((world_seed.shape[0],) + (1,) * len(shape)),
+                       sample, torch.zeros_like(sample))
+
+
+def counter_normal(world_seed, counter, active, tail_shape, *, dtype=None):
+    """Box-Muller normal draws backed by the same isolated per-world stream."""
+    shape = tuple(int(size) for size in tail_shape)
+    count = math.prod(shape) if shape else 1
+    uniforms = counter_uniform(world_seed, counter, active, (2 * count,), dtype=torch.float64)
+    uniforms = uniforms.reshape(world_seed.shape[0], 2, count)
+    first = uniforms[:, 0].clamp_min(2.0 ** -32)
+    sample = torch.sqrt(-2. * torch.log(first)) * torch.cos(2. * math.pi * uniforms[:, 1])
+    sample = sample.to(dtype=dtype or torch.float32)
+    if shape:
+        sample = sample.reshape((world_seed.shape[0], *shape))
+    else:
+        sample = sample[:, 0]
+    return torch.where(active.reshape((world_seed.shape[0],) + (1,) * len(shape)),
+                       sample, torch.zeros_like(sample))
+
+
 def swerve_heading_rate(error, omega_limit, angular_acceleration,
                         current_rate=None, control_dt=None):
     """Return a yaw-rate target with stopping-distance and rate feedback."""
@@ -80,6 +120,8 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
     offense-versus-defense environment. Larger batches use the same per-robot
     swerve, field, obstacle, and pairwise-contact models.
     """
+    reset_rng_schema_id = RESET_RNG_SCHEMA_ID
+
     def __init__(self, num_envs=1, device="cuda", seed=0, dt=.02,
                  field_length=16.54, field_width=8.21, robot_length=.9,
                  robot_width=.9, max_speed=4.8, max_acceleration=8.,
@@ -111,6 +153,9 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         pairs=torch.triu_indices(self.num_robots,self.num_robots,offset=1,device=self.device)
         self._collision_pair_i,self._collision_pair_j=pairs[0],pairs[1]
         self.generator = torch.Generator(device=self.device).manual_seed(int(seed or 0))
+        world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+        self._reset_rng_seed = (world_ids * 0x1F123BB5 + int(seed or 0)) & 0x7fffffff
+        self._reset_rng_counter = torch.zeros(self.n, device=self.device, dtype=torch.long)
         self.field_length, self.field_width = float(field_length), float(field_width)
         self.contact_iterations = max(1, int(contact_iterations))
         self.field_sweep_spacing = float(field_sweep_spacing)
@@ -239,7 +284,11 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
     def state(self): return TensorState(self.pose,self.velocity)
 
     def reset(self, seed=None, pose=None, velocity=None):
-        if seed is not None: self.generator.manual_seed(int(seed))
+        if seed is not None:
+            self.generator.manual_seed(int(seed))
+            world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+            self._reset_rng_seed.copy_((world_ids * 0x1F123BB5 + int(seed)) & 0x7fffffff)
+        self._reset_rng_counter.zero_()
         self.pose.zero_(); self.velocity.zero_(); self.module_angle.zero_(); self.module_steer_rate.zero_()
         self.module_drive_speed.zero_(); self.module_current.zero_(); self.module_supply_current.zero_()
         self.robot_current.zero_(); self.robot_contact.zero_(); self.opponent_contact.zero_()
@@ -254,13 +303,17 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.safety_robot_contact_ticks.zero_()
         self.safety_field_contact_ticks.zero_()
         self.safety_wall_contact_ticks.zero_()
-        if self.randomize: self._randomize(torch.ones((self.n,),device=self.device,dtype=torch.bool))
-        else: self._randomize(torch.ones((self.n,),device=self.device,dtype=torch.bool), nominal=True)
+        full_mask = torch.ones((self.n,),device=self.device,dtype=torch.bool)
+        if self.randomize: self._randomize(full_mask)
+        else: self._randomize(full_mask, nominal=True)
         if pose is None:
             margin=max(.9, .9)  # keep placement independent of device-side tensor reads
-            self.pose[:,:,0].uniform_(margin,self.field_length-margin,generator=self.generator)
-            self.pose[:,:,1].uniform_(margin,self.field_width-margin,generator=self.generator)
-            self.pose[:,:,2].uniform_(-math.pi,math.pi,generator=self.generator)
+            x = self._reset_uniform(full_mask, (self.num_robots,))
+            y = self._reset_uniform(full_mask, (self.num_robots,))
+            angle = self._reset_uniform(full_mask, (self.num_robots,))
+            self.pose[:,:,0].copy_(margin+x*(self.field_length-2*margin))
+            self.pose[:,:,1].copy_(margin+y*(self.field_width-2*margin))
+            self.pose[:,:,2].copy_((2*angle-1)*math.pi)
         else: self.pose.copy_(torch.as_tensor(pose,device=self.device,dtype=self.pose.dtype).expand_as(self.pose))
         if velocity is not None: self.velocity.copy_(torch.as_tensor(velocity,device=self.device,dtype=self.velocity.dtype).expand_as(self.velocity))
         self._field_collision()
@@ -274,21 +327,21 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
         if self.randomize: self._randomize(mask)
         shape=(self.n,self.num_robots)
-        x=torch.rand(shape,device=self.device,generator=self.generator)
-        y=torch.rand(shape,device=self.device,generator=self.generator)
-        a=torch.rand(shape,device=self.device,generator=self.generator)
+        x=self._reset_uniform(mask,(self.num_robots,))
+        y=self._reset_uniform(mask,(self.num_robots,))
+        a=self._reset_uniform(mask,(self.num_robots,))
         margin=.9
         self.pose[:,:,0]=torch.where(mask[:,None],margin+x*(self.field_length-2*margin),self.pose[:,:,0])
         self.pose[:,:,1]=torch.where(mask[:,None],margin+y*(self.field_width-2*margin),self.pose[:,:,1])
         self.pose[:,:,2]=torch.where(mask[:,None],(2*a-1)*math.pi,self.pose[:,:,2])
         self._field_collision(mask)
-        self.velocity=torch.where(mask[:,None,None],torch.zeros_like(self.velocity),self.velocity)
-        self.module_angle=torch.where(mask[:,None,None],torch.zeros_like(self.module_angle),self.module_angle)
-        self.module_steer_rate=torch.where(mask[:,None,None],torch.zeros_like(self.module_steer_rate),self.module_steer_rate)
-        self.module_drive_speed=torch.where(mask[:,None,None],torch.zeros_like(self.module_drive_speed),self.module_drive_speed)
-        self.module_current=torch.where(mask[:,None,None],torch.zeros_like(self.module_current),self.module_current)
-        self.module_supply_current=torch.where(mask[:,None,None],torch.zeros_like(self.module_supply_current),self.module_supply_current)
-        self.robot_current=torch.where(mask[:,None],torch.zeros_like(self.robot_current),self.robot_current)
+        self.velocity.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.velocity),self.velocity))
+        self.module_angle.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.module_angle),self.module_angle))
+        self.module_steer_rate.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.module_steer_rate),self.module_steer_rate))
+        self.module_drive_speed.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.module_drive_speed),self.module_drive_speed))
+        self.module_current.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.module_current),self.module_current))
+        self.module_supply_current.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.module_supply_current),self.module_supply_current))
+        self.robot_current.copy_(torch.where(mask[:,None],torch.zeros_like(self.robot_current),self.robot_current))
         self.robot_contact &= ~mask
         self.robot_contact_by_robot &= ~mask[:,None]
         self.pair_contact_event_count.masked_fill_(mask[:,None], 0)
@@ -309,6 +362,25 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         self.safety_wall_contact_ticks.masked_fill_(mask[:,None], 0)
         return self.state
 
+    def _reset_uniform(self, mask, tail_shape):
+        sim_seed = self._reset_rng_seed ^ 0x6A09E667
+        sample = counter_uniform(sim_seed, self._reset_rng_counter,
+                                 mask, tail_shape, dtype=self.pose.dtype)
+        self._reset_rng_counter.add_(mask.long())
+        return sample
+
+    def reseed_reset_rng(self, mask, seed, generation):
+        if (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (self.n,)):
+            raise ValueError("simulator reset RNG mask must be device bool [world]")
+        generation = torch.as_tensor(generation, device=self.device, dtype=torch.long).reshape(self.n)
+        world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+        new_seed = (world_ids * 0x1F123BB5 + int(seed) +
+                    (generation + 1) * 0x9E3779B1) & 0x7fffffff
+        self._reset_rng_seed.copy_(torch.where(mask, new_seed, self._reset_rng_seed))
+        self._reset_rng_counter.copy_(torch.where(mask, torch.zeros_like(
+            self._reset_rng_counter), self._reset_rng_counter))
+
     def _randomize(self, mask, nominal=False):
         """Sample or restore physical parameters using device-side tensors only."""
         if (not isinstance(mask, torch.Tensor) or mask.device != self.device or
@@ -316,7 +388,7 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             raise ValueError("randomization mask must be a device bool vector [N]")
         def sample(base, shape, lo, hi):
             if nominal: return torch.full(shape,float(base),device=self.device)
-            multiplier=lo+torch.rand(shape,device=self.device,generator=self.generator)*(hi-lo)
+            multiplier=lo+self._reset_uniform(mask, shape[1:])*(hi-lo)
             return float(base)*multiplier
         pair=(self.n,self.num_robots)
         for name,base,lo,hi in (("length",self._base['length'],.82,1.2),("width",self._base['width'],.82,1.2),

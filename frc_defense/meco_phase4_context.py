@@ -311,6 +311,67 @@ def apply_phase4_focal_pose_assignment(env, assignment: dict) -> dict:
 
 
 @torch.no_grad()
+def apply_phase4_focal_pose_assignment_reset(env, assignment: dict, mask) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply a focal estimate assignment once to selected reset worlds."""
+    validate_phase4_focal_pose_assignment(assignment)
+    if not hasattr(env, "sim") or not hasattr(env, "estimated_pose") or not hasattr(env, "policy_pose"):
+        raise ValueError("environment lacks physical and policy pose state")
+    if (env.estimated_pose.data_ptr() == env.sim.pose.data_ptr() or
+            env.policy_pose.data_ptr() == env.sim.pose.data_ptr()):
+        raise ValueError("policy pose state aliases simulator truth")
+    if (env.estimated_pose.shape != env.sim.pose.shape or
+            env.policy_pose.shape != env.sim.pose.shape or env.sim.pose.ndim != 3 or
+            env.sim.pose.shape[1] <= 3 or env.sim.pose.shape[2] != 3):
+        raise ValueError("environment pose tensors do not satisfy the six-robot pose contract")
+    if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+            mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+        raise ValueError("focal reset mask must be a device bool vector [world]")
+    if not isinstance(getattr(env, "curriculum_episode_generation", None), torch.Tensor):
+        raise ValueError("focal reset requires per-world episode generation state")
+    generation = env.curriculum_episode_generation
+    if generation.device != env.device or generation.dtype != torch.long or tuple(generation.shape) != (env.n,):
+        raise ValueError("focal reset episode generation must be device long [world]")
+
+    applied_generation = getattr(env, "phase4_focal_pose_applied_generation", None)
+    if not isinstance(applied_generation, torch.Tensor) or tuple(applied_generation.shape) != (env.n,):
+        applied_generation = torch.full((env.n,), -1, device=env.device, dtype=torch.long)
+    apply_mask = mask & (applied_generation != generation)
+    truth = env.sim.pose[:, 3].clone()
+    focal = env.estimated_pose[:, 3].clone()
+    if assignment["requested_offset_name"] is not None:
+        config = FOCAL_POSE_OFFSETS[assignment["requested_offset_name"]]
+        dx, dy = config["offset_xy_m"]
+        focal[..., 0] += dx
+        focal[..., 1] += dy
+        focal[..., 2] += config["heading_offset_rad"]
+        focal[..., 2] = torch.atan2(torch.sin(focal[..., 2]),
+                                    torch.cos(focal[..., 2]))
+    env.estimated_pose[:, 3].copy_(torch.where(apply_mask[:, None], focal,
+                                                env.estimated_pose[:, 3]))
+    selected = mask[:, None, None]
+    env.policy_pose.copy_(torch.where(selected, env.estimated_pose,
+                                      env.policy_pose))
+    applied_generation = torch.where(mask, generation, applied_generation)
+    env.phase4_focal_pose_applied_generation = applied_generation
+    truth_preserved = (truth == env.sim.pose[:, 3]).all(dim=-1)
+    prior_truth = getattr(env, "phase4_focal_pose_truth_preserved", None)
+    if not isinstance(prior_truth, torch.Tensor) or tuple(prior_truth.shape) != (env.n,):
+        prior_truth = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_focal_pose_truth_preserved = torch.where(mask, truth_preserved, prior_truth)
+    applied = mask & (applied_generation == generation)
+    prior_applied = getattr(env, "phase4_focal_pose_reset_applied", None)
+    if not isinstance(prior_applied, torch.Tensor) or tuple(prior_applied.shape) != (env.n,):
+        prior_applied = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_focal_pose_reset_applied = torch.where(mask, applied, prior_applied)
+    prior_failure = getattr(env, "phase4_reset_failure_mask", None)
+    if not isinstance(prior_failure, torch.Tensor) or tuple(prior_failure.shape) != (env.n,):
+        prior_failure = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_reset_failure_mask = torch.where(mask,
+        prior_failure | ~truth_preserved | ~applied, prior_failure)
+    return applied, truth_preserved
+
+
+@torch.no_grad()
 def phase4_focal_pose_evaluator_diagnostics(env, runtime_event: dict) -> dict:
     """Create truth/estimate diagnostics for evaluator serialization only."""
     truth = env.sim.pose[:, 3].clone()
@@ -387,21 +448,55 @@ def full_team_start_profile(env, profile: str, *, validate: bool = True) -> torc
     return poses
 
 
-def apply_full_team_start_profile(env, profile: str) -> torch.Tensor:
-    """Apply a checked profile at reset and clear stale physical velocities."""
-    # Capture per-world legality from the simulator's actual applied state;
-    # do not discard a mixed legal/illegal batch before it can be diagnosed.
+def apply_full_team_start_profile(env, profile: str, *, mask=None) -> torch.Tensor:
+    """Apply a checked profile to selected worlds without host legality reads."""
+    if profile not in START_PROFILE_NAMES:
+        raise ValueError(f"unknown full-team start profile: {profile}")
+    if mask is None:
+        selected = torch.ones((env.n,), device=env.device, dtype=torch.bool)
+    else:
+        if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+            raise ValueError("profile mask must be a device bool vector [world]")
+        selected = mask
     poses = full_team_start_profile(env, profile, validate=False)
-    env.sim.pose.copy_(poses)
-    env.sim.velocity.zero_()
-    # Validate the poses that actually landed in simulator state.  This is
-    # sampled in reset before the caller builds/returns observations.
+    applied = torch.where(selected[:, None, None], poses, env.sim.pose)
+    env.sim.pose.copy_(applied)
+    env.sim.velocity.copy_(torch.where(selected[:, None, None],
+        torch.zeros_like(env.sim.velocity), env.sim.velocity))
+
+    # Keep the live legality and report accumulators tensor-backed.  The first
+    # selected profile initializes only selected rows; later masked resets
+    # preserve every prior value for unselected worlds.
+    prior_legal = getattr(env, "phase4_start_profile_legality", None)
+    if not isinstance(prior_legal, torch.Tensor) or tuple(prior_legal.shape) != (env.n,):
+        prior_legal = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
     legal = full_team_start_profile_legality(env, env.sim.pose)
-    env.phase4_start_profile_legality = legal.detach().cpu().tolist()
-    legal_count = int(legal.sum().item())
-    env.phase4_start_profile_validated_world_count = int(legal.numel())
-    env.phase4_start_profile_validation_rate = (
-        legal_count / env.phase4_start_profile_validated_world_count)
+    env.phase4_start_profile_legality = torch.where(selected, legal, prior_legal)
+    prior_count = getattr(env, "phase4_start_profile_validated_world_count", None)
+    if not isinstance(prior_count, torch.Tensor) or tuple(prior_count.shape) != (env.n,):
+        prior_count = torch.zeros((env.n,), device=env.device, dtype=torch.long)
+    env.phase4_start_profile_validated_world_count = torch.where(
+        selected, torch.ones_like(prior_count), prior_count)
+    prior_rate = getattr(env, "phase4_start_profile_validation_rate", None)
+    if not isinstance(prior_rate, torch.Tensor) or tuple(prior_rate.shape) != (env.n,):
+        prior_rate = torch.zeros((env.n,), device=env.device, dtype=torch.float32)
+    env.phase4_start_profile_validation_rate = torch.where(
+        selected, legal.to(prior_rate.dtype), prior_rate)
+    prior_failure = getattr(env, "phase4_start_profile_failure_mask", None)
+    if not isinstance(prior_failure, torch.Tensor) or tuple(prior_failure.shape) != (env.n,):
+        prior_failure = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_start_profile_failure_mask = torch.where(
+        selected, ~legal, prior_failure)
+    prior_reset_failure = getattr(env, "phase4_reset_failure_mask", None)
+    if not isinstance(prior_reset_failure, torch.Tensor) or tuple(prior_reset_failure.shape) != (env.n,):
+        prior_reset_failure = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_reset_failure_mask = torch.where(
+        selected, ~legal, prior_reset_failure)
+    prior_applied = getattr(env, "phase4_start_profile_applied", None)
+    if not isinstance(prior_applied, torch.Tensor) or tuple(prior_applied.shape) != (env.n,):
+        prior_applied = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_start_profile_applied = prior_applied | selected
     return poses
 
 
@@ -409,12 +504,11 @@ def full_team_start_profile_legality(env, poses: torch.Tensor) -> torch.Tensor:
     """Return per-world legality for bounds, chassis overlap, and obstacles."""
     if not isinstance(poses, torch.Tensor) or poses.shape != (env.n, 6, 3):
         raise ValueError("start poses must have shape [num_worlds, 6, 3]")
-    if not torch.isfinite(poses).all():
-        raise ValueError("start poses must be finite")
+    finite = torch.isfinite(poses).all(dim=(1, 2))
     length, width = _dimensions(env)
     radius = _robot_radii(env)
     xy = poses[..., :2]
-    legal = ~((xy[..., 0] < radius) | (xy[..., 0] > length-radius) |
+    legal = finite & ~((xy[..., 0] < radius) | (xy[..., 0] > length-radius) |
             (xy[..., 1] < radius) | (xy[..., 1] > width-radius)).any(dim=1)
     distance = torch.linalg.vector_norm(xy[:, :, None, :] - xy[:, None, :, :], dim=-1)
     pair_radius = radius[:, :, None] + radius[:, None, :]
@@ -457,7 +551,7 @@ def validate_full_team_start_profile(env, poses: torch.Tensor) -> None:
             raise ValueError(f"start profile intersects solid field geometry: {box.name}")
 
 
-def contact_exposure_profile(env, geometry: str) -> torch.Tensor:
+def contact_exposure_profile(env, geometry: str, *, mask=None) -> torch.Tensor:
     """Return a legal contact approach start for opponent slots 2 and 3.
 
     Slots 2 and 3 begin with chassis clearance, facing one another. Their
@@ -466,9 +560,13 @@ def contact_exposure_profile(env, geometry: str) -> torch.Tensor:
     """
     if geometry not in CONTACT_GEOMETRIES:
         raise ValueError(f"unknown contact geometry: {geometry}")
+    if mask is not None and (not isinstance(mask, torch.Tensor) or
+            mask.device != env.device or mask.dtype is not torch.bool or
+            tuple(mask.shape) != (env.n,)):
+        raise ValueError("contact profile mask must be a device bool vector [world]")
     length, width = _dimensions(env)
     radius = _robot_radii(env)
-    separation = float((radius[:, 2] + radius[:, 3]).max().item()) + .08
+    separation = radius[:, 2] + radius[:, 3] + .08
     approach = _CONTACT_APPROACHES[geometry]
     opponent_heading = approach["opponent_heading_rad"]
     focal_heading = approach["focal_heading_rad"]
@@ -477,16 +575,21 @@ def contact_exposure_profile(env, geometry: str) -> torch.Tensor:
     # registered geometry a distinct pair pose/orientation while preserving
     # the same conservative chassis clearance.
     dx, dy = separation*math.cos(opponent_heading), separation*math.sin(opponent_heading)
-    poses = torch.tensor((
+    constants = torch.tensor((
         (length*.365, width*.15, opponent_heading),
         (length*.365, width*.85, opponent_heading),
-        (cx-dx, cy-dy, opponent_heading),
         (cx, cy, focal_heading),
         (length*.635, width*.15, focal_heading),
         (length*.635, width*.85, focal_heading)),
         device=env.device, dtype=env.sim.pose.dtype)
-    validate_full_team_start_profile(env, poses.expand(env.n, -1, -1))
-    return poses.expand(env.n, -1, -1).clone()
+    poses = constants[None].expand(env.n, -1, -1)
+    moving = torch.stack((cx-dx, cy-dy,
+                          torch.full_like(dx, opponent_heading)), dim=-1)
+    poses = torch.cat((poses[:, :2], moving[:, None, :],
+                       poses[:, 2:]), dim=1).clone()
+    # Return a fixed-shape proposal; the caller commits it through the same
+    # selected-row mask used by the enclosing scenario reset.
+    return poses
 
 
 def contact_exposure_actions(env, *, focal_slot: int = 3,

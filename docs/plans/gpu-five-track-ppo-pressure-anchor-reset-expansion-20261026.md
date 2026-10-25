@@ -1,0 +1,77 @@
+# Pass 1 superseding plan: all-five PPO and complete per-world reset residency
+
+**Status:** proposed scope expansion after Pass 2 stopped before edits; no implementation or runtime evidence.
+**Planning base:** origin/codex/gpu-five-track-ppo-focal-reset-expansion-plan-20261026 at b71d0ed2b9b10acb8706391265f9fb836df8047b.
+**Supersedes in full:** docs/plans/gpu-five-track-ppo-focal-pose-reset-expansion-20261026.md, SHA-256 ff95c826900b590999c9397f4224052ab6e26dbd1535cf102d6bf23452c1c3c9, and all profile/reset, rollout/candidate and PPO predecessors it incorporates.
+**Requirements:** docs/plans/whole-compute-gpu-only-meco-plan-20261025.md, steps 4–8; docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md, §2, §3 and §5 Phase 3; repository AGENTS.md simulator/dashboard validation rules.
+
+## New Pass 2 stop evidence
+
+The previous reset plan still leaves a row-zero scalar in the curriculum pressure path. curriculum_scenarios.py assigns pressure['anchor_y'] = float(env.sim.pose[0, 3, 1]) after scenario placement and again after an optional full-team start profile. This reads device pose to a Python float and stores the value in the shared host pressure dictionary.
+
+CurriculumEnv._curriculum_commands then uses that one scalar as the y target for every world in level-2/level-5 orbit behavior and the orbiting_interceptor family. Reset placement also uses it to place pressure blockers and the stationary blockage overlay. With heterogeneous selected-row starts, world 0's anchor incorrectly controls every row. Retaining a scalar host fallback would violate device-only decisions; simply deleting it or skipping the per-world assignment changes semantics.
+
+The selected-row reset plan therefore needs an explicit per-world device anchor, its selected-row reset lifecycle, and a vector target/placement path. The static pressure configuration, report schema and checkpoint identity must no longer treat a row-zero measurement as a shared scenario constant.
+
+## Objective and inherited requirements
+
+This plan supersedes the focal-pose reset plan and inherits all its exact source/test targets, profile/contact legality and focal assignment behavior, selected-row reset owner inventory, report boundaries, RNG/checkpoint schema and three-pass gates. It also inherits the entire rollout/candidate/route/terminal-status/fixed PPO plan: all A1/A2/A3/C1/C2 distributions, D1/D2 matched controls, candidate identity/order/recall, failure actor eligibility, replay validation, GAE, exact update cadence, optimizer state, device RNG and checkpoint continuation. No prior invariant is waived.
+
+Add a per-world pressure-anchor contract. Reset initializes one device tensor value per world from the exact stage of robot-3 pose currently sampled by the two anchor assignments; selected resets update only selected entries. All pressure target and blocker y calculations consume that tensor. Homogeneous worlds preserve existing behavior exactly. Heterogeneous worlds use their own corresponding reset pose. Do not derive anchor values from world zero, host scalars or the static pressure dictionary.
+
+## Source trace and mutable state
+
+1. curriculum_scenarios.py::_pressure currently returns static level/style/slots/phase/family plus anchor_y=4.035. Treat pressure scheduling and the seed-derived phase as static config; remove dynamic row-derived anchor from this shared dictionary or leave only an inert documented legacy constant that is never read by runtime logic.
+2. reset_curriculum_scenario creates scenario poses, applies inactive/open-route placement, then captures row 0's y in pressure['anchor_y'] before blocker placement. The level_3_trench/level_3_bump/seeded-choice branches replace the local blocker_y with fixed y constants; they do not replace the stored anchor itself. It later applies lane offsets, optional contact exposure and a full-team start profile. With a profile, it captures row 0 again into the same scalar. Preserve these two stage boundaries and current override precedence, but store selected world values in env.phase4_pressure_anchor_y_m [world] on device.
+3. Pressure blocker placement iterates static slot IDs and writes each slot using one Python blocker_y. Preserve x/heading/slot/order and style overrides, but form [world, 3] blocker poses with the per-world anchor and apply them under the reset mask. A static style such as level_3_trench may replace the tensor with the equivalent per-world constant. Do not use host values extracted from pose.
+4. Optional full-team start profile application overwrites all robot poses in the old implementation; after the mask-safe profile is applied, update only selected anchor entries from that world's slot-3 y. Stationary blockage placement after the profile must use the same per-world tensor and save selected-row stationary_blockage_assigned_pose. Preserve the existing profile-before-stationary-blocker order.
+5. CurriculumEnv._curriculum_commands reads pressure['anchor_y'] for oscillatory target calculation. Replace this dynamic read with env.phase4_pressure_anchor_y_m, maintaining shape/device alignment with match_elapsed and each world. This target branch is active for level 2, level 5 slot 0, or orbiting_interceptor. Do not change static level/style/family selection, phase, x-target formula, offsets or clipping.
+6. The stationary-blocker goal/validity path consumes stationary_blockage_assigned_pose [world, 3]. Keep its tolerance and status calculation identical while ensuring its desired y is row-specific and selected reset only changes selected rows.
+7. pressure['anchor_y'] has no other source consumers in the audited checkout. Any future/report consumer must be identified and migrated explicitly; do not silently serialize or hash device state as though it were static configuration.
+8. Scenario snapshots and evaluation rows currently bind curriculum source/config and Phase 4 report fields. Separate static pressure config identity from dynamic per-world anchor values. The dynamic tensor belongs in episode/reset/checkpoint identity and passive completed-episode report, not the configuration dictionary.
+
+## Authorized source and test targets
+
+All targets and semantics from the superseded plan remain authorized and mandatory. This expansion adds:
+
+| Target | Authorized work | Boundary |
+|---|---|---|
+| frc_defense/curriculum_scenarios.py | Add device-resident phase4_pressure_anchor_y_m [n] lifecycle; initialize it at the existing pre-blocker pose stage and refresh selected entries after optional full-team start profile at the existing second assignment point. Replace blocker and stationary overlay y construction with per-world tensor operations and selected-mask writes. | Preserve stage ordering, deterministic style constants, static pressure metadata and all prior reset/profile/focal behavior. No .item(), float(tensor), host row-zero read, or mutation to unselected rows. |
+| frc_defense/curriculum_scenarios.py::CurriculumEnv._curriculum_commands | Read only the device anchor tensor for per-world orbit/oscillation targets. Verify the static pressure branch does not construct host indices from anchor values. | Preserve homogeneous output exactly, per-row phase, target x behavior, action eligibility and clipping. |
+| frc_defense/meco_track_training.py | Add per-world pressure-anchor values and schema/source identity to passive episode reporting after the decision boundary. Remove any row-zero scalar projection from live/config identity. | Report only; no policy, qualification, actor eligibility, reset or campaign control from host projection. |
+| tests/test_meco_phase4_pressure_anchor.py (new) | Cover all anchor capture stages, heterogeneous starts, optional profile override, level/style blocker overrides, per-world orbit commands, stationary blocker target/validity, homogeneous legacy parity and selected/nonselected row snapshots. | Synthetic device tensor tests only; simulated behavior still needs required end-to-end evaluation after all gates. |
+| tests/test_meco_curriculum_device_reset.py | Add mixed reset masks with heterogeneous robot-3 y values and profiles; assert selected anchors equal reference-stage pose and unselected anchors/config/poses remain unchanged through repeated resets. | Retain full reset-owner inventory assertions. |
+| tests/test_meco_phase4_runtime_adapter_contract.py and related Phase 4 report tests | Verify report schema v2 or equivalent includes per-world anchor values and does not pretend a heterogeneous batch has one scalar; preserve static pressure identity separately. | Projection occurs only after the device result is fixed. |
+| tests/test_meco_phase4_opponents.py | Extend _curriculum_commands fixtures for per-world anchors, homogeneous parity and different target rows with heterogeneous anchors. | Keep existing scheduled opponent and slot override behavior unchanged. |
+
+No changes to the opponent command algorithm, pressure phase/family scheduling, target offset formula, non-reset behavior, simulator physics or other profile helpers are authorized. If implementation needs another target, stop and return for a new exact-file Pass 1.
+
+## Per-world anchor and compatibility contract
+
+1. phase4_pressure_anchor_y_m is a device float tensor of shape [world], with dtype matching sim.pose and one independent value per row. It is dynamic episode state, not an entry in the shared pressure config dictionary.
+2. Initialize from sim.pose[:, 3, 1] at the same reset point as the first current scalar capture, before blocker placement, lane offset, contact exposure and optional start-profile override. This preserves current ordering. After a start profile is applied, refresh selected entries from the selected new slot-3 pose at the same point as the second current scalar capture.
+3. The current level_3_trench, level_3_bump, and seeded-choice values remain exactly .8, 2.5, and seed-parity-selected .8/2.5 respectively, as local blocker-placement y overrides only. Keep the per-world pressure-anchor tensor sourced from slot-3 pose; do not accidentally replace it with these blocker constants or let later generic capture overwrite a style override that current blocker-placement semantics retain.
+4. Each blocker pose uses the anchor vector at the established stage, except where the current style explicitly chooses a fixed y. The stationary blockage overlay uses the post-profile anchor vector and retains its existing heading/x. Its assigned-pose tensor and pose-valid status remain per-world.
+5. In _curriculum_commands, the oscillation target y becomes anchor_y[row] + sin(phase[row]) * .6. Preserve the existing condition, phase, family-specific slot offset, x target and clamp. For a homogeneous batch with the old anchor value, every emitted command must match the current implementation exactly; for heterogeneous starts each row follows its own anchor.
+6. Resetting a mixed mask changes only selected anchor entries. All-false leaves anchor/config/report/checkpoint state untouched. A later reset of one row must not change any other row's next pressure target.
+7. Remove dynamic anchor values from static pressure config/protocol hashing. Bump the resolved scenario/report schema and source identity. Completed episode reporting may serialize the vector and selected row indices after all device decisions. Never silently collapse to row 0. If a legacy scalar report field is needed, emit it only under a separately versioned homogeneous-only report contract, after passive host projection; heterogeneous results must remain explicit per-world data.
+8. Checkpoint/reset schema includes the anchor tensor, stage/generation identity, pressure static config hash and stationary blocker assigned-pose state. Resume reproduces exact next per-row targets and blocker validity. Old checkpoints lacking the versioned anchor field fail closed.
+9. No new random draw is introduced. Existing per-row reset RNG streams and seed-derived pressure phase remain independent of mask cardinality and other rows.
+
+## Acceptance and precise stop conditions
+
+Accept only if source tracing proves no live read/write of pressure['anchor_y']; reset-stage anchors match the appropriate per-world robot-3 pose; static style overrides retain established precedence; stationary blockers and all affected orbit targets use device anchor vectors; homogeneous cases match prior commands exactly; mixed rows isolate; report/config identities are correctly separated; checkpoint continuation matches; and no host scalar sync remains.
+
+Stop before editing if a target or blocker path still reads a shared scalar; if any world reads row zero; if profile/contact/offset stage ordering changes; if an anchor is initialized at the wrong reset stage; if a fixed style override is dropped or overwritten; if a shared config/report hash absorbs dynamic pose values; if heterogeneous reporting is collapsed to a scalar; if unselected anchor, pose, stationary target, status or RNG changes; if a new source helper/file is required; if target commands differ in a homogeneous reference case; or if any device anchor reaches float(), .item(), .tolist(), .cpu(), host reduction/hash, Python branch/index or policy/report control before the passive boundary. Retain every prior focal/profile/reset/all-five stop condition, including all unknown-owner, host terminal/reset, candidate ordering, five policy distribution, optimizer cadence and campaign prohibitions.
+
+## Tests and sequential review gates
+
+Tests above augment all prior Phase 4 profile/focal tests, all selected-row reset tests, and all five-track PPO, candidate/order/recall/route/replay/GAE/optimizer/checkpoint tests. Tests asserting simulated robot behavior require a representative seeded end-to-end simulator evaluation that exercises the changed behavior and inspects a fresh replay; restart and verify the current checkout's dashboard backend and frontend before producing it. Run these only after Pass 3 and confirmed WX9100 lease release.
+
+1. Pass 1: independent reviewer approves this exact plan/head/hash, both anchor initialization points, full read/write call graph, static-vs-dynamic schema, homogeneous/mixed invariants and inherited plan requirements. No implementation or runtime operation.
+2. Pass 2: only after approval, fresh HDD worktree from latest main with approved plan lineage; publish full owner/schema inventory before edits; commit and push incrementally. No tests/imports/compilation/GPU/simulator/dashboard/replay/training/campaign while either WX9100 lease is active. New source target returns to Pass 1 before edits.
+3. Pass 3: independent exact-head read-only review of all changed lines, source read/write trace, heterogeneous and homogeneous anchor paths, reset row isolation, report/checkpoint identity and all predecessor five-track invariants.
+4. Only after Pass 3 approval, explicit user stop and verified release of both WX9100 leases may approved focused device tests run on attested WX9100s. Simulated behavior tests additionally require the AGENTS-mandated fresh replay/dashboard provenance.
+5. This plan does not start, resume or modify a training or evaluation campaign.
+
+No implementation, tests, imports, runtime, GPU, simulator, dashboard, replay, training, fitting, evaluation or campaign operation was performed to create this plan. This document does not assert that per-world pressure anchors or complete GPU-resident reset currently exist.

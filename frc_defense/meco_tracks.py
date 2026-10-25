@@ -1168,7 +1168,7 @@ class C2MapCrossAttentionGRU(nn.Module):
         self.uncertainty = nn.Linear(HIDDEN * 3, 1)
 
     def forward(self, raster, globals_, candidate_features, hidden=None,
-                candidate_mask=None, **_):
+                candidate_mask=None, candidate_present=None, **_):
         map_tokens = self.map_encoder(raster).flatten(2).transpose(1, 2)
         if map_tokens.shape[1] > self.tokens:
             map_tokens = F.adaptive_avg_pool1d(map_tokens.transpose(1, 2), self.tokens).transpose(1, 2)
@@ -1184,8 +1184,18 @@ class C2MapCrossAttentionGRU(nn.Module):
             raise ValueError("C2 candidate mask must be bool [B,C] on the candidate device")
         # Preserve the original all-query context. Support masks gate action
         # selection; using them to reweight this pooled state changes C2's
-        # recurrent context whenever any candidate is infeasible.
-        candidate_context = queried.mean(1)
+        # recurrent context whenever any candidate is infeasible. The training
+        # batch's separate presence mask excludes only fixed-capacity padding.
+        if candidate_present is None:
+            candidate_context = queried.mean(1)
+        else:
+            if (candidate_present.shape != candidate_features.shape[:2]
+                    or candidate_present.dtype != torch.bool
+                    or candidate_present.device != candidate_features.device):
+                raise ValueError("C2 query presence must be bool [B,C] on the candidate device")
+            present = candidate_present.to(dtype=queried.dtype)
+            candidate_context = (queried * present[..., None]).sum(1) / \
+                present.sum(1, keepdim=True).clamp_min(1.)
         state = self.context(global_state + candidate_context, hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
         scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
@@ -1206,6 +1216,62 @@ def make_meco_track(track: str, *, candidate_features: int = MECO_CANDIDATE_RAW_
     if track not in factories:
         raise ValueError(f"unknown MECO track {track!r}; expected one of {MECO_TRACKS}")
     return factories[track]()
+
+
+def score_five_track_ppo_batch(track: str, model: nn.Module, batch, *,
+        value_head: nn.Module, field_length: float, field_width: float,
+        resolution_m: float, p_mode: str = "learned", p_cost_scale: float = 1.,
+        p_points_per_grid_edge: float = .05,
+        commitment_switch_column: int | None = None):
+    """Training-only batched forward over fixed-capacity PPO tensor rows."""
+    if track not in MECO_TRACKS or batch.track != track:
+        raise ValueError("PPO scorer track does not match its fixed batch schema")
+    common = batch.common
+    if track in ("A1", "A2", "A3"):
+        a = batch.plan_a
+        if a is None:
+            raise RuntimeError("A PPO scoring requires the padded pose support")
+        kwargs = {}
+        if track in ("A2", "A3"):
+            kwargs.update(node_features=a.node_features, edges=a.edges,
+                edge_mask=a.edge_mask, node_valid=a.node_valid,
+                region_ids=a.region_ids)
+            if track == "A2":
+                kwargs.update(coarse_edges=a.coarse_edges,
+                              coarse_edge_mask=a.coarse_edge_mask)
+        raw = model(raster=common.raster, globals_=common.globals,
+                    hidden=common.hidden_before, **kwargs)
+        from .meco_plan_a_policy import plan_a_policy_logits_batch
+        logits, path_cost, status = plan_a_policy_logits_batch(track, raw, batch,
+            field_length=field_length, field_width=field_width,
+            resolution_m=resolution_m, p_mode=p_mode,
+            p_cost_scale=p_cost_scale,
+            p_points_per_grid_edge=p_points_per_grid_edge)
+    else:
+        c = batch.plan_c
+        if c is None:
+            raise RuntimeError("C PPO scoring requires the padded candidate payload")
+        raw = model(raster=common.raster, globals_=common.globals,
+            candidate_features=c.candidate_features,
+            candidate_mask=c.candidate_valid,
+            candidate_present=c.candidate_present,
+            hidden=common.hidden_before)
+        utility = raw["candidate_utility"]
+        logits = candidate_policy_logits(utility, c.candidate_valid,
+            c.route_cost, c.risk_cost, validate_inputs=False)
+        if commitment_switch_column is not None:
+            switch = c.raw_features[..., commitment_switch_column]
+            logits = logits - switch.to(dtype=logits.dtype) * .10
+        path_cost = None
+        finite_inputs = (torch.isfinite(utility) |
+            ~c.candidate_valid).all()
+        finite_costs = (torch.isfinite(c.route_cost) & torch.isfinite(c.risk_cost) |
+                        ~c.candidate_valid).all()
+        active_support = (~common.slot_valid | c.candidate_valid.any(dim=-1)).all()
+        status = finite_inputs & finite_costs & active_support
+    value = value_head(common.globals, raw["hidden"]).reshape(-1)
+    return {"raw": raw, "logits": logits, "value": value,
+            "path_cost": path_cost, "status": status}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1721,14 +1787,17 @@ def categorical_from_candidate_logits(logits: torch.Tensor):
                                            validate_args=False)
 
 
-def sample_candidate_action(logits: torch.Tensor, *, deterministic=False):
+def sample_candidate_action(logits: torch.Tensor, *, deterministic=False,
+                            generator: torch.Generator | None = None):
     """Sample a legal categorical choice and return action and PPO log-probability."""
     if logits.ndim != 2:
         raise ValueError("each decision requires at least one finite candidate logit")
     torch._assert_async(torch.isfinite(torch.logsumexp(logits, dim=-1)).all(),
                         "each decision requires at least one finite candidate logit")
     distribution = categorical_from_candidate_logits(logits)
-    action = logits.argmax(-1) if deterministic else distribution.sample()
+    action = (logits.argmax(-1) if deterministic else
+        torch.multinomial(distribution.probs, 1, replacement=True,
+                          generator=generator).squeeze(-1))
     return action, distribution.log_prob(action), distribution.entropy()
 
 

@@ -22,14 +22,10 @@ class TensorDefenseOpponentMixin:
             raise ValueError("GPU planner active mask must already reside on environment device")
         active_mask=torch.as_tensor(active_mask,device=self.device,
                                     dtype=torch.bool).reshape(self.n)
-        if self._planner_full_batch_active and self._planner_tick_aligned:
-            self._planner_tick_scalar += 1
-            self._planner_tick.add_(1)
-            due=self._planner_tick_scalar % self.adstar_replan_interval == 0
-            return active_mask & torch.full_like(active_mask,due)
-        self._planner_tick_aligned=False
-        self._planner_full_batch_active=False
-        self._planner_tick=torch.where(active_mask,self._planner_tick+1,self._planner_tick)
+        # Keep cadence entirely per-world so mixed and all-false masks do not
+        # invalidate shared scalar fast-path state. When every world is active,
+        # this produces the same due ticks as the former aligned scalar clock.
+        self._planner_tick.add_(active_mask.long())
         replan=active_mask&(self._planner_tick%self.adstar_replan_interval==0)
         return replan
 

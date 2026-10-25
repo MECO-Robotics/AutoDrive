@@ -1,6 +1,6 @@
 # Pass 1 plan: five-track PPO batched GPU residency expansion
 
-**Status:** proposed expanded plan; no implementation or runtime evidence. This plan replaces the narrower approved PPO numerics tranche after its Pass 2 implementer stopped at the stated batching/dispatch stop condition before editing source.
+**Status:** Superseded by the further proposed Pass 1 plan gpu-five-track-ppo-rollout-candidate-residency-expansion-20261026.md. Pass 2 identified terminal/status host control and candidate-order/query host materialization outside this document's scope, and stopped before source edits. Retain this artifact as audit history; do not implement it independently.
 **Planning base:** origin/main at 0879b81b8cc92ee70728390d4b98de35ebe42540.
 **Original scope:** docs/plans/gpu-five-track-ppo-numerics-tranche-20261026.md, originally approved at d843d80196e7ee77d6b5b61689da56ecab0f5786, SHA-256 bcdfe325e8c4b1499074c0d2fb7f01b4e8af27868e3286fb242cfed3b0d1202f.
 **Requirements:** docs/plans/whole-compute-gpu-only-meco-plan-20261025.md, especially steps 6–8; docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md, §5 Phase 3.

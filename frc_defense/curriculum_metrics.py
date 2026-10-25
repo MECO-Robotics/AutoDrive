@@ -56,6 +56,38 @@ class CurriculumMetrics:
         self.current_staged = torch.zeros_like(self.acquisitions)
         self.inactive_staged = torch.zeros_like(self.acquisitions)
 
+    def reset(self, mask):
+        """Initialize episode metrics for selected worlds in the existing object."""
+        env = self.env
+        if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+            raise ValueError("curriculum metric reset mask must be device bool [world]")
+
+        def write_rows(tensor, values):
+            row_mask = mask.reshape((env.n,) + (1,) * (tensor.ndim - 1))
+            tensor.copy_(torch.where(row_mask, values, tensor))
+
+        zero_fields = (
+            "acquisition_credit", "ferry_credit", "pending", "initial_staged",
+            "inactive_origin", "settling", "lifecycle", "piece_batch", "batch_id",
+            "delivery_open", "batch_counts", "score_batch_counts", "ferry_batch_counts",
+            "batch_ended", "batch_completed", "acquisitions", "scores", "deliveries",
+            "team_conversions", "staged_conversions", "initial_staged_conversions",
+            "inactive_conversions", "inactive_deliveries", "post_boundary_scores",
+            "post_boundary_deliveries", "encounter_ticks", "elapsed", "active_seconds",
+            "inactive_seconds", "delta", "route_seen", "current_staged", "inactive_staged",
+        )
+        for name in zero_fields:
+            tensor = getattr(self, name)
+            write_rows(tensor, torch.zeros_like(tensor))
+        required = env.piece_active & ((env.piece_owner < 0) | (env.piece_owner == 3))
+        write_rows(self.required, required)
+        external = (env.piece_owner == 3) & (env.piece_pos[..., 0] < self.home_x)
+        write_rows(self.external, external)
+        write_rows(self.nearest_defender, torch.full_like(self.nearest_defender,
+            math.hypot(env.field_length, env.sim.field_width)))
+        write_rows(self.previous_x, env.sim.pose[:, 3, 0])
+
     @property
     def home_x(self):
         return self.env.field_length - self.env.alliance_zone_depth

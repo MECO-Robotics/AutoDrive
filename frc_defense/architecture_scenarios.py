@@ -67,41 +67,58 @@ def make_env(scenario: str, num_envs: int, device: str, seed: int,
 
 
 def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int, *,
-                   refresh_perception: bool = True) -> torch.Tensor | None:
+                   refresh_perception: bool = True, mask=None) -> torch.Tensor | None:
     """Reset positions and physics, optionally deferring sensor exposure.
 
     Curriculum resets defer perception so registered start stimuli can be
     validated and applied before the first observation is generated.
     """
     if scenario == "offense_vs_deterministic_defense":
+        if mask is not None:
+            raise ValueError("offense scenario reset has no selected-row contract")
         from .architecture_offense_scenario import reset_offense_scenario
         if not refresh_perception:
             raise ValueError("this scenario reset does not support deferred perception")
         return reset_offense_scenario(env, seed)
     SCENARIOS[scenario]
-    env.reset(seed=seed, defer_perception=not refresh_perception)
-    generator = torch.Generator(device=env.device).manual_seed(int(seed))
-
+    if mask is None:
+        selected = torch.ones((env.n,), device=env.device, dtype=torch.bool)
+        env.reset(seed=seed, defer_perception=not refresh_perception)
+    else:
+        if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+            raise ValueError("scenario reset mask must be device bool [world]")
+        selected = mask
+        env.reseed_world_rng(selected, seed)
+        env.reset_done(selected, defer_perception=True)
     def uniform(shape):
-        return torch.rand(shape, device=env.device, generator=generator,
-                          dtype=env.sim.pose.dtype)
+        shape = tuple(shape)
+        return env._random_active(selected, shape[1:], dtype=env.sim.pose.dtype,
+                                  stream="scenario_reset")
+
+    def write_rows(destination, values):
+        values = torch.as_tensor(values, device=destination.device,
+                                 dtype=destination.dtype).expand_as(destination)
+        row_mask = selected.reshape((env.n,) + (1,) * (destination.ndim - 1))
+        destination.copy_(torch.where(row_mask, values, destination))
 
     if scenario != "defense_3v3":
         # A none-mode robot is restored to this pose after each physics step.
         # Separate inactive bodies outside the field so they cannot block lanes.
         for slot, mode in enumerate(env.control_modes):
             if mode == "none":
-                env.sim.pose[:, slot, 0] = -20. - slot * 3.
-                env.sim.pose[:, slot, 1] = -20.
-        env.piece_active.zero_()
-        env.piece_owner.fill_(-1)
-        env.piece_zone.fill_(-1)
-        env.piece_vel.zero_()
-        env.piece_pos.zero_()
+                write_rows(env.sim.pose[:, slot, 0], -20. - slot * 3.)
+                write_rows(env.sim.pose[:, slot, 1], -20.)
+        write_rows(env.piece_active, False)
+        write_rows(env.piece_owner, -1)
+        write_rows(env.piece_zone, -1)
+        write_rows(env.piece_vel, 0.)
+        write_rows(env.piece_pos, 0.)
         jitter = (uniform((env.n, 2)) - .5) * .2
         if scenario.startswith("pickup_"):
-            env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((7.4, 4.035)) + jitter
-            env.sim.pose[:, 3, 2] = 0.
+            write_rows(env.sim.pose[:, 3, :2],
+                env.sim.pose.new_tensor((7.4, 4.035)) + jitter)
+            write_rows(env.sim.pose[:, 3, 2], 0.)
             count = 6 if scenario == "pickup_simple" else 24
             if scenario == "pickup_simple":
                 # Two rows, 0.32 m spacing: distinct physical balls near intake.
@@ -116,34 +133,41 @@ def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int, *,
                 yy, xx = torch.meshgrid(y, x, indexing="ij")
                 offsets = torch.stack((xx.flatten(), yy.flatten()), -1)[None]
                 offsets = offsets + (uniform((env.n, count, 2)) - .5) * .16
-            env.piece_pos[:, :count] = env.sim.pose[:, 3, None, :2] + offsets
-            env.piece_active[:, :count] = True
-            env.piece_zone[:, :count] = 0
+            write_rows(env.piece_pos[:, :count],
+                env.sim.pose[:, 3, None, :2] + offsets)
+            write_rows(env.piece_active[:, :count], True)
+            write_rows(env.piece_zone[:, :count], 0)
         else:
             # Open midfield side of the red HUB, clear of the HUB and BUMPs.
-            env.sim.pose[:, 0, :2] = env.sim.pose.new_tensor((8.1, 4.035)) + jitter
-            env.sim.pose[:, 0, 2] = math.pi
-            env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((6.8, 4.035)) + jitter
-            env.sim.pose[:, 3, 2] = 0.
+            write_rows(env.sim.pose[:, 0, :2],
+                env.sim.pose.new_tensor((8.1, 4.035)) + jitter)
+            write_rows(env.sim.pose[:, 0, 2], math.pi)
+            write_rows(env.sim.pose[:, 3, :2],
+                env.sim.pose.new_tensor((6.8, 4.035)) + jitter)
+            write_rows(env.sim.pose[:, 3, 2], 0.)
             count = 24
-            env.piece_pos[:, :count] = env.sim.pose[:, 0, None, :2]
-            env.piece_active[:, :count] = True
-            env.piece_owner[:, :count] = 0
-            env.piece_zone[:, :count] = 5
+            write_rows(env.piece_pos[:, :count], env.sim.pose[:, 0, None, :2])
+            write_rows(env.piece_active[:, :count], True)
+            write_rows(env.piece_owner[:, :count], 0)
+            write_rows(env.piece_zone[:, :count], 5)
 
-    env.sim.velocity.zero_()
-    env._target_collect_heading.copy_(env.sim.pose[:, :, 2])
-    env._target_turn_anchor.copy_(env.sim.pose[:, :, :2])
-    env._raster_cursor.copy_(env._closest_raster_indices(env.sim.pose[:, :, :2]))
-    env._raster_reanchor.fill_(True)
+    write_rows(env.sim.velocity, 0.)
+    write_rows(env._target_collect_heading, env.sim.pose[:, :, 2])
+    write_rows(env._target_turn_anchor, env.sim.pose[:, :, :2])
+    write_rows(env._raster_cursor, env._closest_raster_indices(env.sim.pose[:, :, :2]))
+    write_rows(env._raster_reanchor, True)
     # observe() exposes cached route features before the first replan. Clear
     # all mutable planner outputs so reset cannot retain a previous policy's
     # route or progress, even when the same environment is reused for evaluation.
     for name in ("last_path", "last_lengths", "last_intercept", "last_intercept_time",
                  "last_start", "last_goal", "last_heading", "last_progress",
                  "last_trench_alignment", "last_speed_profile", "potential"):
-        getattr(env.planner, name).zero_()
-    env._planner_controller_modes_dirty = True
+        value = getattr(env.planner, name)
+        write_rows(value, 0.)
+    if mask is None:
+        env._planner_controller_modes_dirty = True
+    else:
+        env._planner_controller_modes_dirty_mask |= selected
 
     # Pickup acceleration caches every possible object cell. Replace the reset
     # spawn cell after placing scenario objects while retaining respawn cells.
@@ -151,26 +175,23 @@ def reset_scenario(env: TensorThreeVsThreeEnv, scenario: str, seed: int, *,
     cells_y = (env.piece_pos[..., 1] / env._pickup_grid_cell_size).floor().long()
     cells = (cells_y.clamp(0, env._pickup_grid_ny - 1) * env._pickup_grid_nx
              + cells_x.clamp(0, env._pickup_grid_nx - 1))
-    env._pickup_possible_cells[:, :, 0] = cells.to(torch.int16)
-    reset_fuel_physics(env)
-    env.track_pos.zero_()
-    env.track_vel.zero_()
-    env.track_mask.zero_()
-    env.track_age.fill_(float("inf"))
-    env.track_confidence.zero_()
-    env.track_spatial_extent.zero_()
-    env.track_angular_extent.zero_()
-    env.track_merged.zero_()
-    env._current_fuel_visibility.zero_()
-    env.perception_quality_state.zero_()
-    env.opponent_valid.zero_()
-    env.opponent_pose.zero_()
-    env.opponent_velocity.zero_()
-    env.opponent_age.fill_(float("inf"))
-    env.opponent_size.zero_()
-    env._perception_rng_ticks.zero_()
+    write_rows(env._pickup_possible_cells[:, :, 0], cells.to(torch.int16))
+    reset_fuel_physics(env, selected)
+    for tensor in (env.track_pos, env.track_vel, env.track_mask,
+                   env.track_confidence, env.track_spatial_extent,
+                   env.track_angular_extent, env.track_merged,
+                   env._current_fuel_visibility, env.perception_quality_state,
+                   env.opponent_valid, env.opponent_pose, env.opponent_velocity,
+                   env.opponent_size):
+        write_rows(tensor, 0.)
+    write_rows(env.track_age, float("inf"))
+    write_rows(env.opponent_age, float("inf"))
     if not refresh_perception:
         return None
-    env._update_perception(torch.ones(env.n, device=env.device, dtype=torch.bool))
-    env._last_obs = env.observe()
+    env._update_perception(selected)
+    fresh = env.observe()
+    if env._last_obs is None:
+        env._last_obs = fresh
+    else:
+        write_rows(env._last_obs, fresh)
     return env._last_obs

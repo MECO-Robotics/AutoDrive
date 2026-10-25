@@ -33,7 +33,7 @@ class TensorThreeVsThreeGamepieceMixin:
             active=torch.ones(self.n,device=self.device,dtype=torch.bool)
         width=self.sim.field_width
         depth=self.alliance_zone_depth
-        samples=self._random_active(active,(2,self.fuel_count,2))
+        samples=self._random_active(active,(2,self.fuel_count,2),stream="gamepiece")
 
         margin=.28
         # Keep clear of the HUB approach lane while spreading drops over the

@@ -12,6 +12,7 @@ import hashlib
 import math
 
 import torch
+from torch.nn import functional as F
 
 
 BEHAVIORS = ("drive", "intake", "score", "ferry", "defense")
@@ -444,6 +445,101 @@ def gather_pose_behavior_logits(track: str, raw, graph, raster, support: PlanAAc
     behavior = raw["behavior_logits"][0]
     logits = node_values[support.pair_node_ids] + behavior[support.behavior_ids]
     return logits.masked_fill(~support.valid_mask, -torch.inf)
+
+
+def gather_pose_behavior_logits_batch(track: str, raw, batch, *,
+        field_length: float, field_width: float):
+    """Batched equivalent of canonical A1/A2/A3 pose-support logits."""
+    if track not in ("A1", "A2", "A3") or batch.plan_a is None:
+        raise ValueError("batched pose scoring requires an A track PPO batch")
+    support = batch.plan_a
+    rows = torch.arange(batch.capacity, device=batch.device, dtype=torch.long)[:, None]
+    if track == "A1":
+        utility = raw["utility"]
+        height, width = batch.common.raster.shape[-2:]
+        col = (support.xy[..., 0] / float(field_length) * width).floor().long().clamp(0, width - 1)
+        row = (support.xy[..., 1] / float(field_width) * height).floor().long().clamp(0, height - 1)
+        node_values = utility[rows, support.heading_bins, row, col]
+    else:
+        node_values = raw["utility"]
+    safe_nodes = support.pair_node_ids.clamp(0, batch.node_capacity - 1)
+    safe_behaviors = support.behavior_ids.clamp(0, 4)
+    pair_utility = node_values.gather(1, safe_nodes)
+    behavior = raw["behavior_logits"].gather(1, safe_behaviors)
+    return pair_utility + behavior
+
+
+def _project_plan_a_penalty_batch(track: str, penalty: torch.Tensor, batch, *,
+        field_length: float, field_width: float, resolution_m: float):
+    """Project per-pose penalty to XY cells with the frozen one-row rules."""
+    support = batch.plan_a
+    rows = torch.arange(batch.capacity, device=batch.device, dtype=torch.long)[:, None]
+    legal_lookup = support.legal_lookup
+    legal = legal_lookup >= 0
+    safe_lookup = legal_lookup.clamp(0, batch.node_capacity - 1)
+    if track in ("A2", "A3"):
+        pose_penalty = torch.nan_to_num(penalty).clamp_min(0.)
+    elif track == "A1":
+        height, width = penalty.shape[-2:]
+        x = support.xy[..., 0]
+        y = support.xy[..., 1]
+        gx = 2. * x / float(field_length) + 1. / width - 1.
+        gy = 2. * y / float(field_width) + 1. / height - 1.
+        grid = torch.stack((gx, gy), -1).reshape(-1, 1, 1, 2)
+        heading_penalty = penalty[rows, support.heading_bins].reshape(
+            batch.capacity * batch.node_capacity, 1, height, width)
+        sampled = F.grid_sample(torch.nan_to_num(heading_penalty).clamp_min(0.),
+            grid, mode="bilinear", padding_mode="border", align_corners=False)
+        pose_penalty = sampled.reshape(batch.capacity, batch.node_capacity)
+    else:
+        raise ValueError("Plan A penalty projection only supports A1/A2/A3")
+    heading_maps = pose_penalty.gather(1,
+        safe_lookup.reshape(batch.capacity, -1)).reshape(
+            batch.capacity, 8, batch.nx, batch.ny)
+    counts = legal.sum(1)
+    projected = (heading_maps * legal.to(heading_maps.dtype)).sum(1)
+    return projected / counts.clamp_min(1).to(projected.dtype)
+
+
+def plan_a_policy_logits_batch(track: str, raw, batch, *,
+        field_length: float, field_width: float, resolution_m: float,
+        p_mode: str, p_cost_scale: float, p_points_per_grid_edge: float):
+    """Batched A policy distribution and source-parity status tensors."""
+    support = batch.plan_a
+    logits = gather_pose_behavior_logits_batch(track, raw, batch,
+        field_length=field_length, field_width=field_width)
+    if p_mode == "learned":
+        projected = _project_plan_a_penalty_batch(track, raw["penalty"], batch,
+            field_length=field_length, field_width=field_width,
+            resolution_m=resolution_m)
+        x = (support.xy[..., 0] / float(resolution_m)).floor().long().clamp(0, batch.nx - 1)
+        y = (support.xy[..., 1] / float(resolution_m)).floor().long().clamp(0, batch.ny - 1)
+        node_cost = projected[torch.arange(batch.capacity, device=batch.device)[:, None], x, y]
+        total = node_cost * support.parent_edge_m
+        for level in range(support.ancestor_jumps.shape[1]):
+            parent = support.ancestor_jumps[:, level].clamp(0, batch.node_capacity - 1)
+            total = total + total.gather(1, parent)
+        root = support.root_node.clamp(0, batch.node_capacity - 1)
+        root_cost = node_cost.gather(1, root[:, None]).squeeze(1)
+        node_path_cost = (total + root_cost[:, None] * support.root_connector_m[:, None])
+        node_path_cost = (node_path_cost * float(p_cost_scale)
+                          * float(p_points_per_grid_edge))
+    elif p_mode == "p0":
+        node_path_cost = torch.zeros_like(support.route_cost)
+    else:
+        raise ValueError("Plan A PPO batch p_mode must be learned or p0")
+    safe_nodes = support.pair_node_ids.clamp(0, batch.node_capacity - 1)
+    route = support.route_cost.gather(1, safe_nodes)
+    risk = support.risk_cost.gather(1, safe_nodes)
+    path = node_path_cost.gather(1, safe_nodes)
+    logits = (logits - route - risk - path).masked_fill(~support.support_valid, -torch.inf)
+    status = torch.isfinite(raw["utility"]).all() & torch.isfinite(raw["penalty"]).all()
+    if "device_input_valid" in raw:
+        status = status & raw["device_input_valid"].all()
+    status = status & (torch.isfinite(logits) | ~support.support_valid).all()
+    status = status & (~batch.common.slot_valid |
+                       support.support_valid.any(dim=1)).all()
+    return logits, node_path_cost, status
 
 
 def graph_path_integral(node_cost: torch.Tensor, support: PlanAActionSupport):

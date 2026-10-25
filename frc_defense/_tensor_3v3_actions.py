@@ -91,14 +91,39 @@ class TensorThreeVsThreeActionMixin:
             clear &= ~overlaps.any(-1)
         return clear
 
-    def _prepare_score_grid(self):
-        """Cache fixed-field score points and their chassis-clearance mask."""
-        # The target graph captures these tensors' addresses. Reset rebuilds
-        # them, so retaining the old graph would read freed scoring-grid data.
-        self._target_action_graph = None
-        self._target_action_graph_outputs = None
-        self._target_action_graph_audit = None
-        self._target_action_graph_signature = None
+    def _prepare_score_grid(self, active_mask=None):
+        """Cache field score points, updating only explicitly reset worlds."""
+        if active_mask is None:
+            selected = None
+            self._target_action_graph = None
+            self._target_action_graph_outputs = None
+            self._target_action_graph_audit = None
+            self._target_action_graph_signature = None
+        else:
+            if (self.device.type != "cpu" and
+                    (not isinstance(active_mask, torch.Tensor) or
+                     active_mask.device != self.device)):
+                raise ValueError("score-grid reset mask must reside on environment device")
+            selected = torch.as_tensor(active_mask, device=self.device,
+                dtype=torch.bool).reshape(self.n)
+
+        def store(name, value):
+            current = getattr(self, name, None)
+            if selected is None:
+                setattr(self, name, value)
+                return
+            if not isinstance(current, torch.Tensor):
+                self._target_action_graph = None
+                self._target_action_graph_outputs = None
+                self._target_action_graph_audit = None
+                self._target_action_graph_signature = None
+                setattr(self, name, value)
+                return
+            if tuple(current.shape) != tuple(value.shape):
+                raise RuntimeError("partial reset changed captured score-grid shape")
+            row_mask = selected.reshape((self.n,) + (1,) * (value.ndim - 1))
+            current.copy_(torch.where(row_mask, value, current))
+
         robot_radius=.5*torch.sqrt(self.sim.length.square()+self.sim.width.square())
         red_min=robot_radius
         red_max=(self.alliance_zone_depth-robot_radius).clamp_min(0.)
@@ -108,15 +133,16 @@ class TensorThreeVsThreeActionMixin:
         x_max=torch.where(self.team_ids[None,:]==0,red_max,blue_max)
         boxes=torch.cat((self.planner._boxes,self.planner._bumps,
                          self.sim.bump_regions),0)
-        self._score_grid_robot_radius=robot_radius
-        self._score_grid_x_min=x_min
-        self._score_grid_x_max=x_max
-        self._score_grid_boxes=boxes
+        store("_score_grid_robot_radius", robot_radius)
+        store("_score_grid_x_min", x_min)
+        store("_score_grid_x_max", x_max)
+        if selected is None or not isinstance(getattr(self, "_score_grid_boxes", None), torch.Tensor):
+            self._score_grid_boxes=boxes
         if boxes.numel()==0:
-            self._score_grid_points=torch.empty(
-                (self.n,self.team_ids.numel(),0,2),device=self.device)
-            self._score_grid_clear=torch.empty(
-                (self.n,self.team_ids.numel(),0),device=self.device,dtype=torch.bool)
+            store("_score_grid_points", torch.empty(
+                (self.n,self.team_ids.numel(),0,2),device=self.device))
+            store("_score_grid_clear", torch.empty(
+                (self.n,self.team_ids.numel(),0),device=self.device,dtype=torch.bool))
             return
         fractions=self._score_x_fractions
         y_fractions=self._score_y_fractions
@@ -135,8 +161,8 @@ class TensorThreeVsThreeActionMixin:
         dy=(points[...,None,1]-box_y[:,:,None,:]).abs()
         overlap=((dx<=box_hx[:,:,None,:]+robot_radius[...,None,None]+.15) &
                  (dy<=box_hy[:,:,None,:]+robot_radius[...,None,None]+.15))
-        self._score_grid_points=points
-        self._score_grid_clear=~overlap.any(-1)
+        store("_score_grid_points", points)
+        store("_score_grid_clear", ~overlap.any(-1))
 
     def _target_for_actions(self, actions, active, policy_action_override=None):
         p = self.policy_pose
