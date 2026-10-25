@@ -518,6 +518,34 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
 
 
 @torch.no_grad()
+def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
+    """Evaluate ordered device goals in bounded planner batches and concatenate tensors."""
+    items = tuple(queries)
+    if (not isinstance(goal_xy, torch.Tensor) or goal_xy.ndim != 2
+            or goal_xy.shape != (len(items), 2)):
+        raise ValueError("goal_xy must be floating [Q,2] aligned with queries")
+    if goal_xy.device != torch.device(env.device) or not goal_xy.is_floating_point():
+        raise ValueError("goal_xy must be floating on env.device")
+    if len(items) <= MAX_ROUTE_QUERY_BATCH:
+        return evaluate_device_routes(env, items, goal_xy, **kwargs)
+    chunks = []
+    for start in range(0, len(items), MAX_ROUTE_QUERY_BATCH):
+        stop = start + MAX_ROUTE_QUERY_BATCH
+        chunks.append(evaluate_device_routes(env, items[start:stop],
+            goal_xy[start:stop], **kwargs))
+    return DeviceRouteBatch(items,
+        torch.cat([batch.status_code for batch in chunks]),
+        torch.cat([batch.feasible for batch in chunks]),
+        torch.cat([batch.path_xy for batch in chunks]),
+        torch.cat([batch.path_length for batch in chunks]),
+        torch.cat([batch.distance_m for batch in chunks]),
+        torch.cat([batch.endpoint_error_m for batch in chunks]),
+        torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
+        torch.arange(len(items), device=goal_xy.device, dtype=torch.long),
+        cost_provenance=chunks[0].cost_provenance)
+
+
+@torch.no_grad()
 def evaluate_routes(env, queries: tuple[RouteQuery, ...] | list[RouteQuery],
                     *, goal_tolerance_m: float = 0.05,
                     endpoint_tolerance_m: float = 0.05,
