@@ -558,6 +558,47 @@ class MaskedSequentialAdamV1:
             flattened.extend((step, first, second))
         return tuple(flattened)
 
+    def state_dict(self) -> dict[str, object]:
+        return {"schema_id": PPO_OPTIMIZER_SCHEMA_ID,
+            "learning_rate": self.learning_rate, "beta1": self.beta1,
+            "beta2": self.beta2, "eps": self.eps,
+            "parameter_count": len(self.parameters),
+            "state": [tuple(value.detach().clone() for value in triple)
+                      for triple in zip(self.step_count, self.first_moment,
+                                        self.second_moment)]}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if (not isinstance(state, dict) or set(state) != {
+                "schema_id", "learning_rate", "beta1", "beta2", "eps",
+                "parameter_count", "state"} or
+                state.get("schema_id") != PPO_OPTIMIZER_SCHEMA_ID or
+                state.get("learning_rate") != self.learning_rate or
+                state.get("beta1") != self.beta1 or
+                state.get("beta2") != self.beta2 or
+                state.get("eps") != self.eps or
+                state.get("parameter_count") != len(self.parameters)):
+            raise ValueError("incompatible sequential Adam checkpoint schema")
+        saved = state["state"]
+        if not isinstance(saved, (list, tuple)) or len(saved) != len(self.parameters):
+            raise ValueError("sequential Adam checkpoint parameter count mismatch")
+        staged = []
+        for index, triple in enumerate(saved):
+            if not isinstance(triple, (list, tuple)) or len(triple) != 3:
+                raise ValueError("sequential Adam checkpoint state tuple is malformed")
+            parameter = self.parameters[index]
+            step, first, second = triple
+            step = torch.as_tensor(step, device=self.device, dtype=torch.long)
+            first = torch.as_tensor(first, device=self.device, dtype=parameter.dtype)
+            second = torch.as_tensor(second, device=self.device, dtype=parameter.dtype)
+            if (step.numel() != 1 or first.shape != parameter.shape or
+                    second.shape != parameter.shape):
+                raise ValueError("sequential Adam checkpoint tensor shape mismatch")
+            staged.append((step, first, second))
+        for index, (step, first, second) in enumerate(staged):
+            self.step_count[index].copy_(step.reshape(()))
+            self.first_moment[index].copy_(first)
+            self.second_moment[index].copy_(second)
+
 
 class DevicePpoRngV1:
     """Independent explicit HIP streams for policy actions and row orders."""

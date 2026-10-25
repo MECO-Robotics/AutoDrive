@@ -50,7 +50,12 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
     PREDICTION_MODEL_ID, MULTIMODEL_HYPOTHESES, MULTIMODEL_MAX_HORIZON_S,
     MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
-    MULTIMODEL_DAMPING_PER_S)
+    MULTIMODEL_DAMPING_PER_S, score_five_track_ppo_batch)
+from .meco_ppo_batch import (FiveTrackPpoBatchV2, MaskedSequentialAdamV1,
+    DevicePpoRngV1, write_common_slot, write_plan_a_slot, write_plan_c_slot,
+    write_slot_digest, validate_slot_digests, gae_v2,
+    normalized_actor_advantage, PPO_BATCH_SCHEMA_ID,
+    PPO_OPTIMIZER_SCHEMA_ID, PPO_RNG_SCHEMA_ID)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     plan_a_support_order_digest, PlanAEmptySupportError, SUPPORT_ORDER)
@@ -2018,133 +2023,152 @@ def _policy_inputs_for_row(track, model, row, hidden, config):
     return decision
 
 
-def _ppo_update(track, model, value_head, optimizer, rows, config, bootstrap_value,
-                *, update_number, diagnostic_output):
-    rewards = torch.stack([row["reward"] for row in rows])
-    dones = torch.tensor([row["done"] for row in rows], device=rewards.device,
-                         dtype=rewards.dtype)
-    old_logprob = torch.stack([row["logprob"] for row in rows]).detach()
-    old_value = torch.stack([row["value"] for row in rows]).detach()
-    # Validate exact rollout/replay identity for Plan A before any optimizer
-    # step. The support tensors are shared by each row, so digesting catches
-    # accidental in-place mutation of pair IDs, descriptors, mask, or paths.
+def _pack_five_track_ppo_batch(track, rows, config, bootstrap_value):
+    """Pack one fixed-capacity rollout into its typed device contract."""
+    if not rows:
+        raise RuntimeError("cannot pack an empty PPO rollout")
+    graph = rows[0].get("graph_object")
+    if graph is None:
+        raise RuntimeError("PPO rollout lacks its frozen legal pose graph")
+    batch = FiveTrackPpoBatchV2.allocate(track=track,
+        capacity=config.rollout_steps, device=config.device,
+        raster_shape=tuple(rows[0]["raster"].shape[-2:]),
+        node_capacity=graph.node_capacity, nx=graph.nx, ny=graph.ny,
+        feature_count=(MECO_CANDIDATE_RAW_FEATURE_COUNT
+                       if track in ("C1", "C2") else 0),
+        dtype=rows[0]["raster"].dtype)
+    if len(rows) > batch.capacity:
+        raise RuntimeError("PPO rollout exceeds its fixed device batch capacity")
+    device = batch.device
+    for slot, row in enumerate(rows):
+        next_value = (rows[slot + 1]["value"] if slot + 1 < len(rows)
+                      else bootstrap_value)
+        write_common_slot(batch, slot,
+            raster=row["raster"], globals_=row["globals"],
+            hidden_before=row["hidden_before"], action=row["action"],
+            old_logprob=row["logprob"], old_value=row["value"],
+            next_value=next_value, reward=row["reward"],
+            episode_boundary=torch.as_tensor(row["done"], device=device,
+                dtype=torch.bool),
+            execution_failure=torch.as_tensor(row["execution_failure"],
+                device=device, dtype=torch.bool))
+        if track in ("A1", "A2", "A3"):
+            graph_features = (row["graph"].get("node_features")
+                if isinstance(row.get("graph"), dict) else None)
+            if graph_features is None:
+                graph_features = batch.plan_a.node_features[slot]
+            write_plan_a_slot(batch, slot, graph=graph,
+                support=row["support"], graph_node_features=graph_features,
+                route_cost=row["route_cost_nodes"],
+                risk_cost=row["risk_cost_nodes"])
+        else:
+            candidate_set = row.get("candidate_set")
+            device_batch = (None if candidate_set is None else
+                            candidate_set.device_batch)
+            if device_batch is None:
+                raise RuntimeError(f"{track} rollout lacks its frozen device candidate batch")
+            write_plan_c_slot(batch, slot, device_batch=device_batch,
+                route_cost=row["route_cost"], risk_cost=row["risk_cost"])
+    # Padding duplicates a valid schema row so every model forward remains
+    # finite. The slot-valid mask makes these rows optimizer no-ops.
+    source = len(rows) - 1
+    for slot in range(source + 1, batch.capacity):
+        for group in (batch.common, batch.plan_a, batch.plan_c):
+            if group is None:
+                continue
+            for field in fields(group):
+                value = getattr(group, field.name)
+                value[slot].copy_(value[source])
+        batch.common.slot_valid[slot] = False
+        batch.common.actor_valid[slot] = False
+        batch.common.critic_valid[slot] = False
+    for slot in range(len(rows)):
+        write_slot_digest(batch, slot)
+    verdict = batch.device_contract_status() & validate_slot_digests(batch)
+    assert_async = getattr(torch, "_assert_async", None)
+    if assert_async is None:
+        raise RuntimeError("device-side PPO batch validation is unavailable")
+    assert_async(verdict, "fixed five-track PPO batch contract/replay digest failed")
+    return batch
+
+
+def _ppo_update(track, model, value_head, optimizer, batch, config,
+                *, rollout_steps, geometry, ppo_rng):
+    common = batch.common
+    assert_async = getattr(torch, "_assert_async", None)
+    if assert_async is None:
+        raise RuntimeError("device-side PPO replay validation is unavailable")
+
+    def score_batch():
+        return score_five_track_ppo_batch(track, model, batch,
+            value_head=value_head,
+            field_length=float(geometry["field_length_m"]),
+            field_width=float(geometry["field_width_m"]),
+            resolution_m=float(geometry["resolution_m"]),
+            p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
+            p_points_per_grid_edge=config.p_points_per_grid_edge,
+            commitment_switch_column=(MECO_CANDIDATE_RAW_FEATURE_COUNT - 1
+                if track in ("C1", "C2") else None))
+
+    # Validate packed policy replay and row digests in one device-side check.
     with torch.no_grad():
-        current_model_parameters_sha256 = (
-            _model_id(model) if track in ("C1", "C2") else None)
-        for row_index, row in enumerate(rows):
-            support = row.get("support")
-            if support is None:
-                continue
-            expected_digest = row.get("support_digest")
-            actual_digest = plan_a_support_digest(support, row["graph_object"])
-            if (not expected_digest or expected_digest != support.support_digest or
-                    actual_digest != expected_digest):
-                raise RuntimeError("Plan A frozen support changed between rollout and PPO update")
-            if row.get("execution_failure", False):
-                continue
-            replay = _policy_inputs_for_row(track, model, row,
-                                            row["hidden_before"], config)
-            replay_logprob = categorical_from_candidate_logits(
-                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
-            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
-                                  atol=5e-5, rtol=5e-5):
-                raise _logprob_replay_error(
-                    "Plan A rollout log-probability does not replay under frozen support",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output)
-        for row_index, row in enumerate(rows):
-            if track not in ("C1", "C2") or row.get("candidate_set") is None:
-                continue
-            expected = row.get("candidate_digest")
-            actual = candidate_digest(row["candidate_set"].table)
-            if not expected or expected != actual:
-                raise RuntimeError("Plan C immutable candidate table changed between rollout and PPO update")
-            replay_digest = _candidate_replay_digest(row["candidate_set"].table,
-                row["route_cost"], row["risk_cost"])
-            if replay_digest != row.get("candidate_replay_digest"):
-                raise RuntimeError("Plan C candidate route/risk costs changed between rollout and PPO update")
-            replay = _policy_inputs_for_row(track, model, row,
-                                            row["hidden_before"], config)
-            replay_logprob = categorical_from_candidate_logits(
-                replay["logits"]).log_prob(row["action"].reshape(1)).reshape(())
-            rollout_fingerprints = row.get("replay_fingerprints")
-            replay_fingerprints = _candidate_replay_fingerprints(row, model,
-                model_parameters_sha256=current_model_parameters_sha256)
-            if (not isinstance(rollout_fingerprints, dict) or
-                    rollout_fingerprints != replay_fingerprints):
-                raise _logprob_replay_error(
-                    "Plan C frozen rollout inputs changed before PPO replay",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output,
-                    model_parameters_sha256=current_model_parameters_sha256)
-            if not torch.allclose(replay_logprob, row["logprob"].reshape(()),
-                                  atol=5e-5, rtol=5e-5):
-                raise _logprob_replay_error(
-                    "Plan C rollout log-probability does not replay under frozen candidate table",
-                    track, model, row, replay, replay_logprob,
-                    update_number=update_number, row_index=row_index,
-                    config=config, output=diagnostic_output,
-                    model_parameters_sha256=current_model_parameters_sha256)
-    with torch.no_grad():
-        next_value = (torch.zeros_like(old_value[-1]) if rows[-1]["done"]
-                      else bootstrap_value.reshape(()))
-    advantage, returns = _gae(rewards, dones, old_value, next_value,
-                              config.gamma, config.gae_lambda)
-    actor_rows = torch.tensor([not row.get("execution_failure", False) for row in rows],
-                              device=advantage.device, dtype=torch.bool)
-    actor_advantage = torch.zeros_like(advantage)
-    if bool(actor_rows.any()):
-        eligible_advantage = advantage[actor_rows]
-        actor_advantage[actor_rows] = (eligible_advantage - eligible_advantage.mean()) / \
-            eligible_advantage.std(unbiased=False).clamp_min(1e-8)
-    policy_losses = []; value_losses = []; entropies = []
-    count = len(rows)
+        replay = score_batch()
+        replay_logprob = categorical_from_candidate_logits(
+            replay["logits"]).log_prob(common.action)
+        replay_matches = ((replay_logprob - common.old_logprob).abs() <= 5e-5)
+        replay_matches = (replay_matches | ~common.slot_valid).all()
+        assert_async(replay["status"] & replay_matches,
+            "batched five-track PPO scorer/replay identity failed")
+    advantage, returns = gae_v2(batch, gamma=config.gamma,
+                               gae_lambda=config.gae_lambda)
+    actor_advantage = normalized_actor_advantage(batch, advantage)
+    policy_loss_sum = torch.zeros((), device=batch.device, dtype=common.reward.dtype)
+    value_loss_sum = torch.zeros_like(policy_loss_sum)
+    entropy_sum = torch.zeros_like(policy_loss_sum)
+    valid_count = common.slot_valid.to(common.reward.dtype).sum().clamp_min(1.)
     for _ in range(config.epochs):
-        order = torch.randperm(count, device=rewards.device)
-        for idx in order.tolist():
-            row = rows[idx]
-            current = _policy_inputs_for_row(track, model, row,
-                                             row["hidden_before"], config)
-            logits = current["logits"]
-            value = _value(value_head, row["globals"], current["hidden"]).reshape(())
-            value_loss = .5 * (value - returns[idx]).square()
-            if row.get("execution_failure", False):
-                # Do not credit a safely remasked fallback as the sampled PPO
-                # action. Keep the transition for critic learning and audit.
-                loss = config.value_coef * value_loss
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
-                                         config.max_grad_norm)
-                optimizer.step()
-                policy_losses.append(0.)
-                value_losses.append(float(value_loss.detach()))
-                entropies.append(0.)
-                continue
-            dist = categorical_from_candidate_logits(logits)
-            action = row["action"].reshape(1)
-            logprob = dist.log_prob(action).reshape(())
-            entropy = dist.entropy().mean()
-            ratio = (logprob - old_logprob[idx]).exp()
-            unclipped = ratio * actor_advantage[idx]
-            clipped = ratio.clamp(1. - config.clip_coef, 1. + config.clip_coef) * actor_advantage[idx]
+        order = ppo_rng.permutation_indices(batch.capacity)
+        for position in range(batch.capacity):
+            index = order[position].reshape(1)
+            current = score_batch()
+            assert_async(current["status"],
+                "batched five-track PPO scorer rejected a replay row")
+            dist = categorical_from_candidate_logits(current["logits"])
+            logprob = dist.log_prob(common.action)
+            entropy = dist.entropy()
+            ratio = (logprob - common.old_logprob).exp()
+            unclipped = ratio * actor_advantage
+            clipped = ratio.clamp(1. - config.clip_coef,
+                                  1. + config.clip_coef) * actor_advantage
             policy_loss = -torch.minimum(unclipped, clipped)
-            loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
-            optimizer.zero_grad(set_to_none=True)
+            value_loss = .5 * (current["value"] - returns).square()
+            actor = common.actor_valid & common.slot_valid
+            critic = common.critic_valid & common.slot_valid
+            row_actor = policy_loss.index_select(0, index).reshape(())
+            row_value = value_loss.index_select(0, index).reshape(())
+            row_entropy = entropy.index_select(0, index).reshape(())
+            actor_enabled = actor.index_select(0, index).reshape(())
+            critic_enabled = critic.index_select(0, index).reshape(())
+            active = common.slot_valid.index_select(0, index).reshape(())
+            loss = (torch.where(actor_enabled,
+                row_actor - config.entropy_coef * row_entropy,
+                torch.zeros_like(row_actor)) +
+                config.value_coef * row_value * critic_enabled.to(row_value.dtype))
+            optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(list(model.parameters()) + list(value_head.parameters()),
-                                     config.max_grad_norm)
-            optimizer.step()
-            policy_losses.append(float(policy_loss.detach()))
-            value_losses.append(float(value_loss.detach()))
-            entropies.append(float(entropy.detach()))
-    return {"policy_loss": sum(policy_losses) / max(1, len(policy_losses)),
-            "value_loss": sum(value_losses) / max(1, len(value_losses)),
-            "entropy": sum(entropies) / max(1, len(entropies)),
-            "rollout_return": float(rewards.sum().detach()),
-            "rollout_steps": count}
+            optimizer.step(active, max_grad_norm=config.max_grad_norm)
+            policy_loss_sum += torch.where(actor_enabled, row_actor,
+                                            torch.zeros_like(row_actor))
+            value_loss_sum += torch.where(critic_enabled, row_value,
+                                           torch.zeros_like(row_value))
+            entropy_sum += torch.where(actor_enabled, row_entropy,
+                                        torch.zeros_like(row_entropy))
+    denominator = valid_count * config.epochs
+    return {"policy_loss": float((policy_loss_sum / denominator).detach()),
+            "value_loss": float((value_loss_sum / denominator).detach()),
+            "entropy": float((entropy_sum / denominator).detach()),
+            "rollout_return": float((common.reward * common.slot_valid).sum().detach()),
+            "rollout_steps": rollout_steps}
 
 
 def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
@@ -2253,8 +2277,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             "qualification_protocol_id": warm_start_provenance.get("protocol_id"),
             "qualification_protocol_sha256": warm_start_provenance.get("qualification_protocol_sha256")}
     value_head = ValueHead().to(config.device)
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(value_head.parameters()),
-                                 lr=config.learning_rate)
+    optimizer = MaskedSequentialAdamV1(
+        list(model.parameters()) + list(value_head.parameters()),
+        device=config.device, learning_rate=config.learning_rate)
+    ppo_rng = DevicePpoRngV1.from_seed(config.seed, device=config.device)
     update = 0
     episode = 0
     history = []
@@ -2267,7 +2293,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     resume_reset_rng_state = None
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
-        if payload.get("schema_version") != 3 or payload.get("sources") != sources:
+        if (payload.get("schema_version") != 4 or payload.get("sources") != sources or
+                payload.get("ppo_batch_schema_id") != PPO_BATCH_SCHEMA_ID or
+                payload.get("ppo_optimizer_schema_id") != PPO_OPTIMIZER_SCHEMA_ID or
+                payload.get("ppo_rng_schema_id") != PPO_RNG_SCHEMA_ID):
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
         if payload.get("protocol_id") != protocol_id:
             raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
@@ -2346,6 +2375,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                                  {"mode": "random_initialization"})
         value_head.load_state_dict(resume_payload["value_head"])
         optimizer.load_state_dict(resume_payload["optimizer"])
+        ppo_rng.load_state_dict(resume_payload["ppo_rng"])
     if resume_rng_torch is not None:
         torch.set_rng_state(resume_rng_torch)
         random.setstate(resume_rng_python)
@@ -2524,6 +2554,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
+                            action_generator=ppo_rng.action,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
                             value_head=value_head)
@@ -2728,6 +2759,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                             p_mode=config.p_mode, p_cost_scale=config.p_cost_scale,
                             p_points_per_grid_edge=config.p_points_per_grid_edge,
                             prediction_mode=config.prediction_mode,
+                            action_generator=ppo_rng.action,
                             commitment=commitment,
                             tracking_was_available=tracking_was_available,
                             deterministic=True,
@@ -2749,9 +2781,14 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                         raise RuntimeError(
                             "empty-support bootstrap discarded the rollout to preserve episode boundaries") from exc
                     bootstrap_value = torch.zeros_like(rows[-1]["value"])
-            stats = _ppo_update(config.track, model, value_head, optimizer, rows,
-                                config, bootstrap_value, update_number=update,
-                                diagnostic_output=output)
+            ppo_batch = _pack_five_track_ppo_batch(
+                config.track, rows, config, bootstrap_value)
+            stats = _ppo_update(config.track, model, value_head, optimizer,
+                ppo_batch, config, rollout_steps=len(rows),
+                geometry={"field_length_m": float(env.sim.field_length),
+                    "field_width_m": float(env.sim.field_width),
+                    "resolution_m": float(env.planner.resolution)},
+                ppo_rng=ppo_rng)
             update += 1
             update_heartbeat()
             stats.update(update=update, episode=episode, track=config.track,
@@ -2781,7 +2818,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     row["candidate_recall"]["candidate_recall"]
                     for row in rows) / len(rows)
             history.append(stats)
-            payload = {"schema_version": 3, "config": asdict(config),
+            payload = {"schema_version": 4, "config": asdict(config),
+                "ppo_batch_schema_id": PPO_BATCH_SCHEMA_ID,
+                "ppo_optimizer_schema_id": PPO_OPTIMIZER_SCHEMA_ID,
+                "ppo_rng_schema_id": PPO_RNG_SCHEMA_ID,
                 "prediction_contract": prediction_contract(config.prediction_mode),
                 "qualification_protocol_id": qualification_protocol_id,
                 "qualification_protocol_sha256": qualification_protocol_sha256,
@@ -2797,6 +2837,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "episode": episode, "model": model.state_dict(),
                 "task_progress": task_progress_payload(),
                 "value_head": value_head.state_dict(), "optimizer": optimizer.state_dict(),
+                "ppo_rng": ppo_rng.state_dict(),
                 "rng_torch": torch.get_rng_state(), "rng_python": random.getstate(),
                 "rng_device": torch.cuda.get_rng_state(torch.device(config.device)) if config.device.startswith("cuda") else None,
                 "history": history}
