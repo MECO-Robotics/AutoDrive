@@ -586,6 +586,17 @@ class FuelPhysics:
     def required_substeps(self, dt=None, base=None, active_mask=None, piece_active=None, piece_owner=None):
         """Use a fixed Python loop bound and assert stability capacity on device."""
         self._validate_qualifying_backend()
+        if self._gpu_qualifying:
+            for name, tensor, shape in (
+                    ("active mask",active_mask,(self.n,)),
+                    ("piece active mask",piece_active,(self.n,self.p)),
+                    ("piece owner",piece_owner,(self.n,self.p))):
+                if tensor is not None and (
+                        not isinstance(tensor,torch.Tensor) or
+                        tensor.device!=self.device or tensor.shape!=shape):
+                    raise ValueError(
+                        f"GPU-qualifying {name} must be a device-resident "
+                        f"tensor with shape {shape}")
         duration=float(self.sim.dt if dt is None else dt)
         count=self.config.substeps if base is None else int(base)
         if not self.config.adaptive_substeps:

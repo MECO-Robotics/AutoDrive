@@ -41,6 +41,16 @@ def initialize_fuel_physics(env, config=True):
 
 def bind_fuel_state(env):
     physics = env.fuel_physics
+    physics._validate_qualifying_backend()
+    if physics._gpu_qualifying:
+        expected=(physics.n,physics.p,2)
+        for name, tensor in (("piece positions",env.piece_pos),
+                             ("piece velocities",env.piece_vel)):
+            if (not isinstance(tensor,torch.Tensor) or
+                    tensor.device!=physics.device or tuple(tensor.shape)!=expected):
+                raise ValueError(
+                    f"GPU-qualifying fuel {name} must remain on-device with "
+                    f"shape {expected}")
     physics.piece_pos = env.piece_pos
     physics.piece_vel = env.piece_vel
     return physics
@@ -60,6 +70,26 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
         _flush_fuel_score_awards(env)
         return state
     physics._validate_qualifying_backend()
+    if physics._gpu_qualifying:
+        for name, tensor, shape in (
+                ("commands",commands,
+                 (env.n,env.sim.num_robots,3)),
+                ("piece active mask",env.piece_active,
+                 (physics.n,physics.p)),
+                ("piece owner",env.piece_owner,
+                 (physics.n,physics.p))):
+            if (not isinstance(tensor,torch.Tensor) or
+                    tensor.device!=physics.device or tensor.shape!=shape):
+                raise ValueError(
+                    f"GPU-qualifying fuel {name} must be device-resident "
+                    f"with shape {shape}")
+        if active_mask is not None and (
+                not isinstance(active_mask,torch.Tensor) or
+                active_mask.device!=physics.device or
+                active_mask.shape!=(physics.n,)):
+            raise ValueError(
+                "GPU-qualifying active mask must be a device-resident "
+                "[world] tensor")
     physics = bind_fuel_state(env)
     active = (torch.ones(env.n, device=env.device, dtype=torch.bool)
               if active_mask is None else active_mask)
