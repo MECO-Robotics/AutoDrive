@@ -4532,6 +4532,39 @@ def _stage1_reject_protected_references(value, *, base, roots):
             _stage1_reject_protected_references(item, base=base, roots=roots)
 
 
+def _stage1_save_report(destination, report):
+    report["report_sha256"] = _canonical_sha256(report)
+    if destination.exists():
+        existing, _ = _stage1_json(destination, label="existing output")
+        if existing != report:
+            raise ValueError("refusing to replace a non-identical existing output")
+        return report
+    tmp = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, sort_keys=True, indent=2, allow_nan=False)
+            stream.write("\n")
+        os.replace(tmp, destination)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return report
+
+
+def _stage1_blocked_report(destination, checks, blocker_codes):
+    report = {"schema": _STAGE1_PREFLIGHT_SCHEMA, "status": "blocked",
+        "scope": "metadata_consistent_only", "ready": False,
+        "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
+        "checkpoint_bytes_opened": False, "outcomes_read": False,
+        "curriculum_state_changed": False, "qualification_decision": False,
+        "tracks": [{"policy_id": policy, "status": "blocked",
+            "blocker_code": "preflight_input_safety_blocked"} for policy in POLICIES],
+        "checks": checks, "blocker_codes": sorted(set(blocker_codes))}
+    return _stage1_save_report(destination, report)
+
+
 def _stage1_check_phase0_artifact(name, value, protocol):
     if not isinstance(value, dict):
         raise ValueError(f"Phase 0 {name} artifact is malformed")
@@ -4652,10 +4685,13 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
     input_values = [protocol_path, phase0_index_path, campaign_manifest_path,
         *checkpoint_manifest_paths]
     inputs = []
+    caller_input_issues = {}
     for value in input_values:
-        path = _stage1_resolved_path(value, label="input")
-        if _stage1_inside(path, protected) or not path.is_file():
-            raise ValueError("input must be a regular file outside every protected root")
+        path = _stage1_resolved_path(value, label="input", strict=False)
+        if _stage1_inside(path, protected):
+            caller_input_issues[path] = "input_path_protected"
+        elif not path.is_file():
+            caller_input_issues[path] = "input_path_missing"
         inputs.append(path)
     output_candidate = Path(output_path).expanduser()
     parent = _stage1_resolved_path(output_candidate.parent, label="output parent")
@@ -4667,24 +4703,65 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
 
     # Read the campaign declaration first, then expand the denylist before
     # opening any other supplied or referenced artifact.
-    campaign, _ = _stage1_json(inputs[2], label="campaign manifest")
+    if _stage1_inside(inputs[2], protected) or not inputs[2].is_file():
+        blocker = "campaign_manifest_path_protected" if _stage1_inside(inputs[2], protected) else "campaign_manifest_missing"
+        rows = [{"check_id": "input_path", "status": "blocked",
+            "evidence_path": str(path), "evidence_sha256": None,
+            "blocker_code": caller_input_issues.get(path, "input_not_opened")}
+            for path in inputs]
+        return _stage1_blocked_report(destination, rows,
+            [blocker, *[row["blocker_code"] for row in rows]])
+    try:
+        campaign, campaign_raw_sha = _stage1_json(inputs[2], label="campaign manifest")
+    except ValueError:
+        return _stage1_blocked_report(destination, [{"check_id": "campaign_manifest",
+            "status": "blocked", "evidence_path": str(inputs[2]),
+            "evidence_sha256": hashlib.sha256(inputs[2].read_bytes()).hexdigest(),
+            "blocker_code": "campaign_manifest_json_invalid"}],
+            ["campaign_manifest_json_invalid"])
     for field in ("campaign_roots", "checkpoint_roots"):
         roots = campaign.get(field)
         if not isinstance(roots, list) or not roots:
-            raise ValueError(f"campaign manifest must declare nonempty {field}")
+            return _stage1_blocked_report(destination, [{"check_id": "campaign_roots",
+                "status": "blocked", "evidence_path": str(inputs[2]),
+                "evidence_sha256": campaign_raw_sha,
+                "blocker_code": "campaign_protected_roots_missing"}],
+                ["campaign_protected_roots_missing"])
         for raw_root in roots:
             if not isinstance(raw_root, str) or not Path(raw_root).is_absolute():
-                raise ValueError(f"declared {field} entries must be absolute paths")
-            root = _stage1_resolved_path(raw_root, label=f"declared {field} root")
+                return _stage1_blocked_report(destination, [{"check_id": "campaign_roots",
+                    "status": "blocked", "evidence_path": str(inputs[2]),
+                    "evidence_sha256": campaign_raw_sha,
+                    "blocker_code": "campaign_protected_root_invalid"}],
+                    ["campaign_protected_root_invalid"])
+            try:
+                root = _stage1_resolved_path(raw_root, label=f"declared {field} root")
+            except ValueError:
+                raise
             if not root.is_dir():
                 raise ValueError(f"declared {field} root is not a directory")
             protected.append(root)
     protected = list(dict.fromkeys(protected))
-    if any(_stage1_inside(path, protected) for path in inputs):
-        raise ValueError("an input resolves inside a campaign-declared protected root")
+    expanded_violations = [path for path in inputs if _stage1_inside(path, protected)]
     if _stage1_inside(destination, protected):
         raise ValueError("output resolves inside a campaign-declared protected root")
-    _stage1_reject_protected_references(campaign, base=inputs[2].parent, roots=protected)
+    try:
+        _stage1_reject_protected_references(campaign, base=inputs[2].parent, roots=protected)
+    except ValueError:
+        return _stage1_blocked_report(destination, [{"check_id": "campaign_references",
+            "status": "blocked", "evidence_path": str(inputs[2]),
+            "evidence_sha256": campaign_raw_sha,
+            "blocker_code": "referenced_evidence_path_protected"}],
+            ["referenced_evidence_path_protected"])
+    expanded_input_issues = dict(caller_input_issues)
+    expanded_input_issues.update({path: "input_path_protected" for path in expanded_violations})
+    if expanded_input_issues:
+        rows = [{"check_id": "input_path", "status": "blocked",
+            "evidence_path": str(path), "evidence_sha256": None,
+            "blocker_code": expanded_input_issues.get(path, "input_not_opened")}
+            for path in inputs]
+        codes = [row["blocker_code"] for row in rows if row["blocker_code"] != "input_not_opened"]
+        return _stage1_blocked_report(destination, rows, codes)
 
     protocol_load_error = phase0_load_error = None
     try:
@@ -4695,10 +4772,17 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
         phase0, phase0_sha = _stage1_json(inputs[1], label="Phase 0 evidence index")
     except ValueError:
         phase0, phase0_sha, phase0_load_error = {}, hashlib.sha256(inputs[1].read_bytes()).hexdigest(), True
-    if not protocol_load_error:
-        _stage1_reject_protected_references(protocol, base=inputs[0].parent, roots=protected)
-    if not phase0_load_error:
-        _stage1_reject_protected_references(phase0, base=inputs[1].parent, roots=protected)
+    try:
+        if not protocol_load_error:
+            _stage1_reject_protected_references(protocol, base=inputs[0].parent, roots=protected)
+        if not phase0_load_error:
+            _stage1_reject_protected_references(phase0, base=inputs[1].parent, roots=protected)
+    except ValueError:
+        return _stage1_blocked_report(destination, [{"check_id": "input_references",
+            "status": "blocked", "evidence_path": str(inputs[0]),
+            "evidence_sha256": None if protocol_load_error else protocol_raw_sha,
+            "blocker_code": "referenced_evidence_path_protected"}],
+            ["referenced_evidence_path_protected"])
     checkpoint_paths = inputs[3:]
     checkpoint_rows = []
     checkpoint_load_errors = []
