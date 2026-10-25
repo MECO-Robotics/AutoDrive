@@ -9,6 +9,7 @@ import struct
 import pytest
 
 from frc_defense import meco_qualification as q
+from frc_defense import meco_external_release_gate as release_gate
 from frc_defense.meco_simulated_score_ledger import (
     ESTIMAND_SCHEMA, OUTCOME_NAME, PHASE0_PLAN_SHA256, RULES, RULES_ID,
     RULES_SHA256, SOURCE_PLAN_SHA256, MecoScoreEventRecorder,
@@ -17,14 +18,14 @@ from frc_defense.meco_simulated_score_ledger import (
 
 
 def _workers():
-    common = {"device_model": "AMD Instinct MI300X WX9100",
+    common = {"device_model": "AMD Radeon Pro WX 9100",
         "backend": "hip", "backend_version": "rocm-test",
         "torch_version": "torch-test"}
     return [
         {"worker_id": "wx-a", "device": "cuda:0", "device_index": 0,
-         "device_uuid": "GPU-a", **common},
+         "device_uuid": "30323133-6632-6261-3734-313632316134", **common},
         {"worker_id": "wx-b", "device": "cuda:1", "device_index": 1,
-         "device_uuid": "GPU-b", **common},
+         "device_uuid": "30323133-6661-3836-3737-346334386134", **common},
     ]
 
 
@@ -86,6 +87,21 @@ def _campaign(monkeypatch, **overrides):
         "worker_assignments": _workers()}
     values.update(overrides)
     return q.build_paired_calibration_campaign(**values)
+
+
+def _release_observation(campaign):
+    devices = {device: {**identity, "active_owners": []}
+        for device, identity in sorted(release_gate.WX9100_BY_INDEX.items())}
+    owners = {device: [] for device in release_gate.WX9100_BY_INDEX}
+    body = {"schema": "meco-external-release-observation-v1",
+        "campaign_id": release_gate.R4_CAMPAIGN_ID,
+        "manifest_path": str(release_gate.R4_MANIFEST_PATH),
+        "manifest_id": "acaf745eb84eb66ea8447a884ad6eb036166abe2f596b168ee392fb6d423bc03",
+        "devices": devices,
+        "observations": [{"r4_processes": [], "device_owners": owners} for _ in range(2)],
+        "settle_seconds": 1.0, "observed_utc": "2026-10-25T00:00:00+00:00",
+        "method": "proc-cmdline-and-proc-fd-render-node-bdf-v1"}
+    return {**body, "observation_sha256": q._canonical_sha256(body)}
 
 
 def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
@@ -275,12 +291,18 @@ def test_paired_runner_groups_exact_case_seed_tuples_and_revalidates_gate_before
         assert set(group["controls"]) == {"D0", group["key"][-1]}
         for control_id, units in group["controls"].items():
             assert [unit["seed"] for unit in units] == group["seeds"]
+    from frc_defense import meco_external_release_gate as release_gate
+    ordering = []
+    monkeypatch.setattr(release_gate, "verify_external_release_before_paired_run",
+        lambda campaign: ordering.append("release") or {})
     monkeypatch.setattr(q, "validate_paired_calibration_gate_artifacts",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("gate validation reached")))
+        lambda *args, **kwargs: ordering.append("artifacts") or
+            (_ for _ in ()).throw(ValueError("gate validation reached")))
     with pytest.raises(ValueError, match="gate validation reached"):
         q.run_paired_calibration_shard(campaign, 0, repo_root="unavailable",
             replay_root="unavailable", output_root="unavailable",
             configuration_artifacts={})
+    assert ordering == ["release", "artifacts"]
 
 
 @pytest.mark.parametrize("field,value", [
@@ -324,7 +346,8 @@ def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch,
 
     with pytest.raises(ValueError, match="progress is incomplete"):
         q.build_paired_calibration_final_shard(campaign, 0, progress,
-            replay_root=tmp_path, approval=approval)
+            replay_root=tmp_path, approval=approval,
+            release_observation=_release_observation(campaign))
 
 
 def test_paired_artifact_writer_is_atomic_idempotent_and_never_overwrites(tmp_path):
@@ -501,7 +524,8 @@ def test_multimodel_contract_digest_survives_final_shard_and_merged_bundle(monke
         progress = q.build_paired_calibration_progress(campaign,
             shard["shard_index"], rows, replay_root=tmp_path, approval=approval)
         final = q.build_paired_calibration_final_shard(campaign,
-            shard["shard_index"], progress, replay_root=tmp_path, approval=approval)
+            shard["shard_index"], progress, replay_root=tmp_path, approval=approval,
+            release_observation=_release_observation(campaign))
         expected_binding = next(control["control_binding_sha256"]
             for control in campaign["controls"]
             if control["control_id"] == "D2/multi_model_v1")

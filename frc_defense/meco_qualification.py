@@ -1865,7 +1865,8 @@ def _paired_worker_assignments(assignments):
                 or assignment["device_index"] < 0
                 or assignment["device"] != f"cuda:{assignment['device_index']}"
                 or not isinstance(assignment["device_model"], str)
-                or "wx9100" not in assignment["device_model"].lower()
+                or "wx9100" not in re.sub(r"[^a-z0-9]", "",
+                    assignment["device_model"].lower())
                 or not isinstance(assignment["device_uuid"], str)
                 or not assignment["device_uuid"].strip()
                 or assignment["backend"] != "hip"
@@ -2264,6 +2265,10 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
     if blockers:
         raise ValueError("paired calibration execution blocked by controls: "
             + ", ".join(blockers))
+    # Observe the user-stopped r4 campaign and both assigned physical devices
+    # before importing the evaluator, creating output roots, or preparing HIP.
+    from .meco_external_release_gate import verify_external_release_before_paired_run
+    release_observation = verify_external_release_before_paired_run(campaign)
     gate = validate_paired_calibration_gate_artifacts(campaign,
         repo_root=repo_root, configuration_artifacts=configuration_artifacts)
     shard = _paired_shard_for_index(campaign, shard_index)
@@ -2385,12 +2390,14 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
     if not progress_path.exists():
         write_paired_calibration_progress_atomic(progress_path, progress)
     final = build_paired_calibration_final_shard(campaign, shard_index, progress,
-        replay_root=replay_root, approval=gate["approval"])
+        replay_root=replay_root, approval=gate["approval"],
+        release_observation=release_observation)
     digest = write_paired_calibration_artifact_immutable(final_path, final)
     return {"campaign_id": campaign["campaign_id"], "shard_index": shard_index,
         "worker_id": worker["worker_id"], "completed_work_units": len(completed_rows),
         "progress_id": progress["progress_id"], "final_shard_sha256": digest,
-        "final_shard": str(final_path)}
+        "final_shard": str(final_path),
+        "external_release_observation": release_observation}
 
 
 def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,
@@ -2468,7 +2475,7 @@ def validate_paired_calibration_progress(campaign, shard_index, progress, *,
 
 
 def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
-        replay_root, approval):
+        replay_root, approval, release_observation):
     """Freeze a complete shard; refuse finalization while any control is blocked."""
     shard = _paired_shard_for_index(campaign, shard_index)
     blockers = paired_calibration_execution_blockers(campaign)
@@ -2479,6 +2486,9 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         replay_root=replay_root, approval=approval)
     if progress.get("complete") is not True:
         raise ValueError("paired calibration shard progress is incomplete")
+    from .meco_external_release_gate import validate_release_observation_record
+    release_observation_sha256 = validate_release_observation_record(
+        release_observation, campaign)
     body = {"schema": PAIRED_CALIBRATION_FINAL_SHARD,
         "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
         "shard_manifest_id": shard["manifest_id"],
@@ -2492,6 +2502,8 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         "control_bindings": shard["control_bindings"],
         "control_binding_sha256": shard["control_binding_sha256"],
         "progress_id": progress["progress_id"],
+        "release_observation": release_observation,
+        "release_observation_sha256": release_observation_sha256,
         "completed_work_unit_ids": progress["completed_work_unit_ids"],
         "completed_rows": progress["completed_rows"], "complete": True}
     return {**body, "final_shard_id": _canonical_sha256(body)}
@@ -2668,7 +2680,14 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
             "source_binding", "baseline_freeze_sha256", "partition_sha256",
             "estimand_approval_sha256", "scoring", "control_bindings",
             "control_binding_sha256", "progress_id",
+            "release_observation", "release_observation_sha256",
             "completed_work_unit_ids", "completed_rows", "complete", "final_shard_id"}
+        from .meco_external_release_gate import validate_release_observation_record
+        try:
+            release_observation_sha256 = validate_release_observation_record(
+                artifact.get("release_observation"), campaign)
+        except ValueError as exc:
+            raise ValueError("paired calibration final shard release observation is invalid") from exc
         if (set(artifact) != expected_fields
                 or artifact.get("schema") != PAIRED_CALIBRATION_FINAL_SHARD
                 or artifact.get("final_shard_id") != _canonical_sha256(body)
@@ -2683,6 +2702,7 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
                 or artifact.get("scoring") != campaign["scoring"]
                 or artifact.get("control_bindings") != shard["control_bindings"]
                 or artifact.get("control_binding_sha256") != shard["control_binding_sha256"]
+                or artifact.get("release_observation_sha256") != release_observation_sha256
                 or artifact.get("complete") is not True):
             raise ValueError("paired calibration final shard identity or bindings changed")
         expected_ids = sorted(_canonical_sha256(unit) for unit in shard["work_units"])
