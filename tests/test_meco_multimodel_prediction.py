@@ -46,6 +46,27 @@ def test_multimodel_forecast_is_bounded_deterministic_and_risk_uses_mixture():
     assert opponent_risk_penalty((4., 2.), first) == pytest.approx(expected)
 
 
+def test_multimodel_zero_eta_preserves_observed_pose_for_every_hypothesis():
+    forecast = opponent_forecast(mode="multi_model_v1", valid=True,
+        position_xy=(1.25, 2.5), velocity_xy=(2., -1.), age_s=.1,
+        horizon_s=0., angular_velocity_rad_s=0.)
+    assert all(row["xy"] == pytest.approx((1.25, 2.5))
+               for row in forecast["hypotheses"])
+    assert forecast["horizon_s"] == forecast["requested_horizon_s"] == 0.
+    assert forecast["horizon_clamped"] is False
+
+
+def test_multimodel_turn_rate_is_clamped_at_both_bounds():
+    common = dict(mode="multi_model_v1", valid=True, position_xy=(0., 0.),
+        velocity_xy=(2., .5), age_s=.1, horizon_s=1.)
+    low = opponent_forecast(**common, angular_velocity_rad_s=0.)
+    at_low = opponent_forecast(**common, angular_velocity_rad_s=.6)
+    high = opponent_forecast(**common, angular_velocity_rad_s=9.)
+    at_high = opponent_forecast(**common, angular_velocity_rad_s=1.5)
+    assert low["hypotheses"] == at_low["hypotheses"]
+    assert high["hypotheses"] == at_high["hypotheses"]
+
+
 @pytest.mark.parametrize("kwargs", [
     dict(valid=True, position_xy=(1., 2.), velocity_xy=(1., 0.), age_s=.6),
     dict(valid=True, position_xy=(1., 2.), velocity_xy=(float("nan"), 0.), age_s=.1),
@@ -119,6 +140,53 @@ def test_plan_a_stale_multimodel_track_falls_back_to_observed_pose_and_masks_nod
     assert risk.tolist() == pytest.approx((.75, 0.))
     assert metadata["fallback"] == "observed_current_pose"
     assert metadata["used_multimodel"] is False
+
+
+@pytest.mark.parametrize("invalidity", ["pose", "velocity"])
+def test_plan_a_invalid_multimodel_observation_matches_scalar_fallback(invalidity):
+    from frc_defense.meco_track_training import _plan_a_prediction_risk
+
+    goals = torch.tensor(((1., 2.), (3., 2.)))
+    support = SimpleNamespace(goal_xy=goals, valid_mask=torch.tensor([True] * 16))
+    pose = [[0., 0., 0.], [0., 0., 0.], [0., 0., 0.], [1., 2., 0.]]
+    velocity = [[0., 0., 0.], [0., 0., 0.], [0., 0., 0.], [2., .5, .8]]
+    if invalidity == "pose":
+        pose[3][0] = float("nan")
+    else:
+        velocity[3][0] = float("nan")
+    env = SimpleNamespace(opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_pose=torch.tensor([pose]), opponent_velocity=torch.tensor([velocity]),
+        opponent_age=torch.tensor([[0., 0., 0., .1]]))
+    risk, metadata = _plan_a_prediction_risk(env, support,
+        torch.tensor((.5, 1.5)), "multi_model_v1")
+    if invalidity == "pose":
+        assert risk.tolist() == [0., 0.]
+        assert metadata["fallback"] == "none_nonfinite_observation"
+    else:
+        expected = [opponent_risk_penalty(goal, opponent_forecast(
+            mode="multi_model_v1", valid=True, position_xy=(1., 2.),
+            velocity_xy=(float("nan"), .5), age_s=.1, horizon_s=eta,
+            angular_velocity_rad_s=.8)) for goal, eta in zip(goals.tolist(), (.5, 1.5))]
+        assert risk.tolist() == pytest.approx(expected, abs=2e-6)
+        assert metadata["fallback"] == "observed_current_pose"
+
+
+def test_plan_a_no_valid_nodes_has_null_eta_provenance_and_zero_risk():
+    from frc_defense.meco_track_training import _plan_a_prediction_risk
+
+    support = SimpleNamespace(goal_xy=torch.tensor(((1., 2.), (3., 2.))),
+        valid_mask=torch.zeros(16, dtype=torch.bool))
+    env = SimpleNamespace(opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_pose=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                    [0., 0., 0.], [1., 2., 0.]]]),
+        opponent_velocity=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                         [0., 0., 0.], [1., .2, .3]]]),
+        opponent_age=torch.tensor([[0., 0., 0., .1]]))
+    risk, metadata = _plan_a_prediction_risk(env, support,
+        torch.tensor((float("nan"), float("nan"))), "multi_model_v1")
+    assert risk.tolist() == [0., 0.]
+    assert metadata["horizon_min_s"] is metadata["horizon_max_s"] is None
+    assert metadata["fallback"] is None
 
 
 def test_candidate_opponent_batch_seam_passes_heading_rate_to_canonical_predictor():

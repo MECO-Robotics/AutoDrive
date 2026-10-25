@@ -191,6 +191,41 @@ def test_plan_c_eta_uses_estimated_heading_not_physical_heading(monkeypatch):
     assert third.table.features[0][13] > first_eta
 
 
+def test_full_candidate_builder_records_multimodel_route_and_prediction_provenance(monkeypatch):
+    env = _env()
+    graph = _tiny_graph(env.device)
+    env.opponent_valid[0, 3] = True
+    env.opponent_pose[0, 3] = torch.tensor((11., 5., 0.))
+    env.opponent_velocity[0, 3] = torch.tensor((1.2, -.3, .8))
+    env.opponent_age[0, 3] = .1
+
+    def goal_node(_env, _graph, xy, heading, *, intake_extended=False):
+        del _env, _graph, heading, intake_extended
+        return 0, xy.clone(), 0
+
+    def fixed_routes(_env, queries, **kwargs):
+        del _env, kwargs
+        return tuple(RouteResult(query.candidate_id, query.snapshot_id,
+            query.world, query.slot, "feasible", True, 1.2,
+            path_points_m=((10., 4.), query.goal_xy)) for query in queries)
+
+    monkeypatch.setattr(meco_candidates, "_goal_node", goal_node)
+    monkeypatch.setattr(meco_candidates, "evaluate_routes", fixed_routes)
+    monkeypatch.setattr(meco_candidates, "_capture_pose_estimate",
+        lambda *args, **kwargs: {"feasible": True})
+    result = build_route_feasible_candidates(env, env.observe(), graph,
+        episode_id="multimodel-route-provenance", candidate_k=8,
+        prediction_mode="multi_model_v1")
+    route = next(row for row in result.routes if row["eta_s"] is not None)
+    prediction = route["opponent_prediction"]
+    assert route["route_status"] == "feasible"
+    assert route["feasible"] is True
+    assert prediction["mode"] == "multi_model_v1"
+    assert prediction["contract"]["model"] == "meco_opponent_kinematics_mm_v1"
+    assert len(prediction["hypotheses"]) == 4
+    assert route["expected_risk_semantics"] == "weighted_expectation_over_prediction_hypotheses"
+
+
 def test_perception_inputs_follow_restored_delayed_sensor_and_pose_frame():
     env = _env()
     builder = PerceptionInputs(env, (3,))
