@@ -2418,8 +2418,9 @@ def validate_counterfactual_composite_artifact(track: str, checkpoint: Path, *,
         raise ValueError("unsupported composite counterfactual artifact")
     cases = [{"scenario_id": item["case_key"][0], "category": item["case_key"][1],
         "seeds": item["seeds"]} for item in payload.get("cases", [])]
+    shard_inputs = [{"path": item["dataset_path"]} for item in payload.get("cases", [])]
     rows, composite, reference, _ = _read_counterfactual_composite_dataset(
-        payload["cases"], expected_cases=cases, qualification_protocol=qualification_protocol,
+        shard_inputs, expected_cases=cases, qualification_protocol=qualification_protocol,
         expected_sources=expected_sources)
     protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
     stable_count = sum(len(row["plan_c_pairwise_labels"]) for row in rows)
