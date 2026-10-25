@@ -133,10 +133,14 @@ check against the exact current checkout:
   PID, invocation ID, service working directory, checkout commit, and source
   identity. Verify the service is active and the endpoint responses succeed.
 - Query `/api/meco-status` and `/api/curriculum-status`. Both must return HTTP
-  200. The current ledger must report `validated_summary_only`, 88 tranches,
-  the new final requirement ID, no `untrusted_reason`, and the exact ledger
-  digest pinned in `dashboard_api.py`. Report unrelated data-read errors
-  separately from provenance validation state.
+  200. In the `three_pass_provenance` payload, require
+  `validation_status == "validated_summary_only"`; this is the API's derived
+  validation result. Preserve the manifest's stored
+  `status == "scoped-transcript-summaries"` rather than replacing it with the
+  API result. Also require 88 tranches, the new final requirement ID, no
+  `untrusted_reason`, and the exact ledger digest pinned in
+  `dashboard_api.py`. Report unrelated data-read errors separately from
+  provenance validation state.
 - Fetch `/`, `/meco`, `/assets/dashboard.css`, `/assets/dashboard.js`,
   `/assets/meco.css`, `/assets/meco.js`, `/assets/field_rendering.js`, and
   `/assets/training_rendering.js`. For each route record HTTP status and
