@@ -2326,6 +2326,48 @@
         "status": "approved-summary"
       },
       "limits": "Static contract checks and source review only: 41 tests passed in the initial focused run, then 1 dispatch and 3 runtime-capture cases passed after the final changes; py_compile and diff checks passed. No seeded Phase 4 simulator evaluation, replay inspection, GPU run, or current-dashboard replay verification occurred. Qualification remains false."
+    },
+    {
+      "requirement_id": "plan-a-signed-human-choice-authority",
+      "title": "Plan A signed human-choice preference authority",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-human-choice-authority-v1.md",
+          "sha256": "aaeb82f4f64855e160b39683c8e78af205c26c41b6eadc244d5f811cb8bc8ac9",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "6e6ef8a5f5e72a6b31d3f90bf3b80af7455b2847",
+        "authority_contract_commit": "066cc0b020dea784e7ad220956c4c4480f3a851a",
+        "integration_commit": "a939e406a28ca4bed0e9eb8acf7cf53077ac789c",
+        "joint_action_target_commit": "08c6a04804dce987cdb2623e8b31d91c942b52a9",
+        "paths": [
+          "frc_defense/meco_plan_a_expert_choice.py",
+          "frc_defense/meco_plan_a_preferences_v2.py",
+          "frc_defense/meco_supervised.py",
+          "tests/test_meco_plan_a_expert_choice.py",
+          "tests/test_plan_a_preferences_v2_contract.py",
+          "docs/implementation-provenance/plan-a-human-choice-authority-v1.md",
+          "docs/MECO_TRACKS_IMPLEMENTATION_STATUS.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-human-choice-authority-v1.md",
+          "sha256": "aaeb82f4f64855e160b39683c8e78af205c26c41b6eadc244d5f811cb8bc8ac9",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "c118f0db07c723944389ebcca788923cbb439535",
+        "verdict": "approved",
+        "verdict_detail": "Independent exact-head review approved the current-main integration after confirming it matches the final reviewed feature code exactly. The signed authority is bound to the sole fitted selected-versus-replayed-min-route complete-action pair; target rewrites and unsupported U-only labels are rejected.",
+        "status": "approved-summary"
+      },
+      "limits": "Nineteen focused CPU contract tests passed using a mocked replay adapter and small test model. No real expert annotations/key registry, production simulator replay, GPU fit, dashboard replay, or campaign warm-start exists. This is a validated code path, not evidence of human expertise or simulator performance."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

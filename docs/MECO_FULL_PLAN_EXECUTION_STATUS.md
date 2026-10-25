@@ -36,6 +36,17 @@
 > qualification remains false. The dashboard provenance ledger now contains
 > 59 scoped tranches.
 
+> **Plan A signed expert-choice authority — 2026-10-25.** The reviewed code path
+> is integrated at `54de5352f` through `c118f0db0`. A protocol-pinned Ed25519
+> key authorizes complete-action preferences; the fresh replay loader binds the
+> sole fitted selected-versus-min-route action pair to that signature and
+> rejects relabeled targets or unsupported U-only goal preferences. The focused
+> CPU suite reported 19 passed using mocked replay and a small test model. No
+> real annotations, production simulator replay, GPU fit, or warm-start
+> artifact exists. This is code/contract coverage, not evidence of human
+> expertise or simulator performance. The three-pass ledger now has 60 scoped
+> tranches.
+
 > **Three-pass dashboard re-verification — 2026-10-25 01:55 UTC.** After adding
 > the reviewed Plan A exact-heap tranche, `frc-defense-dashboard.service` was
 > restarted on current `main` (PID `2810214`). `/`, `/api/meco-status`,

@@ -17,3 +17,20 @@ collection, simulator execution/replay, GPU operation, or dashboard check was
 performed. Production use still requires a qualification protocol containing
 an independently controlled pinned public-key registry and real replay
 evidence.
+
+## Three-pass review record
+
+Planner audit, implementation, and independent exact-head review were recorded
+as a scoped three-pass tranche. Implementer commits are
+`066cc0b02` (authority contract), `a939e406a` (materializer/loader/fitter),
+`08c6a0480` (keep complete-action choices joint), and `6e6ef8a5f`
+(bind fitted pair targets to signed authority). Current-main integration
+`c118f0db07c723944389ebcca788923cbb439535` was independently reviewed and
+matches the final reviewed feature code exactly.
+
+The follow-up rejects JSONL target rewrites even when a valid signed sidecar is
+retained. It also ensures a complete-action preference does not create an
+unsupported U-only goal ranking. The focused suite reported 19 passing CPU
+contract tests. Replay uses a mocked adapter and fitting uses a small CPU test
+model; real expert annotation, production replay, GPU fitting, and campaign
+warm-start remain unverified.

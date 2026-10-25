@@ -631,8 +631,13 @@ recomputes the minimum-route baseline, verifies the selected pair differs and
 that both pairs remain available, then trains a pairwise U+B score over the
 complete actions. The old minimum-route producer remains a baseline and is not
 relabeled as human choice. CPU contract tests fit and validate a small test
-artifact with mocked simulator replay. Real dataset collection, real simulator
-replay, hardware fitting, and dashboard validation remain pending.
+artifact with mocked simulator replay. The loader also requires the fitted
+action-pair target to equal the signed selected-versus-min-route pair and
+rejects conflicting labels or JSONL target rewrites. A complete-action
+preference does not imply a separate U-only goal ranking. The focused suite
+reported 19 passing tests. Real dataset collection, real simulator replay,
+hardware fitting, and campaign warm-start remain pending. The dashboard
+three-pass ledger records the planner, implementation, and exact-head review.
 
 ### C2 deterministic PPO replay on ROCm
 
