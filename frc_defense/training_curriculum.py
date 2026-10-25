@@ -228,7 +228,7 @@ def _ancestors(scenario_id):
     return result
 
 
-def _failures(result):
+def _failures(result, *, expected_verdict_scope='qualification'):
     scenario = get_scenario(result.scenario_id)
     failures = []
     if result.split != 'validation':
@@ -247,10 +247,9 @@ def _failures(result):
     numeric_verdict = result.numeric_gate_verdict
     device_category_verdicts = None
     if numeric_verdict is not None:
-        required_verdict_categories = (
-            'success_rate_pass', 'throughput_ratio_pass',
-            'minimum_useful_throughput_pass', 'useful_gain_ci_pass',
-            'safety_pass')
+        required_verdict_categories = ('success_rate_pass',
+            'throughput_ratio_pass', 'minimum_useful_throughput_pass',
+            'useful_gain_ci_pass')
         runtime = (numeric_verdict.get('runtime_device')
                    if isinstance(numeric_verdict, dict) else None)
         if (not isinstance(numeric_verdict, dict)
@@ -258,6 +257,7 @@ def _failures(result):
                 or numeric_verdict.get('verdict_type') != 'meco-gpu-numeric-gate-verdict-v1'
                 or numeric_verdict.get('implementation_id') !=
                     'meco-v4-cluster-episode-device-percentile-v1'
+                or numeric_verdict.get('verdict_scope') != expected_verdict_scope
                 or numeric_verdict.get('evaluation_id') != result.evaluation_id
                 or numeric_verdict.get('protocol_id') != result.protocol_id
                 or not isinstance(runtime, dict)
@@ -281,17 +281,29 @@ def _failures(result):
             failures.append(f'{name}: success gate failed')
         elif device_category_verdicts is not None:
             category_verdict = device_category_verdicts.get(name)
-            if (not isinstance(category_verdict, dict) or
-                    any(type(category_verdict.get(key)) is not bool
-                        for key in required_verdict_categories) or
-                    not isinstance(category_verdict.get('safety_metric_pass'), dict) or
-                    set(category_verdict.get('safety_metric_pass', {})) != {
-                        'safety_robot_contact_rate', 'safety_field_contact_rate',
-                        'safety_wall_contact_rate'} or
-                    any(type(value) is not bool for value in
-                        category_verdict['safety_metric_pass'].values()) or
-                    category_verdict.get('safety_pass') is not all(
-                        category_verdict.get('safety_metric_pass', {}).values())):
+            valid_base = (isinstance(category_verdict, dict) and
+                all(type(category_verdict.get(key)) is bool
+                    for key in required_verdict_categories))
+            safety_metrics = (category_verdict.get('safety_metric_pass')
+                              if isinstance(category_verdict, dict) else None)
+            if expected_verdict_scope == 'qualification':
+                valid_safety = (isinstance(safety_metrics, dict) and
+                    set(safety_metrics) == {'safety_robot_contact_rate',
+                        'safety_field_contact_rate', 'safety_wall_contact_rate'} and
+                    all(type(value) is bool for value in safety_metrics.values()) and
+                    type(category_verdict.get('safety_pass')) is bool and
+                    category_verdict['safety_pass'] is all(safety_metrics.values()) and
+                    category_verdict.get('safety_assessment') == 'evaluated')
+            else:
+                # Retention's frozen policy has success, delivery and baseline
+                # gates but no safety comparison. Require an explicit typed
+                # N/A disposition; an omitted or populated map cannot pass.
+                valid_safety = (safety_metrics == {} and
+                    category_verdict.get('safety_pass') is None and
+                    category_verdict.get('safety_assessment') ==
+                        'not_in_retention_gate' and
+                    type(category_verdict.get('retention_baseline_pass')) is bool)
+            if not valid_base or not valid_safety:
                 failures.append(f'{name}: GPU numeric category verdict is invalid')
             else:
                 # The device computed the numeric predicates. Host orchestration
@@ -301,15 +313,17 @@ def _failures(result):
                         ('success_rate_pass', 'success gate failed'),
                         ('throughput_ratio_pass', 'qualified paired throughput gate failed'),
                         ('minimum_useful_throughput_pass', 'absolute delivery minimum failed'),
-                        ('useful_gain_ci_pass', 'paired useful-throughput CI does not exceed frozen margin'),
-                        ('safety_pass', 'safety noninferiority CI failed')):
+                        ('useful_gain_ci_pass', 'paired useful-throughput CI does not exceed frozen margin')):
                     if not category_verdict[key]:
                         failures.append(f'{name}: {message}')
                 if category_verdict.get('retention_baseline_pass') is False:
                     failures.append(f'{name}: retention throughput regression or missing baseline')
-                for metric, passed in category_verdict['safety_metric_pass'].items():
-                    if not passed:
-                        failures.append(f'{name}: safety noninferiority failed for {metric}')
+                if expected_verdict_scope == 'qualification':
+                    if not category_verdict['safety_pass']:
+                        failures.append(f'{name}: safety noninferiority CI failed')
+                    for metric, passed in safety_metrics.items():
+                        if not passed:
+                            failures.append(f'{name}: safety noninferiority failed for {metric}')
         if not _validation_seeds(c.seeds, c.episodes):
             failures.append(f'{name}: validation seed evidence missing or invalid')
         if not _number(c.useful_throughput) or not _number(c.reference_throughput):
@@ -354,7 +368,8 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
     if set(retention) != ancestors:
         failures.append('retention must cover all transitive prerequisites exactly')
     for name, retained in retention.items():
-        failures.extend(f'{name}: {f}' for f in _failures(retained))
+        failures.extend(f'{name}: {f}' for f in _failures(
+            retained, expected_verdict_scope='retention'))
         if (retained.evaluation_id, retained.checkpoint_id, retained.protocol_id) != (result.evaluation_id, result.checkpoint_id, result.protocol_id):
             failures.append(f'{name}: retention round/checkpoint/protocol mismatch')
         if retained.protocol_id != state.qualified_protocol.get(name):

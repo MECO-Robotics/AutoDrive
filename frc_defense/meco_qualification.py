@@ -3842,7 +3842,8 @@ def _device_category_statistics(category, cases, candidate_rows,
     success_rate = success_count.to(torch.float64) / success.numel()
     verdict_tensors = {
         "success_rate_pass": success_rate >= gate.success_rate,
-        "throughput_ratio_pass": (candidate_mean >= gate.throughput_ratio * reference_mean
+        "throughput_ratio_pass": ((candidate_mean >= gate.throughput_ratio * reference_mean)
+            & (reference_mean > 0)
             if gate.throughput_ratio else torch.ones((), device=selected, dtype=torch.bool)),
         "minimum_useful_throughput_pass": candidate_mean >= gate.min_useful_throughput,
         "useful_gain_ci_pass": lower > float(useful_margin),
@@ -3936,7 +3937,8 @@ def _device_category_statistics(category, cases, candidate_rows,
                     "noninferiority_margin": values[4]}
                 for metric, values in copied_safety.items()}},
         "category_verdict": {**verdict_values,
-            "safety_metric_pass": safety_values},
+            "safety_metric_pass": safety_values,
+            "safety_assessment": "evaluated"},
         "failures": failures,
     }
 
@@ -4048,6 +4050,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
     numeric_verdict = {"schema_version": 1,
         "verdict_type": "meco-gpu-numeric-gate-verdict-v1",
         "implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
+        "verdict_scope": "qualification",
         "evaluation_id": report["evaluation_id"], "protocol_id": protocol_id,
         "runtime_device": report["statistics_runtime_device"],
         "category_verdicts": category_verdicts, "failures": gate_failures}
@@ -4115,7 +4118,8 @@ def _retention_result(report, protocol, primary, *, device, state):
         gate = SCENARIOS[scenario].gate
         success_pass_tensor = (success_count_tensor.to(torch.float64) /
                                success_tensor.numel()) >= gate.success_rate
-        throughput_ratio_pass_tensor = (mean_tensor >= gate.throughput_ratio * mean_tensor
+        throughput_ratio_pass_tensor = ((mean_tensor >= gate.throughput_ratio * mean_tensor)
+            & (mean_tensor > 0)
             if gate.throughput_ratio else torch.ones((), device=selected, dtype=torch.bool))
         minimum_pass_tensor = mean_tensor >= gate.min_useful_throughput
         baseline = state.qualified_throughput.get(scenario, {}).get(category)
@@ -4129,7 +4133,8 @@ def _retention_result(report, protocol, primary, *, device, state):
         status = {"success_rate_pass": bool(success_pass),
             "throughput_ratio_pass": bool(ratio_pass),
             "minimum_useful_throughput_pass": bool(minimum_pass),
-            "useful_gain_ci_pass": True, "safety_pass": True,
+            "useful_gain_ci_pass": True, "safety_pass": None,
+            "safety_assessment": "not_in_retention_gate",
             "safety_metric_pass": {},
             "retention_baseline_pass": bool(baseline_pass)}
         verdict_by_category[category] = status
@@ -4147,6 +4152,7 @@ def _retention_result(report, protocol, primary, *, device, state):
     numeric_verdict = {"schema_version": 1,
         "verdict_type": "meco-gpu-numeric-gate-verdict-v1",
         "implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
+        "verdict_scope": "retention",
         "evaluation_id": report["evaluation_id"], "protocol_id": report["protocol_id"],
         "runtime_device": report["statistics_runtime_device"],
         "category_verdicts": verdict_by_category, "failures": numeric_failures}
