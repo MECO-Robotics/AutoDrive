@@ -1,3 +1,9 @@
+# Phase 0 effective-v3 paired calibration code integration — 2026-10-25
+
+The reviewed integration is pushed at `ac590f5487436735c78aef7671be5a9f8aaee187`. It binds the effective source/runtime receipt, freeze-v3, closed tuple registry and partition into paired D0/D1/D2 calibration, carries registered tuple IDs and full predictor contracts through derived artifacts, and revalidates the same bundle before training setup. Independent Pass 3 approved the freeze, paired, validator-fix, and combined heads. The combined focused offline suites passed **172 tests**; the dashboard provenance manifest now records this scoped tranche and its dashboard API digest pin has been updated.
+
+This is code-contract evidence only. No production freeze or partition, human estimand approval, paired calibration result, margin approval, simulator/replay, current-dashboard service check, GPU/device evidence, or qualification was produced. The running r4 diagnostic campaign was left untouched; the user’s manual stop and verified release of both WX9100s remain required before new execution. The complete five-track plan remains in progress. See [`phase0-effective-bundle-paired-calibration-20261025.md`](implementation-provenance/phase0-effective-bundle-paired-calibration-20261025.md) and the corresponding entry in [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
 > **Five-track candidate schema fixture integrated — 2026-10-25.** Reviewed
 > implementation `2fb402c69475ab3f43707a5eb0ec797e52b5fa8c` repairs the
 > synthetic C1/C2 fixture to use the canonical 20-column raw schema and adds
