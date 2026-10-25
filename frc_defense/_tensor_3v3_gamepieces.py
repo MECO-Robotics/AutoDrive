@@ -109,7 +109,8 @@ class TensorThreeVsThreeGamepieceMixin:
         neutral_count = (self.fuel_count - 96 - 6 * self.preloaded_per_robot -
                          self._probe_respawn_capacity)
         self._probe_respawn_start=96+neutral_count
-        self._probe_respawn_cursor[mask]=0
+        self._probe_respawn_cursor.copy_(torch.where(
+            mask,torch.zeros_like(self._probe_respawn_cursor),self._probe_respawn_cursor))
         if neutral_count:
             positions[:, 96:96 + neutral_count] = torch.tensor(
                 grid_array_points(neutral_count, 8.27-.915, 8.27+.915,
@@ -125,7 +126,9 @@ class TensorThreeVsThreeGamepieceMixin:
                 active[:, begin:end] = True; owners[:, begin:end] = robot
                 zones[:, begin:end] = 5
         self.piece_pos.copy_(torch.where(mask[:, None, None], positions, self.piece_pos))
-        self.piece_vel[mask] = 0.
+        self.piece_vel.copy_(torch.where(mask[:, None, None],
+                                         torch.zeros_like(self.piece_vel),
+                                         self.piece_vel))
         self.piece_active.copy_(torch.where(mask[:, None], active, self.piece_active))
         self.piece_owner.copy_(torch.where(mask[:, None], owners, self.piece_owner))
         self.piece_zone.copy_(torch.where(mask[:, None], zones, self.piece_zone))

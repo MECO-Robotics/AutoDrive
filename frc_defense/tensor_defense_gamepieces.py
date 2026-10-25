@@ -86,9 +86,15 @@ class TensorDefenseGamepieceMixin:
         # Default to a randomized preload count for the six-robot alliance; a
         # fixed per-robot count can be supplied for controlled experiments.
         max_preload=min(8,max(0,(count-96)//6))
-        per_robot=(self._random_active(mask,(),high=max_preload+1).long()
-                   if self.preloaded_per_robot is None else
-                   torch.full((self.n,),self.preloaded_per_robot,device=self.device,dtype=torch.long))
+        if self.preloaded_per_robot is None:
+            # Keep reset draws at a fixed batch shape. Inactive rows consume
+            # the same RNG slots, then retain their prior state below.
+            preload_draw=torch.randint(max_preload+1,(self.n,),device=self.device,
+                                       generator=self.generator)
+            per_robot=torch.where(mask,preload_draw,torch.zeros_like(preload_draw))
+        else:
+            per_robot=torch.full((self.n,),self.preloaded_per_robot,
+                                 device=self.device,dtype=torch.long)
         neutral_count=count-96-6*per_robot
         half_ball=.075
         def grid_rect(num,x0,x1,y0,y1):
