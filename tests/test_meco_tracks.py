@@ -1,4 +1,5 @@
 import torch
+import pytest
 import threading
 import time
 from types import SimpleNamespace
@@ -16,17 +17,39 @@ from frc_defense.meco_tracks import (
     _gather_graph_candidates,
     SE2MessageBlock,
     _AsyncInferenceBroker,
+    SAFE_ACTION_FEATURES,
+    EXTRA_FEATURES,
 )
 
 
 def table(*, graph=False):
-    names = ("goal_x_m", "goal_y_m", "heading_bin", "behavior_index",
-             "field_length_m", "field_width_m")
-    rows = ((1., 1., 0., 0., 16.5, 8.1), (2., 2., 1., 1., 16.5, 8.1))
-    if graph:
-        names += ("legal_node_index",)
-        rows = tuple(row + (float(i),) for i, row in enumerate(rows))
-    return CandidateTable("e:1", ("fallback", "other"), rows,
+    names = tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)
+    row_values = []
+    for index in range(2):
+        values = {
+            "action_index": index,
+            "sensor_track_buffer_index": None,
+            "goal_x_m": float(index + 1),
+            "goal_y_m": float(index + 1),
+            "heading_bin": index,
+            "behavior_index": index,
+            "field_length_m": 16.5,
+            "field_width_m": 8.1,
+            "target_distance_m": None,
+            "nearby_sensed_track_count": None,
+            "track_confidence": None,
+            "track_age_s": None,
+            "opponent_distance_m": None,
+            "route_time_s": None,
+            "legal_node_index": float(index) if graph else None,
+            "route_distance_m": None,
+            "risk_penalty_points": None,
+            "target_heading_rad": None,
+            "is_continue": float(index == 0),
+            "commitment_switch_cost": None,
+        }
+        row_values.append(tuple(values[name] for name in names))
+    return CandidateTable("e:1", ("fallback", "other"), tuple(row_values),
                           (True, True), names, (None, None))
 
 
@@ -57,6 +80,41 @@ def test_five_architecture_outputs_and_candidate_logits():
         if track in ("A2", "A3"):
             assert int(result["raw"]["occupied_regions"].sum()) == nodes
             assert torch.isfinite(result["raw"]["region_tokens"]).all()
+
+
+@pytest.mark.parametrize("track", ("C1", "C2"))
+@pytest.mark.parametrize("malformation", ("name", "order", "width"))
+def test_c_tracks_reject_malformed_candidate_schema(track, malformation):
+    candidates = table()
+    names = list(candidates.feature_names)
+    rows = [list(row) for row in candidates.features]
+    if malformation == "name":
+        names[0] = "unexpected_feature"
+    elif malformation == "order":
+        names[0], names[1] = names[1], names[0]
+    else:
+        rows[0].pop()
+    if malformation == "width":
+        malformed = object.__new__(CandidateTable)
+        for field, value in (
+                ("snapshot_id", candidates.snapshot_id),
+                ("candidate_ids", candidates.candidate_ids),
+                ("features", tuple(tuple(row) for row in rows)),
+                ("valid_mask", candidates.valid_mask),
+                ("feature_names", candidates.feature_names),
+                ("route_costs", candidates.route_costs),
+                ("schema_version", candidates.schema_version),
+                ("context_digest", candidates.context_digest)):
+            object.__setattr__(malformed, field, value)
+    else:
+        malformed = CandidateTable(
+            candidates.snapshot_id, candidates.candidate_ids,
+            tuple(tuple(row) for row in rows), candidates.valid_mask,
+            tuple(names), candidates.route_costs)
+    model = make_meco_track(track, candidate_features=len(candidates.feature_names))
+    with pytest.raises(ValueError, match="registered shared feature schema"):
+        score_candidates(track, model, raster=torch.zeros(1, 6, 25, 51),
+                          globals_=torch.zeros(1, 7), table=malformed)
 
 
 def test_stale_mismatched_and_nonfinite_outputs_use_valid_fallback():
