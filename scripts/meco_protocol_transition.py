@@ -397,9 +397,24 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
         raise ValueError("legacy evaluation root has no durable history index; completeness is unverifiable")
     history_bytes = history_path.read_bytes()
     history = json.loads(history_bytes)
-    history_rows = history.get("entries") if history.get("schema_version") == 1 else None
+    history_rows = (history.get("entries") if isinstance(history, dict) and
+        history.get("schema_version") == 1 else None)
     if not isinstance(history_rows, list):
         raise ValueError("durable evaluation history index is malformed")
+    queue = _json(Path(queue_status_path))
+    if not isinstance(queue, dict):
+        raise ValueError("supervisor queue status is malformed")
+    campaign_manifest = queue.get("campaign_manifest") or {}
+    scheduler_binding = queue.get("task_scheduler") or {}
+    if not isinstance(campaign_manifest, dict) or not isinstance(scheduler_binding, dict):
+        raise ValueError("queue campaign/scheduler binding is malformed")
+    exposure_enabled = scheduler_binding.get("phase4_train_exposure", False)
+    if type(exposure_enabled) is not bool:
+        raise ValueError("queue Phase 4 training exposure binding must be boolean")
+    expected_campaign_binding = {
+        "campaign_manifest_sha256": campaign_manifest.get("canonical_sha256"),
+        "configuration_sha256": queue.get("configuration_sha256"),
+        "phase4_train_exposure": exposure_enabled}
     indexed = {}
     previous = None
     for sequence, row in enumerate(history_rows, 1):
@@ -412,13 +427,26 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
                 or row.get("previous_entry_sha256") != previous
                 or digest != row_digest):
             raise ValueError("durable evaluation history chain is broken")
+        binding = row.get("campaign_binding")
+        if binding is None:
+            if (expected_campaign_binding["campaign_manifest_sha256"] is not None or
+                    expected_campaign_binding["configuration_sha256"] is not None or
+                    expected_campaign_binding["phase4_train_exposure"]):
+                raise ValueError("durable evaluation history lacks campaign/configuration binding")
+        elif binding != expected_campaign_binding:
+            raise ValueError("durable evaluation history campaign/configuration binding mismatch")
+        if binding is not None:
+            snapshots = row.get("checkpoint_snapshots")
+            if (not isinstance(snapshots, list) or len(snapshots) != len(MECO_TRACKS) or
+                    any(not isinstance(snapshot, dict) or
+                        snapshot.get("campaign_binding") != binding for snapshot in snapshots)):
+                raise ValueError("durable evaluation snapshots do not share campaign binding")
         previous = digest
         name = row.get("output_file")
         if not isinstance(name, str) or name in indexed:
             raise ValueError("durable evaluation history has duplicate or malformed output")
         indexed[name] = row
     try:
-        queue = _json(Path(queue_status_path))
         anchor = queue.get("evaluation_history") or {}
     except (OSError, ValueError, json.JSONDecodeError):
         raise ValueError("supervisor queue lacks a durable evaluation history anchor")

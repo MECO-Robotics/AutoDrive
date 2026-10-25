@@ -105,17 +105,71 @@ def _atomic_json(path: Path, payload):
             os.unlink(temporary)
 
 
-def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Path,
-                              completion: dict, checkpoints: dict):
-    """Persist every terminal evaluation before queue status can advance."""
-    evaluation_root, output = Path(evaluation_root), Path(output)
-    history_path = evaluation_root / "evaluation-history.json"
+def _validate_evaluation_history(history_path: Path, *, expected_campaign_binding=None):
+    """Validate the durable hash chain and its five-checkpoint campaign binding."""
     try:
-        history = json.loads(history_path.read_text())
+        history = json.loads(Path(history_path).read_text())
     except FileNotFoundError:
         history = {"schema_version": 1, "entries": []}
-    if history.get("schema_version") != 1 or not isinstance(history.get("entries"), list):
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("evaluation history is malformed") from exc
+    if (not isinstance(history, dict) or history.get("schema_version") != 1 or
+            not isinstance(history.get("entries"), list)):
         raise ValueError("evaluation history is malformed")
+    previous = None
+    for sequence, row in enumerate(history["entries"], 1):
+        if not isinstance(row, dict):
+            raise ValueError("evaluation history row is malformed")
+        digest = row.get("entry_sha256")
+        body = {key: value for key, value in row.items() if key != "entry_sha256"}
+        if (row.get("sequence") != sequence or
+                row.get("previous_entry_sha256") != previous or digest != _hash(body)):
+            raise ValueError("evaluation history hash chain is broken")
+        binding = row.get("campaign_binding")
+        snapshots = row.get("checkpoint_snapshots")
+        if binding is not None:
+            digests_valid = isinstance(binding, dict) and all(
+                binding.get(key) is None or
+                (isinstance(binding.get(key), str) and len(binding[key]) == 64 and
+                    all(char in "0123456789abcdef" for char in binding[key]))
+                for key in ("campaign_manifest_sha256", "configuration_sha256"))
+            if (not isinstance(binding, dict) or
+                    set(binding) != {"campaign_manifest_sha256", "configuration_sha256",
+                        "phase4_train_exposure"} or
+                    not digests_valid or
+                    type(binding["phase4_train_exposure"]) is not bool or
+                    not isinstance(snapshots, list) or len(snapshots) != len(MECO_TRACKS) or
+                    [item.get("track") for item in snapshots if isinstance(item, dict)] !=
+                        sorted(MECO_TRACKS) or
+                    any(not isinstance(item, dict) or
+                        item.get("campaign_binding") != binding for item in snapshots)):
+                raise ValueError("evaluation history checkpoint campaign binding is malformed")
+            if (expected_campaign_binding is not None and
+                    binding != expected_campaign_binding):
+                raise ValueError("evaluation history campaign/configuration binding changed")
+        elif (expected_campaign_binding is not None and
+                expected_campaign_binding != {"campaign_manifest_sha256": None,
+                    "configuration_sha256": None, "phase4_train_exposure": False}):
+            raise ValueError("legacy evaluation history cannot prove campaign/configuration binding")
+        previous = digest
+    return history
+
+
+def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Path,
+                              completion: dict, checkpoints: dict,
+                              campaign_manifest_sha256=None,
+                              configuration_sha256=None,
+                              phase4_train_exposure=False):
+    """Persist every terminal evaluation before queue status can advance."""
+    if type(phase4_train_exposure) is not bool:
+        raise ValueError("phase4_train_exposure must be boolean")
+    campaign_binding = {"campaign_manifest_sha256": campaign_manifest_sha256,
+        "configuration_sha256": configuration_sha256,
+        "phase4_train_exposure": phase4_train_exposure}
+    evaluation_root, output = Path(evaluation_root), Path(output)
+    history_path = evaluation_root / "evaluation-history.json"
+    history = _validate_evaluation_history(history_path,
+        expected_campaign_binding=campaign_binding)
     entries = history["entries"]
     prior = entries[-1].get("entry_sha256") if entries else None
     if any(row.get("output_file") == output.name for row in entries):
@@ -124,7 +178,8 @@ def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Pat
     for track, path in sorted(checkpoints.items()):
         path = Path(path)
         snapshot_rows.append({"track": track, "path": str(path.resolve()),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "campaign_binding": campaign_binding})
     if [row["track"] for row in snapshot_rows] != sorted(MECO_TRACKS):
         raise ValueError("evaluation history must pin exactly one checkpoint for all five tracks")
     status_path = Path(str(output) + ".status.json")
@@ -141,6 +196,7 @@ def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Pat
         "status_file": status_path.name,
         "status_sha256": (hashlib.sha256(status_path.read_bytes()).hexdigest()
             if status_path.is_file() else None),
+        "campaign_binding": campaign_binding,
         "checkpoint_snapshots": snapshot_rows}
     row["entry_sha256"] = _hash(row)
     entries.append(row)
@@ -559,9 +615,11 @@ class MecoSupervisor:
         if not hasattr(self, "task_scheduler"):
             return None
         state = self.task_scheduler.state
-        return {key: state[key] for key in (
+        status = {key: state[key] for key in (
             "completed_cycle", "pending_assignment", "exposure_chunks",
             "category_exposures", "recovery_pressure", "phase4_exposure_counts")}
+        status["phase4_train_exposure"] = self.phase4_train_exposure
+        return status
 
     def _refresh_progress(self, track):
         payload = _checkpoint_info(self.track_dirs[track] / "latest.pt")
@@ -1310,7 +1368,10 @@ class MecoSupervisor:
         self.last_evaluation = completion
         _append_evaluation_history(self.evaluation_output,
             cycle=job["cycle"], output=output, completion=completion,
-            checkpoints=job["checkpoints"])
+            checkpoints=job["checkpoints"],
+            campaign_manifest_sha256=self.manifest_digest,
+            configuration_sha256=self.configuration_hash,
+            phase4_train_exposure=self.phase4_train_exposure)
         self._start_next_evaluation(occupied_devices=occupied_devices)
         self._publish(cycle=cycle, phase="stopping" if self.request_stop else "training",
                       statuses=statuses, evaluation=completion)

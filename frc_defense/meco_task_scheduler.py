@@ -40,6 +40,8 @@ class MecoTaskScheduler:
     def __post_init__(self):
         if type(self.master_seed) is not int or self.master_seed < 0:
             raise ValueError("master_seed must be nonnegative")
+        if type(self.phase4_train_exposure) is not bool:
+            raise ValueError("phase4_train_exposure must be boolean")
         if type(self.exposure_chunks_per_scenario) is not int or self.exposure_chunks_per_scenario < 1:
             raise ValueError("exposure_chunks_per_scenario must be positive")
         if self.state is None:

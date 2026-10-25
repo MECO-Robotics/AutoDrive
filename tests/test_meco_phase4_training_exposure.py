@@ -125,6 +125,11 @@ def test_scheduler_prerequisites_and_opt_in_are_bound_to_state(monkeypatch):
     assert restored.schedule(1) == pending
 
 
+def test_scheduler_phase4_opt_in_rejects_integer_boolean_alias():
+    with pytest.raises(ValueError, match="phase4_train_exposure must be boolean"):
+        MecoTaskScheduler(17, phase4_train_exposure=1)
+
+
 def test_supervisor_exposure_switch_is_explicit_opt_in():
     args = supervisor_parser().parse_args([
         "--devices", "cuda:0,cuda:1", "--evaluation-device", "cuda:1",
