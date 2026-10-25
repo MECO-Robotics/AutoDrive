@@ -1164,3 +1164,41 @@ This branch selectively combines the reviewed production-input capture/ONNX pari
 This is an isolated review candidate, not a change to live `main`. Its MECO source identity differs from the active training source due to the integrated Python changes. No attempt was made to resume active checkpoints from this candidate. Synthetic ONNX Runtime graph parity for all five randomly initialized model constructors has now passed on CPU; no real production capture or trained-checkpoint parity, simulator evaluation, GPU training, Hailo/device qualification, or deployment qualification is claimed.
 
 The focused Plan A preference-v2, model-input provenance, request-capture, dashboard queue projection, deployment contract, three-pass provenance, and inference broker suites passed **58 tests** at that review point. The separate ONNX Runtime parity follow-up adds 20 focused synthetic tests. Python compilation for changed runtime and script modules and `git diff --check` passed. These checks do not exercise the simulator, GPU production inference, a real request capture, trained-checkpoint or production-capture ONNX parity, Hailo, or device deployment.
+
+## Plan A HIP parity/profile harness planner pass
+
+Planner artifact `docs/plans/plan-a-hip-parity-profile-harness-20261025.md`
+was authored against `main` base `48df1c7d03d72b2645e36070f34f91bf9a4b92ba`
+and independently approved at exact planner commit
+`8dbbfee696b74a5fc4e0b071ccc364dd8db84571`. Its SHA-256 is
+`0880e0880899cd737a9ac8f6c4fb14320f75f7abf24164cb53e3f9fb0e7a5505`.
+The plan covers a CPU-only, source-bound offline fixture mode and a separate
+explicit WX9100 parity/profile run after an exclusive lease handoff. This is
+planner approval only: no harness implementation, test, HIP compilation or
+execution, parity/profile result, simulator, training, replay, or dashboard
+validation is claimed. Normal support/training dispatch remains CPU-only and
+`PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED` remains false.
+
+
+## Plan A HIP parity/profile harness implementation pass
+
+Implementation candidate `ca4604e019826cb6b2a010f84872d0eb15f83d16` on
+`codex/plan-a-hip-parity-profile-harness-impl-20261025` was independently
+approved at that exact head. It adds a canonical source-bound offline fixture
+manifest, a 64,000-node × 10-slot 8-heading pose-lattice recipe, and a distinct
+explicit WX9100 candidate mode. Device mode acquires the repository exclusive
+device lock, performs post-lease physical WX9100 attestation before loading the
+HIP extension, and reports the generated lease identity and attestation. It
+requires a clean checkout and checks exact pinned-source and fixture identity
+at entry and before returning a passing result. The normal CPU oracle dispatch
+and false `PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED` constant are unchanged.
+
+Static Python AST parsing and `git diff --check` passed. Fixture generation
+executed the CPU oracle to freeze expected digests; the offline CLI was not run,
+and no tests, HIP import/compile/execution, device or lease inspection/acquisition,
+simulator, training, replay, dashboard, or deployment run occurred. The exact
+head was approved by the independent reviewer, who confirmed lock acquisition,
+post-lease attestation ordering, source/fixture revalidation, and the closed
+production gate. Device parity, support-digest comparison, profiling, and any
+dispatch decision remain deferred until the orchestrator confirms continuous
+training has released both exclusive WX9100 leases and schedules verification.

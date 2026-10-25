@@ -1,0 +1,421 @@
+{
+  "canonicalization": "UTF-8 JSON, sorted keys, compact separators, non-finite values encoded as string sentinels",
+  "cases": [
+    {
+      "graph": {
+        "edge_allowed": [
+          [
+            true,
+            true,
+            true
+          ],
+          [],
+          []
+        ],
+        "edge_costs": [
+          [
+            1.0,
+            1.0,
+            1.0
+          ],
+          [],
+          []
+        ],
+        "edge_dst": [
+          [
+            2,
+            1,
+            1
+          ],
+          [],
+          []
+        ],
+        "edge_lengths": [
+          [
+            1.0,
+            1.0,
+            0.5
+          ],
+          [],
+          []
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0
+      },
+      "graph_sha256": "60972c79cfae1183b008585097848895fb035e3c357e65139e40ed66a529cfcb",
+      "id": "equal_distance_node_and_edge_slot_ties",
+      "purpose": "Heap equal-distance node-ID order and first edge-slot parent retention",
+      "route_kind": "preweighted",
+      "route_output_field_sha256": {
+        "parent_edge_m": "897c9819d679156409f82178edd2dc4e6a7ebd735340a3869423ce51fa5dfc63",
+        "parent_ids": "3f2a9ad2ba83bf98853d66b972dc3971c8eacca6fbbc25641303f71e36458f38",
+        "physical_distance": "897c9819d679156409f82178edd2dc4e6a7ebd735340a3869423ce51fa5dfc63",
+        "route_cost": "897c9819d679156409f82178edd2dc4e6a7ebd735340a3869423ce51fa5dfc63",
+        "traversal_order": "434026bd98ff2d8a2fb346c89ae9de006d1e2a6862832b6b3cd86e51de36d5c5"
+      },
+      "route_output_sha256": "9c3442cc18d55e171ea7f2c62a7a1f55532ba21d4877ed36db773338950103b6",
+      "support_digest_sha256": "8469691492bbd785dc9da310266dca4722f789c55d491f08d2eba39c9f6e2ab0",
+      "tensor_sha256": {
+        "edge_allowed": "b2e5f07bedac113611cd0dad5f68bef1480eabafaeb6e917fe68cb769bea53ba",
+        "edge_costs": "312833bb98f657cab585619f227c345aa99cf25d8ec32e7e31f3372838320e6e",
+        "edge_dst": "72820ec0d10015a8133a3d9ed7025052712e3eb44b6411a9c96f7e539a18f962",
+        "edge_lengths": "8c01eefcd8a0bea8f972068166d35087cc96f0ff63783a906f296a623a75d0cb"
+      }
+    },
+    {
+      "graph": {
+        "edge_allowed": [
+          [
+            true,
+            true
+          ],
+          [
+            true
+          ],
+          []
+        ],
+        "edge_costs": [
+          [
+            1.0,
+            0.5
+          ],
+          [
+            0.4999999995
+          ],
+          []
+        ],
+        "edge_dst": [
+          [
+            2,
+            1
+          ],
+          [
+            2
+          ],
+          []
+        ],
+        "edge_lengths": [
+          [
+            1.0,
+            0.5
+          ],
+          [
+            0.4999999995
+          ],
+          []
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0
+      },
+      "graph_sha256": "05d0779d61f642d4e714ce85e22036f858a8d8765a7a7d3589c0a2d5a71d0a18",
+      "id": "strict_relaxation_epsilon",
+      "purpose": "Strict 1e-9 relaxation boundary",
+      "route_kind": "preweighted",
+      "route_output_field_sha256": {
+        "parent_edge_m": "21d009d4f5c803e438221cb817196141b41a7b0474241814fb05d8fcd5837167",
+        "parent_ids": "3f2a9ad2ba83bf98853d66b972dc3971c8eacca6fbbc25641303f71e36458f38",
+        "physical_distance": "21d009d4f5c803e438221cb817196141b41a7b0474241814fb05d8fcd5837167",
+        "route_cost": "21d009d4f5c803e438221cb817196141b41a7b0474241814fb05d8fcd5837167",
+        "traversal_order": "434026bd98ff2d8a2fb346c89ae9de006d1e2a6862832b6b3cd86e51de36d5c5"
+      },
+      "route_output_sha256": "0906404e9f1b900600f2fdf611dbaf1874f0c9071ce71aadefa029685afbd108",
+      "support_digest_sha256": "8369fe05364d23ad3ecdde7906e53d4c046b20bbdff970edd248f462d80d7600",
+      "tensor_sha256": {
+        "edge_allowed": "3fcc671d5f26603257428977029620cd677e87ccceac979619c7d27024544753",
+        "edge_costs": "d6e91e9625a9384b08176a74a4b3b2a1a286696e02e34dce0dd61e3b399ffe62",
+        "edge_dst": "7b922a05fc292efe35db8b18d933eafb66208004021a4f1bfb9041cd108d1e3d",
+        "edge_lengths": "d6e91e9625a9384b08176a74a4b3b2a1a286696e02e34dce0dd61e3b399ffe62"
+      }
+    },
+    {
+      "graph": {
+        "edge_allowed": [
+          [
+            true
+          ],
+          [],
+          [
+            true
+          ]
+        ],
+        "edge_costs": [
+          [
+            2.0
+          ],
+          [],
+          [
+            0.0
+          ]
+        ],
+        "edge_dst": [
+          [
+            1
+          ],
+          [],
+          [
+            1
+          ]
+        ],
+        "edge_lengths": [
+          [
+            2.0
+          ],
+          [],
+          [
+            1.0
+          ]
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0
+      },
+      "graph_sha256": "1029f5673dfab48bd145c3d56b19807ee5d12c3f446995e11d2fb71a38682530",
+      "id": "disconnected_defaults",
+      "purpose": "Unreachable nodes retain infinite routes and no parent",
+      "route_kind": "preweighted",
+      "route_output_field_sha256": {
+        "parent_edge_m": "4709fbdf25aa4415245aadcd6890c408fdc42d4495842cb83f610f83b52833ba",
+        "parent_ids": "7913cf6053c7c4264d23f38d8da1918a9dbb5492b5cfca2ddd71ace5db4e46e1",
+        "physical_distance": "6f840206756cfbc7ba8eada8488ddd98f322365ae1135c684b558dfa7b6a9a8b",
+        "route_cost": "6f840206756cfbc7ba8eada8488ddd98f322365ae1135c684b558dfa7b6a9a8b",
+        "traversal_order": "463f2998327eb3a694145e6014444480b2235be84aa6cfd57871cc64f1cd816c"
+      },
+      "route_output_sha256": "c56dc91fed3e12e105360696396dafded1dc3402aa634eaa5c312ac59814e20e",
+      "support_digest_sha256": "57940ad9a39879fafc19c3b48e387f15a14b0c0ac12292a6789fb2a42e506107",
+      "tensor_sha256": {
+        "edge_allowed": "a69436833a3488646df4f82114b838627d60b46a13e88278a68475e800bcb66b",
+        "edge_costs": "59878f9aa0de5055ef840241b1312ac2f310d75bd8f586d17642c68304338143",
+        "edge_dst": "08cee4429ca252ec3521519f2afe39b328cc4b7670ebddcb48a5e25d4ea89347",
+        "edge_lengths": "11623fbf2d2d1f3232af1b3654a6fd3c079408b04f0b09cdeb8504d36d3a766f"
+      }
+    },
+    {
+      "graph": {
+        "edge_allowed": [
+          [
+            true,
+            false
+          ],
+          [
+            true,
+            false
+          ],
+          [
+            false,
+            false
+          ]
+        ],
+        "edge_dst": [
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "heading": [
+          0.0,
+          1.5707963267948966,
+          1.5707963267948966
+        ],
+        "root": 0,
+        "root_connector_m": 3.0,
+        "root_start_cost": 2.0,
+        "xy": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            3.0,
+            4.0
+          ],
+          [
+            6.0,
+            4.0
+          ]
+        ]
+      },
+      "graph_sha256": "9c27ff097aed59c44cc19d807065ac7321f6d14f8eb4cb0fb2397db89f631156",
+      "id": "geometry_root_connector_and_turn_cost",
+      "purpose": "Graph geometry, turn-cost and nonzero connector",
+      "route_kind": "geometry",
+      "route_output_field_sha256": {
+        "parent_edge_m": "10d3270d21a75bf602464a8779202c43f785bcba612232cdd25bb19fec4fcaf9",
+        "parent_ids": "68cd72026f4fc668f11424d0df10bf0bc5c5b6ec0a1add6851bedf1c8e51f6e3",
+        "physical_distance": "a17149f9ba88763b124b4e38b8dabc7bb7abcc8c1e867cf008a6e14472db50c7",
+        "route_cost": "253abc1acabb2023a89ed861435deec58825b19729b1dfc388e70354e4e42bb2",
+        "traversal_order": "434026bd98ff2d8a2fb346c89ae9de006d1e2a6862832b6b3cd86e51de36d5c5"
+      },
+      "route_output_sha256": "493617405f937368518719271eb384086a42d91f41708af08cf9617ce756264e",
+      "support_digest_sha256": "c15b9afb60431ee0a43d09811df148f4ca58b20e0a2d9f9a9ba3091c91b3b5ce",
+      "tensor_sha256": {
+        "edge_allowed": "ccca3393791cd65b6d16478c1c57a97a072e87a03cb37e1c053cf0c803a6d35a",
+        "edge_costs": "4886c1e8c4af2de1c51583f6eb7695316e954dbc4ef02bb2c97fe8eb88f027ad",
+        "edge_dst": "4a63b6bdb570b37cd013239f961848cb2477a17448bee84f20d9ade32ebc3571",
+        "edge_lengths": "6a0c83214173e1be2e0eefb99ac23ce1796fd8529c9d1a1f9fe1cc0f5a3cefe5",
+        "heading": "14e6044f50d940bae90f8bc3bfa33ea23a4bcf2463b5e6eeb6d0ae32898e3a4c",
+        "xy": "1ed794e97523f8fd944588373e4c560deac84b07f5e7a042da32db65f5257256"
+      }
+    },
+    {
+      "device_rejects": true,
+      "expected_error": "IndexError",
+      "graph": {
+        "edge_allowed": [
+          [
+            true
+          ],
+          []
+        ],
+        "edge_costs": [
+          [
+            1.0
+          ],
+          []
+        ],
+        "edge_dst": [
+          [
+            2
+          ],
+          []
+        ],
+        "edge_lengths": [
+          [
+            1.0
+          ],
+          []
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0
+      },
+      "graph_sha256": "cd394d8307e4564bed19ca4edd16f19a8b15dac6137a6983fbc0cccc4fc7d9f2",
+      "id": "invalid_active_edge_destination",
+      "purpose": "Out-of-range active destination; CPU and native rejection contract",
+      "tensor_sha256": {
+        "edge_allowed": "fdf260515e31e0bff3e228b7fd94b6149008e3b1c1a778f7c931b01bc2c5613d",
+        "edge_costs": "0a847fabe21c0f7abed60eec221b4b965b2889c8f611e71745df9d0aedbbf9c3",
+        "edge_dst": "6c5c3c3caf2c92a145a03ff57040e97657d513e16b87d6eab674f80884ebe07b",
+        "edge_lengths": "0a847fabe21c0f7abed60eec221b4b965b2889c8f611e71745df9d0aedbbf9c3"
+      }
+    },
+    {
+      "device_rejects": true,
+      "graph": {
+        "edge_allowed": [
+          [
+            true
+          ],
+          [
+            false
+          ]
+        ],
+        "edge_dst": [
+          [
+            1
+          ],
+          [
+            0
+          ]
+        ],
+        "heading": [
+          0.0,
+          0.0
+        ],
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0,
+        "xy": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            "NaN",
+            1.0
+          ]
+        ]
+      },
+      "graph_sha256": "3f809aa6153221cbea81d6cbf2dcca743858f63623e0373cef4ba8db5634e569",
+      "id": "invalid_active_geometry",
+      "purpose": "Non-finite active graph geometry; device rejection contract",
+      "route_kind": "geometry",
+      "route_output_field_sha256": {
+        "parent_edge_m": "f29310de4c3ebf47f2b596ae85f92daedae7a426dd2e145ab2a1ebec019199e6",
+        "parent_ids": "a95fa6bb464ef00ec44882a7c949fcfacc0d9d4a5a8e24763af102d189d611fc",
+        "physical_distance": "120ca4f75931600de396638b3a9d8293cbe28373c911bc6697985232afaaadb4",
+        "route_cost": "120ca4f75931600de396638b3a9d8293cbe28373c911bc6697985232afaaadb4",
+        "traversal_order": "d0bca111f8628137adc4c16f123496dcdd1d590d06cb5d9acd68b39fe656fb97"
+      },
+      "route_output_sha256": "dfd6add42906611ca38dab04dea5161b9823fa4c3f8a7408db3bef5949f96f97",
+      "support_digest_sha256": "38f69b6e98ebaf92ab604497359267c7778572f9ca9b850b570581dd2d9fe702",
+      "tensor_sha256": {
+        "edge_allowed": "cd320cd4c0a4bfbb285daafd647d11b1c98d3b12742bcef1ab96fdd65fb77317",
+        "edge_costs": "4e034063e6172d1da808bae5aec95b91c4799a30c2c9ccf586af8b51abef91d1",
+        "edge_dst": "191dcde08caaeb673edb8fcc843a8e49794bcc1ea6480e9b48f61fcf6cd2a8a2",
+        "edge_lengths": "47ee8b81ac29321bef143def13b8ba696f4b3801cc9ffa2f386efa8284e3c0dc",
+        "heading": "f29310de4c3ebf47f2b596ae85f92daedae7a426dd2e145ab2a1ebec019199e6",
+        "xy": "c0ded0e145974339f27cc8352ab7b97bf692ffd3f4512f11383eccdf66415e71"
+      }
+    },
+    {
+      "graph_sha256": "e71a155a4675bfb65186763036a2e8824e20a6f9b3d75f038e9e1d6a0ebcaa6a",
+      "id": "production_pose_lattice_8heading_100x80",
+      "purpose": "Open-field 8-heading pose-lattice shape, 64,000 nodes \u00d7 10 slots",
+      "recipe": {
+        "kind": "open_pose_lattice_v1",
+        "node_count": 64000,
+        "nx": 100,
+        "ny": 80,
+        "root": 0,
+        "root_connector_m": 0.0,
+        "root_start_cost": 0.0,
+        "spacing_m": 0.15
+      },
+      "route_kind": "geometry",
+      "route_output_field_sha256": {
+        "parent_edge_m": "eff9073b5b72123c93d288913f65f945c4fe3a98081874cbbbe96a3438a24afc",
+        "parent_ids": "dfda46e44ab33b316990322fdd08eeee04e5096976d815dd6d39e6b2c7db85f0",
+        "physical_distance": "031a7d9ef3bc0fdb080e1357de8eb82b33bafa028020bc88ed7c43f75b38fd71",
+        "route_cost": "fa437ddabd2bf3f260227d80912c5554a29d0b8f6b66c8c62499179aa4a3ed9d",
+        "traversal_order": "8da1d4852155bfc1a4e32b448c8a449046a4200dac0b19045ac53d8d05204e75"
+      },
+      "route_output_sha256": "bd88a43c3dc8d5193451a5ea3a4148f9b324672dc6d3b0e6f41c8a8904ab8f3b",
+      "support_digest_sha256": "8506e9734f8ac45a2fd6eebafc5fc8e968d97bcf087d918d25ba0ad33d56b8a4",
+      "tensor_sha256": {
+        "edge_allowed": "9c644feaee0975fe2daf90284947110e9d3816b7f7cf84cb264efef1523e6d79",
+        "edge_costs": "01d4018377e54b33890030a5f8ff9e869c81ae3abc6de5da2fff191b1ee5aa8a",
+        "edge_dst": "7a112d5e02b61221fa3cf4963029b5bd89e221fda5320a7025520037a7d517f1",
+        "edge_lengths": "c94379e17a1baa303c5570624c42c60933cd19ad0b199952ea66d35e8e04035e",
+        "heading": "788e52c8bb30817466ae7b2c88885f90be050b36ba2a3a95d38191812d625b91",
+        "xy": "c09e877b670884a9767ee48a9b963f6fb738f246bd2bde28af621c59a6f3d93c"
+      }
+    }
+  ],
+  "fixture_set": "plan_a_exact_heap_parity_v1",
+  "manifest_payload_sha256": "d8db6d61627d7575551684e615804b7ae2d4b94ba060fa80575aab8dd869de85",
+  "schema_version": 1,
+  "source_sha256": {
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "0301f9ea627d07cdf405e211ba658c3b6b33e3be21090086e3be8db35af6c8af",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "6dba4f1f7a6ac580752c73948fb0c62f1cedf3ee35d8036cfdfefa0d9610f8b2",
+    "frc_defense/meco_device_lease.py": "ffb9f134086c614053f084fdf17ca55f37a3e54fca0412a0f8a7416220228597",
+    "frc_defense/meco_gpu_attestation.py": "8d439ec511db33dc730a0214f074a94afd5977259bba7e4a1d9ac7231a7e9ffe",
+    "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
+    "frc_defense/meco_plan_a_hip_parity_harness.py": "b8b95de9fbdf85185f2dd221119a51ca45ae7221786a645c8400c51510cf0185",
+    "frc_defense/meco_plan_a_policy.py": "d437c854ce6479fa1510626e39ed7cc0c14c8a043e02a0ac2c7624cc61668b81",
+    "frc_defense/meco_plan_a_shortest_path.py": "c3c2eccd52d24d050df8fcef41325001c7d91e108d16c98f4e5f990a84cd62e7",
+    "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",
+    "frc_defense/meco_pose_graph.py": "251b041e575e7a49ff65a0fc161947e2254ea0a1d223a6cb137388f75635fe0d",
+    "frc_defense/meco_training_manifest.py": "5867fd4e0af3da82fcbbbd5730d15b9b9af4cf312ace2de71728a9b27fef557f",
+    "scripts/verify_plan_a_hip_parity.py": "a5bb80095f8f2d3f9dc3a43e213c3fbd2f677abd72a3a51b6a0eb35354aaee97"
+  }
+}
