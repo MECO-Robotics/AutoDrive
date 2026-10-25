@@ -444,6 +444,14 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
     """Recompute case-shard evidence before a resume may adopt it."""
     if not isinstance(receipt, dict) or receipt.get("schema") != SCHEMA + ".case-receipt":
         raise ValueError("case shard has no recognized validation receipt")
+    datasets = receipt.get("datasets")
+    if not isinstance(datasets, dict) or set(datasets) != {"trajectory", "ub", "p"}:
+        raise ValueError("case receipt dataset family map is malformed")
+    for family, entry in datasets.items():
+        if (not isinstance(entry, dict) or
+                any(not isinstance(entry.get(key), str) or not entry[key]
+                    for key in ("path", "sha256", "manifest_path", "manifest_sha256"))):
+            raise ValueError(f"case receipt {family} dataset binding is malformed")
     if (receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
             receipt.get("case_key") != shard["case_key"] or
             receipt.get("seeds") != shard["seeds"] or
@@ -460,14 +468,17 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
         if (not isinstance(one_case, dict) or not isinstance(manifest_value, str) or
                 not manifest_value or not isinstance(attempt_value, str) or not attempt_value):
             raise ValueError("case receipt lacks the existing complete-set validator evidence")
+        one_case_outputs = one_case.get("outputs")
+        if not isinstance(one_case_outputs, dict):
+            raise ValueError("case receipt complete-set descriptor outputs are malformed")
         manifest_path = Path(manifest_value)
         attempt_root = Path(attempt_value).absolute()
         expected_attempt_parent = Path(descriptor["outputs"]["root"]) / "shards" / f"case-{shard['case_index']:04d}"
         if (not manifest_path.is_file() or manifest_path.is_symlink() or
-                one_case.get("outputs", {}).get("root") != str(attempt_root) or
+                one_case_outputs.get("root") != str(attempt_root) or
                 attempt_root.parent != expected_attempt_parent or
                 re.fullmatch(r"attempt-[0-9]{4,}", attempt_root.name) is None or
-                one_case.get("outputs", {}).get("manifest") != str(manifest_path) or
+                one_case_outputs.get("manifest") != str(manifest_path) or
                 _sha(manifest_path.read_bytes()) != receipt.get("complete_set_manifest_sha256") or
                 one_case.get("scenario_id") != expected_key[0] or
                 one_case.get("category") != expected_key[1] or
@@ -476,12 +487,10 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
                 one_case.get("qualification_protocol") != descriptor["qualification_protocol"]):
             raise ValueError("case receipt lacks the existing complete-set validator evidence")
         complete_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if receipt.get("complete_set_manifest") != complete_manifest:
+        if (not isinstance(complete_manifest, dict) or
+                receipt.get("complete_set_manifest") != complete_manifest):
             raise ValueError("case receipt summary differs from the current complete-set manifest")
         validate_complete_set_manifest(complete_manifest, one_case)
-    datasets = receipt.get("datasets")
-    if not isinstance(datasets, dict) or set(datasets) != {"trajectory", "ub", "p"}:
-        raise ValueError("case receipt must bind C trajectory, U+B, and P target datasets")
     cross_source = None
     target_validators = target_validators or {}
     for family in ("trajectory", "ub", "p"):
@@ -502,6 +511,8 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
                 _sha(manifest_raw) != entry.get("manifest_sha256")):
             raise ValueError(f"case {family} bytes differ from their receipt")
         manifest = json.loads(manifest_raw)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"case {family} manifest must be an object")
         manifest_key = (manifest.get("scenario_id"), manifest.get("category"))
         device = manifest.get("device")
         device_name = device.get("device") if isinstance(device, dict) else device
