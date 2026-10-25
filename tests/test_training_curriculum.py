@@ -15,7 +15,8 @@ def result(scenario_id, round_id='r', **changes):
     categories = tuple(CategoryResult(c, 100, 90, 1., 1., True, True, 'protocol', seeds, seeds)
                        for c in SCENARIOS[scenario_id].required_categories)
     return replace(EvaluationResult(round_id, scenario_id, 'validation', categories,
-                                    'checkpoint', protocol_id='protocol'), **changes)
+                                    'checkpoint', protocol_id='protocol',
+                                    protocol_version='meco-qualification-v1'), **changes)
 
 
 def qualified_state(*names):

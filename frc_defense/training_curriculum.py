@@ -251,22 +251,22 @@ def _failures(result, *, expected_verdict_scope='qualification'):
         failures.append('required categories must match exactly')
     numeric_verdict = result.numeric_gate_verdict
     device_category_verdicts = None
+    required_verdict_categories = ('success_rate_pass',
+        'throughput_ratio_pass', 'minimum_useful_throughput_pass',
+        'useful_gain_ci_pass')
     version = result.protocol_version
-    if (version is not None and
-            version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS and
-            version != GPU_NUMERIC_GATE_PROTOCOL_VERSION):
+    if version is None:
+        failures.append('qualification protocol version is missing')
+    elif (version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS and
+          version != GPU_NUMERIC_GATE_PROTOCOL_VERSION):
         failures.append('qualification protocol version is unsupported')
-    verdict_required = (version == GPU_NUMERIC_GATE_PROTOCOL_VERSION or
-        (version is not None and version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS))
+    verdict_required = version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS
     if numeric_verdict is None and verdict_required:
         failures.append('GPU numeric gate verdict is missing or unbound')
         # An empty device map suppresses all legacy host threshold fallbacks;
         # category validation below will fail closed as well.
         device_category_verdicts = {}
     if numeric_verdict is not None:
-        required_verdict_categories = ('success_rate_pass',
-            'throughput_ratio_pass', 'minimum_useful_throughput_pass',
-            'useful_gain_ci_pass')
         runtime = (numeric_verdict.get('runtime_device')
                    if isinstance(numeric_verdict, dict) else None)
         if (not isinstance(numeric_verdict, dict)
@@ -289,6 +289,8 @@ def _failures(result, *, expected_verdict_scope='qualification'):
                 or any(not isinstance(message, str) or not message
                        for message in numeric_verdict['failures'])):
             failures.append('GPU numeric gate verdict is missing or unbound')
+            if verdict_required:
+                device_category_verdicts = {}
         else:
             device_category_verdicts = numeric_verdict['category_verdicts']
             failures.extend(numeric_verdict['failures'])

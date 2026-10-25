@@ -148,5 +148,15 @@ def test_retention_verdict_requires_explicit_scope_and_safety_disposition():
 
     legacy = EvaluationResult("legacy", scenario.scenario_id, "validation",
         failing_categories, "fixture-bundle", scenario.version,
-        CURRICULUM_VERSION, "legacy-protocol")
+        CURRICULUM_VERSION, "legacy-protocol",
+        protocol_version="meco-qualification-v1")
     assert any("success gate failed" in failure for failure in _failures(legacy))
+
+    unversioned = EvaluationResult("unversioned", scenario.scenario_id,
+        "validation", failing_categories, "fixture-bundle", scenario.version,
+        CURRICULUM_VERSION, "unversioned-protocol")
+    unversioned_failures = _failures(unversioned)
+    assert "qualification protocol version is missing" in unversioned_failures
+    assert not any("success gate failed" in failure or
+                   "absolute delivery minimum failed" in failure
+                   for failure in unversioned_failures)
