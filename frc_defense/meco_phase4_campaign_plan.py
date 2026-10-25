@@ -2,8 +2,8 @@
 
 This compiler binds the schedule to frozen inputs and describes exact matched
 coverage without materializing episodes, exposing seed values, or running a
-simulator. Design-axis expansions are explicitly not executable until runtime
-stimuli and evaluator wiring are implemented and verified.
+simulator. Dispatchable cells are not qualification-executable until runtime
+stimuli, authoritative outcomes, and accepted replay/dashboard review are bound.
 """
 from __future__ import annotations
 
@@ -1607,6 +1607,31 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             evidence_root=start_profile_review_root or Path.cwd())
                     else:
                         start_profile_review_gate = None
+                    scheduler_assignment_supported = (
+                        reactive_assignment is not None or
+                        direct_pursuit_assignment is not None or
+                        trench_interception_assignment is not None or
+                        start_profile_assignment is not None or
+                        req_id in ("teammate_behaviors",
+                                   "observation_only_focal_pose_mislocalization"))
+                    runtime_stimulus_supported = (
+                        factor in runtime_binding["runtime_factor_by_factor_id"] and
+                        runtime_binding["stimulus_supported"])
+                    required_outcome_signals_complete = set(
+                        runtime_binding["required_signals"]).issubset(
+                            runtime_binding["authoritative_signals"])
+                    review_gate = (
+                        direct_review_gate if req_id == "direct_pursuit" else
+                        trench_review_gate if req_id == "trench_interception" else
+                        start_profile_review_gate if req_id ==
+                            "multiple_legal_team_start_states" else None)
+                    replay_dashboard_review_accepted = bool(
+                        review_gate and review_gate.get("accepted") is True)
+                    dispatchable = bool(runtime_stimulus_supported and
+                        (not design_axes or scheduler_assignment_supported))
+                    qualification_executable = bool(dispatchable and
+                        required_outcome_signals_complete and
+                        replay_dashboard_review_accepted)
                     status = ("protocol_bound_policy_assignment_planned_not_executed"
                               if reactive_assignment is not None or direct_pursuit_assignment is not None or
                                 trench_interception_assignment is not None else
@@ -1628,42 +1653,22 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             "runtime_factor_by_factor_id"].get(factor),
                         "runtime_event": runtime_binding[
                             "runtime_event_by_factor_id"].get(factor),
-                        "runtime_stimulus_supported": (
-                            factor in runtime_binding["runtime_factor_by_factor_id"]
-                            and runtime_binding["stimulus_supported"]),
-                        "scheduler_assignment_supported": (
-                            reactive_assignment is not None or
-                            direct_pursuit_assignment is not None or
-                            trench_interception_assignment is not None or
-                            start_profile_assignment is not None),
+                        "runtime_stimulus_supported": runtime_stimulus_supported,
+                        "scheduler_assignment_supported": scheduler_assignment_supported,
+                        "dispatchable": dispatchable,
+                        "replay_dashboard_review_accepted":
+                            replay_dashboard_review_accepted,
                         "opponent_schedule_assignment": reactive_assignment,
                         "direct_pursuit_assignment": direct_pursuit_assignment,
                         "trench_interception_assignment": trench_interception_assignment,
                         "start_profile_assignment": start_profile_assignment,
-                        "required_outcome_signals_complete": set(
-                            runtime_binding["required_signals"]).issubset(
-                                runtime_binding["authoritative_signals"]),
-                        "executable": (not bool(design_axes) or
-                            (req_id == "multiple_legal_team_start_states" and
-                                set(design_axes) == {"legal_team_pose_sets"})
-                            and (req_id != "direct_pursuit" or
-                                bool(direct_review_gate and direct_review_gate.get("accepted")))
-                            and (req_id != "trench_interception" or
-                                bool(trench_interception_assignment and trench_review_gate and
-                                    trench_review_gate.get("accepted")))
-                            and (req_id != "multiple_legal_team_start_states" or
-                                bool(start_profile_assignment and start_profile_review_gate and
-                                    start_profile_review_gate.get("accepted")))
-                            and factor in runtime_binding["runtime_factor_by_factor_id"]
-                            and runtime_binding["stimulus_supported"]
-                            and set(runtime_binding["required_signals"]).issubset(
-                                runtime_binding["authoritative_signals"])),
+                        "required_outcome_signals_complete":
+                            required_outcome_signals_complete,
+                        "qualification_executable": qualification_executable,
+                        "executable": qualification_executable,
                         "executed": False,
-                        "simulator_behavior_validated": bool(
-                            (direct_review_gate and direct_review_gate.get("accepted")) or
-                            (trench_review_gate and trench_review_gate.get("accepted")) or
-                            (start_profile_review_gate and
-                                start_profile_review_gate.get("accepted"))),
+                        "simulator_behavior_validated":
+                            replay_dashboard_review_accepted,
                         "start_profile_review_gate": start_profile_review_gate,
                         "direct_pursuit_review_gate": direct_review_gate,
                         "trench_interception_review_gate": trench_review_gate,
@@ -1725,6 +1730,10 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
         "episode_rows_materialized": False,
         "final_test_rows_or_seed_values_included": False,
         "design_only_cells_executable": False,
+        "dispatchable_cell_count": sum(1 for requirement in plan_requirements
+            for cell in requirement["cells"] if cell["dispatchable"]),
+        "qualification_executable_cell_count": sum(1 for requirement in plan_requirements
+            for cell in requirement["cells"] if cell["qualification_executable"]),
         "executable_cell_count": sum(1 for requirement in plan_requirements
                                       for cell in requirement["cells"]
                                       if cell["executable"]),

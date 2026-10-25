@@ -2,10 +2,14 @@
 
 The validation plan now carries a machine-checked requirement → factor →
 runtime-event → required-signal binding for all eleven registry requirements.
-The campaign compiler marks a cell executable only when its stimulus is wired
-and every required outcome signal has an authoritative source. At this revision
-there are **zero executable qualification cells**. A planned row is not an
-executed or qualified episode.
+It reports dispatchability separately from qualification executability:
+`dispatchable_cell_count` counts cells with a wired stimulus and any required
+assignment path, while `qualification_executable_cell_count` (also exposed as
+`executable_cell_count`) requires a wired stimulus, authoritative sources for
+all required outcome signals, and accepted source-bound replay/dashboard
+review for that cell. At this revision there are **zero executable
+qualification cells**. A dispatchable planned row is not an executed or
+qualified episode, and qualification eligibility remains false.
 
 | Requirement | Factor ID | Runtime event | Required signals | Current status |
 | --- | --- | --- | --- | --- |
