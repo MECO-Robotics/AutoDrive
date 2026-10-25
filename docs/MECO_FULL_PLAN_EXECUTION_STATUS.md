@@ -1,3 +1,12 @@
+> **Five-track candidate schema fixture integrated — 2026-10-25.** Reviewed
+> implementation `2fb402c69475ab3f43707a5eb0ec797e52b5fa8c` repairs the
+> synthetic C1/C2 fixture to use the canonical 20-column raw schema and adds
+> malformed name/order/width rejection coverage. The change is test-only; the
+> runtime schema remains strict. The implementer reported 17 focused tests
+> passing. No simulator behavior, replay, qualification, or deployment evidence
+> is claimed. Three-pass summary is recorded in
+> [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
 > **Phase 0 baseline provenance binding repaired — 2026-10-25.** The curriculum API had rejected the `phase0-baseline-heldout-contracts` summary because its planner digest referred to an obsolete revision. This scoped metadata correction binds the row to the current reviewed plan bytes, source commit `a5aebfb034e0329ed66f097ea38d8cf4e93723ee`, and mainline attribution `81dcf7ab668c6cb40d1e2e9c83648f2894d7c361`; it preserves the existing reviewer and implementation evidence. It adds no baseline or partition freeze, calibration, simulator, runtime, or qualification evidence. Dashboard recovery remains unverified pending integration and a current-checkout restart/check.
 
 > **Phase 0 simulated score ledger integrated — 2026-10-25.** Code support is

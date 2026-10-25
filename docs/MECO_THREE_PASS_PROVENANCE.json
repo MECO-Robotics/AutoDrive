@@ -3432,6 +3432,40 @@
         "status": "approved-summary"
       },
       "limits": "FUEL-only replay-reconstructable code contract. No human estimand approval artifact, seeded simulator evaluation, replay inspection, current-dashboard check, runtime evidence, or device evidence exists. Scorer-path fixtures are skipped. Official match points remain null; qualification is false and Phase 0 remains incomplete."
+    },
+    {
+      "requirement_id": "five-track-candidate-feature-schema",
+      "title": "Five-track candidate feature schema fixture",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/five-track-candidate-feature-schema-20261025.md",
+          "sha256": "36d2e46bf53b79a8ea00326ed966b83b97d93d0dc54050e5588333ee43664de6",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "candidate_commit": "2fb402c69475ab3f43707a5eb0ec797e52b5fa8c",
+        "integration_commit": "2fb402c69475ab3f43707a5eb0ec797e52b5fa8c",
+        "paths": [
+          "tests/test_meco_tracks.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/five-track-candidate-feature-schema-20261025.md",
+          "sha256": "36d2e46bf53b79a8ea00326ed966b83b97d93d0dc54050e5588333ee43664de6",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "2fb402c69475ab3f43707a5eb0ec797e52b5fa8c",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved the exact implementation head. The fixtures use all 20 canonical raw fields, valid A2/A3 graph indices, and malformed C1/C2 name/order/width rejection cases. Implementer-reported evidence was 17 focused tests and a clean diff check; reviewer did not execute tests.",
+        "status": "approved-summary"
+      },
+      "limits": "Test-fixture/schema contract only. No runtime code changed. No end-to-end simulator, scoring, replay, dashboard-currentness, runtime, device, or qualification evidence is claimed."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
