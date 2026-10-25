@@ -1952,7 +1952,8 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
     device = torch.device(train_device)
     result = []
     for row in rows:
-        replay = replay_counterfactual_branch(row, manifest)
+        replay = replay_counterfactual_branch(row, manifest,
+            require_hip_plan_a=track in ("A1", "A2", "A3"))
         try:
             env, graph, snapshot = replay["env"], replay["graph"], replay["snapshot"]
             safe = replay["observation"]
@@ -3465,7 +3466,8 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
         record = source_by_key.get(key)
         if record is None:
             raise ValueError("legal-node row does not map to a frozen source branch")
-        replay = replay_counterfactual_branch(record, source_manifest)
+        replay = replay_counterfactual_branch(record, source_manifest,
+            require_hip_plan_a=True)
         try:
             env, graph, support = replay["env"], replay["graph"], replay["support"]
             if row.get("support_digest") != support.support_digest:

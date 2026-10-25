@@ -1433,7 +1433,8 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
 
 def _legal_node_pair_return(record, manifest, pair_index, repeat_index):
     """Replay a branch and execute one pair from the full legal Plan A support."""
-    replay = replay_counterfactual_branch(record, manifest)
+    replay = replay_counterfactual_branch(record, manifest,
+        require_hip_plan_a=True)
     env = replay["env"]
     repeat_seed = int.from_bytes(hashlib.sha256(
         f"legal-node-repeat:{record['seed']}:{repeat_index}".encode()).digest()[:4], "big")
@@ -1576,7 +1577,8 @@ def collect_plan_a_legal_nodes_v1(output: Path, *, dataset: Path,
     actual_rollouts = 0
     for record in rows:
         if not record.get("plan_a_descriptors"): continue
-        replay = replay_counterfactual_branch(record, source_manifest)
+        replay = replay_counterfactual_branch(record, source_manifest,
+            require_hip_plan_a=True)
         env = replay["env"]
         graph = replay["graph"]
         try:
@@ -1880,7 +1882,8 @@ def _replay_plan_a_expert_goal_source_row(record, base_manifest):
             record.get("state_sha256") != base.get("predecision_simulator_state_sha256") or
             record.get("macro_ticks") != base.get("macro_ticks")):
         raise RuntimeError("expert-goal source state identity differs from its v3 base row")
-    replay = replay_counterfactual_branch(record["base_record"], base_manifest)
+    replay = replay_counterfactual_branch(record["base_record"], base_manifest,
+        require_hip_plan_a=True)
     env = replay["env"]
     try:
         support = replay["support"]
@@ -1939,7 +1942,8 @@ def collect_plan_a_expert_goal_source_v1(output: Path, *, dataset: Path,
         raise ValueError("expert-goal source device/train split must match frozen v3 source")
     output_rows = []
     for base in rows:
-        replay = replay_counterfactual_branch(base, base_manifest)
+        replay = replay_counterfactual_branch(base, base_manifest,
+            require_hip_plan_a=True)
         env = replay["env"]
         try:
             pair, selected = _select_plan_a_expert_goal_v1(replay["support"])
