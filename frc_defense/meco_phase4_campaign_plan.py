@@ -113,6 +113,17 @@ def _parse_http_capture(raw: bytes) -> tuple[int, dict[str, str], bytes] | None:
         return None
 
 
+def _endpoint_url_matches(url: Any, path: str) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (parsed.scheme in ("http", "https") and bool(parsed.netloc) and
+        parsed.path == path)
+
+
 def _checkout_matches_source_identity(service: dict, expected_tree: dict,
         expected_tree_sha256: str) -> bool:
     """Rehash source files under the declared checkout and verify its Git head."""
@@ -162,7 +173,10 @@ def _service_process_matches_checkout(service: dict) -> bool:
     """Bind captured service PID/start data to a live dashboard process."""
     pid = service.get("main_pid")
     start_ticks = service.get("proc_start_ticks")
-    if type(pid) is not int or pid <= 1 or type(start_ticks) is not int:
+    checkout_root = service.get("checkout_root")
+    if (type(pid) is not int or pid <= 1 or type(start_ticks) is not int or
+            not isinstance(checkout_root, str) or
+            not Path(checkout_root).is_absolute()):
         return False
     proc = Path("/proc") / str(pid)
     try:
@@ -174,7 +188,7 @@ def _service_process_matches_checkout(service: dict) -> bool:
         actual_start_ticks = int(fields[19])
     except (OSError, ValueError, IndexError):
         return False
-    expected_root = Path(service.get("checkout_root", "")).resolve()
+    expected_root = Path(checkout_root).resolve()
     return (actual_root == expected_root and actual_start_ticks == start_ticks and
         ("frc_defense.dashboard" in command or "frc_defense/dashboard.py" in command))
 
@@ -877,7 +891,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
     required_assets = {"/assets/dashboard.css", "/assets/dashboard.js",
                        "/assets/meco.css", "/assets/meco.js"}
     asset_paths = ({item.get("path") for item in asset_manifest
-                    if isinstance(item, dict)}
+                    if isinstance(item, dict) and
+                    isinstance(item.get("path"), str)}
                    if isinstance(asset_manifest, list) else set())
     assets_well_formed = (isinstance(asset_manifest, list) and
         all(isinstance(item, dict) and
@@ -907,10 +922,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             isinstance(endpoints[path].get("capture_path"), str) and
             isinstance(endpoints[path].get("capture_sha256"), str) and
             len(endpoints[path]["capture_sha256"]) == 64 and
-            isinstance(endpoints[path].get("url"), str) and
-            urlsplit(endpoints[path]["url"]).scheme in ("http", "https") and
-            bool(urlsplit(endpoints[path]["url"]).netloc) and
-            urlsplit(endpoints[path]["url"]).path == path
+            _endpoint_url_matches(endpoints[path].get("url"), path)
             for path in required_endpoint_paths) and
         all(endpoints[path].get("backend_source_identity_sha256") ==
                 dashboard.get("backend_source_identity_sha256") for path in
@@ -1002,7 +1014,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             except (json.JSONDecodeError, UnicodeDecodeError):
                 payload = None
             replay_payloads.append(payload)
-        replay_artifacts_exact = (all(isinstance(item, dict)
+        replay_artifacts_exact = (all(isinstance(item, dict) and
+                isinstance(item.get("simulation_id"), str)
             for item in replay_payloads) and
             len({item.get("simulation_id") for item in replay_payloads
                  if isinstance(item, dict)}) == 2 and
@@ -1025,10 +1038,16 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                     "source_identity_sha256") and
                 item.get("source_tree_identity_sha256") == outcomes.get(
                     "source_tree_identity_sha256") and
+                isinstance(item.get("policy"), str) and
+                item.get("policy") in START_PROFILE_POLICY_IDS and
                 item.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256", {}).get(
-                    item.get("policy", "").removesuffix("_P0")) and
-                item.get("device") == outcomes.get("execution_device") and
-                item.get("execution_device") == outcomes.get("execution_device")
+                    item["policy"][:-3] if item["policy"].endswith("_P0") else
+                    item["policy"]) and
+                isinstance(outcomes.get("execution_device"), dict) and
+                set(outcomes["execution_device"]) == {"device", "accelerator_backend"} and
+                (item.get("device") == outcomes["execution_device"] or
+                 item.get("device") == outcomes["execution_device"]["device"] or
+                 item.get("simulation_device") == outcomes["execution_device"]["device"])
                 for review_item, item in zip(replays, replay_payloads)))
     exact_review = (row.get("schema") ==
         "meco-phase4-start-profile-review-evidence-v1" and
@@ -1085,6 +1104,10 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         type(replay.get("replay_seed")) is int and
         replay.get("replay_seed") in seed_values and
         isinstance(replays, list) and len(replays) == 2 and
+        all(isinstance(item, dict) and
+            isinstance(item.get("condition"), str) and
+            item.get("condition") in CONDITIONS and
+            type(item.get("seed")) is int for item in replays) and
         {item.get("condition") for item in replays if isinstance(item, dict)} ==
             set(CONDITIONS) and
         len({item.get("seed") for item in replays if isinstance(item, dict)}) == 1 and
