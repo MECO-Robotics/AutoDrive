@@ -3158,6 +3158,43 @@
         "status": "approved-summary"
       },
       "limits": "Scoped implementation and review summary only. No dataset or warm-start weights are reported as generated; training readiness, simulator behavior, GPU/device execution, qualification, and Phase 2 completion are not established. Post-update dashboard restart/currentness evidence is pending integration."
+    },
+    {
+      "requirement_id": "phase2-production-bundle-revalidator",
+      "title": "Phase 2 production bundle revalidator",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/plans/phase2-warmstart-production-execution-20261025.md",
+          "sha256": "04322980aa10eca3b858f3abfc3cfd5fa49ad653a41ca302a58fac587259037b",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "candidate_commit": "3a0d17c001dc35c05659d70180850555258be711",
+        "integration_commit": "79e2d228cde22932b8cf437337be8c1de7859637",
+        "paths": [
+          "frc_defense/meco_phase2_multicase.py",
+          "frc_defense/meco_training_manifest.py",
+          "tests/test_meco_phase2_multicase.py",
+          "tests/test_meco_training_manifest.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase2-production-bundle-revalidator-20261025.md",
+          "sha256": "8cae00d13ccb5f8034e86f7cf017e51afb461c6037725b8e64eefe221684c906",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "79e2d228cde22932b8cf437337be8c1de7859637",
+        "verdict": "approved",
+        "verdict_detail": "Independent reviewer approved exact head 79e2d228cde22932b8cf437337be8c1de7859637 and reported 68 focused tests passed and a clean git diff --check origin/main...HEAD. Review covered descriptor/current-source/protocol/device bindings, per-case receipts and pooled sidecars, re-derivation of the three combined datasets, production validation for all five artifacts, false readiness/qualification, and runtime-error propagation. No simulator or device work was run; the reported tests were not rerun for this metadata update.",
+        "status": "approved-summary"
+      },
+      "limits": "Scoped implementation and review summary only. No production dataset or weights are reported as generated; warm-start/training readiness, simulator behavior, GPU/device execution, qualification, deployment, and Phase 2 completion are not established. Post-update dashboard restart/currentness evidence is pending integration."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
