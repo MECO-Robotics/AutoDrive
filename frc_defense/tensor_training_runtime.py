@@ -208,17 +208,6 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
         known_remaining_ticks > ticks +
         int(getattr(env, "max_observation_latency_steps", 0)) and
         getattr(env, "_full_observation_hip_available", False))
-    delay_groups = None
-    if sparse_observation_capture:
-        delay_groups = getattr(env, "_ppo_observation_delay_groups", None)
-        if delay_groups is None:
-            delays = env.observation_delay.detach().to("cpu").tolist()
-            groups = [[] for _ in range(int(env.max_observation_latency_steps) + 1)]
-            for row, delay in enumerate(delays):
-                groups[int(delay)].append(row)
-            delay_groups = [torch.tensor(rows, device=env.device, dtype=torch.long)
-                            for rows in groups]
-            env._ppo_observation_delay_groups = delay_groups
     active_world_physics_ticks = 0
     for tick_index in range(ticks):
         if active_counts is None:
@@ -233,13 +222,12 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
             step_kwargs["_active_count"] = active_counts[tick_index]
         if sparse_observation_capture:
             # The policy's observation at interval end reads the raw snapshot
-            # observation_delay physics ticks earlier. Capture only those rows
-            # at their source tick. Episode-end intervals use the legacy path,
+            # observation_delay physics ticks earlier. Capture matching worlds
+            # at their source tick with a fixed-shape device mask. Episode-end intervals use the legacy path,
             # preserving complete terminal delayed-observation history.
             source_delay = ticks - tick_index - 1
-            step_kwargs["_ppo_observation_capture_rows"] = (
-                delay_groups[source_delay] if source_delay < len(delay_groups)
-                else torch.empty((0,), device=env.device, dtype=torch.long))
+            step_kwargs["_ppo_observation_capture_mask"] = (
+                env.observation_delay == source_delay)
         elif (coarse_delayed_observation_capture and
               known_remaining_ticks is not None and return_info is False and
               hasattr(env, "max_observation_latency_steps") and
@@ -249,11 +237,11 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
             # A delayed observation at this decision boundary can only read
             # one of the most recent max_latency + 1 raw snapshots. Earlier
             # history slots age out before they can be consumed. Pass an empty
-            # capture-row index so _obs still refreshes strategic candidates,
+            # all-false capture mask so _obs still refreshes strategic candidates,
             # advances the ring index, and consumes its normal RNG draws while
             # avoiding construction of an unused 137-feature observation.
-            step_kwargs["_ppo_observation_capture_rows"] = torch.empty(
-                (0,), device=env.device, dtype=torch.long)
+            step_kwargs["_ppo_observation_capture_mask"] = torch.zeros(
+                (env.n,), device=env.device, dtype=torch.bool)
         if (defer_intermediate_observation and known_remaining_ticks is not None
                 and return_info is False and hasattr(env, "action_mode")):
             # The PPO policy only consumes this interval's final observation,
@@ -263,15 +251,15 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
             step_kwargs["_capture_observation"] = (
                 tick_index == ticks - 1 or
                 tick_index + 1 == known_remaining_ticks)
-        capture_rows = step_kwargs.pop("_ppo_observation_capture_rows", None)
-        if capture_rows is not None:
-            env._ppo_observation_capture_rows = capture_rows
+        capture_mask = step_kwargs.pop("_ppo_observation_capture_mask", None)
+        if capture_mask is not None:
+            env._ppo_observation_capture_mask = capture_mask
         try:
             next_obs, tick_reward, tick_done, tick_truncated, _info = env.step(
                 action, **step_kwargs)
         finally:
-            if capture_rows is not None:
-                del env._ppo_observation_capture_rows
+            if capture_mask is not None:
+                del env._ppo_observation_capture_mask
         active_before_tick = active_this_decision
         full_active_tick = (known_remaining_ticks is not None and
                             active_worlds_this_tick == env.n)

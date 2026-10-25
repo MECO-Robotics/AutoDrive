@@ -281,9 +281,7 @@ class TensorDefenseStepMixin:
             obs=self._obs(active_mask=active_mask,active_count=active_count,
                           capture_output=capture_observation,
                           capture_raw_mask=getattr(
-                              self, "_ppo_observation_capture_mask", None),
-                          capture_raw_rows=getattr(
-                              self, "_ppo_observation_capture_rows", None))
+                              self, "_ppo_observation_capture_mask", None))
             if capture_observation:
                 if active_count == self.n:
                     self._last_observation=obs.clone()

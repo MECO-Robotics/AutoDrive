@@ -354,7 +354,6 @@ class TensorDefenseResetMixin:
         if self.randomize and self.max_observation_latency_steps:
             delays=self._random_active(mask,(),high=self.max_observation_latency_steps+1).long()
             self.observation_delay=torch.where(mask,delays,self.observation_delay)
-        self._ppo_observation_delay_groups=None
         distance=(self._attacker_objective()-self.sim.pose[:,pidx,:2]).norm(dim=-1)
         self.previous=torch.where(mask,distance,self.previous)
         fresh=self._obs(mask,active_mask=mask)

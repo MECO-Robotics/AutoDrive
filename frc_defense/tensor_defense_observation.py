@@ -275,7 +275,7 @@ class TensorDefenseObservationMixin:
 
     def _strategic_observation(self, focal, *, return_candidate_data=False,
                                active_mask=None, cache_active_mask=None,
-                               row_indices=None, candidate_data=None,
+                               candidate_data=None,
                                action_mask=None, own_count=None):
         from . import tensor_sim as _tensor_sim
         if (_tensor_sim._full_strategic_observation_available is not None and
@@ -283,7 +283,7 @@ class TensorDefenseObservationMixin:
             self._full_observation_hip_available=True
             raw, candidate_data, action_mask = _tensor_sim._full_strategic_observation(
                 self, focal, active_mask=active_mask, return_candidate_data=True,
-                row_indices=row_indices, candidates=candidate_data,
+                candidates=candidate_data,
                 action_mask=action_mask, own_count=own_count)
             self._cache_strategic_own_candidates(
                 candidate_data, action_mask, focal=focal,
@@ -395,12 +395,12 @@ class TensorDefenseObservationMixin:
         merged_mask = torch.where(selected[:, None], action_mask, previous_mask)
         self._pending_strategic_own_candidates = (merged_data, merged_mask)
 
-    def _raw_obs(self, active_mask=None, cache_active_mask=None, row_indices=None,
+    def _raw_obs(self, active_mask=None, cache_active_mask=None,
                  candidate_data=None, action_mask=None, own_count=None):
         if self.action_mode=="strategic":
             return self._strategic_observation(
                 0, active_mask=active_mask,
-                cache_active_mask=cache_active_mask, row_indices=row_indices,
+                cache_active_mask=cache_active_mask,
                 candidate_data=candidate_data, action_mask=action_mask,
                 own_count=own_count)
         p,v=self.sim.pose,self.sim.velocity
@@ -441,7 +441,7 @@ class TensorDefenseObservationMixin:
         return raw
 
     def _obs(self, initialize_mask=None, active_mask=None, active_count=None,
-             capture_output=True, capture_raw_mask=None, capture_raw_rows=None):
+             capture_output=True, capture_raw_mask=None):
         # PPO supplies this scalar for its fixed, synchronized full-active
         # batch. Do not inspect the device mask here: active_count is already
         # the trusted shape/RNG count used by _random_active.
@@ -455,41 +455,20 @@ class TensorDefenseObservationMixin:
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
         if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
             raise ValueError("observation active mask must be a device bool vector [N]")
+        if (capture_raw_mask is not None and self.device.type != "cpu" and
+                (not isinstance(capture_raw_mask,torch.Tensor) or
+                 capture_raw_mask.device != self.device)):
+            raise ValueError("GPU raw observation capture mask must be device resident")
         raw_capture_mask=(active_mask if capture_raw_mask is None else
                           (active_mask & torch.as_tensor(
                               capture_raw_mask, device=self.device,
                               dtype=torch.bool).reshape(self.n)))
-        candidate_data=action_mask=own_count=None
-        if capture_raw_rows is not None:
-            # Candidate ranking and masks still refresh for every active world:
-            # the next physics tick consumes them in the strategic controller.
-            candidate_data=self._fuel_candidates(0)
-            own_count=self._own_possession(0)
-            action_mask=self.strategic_action_mask(
-                0, _candidate_data=candidate_data)
-            self._cache_strategic_own_candidates(
-                candidate_data, action_mask, focal=0, active_mask=active_mask)
-            raw=None
-            if capture_raw_rows.numel():
-                raw=self._raw_obs(
-                    active_mask=raw_capture_mask, cache_active_mask=active_mask,
-                    row_indices=capture_raw_rows, candidate_data=candidate_data,
-                    action_mask=action_mask, own_count=own_count)
-        else:
-            raw=self._raw_obs(active_mask=raw_capture_mask,
-                              cache_active_mask=active_mask)
+        raw=self._raw_obs(active_mask=raw_capture_mask,
+                          cache_active_mask=active_mask)
         history_length=self.observation_history.shape[1]
         if initialize_mask is None:
             next_index=(self._observation_history_index+1).remainder(history_length)
-            if capture_raw_rows is not None:
-                self._observation_history_index.copy_(
-                    torch.where(active_mask, next_index,
-                                self._observation_history_index))
-                if capture_raw_rows.numel():
-                    self.observation_history[
-                        self._observation_world_index[capture_raw_rows],
-                        next_index[capture_raw_rows]]=raw
-            elif full_active and capture_raw_mask is None:
+            if full_active and capture_raw_mask is None:
                 # PPO supplies a trusted full-batch active count for ordinary
                 # strategic ticks. Avoid all-true mask selects while retaining
                 # the same ring slot, values, storage, and subsequent RNG calls.
@@ -540,11 +519,9 @@ class TensorDefenseObservationMixin:
             return obs
         return torch.where(active_mask[:,None],obs,self._last_observation)
 
-    def _obstacle_features(self,robot_index=0,row_indices=None):
-        pose=(self.sim.pose[:,robot_index] if row_indices is None else
-              self.sim.pose.index_select(0,row_indices)[:,robot_index])
-        row_count=pose.shape[0]
-        out=torch.zeros((row_count,12),device=self.device)
+    def _obstacle_features(self,robot_index=0):
+        pose=self.sim.pose[:,robot_index]
+        out=torch.zeros((self.n,12),device=self.device)
         obstacles=(torch.cat((self.sim.obstacles,self.field_feature_obstacles),0)
                    if self.field_feature_obstacles.shape[0] else self.sim.obstacles)
         if obstacles.shape[0]:

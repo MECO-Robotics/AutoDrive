@@ -74,3 +74,8 @@ unverified.
 Reset-time defender planning also uses a static full-shape active mask, and the
 focal pose-estimate hook validates finite values with the device assertion
 helper because it writes directly into policy-visible pose state.
+
+Opponent replanning now computes per-world cadence masks and calls AD* with a
+fixed full batch. PPO delayed-observation capture compares the device delay
+vector with the source-tick offset and passes that fixed-shape mask through the
+observation path; it no longer copies delays to CPU or compacts row indices.
