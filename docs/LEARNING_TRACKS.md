@@ -22,7 +22,7 @@ The initial snapshot adapter is implemented in `learning_inputs.py`: it emits si
 
 ## Experimental route query prototype
 
-The MECO comparison uses a shared current/CV opponent prediction contract across Plan A, Plan C, D1, and D2; see [MECO_PREDICTION_MODE.md](MECO_PREDICTION_MODE.md). The existing standalone curriculum D2 diagnostic remains separate.
+The MECO comparison uses one canonical `current`, `cv`, or `multi_model_v1` opponent prediction contract across Plan A, Plan C, D1, and D2; see [MECO_PREDICTION_MODE.md](MECO_PREDICTION_MODE.md). Multi-model prediction is opt-in and diagnostic pending held-out calibration and qualification evidence. The existing standalone curriculum D2 diagnostic remains separate.
 
 `frc_defense/experimental_route_evaluation.py` adds a synchronous, uncached, batched XY route probe. Each query names a candidate and observation snapshot, world and robot slot, goal position, and whether the intake footprint is extended. The probe builds a fresh `TensorADStar` workspace, reads current geometry through the same `_perceived_robot_obstacles()` helper as controller planning, and returns ordered `feasible`, `at_goal`, `no_path`, or `invalid` results with geometric distance in meters only. `at_goal` checks both the measured start pose and requested pose against static field geometry and current observed robot circles using exact footprint clearance, not only raster occupancy. Blocked goals are rejected rather than projected; blocked raster starts are passed to AD*'s visible escape handling. Returned routes must still end within the requested goal tolerance. It does not write to the live planner or controller state.
 

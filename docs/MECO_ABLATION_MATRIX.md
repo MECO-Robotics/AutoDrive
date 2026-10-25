@@ -20,6 +20,7 @@ same-category, same-seed, same-stratum comparisons.
 | --- | --- |
 | Architecture, CV, K=16 | A1/C2, C1/C2, A1/A2/A3, C1/D1; A1/D0, A2/D0, A3/D0, C1/D0, C2/D0; P=0 versions for A1/A2/A3. C1/D1 both use CV here. |
 | Default controls, K=16 | D1=current-pose vs D2=bounded-CV prediction |
+| Multi-model controls, K=16 | D1=current-pose vs D2=`multi_model_v1`, with the full predictor contract in control provenance |
 | Matched prediction, K=16 | All five learned tracks under current-pose and CV modes |
 | Candidate K sweep | C1/C2 candidate recall at K=8, 16, and 32 against the recorded bounded expanded-goal reference pool |
 | Inference-disabled fallback | Each learned track paired with its normal run; inference hands off to D1 at the first macro boundary at or after the requested tick |
@@ -30,7 +31,11 @@ The matrix freezes those per-track config hashes and protocol IDs from the
 checkpoint files before starting; each evaluation report and each subsequent
 condition must match them. Checkpoint and source hashes are rechecked before
 and after every condition. Any provenance drift aborts matrix construction
-before contrast rows are assembled.
+before contrast rows are assembled. The multi-model control condition keeps
+the same five-checkpoint bundle, categories, and seed tuple as the default
+control condition, changing only D2 prediction mode. Its separate
+`D1_vs_D2_multi_model_v1` contrast retains that condition and both control
+contracts.
 The K sweep changes the runtime candidate capacity for every evaluated policy;
 Plan A continues to use its full legal-graph support and does not use K.
 P=0 is an inference-time ablation of the same A checkpoint, not a separately
@@ -45,6 +50,8 @@ retains its production deterministic behavior and is not assigned the learned
 track CV mode. They are not prediction-mode-matched architecture contrasts.
 The matrix harness only assembles and records these comparisons; its output
 does not establish that any track wins or has passed simulation qualification.
+The multi-model predictor is not calibrated or qualified until held-out paired
+calibration and the required seeded simulator evaluation pass.
 
 Example invocation:
 
@@ -215,7 +222,7 @@ python3 scripts/summarize_meco_ablation_matrix.py \
   --output results/validation_paired_ci.json
 ```
 
-The analyzer accepts matrix schema 4 and 5 (new matrices use schema 5) and verifies its content digest,
+The analyzer accepts matrix schemas 4 through 8 (new matrices use schema 8) and verifies its content digest,
 evaluation report mapping, checkpoint/source/configuration/training protocol
 provenance, condition and policy mapping, held-out split, seed coverage, and
 each row's frozen qualification stratum. For held-out matrices it checks the
