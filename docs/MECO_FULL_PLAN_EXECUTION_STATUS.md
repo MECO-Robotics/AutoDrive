@@ -12,13 +12,24 @@ unavailable/non-authoritative; direct pursuit, trench interception, and legal
 start execution remain fail-closed pending their accepted source-bound
 evidence. Qualification remains disabled.
 
-The dashboard refresh note immediately below records a prior 87-entry ledger
-and predates this integration. It is not evidence that the current checkout's
-updated ledger or frontend is being served. That requires a post-merge restart
-and current-checkout API/asset verification after the separately reviewed
-provenance update. See
+The historical dashboard refresh note immediately below records a prior
+87-entry ledger and predates this integration. It is not evidence for the
+current checkout. Post-merge restart and current-checkout API/asset verification
+are recorded separately below. See
 [`phase4-runtime-status-ledger-dashboard-20261025.md`](implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md)
 and its entry in [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
+**Post-merge dashboard verification — 2026-10-25.** The provenance update
+reached `main` at `637cc4b64fd5d1b22532305dd86fc14deb66a913`; the finalizer
+passed exact-head review. The dashboard was restarted from this checkout and
+verified active. Both APIs, the page, and both JavaScript assets returned HTTP
+200; the curriculum API validated 88 summaries with
+`phase4-runtime-status-ledger-dashboard` latest, and both served assets matched
+the checkout byte-for-byte. The local ledger SHA-256 matches the dashboard API
+pin. This is provenance/serving evidence only; no replay or simulator behavior
+result is claimed. See
+[`phase4-runtime-status-ledger-dashboard-currentness-20261025.md`](implementation-provenance/phase4-runtime-status-ledger-dashboard-currentness-20261025.md)
+for response, digest, asset, and service details.
 
 ## Dashboard refreshed for reviewed three-pass provenance — 2026-10-25
 
