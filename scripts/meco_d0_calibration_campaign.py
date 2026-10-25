@@ -316,6 +316,104 @@ def merge_campaign(campaign, output_root: str | Path, report_root: str | Path):
             "output": str(bundle_path)}
 
 
+def _load_config_artifact_bytes(index_path):
+    """Read the caller's logical-ID to source-file map without storing paths."""
+    index = q._load_json(index_path)
+    from frc_defense.meco_baseline_freeze import REQUIRED_CONFIGURATION_ARTIFACT_IDS
+    required = REQUIRED_CONFIGURATION_ARTIFACT_IDS
+    if not isinstance(index, dict) or set(index) != required:
+        raise ValueError("configuration artifact index must cover the exact required IDs")
+    artifacts = {}
+    for artifact_id, source_path in index.items():
+        if not isinstance(source_path, str) or not source_path:
+            raise ValueError("configuration artifact source path is invalid")
+        path = Path(source_path)
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"configuration artifact is missing or symlinked: {artifact_id}")
+        artifacts[artifact_id] = path.read_bytes()
+    return artifacts
+
+
+def _load_phase0_bundle(repo_root, relative_path):
+    """Load the bundle only from a regular, in-checkout, non-symlink path."""
+    _, raw, bundle = q._paired_repo_json_file(repo_root, relative_path,
+        kind="effective Phase 0 bundle")
+    if raw != json.dumps(bundle, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8"):
+        raise ValueError("effective Phase 0 bundle bytes are not canonical JSON")
+    return bundle
+
+
+def plan_paired_campaign(*, repo_root, phase0_bundle_path,
+        approval_path, configuration_artifact_index, worker_assignments_path,
+        shard_count, output):
+    """Compile a paired manifest from one validated Phase 0 bundle."""
+    phase0_bundle = _load_phase0_bundle(repo_root, phase0_bundle_path)
+    config_bytes = _load_config_artifact_bytes(configuration_artifact_index)
+    bindings = q.prepare_paired_calibration_gate_bindings(repo_root=repo_root,
+        phase0_bundle=phase0_bundle, estimand_approval_path=approval_path,
+        configuration_artifacts=config_bytes)
+    assignments = q._load_json(worker_assignments_path)
+    campaign = q.build_paired_calibration_campaign(shard_count=shard_count,
+        worker_assignments=assignments, **bindings)
+    q.validate_paired_calibration_gate_artifacts(campaign, repo_root=repo_root,
+        phase0_bundle=phase0_bundle, configuration_artifacts=config_bytes)
+    digest = q.write_paired_calibration_artifact_immutable(output, campaign)
+    return {"campaign_id": campaign["campaign_id"], "artifact_sha256": digest,
+        "work_unit_count": campaign["work_unit_count"],
+        "shard_count": len(campaign["shards"]), "output": str(output),
+        "execution_blockers": q.paired_calibration_execution_blockers(campaign)}
+
+
+def merge_paired_campaign(*, repo_root, campaign_path, phase0_bundle_path,
+        final_shard_root, replay_root, approval_path,
+        configuration_artifact_index, output):
+    """Validate exact gate bytes and canonical final shards before strict merge."""
+    campaign = q._load_json(campaign_path)
+    if Path(approval_path).as_posix() != campaign.get("estimand_approval", {}).get("path"):
+        raise ValueError("requested estimand approval path differs from campaign binding")
+    phase0_bundle = _load_phase0_bundle(repo_root, phase0_bundle_path)
+    config_bytes = _load_config_artifact_bytes(configuration_artifact_index)
+    gate = q.validate_paired_calibration_gate_artifacts(campaign,
+        repo_root=repo_root, phase0_bundle=phase0_bundle,
+        configuration_artifacts=config_bytes)
+    final_root = Path(final_shard_root)
+    raws = []
+    for shard in campaign["shards"]:
+        path = final_root / f"shard-{shard['shard_index']:04d}.final.json"
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"paired calibration final shard is missing or symlinked: {path}")
+        raws.append(path.read_bytes())
+    report = q.build_paired_calibration_merged_report(campaign, raws,
+        replay_root=replay_root, approval=gate["approval"])
+    bundle_outputs = _publish_paired_control_bundles(output, report)
+    digest = q.write_paired_calibration_artifact_immutable(output, report)
+    return {"campaign_id": campaign["campaign_id"], "report_id": report["report_id"],
+        "report_sha256": digest, "output": str(output),
+        "control_bundles": bundle_outputs,
+        "official_match_points": None, "qualification_eligible": False}
+
+
+def _publish_paired_control_bundles(output, report):
+    control_artifacts = report.pop("_control_bundle_artifacts")
+    if len(control_artifacts) != len(report["control_bundles"]):
+        raise ValueError("paired calibration control bundle references are incomplete")
+    output_path = Path(output)
+    published = []
+    for artifact, reference in zip(control_artifacts, report["control_bundles"]):
+        control_id = artifact["control_id"]
+        if reference["control_id"] != control_id or reference["bundle_id"] != artifact["bundle_id"]:
+            raise ValueError("paired calibration control bundle reference mismatch")
+        bundle_path = output_path.with_name(
+            f"{output_path.stem}.control-{control_id.replace('/', '-')}.json")
+        digest = q.write_paired_calibration_artifact_immutable(bundle_path, artifact)
+        if digest != reference["artifact_sha256"]:
+            raise ValueError("paired calibration control bundle digest mismatch")
+        published.append({"control_id": control_id, "bundle_id": artifact["bundle_id"],
+            "artifact_sha256": digest, "output": str(bundle_path)})
+    return published
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -340,6 +438,35 @@ def main(argv=None):
     merge.add_argument("--campaign", required=True)
     merge.add_argument("--output-root", required=True)
     merge.add_argument("--report-root", required=True)
+    paired_plan = sub.add_parser("paired-plan",
+        help="compile a paired calibration manifest from actual Pass 1 gate artifacts")
+    paired_plan.add_argument("--repo-root", default=str(ROOT))
+    paired_plan.add_argument("--phase0-bundle", required=True)
+    paired_plan.add_argument("--estimand-approval", required=True)
+    paired_plan.add_argument("--configuration-artifact-index", required=True)
+    paired_plan.add_argument("--worker-assignments", required=True,
+        help="JSON array with the two exact indexed WX9100 worker identities")
+    paired_plan.add_argument("--shard-count", type=int, default=2)
+    paired_plan.add_argument("--output", required=True)
+    paired_merge = sub.add_parser("paired-merge",
+        help="validate frozen gates and strictly merge paired final shard artifacts")
+    paired_merge.add_argument("--repo-root", default=str(ROOT))
+    paired_merge.add_argument("--campaign", required=True)
+    paired_merge.add_argument("--phase0-bundle", required=True)
+    paired_merge.add_argument("--final-shard-root", required=True)
+    paired_merge.add_argument("--replay-root", required=True)
+    paired_merge.add_argument("--estimand-approval", required=True)
+    paired_merge.add_argument("--configuration-artifact-index", required=True)
+    paired_merge.add_argument("--output", required=True)
+    paired_run = sub.add_parser("paired-run",
+        help="run or resume one paired shard after exact gate/device checks")
+    paired_run.add_argument("--repo-root", default=str(ROOT))
+    paired_run.add_argument("--campaign", required=True)
+    paired_run.add_argument("--phase0-bundle", required=True)
+    paired_run.add_argument("--shard-index", type=int, required=True)
+    paired_run.add_argument("--replay-root", required=True)
+    paired_run.add_argument("--output-root", required=True)
+    paired_run.add_argument("--configuration-artifact-index", required=True)
     args = parser.parse_args(argv)
     if args.command == "describe":
         schedule = describe_campaign(episodes=args.episodes,
@@ -362,9 +489,33 @@ def main(argv=None):
             "records": campaign["total_record_count"], "output": args.output}, indent=2))
     elif args.command == "run":
         print(json.dumps(run_campaign(q._load_json(args.campaign), args.output_root), indent=2))
-    else:
+    elif args.command == "merge":
         print(json.dumps(merge_campaign(q._load_json(args.campaign), args.output_root,
                                         args.report_root), indent=2))
+    elif args.command == "paired-plan":
+        print(json.dumps(plan_paired_campaign(repo_root=args.repo_root,
+            phase0_bundle_path=args.phase0_bundle,
+            approval_path=args.estimand_approval,
+            configuration_artifact_index=args.configuration_artifact_index,
+            worker_assignments_path=args.worker_assignments,
+            shard_count=args.shard_count, output=args.output), indent=2))
+    elif args.command == "paired-merge":
+        print(json.dumps(merge_paired_campaign(repo_root=args.repo_root,
+            campaign_path=args.campaign, final_shard_root=args.final_shard_root,
+            phase0_bundle_path=args.phase0_bundle,
+            replay_root=args.replay_root, approval_path=args.estimand_approval,
+            configuration_artifact_index=args.configuration_artifact_index,
+            output=args.output), indent=2))
+    else:
+        phase0_bundle = _load_phase0_bundle(args.repo_root, args.phase0_bundle)
+        configuration_artifacts = _load_config_artifact_bytes(
+            args.configuration_artifact_index)
+        campaign = q._load_json(args.campaign)
+        print(json.dumps(q.run_paired_calibration_shard(campaign,
+            args.shard_index, repo_root=args.repo_root,
+            replay_root=args.replay_root, output_root=args.output_root,
+            phase0_bundle=phase0_bundle,
+            configuration_artifacts=configuration_artifacts), indent=2))
 
 
 if __name__ == "__main__":

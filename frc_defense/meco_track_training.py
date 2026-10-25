@@ -41,10 +41,12 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     ordered_candidate_mask_digest,
     managed_meco_adapters,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
-    candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
+    candidate_digest, opponent_forecast, opponent_risk_penalty, prediction_contract, PREDICTION_MODES,
     PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
-    PREDICTION_MODEL_ID)
+    PREDICTION_MODEL_ID, MULTIMODEL_HYPOTHESES, MULTIMODEL_MAX_HORIZON_S,
+    MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
+    MULTIMODEL_DAMPING_PER_S)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     PlanAEmptySupportError, SUPPORT_ORDER)
@@ -426,6 +428,212 @@ def _episode_id(run_id: str, episode: int) -> str:
 def _canonical_digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode()).hexdigest()
+
+
+def _validate_paired_calibration_replay_binding(binding, worker, *, device,
+        execution_device, scenario_id, split, policy, prediction_mode, seed, qualification_case,
+        condition_id, runtime_identity):
+    """Check replay bindings before permitting paired calibration export."""
+    binding_fields = {"campaign_id", "shard_index", "shard_manifest_id",
+        "work_unit_id", "work_unit", "pair_id", "control_id", "source_binding",
+        "phase0_binding", "phase0_binding_sha256", "tuple_id",
+        "estimand_approval_sha256", "scoring", "control_binding",
+        "control_binding_sha256"}
+    worker_fields = {"worker_id", "device", "device_index", "device_model",
+        "device_uuid", "backend", "backend_version", "torch_version"}
+    phase0_digest_fields = {
+        "capture_receipt_sha256", "baseline_freeze_sha256", "partition_sha256",
+        "tuple_registry_sha256", "assignment_table_sha256"}
+    phase0_fields = phase0_digest_fields | {
+        "bundle_sha256", "source_commit", "source_tree", "dependency_lock_sha256"}
+    if not isinstance(binding, dict) or set(binding) != binding_fields:
+        raise ValueError("paired calibration binding has an invalid schema")
+    if not isinstance(worker, dict) or set(worker) != worker_fields:
+        raise ValueError("paired calibration worker identity has an invalid schema")
+    if (type(binding["shard_index"]) is not int or binding["shard_index"] < 0
+            or not all(isinstance(binding[key], str) and binding[key]
+                for key in ("campaign_id", "shard_manifest_id", "work_unit_id",
+                    "pair_id", "control_id", "tuple_id",
+                    "phase0_binding_sha256", "estimand_approval_sha256"))
+            or not isinstance(binding["work_unit"], dict)
+            or _canonical_digest(binding["work_unit"]) != binding["work_unit_id"]
+            or not isinstance(binding["phase0_binding"], dict)
+            or set(binding["phase0_binding"]) != phase0_fields
+            or any(not isinstance(binding["phase0_binding"].get(key), str)
+                or len(binding["phase0_binding"][key]) != 64
+                or any(char not in "0123456789abcdef"
+                    for char in binding["phase0_binding"][key])
+                for key in phase0_digest_fields | {"bundle_sha256", "dependency_lock_sha256"})
+            or any(not isinstance(binding["phase0_binding"].get(key), str)
+                or len(binding["phase0_binding"][key]) != 40
+                or any(char not in "0123456789abcdef"
+                    for char in binding["phase0_binding"][key])
+                for key in ("source_commit", "source_tree"))
+            or _canonical_digest(binding["phase0_binding"]) != binding["phase0_binding_sha256"]
+            or binding["work_unit"].get("tuple_id") != binding["tuple_id"]
+            or binding["tuple_id"] != _canonical_digest({key: binding["work_unit"].get(key)
+                for key in ("scenario_id", "case_id", "category", "defender_family",
+                    "layout_id", "start_condition", "sensor_profile", "seed",
+                    "repetition", "evaluation_phase")})
+            or binding["work_unit"].get("pair_id") != binding["pair_id"]
+            or binding["work_unit"].get("control_id") != binding["control_id"]
+            or binding["work_unit"].get("seed") != seed
+            or binding["work_unit"].get("split") != split
+            or binding["work_unit"].get("evaluation_phase") != split
+            or binding["work_unit"].get("scenario_id") != scenario_id
+            or not isinstance(binding["scoring"], dict)
+            or binding["scoring"].get("replay_contract_schema") !=
+                "dashboard-replay-generation-v1"
+            or not isinstance(binding["control_binding"], dict)
+            or not isinstance(binding["control_binding_sha256"], str)
+            or binding["control_binding"].get("control_binding_sha256") !=
+                binding["control_binding_sha256"]
+            or binding["control_binding"].get("prediction_contract_sha256") !=
+                (_canonical_digest(binding["control_binding"].get("prediction_contract"))
+                 if binding["control_binding"].get("prediction_contract") is not None else None)
+            or _canonical_digest({key: value for key, value in binding["control_binding"].items()
+                if key != "control_binding_sha256"}) != binding["control_binding_sha256"]):
+        raise ValueError("paired calibration binding does not match this replay")
+    if (binding["work_unit"].get("category") not in (None, qualification_case.get("category"))
+            or any(binding["work_unit"].get(key) != value
+                for key, value in qualification_case.items())):
+        raise ValueError("paired calibration work unit differs from frozen case")
+    if (not isinstance(worker["worker_id"], str) or not worker["worker_id"]
+            or worker["device"] != device
+            or type(worker["device_index"]) is not int
+            or device != f"cuda:{worker['device_index']}"
+            or execution_device != {"device": device, "accelerator_backend": "ROCm"}
+            or worker["backend"] != "hip"
+            or not isinstance(worker["device_model"], str)
+            or "wx9100" not in worker["device_model"].lower()
+            or not isinstance(worker["device_uuid"], str) or not worker["device_uuid"]
+            or any(worker[key] != runtime_identity.get(key) for key in
+                ("device_model", "device_uuid", "backend", "backend_version", "torch_version"))):
+        raise ValueError("paired calibration worker identity differs from the assigned ROCm device")
+    if binding["work_unit"].get("policy") not in (None, policy):
+        raise ValueError("paired calibration work unit differs from replay policy")
+    if binding["control_id"] != policy and not binding["control_id"].startswith(policy + "/"):
+        raise ValueError("paired calibration control ID differs from replay policy")
+    if (binding["control_binding"].get("control_id") != binding["control_id"]
+            or binding["control_binding"].get("policy") != policy
+            or binding["control_binding"].get("prediction_mode") !=
+                prediction_mode):
+        raise ValueError("paired calibration control binding differs from replay policy/mode")
+    repetition = binding["work_unit"].get("repetition")
+    expected_condition_id = (f"paired-cal-{binding['campaign_id'][:12]}-"
+        f"{binding['pair_id'][:16]}-{binding['control_id'].replace('/', '-')}-"
+        f"r{repetition:04d}" if type(repetition) is int and repetition >= 0 else None)
+    if condition_id != expected_condition_id:
+        raise ValueError("paired calibration condition ID differs from campaign pair/control")
+
+
+def _paired_calibration_replay_condition_id(binding):
+    if (not isinstance(binding, dict) or not isinstance(binding.get("work_unit"), dict)
+            or type(binding["work_unit"].get("repetition")) is not int
+            or binding["work_unit"]["repetition"] < 0
+            or not all(isinstance(binding.get(key), str) and binding[key]
+                for key in ("campaign_id", "pair_id", "control_id"))):
+        raise ValueError("paired calibration condition binding is malformed")
+    unit = binding["work_unit"]
+    return (f"paired-cal-{binding['campaign_id'][:12]}-{binding['pair_id'][:16]}-"
+        f"{binding['control_id'].replace('/', '-')}-r{unit['repetition']:04d}")
+
+
+def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
+        device, execution_device, scenario_id, split, policy, prediction_mode,
+        qualification_case, runtime_identity):
+    if (not isinstance(bindings, dict) or any(type(seed) is not int for seed in bindings)
+            or set(bindings) != set(seeds)):
+        raise ValueError("paired calibration bindings must cover every exact scored seed")
+    for seed, binding in bindings.items():
+        if not isinstance(binding, dict):
+            raise ValueError("paired calibration per-seed binding must be an object")
+        _validate_paired_calibration_replay_binding(binding, worker,
+            device=device, execution_device=execution_device,
+            scenario_id=scenario_id, split=split, policy=policy,
+            prediction_mode=prediction_mode, seed=seed,
+            qualification_case=qualification_case,
+            condition_id=_paired_calibration_replay_condition_id(binding),
+            runtime_identity=runtime_identity)
+    values = [bindings[seed] for seed in seeds]
+    if any(binding.get("campaign_id") != values[0].get("campaign_id")
+            or binding.get("control_id") != values[0].get("control_id")
+            or binding.get("shard_index") != values[0].get("shard_index")
+            or binding.get("shard_manifest_id") != values[0].get("shard_manifest_id")
+            or binding["work_unit"].get("paired_control_id") !=
+                values[0]["work_unit"].get("paired_control_id")
+            or binding["work_unit"].get("scenario_id") !=
+                values[0]["work_unit"].get("scenario_id")
+            or binding["work_unit"].get("category") !=
+                values[0]["work_unit"].get("category")
+            or binding["work_unit"].get("case_id") !=
+                values[0]["work_unit"].get("case_id")
+            or binding["work_unit"].get("repetition") !=
+                values[0]["work_unit"].get("repetition")
+            or binding["work_unit"].get("evaluation_phase") !=
+                values[0]["work_unit"].get("evaluation_phase")
+            or any(binding["work_unit"].get(key) != values[0]["work_unit"].get(key)
+                for key in ("layout_id", "defender_family", "start_condition", "sensor_profile"))
+            for binding in values[1:]):
+        raise ValueError("paired calibration per-seed bindings mix campaign pair/control units")
+
+
+def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings,
+        worker, seeds, *, device, repo_root, configuration_artifacts, policy,
+        calibration_control_policy, candidate_k, route_cost_weight,
+        prediction_mode, phase0_bundle):
+    """Resolve all replay claims against the frozen campaign before simulation."""
+    from . import meco_qualification as qualification
+
+    gate = qualification.validate_paired_calibration_gate_artifacts(campaign,
+        repo_root=repo_root, phase0_bundle=phase0_bundle,
+        configuration_artifacts=configuration_artifacts)
+    shard = qualification._paired_shard_for_index(campaign, shard_index)
+    phase0_sha256 = qualification._canonical_sha256(campaign["phase0_binding"])
+    if (gate.get("phase0_binding") != campaign["phase0_binding"]
+            or shard.get("phase0_binding_sha256") != phase0_sha256
+            or shard.get("tuple_ids") != sorted({unit["tuple_id"]
+                for unit in shard["work_units"]})):
+        raise ValueError("paired calibration Phase 0 digest or tuple assignment changed")
+    if not isinstance(bindings, dict) or not bindings:
+        raise ValueError("paired calibration campaign requires per-seed bindings")
+    first_binding = next(iter(bindings.values()))
+    if not isinstance(first_binding, dict):
+        raise ValueError("paired calibration per-seed binding must be an object")
+    expected_worker = next((assignment for assignment in campaign["worker_assignments"]
+        if assignment["worker_id"] == shard["worker_id"]), None)
+    if (expected_worker is None or worker != expected_worker
+            or device != expected_worker["device"]):
+        raise ValueError("paired calibration worker identity differs from exact shard assignment")
+    first_unit = first_binding.get("work_unit", {})
+    group_fields = ("scenario_id", "case_id", "category", "split", "repetition",
+        "evaluation_phase",
+        "paired_control_id", "layout_id", "defender_family", "start_condition",
+        "sensor_profile")
+    units = {unit["seed"]: unit for unit in shard["work_units"]
+        if unit.get("control_id") == first_binding.get("control_id")
+        and all(unit.get(key) == first_unit.get(key) for key in group_fields)}
+    if set(units) != set(seeds) or set(bindings) != set(seeds):
+        raise ValueError("paired calibration shard bindings do not cover the exact scored seed tuple")
+    for seed in seeds:
+        expected_binding = qualification.paired_calibration_replay_binding(
+            campaign, shard_index, units[seed])
+        if bindings[seed] != expected_binding:
+            raise ValueError("paired calibration replay binding differs from frozen campaign work unit")
+    control_id = next(iter(bindings.values()))["control_id"]
+    controls = {control["control_id"]: control for control in campaign["controls"]}
+    selected_control = controls.get(control_id)
+    if selected_control is None or selected_control.get("execution_supported") is not True:
+        raise ValueError("paired calibration control is not executable in the frozen campaign")
+    if (selected_control.get("policy") != policy
+            or selected_control.get("prediction_mode") != prediction_mode
+            or (policy != "D0" and calibration_control_policy != policy)
+            or (policy == "D0" and calibration_control_policy not in ("D1", "D2"))
+            or selected_control.get("candidate_configuration", {}).get("candidate_k") != candidate_k
+            or selected_control.get("candidate_configuration", {}).get(
+                "route_cost_points_per_second") != route_cost_weight):
+        raise ValueError("paired calibration replay control differs from frozen control specification")
+    return gate
 
 
 def _evaluation_record_digest(record: dict) -> str:
@@ -900,7 +1108,7 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
 
 
 def _plan_a_prediction_risk(env, support, eta, prediction_mode):
-    """Compute Plan A endpoint risk under the shared current/CV contract."""
+    """Compute Plan A endpoint risk under the shared prediction contract."""
     if prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if eta.ndim != 1 or eta.shape[0] != support.goal_xy.shape[0]:
@@ -919,6 +1127,7 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
     meta = prediction_contract(prediction_mode, horizon_s=horizon)
     horizon_semantics = (
         "observed_current_pose" if prediction_mode == "current" else
+        "per_support_node_eta_clamped_to_multi_model_max_horizon" if prediction_mode == "multi_model_v1" else
         "maximum_eta_over_support_valid_pair_nodes; unreachable_and_masked_nodes_excluded; null_when_no_valid_endpoint")
     valid = bool(env.opponent_valid[0, 3])
     if not valid:
@@ -945,14 +1154,55 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         predicted = position[None] + safe_eta[:, None] * bounded_velocity[None]
         fallback = None
         used_cv = True
+    used_multimodel = False
+    if prediction_mode == "multi_model_v1":
+        fresh_motion = (math.isfinite(age) and 0. <= age <= PREDICTION_MAX_AGE_S
+                        and bool(torch.isfinite(velocity).all()))
+        if fresh_motion:
+            t = safe_eta.clamp_max(MULTIMODEL_MAX_HORIZON_S)
+            speed = velocity.norm().clamp_min(1e-8)
+            bounded_velocity = velocity * torch.clamp(
+                PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+            omega_observed = (float(env.opponent_velocity[0, 3, 2])
+                if env.opponent_velocity.shape[-1] > 2 else 0.)
+            if not math.isfinite(omega_observed):
+                omega_observed = 0.
+            turn_rate = min(MULTIMODEL_TURN_RATE_MAX_RAD_S,
+                max(MULTIMODEL_TURN_RATE_MIN_RAD_S, abs(omega_observed)))
+            weighted_risk = torch.zeros_like(eta)
+            for name, weight in MULTIMODEL_HYPOTHESES:
+                if name == "constant_velocity":
+                    endpoint = position[None] + t[:, None] * bounded_velocity[None]
+                elif name == "damped_velocity":
+                    distance_time = -torch.expm1(-MULTIMODEL_DAMPING_PER_S * t) / MULTIMODEL_DAMPING_PER_S
+                    endpoint = position[None] + distance_time[:, None] * bounded_velocity[None]
+                else:
+                    omega = turn_rate * (1. if name == "turn_left" else -1.)
+                    angle = omega * t
+                    sin_angle, cos_angle = torch.sin(angle), torch.cos(angle)
+                    dx = (bounded_velocity[0] * sin_angle + bounded_velocity[1] * (cos_angle - 1.)) / omega
+                    dy = (bounded_velocity[0] * (1. - cos_angle) + bounded_velocity[1] * sin_angle) / omega
+                    endpoint = position[None] + torch.stack((dx, dy), dim=-1)
+                separation = (support.goal_xy - endpoint).norm(dim=-1)
+                penalty = PREDICTION_MAX_PENALTY_POINTS * (
+                    (PREDICTION_THREAT_RADIUS_M - separation) /
+                    PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+                weighted_risk = weighted_risk + float(weight) * penalty
+            risk = torch.where(valid_nodes, weighted_risk, risk)
+            fallback = None
+            used_multimodel = True
     separation = (support.goal_xy - predicted).norm(dim=-1)
-    risk_values = PREDICTION_MAX_PENALTY_POINTS * (
-        (PREDICTION_THREAT_RADIUS_M - separation) /
-        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
-    risk = torch.where(valid_nodes, risk_values, risk)
+    if prediction_mode != "multi_model_v1" or not used_multimodel:
+        risk_values = PREDICTION_MAX_PENALTY_POINTS * (
+            (PREDICTION_THREAT_RADIUS_M - separation) /
+            PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+        risk = torch.where(valid_nodes, risk_values, risk)
     age = float(env.opponent_age[0, 3])
     return risk, {**meta, "horizon_semantics": horizon_semantics,
         "fallback": fallback, "used_cv": used_cv,
+        "used_multimodel": used_multimodel,
+        "risk_semantics": ("weighted_expected_penalty_over_hypothesis_endpoints"
+            if prediction_mode == "multi_model_v1" else "single_endpoint_penalty"),
         "observed_age_s": age if math.isfinite(age) else None,
         "horizon_min_s": horizon_min,
         "horizon_max_s": horizon_max}
@@ -2473,7 +2723,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
                   condition_id: str | None = None,
-                  simulated_score_estimand: str | Path | None = None):
+                  simulated_score_estimand: str | Path | None = None,
+                  paired_calibration_bindings: dict[int, dict] | None = None,
+                  paired_calibration_worker_identity: dict | None = None,
+                  paired_calibration_campaign: dict | None = None,
+                  paired_calibration_shard_index: int | None = None,
+                  paired_calibration_phase0_bundle: dict | None = None,
+                  paired_calibration_configuration_artifacts: dict | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -2503,8 +2759,43 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         replay_policy_seeds = {policy: set(selected)
                                for policy, selected in replay_selection.items()}
         replay_seed_set = set().union(*replay_policy_seeds.values())
+    paired_replay_requested = any(value is not None for value in (
+        paired_calibration_bindings, paired_calibration_worker_identity,
+        paired_calibration_campaign, paired_calibration_shard_index,
+        paired_calibration_phase0_bundle,
+        paired_calibration_configuration_artifacts))
+    if paired_replay_requested and any(value is None for value in (
+            paired_calibration_bindings, paired_calibration_worker_identity,
+            paired_calibration_campaign, paired_calibration_shard_index,
+            paired_calibration_phase0_bundle,
+            paired_calibration_configuration_artifacts)):
+        raise ValueError("paired calibration replay requires trusted campaign, shard, artifact, worker, and per-seed bindings")
+    if paired_replay_requested and (split != "calibration" or
+            calibration_control_policy is None):
+        raise ValueError("paired replay bindings are accepted only for calibration controls")
+    if paired_replay_requested and (not isinstance(paired_calibration_bindings, dict)
+            or set(paired_calibration_bindings) != set(scored_seeds)):
+        raise ValueError("paired calibration bindings must cover every exact scored seed")
+    if paired_replay_requested:
+        if not isinstance(replay_selection, dict) or len(replay_selection) != 1:
+            raise ValueError("paired calibration replay requires one exact selected policy")
+        trusted_policy = next(iter(replay_selection))
+        trusted_mode = (None if trusted_policy == "D0" else "current" if trusted_policy == "D1" else
+            (control_prediction_modes or {}).get(trusted_policy, "cv"))
+        _validate_paired_calibration_campaign_inputs(
+            paired_calibration_campaign, paired_calibration_shard_index,
+            paired_calibration_bindings, paired_calibration_worker_identity,
+            scored_seeds, device=device,
+            repo_root=Path(__file__).resolve().parents[1],
+            configuration_artifacts=paired_calibration_configuration_artifacts,
+            policy=trusted_policy, calibration_control_policy=calibration_control_policy,
+            candidate_k=candidate_k_override,
+            route_cost_weight=calibration_route_cost_points_per_second,
+            prediction_mode=trusted_mode,
+            phase0_bundle=paired_calibration_phase0_bundle)
     if simulated_score_estimand is not None:
-        if (replay_output_dir is None or replay_selection is not None
+        if (replay_output_dir is None or
+                (replay_selection is not None and not paired_replay_requested)
                 or replay_seed_set != set(scored_seeds)):
             raise ValueError("simulated score collection requires replay export for every policy and scored seed")
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
@@ -2633,7 +2924,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     from .meco_phase4 import validate_phase4_factor
     from .meco_device import normalized_device_info
     from .fuel_physics_hip import prepare_native_fuel_extension
-    prepare_native_fuel_extension(device)
     phase4_factor = validate_phase4_factor(phase4_factor)
     if phase4_contact_factor_id not in (None, "contact.robot_bump"):
         raise ValueError("unsupported Phase 4 contact factor")
@@ -2649,6 +2939,31 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         raise ValueError("contact geometry and event factor must match the frozen registry")
     validate_contact_geometry_split(contact_geometry_id, split)
     execution_device = normalized_device_info(device)
+    if paired_replay_requested:
+        import re
+        match = re.fullmatch(r"cuda:(\d+)", device)
+        if match is None or not torch.version.hip:
+            raise ValueError("paired calibration replay requires an indexed ROCm device")
+        props = torch.cuda.get_device_properties(int(match.group(1)))
+        runtime_identity = {
+            "device_model": str(props.name),
+            "device_uuid": str(getattr(props, "uuid", "")),
+            "backend": "hip",
+            "backend_version": str(torch.version.hip),
+            "torch_version": str(torch.__version__),
+        }
+        paired_policy = next(iter(replay_selection)) if replay_selection else None
+        if paired_policy not in ("D0", calibration_control_policy):
+            raise ValueError("paired replay selection differs from its calibrated control")
+        _validate_paired_calibration_replay_bindings(paired_calibration_bindings,
+            scored_seeds, paired_calibration_worker_identity, device=device,
+            execution_device=execution_device, scenario_id=scenario_id,
+            split=split, policy=paired_policy,
+            prediction_mode=(None if paired_policy == "D0" else "current" if paired_policy == "D1" else
+                (control_prediction_modes or {}).get("D2", "cv")),
+            qualification_case={"category": categories[0], **(qualification_case or {})},
+            runtime_identity=runtime_identity)
+    prepare_native_fuel_extension(device)
     if condition_id is not None and (not isinstance(condition_id, str) or not condition_id):
         raise ValueError("condition_id must be a nonempty string when provided")
     if qualification_case is not None:
@@ -2747,15 +3062,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if (split != "calibration" or evaluation_policies != () or selected
                 or checkpoints != {} or not include_controls
                 or controls != ("D0", calibration_control_policy)
-                or inference_disable_tick is not None or replay_output_dir is not None
-                or replay_seeds is not None or replay_selection is not None
+                or inference_disable_tick is not None
+                or ((replay_output_dir is not None or replay_seeds is not None
+                    or replay_selection is not None) and not paired_replay_requested)
                 or qualification_case is None
                 or control_prediction_modes != {calibration_control_policy: expected_mode}
                 or not valid_mode or candidate_k_override != 16
                 or calibration_route_cost_points_per_second is None):
             raise ValueError("calibration control opt-in requires calibration split, empty checkpoints/policies, "
                 "D0 plus exactly the selected D1/D2 reference, an explicit supported mode and frozen case, "
-                "no inference fault or replay, candidate_k=16, and explicit route-cost weight")
+                "no inference fault, candidate_k=16, and explicit route-cost weight")
+        if paired_replay_requested and (replay_output_dir is None or replay_selection is None
+                or simulated_score_estimand is None or len(replay_selection) != 1
+                or next(iter(replay_selection)) not in ("D0", calibration_control_policy)
+                or next(iter(replay_selection.values())) != list(scored_seeds)):
+            raise ValueError("paired calibration replay requires one D0/comparator policy, exact seeds, and approved score estimand")
         from .meco_qualification import protocol_cases
         frozen_cases = protocol_cases(scenario_id, "calibration", episodes=episodes,
             master_seed=master_seed)
@@ -2793,6 +3114,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         score_estimand_path = Path(simulated_score_estimand)
     else:
         score_estimand_path = None
+    if paired_replay_requested and any(
+            not isinstance(binding.get("source_binding"), dict)
+            or binding["source_binding"].get("source_identity_sha256") != source_hash
+            or binding.get("estimand_approval_sha256") != score_estimand_approval_sha256
+            for binding in paired_calibration_bindings.values()):
+        raise ValueError("paired calibration campaign source or score approval differs from this evaluation")
     source_tree = source_tree_identity()
     source_tree_hash = hashlib.sha256(json.dumps(source_tree, sort_keys=True,
         allow_nan=False).encode()).hexdigest()
@@ -4078,7 +4405,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "safety_metrics": record["meco_metric_ledger"].get(
                                     "safety_metrics"),
                                 "execution_failures": record["execution_failures"]})
-                            replay_condition_id = condition_id or _canonical_digest({
+                            paired_replay_binding = (paired_calibration_bindings[seed]
+                                if paired_replay_requested else None)
+                            replay_condition_id = (_paired_calibration_replay_condition_id(
+                                paired_replay_binding) if paired_replay_binding is not None else
+                                condition_id or _canonical_digest({
                                 "scenario_id": scenario_id, "category": category,
                                 "split": split, "policy": record_policy,
                                 "candidate_k": candidate_k,
@@ -4088,7 +4419,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "phase4_start_profile_assignment": phase4_start_profile_assignment,
                                 "contact_geometry_config": contact_geometry_config,
                                 "qualification_eligible": False,
-                                "inference_disable_tick": inference_disable_tick})
+                                "inference_disable_tick": inference_disable_tick}))
                             replay_identity = _canonical_digest({
                                 "evaluation_id": eval_id, "condition_id": replay_condition_id,
                                 "record_digest": record_digest, "seed": seed,
@@ -4103,6 +4434,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 training_source_hash != record["source_identity_sha256"])
                             code_state = replay_code_state_snapshot
                             replay_record = {
+                                "replay_contract_schema": "dashboard-replay-generation-v1",
                                 "input_contract_sha256": input_contract_digest(),
                                 "simulation_id": simulation_id, "task": "3v3",
                                 "matchup": scenario_id, "scenario_id": scenario_id,
@@ -4205,6 +4537,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         f"{split} seed {seed}"),
                                     "frames": replay_frames}],
                                 "frames": replay_frames}
+                            if paired_replay_requested:
+                                replay_record["paired_calibration_binding"] = paired_replay_binding
+                                replay_record["paired_calibration_worker_identity"] = paired_calibration_worker_identity
                             if score_capture is not None:
                                 _assert_score_estimand_unchanged(
                                     score_estimand_path,
@@ -4524,6 +4859,8 @@ def _parser():
         help="override learned A/C prediction mode; default preserves checkpoint mode")
     ev.add_argument("--control-prediction-mode", choices=PREDICTION_MODES,
         help="override D1 and D2 together; default preserves D1=current and D2=cv")
+    ev.add_argument("--control-prediction-modes", type=json.loads,
+        help='JSON mapping for per-control modes, e.g. \'{"D1":"current","D2":"multi_model_v1"}\'; cannot combine with --control-prediction-mode')
     ev.add_argument("--candidate-k-override", type=int, choices=(8, 16, 32),
         help="evaluation-only candidate K for C tracks and controls")
     ev.add_argument("--inference-disable-tick", type=int,
@@ -4591,6 +4928,7 @@ def main(argv=None):
         simulated_score_estimand=args.simulated_score_estimand,
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
+        control_prediction_modes=args.control_prediction_modes,
         candidate_k_override=args.candidate_k_override,
         inference_disable_tick=args.inference_disable_tick,
         replay_output_dir=args.replay_output_dir,
