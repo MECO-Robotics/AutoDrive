@@ -29,7 +29,9 @@ validation passed. Launch readiness, Phase 2 coverage, validation readiness,
 qualification readiness, and warm starts remain false. The evaluation queue
 currently replaces pending jobs when it falls behind and may advance past a
 failed or incomplete evaluation. A reviewed durable no-loss dispatch/recovery
-change is required before claiming all 466 scheduled cases will execute.
+change is required before claiming all 466 scheduled cases will execute. An
+independent reviewer confirmed the manifest's internal bindings but rejected
+it as a full-coverage execution guarantee until this is fixed.
 
 The current runtime also does not meet the user's CPU-free request. The two
 WX9100s run the model and much tensor state, but Plan A graph routing and fuel

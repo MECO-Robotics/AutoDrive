@@ -38,11 +38,12 @@
 > protocol validation cases (46,600 exact seeds). Offline manifest validation
 > passed, while launch, Phase 2, validation, qualification, and warm-start
 > readiness remain false. It is not launched: r4 still owns the two device
-> leases. Planner review also found that the current evaluator replaces pending
-> jobs and advances past failed or incomplete cases; a durable no-loss schedule
-> dispatcher/recovery tranche is required before claiming the 466 cases will
-> execute. No r5 training, simulation, GPU evaluation, or qualification has
-> occurred.
+> leases. Planner and independent reviewer found that the current evaluator
+> replaces pending jobs and advances past failed or incomplete cases; the
+> reviewer rejected this manifest as a guarantee of full validation coverage.
+> A durable no-loss schedule dispatcher/recovery tranche is required before
+> claiming the 466 cases will execute. No r5 training, simulation, GPU
+> evaluation, or qualification has occurred.
 
 > **GPU/CPU execution audit — 2026-10-25.** The active A3 and C1 workers are
 > assigned to the two WX9100s and use HIP tensors, but execution is hybrid, not
