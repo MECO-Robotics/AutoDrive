@@ -66,6 +66,47 @@ def _canonical_hash(value):
                                    allow_nan=False).encode()).hexdigest()
 
 
+def _validate_multicase_combined_input(entry, family, descriptor_sha256,
+        case_set_sha256, case_bindings):
+    """Reopen the exact pooled bytes and verify their ordered source-shard links."""
+    if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "manifest_path", "manifest_sha256"}:
+        raise ValueError("composite artifact requires an exact pooled corpus binding")
+    data_path = Path(entry["path"]).resolve(strict=True)
+    manifest_path = Path(entry["manifest_path"]).resolve(strict=True)
+    data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (data_sha != entry["sha256"] or manifest_sha != entry["manifest_sha256"] or
+            manifest.get("target_family") != family or manifest.get("descriptor_sha256") != descriptor_sha256 or
+            manifest.get("case_set_sha256") != case_set_sha256 or
+            manifest.get("dataset_sha256") != data_sha):
+        raise ValueError("pooled corpus bytes or composite descriptor binding changed")
+    shards = manifest.get("shard_manifests")
+    if not isinstance(shards, list) or len(shards) != len(case_bindings):
+        raise ValueError("pooled corpus sidecar does not bind every original case shard")
+    for shard, binding in zip(shards, case_bindings):
+        if (shard.get("case_key") != binding["case_key"] or
+                shard.get("seeds") != binding["seeds"] or
+                shard.get("dataset_sha256") != binding["dataset_sha256"] or
+                shard.get("manifest_sha256") != binding["manifest_sha256"]):
+            raise ValueError("pooled corpus source-shard binding differs from composite fit inputs")
+    return {"path": str(data_path), "sha256": data_sha,
+        "manifest_path": str(manifest_path), "manifest_sha256": manifest_sha}
+
+
+def _count_composite_plan_c_pairs(rows):
+    labels = [label for row in rows for label in row["plan_c_pairwise_labels"]]
+    if any(not isinstance(label, dict) or type(label.get("stable_preference")) is not bool
+            for label in labels):
+        raise ValueError("composite C pair labels must declare boolean stable_preference")
+    stable = sum(label["stable_preference"] is True for label in labels)
+    all_pairs = sum(len(row["plan_c_counterfactuals"]) *
+        (len(row["plan_c_counterfactuals"]) - 1) // 2 for row in rows)
+    if len(labels) != all_pairs:
+        raise ValueError("composite C pair labels do not cover every within-prefix candidate pair")
+    return stable, all_pairs - stable
+
+
 def validate_record(record):
     if not isinstance(record, dict) or record.get("schema") != DATASET_SCHEMA:
         raise ValueError("unsupported MECO supervised dataset record schema")
@@ -2290,7 +2331,8 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
 
 def warm_start_counterfactual_composite_v1(track: str, shards, output: Path, *,
         expected_cases, qualification_protocol: Path, updates=10,
-        learning_rate=1e-4, device=None):
+        learning_rate=1e-4, device=None, descriptor_sha256=None,
+        combined_inputs=None):
     """Fit Plan C repeated labels over independently validated case shards."""
     if track not in ("C1", "C2") or type(updates) is not int or updates < 1 or not _finite_number(learning_rate) or learning_rate <= 0:
         raise ValueError("composite repeated-label fitter requires C1/C2 and valid optimizer settings")
@@ -2303,6 +2345,8 @@ def warm_start_counterfactual_composite_v1(track: str, shards, output: Path, *,
     rows, composite, reference, manifests = _read_counterfactual_composite_dataset(
         shards, expected_cases=expected_cases, qualification_protocol=qualification_protocol,
         expected_sources=sources)
+    pooled = _validate_multicase_combined_input(combined_inputs, "trajectory",
+        descriptor_sha256, composite["case_set_sha256"], composite["cases"])
     if reference.get("plan_c_target_schema") != "meco-plan-c-matched-repeated-gross-return-v1":
         raise ValueError("composite C fitter requires repeated matched-rollout labels in every shard")
     if any(manifest["device"] != reference["device"] for manifest in manifests):
@@ -2359,7 +2403,9 @@ def warm_start_counterfactual_composite_v1(track: str, shards, output: Path, *,
         "dataset_schema": MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA,
         "dataset_sha256": composite["dataset_sha256"],
         "dataset_manifest_sha256": composite["manifest_sha256"],
-        "case_set_sha256": composite["case_set_sha256"], "cases": composite["cases"],
+        "combined_input": pooled,
+        "case_set_sha256": composite["case_set_sha256"], "descriptor_sha256": descriptor_sha256,
+        "cases": composite["cases"],
         "case_coverage": composite["case_coverage"],
         "records_have_prefix_replay_parity": True, "source_runtime_device_bound": True,
         "state_digest_schema": "meco-full-environment-state-v2",
@@ -2413,6 +2459,7 @@ def validate_counterfactual_composite_artifact(track: str, checkpoint: Path, *,
     """Validate a composite C artifact by reopening every original strict shard."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     if (track not in ("C1", "C2") or payload.get("schema") != MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA or
+            not isinstance(payload.get("descriptor_sha256"), str) or len(payload["descriptor_sha256"]) != 64 or
             payload.get("schema_version") != 1 or payload.get("artifact_kind") !=
             "weights_only_multicase_plan_c_repeated_pairwise_v1" or payload.get("track") != track):
         raise ValueError("unsupported composite counterfactual artifact")
@@ -2422,13 +2469,14 @@ def validate_counterfactual_composite_artifact(track: str, checkpoint: Path, *,
     rows, composite, reference, _ = _read_counterfactual_composite_dataset(
         shard_inputs, expected_cases=cases, qualification_protocol=qualification_protocol,
         expected_sources=expected_sources)
+    pooled = _validate_multicase_combined_input(payload.get("combined_input"),
+        "trajectory", payload.get("descriptor_sha256"), composite["case_set_sha256"], composite["cases"])
     protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
-    stable_count = sum(len(row["plan_c_pairwise_labels"]) for row in rows)
-    all_pair_count = sum(len(row["plan_c_counterfactuals"]) *
-        (len(row["plan_c_counterfactuals"]) - 1) // 2 for row in rows)
+    stable_count, abstained_count = _count_composite_plan_c_pairs(rows)
     expected_fields = {"dataset_schema": MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA,
         "dataset_sha256": composite["dataset_sha256"],
         "dataset_manifest_sha256": composite["manifest_sha256"],
+        "combined_input": pooled,
         "case_set_sha256": composite["case_set_sha256"], "cases": composite["cases"],
         "case_coverage": composite["case_coverage"], "protocol_id": protocol_id,
         "qualification_protocol_sha256": protocol_sha,
@@ -2465,7 +2513,7 @@ def validate_counterfactual_composite_artifact(track: str, checkpoint: Path, *,
             payload.get("continuation_policy") != reference.get("continuation_policy") or
             payload.get("plan_c_stable_pair_count") != stable_count or
             payload.get("non_tied_pair_count") != stable_count or
-            payload.get("tied_pair_count") != all_pair_count - stable_count or
+            payload.get("tied_pair_count") != abstained_count or
             payload.get("pair_count_semantics") != "non_tied_pair_count counts stable Plan C labels; tied_pair_count counts all abstentions" or
             type(payload.get("updates")) is not int or payload["updates"] < 1 or
             not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
@@ -2723,7 +2771,7 @@ def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
                         replayed_outcome = archived
                     verified.append(replayed_outcome)
                 route_groups.append(verified)
-            materialized.append({"raster": raster, "globals": globals_,
+            materialized.append({"row": row, "raster": raster, "globals": globals_,
                 "graph": graph_values, "graph_object": graph,
                 "planner": env.planner,
                 "field_length": float(env.sim.field_length),
@@ -2990,7 +3038,8 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
             expected_prediction_mode=expected_prediction_mode)
-    if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
+    if payload.get("schema") in (PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA,
+            PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA):
         return validate_plan_a_joint_ubp_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
@@ -3078,6 +3127,10 @@ def validate_plan_a_joint_ubp_artifact(track: str, checkpoint: Path, *,
         expected_prediction_mode: str | None = None):
     """Validate joint U+B+P provenance, exact source bytes and full model state."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA:
+        return validate_plan_a_multicase_joint_ubp_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol, expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     from .meco_counterfactual import (PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         PLAN_A_LEGAL_NODE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
         PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
@@ -3205,6 +3258,177 @@ def validate_plan_a_joint_ubp_artifact(track: str, checkpoint: Path, *,
     return payload
 
 
+def validate_plan_a_multicase_joint_ubp_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate every per-case U+B/P/source binding in a composite A artifact."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    from .curriculum_training import source_identity
+    from .meco_counterfactual import (PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
+        PLAN_A_LEGAL_NODE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
+        PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION)
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    bindings = payload.get("case_bindings")
+    if (track not in ("A1", "A2", "A3") or
+            payload.get("schema") != PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or
+            payload.get("artifact_kind") != "weights_only_plan_a_multicase_joint_u_b_p_v1" or
+            payload.get("track") != track or
+            not isinstance(payload.get("descriptor_sha256"), str) or len(payload["descriptor_sha256"]) != 64 or
+            payload.get("sources") != expected_sources or
+            source_identity() != expected_sources or not isinstance(bindings, list) or not bindings):
+        raise ValueError("composite Plan A artifact identity/schema mismatch")
+    if (payload.get("protocol_id") != protocol_id or
+            payload.get("qualification_protocol_sha256") != protocol_sha or
+            payload.get("qualification_protocol_file") != protocol_path.name or
+            payload.get("split") != "train" or payload.get("prediction_mode") not in PREDICTION_MODES or
+            payload.get("prediction_contract") != prediction_contract(payload.get("prediction_mode")) or
+            (expected_prediction_mode is not None and payload.get("prediction_mode") != expected_prediction_mode) or
+            payload.get("source_identity_sha256") != _canonical_hash(expected_sources)):
+        raise ValueError("composite Plan A source/protocol/prediction binding mismatch")
+    seen_cases, dataset_hashes, manifest_hashes = set(), {"u_b": [], "p": []}, {"u_b": [], "p": []}
+    min_coverage = payload.get("p_route_minimum_coverage_fraction")
+    if not _finite_number(min_coverage) or not 0 < min_coverage <= 1:
+        raise ValueError("composite Plan A coverage threshold is invalid")
+    _, _, _, _, _, _, _ = _load_protocol(qualification_protocol)
+    for binding in bindings:
+        key = tuple(binding.get("case_key", ()))
+        seeds = binding.get("seeds")
+        if (len(key) != 2 or not all(isinstance(value, str) and value for value in key) or
+                key in seen_cases or not isinstance(seeds, list) or not seeds or
+                len(set(seeds)) != len(seeds) or
+                any(type(seed) is not int or seed not in _protocol_train_seeds(protocol, *key) for seed in seeds)):
+            raise ValueError("composite Plan A artifact has an invalid or duplicate frozen case")
+        seen_cases.add(key)
+        source_path = Path(binding["source_dataset"]).resolve(strict=True)
+        legal_path = Path(binding["legal_dataset"]).resolve(strict=True)
+        p_path = Path(binding["p_dataset"]).resolve(strict=True)
+        source_rows, source_sha, source_manifest_sha, _, case_protocol_id, case_protocol_sha, source_manifest = (
+            _read_counterfactual_dataset(source_path, qualification_protocol=qualification_protocol,
+                expected_sources=expected_sources))
+        if ((source_manifest.get("scenario_id"), source_manifest.get("category")) != key or
+                source_manifest.get("seeds") != seeds or source_sha != binding.get("source_dataset_sha256") or
+                source_manifest_sha != binding.get("source_manifest_sha256") or
+                (case_protocol_id, case_protocol_sha) != (protocol_id, protocol_sha)):
+            raise ValueError("composite Plan A trajectory source differs from its bound case")
+        legal_bytes = legal_path.read_bytes()
+        legal_manifest_path = legal_path.with_suffix(legal_path.suffix + ".manifest.json")
+        legal_manifest_bytes = legal_manifest_path.read_bytes()
+        legal_manifest = json.loads(legal_manifest_bytes)
+        legal_rows = [json.loads(line) for line in legal_bytes.decode("utf-8").splitlines() if line.strip()]
+        if (hashlib.sha256(legal_bytes).hexdigest() != binding.get("legal_dataset_sha256") or
+                hashlib.sha256(legal_manifest_bytes).hexdigest() != binding.get("legal_manifest_sha256") or
+                legal_manifest.get("record_count") != len(legal_rows) or
+                legal_manifest.get("schema") != PLAN_A_LEGAL_NODE_DATASET_SCHEMA or
+                legal_manifest.get("target_schema") != PLAN_A_LEGAL_NODE_TARGET_SCHEMA or
+                legal_manifest.get("source_dataset_sha256") != source_sha or
+                legal_manifest.get("source_manifest_sha256") != source_manifest_sha or
+                legal_manifest.get("protocol_id") != protocol_id or
+                legal_manifest.get("qualification_protocol_sha256") != protocol_sha or
+                legal_manifest.get("sources") != expected_sources or
+                legal_manifest.get("prediction_mode") != payload.get("prediction_mode")):
+            raise ValueError("composite U+B shard bytes or source/protocol manifest binding changed")
+        p_rows, p_sha, p_manifest_sha, _, p_protocol_id, p_protocol_sha, p_manifest = (
+            _read_plan_a_p_route_dataset(p_path, qualification_protocol=qualification_protocol,
+                expected_sources=expected_sources))
+        if (p_manifest.get("schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA or
+                p_manifest.get("target_schema") != PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA or
+                p_manifest.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION):
+            raise ValueError("composite P shard schema/case mismatch")
+        if ((p_manifest.get("scenario_id"), p_manifest.get("category")) != key or
+                p_manifest.get("seeds") != seeds or p_manifest.get("source_counterfactual_dataset_sha256") != source_sha or
+                p_manifest.get("source_counterfactual_manifest_sha256") != source_manifest_sha or
+                p_manifest.get("device") != legal_manifest.get("device") or
+                p_manifest.get("prediction_mode") != legal_manifest.get("prediction_mode") or
+                p_manifest.get("prediction_contract") != legal_manifest.get("prediction_contract") or
+                p_manifest.get("p_intervention_scale") != payload.get("p_cost_scale") or
+                p_manifest.get("p_oracle_version") != payload.get("p_oracle_version") or
+                (p_protocol_id, p_protocol_sha) != (protocol_id, protocol_sha) or
+                p_sha != binding.get("p_dataset_sha256") or p_manifest_sha != binding.get("p_manifest_sha256")):
+            raise ValueError("composite P shard differs from its exact trajectory case source")
+        legal_ids = {(row.get("scenario_id"), row.get("category"), row.get("seed"), row.get("decision_index"))
+            for row in legal_rows}
+        p_ids = {(row.get("scenario_id"), row.get("category"), row.get("seed"), row.get("decision_index"))
+            for row in p_rows}
+        declared_ids = {(key[0], key[1], seed, decision)
+            for seed, decision in binding.get("decision_keys", [])}
+        source_ids = {(row.get("scenario_id"), row.get("category"), row.get("seed"), row.get("decision_index"))
+            for row in source_rows}
+        if (not declared_ids or len(declared_ids) != len(binding.get("decision_keys", [])) or
+                {identity[2] for identity in declared_ids} != set(seeds) or
+                len(legal_ids) != len(legal_rows) or len(p_ids) != len(p_rows) or
+                legal_ids != declared_ids or p_ids != declared_ids or
+                not legal_ids <= source_ids or not p_ids <= source_ids):
+            raise ValueError("composite U+B/P rows no longer match the exact aligned branch identities")
+        case_coverage = payload.get("case_coverage", {}).get(f"{key[0]}::{key[1]}")
+        if (not isinstance(case_coverage, dict) or
+                case_coverage.get("legal_xy_cell_count", 0) < case_coverage.get("visited_xy_cell_count", 0) or
+                case_coverage.get("visited_xy_cell_count", 0) < 1 or
+                not _finite_number(case_coverage.get("coverage_fraction")) or
+                case_coverage["coverage_fraction"] != case_coverage["visited_xy_cell_count"] / max(
+                    1, case_coverage["legal_xy_cell_count"]) or
+                case_coverage["coverage_fraction"] < min_coverage or
+                any(case_coverage.get("target_counts", {}).get(name, 0) < 1 for name in ("u", "b", "p"))):
+            raise ValueError("composite Plan A per-case target or legal-mask coverage is incomplete")
+        dataset_hashes["u_b"].append(binding["legal_dataset_sha256"])
+        dataset_hashes["p"].append(p_sha)
+        manifest_hashes["u_b"].append(binding["legal_manifest_sha256"])
+        manifest_hashes["p"].append(p_manifest_sha)
+    case_set_sha = _canonical_hash([[entry["case_key"][0],
+            entry["case_key"][1], entry["seeds"]] for entry in bindings])
+    if (payload.get("case_set_sha256") != case_set_sha or
+            payload.get("dataset_sha256_by_family") != {key: _canonical_hash(value)
+                for key, value in dataset_hashes.items()} or
+            payload.get("dataset_manifest_sha256_by_family") != {key: _canonical_hash(value)
+                for key, value in manifest_hashes.items()} or
+            set(payload.get("case_coverage", {})) != {f"{key[0]}::{key[1]}" for key in seen_cases}):
+        raise ValueError("composite Plan A case-set or pooled dataset digest mismatch")
+    combined = payload.get("combined_inputs")
+    if not isinstance(combined, dict) or set(combined) != {"trajectory", "ub", "p"}:
+        raise ValueError("composite Plan A artifact omits pooled corpus bindings")
+    source_bindings = [{"case_key": item["case_key"], "seeds": item["seeds"],
+        "dataset_sha256": item["source_dataset_sha256"],
+        "manifest_sha256": item["source_manifest_sha256"]} for item in bindings]
+    ub_bindings = [{"case_key": item["case_key"], "seeds": item["seeds"],
+        "dataset_sha256": item["legal_dataset_sha256"],
+        "manifest_sha256": item["legal_manifest_sha256"]} for item in bindings]
+    p_bindings = [{"case_key": item["case_key"], "seeds": item["seeds"],
+        "dataset_sha256": item["p_dataset_sha256"],
+        "manifest_sha256": item["p_manifest_sha256"]} for item in bindings]
+    for family, family_bindings in (("trajectory", source_bindings), ("ub", ub_bindings), ("p", p_bindings)):
+        _validate_multicase_combined_input(combined[family], family,
+            payload["descriptor_sha256"], case_set_sha, family_bindings)
+    if (payload.get("p_route_legal_xy_coverage_by_case") != payload.get("case_coverage") or
+            not isinstance(payload.get("collection_device"), dict) or
+            payload.get("collection_device") != p_manifest.get("device") or
+            payload.get("training_device") != _device_identity(payload["collection_device"]["device"]) or
+            payload.get("p_route_legal_xy_coverage_fraction") != min(
+                row["coverage_fraction"] for row in payload["case_coverage"].values()) or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") != list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            payload.get("p_oracle_version") != PLAN_A_P_ROUTE_ORACLE_VERSION or
+            payload.get("p_mode") != "learned" or payload.get("p_cost_scale") != p_manifest.get("p_intervention_scale") or
+            payload.get("optimizer_state_included") is not False or payload.get("resume_compatible") is not False or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            not isinstance(payload.get("joint_loss_history"), list) or
+            len(payload["joint_loss_history"]) != payload["updates"] or
+            not isinstance(payload.get("model"), dict)):
+        raise ValueError("composite Plan A model/loss schema mismatch")
+    template = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        template.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("composite Plan A weights do not match the requested track") from exc
+    layer, mask = _plan_a_p_output_parameters(template, track)
+    selected = (layer.weight.detach() * mask.reshape(-1, *([1] * (layer.weight.ndim - 1)))).abs().sum()
+    bias = layer.bias.detach()[1::2] if track == "A1" else layer.bias.detach()[1:2]
+    if not bool(torch.isfinite(selected)) or not bool(torch.isfinite(bias).all()) or not bool((selected > 0) or (bias > -20).any()):
+        raise ValueError("composite Plan A weights contain no trained P channel")
+    return payload
+
+
 def validate_plan_a_legal_node_artifact(track: str, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
@@ -3320,7 +3544,8 @@ def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protoc
             purpose="Plan A expert-goal warm-start consumption"))
         if payload.get("training_device", {}).get("device") != selected:
             raise ValueError("expert-goal weights were fitted on a different indexed CUDA device")
-    if payload.get("schema") == PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA:
+    if payload.get("schema") in (PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA,
+            PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA):
         from .meco_device import require_indexed_cuda_device
         try:
             model_device = next(model.parameters()).device
@@ -3917,12 +4142,57 @@ def warm_start_plan_a_legal_nodes_v1(track: str, dataset: Path, source_dataset: 
         "node_targets": node_count, "comparable_pairs": preference_count}
 
 
+PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-multicase-joint-u-b-p-weights-v1"
+
+
+def _align_plan_a_ubp_composite_samples(case_shards, ub_by_case, p_by_case):
+    """Require exact case/seed/decision alignment and report per-case target coverage."""
+    if not (len(case_shards) == len(ub_by_case) == len(p_by_case)):
+        raise ValueError("composite Plan A family shard counts differ")
+    aligned, case_bindings = [], []
+    case_keys = set()
+    for case, ub_samples, p_samples in zip(case_shards, ub_by_case, p_by_case):
+        case_key = tuple(case["case_key"])
+        if case_key in case_keys:
+            raise ValueError("composite Plan A case keys must be unique")
+        case_keys.add(case_key)
+        def identity(sample):
+            row = sample["row"]
+            key = (row.get("scenario_id"), row.get("category"), row.get("seed"), row.get("decision_index"))
+            if key[:2] != case_key or type(key[2]) is not int or type(key[3]) is not int:
+                raise ValueError("Plan A sample is outside its declared case identity")
+            return key
+        ub_map = {identity(sample): sample for sample in ub_samples}
+        p_map = {identity(sample): sample for sample in p_samples}
+        if len(ub_map) != len(ub_samples) or len(p_map) != len(p_samples) or set(ub_map) != set(p_map):
+            raise ValueError("U+B and P target branches must have exact matching case/seed/decision identities")
+        ordered = sorted(ub_map)
+        if {key[2] for key in ordered} != set(case["seeds"]):
+            raise ValueError("aligned Plan A target rows do not cover every declared seed")
+        masks = [p_map[key]["legal_xy_mask"] for key in ordered]
+        if masks and any(not torch.equal(mask, masks[0]) for mask in masks[1:]):
+            raise ValueError("one Plan A case contains inconsistent legal XY geometries")
+        if masks:
+            ub_masks = [(sample["graph"].lookup >= 0).any(0).detach().cpu()
+                for sample in (ub_map[key] for key in ordered)]
+            if any(not torch.equal(mask, masks[0]) for mask in ub_masks):
+                raise ValueError("aligned U+B and P branches have different legal XY masks")
+        aligned.extend((ub_map[key], p_map[key]) for key in ordered)
+        case_bindings.append({"case_key": list(case_key), "seeds": list(case["seeds"]),
+            "aligned_branch_count": len(ordered),
+            "decision_keys": [[key[2], key[3]] for key in ordered]})
+    if len(case_bindings) != len(case_shards) or not aligned:
+        raise ValueError("composite Plan A targets have no aligned branches")
+    return aligned, case_bindings
+
+
 def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
         source_dataset: Path, p_dataset: Path, output: Path, *,
         qualification_protocol: Path, updates=10, learning_rate=1e-4,
         device=None, route_margin=0.02, map_regularization=0.001,
-        minimum_coverage_fraction=0.01):
-    """Fit one shared A model against replay-bound legal-node U/B and oracle P."""
+        minimum_coverage_fraction=0.01, composite_case_shards=None,
+        composite_descriptor_sha256=None, composite_combined_inputs=None):
+    """Fit A U+B+P from one case or an aligned composite case set."""
     if (track not in ("A1", "A2", "A3") or type(updates) is not int or updates < 1 or
             not _finite_number(learning_rate) or learning_rate <= 0 or
             not _finite_number(route_margin) or route_margin <= 0 or
@@ -3940,15 +4210,114 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
         PLAN_A_P_ROUTE_ORACLE_TARGET_SCHEMA, PLAN_A_P_ROUTE_ORACLE_VERSION,
         _device_identity)
     sources = source_identity()
-    ub_samples, ub_manifest, ub_data_sha, ub_manifest_sha = (
-        _read_and_replay_plan_a_legal_node_dataset(legal_dataset, source_dataset,
-            qualification_protocol, device, track))
-    p_rows, p_data_sha, p_manifest_sha, _, protocol_id, protocol_sha, p_manifest = (
-        _read_plan_a_p_route_dataset(p_dataset,
-            qualification_protocol=qualification_protocol, expected_sources=sources))
+    composite_mode = composite_case_shards is not None
+    if composite_mode:
+        if not isinstance(composite_case_shards, (list, tuple)) or not composite_case_shards:
+            raise ValueError("composite U+B/P fitting requires ordered per-case shard bindings")
+        ub_by_case, p_by_case, case_records = [], [], []
+        composite_protocol = None
+        ub_manifest = p_manifest = None
+        for case in composite_case_shards:
+            if (not isinstance(case, dict) or not isinstance(case.get("case_key"), (list, tuple)) or
+                    len(case["case_key"]) != 2 or not isinstance(case.get("seeds"), list) or
+                    not case["seeds"]):
+                raise ValueError("composite Plan A case binding is malformed")
+            source_path = Path(case["source_dataset"]).resolve(strict=True)
+            legal_path = Path(case["legal_dataset"]).resolve(strict=True)
+            p_path = Path(case["p_dataset"]).resolve(strict=True)
+            source_rows, source_sha, source_manifest_sha, _, protocol_id, protocol_sha, source_manifest = (
+                _read_counterfactual_dataset(source_path,
+                    qualification_protocol=qualification_protocol, expected_sources=sources))
+            key = tuple(case["case_key"])
+            if ((source_manifest.get("scenario_id"), source_manifest.get("category")) != key or
+                    source_manifest.get("seeds") != case["seeds"] or
+                    {row["seed"] for row in source_rows} != set(case["seeds"])):
+                raise ValueError("composite trajectory shard differs from its frozen case/seeds")
+            if composite_protocol is not None and composite_protocol != (protocol_id, protocol_sha):
+                raise ValueError("composite Plan A trajectory shards use different protocols")
+            composite_protocol = (protocol_id, protocol_sha)
+            local_ub, local_ub_manifest, local_ub_sha, local_ub_manifest_sha = (
+                _read_and_replay_plan_a_legal_node_dataset(legal_path, source_path,
+                    qualification_protocol, device, track))
+            p_rows, local_p_sha, local_p_manifest_sha, _, p_protocol_id, p_protocol_sha, local_p_manifest = (
+                _read_plan_a_p_route_dataset(p_path,
+                    qualification_protocol=qualification_protocol, expected_sources=sources))
+            if (local_p_manifest.get("schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA or
+                    (local_p_manifest.get("scenario_id"), local_p_manifest.get("category")) != key or
+                    local_p_manifest.get("seeds") != case["seeds"] or
+                    local_p_manifest.get("source_counterfactual_dataset_sha256") != source_sha or
+                    local_p_manifest.get("source_counterfactual_manifest_sha256") != source_manifest_sha or
+                    (p_protocol_id, p_protocol_sha) != composite_protocol):
+                raise ValueError("composite P shard does not bind its exact trajectory case/protocol")
+            common = ("protocol_id", "qualification_protocol_sha256", "sources",
+                "source_identity_sha256", "prediction_mode", "prediction_contract", "split", "device")
+            if any(local_ub_manifest.get(name) != local_p_manifest.get(name) for name in common):
+                raise ValueError("composite U+B and P family contracts differ within a case")
+            if ub_manifest is None:
+                ub_manifest, p_manifest = local_ub_manifest, local_p_manifest
+            else:
+                if any(local_ub_manifest.get(name) != ub_manifest.get(name) for name in common) or any(
+                        local_p_manifest.get(name) != p_manifest.get(name) for name in common):
+                    raise ValueError("composite Plan A cases use incompatible model/protocol/device contracts")
+                if (local_p_manifest.get("p_intervention_scale") != p_manifest.get("p_intervention_scale") or
+                        local_p_manifest.get("p_oracle_version") != p_manifest.get("p_oracle_version")):
+                    raise ValueError("composite P cases use different oracle or cost-scale semantics")
+            local_p_samples = _materialize_plan_a_p_route_rows(p_rows, local_p_manifest,
+                track=track, train_device=device)
+            ub_by_case.append(local_ub)
+            p_by_case.append(local_p_samples)
+            case_records.append({"case_key": list(key), "seeds": list(case["seeds"]),
+                "source_dataset": str(source_path), "source_dataset_sha256": source_sha,
+                "source_manifest_sha256": source_manifest_sha,
+                "legal_dataset": str(legal_path), "legal_dataset_sha256": local_ub_sha,
+                "legal_manifest_sha256": local_ub_manifest_sha,
+                "p_dataset": str(p_path), "p_dataset_sha256": local_p_sha,
+                "p_manifest_sha256": local_p_manifest_sha})
+        aligned, case_coverage = _align_plan_a_ubp_composite_samples(
+            composite_case_shards, ub_by_case, p_by_case)
+        ub_samples = [pair[0] for pair in aligned]
+        p_samples = [pair[1] for pair in aligned]
+        case_records = [{**record, **coverage} for record, coverage in zip(case_records, case_coverage)]
+        if not isinstance(composite_combined_inputs, dict):
+            raise ValueError("composite Plan A fitting requires pooled U+B/P corpus bindings")
+        combined_case_bindings = [{"case_key": item["case_key"], "seeds": item["seeds"],
+            "dataset_sha256": item["legal_dataset_sha256"],
+            "manifest_sha256": item["legal_manifest_sha256"]} for item in case_records]
+        pooled_ub = _validate_multicase_combined_input(composite_combined_inputs.get("ub"),
+            "ub", composite_descriptor_sha256,
+            _canonical_hash([[item["case_key"][0], item["case_key"][1], item["seeds"]]
+                for item in composite_case_shards]), combined_case_bindings)
+        combined_case_bindings_p = [{"case_key": item["case_key"], "seeds": item["seeds"],
+            "dataset_sha256": item["p_dataset_sha256"],
+            "manifest_sha256": item["p_manifest_sha256"]} for item in case_records]
+        pooled_p = _validate_multicase_combined_input(composite_combined_inputs.get("p"),
+            "p", composite_descriptor_sha256,
+            _canonical_hash([[item["case_key"][0], item["case_key"][1], item["seeds"]]
+                for item in composite_case_shards]), combined_case_bindings_p)
+        combined_case_bindings_source = [{"case_key": item["case_key"], "seeds": item["seeds"],
+            "dataset_sha256": item["source_dataset_sha256"],
+            "manifest_sha256": item["source_manifest_sha256"]} for item in case_records]
+        pooled_source = _validate_multicase_combined_input(composite_combined_inputs.get("trajectory"),
+            "trajectory", composite_descriptor_sha256,
+            _canonical_hash([[item["case_key"][0], item["case_key"][1], item["seeds"]]
+                for item in composite_case_shards]), combined_case_bindings_source)
+        ub_data_sha = _canonical_hash([row["legal_dataset_sha256"] for row in case_records])
+        ub_manifest_sha = _canonical_hash([row["legal_manifest_sha256"] for row in case_records])
+        p_data_sha = _canonical_hash([row["p_dataset_sha256"] for row in case_records])
+        p_manifest_sha = _canonical_hash([row["p_manifest_sha256"] for row in case_records])
+    else:
+        ub_samples, ub_manifest, ub_data_sha, ub_manifest_sha = (
+            _read_and_replay_plan_a_legal_node_dataset(legal_dataset, source_dataset,
+                qualification_protocol, device, track))
+        p_rows, p_data_sha, p_manifest_sha, _, protocol_id, protocol_sha, p_manifest = (
+            _read_plan_a_p_route_dataset(p_dataset,
+                qualification_protocol=qualification_protocol, expected_sources=sources))
     if p_manifest.get("schema") != PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA:
         raise ValueError("joint U+B+P fitter requires independent oracle-v3 P-route labels")
-    if (ub_manifest.get("source_dataset_sha256") !=
+    if composite_mode:
+        protocol_id = p_manifest["protocol_id"]
+        protocol_sha = p_manifest["qualification_protocol_sha256"]
+    if not composite_mode and (ub_manifest.get("source_dataset_sha256") !=
             p_manifest.get("source_counterfactual_dataset_sha256") or
             ub_manifest.get("source_manifest_sha256") !=
             p_manifest.get("source_counterfactual_manifest_sha256")):
@@ -3964,8 +4333,9 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
             ub_manifest.get("device", {}).get("device") != device or
             p_manifest.get("device") != _device_identity(device)):
         raise ValueError("joint U+B/P protocol, source, mode, split, or device identities differ")
-    p_samples = _materialize_plan_a_p_route_rows(p_rows, p_manifest,
-        track=track, train_device=device)
+    if not composite_mode:
+        p_samples = _materialize_plan_a_p_route_rows(p_rows, p_manifest,
+            track=track, train_device=device)
     if not ub_samples or not p_samples:
         raise ValueError("joint Plan A datasets must both contain replayed training rows")
     model = make_meco_track(track,
@@ -3984,20 +4354,43 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
     p_cost_scale = float(p_manifest["p_intervention_scale"])
     if any(abs(sample["p_cost_scale"] - p_cost_scale) > 1e-12 for sample in p_samples):
         raise ValueError("replayed P rows disagree on the frozen P scale")
-    legal_mask = p_samples[0]["legal_xy_mask"]
-    if any(not torch.equal(s["legal_xy_mask"], legal_mask) for s in p_samples):
-        raise ValueError("P dataset mixes legal XY grid geometries")
-    legal_cell_count = int(legal_mask.sum().item())
-    visited_cells = set()
+    if composite_mode:
+        legal_mask_by_case = {}
+        for sample in p_samples:
+            row = sample["row"]
+            key = (row["scenario_id"], row["category"])
+            mask = sample["legal_xy_mask"]
+            if key in legal_mask_by_case and not torch.equal(legal_mask_by_case[key], mask):
+                raise ValueError("P shard has inconsistent legal XY masks within a case")
+            legal_mask_by_case[key] = mask
+        visited_cells_by_case = {key: set() for key in legal_mask_by_case}
+        legal_mask = next(iter(legal_mask_by_case.values()))
+        legal_cell_count = int(legal_mask.sum().item())
+        visited_cells = set()
+    else:
+        legal_mask = p_samples[0]["legal_xy_mask"]
+        if any(not torch.equal(s["legal_xy_mask"], legal_mask) for s in p_samples):
+            raise ValueError("P dataset mixes legal XY grid geometries")
+        legal_cell_count = int(legal_mask.sum().item())
+        visited_cells = set()
     counts = {"u": 0, "b": 0, "p": 0}
+    counts_by_case = ({tuple(case["case_key"]): {"u": 0, "b": 0, "p": 0}
+        for case in composite_case_shards} if composite_mode else {})
     history = []
     model.train()
-    steps_per_epoch = max(len(ub_samples), len(p_samples))
+    steps_per_epoch = (len(ub_samples) if composite_mode else
+        max(len(ub_samples), len(p_samples)))
     for epoch in range(updates):
         epoch_history = []
         for step in range(steps_per_epoch):
-            ub = ub_samples[step % len(ub_samples)]
-            ps = p_samples[step % len(p_samples)]
+            ub = ub_samples[step] if composite_mode else ub_samples[step % len(ub_samples)]
+            ps = p_samples[step] if composite_mode else p_samples[step % len(p_samples)]
+            route_case_key = ((ps["row"]["scenario_id"], ps["row"]["category"])
+                if composite_mode else None)
+            route_legal_mask = (legal_mask_by_case[route_case_key]
+                if composite_mode else legal_mask)
+            route_visited = (visited_cells_by_case[route_case_key]
+                if composite_mode else visited_cells)
             raw = model(raster=ub["raster"], globals_=ub["globals"], **ub["graph_inputs"])
             graph, support, row = ub["graph"], ub["support"], ub["row"]
             logits = gather_pose_behavior_logits(track, raw, graph, ub["raster"], support,
@@ -4018,6 +4411,7 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
                     device=device, dtype=node_u.dtype)
                 loss_u = (F.smooth_l1_loss(node_u[ids], target_u, beta=1., reduction="none") * iw).sum() / iw.sum()
                 counts["u"] += len(targets)
+                if composite_mode: counts_by_case[route_case_key]["u"] += len(targets)
             else:
                 loss_u = node_u.new_zeros(())
             pair_by_behavior = {}
@@ -4050,6 +4444,7 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
                 bw = torch.tensor(node_weights, device=device, dtype=node_terms[0].dtype)
                 loss_b = (torch.stack(node_terms) * bw).sum() / bw.sum()
                 counts["b"] += sum(len(x) for x in by_node.values())
+                if composite_mode: counts_by_case[route_case_key]["b"] += sum(len(x) for x in by_node.values())
             else:
                 loss_b = loss_u.new_zeros(())
 
@@ -4065,21 +4460,21 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
                     for snap in native["route_trace"]:
                         points = snap["route_points_m"]
                         for point in points:
-                            ix = min(legal_mask.shape[0]-1,
+                            ix = min(route_legal_mask.shape[0]-1,
                                 max(0, int(float(point[0]) / ps["resolution_m"])))
-                            iy = min(legal_mask.shape[1]-1,
+                            iy = min(route_legal_mask.shape[1]-1,
                                 max(0, int(float(point[1]) / ps["resolution_m"])))
-                            if bool(legal_mask[ix, iy]):
-                                visited_cells.add((ix, iy))
+                            if bool(route_legal_mask[ix, iy]):
+                                route_visited.add((ix, iy))
                         for first, second in zip(points, points[1:]):
                             dx, dy = float(second[0])-float(first[0]), float(second[1])-float(first[1])
                             n = max(1, math.ceil(math.hypot(dx, dy) / (ps["resolution_m"] * .5)))
                             for i in range(n + 1):
                                 f = i / n
-                                ix = min(legal_mask.shape[0]-1, max(0, int((float(first[0])+f*dx)/ps["resolution_m"])))
-                                iy = min(legal_mask.shape[1]-1, max(0, int((float(first[1])+f*dy)/ps["resolution_m"])))
-                                if bool(legal_mask[ix, iy]):
-                                    visited_cells.add((ix, iy))
+                                ix = min(route_legal_mask.shape[0]-1, max(0, int((float(first[0])+f*dx)/ps["resolution_m"])))
+                                iy = min(route_legal_mask.shape[1]-1, max(0, int((float(first[1])+f*dy)/ps["resolution_m"])))
+                                if bool(route_legal_mask[ix, iy]):
+                                    route_visited.add((ix, iy))
                 variants = list(unique.values())
                 for i, left in enumerate(variants):
                     for right in variants[i+1:]:
@@ -4103,6 +4498,7 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
             if route_terms:
                 loss_p = torch.stack(route_terms).mean() + map_regularization * pmap.mean()
                 counts["p"] += len(route_terms)
+                if composite_mode: counts_by_case[route_case_key]["p"] += len(route_terms)
             else:
                 loss_p = raw_p["penalty"].new_zeros(())
             if not targets and not by_node and not route_terms:
@@ -4124,11 +4520,25 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
                 else (sum(item[key] for item in epoch_history) / len(epoch_history)
                     if key == "joint" else None))
             for key in ("u", "b", "p", "joint")})
-    coverage = len(visited_cells) / max(1, legal_cell_count)
+    if composite_mode:
+        coverage_by_case = {f"{key[0]}::{key[1]}": {
+            "legal_xy_cell_count": int(legal_mask_by_case[key].sum().item()),
+            "visited_xy_cell_count": len(visited_cells_by_case[key]),
+            "coverage_fraction": len(visited_cells_by_case[key]) / max(1, int(legal_mask_by_case[key].sum().item())),
+            "target_counts": counts_by_case[key]}
+            for key in legal_mask_by_case}
+        coverage = min(item["coverage_fraction"] for item in coverage_by_case.values())
+        if any(any(item["target_counts"][name] < 1 for name in ("u", "b", "p")) or
+                item["coverage_fraction"] < minimum_coverage_fraction
+                for item in coverage_by_case.values()):
+            raise ValueError("a composite Plan A case lacks U/B/P labels or its own legal-mask coverage floor")
+    else:
+        coverage = len(visited_cells) / max(1, legal_cell_count)
+        coverage_by_case = None
+        if coverage < minimum_coverage_fraction:
+            raise ValueError("P executed paths do not meet the configured legal-grid coverage floor")
     if any(counts[key] < 1 for key in ("u", "b", "p")):
         raise ValueError("joint datasets require estimable U, B, and non-tied oracle P targets")
-    if coverage < minimum_coverage_fraction:
-        raise ValueError("P executed paths do not meet the configured legal-grid coverage floor")
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during joint Plan A fitting")
     from .meco_counterfactual import PLAN_A_LEGAL_NODE_DATASET_SCHEMA, PLAN_A_LEGAL_NODE_TARGET_SCHEMA
@@ -4136,13 +4546,13 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
     payload = {"schema": PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA, "schema_version": 1,
         "artifact_kind": "weights_only_plan_a_joint_u_b_p_v1", "track": track,
         "model_schema_version": 1, "model": model.state_dict(),
-        "legal_dataset_path": str(Path(legal_dataset).resolve()),
-        "source_dataset_path": str(Path(source_dataset).resolve()),
-        "p_dataset_path": str(Path(p_dataset).resolve()),
+        "legal_dataset_path": (None if composite_mode else str(Path(legal_dataset).resolve())),
+        "source_dataset_path": (None if composite_mode else str(Path(source_dataset).resolve())),
+        "p_dataset_path": (None if composite_mode else str(Path(p_dataset).resolve())),
         "legal_dataset_sha256": ub_data_sha, "legal_manifest_sha256": ub_manifest_sha,
         "p_dataset_sha256": p_data_sha, "p_manifest_sha256": p_manifest_sha,
-        "source_dataset_sha256": ub_manifest["source_dataset_sha256"],
-        "source_manifest_sha256": ub_manifest["source_manifest_sha256"],
+        "source_dataset_sha256": (None if composite_mode else ub_manifest["source_dataset_sha256"]),
+        "source_manifest_sha256": (None if composite_mode else ub_manifest["source_manifest_sha256"]),
         "legal_dataset_schema": PLAN_A_LEGAL_NODE_DATASET_SCHEMA,
         "legal_target_schema": PLAN_A_LEGAL_NODE_TARGET_SCHEMA,
         "p_dataset_schema": PLAN_A_P_ROUTE_ORACLE_DATASET_SCHEMA,
@@ -4177,12 +4587,31 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
         "updates": updates, "learning_rate": learning_rate,
         "joint_loss_history": history,
         "optimizer_state_included": False, "resume_compatible": False}
+    if composite_mode:
+        case_set_sha256 = _canonical_hash([[case["case_key"][0], case["case_key"][1], case["seeds"]]
+            for case in composite_case_shards])
+        payload.update({"schema": PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA,
+            "schema_version": 1, "artifact_kind": "weights_only_plan_a_multicase_joint_u_b_p_v1",
+            "descriptor_sha256": composite_descriptor_sha256,
+            "case_set_sha256": case_set_sha256, "case_bindings": case_records,
+            "case_coverage": coverage_by_case,
+            "combined_inputs": {"trajectory": pooled_source, "ub": pooled_ub, "p": pooled_p},
+            "dataset_sha256_by_family": {"u_b": ub_data_sha, "p": p_data_sha},
+            "dataset_manifest_sha256_by_family": {"u_b": ub_manifest_sha, "p": p_manifest_sha},
+            "p_route_legal_xy_coverage_by_case": coverage_by_case,
+            "batch_schedule": "exact join by scenario/category/seed/decision_index; no cycling or cross-case target pairing",
+            "steps_per_epoch": len(ub_samples)})
+        for key in ("legal_dataset_path", "source_dataset_path", "p_dataset_path",
+                "source_dataset_sha256", "source_manifest_sha256", "legal_dataset_sha256",
+                "legal_manifest_sha256", "p_dataset_sha256", "p_manifest_sha256"):
+            payload.pop(key, None)
     output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output)
     validate_plan_a_joint_ubp_artifact(track, output,
         qualification_protocol=qualification_protocol, expected_sources=sources,
         expected_prediction_mode=ub_manifest["prediction_mode"])
-    return {"path": str(output), "schema": PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA,
+    return {"path": str(output), "schema": (PLAN_A_MULTICASE_UBP_WEIGHTS_SCHEMA
+            if composite_mode else PLAN_A_JOINT_UBP_WEIGHTS_SCHEMA),
         "u_target_count": counts["u"], "b_pair_count": counts["b"],
         "p_route_pair_count": counts["p"], "p_route_coverage": coverage,
         "joint_loss_history": history}

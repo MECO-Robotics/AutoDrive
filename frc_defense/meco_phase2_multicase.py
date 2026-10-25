@@ -25,7 +25,8 @@ ACTION_TICKS = C_FIXED["action_ticks"]
 HORIZON_TICKS = C_FIXED["horizon_ticks"]
 CANDIDATE_K = C_FIXED["candidate_k"]
 A_SETTINGS = {"p_cost_scale": 1.0, "intervention_maps": 3,
-    "updates": 10, "learning_rate": 1e-4}
+    "updates": 10, "learning_rate": 1e-4, "route_margin": 0.02,
+    "map_regularization": 0.001, "minimum_coverage_fraction": 0.01}
 
 
 def _digest(value) -> str:
@@ -528,12 +529,14 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
             raise ValueError(f"case {family} target does not bind the exact trajectory shard")
         rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
         for row in rows:
-            if ((row.get("scenario_id"), row.get("category")) != expected_key or
-                    row.get("seed") not in shard["seeds"] or
-                    row.get("protocol_id") != descriptor["qualification_protocol"]["id"] or
-                    row.get("qualification_protocol_sha256") != descriptor["qualification_protocol"]["sha256"] or
-                    row.get("source_identity_sha256") != _digest(descriptor["runtime_source_identity"]) or
-                    row.get("device") != device):
+            identity_ok = ((row.get("scenario_id"), row.get("category")) == expected_key and
+                row.get("seed") in shard["seeds"])
+            metadata_ok = (family == "ub" or (
+                row.get("protocol_id") == descriptor["qualification_protocol"]["id"] and
+                row.get("qualification_protocol_sha256") == descriptor["qualification_protocol"]["sha256"] and
+                row.get("source_identity_sha256") == _digest(descriptor["runtime_source_identity"]) and
+                row.get("device") == device))
+            if not identity_ok or not metadata_ok:
                 raise ValueError(f"case {family} rows drift from their source manifest")
     return receipt
 
@@ -575,8 +578,87 @@ def collect_case_complete_set(case: dict, output_root: Path, *, lease_attestatio
     return record
 
 
-def execute_multicase(descriptor: dict, *, collect_case, combine_target,
-        fit_combined, validate_track, target_validators=None,
+def fit_multicase_warm_starts(combined, artifact_paths, *, descriptor, shard_receipts):
+    """Fit all five native composite artifacts from strict original case shards."""
+    from . import meco_supervised
+    from .curriculum_training import source_identity
+    validate_multicase_descriptor(descriptor)
+    if not isinstance(shard_receipts, list) or len(shard_receipts) != len(descriptor["ordered_cases"]):
+        raise ValueError("composite fitter requires every ordered case receipt")
+    c_shards, a_shards = [], []
+    for case, receipt in zip(descriptor["ordered_cases"], shard_receipts):
+        datasets = receipt.get("datasets", {})
+        if receipt.get("case_key") != [case["scenario_id"], case["category"]] or receipt.get("seeds") != case["seeds"]:
+            raise ValueError("fitter shard receipt differs from frozen case ordering")
+        c_shards.append({"path": datasets["trajectory"]["path"]})
+        a_shards.append({"case_key": [case["scenario_id"], case["category"]],
+            "seeds": list(case["seeds"]), "source_dataset": datasets["trajectory"]["path"],
+            "legal_dataset": datasets["ub"]["path"], "p_dataset": datasets["p"]["path"]})
+    expected_cases = descriptor["ordered_cases"]
+    sources = source_identity()
+    for track in MECO_TRACKS:
+        output = Path(artifact_paths[track])
+        if track in ("C1", "C2"):
+            meco_supervised.warm_start_counterfactual_composite_v1(track, c_shards,
+                output, expected_cases=expected_cases,
+                qualification_protocol=Path(descriptor["qualification_protocol"]["path"]),
+                updates=descriptor["c_settings"]["updates"],
+                learning_rate=descriptor["c_settings"]["learning_rate"],
+                device=descriptor["device"], descriptor_sha256=descriptor["descriptor_sha256"],
+                combined_inputs=combined["trajectory"])
+        else:
+            meco_supervised.warm_start_plan_a_joint_ubp_v1(track, None, None, None,
+                output, qualification_protocol=Path(descriptor["qualification_protocol"]["path"]),
+                updates=descriptor["a_settings"]["updates"],
+                learning_rate=descriptor["a_settings"]["learning_rate"],
+                device=descriptor["device"],
+                route_margin=descriptor["a_settings"]["route_margin"],
+                map_regularization=descriptor["a_settings"]["map_regularization"],
+                minimum_coverage_fraction=descriptor["a_settings"]["minimum_coverage_fraction"],
+                composite_case_shards=a_shards,
+                composite_descriptor_sha256=descriptor["descriptor_sha256"],
+                composite_combined_inputs=combined)
+        payload = meco_supervised.validate_warm_start_artifact(track, output,
+            qualification_protocol=Path(descriptor["qualification_protocol"]["path"]),
+            expected_sources=sources, expected_prediction_mode=descriptor["prediction_mode"])
+        if (payload.get("case_set_sha256") != descriptor["case_set_sha256"] or
+                payload.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
+                payload.get("track") != track):
+            raise ValueError(f"{track} composite fitter did not preserve the frozen case set")
+    return {"descriptor_sha256": descriptor["descriptor_sha256"],
+        "case_set_sha256": descriptor["case_set_sha256"],
+        "combined_inputs": combined,
+        "fit_schema": SCHEMA + ".native-composite-fit-v1",
+        "case_shard_bindings": [{"case_key": receipt["case_key"],
+            "seeds": receipt["seeds"], "receipt_sha256": _digest(receipt)}
+            for receipt in shard_receipts]}
+
+
+def validate_multicase_warm_start_track(track, artifact_path, combined, *, descriptor):
+    """Validate one concrete composite artifact and seal a five-track receipt."""
+    from . import meco_supervised
+    from .curriculum_training import source_identity
+    if track not in MECO_TRACKS:
+        raise ValueError("unknown MECO track")
+    payload = meco_supervised.validate_warm_start_artifact(track, Path(artifact_path),
+        qualification_protocol=Path(descriptor["qualification_protocol"]["path"]),
+        expected_sources=source_identity(), expected_prediction_mode=descriptor["prediction_mode"])
+    digest = _sha(Path(artifact_path).read_bytes())
+    if (payload.get("track") != track or
+            payload.get("case_set_sha256") != descriptor["case_set_sha256"] or
+            payload.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
+        raise ValueError(f"{track} composite artifact does not bind the declared cases")
+    return {"track": track, "artifact_sha256": digest,
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "case_set_sha256": descriptor["case_set_sha256"],
+        "combined_inputs": combined,
+        "artifact_schema": payload.get("schema"),
+        "phase2_ready": False, "phase2_complete": False,
+        "qualification_eligible": False}
+
+
+def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=None,
+        fit_combined=None, validate_track=None, target_validators=None,
         lease_factory=None, device_identity_verifier=None) -> dict:
     """Run serial shards and pooled fitting under one verified device lease."""
     validate_multicase_descriptor(descriptor)
@@ -593,6 +675,12 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
         raise ValueError("exclusive lease and indexed WX9100 identity verifier are required")
     if collect_case is None:
         collect_case = collect_case_complete_set
+    production_fitter = fit_combined is None
+    production_validator = validate_track is None
+    if production_fitter:
+        fit_combined = fit_multicase_warm_starts
+    if production_validator:
+        validate_track = validate_multicase_warm_start_track
     if root.exists() and (root.is_symlink() or not root.is_dir()):
         raise ValueError("multi-case campaign root is not a safe directory")
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -716,7 +804,9 @@ def execute_multicase(descriptor: dict, *, collect_case, combine_target,
         artifact_paths = {track: Path(descriptor["outputs"]["bundle"][track]) for track in MECO_TRACKS}
         for path in artifact_paths.values():
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fit_receipt = fit_combined(combined, artifact_paths, descriptor=descriptor)
+        fit_receipt = (fit_combined(combined, artifact_paths, descriptor=descriptor,
+            shard_receipts=shard_receipts) if production_fitter else
+            fit_combined(combined, artifact_paths, descriptor=descriptor))
         if not isinstance(fit_receipt, dict) or fit_receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or fit_receipt.get("combined_inputs") != expected_combined:
             raise ValueError("combined fitter receipt is not bound to current pooled target bytes")
         validator_receipts = {}

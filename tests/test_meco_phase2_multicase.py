@@ -296,3 +296,74 @@ def test_composite_counterfactual_reader_namespaces_repeated_seed_by_case(tmp_pa
     assert aggregate["cases"][0]["case_key"] == ["s1", "single"]
     assert reference["scenario_id"] == "s1"
     assert len(manifests) == 2
+
+
+def test_composite_c_pair_counts_treat_unstable_labels_as_abstentions():
+    from frc_defense import meco_supervised
+    row = {"plan_c_counterfactuals": [{}, {}, {}],
+        "plan_c_pairwise_labels": [{"stable_preference": True},
+            {"stable_preference": False}, {"stable_preference": False}]}
+    assert meco_supervised._count_composite_plan_c_pairs([row]) == (1, 2)
+    row["plan_c_pairwise_labels"][1]["stable_preference"] = 0
+    with pytest.raises(ValueError, match="boolean stable_preference"):
+        meco_supervised._count_composite_plan_c_pairs([row])
+
+
+def test_plan_a_composite_alignment_joins_case_seed_decision_and_separate_masks():
+    import torch
+    from types import SimpleNamespace
+    from frc_defense import meco_supervised
+    cases = [{"case_key": ["s1", "single"], "seeds": [1]},
+        {"case_key": ["s2", "pair"], "seeds": [1]}]
+    ub_by_case, p_by_case = [], []
+    for case, mask in zip(cases, (torch.tensor([[1, 0], [1, 0]], dtype=torch.bool),
+            torch.tensor([[1, 1], [1, 0]], dtype=torch.bool))):
+        key = tuple(case["case_key"])
+        row = {"scenario_id": key[0], "category": key[1], "seed": 1, "decision_index": 0}
+        lookup = torch.where(mask, torch.zeros_like(mask, dtype=torch.long),
+            torch.full_like(mask, -1, dtype=torch.long))
+        ub_by_case.append([{"row": row, "graph": SimpleNamespace(lookup=lookup.unsqueeze(0))}])
+        p_by_case.append([{"row": row, "legal_xy_mask": mask}])
+    aligned, coverage = meco_supervised._align_plan_a_ubp_composite_samples(
+        cases, ub_by_case, p_by_case)
+    assert len(aligned) == 2
+    assert [item["case_key"] for item in coverage] == [["s1", "single"], ["s2", "pair"]]
+    p_by_case[1][0]["row"] = {**p_by_case[1][0]["row"], "decision_index": 1}
+    with pytest.raises(ValueError, match="exact matching"):
+        meco_supervised._align_plan_a_ubp_composite_samples(cases, ub_by_case, p_by_case)
+
+
+def test_default_native_composite_fit_adapter_routes_all_five_tracks(tmp_path, monkeypatch):
+    from frc_defense import meco_supervised
+    descriptor = {"descriptor_sha256": "d" * 64, "case_set_sha256": "k" * 64,
+        "ordered_cases": [{"scenario_id": "s", "category": "c", "seeds": [1]}],
+        "qualification_protocol": {"path": str(tmp_path / "protocol.json")},
+        "prediction_mode": "cv", "device": "cuda:0",
+        "c_settings": {"updates": 2, "learning_rate": .001},
+        "a_settings": {"updates": 3, "learning_rate": .002, "route_margin": .02,
+            "map_regularization": .001, "minimum_coverage_fraction": .01}}
+    monkeypatch.setattr(multi, "validate_multicase_descriptor", lambda value: value)
+    monkeypatch.setattr("frc_defense.curriculum_training.source_identity", lambda: {"source": "x"})
+    calls = []
+    def fake_c(track, shards, output, **kwargs):
+        calls.append((track, "C", shards, kwargs))
+        Path(output).write_bytes(track.encode())
+    def fake_a(track, *args, **kwargs):
+        calls.append((track, "A", kwargs["composite_case_shards"], kwargs))
+        Path(args[3]).write_bytes(track.encode())
+    monkeypatch.setattr(meco_supervised, "warm_start_counterfactual_composite_v1", fake_c)
+    monkeypatch.setattr(meco_supervised, "warm_start_plan_a_joint_ubp_v1", fake_a)
+    monkeypatch.setattr(meco_supervised, "validate_warm_start_artifact",
+        lambda track, path, **kwargs: {"track": track, "case_set_sha256": "k" * 64,
+            "descriptor_sha256": "d" * 64})
+    paths = {track: tmp_path / f"{track}.pt" for track in multi.MECO_TRACKS}
+    combined = {name: {"path": f"/{name}", "sha256": name, "manifest_path": f"/{name}.m",
+        "manifest_sha256": name + "m"} for name in ("trajectory", "ub", "p")}
+    receipt = {"case_key": ["s", "c"], "seeds": [1], "datasets": {
+        family: {"path": f"/{family}"} for family in ("trajectory", "ub", "p")}}
+    result = multi.fit_multicase_warm_starts(combined, paths, descriptor=descriptor,
+        shard_receipts=[receipt])
+    assert result["combined_inputs"] == combined
+    assert [call[0] for call in calls] == list(multi.MECO_TRACKS)
+    assert [call[1] for call in calls] == ["A", "A", "A", "C", "C"]
+    assert result["case_shard_bindings"][0]["case_key"] == ["s", "c"]

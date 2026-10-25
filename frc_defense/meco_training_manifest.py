@@ -592,6 +592,11 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("all supplied warm starts must bind the current source, protocol and track")
     multicase_binding = _validate_multicase_warm_start_binding(
         config.get("multicase_warm_start_binding"), warm_artifacts, warm)
+    composite_schemas = {"meco-counterfactual-multicase-composite-weights-v1",
+        "meco-counterfactual-plan-a-multicase-joint-u-b-p-weights-v1"}
+    if (any(item.get("artifact_schema") in composite_schemas for item in warm.values()) and
+            multicase_binding is None):
+        raise ValueError("composite five-track warm starts require their case-set bundle binding")
     schedule = config.get("scheduler")
     if not isinstance(schedule, dict) or schedule.get("master_seed") != base_seed:
         raise ValueError("scheduler must explicitly bind the protocol master seed")
@@ -826,6 +831,11 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
     binding = _validate_multicase_warm_start_binding(
         manifest.get("multicase_warm_start_binding"),
         {track: item.get("path") for track, item in warm.items()}, warm)
+    composite_schemas = {"meco-counterfactual-multicase-composite-weights-v1",
+        "meco-counterfactual-plan-a-multicase-joint-u-b-p-weights-v1"}
+    if (any(item.get("artifact_schema") in composite_schemas for item in warm.values()) and
+            binding is None):
+        raise ValueError("composite five-track warm starts require their case-set bundle binding")
     if binding != manifest.get("multicase_warm_start_binding"):
         raise ValueError("multi-case warm-start binding is not canonical")
     if any(present_warm_starts) and not all(present_warm_starts):
