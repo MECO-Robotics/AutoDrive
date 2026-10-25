@@ -370,7 +370,7 @@
     {
       "graph_sha256": "e71a155a4675bfb65186763036a2e8824e20a6f9b3d75f038e9e1d6a0ebcaa6a",
       "id": "production_pose_lattice_8heading_100x80",
-      "purpose": "Open-field 8-heading pose-lattice shape, 64,000 nodes \u00d7 10 slots",
+      "purpose": "Open-field 8-heading pose-lattice shape, 64,000 nodes × 10 slots",
       "recipe": {
         "kind": "open_pose_lattice_v1",
         "node_count": 64000,
@@ -402,20 +402,20 @@
     }
   ],
   "fixture_set": "plan_a_exact_heap_parity_v1",
-  "manifest_payload_sha256": "d8db6d61627d7575551684e615804b7ae2d4b94ba060fa80575aab8dd869de85",
   "schema_version": 1,
   "source_sha256": {
-    "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "0301f9ea627d07cdf405e211ba658c3b6b33e3be21090086e3be8db35af6c8af",
-    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "6dba4f1f7a6ac580752c73948fb0c62f1cedf3ee35d8036cfdfefa0d9610f8b2",
+    "frc_defense/meco_plan_a_shortest_path.py": "47a2b5d6ac8f7c74872bb3cc4c2a777ed1a6148e949b6a0315c7f48464a8b024",
+    "frc_defense/meco_pose_graph.py": "62251b6cac235207fc669293bf792e73f1ecf7ce2586099ddb7616a7f8f31b67",
+    "frc_defense/meco_plan_a_policy.py": "21d18e39043546390dbbeecced9eafbd5e39941ded0247ce0e144aea3519ec54",
+    "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp": "959dc37cd87892a9f01fd9b7448ccf396dfcf5edd1064843d2b767d3290680a2",
+    "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu": "b52f6093b77d95ed8aac189905ed961fe0bec0447570601f7062f4b36e01d906",
+    "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",
     "frc_defense/meco_device_lease.py": "ffb9f134086c614053f084fdf17ca55f37a3e54fca0412a0f8a7416220228597",
     "frc_defense/meco_gpu_attestation.py": "8d439ec511db33dc730a0214f074a94afd5977259bba7e4a1d9ac7231a7e9ffe",
-    "frc_defense/meco_plan_a_hip_fixture_graph.py": "e5b63f9373a90d159c21482d39c3f0d1fabc11767bbe735ae0c1fb64bbd7ce36",
-    "frc_defense/meco_plan_a_hip_parity_harness.py": "b8b95de9fbdf85185f2dd221119a51ca45ae7221786a645c8400c51510cf0185",
-    "frc_defense/meco_plan_a_policy.py": "d437c854ce6479fa1510626e39ed7cc0c14c8a043e02a0ac2c7624cc61668b81",
-    "frc_defense/meco_plan_a_shortest_path.py": "c3c2eccd52d24d050df8fcef41325001c7d91e108d16c98f4e5f990a84cd62e7",
-    "frc_defense/meco_plan_a_shortest_path_hip.py": "0295e866d4da3cbc495f1ba2cd4c1441e66c36cc82ae8b3f74b057a506363470",
-    "frc_defense/meco_pose_graph.py": "251b041e575e7a49ff65a0fc161947e2254ea0a1d223a6cb137388f75635fe0d",
-    "frc_defense/meco_training_manifest.py": "5867fd4e0af3da82fcbbbd5730d15b9b9af4cf312ace2de71728a9b27fef557f",
+    "frc_defense/meco_training_manifest.py": "00da7eb8d8887382af9e4a2c87a66e40c892c79ee28421748746a64cfcc5755f",
+    "frc_defense/meco_plan_a_hip_parity_harness.py": "4d495e7bbef4ffe67283ab83262889f9b262ce776a17aca7b87e43ef37824ad9",
     "scripts/verify_plan_a_hip_parity.py": "a5bb80095f8f2d3f9dc3a43e213c3fbd2f677abd72a3a51b6a0eb35354aaee97"
-  }
+  },
+  "manifest_payload_sha256": "c8c9acd391c8d2f46f5d4eef67f2c85f50eeb0fee27ce15598fa859d9111f131"
 }

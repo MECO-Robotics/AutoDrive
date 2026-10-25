@@ -165,6 +165,40 @@ def plan_a_support_digest_cpu_reference(support: PlanAActionSupport, graph) -> s
     return digest.hexdigest()
 
 
+def plan_a_hip_fixture_support_digest_cpu_reference(
+        support: PlanAActionSupport, graph) -> str:
+    """Preserve the v1 offline route-fixture digest, never used by live code.
+
+    These preweighted HIP parity fixtures do not model the live fixed-capacity
+    pose graph. Their historical digest binds their route tree and geometry;
+    the required graph-contract tensors are supplied for shape completeness,
+    but are deliberately outside this separately versioned fixture digest.
+    """
+    if graph.xy.device.type != "cpu":
+        raise RuntimeError("Plan A HIP fixture digest only accepts CPU artifacts")
+    digest = hashlib.sha256(SUPPORT_ORDER.encode())
+    digest.update(support.snapshot_id.encode())
+    root_node = (int(support.root_node.item()) if torch.is_tensor(support.root_node)
+                 else support.root_node)
+    root_connector = (float(support.root_connector_m.item())
+                      if torch.is_tensor(support.root_connector_m)
+                      else support.root_connector_m)
+    digest.update(f"root_node={root_node};root_connector_m={root_connector:.17g};"
+                  f"fallback_pair={support.fallback_pair}".encode())
+    digest.update(support.order_digest.encode())
+    fixture_only_names = {"lookup", "node_valid", "region_ids", "coarse_edges",
+                          "coarse_edge_mask", "graph_status"}
+    for name, tensor in _plan_a_support_tensors(support, graph).items():
+        if name in fixture_only_names:
+            continue
+        if tensor is None:
+            digest.update(f"{name}=none".encode())
+            continue
+        digest.update(name.encode())
+        digest.update(tensor.detach().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+
 def plan_a_support_order_digest(support: PlanAActionSupport, graph) -> str:
     """Bind scorer row order from immutable metadata without reading device data."""
     digest = hashlib.sha256()

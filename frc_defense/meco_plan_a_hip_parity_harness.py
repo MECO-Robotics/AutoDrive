@@ -151,7 +151,7 @@ def _support_digest(graph: dict, result: dict, case_id: str) -> str:
     """Digest a canonical one-behavior support over the fixture route tree."""
     import torch
     from .meco_plan_a_policy import (PlanAActionSupport,
-        plan_a_support_digest_cpu_reference)
+        plan_a_hip_fixture_support_digest_cpu_reference)
     if "xy" not in graph:
         # A geometry identity is required because the support digest binds the
         # graph endpoints, heading bins, edges and edge mask as well as route.
@@ -204,11 +204,19 @@ def _support_digest(graph: dict, result: dict, case_id: str) -> str:
         fallback_pair=reachable.index(fallback_node),
         goal_xy=xy_tensor, goal_heading=heading_tensor,
         snapshot_id=f"plan-a-hip-fixture-v1:{case_id}", support_digest="")
+    lookup = torch.full((8, node_count, 1), -1, dtype=torch.long)
+    lookup[heading_bins, torch.arange(node_count), 0] = torch.arange(node_count)
     graph_object = type("FixtureGraph", (), {
         "heading_bin": heading_bins, "xy": xy_tensor,
         "heading": heading_tensor, "edges": edges_tensor,
-        "edge_mask": mask_tensor})()
-    return plan_a_support_digest_cpu_reference(support, graph_object)
+        "edge_mask": mask_tensor,
+        "lookup": lookup,
+        "node_valid": torch.ones((1, node_count), dtype=torch.bool),
+        "region_ids": torch.zeros((1, node_count), dtype=torch.long),
+        "coarse_edges": torch.zeros((1, 64, 64), dtype=torch.long),
+        "coarse_edge_mask": torch.zeros((1, 64, 64), dtype=torch.bool),
+        "graph_status": torch.zeros((), dtype=torch.long)})()
+    return plan_a_hip_fixture_support_digest_cpu_reference(support, graph_object)
 
 
 def _fixture_result(root: Path) -> tuple[dict, list[dict]]:
