@@ -12,6 +12,7 @@ from frc_defense.experimental_route_evaluation import (
     evaluate_device_route_chunks,
     evaluate_device_routes,
     evaluate_routes,
+    make_device_route_chunk_map,
     RouteQuery,
 )
 import frc_defense.meco_candidates as meco_candidates
@@ -23,14 +24,62 @@ from types import SimpleNamespace
 from frc_defense.learning_contract import CandidateTable
 from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_WIDTH,
                                      SAFE_ACTION_FEATURES,
+                                     MECO_INPUT_NAMES, MECO_MAX_INFERENCE_AGE_S,
+                                     MecoInferenceRequest,
                                      MecoInferenceResponse,
                                      ProductionMecoAdapter, SafeActionCandidates,
                                      candidate_policy_logits,
                                      candidate_feature_tensor,
                                      build_safe_action_candidates,
                                      make_meco_track, sample_candidate_action,
-                                     make_meco_inference_request, score_candidates)
+                                     make_meco_inference_request,
+                                     ordered_candidate_order_digest, score_candidates)
+from frc_defense.meco_input_provenance import input_contract_digest
 from frc_defense.curriculum_scenarios import make_curriculum_env
+
+
+def test_plan_a_route_chunk_map_preserves_all_global_rows_without_truncation():
+    mapping = make_device_route_chunk_map(130, device="cpu")
+    assert mapping.spans == ((0, 64), (64, 128), (128, 130))
+    assert mapping.global_row.tolist() == list(range(130))
+    assert mapping.chunk_index.tolist() == [0] * 64 + [1] * 64 + [2] * 2
+    assert mapping.local_row.tolist() == list(range(64)) * 2 + [0, 1]
+
+
+def test_plan_a_route_chunk_map_keeps_empty_support_explicit():
+    mapping = make_device_route_chunk_map(0, device="cpu")
+    assert mapping.spans == ()
+    assert mapping.global_row.shape == (0,)
+    with pytest.raises(ValueError, match="contiguous"):
+        type(mapping)(1, ((1, 1),), torch.tensor([0]), torch.tensor([0]),
+                      torch.tensor([0]))
+
+
+@pytest.mark.parametrize("track", ("A1", "A2", "A3"))
+def test_plan_a_inference_request_keeps_dynamic_support_mask_device_resident(track):
+    captured = time.monotonic()
+    candidate_ids = tuple(f"plan-a-row:{i}" for i in range(24))
+    request = MecoInferenceRequest(track=track, snapshot_id="snapshot:plan-a",
+        checkpoint_sha256="a" * 64, protocol_id="plan-a-contract",
+        observation_schema=1, observation_timestamp=1.0,
+        capture_monotonic=captured, dispatch_monotonic=captured,
+        expires_monotonic=captured + MECO_MAX_INFERENCE_AGE_S,
+        input_names=MECO_INPUT_NAMES[track],
+        input_shapes=tuple((1, 6, 32, 32) if name == "raster" else
+            (1, 7) if name == "globals_" else (1, 64) if name == "hidden" else
+            (1, 24, 9) if name == "node_features" else
+            (1, 24, 4) if name == "edges" or name == "edge_mask" else
+            (1, 24) if name == "region_ids" else (1, 64, 4)
+            for name in MECO_INPUT_NAMES[track]),
+        candidate_ids=candidate_ids, valid_mask=(), fallback_index=-1,
+        request_sequence=1, generation_id="generation:plan-a",
+        candidate_mask_digest=ordered_candidate_order_digest(candidate_ids),
+        legal_pose_order_digest="b" * 64,
+        input_contract_sha256=input_contract_digest(), model_id=f"meco:{track}",
+        candidate_support_mode="device-mask")
+    assert request.valid_mask == ()
+    assert request.fallback_index == -1
+    assert request.candidate_support_mode == "device-mask"
 
 
 class _NoHostScalarSync(TorchDispatchMode):

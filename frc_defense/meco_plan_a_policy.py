@@ -35,11 +35,15 @@ class PlanAActionSupport:
     ancestor_jumps: torch.Tensor  # [ceil(log2 N)+1,N], binary-lifting parent table
     root_node: int
     root_connector_m: float
+    # `fallback_pair` remains for old serialized test fixtures. Runtime
+    # selection uses the device tensor so choosing a fallback does not read a
+    # CUDA/HIP scalar before the action boundary.
     fallback_pair: int
     goal_xy: torch.Tensor       # [N,2], frozen legal node endpoints
     goal_heading: torch.Tensor  # [N], frozen legal SE(2) heading endpoints
     snapshot_id: str
     support_digest: str
+    fallback_pair_tensor: torch.Tensor | None = None
 
     @property
     def pair_count(self):
@@ -301,26 +305,18 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
         raise PlanAEmptySupportError(diagnostic)
     # Use the closest graph pose with any deterministic executable behavior,
     # then its first valid descriptor in canonical order.
-    if torch.is_tensor(physical_distances):
-        # torch.argmin returns the first minimum, preserving the canonical
-        # node-index tie break. The first nonzero slot preserves behavior order.
-        fallback_node = physical_distances.masked_fill(
-            ~valid_matrix.any(dim=-1), torch.inf).argmin()
-        fallback_slot = torch.nonzero(valid_matrix[fallback_node],
-                                      as_tuple=False)[0, 0]
-        fallback_pair = int((fallback_node * valid_matrix.shape[1] +
-                             fallback_slot).item())
-        parent_tensor = torch.where(parents >= 0, parents,
-                                    torch.full_like(parents, root))
-    else:
-        valid_matrix_values = valid_matrix.detach().cpu().tolist()
-        from .meco_plan_a_shortest_path import plan_a_fallback_pair
-        fallback_distances = torch.tensor(physical_distances,
-            dtype=graph.xy.dtype).tolist()
-        fallback_pair = plan_a_fallback_pair(valid_matrix_values,
-                                             fallback_distances)
-        parent_tensor = torch.tensor([p if p >= 0 else root for p in parents],
-                                     device=device, dtype=torch.long)
+    physical_tensor = (physical_distances.to(device=device, dtype=graph.xy.dtype)
+        if torch.is_tensor(physical_distances) else
+        torch.tensor(physical_distances, device=device, dtype=graph.xy.dtype))
+    # argmin gives the first node on ties; argmax over 0/1 slots gives the
+    # first behavior/descriptor in canonical order.
+    fallback_node = physical_tensor.masked_fill(
+        ~valid_matrix.any(dim=-1), torch.inf).argmin()
+    fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
+    fallback_pair_tensor = fallback_node * valid_matrix.shape[1] + fallback_slot
+    fallback_pair = -1
+    parent_tensor = torch.where(parents >= 0, parents,
+                                torch.full_like(parents, root))
     jumps = [parent_tensor]
     while (1 << len(jumps)) < n:
         previous = jumps[-1]
@@ -350,7 +346,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
         fallback_pair=fallback_pair,
         goal_xy=graph.xy.detach().clone(),
         goal_heading=graph.heading.detach().clone(), snapshot_id=snapshot_id,
-        support_digest="")
+        support_digest="", fallback_pair_tensor=fallback_pair_tensor.reshape(()))
     return PlanAActionSupport(**{
         **support.__dict__,
         "support_digest": plan_a_support_digest(support, graph),

@@ -314,7 +314,8 @@ class ProductionMecoAdapter:
                         ({support_key} if candidate_mask is not None else set()))):
                 return None
             if (request.candidate_support_mode == "device-mask" and
-                    (self.track not in ("C1", "C2") or candidate_mask is None)):
+                    (self.track not in ("A1", "A2", "A3", "C1", "C2")
+                     or candidate_mask is None)):
                 return None
             tensors = tuple(model_inputs[name] for name in request.input_names)
             if tuple(tuple(t.shape) for t in tensors) != request.input_shapes:
@@ -323,7 +324,10 @@ class ProductionMecoAdapter:
                 return None
             if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
-            device_validity_mode = self.track in ("C1", "C2")
+            # Device-mask requests keep the dynamic support mask and numeric
+            # validity predicates on the scoring device for both Plan A and C.
+            # Table-mask requests retain the established synchronous contract.
+            device_validity_mode = request.candidate_support_mode == "device-mask"
             inference_valid = None
             if device_validity_mode:
                 # Plan C device-mask requests cannot synchronize dynamic CUDA
@@ -351,7 +355,7 @@ class ProductionMecoAdapter:
                     return None
             by_name = dict(zip(request.input_names, safe_tensors))
             if candidate_mask is not None:
-                if (self.track not in ("C1", "C2") or request.candidate_support_mode != "device-mask"
+                if (request.candidate_support_mode != "device-mask"
                         or not isinstance(candidate_mask, torch.Tensor)
                         or candidate_mask.dtype != torch.bool
                         or candidate_mask.device != self.device

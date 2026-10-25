@@ -6,7 +6,7 @@ or relaxes the simulator's existing action legality and safety checks.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 from functools import wraps
@@ -32,6 +32,8 @@ from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, 
     RouteFeasibleCandidates, build_route_feasible_candidates,
     materialize_device_candidate_evidence)
 from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
+from .experimental_route_evaluation import (DeviceRouteQuery,
+    evaluate_device_route_chunks)
 from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, plan_a_ppo_contract_metadata,
     integrate_frozen_routes, project_pose_penalty)
@@ -39,7 +41,7 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     make_meco_track, ProductionMecoAdapter, MecoInferenceRequest,
     MECO_INPUT_NAMES, MECO_INFERENCE_SCHEMA, MECO_MAX_INFERENCE_AGE_S,
     candidate_policy_logits, categorical_from_candidate_logits,
-    ordered_candidate_mask_digest,
+    ordered_candidate_mask_digest, ordered_candidate_order_digest,
     managed_meco_adapters,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
     candidate_digest, opponent_forecast, opponent_risk_penalty, prediction_contract, PREDICTION_MODES,
@@ -1082,14 +1084,17 @@ def _apply_plan_a_path_cost(track, decision, candidate_set, route_cost, risk_cos
 
 def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
                    route_nodes=None, risk_nodes=None, planner=None,
-                   penalty_map=None):
+                   penalty_map=None, route_batch=None):
     """Score all frozen node × behavior pairs with current U, P and behavior heads."""
     planner = (env.planner if env is not None else planner)
     logits = gather_pose_behavior_logits(track, raw, graph, raster, support,
         field_length=(float(env.sim.field_length) if env is not None else float(planner.length)),
         field_width=(float(env.sim.field_width) if env is not None else float(planner.width)))
     node_count = graph.node_count
-    eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1) if env is not None else None
+    eta = ((route_batch.distance_m.to(dtype=support.route_cost.dtype) /
+            max(float(env.sim.speed[0, 3]), .1)) if route_batch is not None else
+           support.route_cost / max(float(env.sim.speed[0, 3]), .1)
+           if env is not None else None)
     route = (eta * float(config.route_cost_points_per_second) if route_nodes is None
              else route_nodes)
     risk = torch.zeros_like(route) if risk_nodes is None else risk_nodes
@@ -1097,7 +1102,13 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
         risk, _ = _plan_a_prediction_risk(env, support, eta,
                                           config.prediction_mode)
     path_cost = torch.zeros_like(route)
-    if config.p_mode == "learned":
+    if route_batch is not None and config.p_mode == "learned":
+        learned_integral = route_batch.learned_cost_grid_edges
+        if learned_integral is None:
+            raise RuntimeError("shared Plan A route batch omitted learned P integral")
+        path_cost = learned_integral.to(dtype=route.dtype) * (
+            config.p_cost_scale * config.p_points_per_grid_edge)
+    elif route_batch is None and config.p_mode == "learned":
         if penalty_map is None:
             field_length = (float(env.sim.field_length) if env is not None
                             else float(planner.length))
@@ -1113,6 +1124,32 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
     pair_node = support.pair_node_ids
     logits = logits - route[pair_node] - risk[pair_node] - path_cost[pair_node]
     return logits.masked_fill(~support.valid_mask, -torch.inf), path_cost
+
+
+def _plan_a_route_support(env, graph, support, snapshot_id, penalty_map, config):
+    """Evaluate every canonical Plan A node through the shared 64-row API."""
+    queries = tuple(DeviceRouteQuery(
+        candidate_id=f"plan-a-node:{node}", snapshot_id=snapshot_id,
+        world=0, slot=3) for node in range(support.goal_xy.shape[0]))
+    kwargs = {}
+    if config.p_mode == "learned":
+        if penalty_map is None:
+            raise RuntimeError("learned Plan A routes require the current P map")
+        kwargs.update(learned_traversal_cost=penalty_map,
+                      learned_cost_scale=1.,
+                      learned_cost_provenance="plan_a_current_P_v1")
+    routes = evaluate_device_route_chunks(env, queries, support.goal_xy, **kwargs)
+    route_legal = routes.feasible
+    valid_matrix = support.valid_mask.reshape(-1, 8) & route_legal[:, None]
+    pair_mask = valid_matrix.reshape(-1)
+    fallback_node = routes.distance_m.to(support.distances_m.dtype).masked_fill(
+        ~valid_matrix.any(-1), torch.inf).argmin()
+    fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
+    fallback_pair = fallback_node * valid_matrix.shape[1] + fallback_slot
+    updated = replace(support, valid_mask=pair_mask,
+        fallback_pair_tensor=fallback_pair.reshape(()), support_digest="")
+    updated = replace(updated, support_digest=plan_a_support_digest(updated, graph))
+    return updated, routes
 
 
 def _plan_a_prediction_risk(env, support, eta, prediction_mode):
@@ -1237,19 +1274,17 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     inference_request = None
     inference_handle = None
     response = None
+    inference_valid_device = None
     if isinstance(model, ProductionMecoAdapter):
         hidden_input = (hidden_before if hidden_before is not None else
                         raster.new_zeros((raster.shape[0], 64)))
         model_inputs = {"raster": raster, "globals_": globals_, "hidden": hidden_input}
         model_inputs.update(graph_data or {})
         ordered_inputs = {name: model_inputs[name] for name in MECO_INPUT_NAMES[track]}
-        pair_nodes = support.pair_node_ids.detach().cpu().tolist()
-        behaviors = support.behavior_ids.detach().cpu().tolist()
-        descriptors = support.descriptor_ids.detach().cpu().tolist()
-        candidate_ids = tuple(f"node:{node}:behavior:{behavior}:descriptor:{descriptor}"
-                              for node, behavior, descriptor in zip(pair_nodes, behaviors, descriptors))
-        candidate_mask = tuple(bool(value) for value in
-                               support.valid_mask.detach().cpu().tolist())
+        # Stable IDs are derived from the canonical support row order; dynamic
+        # descriptors and legality stay in device tensors.
+        candidate_ids = tuple(f"plan-a-row:{index}"
+                              for index in range(support.pair_count))
         request_dispatch = time.monotonic()
         request = None
         if request_dispatch <= safe.observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
@@ -1269,18 +1304,21 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     input_shapes=tuple(tuple(ordered_inputs[name].shape)
                                        for name in MECO_INPUT_NAMES[track]),
                     candidate_ids=candidate_ids,
-                    valid_mask=candidate_mask,
-                    fallback_index=support.fallback_pair,
+                    valid_mask=(),
+                    fallback_index=-1,
                     request_sequence=request_sequence, generation_id=generation_id,
-                    candidate_mask_digest=ordered_candidate_mask_digest(
-                        candidate_ids, candidate_mask),
+                    candidate_mask_digest=ordered_candidate_order_digest(candidate_ids),
                     input_contract_sha256=input_contract_sha256,
                     legal_pose_order_digest=support.support_digest,
-                    model_id=f"meco:{track}")
+                    model_id=f"meco:{track}",
+                    candidate_support_mode="device-mask")
             except Exception:
                 request = None
         if request is not None:
-            inference_handle = model.submit_inference(request, ordered_inputs)
+            inference_handle = model.submit_inference(request, {
+                **ordered_inputs,
+                "__candidate_valid_mask": support.valid_mask[None],
+            })
         if track == "A1":
             utility_shape = (1, 8, *raster.shape[-2:])
         else:
@@ -1303,10 +1341,14 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         p_mode=p_mode, p_cost_scale=p_cost_scale,
         p_points_per_grid_edge=p_points_per_grid_edge,
         prediction_mode=prediction_mode)
+    support, route_batch = _plan_a_route_support(env, graph, support,
+        safe.observation.snapshot_id, penalty_map, config)
     logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
                                        graph, raster, env, config,
-                                       penalty_map=penalty_map)
-    eta = support.route_cost / max(float(env.sim.speed[0, 3]), .1)
+                                       penalty_map=penalty_map,
+                                       route_batch=route_batch)
+    eta = route_batch.distance_m.to(support.route_cost.dtype) / max(
+        float(env.sim.speed[0, 3]), .1)
     route_nodes = eta * float(route_cost_points_per_second)
     risk_nodes, prediction_metadata = _plan_a_prediction_risk(
         env, support, eta, config.prediction_mode)
@@ -1335,14 +1377,29 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             and time.monotonic() <= request.expires_monotonic)
         if response_valid:
             raw = response.outputs
+            inference_valid_device = raw.get("__inference_valid")
+            if (not isinstance(inference_valid_device, torch.Tensor) or
+                    inference_valid_device.numel() != 1 or
+                    inference_valid_device.device != torch.device(env.device)):
+                response_valid = False
+                inference_valid_device = None
+        if response_valid:
+            raw = response.outputs
             seed_decision = {"raw": raw, "hidden": raw["hidden"]}
             penalty_map = None
             if p_mode == "learned":
                 penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
                     env.planner, float(env.sim.field_length), float(env.sim.field_width),
                     mode="learned")
+            support, route_batch = _plan_a_route_support(env, graph, support,
+                safe.observation.snapshot_id, penalty_map, config)
             logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
-                env, config, penalty_map=penalty_map)
+                env, config, penalty_map=penalty_map, route_batch=route_batch)
+            eta = route_batch.distance_m.to(support.route_cost.dtype) / max(
+                float(env.sim.speed[0, 3]), .1)
+            route_nodes = eta * float(route_cost_points_per_second)
+            risk_nodes, prediction_metadata = _plan_a_prediction_risk(
+                env, support, eta, config.prediction_mode)
         else:
             production_inference_failed = True
         inference_provenance = {"schema": MECO_INFERENCE_SCHEMA,
@@ -1360,17 +1417,47 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             "expires_monotonic": request.expires_monotonic if request else None,
             "status": "accepted" if response_valid else "deterministic_fallback",
             "counters": model.inference_counters}
-    finite_decision = bool(torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all())
-    fallback_used = production_inference_failed or not finite_decision
-    fallback_reason = ("policy_inference_fallback" if production_inference_failed else
-                       "nonfinite_policy_decision" if not finite_decision else None)
-    if not finite_decision:
-        action = torch.tensor([support.fallback_pair], device=env.device, dtype=torch.long)
-        logprob = torch.zeros((1,), device=env.device, dtype=logits.dtype)
-        entropy = torch.zeros_like(logprob)
-    else:
-        action, logprob, entropy = sample_candidate_action(logits[None],
-            deterministic=(True if production_inference_failed else deterministic))
+    decision_valid = torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all()
+    if inference_valid_device is not None:
+        decision_valid = decision_valid & inference_valid_device.reshape(()).bool()
+    fallback_logits = torch.full_like(logits, -torch.inf)
+    fallback_logits = fallback_logits.scatter(0,
+        support.fallback_pair_tensor.reshape(1), torch.zeros((1,),
+        device=env.device, dtype=logits.dtype))
+    selection_logits = torch.where(decision_valid, logits, fallback_logits)
+    action, logprob, entropy = sample_candidate_action(selection_logits[None],
+        deterministic=(True if production_inference_failed else deterministic))
+    selected_index = action.reshape(())
+    selected_node = support.pair_node_ids.index_select(0,
+        selected_index.reshape(1)).reshape(())
+    selected_behavior = support.behavior_ids.index_select(0,
+        selected_index.reshape(1)).reshape(())
+    selected_descriptor = support.descriptor_ids.index_select(0,
+        selected_index.reshape(1)).reshape(())
+    selected_action = support.action_ids.index_select(0,
+        selected_index.reshape(1)).reshape(())
+    safe_descriptor = selected_descriptor.clamp(0, 3)
+    fuel_ids, _, _ = env._candidates()
+    target_tracks = fuel_ids[0, 3]
+    target_track = target_tracks.index_select(0, safe_descriptor.reshape(1)).reshape(())
+    target_xy = env.track_pos[0, 3].index_select(0,
+        target_track.reshape(1)).reshape(-1)
+    has_intake_target = (selected_behavior == 1) & (selected_descriptor >= 0)
+    selected_target_track = torch.where(has_intake_target, target_track,
+                                        torch.full_like(target_track, -1))
+    selected_target_xy = torch.where(has_intake_target, target_xy,
+                                     torch.zeros_like(target_xy))
+    selected_goal_xy = support.goal_xy.index_select(0,
+        selected_node.reshape(1)).reshape(-1)
+    selected_heading = support.goal_heading.index_select(0,
+        selected_node.reshape(1)).reshape(())
+    selected_action_payload = torch.stack((selected_index, selected_action,
+        selected_target_track, selected_target_xy[0], selected_target_xy[1],
+        selected_goal_xy[0], selected_goal_xy[1], selected_heading,
+        selected_node, selected_behavior, selected_descriptor,
+        (~decision_valid).to(torch.long))).to(torch.float64)
+    fallback_used = production_inference_failed
+    fallback_reason = "policy_inference_fallback" if production_inference_failed else None
     value = (_value(value_head, globals_, seed_decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": safe.observation, "candidate_set": None,
@@ -1378,16 +1465,19 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         "hidden_before": hidden_before,
         "tracking_available": tracking_available,
         "tracking_reset": tracking_reset,
-        "graph": (graph_data or {}), "decision": {**seed_decision, "logits": logits[None]},
+        "graph": (graph_data or {}), "decision": {**seed_decision, "logits": selection_logits[None]},
         "action": action, "logprob": logprob, "entropy": entropy,
+        "selected_action_payload": selected_action_payload,
         "hidden_next": seed_decision["hidden"], "value": value,
         "route_cost": route_nodes[None], "risk_cost": risk_nodes[None],
+        "route_batch": route_batch,
         "path_cost": path_cost, "legal_lookup": graph.lookup,
         "planner_traversal_cost": penalty_map,
         "planner_traversal_cost_scale": (p_cost_scale if penalty_map is not None else 1.),
         "path_geometry": _path_geometry(env), "route_cost_nodes": route_nodes,
         "risk_cost_nodes": risk_nodes, "graph_object": graph,
         "planner_object": env.planner, "fallback_used": fallback_used,
+        "fallback_used_device": ~decision_valid,
         "fallback_reason": fallback_reason,
         "prediction": prediction_metadata,
         "inference_provenance": inference_provenance if isinstance(model, ProductionMecoAdapter) else None}
@@ -2185,6 +2275,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     dispatch_payload = selected_payload.detach().to(
                         device="cpu").reshape(-1).tolist()
                     action_index = int(dispatch_payload[0])
+                    if len(dispatch_payload) >= 12:
+                        prepared["fallback_used"] = bool(dispatch_payload[11])
                 hidden_before = (None if prepared["hidden_before"] is None else
                                  prepared["hidden_before"].detach().clone())
                 tracking_was_available = prepared["tracking_available"]
@@ -3703,7 +3795,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                             isinstance(completed, (int, float)) and
                                             completed >= dispatch):
                                         inference_latency_samples.append((completed - dispatch) * 1000.)
-                                policy_fallback_count += int(bool(prepared.get("fallback_used")))
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
@@ -3714,6 +3805,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     choice = int(device_dispatch_payload[0])
                                 else:
                                     choice = int(prepared["action"].item())
+                                if prepared is not None:
+                                    if (device_dispatch_payload is not None and
+                                            len(device_dispatch_payload) >= 12):
+                                        prepared["fallback_used"] = bool(
+                                            device_dispatch_payload[11])
+                                    policy_fallback_count += int(bool(
+                                        prepared.get("fallback_used")))
                                 hidden = prepared["hidden_next"]
                                 tracking_was_available = prepared["tracking_available"]
                                 tracking_loss_reset_count += int(prepared["tracking_reset"])
@@ -3764,13 +3862,31 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             selected_goal_node = None
                             if prepared is not None and "support" in prepared:
                                 support = prepared["support"]
-                                action = int(support.action_ids[choice].item())
-                                node = int(support.pair_node_ids[choice].item())
+                                if (device_dispatch_payload is not None and
+                                        len(device_dispatch_payload) >= 11):
+                                    action = int(device_dispatch_payload[1])
+                                    node = int(device_dispatch_payload[8])
+                                    behavior_index = int(device_dispatch_payload[9])
+                                    descriptor = int(device_dispatch_payload[10])
+                                    selected_target_track = (None if
+                                        device_dispatch_payload[2] < 0 else
+                                        int(device_dispatch_payload[2]))
+                                    selected_target_xy = (None if
+                                        selected_target_track is None else
+                                        (device_dispatch_payload[3],
+                                         device_dispatch_payload[4]))
+                                    goal_xy = (device_dispatch_payload[5],
+                                               device_dispatch_payload[6])
+                                    goal_heading = device_dispatch_payload[7]
+                                else:
+                                    action = int(support.action_ids[choice].item())
+                                    node = int(support.pair_node_ids[choice].item())
+                                    behavior_index = int(support.behavior_ids[choice].item())
+                                    descriptor = int(support.descriptor_ids[choice].item())
+                                    goal_xy = tuple(float(v) for v in
+                                                    support.goal_xy[node].tolist())
+                                    goal_heading = float(support.goal_heading[node].item())
                                 selected_goal_node = node
-                                behavior_index = int(support.behavior_ids[choice].item())
-                                descriptor = int(support.descriptor_ids[choice].item())
-                                goal_xy = tuple(float(v) for v in
-                                                support.goal_xy[node].tolist())
                                 parent_chain = [node]
                                 parent = int(support.parent_ids[node].item())
                                 while parent >= 0:
@@ -3830,7 +3946,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     choice].get("legal_node_index")
                                 selected_target_xy = candidate_set.route_records[
                                     choice].get("source_fuel_xy_m")
-                            if prepared is not None and "support" in prepared:
+                            if (prepared is not None and "support" in prepared and
+                                    not (device_dispatch_payload is not None and
+                                         len(device_dispatch_payload) >= 11)):
                                 goal_heading = float(support.goal_heading[node].item())
                             elif device_dispatch_payload is None:
                                 goal_heading = None
