@@ -781,6 +781,78 @@ def _reconcile_start_profile_outcomes(outcomes: dict, evidence_root: Path, *,
             total_worlds > 0 and total_legal == total_worlds)
 
 
+def _replay_matches_condition_report(outcomes: dict, outcome_dir: Path,
+        replay: dict, *, arm: str, case: dict) -> bool:
+    """Bind a retained replay to its indexed row in the copied condition report."""
+    from .meco_ablation_matrix import _records_by_key
+
+    matrix_raw = _bound_evidence_bytes(outcome_dir,
+        outcomes.get("condition_matrix_paths", {}).get(arm),
+        outcomes.get("condition_matrix_sha256", {}).get(arm))
+    report_raw = _bound_evidence_bytes(outcome_dir,
+        outcomes.get("condition_report_paths", {}).get(arm),
+        outcomes.get("condition_report_sha256", {}).get(arm))
+    if matrix_raw is None or report_raw is None:
+        return False
+    try:
+        matrix = json.loads(matrix_raw)
+        report = json.loads(report_raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    conditions = matrix.get("conditions") if isinstance(matrix, dict) else None
+    condition = (conditions.get("architecture_matched_cv_k16")
+        if isinstance(conditions, dict) else None)
+    records = report.get("records") if isinstance(report, dict) else None
+    index = replay.get("evaluation_record_index")
+    policy = replay.get("policy")
+    seed = replay.get("seed")
+    if (not isinstance(condition, dict) or not isinstance(records, list) or
+            type(index) is not int or index < 0 or index >= len(records) or
+            not isinstance(policy, str) or type(seed) is not int):
+        return False
+    record = records[index]
+    nested = replay.get("replay_provenance")
+    evaluation_record = replay.get("evaluation_record")
+    scored_record = ({key: value for key, value in record.items()
+        if key != "dashboard_replay"} if isinstance(record, dict) else None)
+    record_digest = (_sha256(_canonical_bytes(scored_record))
+        if scored_record is not None else None)
+    try:
+        indexed_record = _records_by_key(report).get(
+            (policy, case["category"], seed))
+    except (TypeError, ValueError, KeyError):
+        return False
+    expected_path = condition.get("report_path")
+    expected_condition_id = condition.get("condition_id")
+    return (isinstance(record, dict) and indexed_record is record and
+        isinstance(expected_path, str) and
+        replay.get("evaluation_report_path") == expected_path and
+        isinstance(nested, dict) and
+        nested.get("evaluation_report_path") == expected_path and
+        nested.get("evaluation_record_index") == index and
+        nested.get("policy") == policy and
+        nested.get("scenario_id") == case["scenario_id"] and
+        nested.get("category") == case["category"] and
+        nested.get("seed") == seed and
+        replay.get("evaluation_record_digest") == record_digest and
+        nested.get("evaluation_record_digest") == record_digest and
+        record.get("policy") == policy and
+        record.get("scenario_id") == case["scenario_id"] and
+        record.get("category") == case["category"] and
+        record.get("seed") == seed and
+        record.get("metrics") == replay.get("metrics") and
+        isinstance(evaluation_record, dict) and
+        evaluation_record.get("policy") == policy and
+        evaluation_record.get("scenario_id") == case["scenario_id"] and
+        evaluation_record.get("category") == case["category"] and
+        evaluation_record.get("seed") == seed and
+        evaluation_record.get("metrics") == record.get("metrics") and
+        replay.get("condition_id") == expected_condition_id and
+        nested.get("condition_id") == expected_condition_id and
+        replay.get("outcome_digest") == record.get("outcome_digest") and
+        evaluation_record.get("outcome_digest") == record.get("outcome_digest"))
+
+
 START_PROFILE_POLICY_IDS = tuple(sorted((
     "A1", "A2", "A3", "C1", "C2", "A1_P0", "A2_P0", "A3_P0",
     "D0", "D1", "D2")))
@@ -873,10 +945,11 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         isinstance(outcomes.get("condition_matrix_paths"), dict) and
         set(outcomes["condition_matrix_paths"]) == set(CONDITIONS) and
         isinstance(outcomes.get("per_world_legality_records"), list))
+    outcome_artifact_path = (evidence_root / row[
+        "paired_outcomes_artifact_path"]).resolve()
     exact_outcomes = (metadata_exact and
         _reconcile_start_profile_outcomes(outcomes, evidence_root,
-            outcome_artifact_path=(evidence_root / row[
-                "paired_outcomes_artifact_path"]).resolve(),
+            outcome_artifact_path=outcome_artifact_path,
             assignment=assignment, expected_keys=expected_keys,
             categories=[case["category"]], seeds=seed_values))
     if not exact_outcomes:
@@ -1015,10 +1088,13 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                 payload = None
             replay_payloads.append(payload)
         replay_artifacts_exact = (all(isinstance(item, dict) and
-                isinstance(item.get("simulation_id"), str)
+                isinstance(item.get("simulation_id"), str) and
+                isinstance(item.get("policy"), str) and
+                item.get("policy") in START_PROFILE_POLICY_IDS
             for item in replay_payloads) and
             len({item.get("simulation_id") for item in replay_payloads
                  if isinstance(item, dict)}) == 2 and
+            len({item["policy"] for item in replay_payloads}) == 1 and
             all(isinstance(review_item, dict) and
                 isinstance(item.get("simulation_id"), str) and
                 item.get("simulation_id") == review_item.get("replay_id") and
