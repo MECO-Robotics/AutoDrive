@@ -4,10 +4,10 @@
 
 **Status:** proposed offline test tranche; no implementation or behavior claim.
 
-**Planning base:** `origin/main` at `fd9c0d3eec7a0802eb6ef95a384efa4c594357d8`.
-The approved Phase 2 branch head `d20a55a18259c4dc41e01b8040c8c2826ebc6833`
-changes the multi-case coordinator and training manifest, but leaves the Phase
-3 PPO and policy files unchanged from this base.
+**Planning base:** `origin/main` at
+`a9326946b272774546927f465002baf88d0cd2dd`. The approved Phase 2 feature head
+is `4a4e4687d5587030aa1585346cbb2528724a4480`; it leaves the Phase 3 PPO and
+policy files unchanged from this base.
 
 **Source requirement:** `docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md`
 §5 Phase 3 requires an actual stochastic policy distribution over feasible
@@ -64,15 +64,23 @@ Required cases, parameterized over A1/A2/A3:
    remains available for value loss. Assert the update diagnostics reflect
    zero actor contribution for the failure row.
 
-Use fixed random seeds and deterministic small tensors. Keep the learning rate
-zero or use an injected optimizer where needed to observe validation without
-changing the fixture between cases. Do not weaken existing tolerances or skip
-one of A1/A2/A3 to make the suite pass.
+Use fixed random seeds and small synthetic tensors. Place each model and its
+tensor inputs on the selected WX9100; do not add a CPU execution path or use a
+CPU fallback. Keep the learning rate zero or use an injected optimizer where
+needed to observe validation without changing the fixture between cases. Do
+not weaken existing tolerances or skip one of A1/A2/A3 to make the suite pass.
+
+Do not run the new tests while the active r4 run holds the device leases. Once
+r4 ends or is manually stopped and the selected WX9100 lease is verified free,
+run the focused suite on that assigned device. Adding the tests does not mean
+they passed; report test additions and executed test results separately.
 
 ## Pass 2 acceptance criteria
 
-- All four cases pass for each of A1, A2, and A3 on CPU using synthetic tensor
-  inputs only.
+- The test module adds all four cases for each of A1, A2, and A3 using
+  synthetic tensor inputs, with no simulator/environment/graph-search calls.
+- After the device-release gate, the focused tests run on the selected WX9100;
+  report their actual outcome separately from code completion.
 - The successful replay uses the same exact frozen support index and
   recomputed distribution; no invalid support item is sampled.
 - Both mutations are rejected before any optimizer step.
@@ -86,8 +94,10 @@ one of A1/A2/A3 to make the suite pass.
 ## Limits and exclusions
 
 This tranche does not run `build_plan_a_support`, simulator environments,
-training, GPU/HIP code, campaign data, or dashboard services. It checks the
-mathematical PPO input/log-probability contract with constructed support only.
+training, campaign data, or dashboard services. The test fixtures exercise
+model and PPO tensor code on the selected WX9100 after the lease-release gate;
+they check the mathematical PPO input/log-probability contract with
+constructed support only.
 It does not establish that sampled actions execute safely in simulation, that
 the reward/risk objective improves outcomes, or that A1/A2/A3 perform well.
 Any behavior test later must follow the repository's `AGENTS.md` simulator and
