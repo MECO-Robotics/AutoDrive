@@ -172,6 +172,11 @@ class FuelPhysics:
 
     def reset(self, mask=None):
         self._validate_qualifying_backend()
+        if (self._gpu_qualifying and mask is not None and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                 mask.shape != (self.n,))):
+            raise ValueError(
+                "GPU-qualifying fuel reset mask must be a device-resident [world] tensor")
         mask = torch.ones(self.n, device=self.device, dtype=torch.bool) if mask is None else torch.as_tensor(mask, device=self.device, dtype=torch.bool)
         mask = mask.reshape(self.n)
         selected = mask[:, None]
@@ -566,6 +571,16 @@ class FuelPhysics:
 
     def step(self, active_mask, piece_active, piece_owner, *, dt=None, substeps=None, adaptive=None):
         self._validate_qualifying_backend()
+        if self._gpu_qualifying:
+            for name, tensor, shape in (
+                    ("active mask", active_mask, (self.n,)),
+                    ("piece active mask", piece_active, (self.n, self.p)),
+                    ("piece owner", piece_owner, (self.n, self.p))):
+                if (not isinstance(tensor, torch.Tensor) or
+                        tensor.device != self.device or tensor.shape != shape):
+                    raise ValueError(
+                        f"GPU-qualifying fuel {name} must be a device-resident "
+                        f"tensor with shape {shape}")
         active=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         free=active[:,None] & piece_active.bool() & (piece_owner<0)
         changed=self._sync_external()
