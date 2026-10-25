@@ -23,7 +23,16 @@ qualified episode, and qualification eligibility remains false.
 | sensor delay and low confidence | `sensor.delay_120ms`, `sensor.low_confidence` | delayed-observation ticks, confidence-cap refresh/reduction | outcome by sensor condition, stale-observation reaction latency, outcome by confidence band | Existing factors capture stimulus; required outcome signals unavailable |
 | abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` plus route-goal lifecycle endpoint record | reaction latency, interception, route completion | Existing factor capture can retain a fully observed, exact-bound route completion diagnostic; reaction latency/interception remain unavailable, no representative replay has validated it, and qualification is disabled |
 | bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event`, `first_route_progress_interval`, `selected_goal_endpoint_completion_rate` | robot contact rate, recovery time, route completion | Three registered geometries flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate exposure, solver-confirmed pair (2,3) contact, route crossing, an outer-tick interval-censored route-progress observation, and an episode-wide selected-goal endpoint diagnostic. Neither diagnostic is contact-caused recovery or registry route completion; D0 has no selected-goal ledger, and qualification stays disabled. |
-| observation-only focal pose mislocalization | `observation.focal_pose_offset` | none | relocalization time, pose-error recovery, safety contact | Observation-boundary helper exists, but validation reset/observation application is not wired; signals unavailable |
+| observation-only focal pose mislocalization | `observation.focal_pose_offset` | `phase4_focal_pose_assignment`; `records[].phase4_focal_pose.applied_before_policy_observation` | relocalization time, pose-error recovery, safety contact | Protocol-bound paired no-offset/registered-offset assignment is validated for the full-match validation case, categories, seeds, and protocol. It is applied after scenario reset and before perception and the first policy observation without changing simulator truth; evaluator diagnostics record initial truth, policy estimate, and pose error. No representative E2E simulator/replay evidence is accepted; relocalization time, pose-error recovery, and safety-contact outcomes remain unavailable, and qualification stays disabled. |
+
+Focal-pose wiring source anchors: assignment compilation/validation and
+truth-preserving application are in `frc_defense/meco_phase4_context.py:215-325`;
+episode assignment binding and reset-time application are in
+`frc_defense/curriculum_scenarios.py:475-485,777-782,1015-1075`; evaluator
+diagnostic capture is in `frc_defense/meco_track_training.py:3460-3464`; and the
+runtime-event contract is in `frc_defense/meco_phase4_runtime_adapter.py:198-206`.
+These source bindings establish code wiring only, not simulator behavior or
+qualification.
 
 The generic factor capture also retains the existing route-goal lifecycle
 outcome diagnostic for stationary blockage, feint reversal, and abrupt policy
