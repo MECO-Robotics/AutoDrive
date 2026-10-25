@@ -39,8 +39,50 @@ def validate(project, data):
 def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
+    assert result["status"] == "scoped-transcript-summaries"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) >= 65
+    assert len(result["tranches"]) == 88
+    assert result["tranches"][-1]["requirement_id"] == (
+        "phase4-runtime-status-ledger-dashboard")
+    assert hashlib.sha256(MANIFEST.read_bytes()).hexdigest() == (
+        dashboard_api._EXPECTED_THREE_PASS_PROVENANCE_SHA256)
+    assert hashlib.sha256(json.dumps(
+        result["tranches"][:-1], sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest() == (
+        "7f86456dbf21fbeffb43105681ece6c1dfd71bdfd2efb415796c0f51b76bc663")
+    phase4_status = result["tranches"][-1]
+    assert phase4_status["planner"]["artifact"] == {
+        "path": "docs/plans/phase4-runtime-status-ledger-dashboard-20261025.md",
+        "sha256": "10363db292fcf81a50d818283eaeddc8f77a95420b154c580b0a712a0074cdde",
+        "kind": "scoped-transcript-summary",
+        "status": "transcript-summary",
+    }
+    assert phase4_status["implementer"]["focal_status_pass2_commit"] == (
+        "2357ae4a9661c7cb6d6c038a72881a55fbdcfbec")
+    assert phase4_status["implementer"]["focal_status_approved_commit"] == (
+        phase4_status["implementer"]["focal_status_pass2_commit"])
+    assert phase4_status["implementer"]["focal_status_integration_commit"] == (
+        "252eb3d65e27a0d96352cf2abb83265384ce1d8d")
+    assert phase4_status["implementer"]["runtime_status_pass2_commit"] == (
+        "3ed5c86e5108db24eb1588afc890d1cf379cad39")
+    assert phase4_status["implementer"]["runtime_status_approved_commit"] == (
+        phase4_status["implementer"]["runtime_status_pass2_commit"])
+    assert phase4_status["implementer"]["runtime_status_integration_commit"] == (
+        "384c9a2baa9a97a27271cc6ed26fb316f01be8ed")
+    assert phase4_status["reviewer"]["approved_commit"] == (
+        phase4_status["implementer"]["runtime_status_approved_commit"])
+    assert phase4_status["reviewer"]["artifact"]["path"] == (
+        "docs/implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md")
+    phase4_status_summary = (REPO / phase4_status["reviewer"]["artifact"]["path"]).read_text()
+    for required_reference in (
+        "phase4-focal-pose-mislocalization-wiring-20261025.md",
+        "phase4-runtime-status-corrections-20261025.md",
+        "2357ae4a9661c7cb6d6c038a72881a55fbdcfbec",
+        "3ed5c86e5108db24eb1588afc890d1cf379cad39",
+        "252eb3d65e27a0d96352cf2abb83265384ce1d8d",
+        "384c9a2baa9a97a27271cc6ed26fb316f01be8ed",
+    ):
+        assert required_reference in phase4_status_summary
     phase2_complete_set = next(t for t in result["tranches"]
                                if t["requirement_id"] == "phase2-five-track-complete-set")
     assert phase2_complete_set["reviewer"]["verdict"] == "approved"
