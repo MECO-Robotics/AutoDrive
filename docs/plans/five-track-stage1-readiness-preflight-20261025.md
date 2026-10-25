@@ -38,8 +38,12 @@ This tranche can be implemented and reviewed in a separate worktree while the li
    - Correct the Stage 1 promotion instructions so the required protocol is explicitly v5 GPU-bootstrap with implementation ID `meco-v4-cluster-episode-device-percentile-v1`; retain v1-v4 as historical/diagnostic only for this gate.
    - State that preflight readiness is not evaluation, qualification, or permission to use GPUs while the current training campaign is active.
 
-5. `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md`
-   - Record only the code capability after it is integrated and reviewed. Keep the campaign, Phase 0, simulator, five track qualification, matched outcomes, dashboard/replay, and whole-plan status open until their own evidence exists.
+5. `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md` (**post-integration only; excluded from the Pass 2 candidate**)
+   - After the Pass 2 source/docs candidate passes exact-head Pass 3 review and is integrated, make a separate status-document update recording only the code capability now present on main. That later update must receive its own review before integration. Keep the campaign, Phase 0, simulator, five-track qualification, matched outcomes, dashboard/replay, and whole-plan status open until their own evidence exists.
+
+### Pass 2 candidate allowlist
+
+The Pass 2 candidate may change only `frc_defense/meco_prediction_contract.py`, `frc_defense/meco_tracks.py`, `frc_defense/meco_qualification.py`, and `docs/MECO_QUALIFICATION.md`. It must not change `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md`; that status update is deferred until after candidate approval and integration, as described above.
 
 ## Required behavior and invariants
 
@@ -83,7 +87,8 @@ This tranche can be implemented and reviewed in a separate worktree while the li
 
 ## Next sequence
 
-1. Pass 2 implements only the listed metadata preflight and documentation changes on a dedicated branch from this exact base.
+1. Pass 2 implements only the four-file allowlist above on a dedicated branch from this exact base. Do not edit the execution-status document in the candidate.
 2. Pass 3 reviews the exact candidate commit and the preflight's fail-closed/side-effect guarantees; corrections get a new exact-head review.
-3. Integrate only after Pass 3 approval, preserving any user-owned dirty files.
-4. Keep the live r4 campaign running until the user manually stops it. Once stopped and both WX9100 leases are confirmed free, follow the separate approved Stage 1 plan's Phase 0 prerequisites, checkpoint/source audit, matched evaluation, replay review, and dashboard currentness checks. This preflight alone does not authorize that execution.
+3. Integrate only after exact-head Pass 3 approval, preserving any user-owned dirty files.
+4. Only after integration, prepare a separate `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md` update that records the reviewed code capability and retains all remaining runtime/evidence gates. Review and integrate that follow-up documentation change separately; do not backport it into the already-reviewed Pass 2 candidate.
+5. Keep the live r4 campaign running until the user manually stops it. Once stopped and both WX9100 leases are confirmed free, follow the separate approved Stage 1 plan's Phase 0 prerequisites, checkpoint/source audit, matched evaluation, replay review, and dashboard currentness checks. This preflight alone does not authorize that execution.
