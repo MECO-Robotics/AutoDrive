@@ -30,6 +30,7 @@ from .curriculum_training import source_identity
 from .meco_final_test_ledger import assert_training_not_released_after_final_test
 from .meco_evaluation_schedule import (MecoEvaluationSchedule,
     validate_history_indexes, verify_evaluation_artifacts)
+from .meco_diagnostic_monitor import MecoDiagnosticMonitor
 from .meco_candidates import CANDIDATE_BOUNDARY
 from .meco_track_training import (CHUNK_RESET_POLICY, MecoTrainConfig, ROOT,
     resolve_evaluation_case, resolve_evaluation_protocol)
@@ -363,7 +364,8 @@ def _train_command(*, config: MecoTrainConfig, output: Path, run_id: str,
 def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
                         device, output, prediction_mode=None, split="diagnostic",
                         evaluation_protocol=None, evaluation_case=None,
-                        episode_seeds=None, schedule_case_binding=None):
+                        episode_seeds=None, schedule_case_binding=None,
+                        diagnostic_frontier_binding=None):
     command = [sys.executable, "-m", "frc_defense.meco_track_training", "evaluate",
         "--scenario", scenario, "--categories", ",".join(categories),
         "--episodes", str(episodes), "--seed", str(seed), "--device", device,
@@ -377,6 +379,9 @@ def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
     if schedule_case_binding is not None:
         command.extend(("--schedule-case-binding-json", json.dumps(
             schedule_case_binding, sort_keys=True, allow_nan=False)))
+    if diagnostic_frontier_binding is not None:
+        command.extend(("--diagnostic-frontier-binding-json", json.dumps(
+            diagnostic_frontier_binding, sort_keys=True, allow_nan=False)))
     if prediction_mode is not None:
         command.extend(("--prediction-mode", prediction_mode))
     for track in MECO_TRACKS:
@@ -435,6 +440,8 @@ class MecoSupervisor:
         self.manifest_configs = None
         self.evaluation_schedule = None
         self.evaluation_schedule_sha256 = None
+        self.diagnostic_monitor_config = None
+        self.diagnostic_monitor = None
         self.schedule_evaluation_protocol_path = None
         if campaign_manifest is not None:
             from .meco_training_manifest import validate_campaign_manifest
@@ -465,8 +472,10 @@ class MecoSupervisor:
             self.manifest_configs = {track: MecoTrainConfig(**campaign_manifest["tracks"][track]["config"])
                                      for track in MECO_TRACKS}
             self.evaluation_schedule = campaign_manifest.get("evaluation_schedule")
-            if resume_campaign and self.evaluation_schedule is None:
-                raise ValueError("campaign resume requires a frozen evaluation schedule for durable resume")
+            self.diagnostic_monitor_config = campaign_manifest.get("diagnostic_monitor")
+            if (resume_campaign and self.evaluation_schedule is None and
+                    self.diagnostic_monitor_config is None):
+                raise ValueError("campaign resume requires a durable frozen evaluation schedule or diagnostic monitor")
             if self.evaluation_schedule is not None:
                 self.evaluation_schedule_sha256 = _hash(self.evaluation_schedule)
                 self.schedule_evaluation_protocol_path = Path(
@@ -659,8 +668,7 @@ class MecoSupervisor:
     def _lane_payload(self, track, statuses):
         status = statuses.get(track, "queued")
         deferred = (status == "queued" and
-            self.configs[track].device == self.evaluation_device and
-            (self.evaluator is not None or self.pending_evaluations))
+            self._training_device_deferred_for_evaluation(self.configs[track].device))
         return {"track": track, "run_id": self.run_ids[track],
                 "run_directory": track, "device": self.configs[track].device,
                 "status": "deferred_for_evaluation" if deferred else status,
@@ -668,6 +676,13 @@ class MecoSupervisor:
                 "pid": self.worker_pids.get(track),
                 "completed_updates": self._heartbeat_updates(track),
                 "chunk_updates": self.chunk_updates}
+
+    def _training_device_deferred_for_evaluation(self, device):
+        if device != self.evaluation_device:
+            return False
+        monitor = getattr(self, "diagnostic_monitor", None)
+        return bool(self.evaluator is not None or self.pending_evaluations or
+            (monitor is not None and monitor.pending is not None))
 
     def _heartbeat_updates(self, track):
         try:
@@ -731,6 +746,8 @@ class MecoSupervisor:
                     1 <= cycle <= len(self.evaluation_schedule) else None),
             "evaluation_schedule": (self.evaluation_schedule_journal.summary()
                 if self.evaluation_schedule_journal is not None else None),
+            "diagnostic_monitor": (self.diagnostic_monitor.summary()
+                if self.diagnostic_monitor is not None else None),
             "evaluation_history": {"count": len(history_entries),
                 "head_sha256": (history_entries[-1].get("entry_sha256")
                     if history_entries else None)},
@@ -801,10 +818,15 @@ class MecoSupervisor:
             detail = None
         schedule_summary = (self.evaluation_schedule_journal.summary()
             if self.evaluation_schedule_journal is not None else None)
+        monitor = getattr(self, "diagnostic_monitor", None)
+        monitor_summary = monitor.summary() if monitor is not None else None
         return {"active": self.evaluator is not None,
-            "pending": (schedule_summary["pending_count"] if schedule_summary
-                else len(self.pending_evaluations)),
+            "pending": (schedule_summary["pending_count"] if schedule_summary else
+                1 if monitor_summary and monitor_summary.get("pending_frontier") else
+                len(self.pending_evaluations)),
             "schedule": schedule_summary,
+            "diagnostic_monitor": monitor_summary,
+            "diagnostic_monitor_error": getattr(self, "last_monitor_error", None),
             "evaluation_id": detail.get("evaluation_id") if detail else (
                 self.last_evaluation.get("evaluation_id") if self.last_evaluation else None),
             "protocol_id": detail.get("protocol_id") if detail else (
@@ -887,6 +909,9 @@ class MecoSupervisor:
             "phase4_training_protocol_id": (phase4_train_protocol_id()
                 if self.phase4_train_exposure else None),
             "candidate_boundary": CANDIDATE_BOUNDARY}
+        if self.diagnostic_monitor_config is not None:
+            self.configuration["diagnostic_monitor_sha256"] = _hash(
+                self.diagnostic_monitor_config)
         self.configuration_hash = _hash(self.configuration)
         runtime_binding = {"schema_version": 1,
             "campaign_manifest_sha256": self.manifest_digest,
@@ -895,6 +920,9 @@ class MecoSupervisor:
             "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "evaluation_protocol_sha256": (self.manifest["evaluation_protocol"]["sha256"]
                 if self.manifest is not None else None)}
+        if self.diagnostic_monitor_config is not None:
+            runtime_binding["diagnostic_monitor_sha256"] = _hash(
+                self.diagnostic_monitor_config)
         if self.resume_campaign:
             try:
                 persisted_binding = json.loads(self.runtime_binding_path.read_text())
@@ -933,6 +961,18 @@ class MecoSupervisor:
                     "configuration_sha256": self.configuration_hash,
                     "phase4_train_exposure": self.phase4_train_exposure})
             self.evaluation_schedule_journal.reconcile_history(history["entries"])
+        if getattr(self, "diagnostic_monitor_config", None) is not None:
+            try:
+                self.diagnostic_monitor = MecoDiagnosticMonitor(
+                    self.evaluation_output / "diagnostic-monitor",
+                    manifest_sha256=self.manifest_digest,
+                    configuration_sha256=self.configuration_hash,
+                    protocol_sha256=self.diagnostic_monitor_config["protocol_sha256"],
+                    monitor=self.diagnostic_monitor_config,
+                    resume=self.resume_campaign)
+            except (OSError, ValueError) as exc:
+                self.diagnostic_monitor = None
+                self.last_monitor_error = f"{type(exc).__name__}: {exc}"
         if self.resume_campaign and self.stop_file.exists():
             self.stop_file.unlink()
 
@@ -1143,8 +1183,7 @@ class MecoSupervisor:
                         continue
                     # A queued or running evaluator owns its indexed device.
                     # Keep that lane pending until the evaluation releases it.
-                    if (device == self.evaluation_device and
-                            (self.evaluator is not None or self.pending_evaluations)):
+                    if self._training_device_deferred_for_evaluation(device):
                         continue
                     selected = next((track for track in pending
                                      if self.configs[track].device == device), None)
@@ -1359,6 +1398,13 @@ class MecoSupervisor:
             raise RuntimeError(f"training workers failed: {failed}")
 
     def _queue_evaluation(self, cycle):
+        monitor = getattr(self, "diagnostic_monitor", None)
+        if (monitor is not None and
+                cycle % self.diagnostic_monitor_config["cadence_cycles"] == 0):
+            try:
+                self._enqueue_diagnostic_frontier(cycle)
+            except Exception as exc:
+                self.last_monitor_error = f"{type(exc).__name__}: {exc}"
         if self.evaluation_schedule is not None:
             if _hash(self.evaluation_schedule) != self.evaluation_schedule_sha256:
                 raise RuntimeError("frozen evaluation schedule drifted after campaign validation")
@@ -1403,6 +1449,8 @@ class MecoSupervisor:
                 schedule_case, snapshot_rows)
             return
         else:
+            if getattr(self, "diagnostic_monitor_config", None) is not None:
+                return
             schedule_case = None
         if source_identity() != self.sources:
             raise RuntimeError("source identity changed before paired evaluation")
@@ -1441,6 +1489,51 @@ class MecoSupervisor:
                           ignore_errors=True)
         self.pending_evaluations = [job]
 
+    def _enqueue_diagnostic_frontier(self, cycle):
+        if source_identity() != self.sources:
+            raise RuntimeError("source identity changed before diagnostic frontier capture")
+        suffix = f"frontier-cycle-{cycle:08d}-update-{cycle * self.chunk_updates:012d}"
+        snapshot_dir = (self.evaluation_output / "diagnostic-monitor" /
+            "checkpoint-snapshots" / suffix)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        snapshots = []
+        for track in sorted(MECO_TRACKS):
+            source = self.track_dirs[track] / "latest.pt"
+            if not source.is_file():
+                raise RuntimeError(f"{track} checkpoint is missing at diagnostic frontier")
+            destination = snapshot_dir / f"{track}.pt"
+            if not destination.exists():
+                temporary = snapshot_dir / f".{track}.pt.tmp"
+                try:
+                    os.link(source, temporary)
+                except OSError:
+                    shutil.copyfile(source, temporary)
+                os.replace(temporary, destination)
+            snapshots.append({"track": track, "path": str(destination.resolve()),
+                "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()})
+        payload = {"cycle": cycle, "update": cycle * self.chunk_updates,
+            "checkpoint_snapshots": snapshots,
+            "source_sha256": self.source_hash,
+            "configuration_sha256": self.configuration_hash,
+            "protocol_sha256": self.diagnostic_monitor_config["protocol_sha256"]}
+        frontier = {"frontier_id": _hash(payload), **payload}
+        self.diagnostic_monitor.enqueue(frontier)
+
+    def _reconcile_completed_diagnostic_frontier(self):
+        monitor = getattr(self, "diagnostic_monitor", None)
+        if monitor is None or self.completed_cycles < 1:
+            return
+        cadence = self.diagnostic_monitor_config["cadence_cycles"]
+        latest_due = self.completed_cycles - (self.completed_cycles % cadence)
+        if latest_due < 1:
+            return
+        represented = monitor.summary()["frontier_cycles"]
+        if latest_due not in represented:
+            try:
+                self._enqueue_diagnostic_frontier(latest_due)
+            except Exception as exc:
+                self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+
     def _reconcile_completed_schedule_cycles(self):
         """Recover the one cycle-complete / journal-enqueue crash window."""
         if self.evaluation_schedule_journal is None:
@@ -1459,45 +1552,102 @@ class MecoSupervisor:
         self._queue_evaluation(completed)
 
     def _start_next_evaluation(self, *, occupied_devices=()):
+        try:
+            return self._start_next_evaluation_impl(
+                occupied_devices=occupied_devices)
+        except Exception as exc:
+            if getattr(self, "diagnostic_monitor_config", None) is None:
+                raise
+            self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+
+    def _start_next_evaluation_impl(self, *, occupied_devices=()):
         if self.evaluator is not None or self.request_stop:
             return
         if self.evaluation_device in occupied_devices:
             return
-        if self.evaluation_schedule_journal is not None:
-            item = self.evaluation_schedule_journal.head()
-            if item is None:
-                return
-            if item["status"] == "verified":
+        job = None
+        monitor = getattr(self, "diagnostic_monitor", None)
+        if self.evaluation_schedule_journal is not None or monitor is not None:
+            item = (self.evaluation_schedule_journal.head()
+                if self.evaluation_schedule_journal is not None else None)
+            if item is not None and item["status"] == "verified":
                 self._commit_scheduled_evaluation(item)
                 self._start_next_evaluation(occupied_devices=occupied_devices)
                 return
-            if item["status"] == "running":
+            if item is not None and item["status"] == "running":
                 raise RuntimeError("scheduled evaluator is marked running without a process handle")
-            if item["status"] == "failed" and item["attempts"]:
+            if item is not None and item["status"] == "failed" and item["attempts"]:
                 failed_at = item["attempts"][-1].get("failed_at_unix")
                 if isinstance(failed_at, (int, float)) and not isinstance(failed_at, bool):
                     retry_delay = min(64., 2. ** min(len(item["attempts"]), 6))
                     if time.time() < failed_at + retry_delay:
                         return
-            schedule_case = item["schedule_case"]
-            checkpoints = {row["track"]: Path(row["path"])
-                for row in item["checkpoint_snapshots"]}
-            attempt_number = len(item["attempts"]) + 1
-            attempt_dir = self.evaluation_output / ".schedule-attempts"
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            output = attempt_dir / f"case-{item['index']:04d}-attempt-{attempt_number:04d}.json"
-            final_output = self.evaluation_output / (
-                f"schedule-{item['index']:04d}-cycle-{item['cycle']:06d}.json")
-            job = {"cycle": item["cycle"], "output": output,
-                "final_output": final_output, "checkpoints": checkpoints,
-                "seed": schedule_case["seeds"][0],
-                "episode_seeds": schedule_case["seeds"],
-                "evaluation_binding": schedule_case,
-                "schedule_case": schedule_case,
-                "schedule_index": item["index"]}
-            self.evaluation_schedule_journal.begin_attempt(output)
-        else:
+            if item is not None:
+                schedule_case = item["schedule_case"]
+                checkpoints = {row["track"]: Path(row["path"])
+                    for row in item["checkpoint_snapshots"]}
+                attempt_number = len(item["attempts"]) + 1
+                attempt_dir = self.evaluation_output / ".schedule-attempts"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                output = attempt_dir / f"case-{item['index']:04d}-attempt-{attempt_number:04d}.json"
+                final_output = self.evaluation_output / (
+                    f"schedule-{item['index']:04d}-cycle-{item['cycle']:06d}.json")
+                job = {"cycle": item["cycle"], "output": output,
+                    "final_output": final_output, "checkpoints": checkpoints,
+                    "seed": schedule_case["seeds"][0],
+                    "episode_seeds": schedule_case["seeds"],
+                    "evaluation_binding": schedule_case,
+                    "schedule_case": schedule_case,
+                    "schedule_index": item["index"]}
+                self.evaluation_schedule_journal.begin_attempt(output)
+            elif monitor is not None:
+                monitor_item = monitor.pending
+                if monitor_item is None or monitor_item["status"] in ("running", "verified"):
+                    return
+                if monitor_item["status"] == "failed" and monitor_item["attempts"]:
+                    failed_at = monitor_item["attempts"][-1].get("failed_at_unix")
+                    retry_delay = min(64., 2. ** min(len(monitor_item["attempts"]), 6))
+                    if isinstance(failed_at, (int, float)) and time.time() < failed_at + retry_delay:
+                        return
+                schedule_case = {"index": monitor_item["cycle"] - 1,
+                    "scenario_id": self.diagnostic_monitor_config["scenario_id"],
+                    "category": self.diagnostic_monitor_config["category"],
+                    "seeds": self.diagnostic_monitor_config["seeds"],
+                    "split": "diagnostic",
+                    "protocol_id": self.diagnostic_monitor_config["protocol_id"],
+                    "protocol_sha256": self.diagnostic_monitor_config["protocol_sha256"],
+                    "qualification_case": None}
+                checkpoints = {row["track"]: Path(row["path"])
+                    for row in monitor_item["checkpoint_snapshots"]}
+                attempt_number = len(monitor_item["attempts"]) + 1
+                attempt_dir = self.evaluation_output / "diagnostic-monitor" / "attempts"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                output = attempt_dir / (
+                    f"frontier-{monitor_item['cycle']:08d}-attempt-{attempt_number:04d}.json")
+                job = {"cycle": monitor_item["cycle"], "output": output,
+                    "checkpoints": checkpoints, "seed": schedule_case["seeds"][0],
+                    "episode_seeds": schedule_case["seeds"],
+                    "evaluation_binding": schedule_case, "schedule_case": schedule_case,
+                    "diagnostic_monitor": True,
+                    "frontier_id": monitor_item["frontier_id"],
+                    "diagnostic_frontier_binding": {
+                        "schema_version": 1,
+                        "frontier_id": monitor_item["frontier_id"],
+                        "cycle": monitor_item["cycle"], "update": monitor_item["update"],
+                        "checkpoint_sha256": {row["track"]: row["sha256"]
+                            for row in monitor_item["checkpoint_snapshots"]},
+                        "source_sha256": monitor_item["source_sha256"],
+                        "configuration_sha256": monitor_item["configuration_sha256"],
+                        "protocol_id": self.diagnostic_monitor_config["protocol_id"],
+                        "protocol_sha256": monitor_item["protocol_sha256"]}}
+                monitor.begin_attempt(output)
+            else:
+                return
+        if job is None:
             if not self.pending_evaluations:
+                if monitor is None:
+                    return
+                # The monitor branch above owns this slot when enabled.
                 return
             job = self.pending_evaluations.pop(0)
             schedule_case = job.get("schedule_case")
@@ -1519,7 +1669,9 @@ class MecoSupervisor:
                 if job.get("schedule_case") else self.evaluation_case),
             episode_seeds=job["episode_seeds"],
             schedule_case_binding=(schedule_case
-                if self.evaluation_schedule_journal is not None else None))
+                if (self.evaluation_schedule_journal is not None or
+                    job.get("diagnostic_monitor")) else None),
+            diagnostic_frontier_binding=job.get("diagnostic_frontier_binding"))
         try:
             self.evaluator_job = job
             self.evaluator_log = job["output"].with_suffix(".log").open("ab")
@@ -1527,7 +1679,10 @@ class MecoSupervisor:
                 stdout=self.evaluator_log, stderr=subprocess.STDOUT,
                 start_new_session=True)
         except OSError as exc:
-            if self.evaluation_schedule_journal is not None:
+            if job.get("diagnostic_monitor"):
+                self.diagnostic_monitor.fail_attempt(
+                    f"evaluator spawn failed: {type(exc).__name__}: {exc}")
+            elif self.evaluation_schedule_journal is not None:
                 self.evaluation_schedule_journal.fail_attempt(
                     f"evaluator spawn failed: {type(exc).__name__}: {exc}")
             if self.evaluator_log is not None:
@@ -1553,7 +1708,7 @@ class MecoSupervisor:
         self.evaluator_log.close()
         job = self.evaluator_job
         output = job["output"]
-        if self.evaluation_schedule_journal is not None:
+        if self.evaluation_schedule_journal is not None and not job.get("diagnostic_monitor"):
             try:
                 if result != 0:
                     raise ValueError(f"evaluator exited with status {result}")
@@ -1578,6 +1733,58 @@ class MecoSupervisor:
                 self.evaluator_job = None
             if self.last_evaluation["status"] == "complete":
                 self._start_next_evaluation(occupied_devices=occupied_devices)
+            self._publish(cycle=cycle,
+                phase="stopping" if self.request_stop else "training",
+                statuses=statuses, evaluation=self.last_evaluation)
+            return
+        if job.get("diagnostic_monitor"):
+            try:
+                if result != 0:
+                    raise ValueError(f"diagnostic evaluator exited with status {result}")
+                artifact = verify_evaluation_artifacts(job["schedule_case"], output,
+                    result, job["checkpoints"])
+                report = json.loads(output.read_text())
+                status = json.loads(Path(str(output) + ".status.json").read_text())
+                expected_frontier_binding = job["diagnostic_frontier_binding"]
+                if (report.get("diagnostic_frontier_binding") != expected_frontier_binding or
+                        status.get("diagnostic_frontier_binding") != expected_frontier_binding):
+                    raise ValueError("diagnostic report/status lost its exact frontier binding")
+                record = {"report_path": artifact["output_path"],
+                    "status_path": artifact["status_path"],
+                    "report_sha256": artifact["report_sha256"],
+                    "status_sha256": artifact["status_sha256"],
+                    "checkpoint_sha256": artifact["checkpoint_sha256"],
+                    "seeds": list(job["episode_seeds"]),
+                    "frontier_id": expected_frontier_binding["frontier_id"],
+                    "source_sha256": expected_frontier_binding["source_sha256"],
+                    "configuration_sha256": expected_frontier_binding["configuration_sha256"],
+                    "protocol_sha256": expected_frontier_binding["protocol_sha256"],
+                    "frontier_binding_sha256": _hash(expected_frontier_binding),
+                    "diagnostic_only": True, "qualification_eligible": False,
+                    "evaluation_id": artifact["evaluation_id"]}
+                self.diagnostic_monitor.verify_attempt(record)
+                self.diagnostic_monitor.complete()
+                self.last_evaluation = {"cycle": job["cycle"],
+                    "status": "complete", "diagnostic_only": True,
+                    "qualification_eligible": False,
+                    "frontier_id": job["frontier_id"],
+                    "report_sha256": record["report_sha256"],
+                    "status_sha256": record["status_sha256"]}
+                self.last_monitor_error = None
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                try:
+                    self.diagnostic_monitor.fail_attempt(str(exc))
+                except ValueError:
+                    pass
+                self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                self.last_evaluation = {"cycle": job["cycle"],
+                    "status": "failed", "diagnostic_only": True,
+                    "qualification_eligible": False, "error": str(exc)}
+            finally:
+                self.evaluator = None
+                self.evaluator_log = None
+                self.evaluator_job = None
+            self._start_next_evaluation(occupied_devices=occupied_devices)
             self._publish(cycle=cycle,
                 phase="stopping" if self.request_stop else "training",
                 statuses=statuses, evaluation=self.last_evaluation)
@@ -1820,6 +2027,7 @@ class MecoSupervisor:
                     self._queue_evaluation(cycle)
                     self._start_next_evaluation()
             self._reconcile_completed_schedule_cycles()
+            self._reconcile_completed_diagnostic_frontier()
             self._start_next_evaluation()
             cycles_run = 0
             while not self.request_stop and (self.cycles == 0 or cycles_run < self.cycles):
@@ -1858,8 +2066,10 @@ class MecoSupervisor:
                 self._mark_queued_stopped(statuses)
             schedule_pending = (self.evaluation_schedule_journal is not None and
                 self.evaluation_schedule_journal.summary()["pending_count"] > 0)
+            monitor_pending = (self.diagnostic_monitor is not None and
+                self.diagnostic_monitor.summary()["pending_frontier"] is not None)
             final_state = ("stopped" if self.request_stop else
-                "evaluation_pending" if schedule_pending else "complete")
+                "evaluation_pending" if schedule_pending or monitor_pending else "complete")
             self._publish(cycle=cycle, phase=final_state, statuses=statuses,
                           evaluation=evaluation)
             return {"status": final_state, "cycle": cycle,

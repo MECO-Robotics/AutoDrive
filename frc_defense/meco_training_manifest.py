@@ -256,6 +256,58 @@ def _validate_evaluation_schedule(schedule, protocol, protocol_sha256):
     return normalized
 
 
+def _validate_diagnostic_monitor(monitor, protocol, protocol_sha256, device_pool,
+                                 evaluation_device):
+    """Freeze an opt-in, diagnostic-only repeated-frontier monitor."""
+    if monitor is None:
+        return None
+    fields = {"enabled", "cadence_cycles", "episode_budget", "device",
+        "protocol_id", "protocol_sha256", "scenario_id", "category", "seeds",
+        "backlog_policy"}
+    canonical_fields = fields | {"split", "qualification_eligible"}
+    if (not isinstance(monitor, dict) or not fields <= set(monitor) or
+            set(monitor) - canonical_fields):
+        raise ValueError("diagnostic_monitor fields are incomplete or unknown")
+    if ("split" in monitor and monitor["split"] != "diagnostic") or (
+            "qualification_eligible" in monitor and
+            monitor["qualification_eligible"] is not False):
+        raise ValueError("diagnostic_monitor must remain diagnostic and qualification-ineligible")
+    if monitor["enabled"] is not True:
+        raise ValueError("diagnostic_monitor must be explicitly enabled when configured")
+    cadence, budget = monitor["cadence_cycles"], monitor["episode_budget"]
+    if type(cadence) is not int or cadence < 1:
+        raise ValueError("diagnostic_monitor cadence_cycles must be a positive integer")
+    if type(budget) is not int or budget < 1:
+        raise ValueError("diagnostic_monitor episode_budget must be a positive integer")
+    if (monitor["device"] != evaluation_device or monitor["device"] not in device_pool or
+            _device_index(monitor["device"]) < 0):
+        raise ValueError("diagnostic_monitor device must equal the configured evaluation device")
+    if (monitor["protocol_id"] != protocol.get("protocol_id") or
+            monitor["protocol_sha256"] != protocol_sha256):
+        raise ValueError("diagnostic_monitor protocol identity/digest mismatch")
+    scenario, category, seeds = (monitor["scenario_id"], monitor["category"],
+        monitor["seeds"])
+    definition = get_scenario(scenario) if isinstance(scenario, str) else None
+    if (definition is None or category not in definition.required_categories or
+            not isinstance(seeds, list) or len(seeds) != budget or
+            any(type(seed) is not int or seed < 0 for seed in seeds) or
+            len(set(seeds)) != len(seeds)):
+        raise ValueError("diagnostic_monitor case or exact episode budget is malformed")
+    if monitor["backlog_policy"] != "latest_only":
+        raise ValueError("diagnostic_monitor backlog_policy must be latest_only")
+    protocol_seeds = {seed for case in protocol.get("cases", [])
+        for seed in case.get("seeds", [])}
+    if set(seeds) & protocol_seeds:
+        raise ValueError("diagnostic_monitor seeds overlap train/validation/test partitions")
+    return {"enabled": True, "cadence_cycles": cadence,
+        "episode_budget": budget, "device": monitor["device"],
+        "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": protocol_sha256, "scenario_id": scenario,
+        "category": category, "seeds": list(seeds),
+        "backlog_policy": "latest_only", "split": "diagnostic",
+        "qualification_eligible": False}
+
+
 def _validate_campaign_paths(campaign_id, campaign_root, tracks, evaluation_output, output=None,
                              check_existing_output=True, check_namespace_available=True):
     if (not isinstance(campaign_id, str) or
@@ -524,6 +576,11 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("evaluation protocol ID does not match protocol file")
     evaluation_schedule = _validate_evaluation_schedule(
         config.get("evaluation_schedule"), evaluation_protocol, evaluation_sha)
+    if evaluation_schedule is not None and config.get("diagnostic_monitor") is not None:
+        raise ValueError("diagnostic_monitor and finite evaluation_schedule are separate modes")
+    diagnostic_monitor = _validate_diagnostic_monitor(
+        config.get("diagnostic_monitor"), evaluation_protocol, evaluation_sha,
+        device_pool, eval_device)
     manifest = {"schema": SCHEMA, "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
             "clean": git["clean"], "status_sha256": git["status_sha256"],
@@ -553,6 +610,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         "warm_starts": warm}
     if evaluation_schedule is not None:
         manifest["evaluation_schedule"] = evaluation_schedule
+    if diagnostic_monitor is not None:
+        manifest["diagnostic_monitor"] = diagnostic_monitor
     implementation_ready = bool(git["clean"] and hardware_verified and len(entries) == 5 and
         len(indices) == 2 and
         all(entry["config_sha256"] for entry in entries.values()))
@@ -691,10 +750,17 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
             (eval_split != "diagnostic" and not set(episode_seeds) <= eval_case_seeds)):
         raise ValueError("evaluation seed case no longer matches the bound protocol split")
     if "evaluation_schedule" in manifest:
+        if "diagnostic_monitor" in manifest:
+            raise ValueError("diagnostic_monitor and finite evaluation_schedule are separate modes")
         schedule = _validate_evaluation_schedule(manifest["evaluation_schedule"],
             eval_protocol, eval_sha)
         if schedule != manifest["evaluation_schedule"]:
             raise ValueError("evaluation schedule is not in canonical frozen form")
+    if "diagnostic_monitor" in manifest:
+        monitor = _validate_diagnostic_monitor(manifest["diagnostic_monitor"],
+            eval_protocol, eval_sha, pool, devices.get("evaluation"))
+        if monitor != manifest["diagnostic_monitor"]:
+            raise ValueError("diagnostic monitor is not in canonical frozen form")
     warm = manifest.get("warm_starts", {})
     if set(warm) != set(MECO_TRACKS):
         raise ValueError("warm-start map must contain all five tracks, including absent entries")

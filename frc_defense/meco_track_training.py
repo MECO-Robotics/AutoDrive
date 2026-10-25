@@ -2324,6 +2324,36 @@ def _manage_evaluation_adapters(function):
     return wrapped
 
 
+def validate_diagnostic_frontier_binding(binding, *, schedule_case_binding,
+        split, checkpoints):
+    """Validate frozen frontier metadata and checkpoint bytes without simulation."""
+    required = {"schema_version", "frontier_id", "cycle", "update",
+        "checkpoint_sha256", "source_sha256", "configuration_sha256",
+        "protocol_id", "protocol_sha256"}
+    if (split != "diagnostic" or schedule_case_binding is None or
+            not isinstance(binding, dict) or set(binding) != required or
+            binding.get("schema_version") != 1 or
+            not isinstance(binding.get("frontier_id"), str) or not binding["frontier_id"] or
+            type(binding.get("cycle")) is not int or binding["cycle"] < 1 or
+            type(binding.get("update")) is not int or binding["update"] < 0 or
+            binding.get("protocol_id") != schedule_case_binding.get("protocol_id") or
+            binding.get("protocol_sha256") != schedule_case_binding.get("protocol_sha256") or
+            any(not isinstance(binding.get(key), str) or len(binding[key]) != 64 or
+                any(char not in "0123456789abcdef" for char in binding[key])
+                for key in ("source_sha256", "configuration_sha256", "protocol_sha256")) or
+            not isinstance(binding.get("checkpoint_sha256"), dict) or
+            set(binding["checkpoint_sha256"]) != set(MECO_TRACKS) or
+            any(not isinstance(value, str) or len(value) != 64 or
+                any(char not in "0123456789abcdef" for char in value)
+                for value in binding["checkpoint_sha256"].values())):
+        raise ValueError("diagnostic frontier binding is malformed or conflicts with its case")
+    actual = {track: hashlib.sha256(Path(checkpoints[track]).read_bytes()).hexdigest()
+        for track in MECO_TRACKS}
+    if actual != binding["checkpoint_sha256"]:
+        raise ValueError("diagnostic frontier checkpoint snapshots changed before evaluation")
+    return binding
+
+
 @_manage_evaluation_adapters
 @torch.no_grad()
 def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
@@ -2353,6 +2383,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_focal_pose_assignment: dict | None = None,
                   phase4_teammate_behavior_assignment: dict | None = None,
                   schedule_case_binding: dict | None = None,
+                  diagnostic_frontier_binding: dict | None = None,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
@@ -2401,6 +2432,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 not isinstance(schedule_case_binding.get("protocol_id"), str) or
                 not isinstance(schedule_case_binding.get("protocol_sha256"), str)):
             raise ValueError("scheduled evaluation binding differs from evaluator arguments")
+    if diagnostic_frontier_binding is not None:
+        validate_diagnostic_frontier_binding(diagnostic_frontier_binding,
+            schedule_case_binding=schedule_case_binding, split=split,
+            checkpoints=checkpoints)
     evaluation_binding = None
     if split in ("validation", "test"):
         if evaluation_case is None:
@@ -2826,6 +2861,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 if schedule_case_binding else None),
             "evaluation_case": evaluation_binding,
             "schedule_case_binding": schedule_case_binding,
+            "diagnostic_frontier_binding": diagnostic_frontier_binding,
+            "diagnostic_only": split == "diagnostic",
+            "qualification_eligible": False,
             "calibration_control_case_binding": calibration_control_case_binding,
             "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else
                 schedule_case_binding["seeds"] if schedule_case_binding else None),
@@ -3912,6 +3950,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 if schedule_case_binding else None),
             "evaluation_case": evaluation_binding,
             "schedule_case_binding": schedule_case_binding,
+            "diagnostic_frontier_binding": diagnostic_frontier_binding,
+            "diagnostic_only": split == "diagnostic",
             "calibration_control_case_binding": calibration_control_case_binding,
             "exact_episode_seeds": (evaluation_binding["seeds"] if evaluation_binding else
                 schedule_case_binding["seeds"] if schedule_case_binding else None),
@@ -4134,6 +4174,8 @@ def _parser():
         help="comma-separated exact held-out seed list; required with --evaluation-protocol")
     ev.add_argument("--schedule-case-binding-json",
         help="frozen campaign schedule case binding for durable evaluations")
+    ev.add_argument("--diagnostic-frontier-binding-json",
+        help="manifest/source/configuration-bound diagnostic checkpoint frontier")
     ev.add_argument("--device", required=True,
         help="explicit indexed CUDA/ROCm device, for example cuda:0")
     ev.add_argument("--prediction-mode", choices=PREDICTION_MODES,
@@ -4198,6 +4240,8 @@ def main(argv=None):
             if args.evaluation_case_json else None),
         schedule_case_binding=(json.loads(args.schedule_case_binding_json)
             if args.schedule_case_binding_json else None),
+        diagnostic_frontier_binding=(json.loads(args.diagnostic_frontier_binding_json)
+            if args.diagnostic_frontier_binding_json else None),
         episode_seeds=(tuple(int(item) for item in args.episode_seeds.split(",") if item)
             if args.episode_seeds else None),
         output=args.output, prediction_mode=args.prediction_mode,
