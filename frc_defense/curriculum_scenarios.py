@@ -426,6 +426,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
             raise ValueError('effective capture requires explicit overrides for every material setting')
         if phase4_focal_pose_assignment is not None or phase4_teammate_behavior_assignment is not None:
             raise ValueError('effective capture for focal/teammate validation assignments is not registered')
+        selected_device_identity = _discover_effective_device_identity(device)
         return _effective_curriculum_snapshot(scenario_id, category, seed, definition,
             defender_family, start_condition, sensor_profile, production_d0, pressure,
             phase4_factor, phase4_opponent_policy_id, trench_schedule,
@@ -434,6 +435,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
             evaluation_protocol_content_base64=evaluation_protocol_content_base64,
             evaluation_protocol_object=evaluation_protocol_object,
             evaluation_protocol_content_sha256=evaluation_protocol_content_sha256,
+            selected_device_identity=selected_device_identity,
             runtime_identity=_effective_snapshot_runtime_identity,
             repo_root=_effective_snapshot_repo_root,
             source_plan_path=_effective_snapshot_source_plan_path)
@@ -548,6 +550,23 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     return env
 
 
+def _discover_effective_device_identity(device):
+    """Read the selected indexed accelerator identity without constructing an environment."""
+    selected = torch.device(device)
+    if selected.type != 'cuda' or selected.index is None:
+        raise ValueError('effective capture requires an explicitly indexed CUDA/ROCm device')
+    try:
+        properties = torch.cuda.get_device_properties(selected.index)
+    except Exception as exc:
+        raise ValueError('effective capture could not discover the selected accelerator') from exc
+    uuid = getattr(properties, 'uuid', None)
+    name = getattr(properties, 'name', None)
+    if not isinstance(uuid, str) or not uuid.strip() or not isinstance(name, str) or not name.strip():
+        raise ValueError('selected accelerator must expose a stable UUID and model name')
+    return {'device_index': selected.index, 'device_model': name.strip(),
+        'device_id': uuid.strip()}
+
+
 def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
         defender_family, start_condition, sensor_profile, production_d0, pressure,
         phase4_factor, phase4_opponent_policy_id, opponent_schedule,
@@ -555,6 +574,7 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
         requested_values, evaluation_protocol_content_base64,
         evaluation_protocol_object,
         evaluation_protocol_content_sha256,
+        selected_device_identity,
         runtime_identity, repo_root, source_plan_path):
     """Export the normalized object passed to CurriculumEnv without constructing it."""
     from pathlib import Path
@@ -566,6 +586,9 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
     root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
     source = capture_source_identity(root, source_plan_path)
     runtime = _validate_effective_runtime(runtime_identity)
+    if any(runtime[key] != selected_device_identity[key] for key in
+            ('device_index', 'device_model', 'device_id')):
+        raise ValueError('runtime identity does not match the selected accelerator discovered by the factory')
     resolved = {"scenario_id": scenario_id, "scenario_version": definition.version,
         "scenario_time_budget_s": definition.time_budget_s, "category": category,
         "seed": int(seed), "defender_family": defender_family,

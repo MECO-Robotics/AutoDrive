@@ -527,7 +527,7 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
     return {key: binding[key] for key in sorted(binding)}
 
 
-def describe_campaign(config, *, source_root=ROOT, output=None):
+def describe_campaign(config, *, source_root=ROOT, output=None, legacy_diagnostic=False):
     """Describe a campaign from explicit config; write only when output is passed."""
     source_root = Path(source_root).resolve()
     if not isinstance(config, dict) or set(config.get("tracks", {})) != set(MECO_TRACKS):
@@ -650,6 +650,10 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     phase0_bundle = config.get("phase0_materialization")
     phase0_binding = (validate_effective_phase0_bundle(phase0_bundle, source_root)
         if phase0_bundle is not None else None)
+    if phase0_binding is None and legacy_diagnostic is not True:
+        raise ValueError("new five-track manifests require Phase 0 materialization; use the explicit legacy diagnostic path only for archival diagnostics")
+    if phase0_binding is not None and legacy_diagnostic:
+        raise ValueError("Phase 0 current manifests cannot use the legacy diagnostic path")
     manifest = {"schema": PHASE0_SCHEMA if phase0_binding is not None else SCHEMA,
         "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
@@ -682,6 +686,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     if phase0_binding is not None:
         manifest["phase0_materialization"] = phase0_bundle
         manifest["phase0_binding"] = phase0_binding
+    else:
+        manifest["legacy_diagnostic_only"] = True
     if evaluation_schedule is not None:
         manifest["evaluation_schedule"] = evaluation_schedule
     if diagnostic_monitor is not None:
@@ -708,7 +714,7 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     return manifest
 
 
-def validate_campaign_manifest(manifest, *, source_root=ROOT):
+def validate_campaign_manifest(manifest, *, source_root=ROOT, allow_legacy_v2=False):
     """Validate canonical digest, clean source binding, protocol bytes and track map."""
     if (not isinstance(manifest, dict)
             or manifest.get("schema") not in (SCHEMA, PHASE0_SCHEMA)):
@@ -718,12 +724,19 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
     if digest != _sha(data):
         raise ValueError("campaign manifest canonical digest mismatch")
     if manifest["schema"] == PHASE0_SCHEMA:
+        if "legacy_diagnostic_only" in manifest:
+            raise ValueError("current Phase 0 manifest cannot be marked legacy diagnostic")
         binding = validate_effective_phase0_bundle(
             manifest.get("phase0_materialization"), source_root)
         if manifest.get("phase0_binding") != binding:
             raise ValueError("campaign manifest Phase 0 freeze/partition binding mismatch")
-    elif "phase0_binding" in manifest or "phase0_materialization" in manifest:
-        raise ValueError("legacy diagnostic manifest cannot carry current Phase 0 evidence")
+    else:
+        if not allow_legacy_v2:
+            raise ValueError("legacy v2 manifests are read-only; pass allow_legacy_v2=True for archival validation")
+        if "phase0_binding" in manifest or "phase0_materialization" in manifest:
+            raise ValueError("legacy diagnostic manifest cannot carry current Phase 0 evidence")
+        if manifest.get("legacy_diagnostic_only", True) is not True:
+            raise ValueError("legacy v2 manifest is not marked diagnostic-only")
     campaign_config = manifest.get("campaign")
     if not isinstance(campaign_config, dict):
         raise ValueError("campaign manifest campaign config is malformed")

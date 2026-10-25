@@ -200,6 +200,14 @@ def _effective_runtime_identity():
         "device_model": "fixture WX9100", "dependency_lock_sha256": digest}
 
 
+@pytest.fixture
+def stub_effective_device_probe(monkeypatch):
+    from frc_defense import curriculum_scenarios
+    monkeypatch.setattr(curriculum_scenarios, "_discover_effective_device_identity",
+        lambda device: {"device_index": int(str(device).rsplit(":", 1)[1]),
+            "device_model": "fixture WX9100", "device_id": "GPU-0123456789abcdef"})
+
+
 def _registry_and_assignment():
     tuples = []
     assignments = {}
@@ -418,7 +426,8 @@ def test_partition_contract_rejects_final_test_use_for_training_or_margin_review
         )
 
 
-def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp_path):
+def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp_path,
+        stub_effective_device_probe):
     _init_repo(tmp_path)
     receipt = compile_effective_capture_receipt(tmp_path,
         source_plan_path=SOURCE_PLAN, factory_arguments=_factory_arguments(),
@@ -437,7 +446,8 @@ def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp
 
 @pytest.mark.parametrize("mutation", ["missing_field", "default_only", "noncanonical_config",
     "protocol_object_mismatch", "duplicate_protocol_key"])
-def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path, mutation):
+def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path, mutation,
+        stub_effective_device_probe):
     _init_repo(tmp_path)
     arguments = _factory_arguments()
     if mutation == "missing_field":
@@ -469,6 +479,26 @@ def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path,
         if k != "receipt_sha256"})
     with pytest.raises(ValueError, match="canonical"):
         validate_effective_capture_receipt(receipt, tmp_path)
+
+
+@pytest.mark.parametrize("mismatch", ["selector", "index", "model", "uuid"])
+def test_effective_capture_rejects_runtime_device_not_selected_by_factory(tmp_path,
+        stub_effective_device_probe, mismatch):
+    _init_repo(tmp_path)
+    arguments = _factory_arguments()
+    runtime = _effective_runtime_identity()
+    if mismatch == "selector":
+        arguments["device"] = "cuda:1"
+    elif mismatch == "index":
+        runtime["device_index"] = 1
+    elif mismatch == "model":
+        runtime["device_model"] = "different model"
+    else:
+        runtime["device_id"] = "GPU-ffffffffffffffff"
+    with pytest.raises(ValueError, match="selected accelerator"):
+        compile_effective_capture_receipt(tmp_path, source_plan_path=SOURCE_PLAN,
+            factory_arguments=arguments, runtime_identity=runtime,
+            captured_at_utc="2026-10-25T00:00:00Z")
 
 
 def test_tuple_partition_closes_registry_for_five_identical_tracks():
