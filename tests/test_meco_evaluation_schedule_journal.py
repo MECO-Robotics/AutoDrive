@@ -72,17 +72,38 @@ def test_long_running_attempt_persists_failure_time_separately_from_start(tmp_pa
     assert attempt["failed_at_unix"] == 1010.
 
 
-def test_restart_reconciles_verified_history_and_retries_interrupted_attempt(tmp_path):
+def test_restart_reconciles_verified_history_and_retries_interrupted_attempt(tmp_path,
+                                                                            monkeypatch):
+    from frc_defense import meco_evaluation_schedule as schedule_module
+    from frc_defense import meco_supervisor as supervisor_module
+
     schedule = [_case(i) for i in range(2)]
     journal = _journal(tmp_path, schedule)
     rows = _snapshots(tmp_path)
     journal.enqueue(0, 1, schedule[0], rows)
     journal.enqueue(1, 2, schedule[1], rows)
+    clock = [50.]
+    monkeypatch.setattr(schedule_module.time, "time", lambda: clock[0])
     journal.begin_attempt(tmp_path / "active.json")
     resumed = _journal(tmp_path, schedule, resume=True)
+    clock[0] = 100.
     resumed.reconcile_history([])
     assert resumed.head()["status"] == "failed"
     assert resumed.head()["index"] == 0
+    assert resumed.head()["attempts"][0]["failed_at_unix"] == 100.
+
+    supervisor = object.__new__(supervisor_module.MecoSupervisor)
+    supervisor.evaluator = None
+    supervisor.request_stop = False
+    supervisor.evaluation_device = "cpu"
+    supervisor.evaluation_schedule_journal = resumed
+    monkeypatch.setattr(supervisor_module.subprocess, "Popen",
+        lambda *_args, **_kwargs: pytest.fail("restart retry must respect failure backoff"))
+    supervisor._start_next_evaluation()
+    assert resumed.head()["index"] == 0
+    assert resumed.head()["status"] == "failed"
+    assert len(resumed.head()["attempts"]) == 1
+
     resumed.begin_attempt(tmp_path / "retry.json")
     output, checkpoint_paths, _, _ = _valid_artifacts(tmp_path, schedule[0])
     artifact = verify_evaluation_artifacts(schedule[0], output, 0, checkpoint_paths)

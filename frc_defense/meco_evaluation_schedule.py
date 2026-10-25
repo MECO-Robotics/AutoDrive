@@ -299,8 +299,10 @@ class MecoEvaluationSchedule:
     def recover_interrupted_attempt(self):
         item = self.head()
         if item is not None and item["status"] == "running":
+            failed_at = time.time()
             item["attempts"][-1].update(status="failed",
-                error="supervisor restarted before verified completion")
+                error="supervisor restarted before verified completion",
+                failed_at_unix=failed_at)
             item.update(status="failed",
                 last_error="supervisor restarted before verified completion")
             self._save()
