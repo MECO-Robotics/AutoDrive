@@ -456,6 +456,99 @@ def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp
         validate_effective_capture_receipt(changed_receipt, tmp_path)
 
 
+def test_paired_gate_prepare_and_revalidation_accept_real_effective_v3_bundle(
+        tmp_path, stub_effective_device_probe, monkeypatch):
+    """Exercise paired gate APIs against the actual v3 receipt/freeze/partition chain."""
+    import base64
+    import json
+    from frc_defense import curriculum_training, meco_qualification as qualification
+    from frc_defense.meco_simulated_score_ledger import (
+        ESTIMAND_SCHEMA, RULES, RULES_ID, RULES_SHA256, OUTCOME_NAME,
+        SOURCE_PLAN_SHA256, PHASE0_PLAN_SHA256, canonical_bytes)
+
+    _init_repo(tmp_path)
+    source_identity_value = {"fixture_source": "paired-gate-v3"}
+    source_tree_value = {"fixture_tree": "paired-gate-v3"}
+    source_hash = hashlib.sha256(json.dumps(source_identity_value,
+        sort_keys=True, allow_nan=False).encode()).hexdigest()
+    monkeypatch.setattr(curriculum_training, "source_identity",
+        lambda: source_identity_value)
+    monkeypatch.setattr(curriculum_training, "source_tree_identity",
+        lambda: source_tree_value)
+    monkeypatch.setattr(qualification, "_calibration_source_identity_sha256",
+        lambda: source_hash)
+    approval = {"schema": ESTIMAND_SCHEMA, "approval_id": "fixture-approval",
+        "approved": True, "approver": "fixture@example.invalid",
+        "approved_at": "2026-10-25T12:00:00Z",
+        "source_plan_sha256": SOURCE_PLAN_SHA256,
+        "phase0_plan_sha256": PHASE0_PLAN_SHA256,
+        "simulator_source_sha256": source_hash, "rules_id": RULES_ID,
+        "rules_sha256": RULES_SHA256, "primary_estimand": OUTCOME_NAME,
+        "formula": "sum score_units by alliance over accepted FUEL score-award events",
+        "unit": RULES["unit"], "included_outcomes": RULES["included_outcomes"],
+        "excluded_outcomes": RULES["excluded_outcomes"],
+        "interpretation_limits": "Synthetic v3 contract fixture only.",
+        "intended_use": "Descriptive simulator outcome research only."}
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_bytes(canonical_bytes(approval))
+    subprocess.run(["git", "-C", str(tmp_path), "add", "approval.json"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm",
+        "add synthetic approval fixture"], check=True)
+    receipt = compile_effective_capture_receipt(tmp_path,
+        source_plan_path=SOURCE_PLAN, factory_arguments=_factory_arguments(),
+        runtime_identity=_effective_runtime_identity(),
+        captured_at_utc="2026-10-25T00:00:00Z")
+    freeze = compile_effective_baseline_freeze(receipt, tmp_path)
+    registry, assignments = _registry_and_assignment()
+    assignment_body = {key: assignments[key] for key in (
+        "schema", "assignments", "model_tracks", "evaluation_budget")}
+    assignment_raw = json.dumps(assignment_body, sort_keys=True,
+        separators=(",", ":")).encode()
+    assignment_digest = hashlib.sha256(assignment_raw).hexdigest()
+    assignments["allocation_provenance"]["authorization_artifact"] = {
+        "content_base64": base64.b64encode(assignment_raw).decode(),
+        "content_sha256": assignment_digest}
+    monkeypatch.setattr("frc_defense.meco_baseline_freeze.TRUSTED_ALLOCATION_ARTIFACT_SHA256",
+        frozenset({assignment_digest}))
+    partition = compile_tuple_partition_materialization(
+        freeze_sha256=freeze["freeze_sha256"], registry=registry,
+        assignment_table=assignments)
+    assert partition["allocation_authorized"] is True
+    phase0_bundle = {"capture_receipt": receipt, "baseline_freeze": freeze,
+        "partition_materialization": partition}
+
+    artifacts = {item["artifact_id"]: base64.b64decode(item["content_base64"])
+        for item in receipt["configuration_artifacts"]}
+
+    gate = qualification.prepare_paired_calibration_gate_bindings(
+        repo_root=tmp_path, phase0_bundle=phase0_bundle,
+        estimand_approval_path="approval.json", configuration_artifacts=artifacts)
+    source_runtime = freeze["runtime"]
+    workers = [{"worker_id": f"wx-{index}", "device": f"cuda:{index}",
+        "device_index": index, "device_model": "AMD Radeon Pro WX 9100",
+        "device_uuid": f"GPU-fixture-{index}", "backend": "hip",
+        "backend_version": source_runtime["backend_version"],
+        "torch_version": source_runtime["torch_version"]} for index in range(2)]
+    campaign = qualification.build_paired_calibration_campaign(
+        shard_count=2, source_binding=gate["source_binding"],
+        phase0_binding=gate["phase0_binding"],
+        calibration_tuples=gate["calibration_tuples"],
+        evaluation_budget=gate["evaluation_budget"],
+        estimand_approval_binding=gate["estimand_approval_binding"],
+        worker_assignments=workers)
+    validated = qualification.validate_paired_calibration_gate_artifacts(
+        campaign, repo_root=tmp_path, phase0_bundle=phase0_bundle,
+        configuration_artifacts=artifacts)
+    assert validated["phase0_binding"] == campaign["phase0_binding"]
+    assert validated["partition"]["allocation_authorized"] is True
+    changed_artifacts = dict(artifacts)
+    changed_artifacts["field_layout"] += b" "
+    with pytest.raises(ValueError, match="configuration bytes differ"):
+        qualification.validate_paired_calibration_gate_artifacts(
+            campaign, repo_root=tmp_path, phase0_bundle=phase0_bundle,
+            configuration_artifacts=changed_artifacts)
+
+
 @pytest.mark.parametrize("mutation", ["missing_field", "default_only", "noncanonical_config",
     "protocol_object_mismatch", "duplicate_protocol_key"])
 def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path, mutation,
