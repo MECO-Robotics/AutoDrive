@@ -79,6 +79,11 @@ def _queue_track_directory(root, track):
 def _select_queue_track_directory(root, lane, by_path):
     run_directory = lane.get('run_directory')
     track = lane.get('track')
+    if run_directory is None and track is None and 'directory' in lane:
+        # Older architecture-queue lanes publish their full run directory and
+        # have no track/run_directory fields. Keep that shape contained, and
+        # join saved evidence only through exact resolved-path equality.
+        return _queue_lane_directory(root, lane['directory'])
     if run_directory is not None and run_directory != track:
         raise ValueError('queue run_directory must name its track directory')
     if run_directory is None and track is None:

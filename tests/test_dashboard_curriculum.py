@@ -417,6 +417,60 @@ def test_same_basename_elsewhere_under_root_never_matches_queue_track(tmp_path):
     assert queued["qualification_evidence"] == []
 
 
+def test_legacy_directory_only_queue_joins_exact_stats_run(tmp_path):
+    run = tmp_path / "variants" / "ppo" / "baseline_mlp" / "seed-7"
+    run.mkdir(parents=True)
+    (run / "stats.json").write_text(json.dumps({
+        "curriculum_state": {"qualified": ["from-stats"]}, "stats": [],
+        "config": {"eval_every": 1}}))
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "algorithm": "ppo", "architecture": "baseline_mlp", "seed": 7,
+        "directory": str(run.resolve()), "status": "running",
+        "qualified": ["forged-from-queue"], "evaluation": {"success": True}}]}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert len(report["runs"]) == 1
+    assert report["runs"][0]["path"] == str(run.resolve())
+    assert report["runs"][0]["qualified"] == ["from-stats"]
+    assert report["queue_lanes"][0]["track"] is None
+    assert "evaluation" not in report["queue_lanes"][0]
+
+
+def test_legacy_directory_only_pending_lane_is_status_only(tmp_path):
+    run = tmp_path / "variants" / "ppo" / "baseline_mlp" / "seed-7"
+    run.mkdir(parents=True)
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "algorithm": "ppo", "architecture": "baseline_mlp", "seed": 7,
+        "directory": str(run.resolve()), "status": "pending", "completed_updates": 0,
+        "current": "pickup_simple", "qualified": ["forged"],
+        "evaluation": {"success": True}}]}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert len(report["runs"]) == 1
+    pending = report["runs"][0]
+    assert pending["path"] == str(run.resolve())
+    assert pending["queue_status"] == "pending"
+    assert pending["qualified"] == []
+    assert pending["latest_evaluations"] == []
+    assert pending["evaluation_history"] == []
+    assert pending["qualification_evidence"] == []
+    assert "evaluation" not in report["queue_lanes"][0]
+
+    linked = tmp_path / "linked-run"
+    linked.symlink_to(run, target_is_directory=True)
+    queue = tmp_path / "queue-status.json"
+    lane = json.loads(queue.read_text())["lanes"][0]
+    lane["directory"] = str(linked)
+    queue.write_text(json.dumps({"lanes": [lane]}))
+    rejected = summarize(tmp_path)
+    assert rejected["queue_lanes"] == []
+    assert rejected["errors"]
+
+
 def test_only_valid_paired_nondiagnostic_reference_qualified_evidence_qualifies(tmp_path):
     _run(tmp_path, qualified=("pickup_simple",))
     data = _payload(tmp_path)
