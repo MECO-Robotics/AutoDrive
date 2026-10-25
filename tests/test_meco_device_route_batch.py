@@ -4,6 +4,8 @@ import torch
 from frc_defense.experimental_route_evaluation import (
     DeviceRouteBatch,
     DeviceRouteQuery,
+    MAX_ROUTE_QUERY_BATCH,
+    evaluate_device_route_chunks,
 )
 from frc_defense.meco_candidates import DeviceCandidateBatch
 from frc_defense.meco_track_training import _d1_d2_scores
@@ -142,3 +144,32 @@ def test_d1_d2_device_batch_scoring_keeps_route_and_risk_cost_on_device():
     invalid_scores = _d1_d2_scores(SimpleNamespace(device_batch=batch), None, "D1",
                                    route_cost_points_per_second=10.)
     assert torch.isneginf(invalid_scores[0, 1])
+
+
+def test_device_route_chunks_keep_query_order_without_host_projection(monkeypatch):
+    calls = []
+
+    def fake_evaluate(env, queries, goals, **kwargs):
+        calls.append((len(queries), goals.clone()))
+        count = len(queries)
+        return DeviceRouteBatch(
+            queries=tuple(queries), status_code=torch.full((count,), 3, dtype=torch.long),
+            feasible=torch.ones(count, dtype=torch.bool),
+            path_xy=torch.zeros((count, 1, 2)),
+            path_length=torch.ones(count, dtype=torch.long),
+            distance_m=goals[:, 0].clone(), endpoint_error_m=torch.zeros(count),
+            weighted_cost_grid_edges=torch.zeros(count),
+            candidate_index=torch.arange(count, dtype=torch.long))
+
+    import frc_defense.experimental_route_evaluation as route_eval
+    monkeypatch.setattr(route_eval, "evaluate_device_routes", fake_evaluate)
+    count = MAX_ROUTE_QUERY_BATCH + 2
+    queries = tuple(DeviceRouteQuery(f"c{i}", "ep:1", 0, 3) for i in range(count))
+    goals = torch.stack((torch.arange(count, dtype=torch.float32),
+                         torch.zeros(count)), dim=-1)
+    batch = evaluate_device_route_chunks(SimpleNamespace(device="cpu"), queries, goals)
+
+    assert [size for size, _ in calls] == [MAX_ROUTE_QUERY_BATCH, 2]
+    assert batch.queries == queries
+    assert torch.equal(batch.distance_m, goals[:, 0].to(torch.float64))
+    assert torch.equal(batch.candidate_index, torch.arange(count))
