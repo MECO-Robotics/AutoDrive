@@ -1,5 +1,35 @@
 # MECO learning tracks plan: execution status
 
+> **Phase 2 coordinator code integrated — 2026-10-25 04:24 UTC.** The
+> reviewed resumable Plan A/C complete-set coordinator is integrated on `main`
+> through `59524d21a` and pushed. It provides a shared C1/C2 source campaign,
+> A1/A2/A3 U+B+P bundle handoff, immutable stage receipts, a revalidated
+> five-track seal, and exact manifest warm-start forwarding. Reviewer-approved
+> implementation and test heads were `41efbb1ca6cd08c9cf45ad8811088b129130bfbf`
+> and `d77cb19c0bcd91688f2aa3d0ac4d69c10efcd982`. Integrated checks passed:
+> 43 manifest/coordinator tests and 2 targeted no-device supervisor launch
+> tests; compilation and diff checks passed. The coordinator has not generated
+> a dataset, weights, or seal; readiness remains false.
+>
+> The user-requested r4 run remains active on its older source and was not
+> altered. Immutable status snapshot `docs/MECO_CAMPAIGN_SNAPSHOT_20261025T0423Z.json`
+> (SHA-256 `c13e4dabb94bf36cbf4bcb0593fb7f4540e3df3e0a78215d2dac1c0996a759ca`)
+> records cycle 2, one completed cycle, five completed training chunks, all
+> five tracks at their first 100-update chunk, and no evaluation result in the
+> supervisor record. At the subsequent live check, the supervisor had A2
+> running its next chunk and a diagnostic one-episode evaluation process was
+> still active. This run remains diagnostic `pickup_simple` exposure with no
+> evaluation protocol binding or warm-start artifacts; chunk completion is
+> not a held-out pass or qualification.
+>
+> The three-pass provenance ledger now records the approved coordinator
+> tranche. After updating the ledger and pinned digest, dashboard process
+> `2963161` was restarted from this checkout. `/`, both status APIs and both
+> frontend assets returned HTTP 200; the curriculum API validated all 67
+> scoped summaries, and both served JavaScript hashes matched the checkout.
+> No replay was generated because this code tranche did not run a simulator
+> behavior evaluation.
+
 > **Live r4 and durable-evaluation update — 2026-10-25 03:46 UTC.** The
 > supervisor PID `2750253` is active with both WX9100 lanes. Its queue
 > heartbeat at `2026-10-25T03:46:36Z` shows A1, A2, A3, and C1 complete at

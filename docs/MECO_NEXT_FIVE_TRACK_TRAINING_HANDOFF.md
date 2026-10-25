@@ -18,6 +18,15 @@ focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
 factors, and Phase 5 scorer-timing correction. The current active workers
 were not changed or restarted during this integration.
 
+**Manifest refresh required:** the r5 config and manifest above predate the
+Phase 2 complete-set coordinator integrated through `59524d21a`. They are now
+stale for launch and must be regenerated from a clean current checkout after
+the active r4 run releases both device leases. The coordinator and supervisor
+now preserve and forward an exact all-five warm-start map, but no dataset,
+warm-start weights, or complete-set seal has yet been generated. Keep
+`phase2_ready`, validation readiness, and qualification readiness false until
+the runtime campaign and later gates produce their required evidence.
+
 ## Campaign setup
 
 An offline manifest API now describes the five-track configuration and
