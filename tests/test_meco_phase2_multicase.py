@@ -260,7 +260,8 @@ def test_execute_multicase_publishes_only_after_serial_shards_and_five_receipts(
             artifact_paths={track: Path(entry["path"]) for track, entry in result["artifacts"].items()})
 
 
-@pytest.mark.parametrize("tamper_kind", ["receipt", "malformed", "trajectory", "ub", "p", "sidecar"])
+@pytest.mark.parametrize("tamper_kind", ["receipt", "malformed", "malformed_row",
+    "trajectory", "ub", "p", "sidecar"])
 def test_execute_resume_rejects_tampered_receipt_and_retries_fresh_attempt(
         tmp_path, frozen_protocol, monkeypatch, tamper_kind):
     protocol, repo = frozen_protocol
@@ -292,6 +293,17 @@ def test_execute_resume_rejects_tampered_receipt_and_retries_fresh_attempt(
     elif tamper_kind == "malformed":
         receipt = json.loads(receipt_path.read_text())
         receipt["datasets"]["trajectory"] = None
+        receipt_path.write_text(json.dumps(receipt))
+    elif tamper_kind == "malformed_row":
+        receipt = json.loads(receipt_path.read_text())
+        entry = receipt["datasets"]["trajectory"]
+        data_path, manifest_path = Path(entry["path"]), Path(entry["manifest_path"])
+        data_path.write_text("null\nnull\n")
+        sidecar = json.loads(manifest_path.read_text())
+        sidecar["dataset_sha256"] = multi._sha(data_path.read_bytes())
+        manifest_path.write_text(json.dumps(sidecar, sort_keys=True))
+        entry["sha256"] = multi._sha(data_path.read_bytes())
+        entry["manifest_sha256"] = multi._sha(manifest_path.read_bytes())
         receipt_path.write_text(json.dumps(receipt))
     elif tamper_kind == "sidecar":
         receipt = json.loads(receipt_path.read_text())
@@ -380,6 +392,39 @@ def test_execute_resume_adopts_valid_first_shard_after_second_shard_interruption
     assert [case for case, _ in collected].count(["case-b", "pair"]) == 1
     assert len([event for event in events if event[0] == "collect" and event[1] == ("case-a", "single")]) == 1
     assert result["phase2_complete"] is False
+
+
+def test_execute_resume_does_not_swallow_runtime_source_validation_failure(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    stopped = {"value": False}
+    def interrupt_second_case(case, _attempt):
+        if case["case_key"] == ["case-b", "pair"] and not stopped["value"]:
+            stopped["value"] = True
+            raise RuntimeError("injected interruption")
+    from frc_defense import meco_phase2_complete_set
+    monkeypatch.setattr(multi, "validate_multicase_descriptor", lambda value: value)
+    monkeypatch.setattr(meco_phase2_complete_set, "validate_complete_set_manifest",
+        lambda manifest, _descriptor: manifest if manifest == {"synthetic_complete": True}
+        else (_ for _ in ()).throw(ValueError("synthetic complete-set evidence mismatch")))
+    collect, combine, fit, validate, lease, attest, _collected, _events = _execute_adapters(
+        tmp_path, descriptor, collector_hook=interrupt_second_case)
+    with pytest.raises(RuntimeError, match="injected interruption"):
+        multi.execute_multicase(descriptor, collect_case=collect, combine_target=combine,
+            fit_combined=fit, validate_track=validate, lease_factory=lease,
+            device_identity_verifier=attest)
+    monkeypatch.setattr(multi, "validate_case_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime/source validation failure")))
+    with pytest.raises(RuntimeError, match="runtime/source validation failure"):
+        multi.execute_multicase(descriptor, collect_case=collect, combine_target=combine,
+            fit_combined=fit, validate_track=validate, lease_factory=lease,
+            device_identity_verifier=attest)
+    attempts = sorted(Path(descriptor["outputs"]["root"]
+        + "/shards/case-0001").glob("attempt-*"))
+    assert [item.name for item in attempts] == ["attempt-0001"]
 
 
 @pytest.mark.parametrize("tamper_family", ["trajectory", "ub", "p"])

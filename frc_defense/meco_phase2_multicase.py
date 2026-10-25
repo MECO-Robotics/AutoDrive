@@ -540,6 +540,8 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
             raise ValueError(f"case {family} target does not bind the exact trajectory shard")
         rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
         for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"case {family} dataset rows must be objects")
             identity_ok = ((row.get("scenario_id"), row.get("category")) == expected_key and
                 row.get("seed") in shard["seeds"])
             metadata_ok = (family == "ub" or (

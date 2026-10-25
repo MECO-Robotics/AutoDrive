@@ -1836,6 +1836,8 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
     rows = [json.loads(line) for line in payload.decode("utf-8").splitlines() if line.strip()]
     if not rows or len(rows) != manifest.get("record_count"):
         raise ValueError("Plan A P route dataset row count mismatch or empty data")
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Plan A P route dataset rows must be objects")
     seeds = manifest.get("seeds")
     scenario, category = manifest.get("scenario_id"), manifest.get("category")
     allowed = _protocol_train_seeds(protocol, scenario, category)
@@ -3316,6 +3318,8 @@ def validate_plan_a_multicase_joint_ubp_artifact(track: str, checkpoint: Path, *
         legal_manifest_bytes = legal_manifest_path.read_bytes()
         legal_manifest = json.loads(legal_manifest_bytes)
         legal_rows = [json.loads(line) for line in legal_bytes.decode("utf-8").splitlines() if line.strip()]
+        if any(not isinstance(row, dict) for row in legal_rows):
+            raise ValueError("composite U+B dataset rows must be objects")
         if (hashlib.sha256(legal_bytes).hexdigest() != binding.get("legal_dataset_sha256") or
                 hashlib.sha256(legal_manifest_bytes).hexdigest() != binding.get("legal_manifest_sha256") or
                 legal_manifest.get("record_count") != len(legal_rows) or
