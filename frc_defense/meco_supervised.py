@@ -1953,7 +1953,7 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
     result = []
     for row in rows:
         replay = replay_counterfactual_branch(row, manifest,
-            require_hip_plan_a=track in ("A1", "A2", "A3"))
+            require_hip_plan_a=True)
         try:
             env, graph, snapshot = replay["env"], replay["graph"], replay["snapshot"]
             safe = replay["observation"]

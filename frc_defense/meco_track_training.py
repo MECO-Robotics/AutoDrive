@@ -903,7 +903,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     safe = build_safe_action_candidates(env, env._last_obs, world=0, slot=3,
                                         episode_id=episode_id)
     support = build_plan_a_support(env, graph, env._last_obs,
-                                   safe.observation.snapshot_id)
+                                   safe.observation.snapshot_id,
+                                   require_hip_shortest_path=True)
     raster, globals_ = _snapshot_tensors(safe.observation, device=env.device)
     hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
         hidden, tracking_was_available, raster)

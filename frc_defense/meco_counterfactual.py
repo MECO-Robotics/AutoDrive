@@ -703,7 +703,7 @@ def _plan_a_p_route_record(env, *, intervention_map, intervention_seed,
 
 def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
                      prediction_mode, max_c_candidates, max_a_pairs,
-                     materialize=False, require_hip_plan_a=False):
+                     materialize=False, require_hip_plan_a=True):
     from .meco_track_training import (_candidate_replay_digest, _route_cost_tensor)
     candidates = build_route_feasible_candidates(env, env._last_obs, graph,
         episode_id=episode_id, action_ticks=action_ticks,
@@ -792,7 +792,7 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     return result
 
 
-def replay_counterfactual_branch(record, manifest, *, require_hip_plan_a=False):
+def replay_counterfactual_branch(record, manifest, *, require_hip_plan_a=True):
     """Replay under the record seed while restoring the caller's RNG streams."""
     device = manifest.get("device", {}).get("device") if isinstance(
         manifest.get("device"), dict) else None
@@ -810,7 +810,7 @@ def replay_counterfactual_branch(record, manifest, *, require_hip_plan_a=False):
             require_hip_plan_a=require_hip_plan_a)
 
 
-def _replay_episode_eligibility(record, manifest, *, require_hip_plan_a=False):
+def _replay_episode_eligibility(record, manifest, *, require_hip_plan_a=True):
     """Replay the complete teacher episode to verify post-branch eligibility metadata."""
     from .meco_track_training import _reset_episode
     scenario_id, category, seed = record["scenario_id"], record["category"], record["seed"]
@@ -895,7 +895,7 @@ def _replay_episode_eligibility(record, manifest, *, require_hip_plan_a=False):
 
 
 def _replay_counterfactual_branch_seeded(record, manifest, *,
-                                        require_hip_plan_a=False):
+                                        require_hip_plan_a=True):
     """Replay a v2 prefix with strict digest/trace parity and return branch inputs."""
     from .meco_track_training import _reset_episode
 
@@ -1040,7 +1040,8 @@ def _rebuild_and_check(env, graph, episode_id, expected, *, action_ticks,
                        max_a_pairs):
     actual = _prefix_snapshot(env, graph, episode_id, action_ticks=action_ticks,
         candidate_k=candidate_k, prediction_mode=prediction_mode,
-        max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs)
+        max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
+        require_hip_plan_a=True)
     for field in ("snapshot_id", "macro_ticks", "simulator_state_sha256", "observation_sha256",
                   "safe_observation_sha256", "candidate_digest",
                   "candidate_replay_digest", "support_digest",
@@ -1250,7 +1251,7 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                         action_ticks=macro_ticks, candidate_k=candidate_k,
                         prediction_mode=prediction_mode,
                         max_c_candidates=max_c_candidates,
-                        max_a_pairs=max_a_pairs)
+                        max_a_pairs=max_a_pairs, require_hip_plan_a=True)
                     prefix.append(item)
                     reward, ended, timeout, trace, heading_error, goal_distance, preempted = _reward_step(
                         env, item["teacher_action"], macro_ticks)
