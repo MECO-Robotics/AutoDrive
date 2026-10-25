@@ -615,6 +615,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
             elif (not isinstance(captured, dict) or
                     captured.get("factor_id") != assignment["factor_id"] or
                     captured.get("registry_profile_id") != assignment["registry_profile_id"] or
+                    captured.get("runtime_profile_name") != assignment["runtime_profile_name"] or
                     captured.get("profile_config_sha256") != assignment["profile_config_sha256"] or
                     captured.get("assignment_sha256") != assignment["assignment_sha256"] or
                     captured.get("profile_applied_before_observation") is not True or
@@ -704,11 +705,19 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         paired_deltas[policy] = by_metric
     outcome_by_start_state = {"states": by_state,
         "paired_deltas_vs_scenario_defined": paired_deltas}
+    legality_records = []
+    for key in sorted(expected_keys):
+        captured = arms["factor_treatment"][key]["phase4_start_profile"]
+        legality_records.append({"policy": key[0], "category": key[1],
+            "seed": key[2], "world_count": captured["validated_pose_world_count"],
+            "per_world_legal": captured["per_world_legal"],
+            "legal_start_validation_rate": captured["legal_start_validation_rate"]})
     coverage_digest = _sha({"expected_keys": [list(key) for key in sorted(expected_keys)],
         "assignment_sha256": assignment["assignment_sha256"],
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
+        "per_world_legality_records": legality_records,
         "outcome_by_start_state": outcome_by_start_state})
     return {"policies": sorted(policies), "categories": categories,
         "condition_names": ["architecture_matched_cv_k16"],

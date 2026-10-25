@@ -429,8 +429,19 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
         legal_start_validation_rate=.5), "partial per-world legality")
     reject(lambda report: report["records"][0]["phase4_start_profile"][
         "outcome_metrics"].update(scores=float("nan")), "invalid outcome metric")
+    reject(lambda report: report["records"][0]["phase4_start_profile"].update(
+        runtime_profile_name="wrong_profile"), "lacks exact profile provenance")
     reject(lambda report: report["records"][0].update(source_identity_sha256="wrong"),
         "mismatched checkpoint/source/device binding")
+    expanded_world_record = json.loads(json.dumps(original))
+    captured = expanded_world_record["records"][0]["phase4_start_profile"]
+    captured.update(validated_pose_world_count=2, per_world_legal=[True, True])
+    treatment_report_path.write_text(json.dumps(expanded_world_record))
+    expanded_pair = campaign_runner._validate_phase4_start_profile_pair(
+        tmp_path / "dispatch", assignment,
+        categories=[cell["case_axes"]["category"]],
+        seeds=observed_seeds, expected_binding=expected_binding)
+    assert expanded_pair["coverage_digest_sha256"] != result["coverage_digest_sha256"]
     treatment_report_path.write_text(json.dumps(original))
     assert all("--phase4-start-profile" not in argv for argv in observed[:1])
     assert "--phase4-start-profile" in observed[1]
