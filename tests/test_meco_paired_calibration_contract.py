@@ -381,6 +381,27 @@ def test_paired_control_summary_uses_same_tuple_and_separate_alliance_deltas(mon
     assert summary["safety_rate_difference"][next(iter(q.SAFETY_METRIC_NAMES))]["mean"] == -0.1
 
 
+def test_paired_control_bundle_is_individually_digest_bound_and_nonqualifying(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    summary = {"control_id": "D1/current", "pair_count": 3,
+        "simulated_match_score_difference": {"red": {"mean": 1.0}}}
+    bundle, artifact_sha256 = q._build_paired_control_bundle(campaign,
+        summary, ["a" * 64, "b" * 64])
+    raw = json.dumps(bundle, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode()
+    assert hashlib.sha256(raw).hexdigest() == artifact_sha256
+    assert bundle["bundle_id"] == q._canonical_sha256({
+        key: value for key, value in bundle.items() if key != "bundle_id"})
+    assert bundle["final_shard_sha256"] == ["a" * 64, "b" * 64]
+    assert bundle["official_match_points"] is None
+    assert bundle["qualification_eligible"] is False
+
+    changed, changed_sha = q._build_paired_control_bundle(campaign,
+        {**summary, "pair_count": 4}, ["a" * 64, "b" * 64])
+    assert changed["bundle_id"] != bundle["bundle_id"]
+    assert changed_sha != artifact_sha256
+
+
 def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_path):
     campaign = _campaign(monkeypatch)
     unit = campaign["shards"][0]["work_units"][0]

@@ -1,5 +1,6 @@
 """Pure CLI input contracts for paired campaign planning/merging."""
 
+import hashlib
 import json
 
 import pytest
@@ -54,3 +55,27 @@ def test_paired_cli_rejects_symlinked_config_artifact_source(tmp_path):
 
     with pytest.raises(ValueError, match="missing or symlinked"):
         cli._load_config_artifact_bytes(index_path)
+
+
+def test_paired_merge_publishes_each_control_bundle_before_report(tmp_path, monkeypatch):
+    from frc_defense import meco_qualification as q
+
+    campaign = {"campaign_id": "campaign", "controls": []}
+    summary = {"control_id": "D1/current", "pair_count": 1}
+    bundle, digest = q._build_paired_control_bundle(campaign, summary, ["a" * 64])
+    report = {"control_bundles": [{"control_id": "D1/current",
+        "bundle_id": bundle["bundle_id"], "artifact_sha256": digest}],
+        "_control_bundle_artifacts": [bundle]}
+    output = tmp_path / "merged.json"
+    cli._publish_paired_control_bundles(output, report)
+
+    bundle_path = tmp_path / "merged.control-D1-current.json"
+    assert json.loads(bundle_path.read_bytes()) == bundle
+    assert hashlib.sha256(bundle_path.read_bytes()).hexdigest() == digest
+    assert "_control_bundle_artifacts" not in report
+
+    monkeypatch.setattr(q, "write_paired_calibration_artifact_immutable",
+        lambda path, artifact: (_ for _ in ()).throw(ValueError("conflicting bytes")))
+    report["_control_bundle_artifacts"] = [bundle]
+    with pytest.raises(ValueError, match="conflicting bytes"):
+        cli._publish_paired_control_bundles(output, report)

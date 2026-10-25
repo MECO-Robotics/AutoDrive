@@ -2568,6 +2568,22 @@ def _paired_control_summary(campaign, control_id, pairs):
     return summary
 
 
+def _build_paired_control_bundle(campaign, summary, final_shard_sha256):
+    body = {"schema": "meco-paired-calibration-control-bundle-v1",
+        "campaign_id": campaign["campaign_id"],
+        "control_id": summary["control_id"],
+        "control_binding_sha256": _canonical_sha256(
+            _paired_shard_control_bindings(campaign["controls"])),
+        "final_shard_sha256": list(final_shard_sha256),
+        "summary": summary, "official_match_points": None,
+        "qualification_eligible": False,
+        "interpretation": "descriptive simulated outcome calibration; not official match points, qualification, or margin approval"}
+    bundle = {**body, "bundle_id": _canonical_sha256(body)}
+    raw = json.dumps(bundle, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8")
+    return bundle, hashlib.sha256(raw).hexdigest()
+
+
 def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         replay_root, approval):
     """Strictly merge complete canonical shard bytes and produce preregistered summaries."""
@@ -2653,16 +2669,26 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
     summaries = [_paired_control_summary(campaign, control_id,
         {pair_id: rows for pair_id, rows in pairs.items() if control_id in rows})
         for control_id in PAIRED_CALIBRATION_CONTROLS[1:]]
+    control_bundles = []
+    bundle_refs = []
+    for summary in summaries:
+        bundle, artifact_sha256 = _build_paired_control_bundle(campaign,
+            summary, [final_hashes[index] for index in range(len(campaign["shards"]))])
+        control_bundles.append(bundle)
+        bundle_refs.append({"control_id": summary["control_id"],
+            "bundle_id": bundle["bundle_id"],
+            "artifact_sha256": artifact_sha256})
     body = {"schema": "meco-paired-calibration-merged-report-v1",
         "campaign_id": campaign["campaign_id"],
         "control_binding_sha256": _canonical_sha256(
             _paired_shard_control_bindings(campaign["controls"])),
         "final_shard_sha256": [final_hashes[index]
             for index in range(len(campaign["shards"]))],
-        "work_unit_count": len(all_rows), "control_summaries": summaries,
+        "work_unit_count": len(all_rows), "control_bundles": bundle_refs,
         "official_match_points": None, "qualification_eligible": False,
         "interpretation": "descriptive simulated outcome calibration; not official match points, qualification, or margin approval"}
-    return {**body, "report_id": _canonical_sha256(body)}
+    return {**body, "report_id": _canonical_sha256(body),
+        "_control_bundle_artifacts": control_bundles}
 
 
 def write_paired_calibration_artifact_immutable(path, artifact):
