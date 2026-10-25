@@ -561,20 +561,26 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
     base_tracks = {int(base.table.features[i][1]) for i in range(4)
                    if base.table.features[i][1] is not None}
     ids = []
+    used = set()
     for row_index, (action, variant, _forward, _lateral, target_track) in enumerate(specs):
         is_continue = continue_index is not None and row_index == continue_index
         if is_continue:
-            ids.append("continue:" + active_commitment.candidate_id)
+            candidate_id = "continue:" + active_commitment.candidate_id
         elif target_track is not None:
-            ids.append(base.table.candidate_ids[action] if not variant and
-                target_track in base_tracks else
+            candidate_id = (base.table.candidate_ids[action]
+                if not variant and target_track in base_tracks else
                 f"collect:track:{target_track}" if not variant else
                 f"collect:track:{target_track}:approach:{variant}")
         else:
-            ids.append(base.table.candidate_ids[action] if not variant else
-                       f"{base.table.candidate_ids[action]}:approach:{variant}")
-    if len(set(ids)) != len(ids):
-        raise ValueError("device candidate specification produced duplicate IDs")
+            candidate_id = base.table.candidate_ids[action] if not variant else \
+                           f"{base.table.candidate_ids[action]}:approach:{variant}"
+        # Fixed-capacity expansion carries masked padding and can contain
+        # duplicate base/oracle targets. Preserve the first canonical label;
+        # give only later padded/duplicate rows a deterministic row suffix.
+        if candidate_id in used:
+            candidate_id = f"{candidate_id}:expanded:{row_index}"
+        used.add(candidate_id)
+        ids.append(candidate_id)
     return tuple(ids)
 
 
@@ -583,6 +589,8 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
         extra_track_start=None, extra_track_indices=None,
+        extra_candidate_mask=None,
+        policy_offset_start=None,
         oracle_track_start=None, oracle_track_indices=None,
         oracle_variant_count=0, continue_action_tensor=None,
         continue_track_tensor=None,
@@ -609,7 +617,13 @@ def _build_device_candidate_set(env, base, graph, specs, *,
             raise RuntimeError("extra target tensor does not align with the candidate specification")
         extra_slice = slice(extra_track_start,
                             extra_track_start + extra_track_indices.numel())
-        track_indices[extra_slice] = extra_track_indices
+        if (extra_candidate_mask is None
+                or extra_candidate_mask.device != device
+                or extra_candidate_mask.shape != extra_track_indices.shape):
+            raise RuntimeError("extra target eligibility mask is not aligned with its fixed-capacity rows")
+        track_indices[extra_slice] = torch.where(
+            extra_candidate_mask, extra_track_indices,
+            torch.full_like(extra_track_indices, -1))
     if oracle_track_indices is not None:
         oracle_count = oracle_track_indices.numel() * oracle_variant_count
         if (oracle_track_indices.device != device or oracle_track_indices.ndim != 1
@@ -677,6 +691,10 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         learned_cost_scale=learned_cost_scale,
         learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
     route_available = geometry["allowed"] & route_full.feasible
+    if oracle_track_indices is not None:
+        oracle_rows = torch.arange(count, device=device) >= int(oracle_track_start)
+        oracle_track_available = (oracle_track_indices >= 0).repeat(oracle_variant_count)
+        route_available = route_available & (~oracle_rows | oracle_track_available)
     if continue_index is not None and commitment_match_valid is not None:
         route_available = route_available & torch.where(
             torch.arange(count, device=device) == continue_index,
@@ -743,10 +761,32 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         torch.zeros_like(route_available), torch.zeros_like(route_available)), dim=-1)
     missing = torch.cat((missing, extra_missing.to(dtype)), dim=-1)
     raw = torch.nan_to_num(raw, nan=0., posinf=0., neginf=0.)
-    policy_indices = list(range(candidate_k))
+    if (extra_candidate_mask is None or policy_offset_start is None
+            or extra_track_start is None or extra_track_indices is None):
+        raise RuntimeError("fixed-capacity policy ordering requires device expansion masks and offsets")
+    # Preserve the legacy policy prefix: base actions, eligible sensed goals
+    # in device distance order, then the fixed legacy approach-offset block.
+    # Masked capacity rows remain in the evaluated pool but do not displace
+    # offsets when fewer sensed targets are eligible.
+    ranks = torch.full((count,), 2**60, device=device, dtype=torch.long)
+    ranks[:8] = torch.arange(8, device=device, dtype=torch.long)
+    extra_count = extra_track_indices.numel()
+    extra_rank = extra_candidate_mask.to(torch.long).cumsum(0) - 1
+    extra_rows = torch.arange(extra_count, device=device, dtype=torch.long)
+    ranks[extra_track_start:extra_track_start + extra_count] = torch.where(
+        extra_candidate_mask, 8 + extra_rank, 2**50 + extra_rows)
+    offset_count = 4 * 6
+    offset_ranks = (8 + extra_candidate_mask.sum() +
+                    torch.arange(offset_count, device=device, dtype=torch.long))
+    ranks[policy_offset_start:policy_offset_start + offset_count] = offset_ranks
+    selected_policy = torch.argsort(ranks, stable=True)[:candidate_k]
+    policy_indices = selected_policy.detach().to(device="cpu").tolist()
     if continue_index is not None:
         policy_indices.append(continue_index)
-    selected = torch.tensor(policy_indices, device=device, dtype=torch.long)
+        selected = torch.cat((selected_policy,
+            torch.tensor([continue_index], device=device, dtype=torch.long)))
+    else:
+        selected = selected_policy
     policy_ids = tuple(ids[index] for index in policy_indices)
     policy_queries = tuple(query_rows[index] for index in policy_indices)
     policy_routes = DeviceRouteBatch(policy_queries,
@@ -810,18 +850,19 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         geometry["capture_inside"].index_select(0, selected)[None])
     oracle_mask = route_available & ~continue_mask
     oracle_count = oracle_mask.sum()
-    requested_mask = route_available[:candidate_k]
+    requested_rows = torch.zeros(count, device=device, dtype=torch.bool).scatter(
+        0, selected_policy, True)
+    requested_mask = route_available & requested_rows
     requested_count = requested_mask.sum()
     total_cost = eta * ROUTE_COST_POINTS_PER_SECOND + risk
     oracle_cost_sum = torch.where(oracle_mask, total_cost,
                                   torch.zeros_like(total_cost)).sum()
     oracle_mean = oracle_cost_sum / oracle_count.clamp_min(1)
     oracle_min = total_cost.masked_fill(~oracle_mask, float("inf")).amin()
-    selected_cost = total_cost[:candidate_k]
-    selected_cost_sum = torch.where(requested_mask, selected_cost,
-                                    torch.zeros_like(selected_cost)).sum()
+    selected_cost_sum = torch.where(requested_mask, total_cost,
+                                    torch.zeros_like(total_cost)).sum()
     selected_mean = selected_cost_sum / requested_count.clamp_min(1)
-    selected_min = selected_cost.masked_fill(~requested_mask, float("inf")).amin()
+    selected_min = total_cost.masked_fill(~requested_mask, float("inf")).amin()
     candidate_recall = {"candidate_capacity": candidate_k,
         "prediction_mode": prediction_mode,
         "reference_pool_capacity": oracle_capacity,
@@ -1156,13 +1197,13 @@ def _additional_sensed_target_specs(env, base: SafeActionCandidates):
     in_base = ((buffer_ids[:, None] == base.device_track_indices[:4][None, :]) &
                (base.device_missing_mask[:4, 1] < .5)[None, :]).any(dim=-1)
     eligible &= ~in_base
+    # Keep a fixed row for every sensor slot. Device eligibility sorts valid
+    # rows first and carries invalid/base rows as masked capacity; the host
+    # copy below is only stable identity metadata after order is fixed.
     order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
-    # Track indices are host identity metadata for stable candidate IDs; all
-    # candidate coordinates and features remain tensors in the device path.
-    ordered_indices = order[eligible[order]]
+    ordered_indices = order
     ordered = ordered_indices.detach().to(device="cpu").tolist()
-    # Action selection for expansion is resolved on-device in the batch builder.
-    return [(0, None, int(track)) for track in ordered], ordered_indices
+    return [(0, None, int(track)) for track in ordered], ordered_indices, eligible.index_select(0, order)
 
 
 @torch.no_grad()
@@ -1215,9 +1256,12 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         base.table.features[action][1] is not None})
     specs = [(action, 0, 0., 0., None) for action in range(8)]
     additional_track_indices = None
+    additional_candidate_mask = None
     additional_track_start = None
+    policy_offset_start = None
     if device_resident:
-        additional_targets, additional_track_indices = _additional_sensed_target_specs(env, base)
+        (additional_targets, additional_track_indices,
+         additional_candidate_mask) = _additional_sensed_target_specs(env, base)
         additional_track_start = len(specs)
     else:
         additional_targets = _additional_sensed_target_rows(env, base)
@@ -1227,6 +1271,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         specs.append((action, 0, 0., 0., track))
     offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
                (.34, 0.), (-.34, 0.))
+    if device_resident:
+        policy_offset_start = len(specs)
     for variant, (forward, lateral) in enumerate(offsets, 1):
         for action in range(4):
             track = None
@@ -1306,11 +1352,22 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         (.25, .68), (-.25, .68))
     oracle_start_index = len(specs)
     if device_resident:
-        base_oracle_tracks = base.device_track_indices[:4][
-            base.device_missing_mask[:4, 1] < .5]
-        oracle_track_indices = torch.unique(torch.cat((base_oracle_tracks,
-            additional_track_indices)), sorted=True)
-        oracle_track_ids = oracle_track_indices.detach().to(device="cpu").tolist()
+        base_oracle_tracks = torch.where(
+            base.device_missing_mask[:4, 1] < .5,
+            base.device_track_indices[:4],
+            torch.full_like(base.device_track_indices[:4], -1))
+        oracle_track_indices = torch.cat((base_oracle_tracks,
+            torch.where(additional_candidate_mask, additional_track_indices,
+                        torch.full_like(additional_track_indices, -1))))
+        oracle_sentinel = max(env.track_pos.shape[2],
+                              additional_track_indices.numel()) + 1
+        oracle_order = torch.argsort(
+            oracle_track_indices.masked_fill(oracle_track_indices < 0, oracle_sentinel),
+            stable=True)
+        oracle_track_indices = oracle_track_indices.index_select(0, oracle_order)
+        oracle_track_indices = torch.where(oracle_track_indices == oracle_sentinel,
+            torch.full_like(oracle_track_indices, -1), oracle_track_indices)
+        oracle_track_ids = oracle_track_indices.clamp_min(0).detach().to(device="cpu").tolist()
     else:
         oracle_track_indices = None
         oracle_track_ids = sorted(target_rows)
@@ -1318,8 +1375,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         for track in oracle_track_ids:
             specs.append((0, variant, forward, lateral, track))
     if device_resident:
-        oracle_capacity = (8 + len(additional_targets) + 4 * len(offsets) +
-                           len(oracle_track_ids) * len(oracle_offsets))
+        oracle_capacity = (8 + additional_track_indices.numel() + 4 * len(offsets) +
+                           oracle_track_indices.numel() * len(oracle_offsets))
         return _build_device_candidate_set(env, base, graph, specs,
             candidate_k=candidate_k, action_ticks=action_ticks,
             prediction_mode=prediction_mode, active_commitment=active_commitment,
@@ -1327,6 +1384,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             commitment_match_valid=commitment_match_valid,
             extra_track_start=additional_track_start,
             extra_track_indices=additional_track_indices,
+            extra_candidate_mask=additional_candidate_mask,
+            policy_offset_start=policy_offset_start,
             oracle_track_start=oracle_start_index,
             oracle_track_indices=oracle_track_indices,
             oracle_variant_count=len(oracle_offsets),
