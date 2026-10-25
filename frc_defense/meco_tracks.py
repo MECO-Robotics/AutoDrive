@@ -1114,36 +1114,69 @@ def make_scorer_snapshot(model_id: str, observation: ObservationSnapshot,
 def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
                             route_cost: torch.Tensor | None = None,
                             risk_cost: torch.Tensor | None = None,
-                            path_cost: torch.Tensor | None = None) -> torch.Tensor:
+                            path_cost: torch.Tensor | None = None, *,
+                            validate_inputs: bool = True) -> torch.Tensor:
     """Gross reward minus ETA, risk, and integrated Plan A path costs once."""
     if utility.shape != valid_mask.shape or valid_mask.dtype != torch.bool:
         raise ValueError("utility and boolean feasibility mask shapes must match")
-    if not bool(torch.isfinite(utility[valid_mask]).all()):
+    if validate_inputs and not bool(torch.isfinite(utility[valid_mask]).all()):
         raise ValueError("valid candidate utilities must be finite")
-    value = utility
+    utility_finite = torch.isfinite(utility)
+    valid_mask = valid_mask & utility_finite
+    value = torch.where(utility_finite, utility, torch.zeros_like(utility))
     if route_cost is not None:
-        if route_cost.shape != value.shape or not bool(torch.isfinite(route_cost[valid_mask]).all()):
+        if route_cost.shape != value.shape:
+            raise ValueError("route costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(route_cost[valid_mask]).all()):
             raise ValueError("valid route costs must be finite and match utility")
-        value = value - route_cost
+        route_finite = torch.isfinite(route_cost)
+        valid_mask = valid_mask & route_finite
+        value = value - torch.where(route_finite, route_cost,
+                                    torch.zeros_like(route_cost))
     if risk_cost is not None:
-        if risk_cost.shape != value.shape or not bool(torch.isfinite(risk_cost[valid_mask]).all()):
+        if risk_cost.shape != value.shape:
+            raise ValueError("risk costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(risk_cost[valid_mask]).all()):
             raise ValueError("valid risk costs must be finite and match utility")
-        value = value - risk_cost
+        risk_finite = torch.isfinite(risk_cost)
+        valid_mask = valid_mask & risk_finite
+        value = value - torch.where(risk_finite, risk_cost,
+                                    torch.zeros_like(risk_cost))
     if path_cost is not None:
-        if path_cost.shape != value.shape or not bool(torch.isfinite(path_cost[valid_mask]).all()):
+        if path_cost.shape != value.shape:
+            raise ValueError("path costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(path_cost[valid_mask]).all()):
             raise ValueError("valid path costs must be finite and match utility")
-        value = value - path_cost
-    if not bool(valid_mask.any(dim=-1).all()):
+        path_finite = torch.isfinite(path_cost)
+        valid_mask = valid_mask & path_finite
+        value = value - torch.where(path_finite, path_cost,
+                                    torch.zeros_like(path_cost))
+    if validate_inputs and not bool(valid_mask.any(dim=-1).all()):
         raise ValueError("each row must include at least one feasible candidate")
     return value.masked_fill(~valid_mask, -torch.inf)
 
 
-def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float32):
+def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float32,
+                             raw_features: torch.Tensor | None = None,
+                             missing_mask: torch.Tensor | None = None):
     """Numerically encode named candidate rows and append missingness indicators.
 
     Missing estimates stay distinguishable from a real zero. The returned
     feature names and unavailable masks are part of the evaluation record.
     """
+    if raw_features is not None or missing_mask is not None:
+        if (not isinstance(raw_features, torch.Tensor) or
+                not isinstance(missing_mask, torch.Tensor)):
+            raise ValueError("raw_features and missing_mask must be supplied together")
+        expected = (len(table.candidate_ids), len(table.feature_names))
+        if (raw_features.shape != expected or missing_mask.shape != expected or
+                raw_features.device != torch.device(device) or
+                missing_mask.device != torch.device(device) or
+                raw_features.dtype != dtype or missing_mask.dtype != dtype or
+                not raw_features.is_floating_point() or
+                not missing_mask.is_floating_point()):
+            raise ValueError("pre-encoded candidate tensors differ from the table contract")
+        return raw_features, missing_mask
     values = []
     missing = []
     for row in table.features:
@@ -1155,6 +1188,7 @@ def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float
 
 def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                      globals_: torch.Tensor, table: CandidateTable,
+                     candidate_batch=None,
                      hidden: torch.Tensor | None = None,
                      graph: Mapping[str, torch.Tensor] | None = None,
                      route_cost: torch.Tensor | None = None,
@@ -1179,8 +1213,32 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         if (tuple(table.feature_names) != expected_features or
                 any(len(row) != MECO_CANDIDATE_RAW_FEATURE_COUNT for row in table.features)):
             raise ValueError("C1/C2 candidate rows differ from the registered shared feature schema")
-    candidate, unavailable = candidate_feature_tensor(table, device=raster.device, dtype=raster.dtype)
-    candidate = torch.cat((candidate, unavailable), -1)[None]
+    if candidate_batch is None:
+        candidate, unavailable = candidate_feature_tensor(
+            table, device=raster.device, dtype=raster.dtype)
+        candidate = torch.cat((candidate, unavailable), -1)[None]
+        valid_candidates = torch.tensor(table.valid_mask, device=raster.device,
+                                        dtype=torch.bool)[None]
+    else:
+        if isinstance(model, ProductionMecoAdapter):
+            raise RuntimeError("device candidate masks are not supported by the bound production request API")
+        if (tuple(candidate_batch.candidate_ids) != tuple(table.candidate_ids) or
+                tuple(candidate_batch.feature_names) != tuple(table.feature_names)):
+            raise ValueError("device candidate metadata differs from CandidateTable order/schema")
+        candidate_feature_tensor(table,
+            device=raster.device, dtype=raster.dtype,
+            raw_features=candidate_batch.raw_features[0],
+            missing_mask=candidate_batch.missing_mask[0])
+        candidate = candidate_batch.candidate_features
+        if (candidate.shape != (1, len(table.candidate_ids),
+                                MECO_CANDIDATE_MODEL_INPUT_WIDTH) or
+                candidate.device != raster.device or candidate.dtype != raster.dtype):
+            raise ValueError("device candidate feature tensor violates model input contract")
+        valid_candidates = candidate_batch.valid_mask
+        if (valid_candidates.shape != (1, len(table.candidate_ids)) or
+                valid_candidates.dtype != torch.bool or
+                valid_candidates.device != raster.device):
+            raise ValueError("device candidate validity mask violates decision contract")
     if isinstance(model, ProductionMecoAdapter) and hidden is None:
         hidden = raster.new_zeros((raster.shape[0], HIDDEN))
     inputs = {"raster": raster, "globals_": globals_, "candidate_features": candidate,
@@ -1226,9 +1284,10 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         # Compute the complete deterministic decision while accelerator
         # inference is in flight. A missing result uses this exact fallback.
         utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)
-        valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
+        valid = valid_candidates.to(device=utility.device)
         if route_cost is not None or risk_cost is not None:
-            fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+            fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost,
+                validate_inputs=candidate_batch is None)
         else:
             fallback = (inference_request.fallback_index if inference_request is not None else
                         next((i for i, ok in enumerate(table.valid_mask) if ok), -1))
@@ -1295,8 +1354,13 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         utility = _gather_dense_candidates(output, table, raster.shape[-2:])[0]
     else:
         utility = _gather_graph_candidates(output, table)[0]
-    valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
-    logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+    valid = valid_candidates.to(device=utility.device)
+    if candidate_batch is not None:
+        valid = valid & torch.isfinite(utility[None])
+        logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost,
+                                         validate_inputs=False)
+    else:
+        logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
     provenance = ({"schema": MECO_INFERENCE_SCHEMA,
         "model_id": inference_request.model_id,
         "checkpoint_sha256": inference_request.checkpoint_sha256,
