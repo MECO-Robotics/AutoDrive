@@ -125,6 +125,7 @@ class FuelPhysics:
                     self._hip = None
         if self.config.backend == "hip" and self._hip is None:
             raise RuntimeError("requested HIP fuel backend unavailable")
+        self._validate_qualifying_backend()
         self.reset()
         if self.config.sleep and self.config.sleep_islands:
             from .fuel_physics_sleep import initialize_island_sleep
@@ -133,6 +134,19 @@ class FuelPhysics:
     @property
     def candidate_pairs(self):
         return self._pairs
+
+    def _validate_qualifying_backend(self):
+        """Keep the qualifying path pinned to native HIP after construction."""
+        if not self.config.gpu_qualifying:
+            return
+        if (self.device.type != "cuda" or self.device.index is None or
+                torch.version.hip is None or self.config.backend != "hip" or
+                self._hip is None):
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot select the Torch fallback")
+        if self.config.sleep and self.config.sleep_islands:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
 
     def _spawn_height(self, xy):
         """Place released ground fuel on the analytic terrain contact plane."""
@@ -153,6 +167,7 @@ class FuelPhysics:
         return height
 
     def reset(self, mask=None):
+        self._validate_qualifying_backend()
         mask = torch.ones(self.n, device=self.device, dtype=torch.bool) if mask is None else torch.as_tensor(mask, device=self.device, dtype=torch.bool)
         mask = mask.reshape(self.n)
         selected = mask[:, None]
@@ -270,6 +285,9 @@ class FuelPhysics:
         return changed
 
     def _build_pairs(self, free):
+        if self.config.gpu_qualifying:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot use Torch CPU pair generation")
         c = self.config
         rebuild = not self._valid_cache or not c.cache
         if not rebuild:
@@ -443,6 +461,9 @@ class FuelPhysics:
         s.velocity.add_(robot_delta)
 
     def _torch_substep(self, free, dt):
+        if self.config.gpu_qualifying:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot use the Torch reference solver")
         moving = (self.vel.norm(dim=-1)>=self.config.sleep_speed) | (self.angular.norm(dim=-1)>=self.config.sleep_angular_speed)
         self.sleeping &= ~(moving & free)
         awake = free & ~self.sleeping
@@ -540,6 +561,7 @@ class FuelPhysics:
         return limit
 
     def step(self, active_mask, piece_active, piece_owner, *, dt=None, substeps=None, adaptive=None):
+        self._validate_qualifying_backend()
         active=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         free=active[:,None] & piece_active.bool() & (piece_owner<0)
         changed=self._sync_external()
