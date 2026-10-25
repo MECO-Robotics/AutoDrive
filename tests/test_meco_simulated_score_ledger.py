@@ -1,18 +1,19 @@
 """Pure schema and replay reconstruction tests; no simulator is imported."""
 from copy import deepcopy
+import struct
 
 import pytest
 
 from frc_defense.meco_simulated_score_ledger import (
     ESTIMAND_SCHEMA, OUTCOME_NAME, PHASE0_PLAN_SHA256, RULES, RULES_ID,
     RULES_SHA256, SOURCE_PLAN_SHA256, build_score_ledger, make_event_stream,
-    MecoScoreEventRecorder, reconstruct_replay_score, sha256, validate_estimand_approval,
+    MecoScoreEventRecorder, canonical_bytes, estimand_approval_digest,
+    load_estimand_approval, reconstruct_replay_score, sha256, validate_estimand_approval,
     validate_replay_score_binding,
 )
 
 
 SOURCE = "a" * 64
-APPROVAL_SHA = "b" * 64
 
 
 def _approval():
@@ -37,6 +38,9 @@ def _approval():
     }
 
 
+APPROVAL_SHA = estimand_approval_digest(_approval())
+
+
 def _context(**overrides):
     value = {
         "episode_id": "episode-91",
@@ -47,10 +51,25 @@ def _context(**overrides):
         "source_identity_sha256": SOURCE,
         "effective_scoring_configuration": {
             "dt": 0.02,
-            "score_rules_id": RULES_ID,
+            "alliance_zone_depth_m": 3.0,
             "hub_schedule": "source-bound-current",
+            "robot_control_modes": ["deterministic"] * 6,
+            "robot_types": ["dumper"] * 6,
+            "robot_roles": ["offense", "offense", "offense", "defense", "defense", "defense"],
+            "robot_fuel_capacities": [8] * 6,
+            "robot_score_interval_s": [0.2] * 6,
+            "robot_dimensions_m": {"length": [1.] * 6, "width": [.7] * 6},
+            "field_geometry": {"field_length_m": 16., "field_width_m": 8.,
+                "hub_centers_m": [[4., 4.], [12., 4.]], "bump_regions": []},
+            "robot_readiness": {"dumper_stationary_linear_mps": 0.2,
+                "dumper_stationary_angular_radps": 0.2,
+                "dumper_aim_tolerance_rad": 3.14159 / 9,
+                "bump_clearance_source": "TensorThreeVsThreeEnv._robots_clear_of_bumps"},
+            "score_intent_source": "effective policy action trace passed to update_fuel_actions",
+            "score_rules_id": RULES_ID,
         },
         "effective_scoring_configuration_sha256": None,
+        "fuel_count": 32,
         "terminal_state": "complete",
         "terminal_tick": 8,
     }
@@ -62,11 +81,12 @@ def _context(**overrides):
 
 
 def _event(event_id, tick, robot, piece, generation, **overrides):
+    elapsed = _simulator_elapsed(tick)
     value = {
         "event_id": event_id,
         "episode_id": "episode-91",
         "tick": tick,
-        "match_elapsed_s": tick * .02,
+        "match_elapsed_s": elapsed,
         "world_slot": 0,
         "alliance": 0 if robot < 3 else 1,
         "robot_slot": robot,
@@ -78,6 +98,14 @@ def _event(event_id, tick, robot, piece, generation, **overrides):
     }
     value.update(overrides)
     return value
+
+
+def _simulator_elapsed(tick):
+    elapsed = 0.
+    dt = struct.unpack("=f", struct.pack("=f", .02))[0]
+    for _ in range(tick + 1):
+        elapsed = min(struct.unpack("=f", struct.pack("=f", elapsed + dt))[0], 160.)
+    return elapsed
 
 
 def _events():
@@ -106,10 +134,10 @@ def test_ledger_aggregates_only_versioned_score_events_deterministically():
 
 def test_recorder_assigns_stable_ids_and_keeps_pre_respawn_generation():
     recorder = MecoScoreEventRecorder(_context(), _approval(), APPROVAL_SHA)
-    recorder.record_award(tick=1, match_elapsed_s=.02, world_slot=0,
+    recorder.record_award(tick=0, match_elapsed_s=_simulator_elapsed(0), world_slot=0,
         alliance=0, robot_slot=0, piece_slot=4, piece_generation=0,
         source_site="gamepiece_actions.update_fuel_actions.vectorized_score_mutation")
-    recorder.record_award(tick=4, match_elapsed_s=.08, world_slot=0,
+    recorder.record_award(tick=3, match_elapsed_s=_simulator_elapsed(3), world_slot=0,
         alliance=0, robot_slot=0, piece_slot=4, piece_generation=1,
         source_site="gamepiece_actions.update_fuel_actions.robot_loop_score_mutation")
     captured = recorder.finish(terminal_tick=8, terminal_state="complete",
@@ -128,12 +156,38 @@ def test_recorder_rejects_an_episode_reset_during_capture():
                         terminal_score_counts=[0, 0])
 
 
+def test_approval_digest_is_bound_to_exact_canonical_artifact():
+    approval = _approval()
+    bad_digest = "b" * 64
+    ledger = build_score_ledger(_context(), _events(), approval,
+                                approval_sha256=bad_digest)
+    assert ledger["status"] == "invalid"
+    assert "exact artifact" in ledger["invalid_reason"]
+    with pytest.raises(ValueError, match="exact approval artifact"):
+        MecoScoreEventRecorder(_context(), approval, bad_digest)
+
+
+def test_loaded_approval_digest_binds_canonical_file_bytes(tmp_path):
+    approval = _approval()
+    path = tmp_path / "estimand.json"
+    path.write_bytes(canonical_bytes(approval))
+    loaded, digest = load_estimand_approval(path, source_identity_sha256=SOURCE)
+    assert loaded == approval
+    assert digest == estimand_approval_digest(approval)
+    path.write_text('{ "schema": "' + ESTIMAND_SCHEMA + '" }', encoding="utf-8")
+    with pytest.raises(ValueError, match="canonical immutable bytes"):
+        load_estimand_approval(path, source_identity_sha256=SOURCE)
+
+
 @pytest.mark.parametrize("mutation, message", [
     (lambda events: events.append(deepcopy(events[0])), "duplicate score event ID"),
     (lambda events: events.__setitem__(2, {**events[2], "piece_generation": 0}),
      "duplicate award for piece incarnation"),
     (lambda events: events.reverse(), "score event rows are reordered"),
     (lambda events: events[0].update(tick=99), "score event tick is outside"),
+    (lambda events: events[0].update(match_elapsed_s=.031), "differs from simulator tick"),
+    (lambda events: events[0].update(piece_slot=32), "piece slot is invalid"),
+    (lambda events: events[0].update(piece_generation=1), "not the next scorer lifecycle"),
     (lambda events: events[0].update(match_elapsed_s=float("nan")), "clock is invalid"),
     (lambda events: events[0].update(alliance=1), "alliance differs"),
     (lambda events: events[0].update(score_units=2), "units differ"),
@@ -216,6 +270,10 @@ def test_replay_reconstruction_uses_events_and_detects_summary_or_stream_mutatio
     bad_record["simulated_match_score"] = {**record["simulated_match_score"], "red": 99}
     with pytest.raises(ValueError, match="summary differs"):
         validate_replay_score_binding(replay, bad_record, [2, 1], approval)
+    changed_approval_binding = deepcopy(replay)
+    changed_approval_binding["estimand_approval_sha256"] = "b" * 64
+    with pytest.raises(ValueError, match="approval digest differs"):
+        reconstruct_replay_score(changed_approval_binding, approval)
 
 
 def test_terminal_counters_and_official_or_qualification_claims_are_not_aliases():

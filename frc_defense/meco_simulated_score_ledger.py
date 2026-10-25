@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 from pathlib import Path
 
 
@@ -53,6 +54,10 @@ def _is_sha256(value):
             and all(char in "0123456789abcdef" for char in value))
 
 
+def _float32(value):
+    return struct.unpack("=f", struct.pack("=f", float(value)))[0]
+
+
 def load_estimand_approval(path: str | Path, *, source_identity_sha256: str):
     """Read and validate the human-authored, source-bound approval artifact."""
     raw = Path(path).read_bytes()
@@ -60,8 +65,15 @@ def load_estimand_approval(path: str | Path, *, source_identity_sha256: str):
         artifact = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("score estimand approval is not valid JSON") from exc
+    if raw != canonical_bytes(artifact):
+        raise ValueError("score estimand approval must use canonical immutable bytes")
     validate_estimand_approval(artifact, source_identity_sha256=source_identity_sha256)
     return artifact, hashlib.sha256(raw).hexdigest()
+
+
+def estimand_approval_digest(artifact):
+    """Digest the exact canonical approval artifact accepted by this contract."""
+    return hashlib.sha256(canonical_bytes(artifact)).hexdigest()
 
 
 def validate_estimand_approval(artifact, *, source_identity_sha256: str):
@@ -142,7 +154,7 @@ def _validate_context(context, approval_sha256):
     required = ("episode_id", "seed", "scenario_id", "robot_team_slots", "world_count",
                 "source_identity_sha256", "effective_scoring_configuration",
                 "effective_scoring_configuration_sha256", "terminal_state",
-                "terminal_tick")
+                "terminal_tick", "fuel_count")
     if not isinstance(context, dict):
         return ["episode context missing"]
     missing = [f"missing context field: {key}" for key in required if key not in context]
@@ -166,28 +178,104 @@ def _validate_context(context, approval_sha256):
     config = context["effective_scoring_configuration"]
     if not isinstance(config, dict) or not config:
         missing.append("effective scoring configuration missing")
-    elif context["effective_scoring_configuration_sha256"] != sha256(config):
-        missing.append("effective scoring configuration digest mismatch")
+    else:
+        required_config = ("dt", "robot_control_modes", "robot_types", "robot_roles",
+            "robot_fuel_capacities", "robot_score_interval_s", "robot_readiness",
+            "score_intent_source", "alliance_zone_depth_m", "hub_schedule",
+            "robot_dimensions_m", "field_geometry")
+        missing.extend(f"effective scoring configuration missing: {key}"
+                       for key in required_config if key not in config)
+        if context["effective_scoring_configuration_sha256"] != sha256(config):
+            missing.append("effective scoring configuration digest mismatch")
+        for key, allowed in (("robot_control_modes", {"none", "nn", "deterministic"}),
+                              ("robot_types", {"dumper", "turret"}),
+                              ("robot_roles", {"offense", "defense"})):
+            values = config.get(key)
+            if (not isinstance(values, list) or len(values) != 6
+                    or any(value not in allowed for value in values)):
+                missing.append(f"invalid effective {key}")
+        for key in ("robot_fuel_capacities", "robot_score_interval_s"):
+            values = config.get(key)
+            if (not isinstance(values, list) or len(values) != 6
+                    or any(type(value) not in (int, float)
+                           or not math.isfinite(value) or value <= 0 for value in values)):
+                missing.append(f"invalid effective {key}")
+        zone_depth = config.get("alliance_zone_depth_m")
+        if (type(zone_depth) not in (int, float) or not math.isfinite(zone_depth)
+                or zone_depth <= 0):
+            missing.append("invalid effective alliance zone depth")
+        if (not isinstance(config.get("score_intent_source"), str)
+                or not config["score_intent_source"]):
+            missing.append("effective score intent source missing")
+        dimensions = config.get("robot_dimensions_m")
+        if (not isinstance(dimensions, dict)
+                or any(not isinstance(dimensions.get(key), list)
+                       or len(dimensions[key]) != 6
+                       or any(type(value) not in (int, float)
+                              or not math.isfinite(value) or value <= 0
+                              for value in dimensions[key])
+                       for key in ("length", "width"))):
+            missing.append("invalid effective robot dimensions")
+        geometry = config.get("field_geometry")
+        if (not isinstance(geometry, dict)
+                or any(type(geometry.get(key)) not in (int, float)
+                       or not math.isfinite(geometry[key]) or geometry[key] <= 0
+                       for key in ("field_length_m", "field_width_m"))
+                or not isinstance(geometry.get("hub_centers_m"), list)
+                or len(geometry["hub_centers_m"]) != 2
+                or not isinstance(geometry.get("bump_regions"), list)):
+            missing.append("invalid effective field scoring geometry")
+        readiness = config.get("robot_readiness")
+        if (not isinstance(readiness, dict)
+                or any(type(readiness.get(key)) not in (int, float)
+                       or not math.isfinite(readiness[key]) or readiness[key] < 0
+                       for key in ("dumper_stationary_linear_mps",
+                                   "dumper_stationary_angular_radps",
+                                   "dumper_aim_tolerance_rad"))
+                or not isinstance(readiness.get("bump_clearance_source"), str)
+                or not readiness["bump_clearance_source"]):
+            missing.append("invalid effective robot readiness configuration")
     if context["terminal_state"] not in ("complete", "censored"):
         missing.append("invalid terminal or censoring state")
     if type(context["terminal_tick"]) is not int or context["terminal_tick"] < 0:
         missing.append("invalid terminal tick")
     if not _is_sha256(approval_sha256):
         missing.append("estimand approval digest missing")
+    fuel_count = context.get("fuel_count")
+    if type(fuel_count) is not int or fuel_count < 1:
+        missing.append("invalid configured FUEL count")
+    config = context.get("effective_scoring_configuration")
+    if isinstance(config, dict):
+        dt = config.get("dt")
+        if type(dt) not in (int, float) or not math.isfinite(dt) or dt <= 0:
+            missing.append("effective simulator timestep missing")
     return missing
 
 
 def _validate_event_rows(context, events):
     if not isinstance(events, list):
         raise ValueError("score event rows must be a list")
+    order_rows = [(row.get("tick"), row.get("event_id")) for row in events
+                  if isinstance(row, dict)]
+    if len(order_rows) == len(events) and all(
+            type(tick) is int and isinstance(event_id, str)
+            and 0 <= tick <= context.get("terminal_tick", -1)
+            for tick, event_id in order_rows) and len({key for _, key in order_rows}) == len(events):
+        if any(current <= previous for previous, current in
+               zip(order_rows, order_rows[1:])):
+            raise ValueError("score event rows are reordered")
     teams = context["robot_team_slots"]
     normalized = []
     seen_ids = set()
     seen_incarnations = set()
-    previous = None
+    next_generation = {}
     expected = {"event_id", "episode_id", "tick", "match_elapsed_s", "world_slot",
                 "alliance", "robot_slot", "piece_slot", "piece_generation",
                 "event_type", "score_units", "source_site"}
+    dt = context["effective_scoring_configuration"]["dt"]
+    dt32 = _float32(dt)
+    elapsed_by_world = {}
+    fuel_count = context["fuel_count"]
     for source in events:
         if not isinstance(source, dict) or set(source) != expected:
             raise ValueError("score event row has an invalid schema")
@@ -201,17 +289,27 @@ def _validate_event_rows(context, events):
             raise ValueError("score event episode differs from replay context")
         if type(row["tick"]) is not int or not 0 <= row["tick"] <= context["terminal_tick"]:
             raise ValueError("score event tick is outside the episode")
-        elapsed = row["match_elapsed_s"]
-        if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 160:
-            raise ValueError("score event clock is invalid")
         if (type(row["world_slot"]) is not int or row["world_slot"] < 0
                 or row["world_slot"] >= context["world_count"]):
             raise ValueError("score event world slot is invalid")
+        elapsed = row["match_elapsed_s"]
+        if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 160:
+            raise ValueError("score event clock is invalid")
+        # `tick` is zero-based and match_elapsed is a float32 accumulator that
+        # advances before scoring. Reproduce that recurrence exactly.
+        elapsed32, elapsed_tick = elapsed_by_world.get(row["world_slot"], (0.0, -1))
+        while elapsed_tick < row["tick"]:
+            elapsed32 = min(_float32(elapsed32 + dt32), 160.0)
+            elapsed_tick += 1
+        elapsed_by_world[row["world_slot"]] = (elapsed32, elapsed_tick)
+        if elapsed != elapsed32:
+            raise ValueError("score event clock differs from simulator tick and timestep")
         if type(row["robot_slot"]) is not int or not 0 <= row["robot_slot"] < 6:
             raise ValueError("score event robot slot is invalid")
         if type(row["alliance"]) is not int or row["alliance"] != teams[row["robot_slot"]]:
             raise ValueError("score event alliance differs from robot map")
-        if type(row["piece_slot"]) is not int or row["piece_slot"] < 0:
+        if (type(row["piece_slot"]) is not int
+                or not 0 <= row["piece_slot"] < fuel_count):
             raise ValueError("score event piece slot is invalid")
         if type(row["piece_generation"]) is not int or row["piece_generation"] < 0:
             raise ValueError("score event piece generation is invalid")
@@ -228,10 +326,11 @@ def _validate_event_rows(context, events):
         if incarnation in seen_incarnations:
             raise ValueError("duplicate award for piece incarnation")
         seen_incarnations.add(incarnation)
-        order = (row["tick"], row["event_id"])
-        if previous is not None and order <= previous:
-            raise ValueError("score event rows are reordered")
-        previous = order
+        slot_key = (row["episode_id"], row["world_slot"], row["piece_slot"])
+        expected_generation = next_generation.get(slot_key, 0)
+        if row["piece_generation"] != expected_generation:
+            raise ValueError("piece incarnation generation is not the next scorer lifecycle")
+        next_generation[slot_key] = expected_generation + 1
         normalized.append(row)
     return normalized
 
@@ -241,6 +340,9 @@ def build_score_ledger(context, events, approval, *, approval_sha256):
     source_hash = (context.get("source_identity_sha256")
                    if isinstance(context, dict) else None)
     validate_estimand_approval(approval, source_identity_sha256=source_hash)
+    if approval_sha256 != estimand_approval_digest(approval):
+        return _invalid_ledger(context, approval_sha256,
+                               "estimand approval digest differs from exact artifact")
     missing = _validate_context(context, approval_sha256)
     if context.get("terminal_state") == "censored":
         missing.append("episode is censored")
@@ -288,6 +390,8 @@ class MecoScoreEventRecorder:
     def __init__(self, context, approval, approval_sha256):
         validate_estimand_approval(approval,
             source_identity_sha256=context.get("source_identity_sha256"))
+        if approval_sha256 != estimand_approval_digest(approval):
+            raise ValueError("score estimand digest differs from exact approval artifact")
         missing = _validate_context(context, approval_sha256)
         if missing:
             raise ValueError("score event recorder context is incomplete: " + "; ".join(missing))
@@ -356,6 +460,9 @@ def reconstruct_replay_score(replay, approval):
     if replay.get("source_identity_sha256") != stream.get("context", {}).get(
             "source_identity_sha256"):
         raise ValueError("MECO score replay source identity differs from event context")
+    approval_digest = estimand_approval_digest(approval)
+    if replay.get("estimand_approval_sha256") != approval_digest:
+        raise ValueError("MECO score replay approval digest differs from exact artifact")
     events = stream.get("events")
     if stream.get("events_sha256") != sha256(events):
         raise ValueError("MECO score replay event digest mismatch")
