@@ -8,18 +8,20 @@
 ## Decision and evidence
 
 The dashboard is correct to reject these five reports as usable evaluation
-evidence. It is misleading to project their execution status as `invalid`.
-Keep those two conclusions separate.
+evidence. It is misleading to project their status-file lifecycle as `invalid`.
+Keep the status-reported execution lifecycle separate from report validation.
 
 At the read-only inspection on 2026-10-26, the live r4 directory contained five
-completed status files and five matching report files. For every pair, the
-status and report headers had the same `evaluation_id` and `protocol_id`; both
-declared `split: diagnostic`. The reports declared `diagnostic: true` and
-`evaluation_design: diagnostic_unbound`. Their sizes ranged from 63,310,897 to
+completed status files and five report paths. The status files declare
+`status: complete`, `split: diagnostic`, evaluation/protocol IDs, and safe
+output basenames. A bounded prefix inspection found matching report header
+IDs and diagnostic fields, but that does **not** establish report identity:
+without the digest-bound summary, the dashboard has no bounded mechanism to
+authenticate those oversized reports. Their sizes ranged from 63,310,897 to
 78,462,169 bytes. Every status lacked `dashboard_summary_sha256`, and none had
 the corresponding `.dashboard-summary.json` sidecar. The live API returned five
 `oversized report lacks evaluator summary binding` file errors and projected
-the five execution records as `invalid` with the generic
+the five status-file lifecycle records as `invalid` with the generic
 `evaluator status/report provenance mismatch` message. It also reported a
 separate incomplete `evaluation-history.json` error.
 
@@ -29,16 +31,19 @@ requires a digest-bound evaluator summary for an oversized report. Diagnostic
 split/status matching alone cannot authenticate the report's contents or make
 it comparison evidence. Do not accept these reports as comparisons, infer
 qualification, or alter their status/split/bindings. The telemetry defect is
-that one `status` field conflates a terminal evaluator execution (`complete`)
-with report evidence validation (`invalid`).
+that one `status` field conflates a schema-validated status-file claim of
+terminal execution (`complete`) with report evidence validation (`invalid`).
+The UI must say **status-reported complete** and must not imply independent
+confirmation that the referenced report matches that status.
 
 ## Objective
 
-Represent diagnostic evaluator completion accurately while preserving explicit
-report/provenance errors. The dashboard must make it clear that a diagnostic
-run finished, that its full report was not validated because it lacks the
-required oversized-report summary binding, and that it is never qualification
-evidence.
+Represent the diagnostic evaluator's terminal status claim accurately while
+preserving explicit report/provenance errors. The dashboard must make clear
+that a schema-validated status file reports completion, that the referenced
+full report is unavailable/unvalidated because it lacks the required
+oversized-report summary binding, and that neither the status file nor the
+diagnostic record is qualification evidence.
 
 ## Three-pass execution
 
@@ -53,27 +58,42 @@ checkpoint is changed in this pass.
 ### Pass 2 — Implementer
 
 In an isolated HDD-backed worktree, update `frc_defense/meco_dashboard.py` to
-expose separate bounded fields for evaluator lifecycle and report validation.
-For example, retain the validated report state as `invalid` while projecting
-`execution_status: complete`, `diagnostic: true` only when supported by
-validated status fields, and a specific bounded `evidence_error` such as
-`oversized report lacks evaluator summary binding`. Do not repurpose the
-existing `status` into a positive evidence state or suppress the error.
+expose separate bounded fields for status-file lifecycle and report validation.
+Only a schema-validated status with terminal `complete`, `split: diagnostic`,
+string evaluation/protocol IDs, and a safe in-root output basename may project
+`execution_status: status-reported complete` and `diagnostic: true`. This is a
+status-file-only claim. Do not read an oversized report prefix or trust its
+header to establish identity. Keep a separate `report_validation` state and
+`evidence_error`; absent binding must report unvalidated/unavailable with the
+specific `oversized report lacks evaluator summary binding` reason. A
+status-reported completion must never clear or weaken that evidence error.
 
-Update `frc_defense/dashboard_static/meco.js` to label the record as completed
-diagnostic execution with unvalidated report evidence. Continue displaying the
-split, progress, and evidence error. Escape all strings as today. If the
-diagnostic flag or lifecycle status cannot be confirmed from status/report
-metadata, show an unconfirmed state instead of inferring completion. Do not
-change evaluator output, retroactively create bindings, or read raw report
-contents in the browser.
+When the report is missing, unsafe/outside-root, malformed, mismatched, or
+cannot be validated by the bounded reader, report evidence must remain
+invalid/unconfirmed and must not be described as matched to the status. Keep
+the evaluator lifecycle claim explicitly tied to the status file; do not infer
+report completion or identity from progress, filenames, a report prefix, or
+status alone. Do not repurpose a positive lifecycle label into a positive
+evidence state or suppress the error.
 
-Add focused fixture tests for these projection cases: matching diagnostic
-status/report IDs with missing summary binding; a complete report with a valid
-bound summary; status/report ID or protocol mismatch; malformed or absent
-status; and an incomplete/running evaluator. Tests must assert that the
-diagnostic case remains absent from comparison groups and qualification inputs,
-while lifecycle completion and missing binding are independently visible.
+Update `frc_defense/dashboard_static/meco.js` to label the record as
+“status-reported complete · diagnostic · report unvalidated” when those exact
+status-only predicates pass. Continue displaying the split, progress, and
+evidence error. Escape all strings as today. If status validation, terminal
+state, diagnostic split, IDs, or safe output path fail, show status as
+unconfirmed/invalid; never infer completion or report identity from progress,
+filenames, or report metadata. Do not change evaluator output, retroactively
+create bindings, or read raw report contents in the browser.
+
+Add focused fixture tests for these projection cases: schema-valid complete
+diagnostic status with an oversized output and no summary binding (lifecycle is
+status-reported complete; report identity remains unconfirmed); a complete
+report with a valid bound summary; missing or unsafe report path; digest,
+ID/protocol/split mismatch after bounded validation; malformed or absent
+status; and incomplete/running evaluator. Tests must assert no report identity
+is inferred from an unbound oversized report, the diagnostic case remains
+absent from comparison groups and qualification inputs, and lifecycle status
+and missing binding are independently visible.
 Run only the focused dashboard contract tests and static checks; do not run a
 simulator, training, fitting, GPU/HIP/CUDA work, device inventory, or any
 campaign workload. CPU-only contract tests may not be used as a training
@@ -91,9 +111,12 @@ require a new review of the amended head.
 
 ## Acceptance criteria
 
-- A completed, diagnostic evaluator with matching status/report IDs is shown as
-  a completed diagnostic *run*, with report evidence explicitly unvalidated
-  when its summary binding is absent.
+- A schema-validated terminal status file with diagnostic split, IDs, and a
+  safe in-root output basename is shown as **status-reported complete**. This
+  does not assert that the referenced report matches the status.
+- Without the required bounded report binding, report validation remains
+  unvalidated/invalid even when the status file reports completion. No
+  oversized report identity is inferred from a header or filename.
 - The specific missing-binding error remains visible in the API/UI and in the
   aggregate errors list; it is not replaced by a generic success or silently
   hidden.
@@ -101,9 +124,11 @@ require a new review of the amended head.
   qualification evidence.
 - A fully bound report continues through the existing bounded reader and
   validation rules without changing its semantics.
-- Status/report ID, protocol, split, or lifecycle inconsistencies remain
-  unconfirmed/invalid with an actionable error; no fields are inferred from
-  filenames or progress counts.
+- A missing, unsafe, malformed, digest-mismatched, ID/protocol/split-mismatched,
+  or otherwise unvalidated report remains evidence-invalid/unconfirmed with an
+  actionable error. A status-file completion claim remains explicitly
+  status-only; no report identity or evidence validity is inferred from
+  filenames, headers, or progress counts.
 - The five live r4 artifacts remain read-only and unchanged. No process/service
   restart, training interruption, device lease, GPU workload, CPU training, or
   report-sidecar backfill is part of these passes. Preserve the two-WX9100
