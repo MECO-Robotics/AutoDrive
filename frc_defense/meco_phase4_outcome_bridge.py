@@ -1,6 +1,24 @@
 """Fail-closed diagnostic reducers for Phase 4 policy/behavior outcomes."""
 from __future__ import annotations
 
+import math
+
+
+_PAIRED_METRIC_FIELDS = (
+    "success", "scores", "useful_throughput", "completed_cycles")
+
+
+def _require_complete_episode_outcome(value: object, *, where: str) -> None:
+    """Reject missing, null, non-finite, or ill-typed paired outcome metrics."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must contain complete whole-team outcome metrics")
+    if (any(name not in value for name in _PAIRED_METRIC_FIELDS) or
+            type(value["success"]) is not bool or
+            any(type(value[name]) not in (int, float) or
+                not math.isfinite(float(value[name]))
+                for name in _PAIRED_METRIC_FIELDS[1:])):
+        raise ValueError(f"{where} has incomplete or invalid whole-team outcome metrics")
+
 
 def reduce_policy_family_outcomes(rows: list[dict], *,
         expected_policy_ids: set[str], categories: list[str], seeds: list[int],
@@ -25,10 +43,12 @@ def reduce_policy_family_outcomes(rows: list[dict], *,
         key = (row.get("policy_id"), row.get("category"), row.get("seed"))
         if key not in expected or key in by_key:
             raise ValueError("reactive family outcomes contain an unexpected or duplicate key")
+        _require_complete_episode_outcome(row.get("control_episode_outcome"),
+            where="reactive control episode")
+        _require_complete_episode_outcome(row.get("treatment_episode_outcome"),
+            where="reactive treatment episode")
         if (row.get("policy_family") != family_by_policy[key[0]] or
                 not isinstance(row.get("opponent_policy_id"), str) or
-                not isinstance(row.get("control_episode_outcome"), dict) or
-                not isinstance(row.get("treatment_episode_outcome"), dict) or
                 row.get("outcome_semantics") != (
                     "whole-team paired episode outcome while the policy was assigned; "
                     "association by policy family, not per-policy causal contribution")):
@@ -68,9 +88,11 @@ def reduce_teammate_behavior_outcomes(rows: list[dict], *,
         behavior = row.get("behavior")
         if key not in expected_keys or behavior not in expected_behaviors or key in keys:
             raise ValueError("teammate behavior outcomes contain duplicate or unexpected rows")
-        if (not isinstance(row.get("control_whole_team_outcome"), dict) or
-                not isinstance(row.get("treatment_whole_team_outcome"), dict) or
-                row.get("outcome_semantics") != (
+        _require_complete_episode_outcome(row.get("control_whole_team_outcome"),
+            where="teammate control episode")
+        _require_complete_episode_outcome(row.get("treatment_whole_team_outcome"),
+            where="teammate treatment episode")
+        if (row.get("outcome_semantics") != (
                     "paired whole-team episode outcomes while this behavior was present; "
                     "concurrent behavior slots prevent individual score attribution")):
             raise ValueError("teammate behavior outcome row has invalid metrics or semantics")
