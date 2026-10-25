@@ -11,8 +11,8 @@ from dataclasses import dataclass, fields
 import torch
 
 
-PPO_BATCH_SCHEMA_VERSION = 2
-PPO_BATCH_SCHEMA_ID = "five-track-ppo-fixed-capacity-v2"
+PPO_BATCH_SCHEMA_VERSION = 3
+PPO_BATCH_SCHEMA_ID = "five-track-ppo-fixed-capacity-v3"
 PPO_OPTIMIZER_SCHEMA_ID = "sequential-adam-masked-noop-v1"
 PPO_RNG_SCHEMA_ID = "hip-generator-action-permutation-v1"
 PPO_HIDDEN_WIDTH = 64
@@ -63,6 +63,7 @@ class PlanAPpoTensors:
     action_ids: torch.Tensor
     descriptor_ids: torch.Tensor
     support_valid: torch.Tensor
+    old_action_probs: torch.Tensor
     route_cost: torch.Tensor
     risk_cost: torch.Tensor
     parent_edge_m: torch.Tensor
@@ -90,6 +91,7 @@ class PlanCPpoTensors:
     route_override_flags: torch.Tensor
     candidate_present: torch.Tensor
     candidate_valid: torch.Tensor
+    old_action_probs: torch.Tensor
     fallback_index: torch.Tensor
     route_cost: torch.Tensor
     risk_cost: torch.Tensor
@@ -175,6 +177,7 @@ class FiveTrackPpoBatchV2:
                 action_ids=empty((R, P), dtype_=torch.long),
                 descriptor_ids=empty((R, P), dtype_=torch.long),
                 support_valid=empty((R, P), dtype_=torch.bool),
+                old_action_probs=empty((R, P)),
                 route_cost=empty((R, N)), risk_cost=empty((R, N)),
                 parent_edge_m=empty((R, N)),
                 parent_ids=empty((R, N), dtype_=torch.long),
@@ -199,6 +202,7 @@ class FiveTrackPpoBatchV2:
                 route_override_flags=empty((R, K), dtype_=torch.bool),
                 candidate_present=empty((R, K), dtype_=torch.bool),
                 candidate_valid=empty((R, K), dtype_=torch.bool),
+                old_action_probs=empty((R, K)),
                 fallback_index=empty((R,), dtype_=torch.long),
                 route_cost=empty((R, K)), risk_cost=empty((R, K)))
 
@@ -266,6 +270,11 @@ class FiveTrackPpoBatchV2:
                                ~a.support_valid).all()
             status = status & ((torch.isfinite(pair_route) & torch.isfinite(pair_risk)) |
                                ~a.support_valid).all()
+            status = status & (torch.isfinite(a.old_action_probs) &
+                (a.old_action_probs >= 0.) & (a.old_action_probs <= 1.) |
+                ~common.slot_valid[:, None]).all()
+            status = status & ((a.old_action_probs.sum(dim=1) - 1.).abs() <= 5e-5 |
+                               ~active).all()
             status = status & (~active | a.support_valid.any(dim=1)).all()
             status = status & ((a.graph_status == 0) | ~active).all()
             safe_fallback = a.fallback_pair.clamp(0, self.pair_capacity - 1)
@@ -281,6 +290,11 @@ class FiveTrackPpoBatchV2:
             status = status & ((torch.isfinite(c.route_cost) &
                                 torch.isfinite(c.risk_cost)) |
                                ~c.candidate_valid).all()
+            status = status & (torch.isfinite(c.old_action_probs) &
+                (c.old_action_probs >= 0.) & (c.old_action_probs <= 1.) |
+                ~common.slot_valid[:, None]).all()
+            status = status & ((c.old_action_probs.sum(dim=1) - 1.).abs() <= 5e-5 |
+                               ~active).all()
             status = status & (~active | c.candidate_valid.any(dim=1)).all()
             status = status & (~c.candidate_valid | c.candidate_present).all()
             status = status & (~c.candidate_present[:, 1:] |
@@ -328,7 +342,8 @@ def write_common_slot(batch: FiveTrackPpoBatchV2, slot: int, *, raster: torch.Te
 
 def write_plan_a_slot(batch: FiveTrackPpoBatchV2, slot: int, *, graph,
                       support, graph_node_features: torch.Tensor,
-                      route_cost: torch.Tensor, risk_cost: torch.Tensor) -> None:
+                      route_cost: torch.Tensor, risk_cost: torch.Tensor,
+                      old_action_probs: torch.Tensor) -> None:
     """Copy fixed-shape A support/graph tensors into the chosen static slot."""
     if batch.plan_a is None or type(slot) is not int or not 0 <= slot < batch.capacity:
         raise ValueError("invalid Plan A PPO slot")
@@ -354,6 +369,7 @@ def write_plan_a_slot(batch: FiveTrackPpoBatchV2, slot: int, *, graph,
         (destination.action_ids, support.action_ids),
         (destination.descriptor_ids, support.descriptor_ids),
         (destination.support_valid, support.valid_mask),
+        (destination.old_action_probs, old_action_probs.reshape_as(destination.old_action_probs[slot])),
         (destination.route_cost, route_cost.reshape_as(destination.route_cost[slot])),
         (destination.risk_cost, risk_cost.reshape_as(destination.risk_cost[slot])),
         (destination.parent_edge_m, support.parent_edge_m),
@@ -375,7 +391,8 @@ def write_plan_a_slot(batch: FiveTrackPpoBatchV2, slot: int, *, graph,
 
 
 def write_plan_c_slot(batch: FiveTrackPpoBatchV2, slot: int, *, device_batch,
-                      route_cost: torch.Tensor, risk_cost: torch.Tensor) -> None:
+                      route_cost: torch.Tensor, risk_cost: torch.Tensor,
+                      old_action_probs: torch.Tensor) -> None:
     """Copy the frozen C device payload, padding only by the preallocated zeros."""
     if batch.plan_c is None or type(slot) is not int or not 0 <= slot < batch.capacity:
         raise ValueError("invalid Plan C PPO slot")
@@ -397,6 +414,7 @@ def write_plan_c_slot(batch: FiveTrackPpoBatchV2, slot: int, *, device_batch,
         (destination.candidate_present, torch.ones((count,), device=batch.device,
                                                      dtype=torch.bool)),
         (destination.candidate_valid, device_batch.valid_mask),
+        (destination.old_action_probs, old_action_probs),
         (destination.route_cost, route_cost),
         (destination.risk_cost, risk_cost),
     )
@@ -567,7 +585,7 @@ class MaskedSequentialAdamV1:
                       for triple in zip(self.step_count, self.first_moment,
                                         self.second_moment)]}
 
-    def load_state_dict(self, state: dict[str, object]) -> None:
+    def validate_state_dict(self, state: dict[str, object]):
         if (not isinstance(state, dict) or set(state) != {
                 "schema_id", "learning_rate", "beta1", "beta2", "eps",
                 "parameter_count", "state"} or
@@ -587,13 +605,26 @@ class MaskedSequentialAdamV1:
                 raise ValueError("sequential Adam checkpoint state tuple is malformed")
             parameter = self.parameters[index]
             step, first, second = triple
-            step = torch.as_tensor(step, device=self.device, dtype=torch.long)
-            first = torch.as_tensor(first, device=self.device, dtype=parameter.dtype)
-            second = torch.as_tensor(second, device=self.device, dtype=parameter.dtype)
-            if (step.numel() != 1 or first.shape != parameter.shape or
-                    second.shape != parameter.shape):
+            if (not isinstance(step, torch.Tensor) or step.dtype != torch.long or
+                    step.numel() != 1 or int(step.item()) < 0 or
+                    not isinstance(first, torch.Tensor) or
+                    not isinstance(second, torch.Tensor) or
+                    first.shape != parameter.shape or second.shape != parameter.shape or
+                    first.dtype != parameter.dtype or second.dtype != parameter.dtype):
                 raise ValueError("sequential Adam checkpoint tensor shape mismatch")
+            if (not bool(torch.isfinite(first).all()) or
+                    not bool(torch.isfinite(second).all())):
+                raise ValueError("sequential Adam checkpoint moments must be finite")
+            if bool((second < 0).any()):
+                raise ValueError("sequential Adam second moments must be nonnegative")
+            step = step.to(device=self.device)
+            first = first.to(device=self.device)
+            second = second.to(device=self.device)
             staged.append((step, first, second))
+        return tuple(staged)
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        staged = self.validate_state_dict(state)
         for index, (step, first, second) in enumerate(staged):
             self.step_count[index].copy_(step.reshape(()))
             self.first_moment[index].copy_(first)
@@ -640,10 +671,23 @@ class DevicePpoRngV1:
                 "action": self.action.get_state(),
                 "permutation": self.permutation.get_state()}
 
-    def load_state_dict(self, state: dict[str, object]) -> None:
+    def validate_state_dict(self, state: dict[str, object]) -> tuple[torch.Tensor, torch.Tensor]:
         if (not isinstance(state, dict) or
                 state.get("schema_id") != PPO_RNG_SCHEMA_ID or
                 set(state) != {"schema_id", "action", "permutation"}):
             raise ValueError("incompatible five-track PPO RNG checkpoint schema")
-        self.action.set_state(state["action"])
-        self.permutation.set_state(state["permutation"])
+        if any(not isinstance(state[name], torch.Tensor) for name in ("action", "permutation")):
+            raise ValueError("five-track PPO RNG checkpoint states must be tensors")
+        action = torch.Generator(device=self.device)
+        permutation = torch.Generator(device=self.device)
+        try:
+            action.set_state(state["action"])
+            permutation.set_state(state["permutation"])
+        except (RuntimeError, TypeError) as exc:
+            raise ValueError("five-track PPO RNG checkpoint state is malformed") from exc
+        return action.get_state(), permutation.get_state()
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        action_state, permutation_state = self.validate_state_dict(state)
+        self.action.set_state(action_state)
+        self.permutation.set_state(permutation_state)

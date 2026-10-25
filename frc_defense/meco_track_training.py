@@ -1807,6 +1807,42 @@ def _value(value_head, globals_, hidden):
     return value_head(globals_, hidden)
 
 
+def _validate_module_checkpoint_state(module, state, *, label):
+    expected = module.state_dict()
+    if not isinstance(state, dict) or set(state) != set(expected):
+        raise ValueError(f"{label} checkpoint keys do not match the live architecture")
+    for name, target in expected.items():
+        value = state[name]
+        if (not isinstance(value, torch.Tensor) or value.shape != target.shape or
+                value.dtype != target.dtype):
+            raise ValueError(f"{label} checkpoint tensor contract mismatch at {name}")
+        if (value.is_floating_point() or value.is_complex()) and not bool(
+                torch.isfinite(value).all()):
+            raise ValueError(f"{label} checkpoint tensor is non-finite at {name}")
+
+
+def _validate_global_rng_checkpoint(payload, device):
+    cpu_state = payload.get("rng_torch")
+    python_state = payload.get("rng_python")
+    if not isinstance(cpu_state, torch.Tensor):
+        raise ValueError("MECO checkpoint CPU RNG state is missing or malformed")
+    try:
+        torch.Generator(device="cpu").set_state(cpu_state)
+        random.Random().setstate(python_state)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("MECO checkpoint CPU/Python RNG state is malformed") from exc
+    device_state = payload.get("rng_device")
+    if str(device).startswith("cuda"):
+        if not isinstance(device_state, torch.Tensor):
+            raise ValueError("MECO checkpoint device RNG state is missing or malformed")
+        try:
+            torch.Generator(device=torch.device(device)).set_state(device_state)
+        except (RuntimeError, TypeError) as exc:
+            raise ValueError("MECO checkpoint device RNG state is malformed") from exc
+    elif device_state is not None:
+        raise ValueError("MECO checkpoint has unexpected device RNG state")
+
+
 def _apply_candidate_hysteresis(logits, table, candidate_batch=None):
     """Apply the shared committed-task switch cost without changing feasibility."""
     if "commitment_switch_cost" not in table.feature_names:
@@ -2043,6 +2079,8 @@ def _pack_five_track_ppo_batch(track, rows, config, bootstrap_value):
     for slot, row in enumerate(rows):
         next_value = (rows[slot + 1]["value"] if slot + 1 < len(rows)
                       else bootstrap_value)
+        rollout_probs = categorical_from_candidate_logits(
+            row["rollout_logits"]).probs.detach().reshape(-1)
         write_common_slot(batch, slot,
             raster=row["raster"], globals_=row["globals"],
             hidden_before=row["hidden_before"], action=row["action"],
@@ -2060,7 +2098,8 @@ def _pack_five_track_ppo_batch(track, rows, config, bootstrap_value):
             write_plan_a_slot(batch, slot, graph=graph,
                 support=row["support"], graph_node_features=graph_features,
                 route_cost=row["route_cost_nodes"],
-                risk_cost=row["risk_cost_nodes"])
+                risk_cost=row["risk_cost_nodes"],
+                old_action_probs=rollout_probs)
         else:
             candidate_set = row.get("candidate_set")
             device_batch = (None if candidate_set is None else
@@ -2068,7 +2107,8 @@ def _pack_five_track_ppo_batch(track, rows, config, bootstrap_value):
             if device_batch is None:
                 raise RuntimeError(f"{track} rollout lacks its frozen device candidate batch")
             write_plan_c_slot(batch, slot, device_batch=device_batch,
-                route_cost=row["route_cost"], risk_cost=row["risk_cost"])
+                route_cost=row["route_cost"], risk_cost=row["risk_cost"],
+                old_action_probs=rollout_probs)
     # Padding duplicates a valid schema row so every model forward remains
     # finite. The slot-valid mask makes these rows optimizer no-ops.
     source = len(rows) - 1
@@ -2116,7 +2156,16 @@ def _ppo_update(track, model, value_head, optimizer, batch, config,
         replay_logprob = categorical_from_candidate_logits(
             replay["logits"]).log_prob(common.action)
         replay_matches = ((replay_logprob - common.old_logprob).abs() <= 5e-5)
-        replay_matches = (replay_matches | ~common.slot_valid).all()
+        replay_probs = categorical_from_candidate_logits(replay["logits"]).probs
+        if batch.plan_a is not None:
+            frozen_probs = batch.plan_a.old_action_probs
+            action_mask = batch.plan_a.support_valid
+        else:
+            frozen_probs = batch.plan_c.old_action_probs
+            action_mask = batch.plan_c.candidate_valid
+        distribution_matches = ((replay_probs - frozen_probs).abs() <= 5e-5)
+        distribution_matches = (distribution_matches | ~action_mask).all(dim=-1)
+        replay_matches = (replay_matches & distribution_matches | ~common.slot_valid).all()
         assert_async(replay["status"] & replay_matches,
             "batched five-track PPO scorer/replay identity failed")
     advantage, returns = gae_v2(batch, gamma=config.gamma,
@@ -2332,6 +2381,13 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         if (not isinstance(resume_reset_rng_state, dict) or
                 resume_reset_rng_state.get("schema_id") != "meco-3v3-per-world-rng-v1"):
             raise ValueError("MECO checkpoint reset RNG schema is missing or incompatible")
+        _validate_module_checkpoint_state(model, payload.get("model"),
+                                          label="policy model")
+        _validate_module_checkpoint_state(value_head, payload.get("value_head"),
+                                          label="value head")
+        optimizer.validate_state_dict(payload.get("optimizer"))
+        ppo_rng.validate_state_dict(payload.get("ppo_rng"))
+        _validate_global_rng_checkpoint(payload, config.device)
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         prior_task = payload.get("task_assignment") or {}
         if (task_assignment.get("assignment_id") is not None
