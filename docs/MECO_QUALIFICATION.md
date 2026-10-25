@@ -2,7 +2,7 @@
 
 ## Calibrate before validating
 
-New promotion runs use a target-scoped calibrated v4 protocol. It freezes one
+New promotion runs use a target-scoped calibrated v5 GPU-bootstrap protocol. It freezes one
 matched deterministic reference before held-out evaluation: `D1/current`,
 `D2/cv`, or `D2/multi_model_v1`. D0 remains a separately reported safety floor.
 Historical v1 protocols are nonpromotable; legacy calibrated v2 and v3
@@ -10,7 +10,9 @@ protocols and their reports remain readable with their original comparison
 semantics. Do not run promotion validation until the target's complete
 prerequisite closure has disjoint D0 calibration reports, a verified bundle,
 repeated matched-reference variance reports, an explicit reviewed margin
-decision, and an immutable v4 protocol.
+decision, and an immutable v5 protocol using implementation ID
+`meco-v4-cluster-episode-device-percentile-v1`. Versions v1-v4 are historical
+or diagnostic only for the five-track Stage 1 gate.
 
 Calibration, model evaluation, and qualification currently require an
 explicitly indexed available ROCm/HIP GPU, exposed by PyTorch with a device name
@@ -235,7 +237,7 @@ python -m frc_defense.meco_qualification create-protocol \
   --matched-reference-calibration-bundle-json "qualifications/meco/reference-variance-${TARGET}-bundle.json" \
   --reference-margin-review-json "qualifications/meco/reference-margin-review-${TARGET}.json" \
   --safety-margins-json qualifications/meco/safety-margins.json \
-  --output "qualifications/meco/protocol-${TARGET}-v4.json"
+  --output "qualifications/meco/protocol-${TARGET}-v5.json"
 ```
 
 Replace `pickup_simple` with the selected promotion target. The protocol binds
@@ -245,13 +247,96 @@ the frozen matched reference and prediction contract, safety schema, and
 explicit reviewer-approved useful-gain and safety margins. D0 remains the
 separately bound safety floor. Existing protocol files are never rewritten.
 
-## Run validation under the frozen v4 protocol
+## Stage 1 metadata readiness preflight
+
+Before launching the matched Stage 1 campaign, run `preflight-stage1` with
+the exact v5 protocol, a digest-pinned Phase 0 evidence index, the
+qualification campaign manifest, and one manifest for each of A1, A2, A3, C1,
+and C2. Supply every active/protected campaign and checkpoint root. The
+campaign manifest also declares its campaign/checkpoint roots; these are added
+to the protected set before any Phase 0 evidence path is opened.
+
+```bash
+python -m frc_defense.meco_qualification preflight-stage1 \
+  --protocol qualifications/meco/protocol-pickup_simple-v5.json \
+  --phase0-index qualifications/meco/stage1-phase0-evidence-index.json \
+  --campaign-manifest qualifications/meco/stage1-campaign-manifest.json \
+  --checkpoint-manifest qualifications/meco/checkpoints/A1-manifest.json \
+  --checkpoint-manifest qualifications/meco/checkpoints/A2-manifest.json \
+  --checkpoint-manifest qualifications/meco/checkpoints/A3-manifest.json \
+  --checkpoint-manifest qualifications/meco/checkpoints/C1-manifest.json \
+  --checkpoint-manifest qualifications/meco/checkpoints/C2-manifest.json \
+  --protected-campaign-root /data/meco/active-campaign \
+  --protected-checkpoint-root /data/meco/checkpoints \
+  --output qualifications/meco/stage1-readiness.json
+```
+
+The Phase 0 index uses schema `meco-stage1-phase0-evidence-index-v1` and
+contains `source_identity_sha256`, `config_sha256`, six relative JSON artifact
+references (`effective_freeze`, `seed_partition`, `score_estimand_review`,
+`d0_calibration_bundle`, `matched_reference_calibration_bundle`, and
+`margin_review`), and `index_sha256` over the other index fields. Each
+reference contains only `path` and the SHA-256 of the exact file bytes. Freeze
+and partition artifacts receive current-schema and self-digest/cross-binding
+checks; the report validators are reused for D0 calibration, matched-reference
+calibration, score-estimand, and margin-review content. This metadata check
+does not re-capture source/runtime state or execute the full Phase 0 materializer.
+The campaign manifest uses schema
+`meco-five-track-stage1-campaign-manifest-v1`; each track manifest uses
+`meco-stage1-checkpoint-manifest-v1`. These metadata contracts bind the
+scenario/version, source/config/protocol, disjoint validation/final-test seed
+sets, selected single comparator, D0 safety floor, and common five-track
+campaign ancestry. The campaign manifest fields are `qualification_eligible`,
+`evaluation_split`, `scenario_id`, `scenario_version`, `protocol_id`,
+`source_identity_sha256`, `config_sha256`, `promotion_comparator`,
+`safety_floor_policy`, `validation_seeds`, `final_test_seeds`,
+`matched_campaign_ancestry`, `campaign_roots`, and `checkpoint_roots`, in
+addition to its schema tag. Checkpoint manifests carry `policy_id`, the
+declared `checkpoint_sha256`, source/config/protocol/scenario bindings, both
+seed-partition digests, and `matched_campaign_ancestry`, in addition to their
+schema tag. Campaign-declared roots must be absolute paths that resolve to existing
+directories. Input and referenced evidence paths are canonicalized through
+symlinks and rejected if they fall inside any protected root; the report path
+is subject to the same check. The output is written only to the explicit
+destination, and an existing non-identical report is never replaced.
+
+The report is deterministic for the same inputs and uses stable blocker codes.
+`ready: true` means only `metadata_consistent_only`: it does not open, stat,
+hash, or deserialize checkpoint bytes, execute models, read held-out outcomes,
+advance curriculum state, qualify a track, or authorize GPU work. Checkpoint
+SHA-256 values are declarations in the manifests and are explicitly unverified
+against file bytes. Diagnostic campaign manifests, including the active r4
+campaign, remain blocked. The preflight is read-only with respect to campaign
+and checkpoint data and does not imply permission to interrupt or compete with
+the currently active training campaign.
+
+The output schema is `meco-stage1-readiness-preflight-v1`; it contains
+`status`, `ready`, `scope`, `checkpoint_digest_semantics`, explicit false
+side-effect/outcome flags, five separate `tracks` rows, per-check evidence
+paths and digests, and stable `blocker_codes`. Illustrative output fragments
+(not evidence):
+
+```json
+{"status":"blocked","ready":false,"scope":"metadata_consistent_only",
+ "blocker_codes":["phase0_artifact_set_incomplete"]}
+```
+
+```json
+{"status":"ready","ready":true,"scope":"metadata_consistent_only",
+ "checkpoint_digest_semantics":"declared_metadata_only_not_verified_against_checkpoint_bytes",
+ "blocker_codes":[]}
+```
+
+The second fragment represents metadata consistency only; it is not a report
+that a real campaign or any model passed.
+
+## Run validation under the frozen v5 protocol
 
 Validation requires at least 100 episodes per category and each frozen
 layout/family stratum. Within each round, use the exact same protocol and
 checkpoint bundle for the target and every transitive prerequisite. Run
 prerequisite scenarios as retention evidence, then run the target to advance
-its promotion streak. Each v4 round pairs the selected learned policy with the
+its promotion streak. Each v5 round pairs the selected learned policy with the
 preselected D1/D2 reference on identical seeds, and separately checks safety
 against D0. Useful-throughput and safety confidence intervals use the frozen
 reference; no reference is selected after observing held-out outcomes. Keep a
@@ -268,7 +353,7 @@ across-seed variance.
 python -m frc_defense.meco_qualification run-validation \
   --scenario pickup_simple --candidate-policy A1 \
   --checkpoint checkpoints/meco-five/A1/latest.pt \
-  --protocol qualifications/meco/protocol-pickup_simple-v4.json \
+  --protocol qualifications/meco/protocol-pickup_simple-v5.json \
   --state qualifications/meco/A1-state.json \
   --output qualifications/meco/A1-pickup-simple-round-1.json \
   --device cuda:0
@@ -301,8 +386,9 @@ calibration/source IDs, and an `evidence_sha256` over the immutable report's
 policy manifest, source identity, cases, safety provenance, and raw rows. New
 evidence schema v2 also binds final-test summary fields; older reports without
 an explicit evidence schema retain the legacy digest field set, and calibrated
-v3 and v4 reports require schema v2. V4 evidence additionally binds matched-
-reference variance reports and the explicit margin review.
+v3 through v5 reports require schema v2. V4 evidence additionally binds
+matched-reference variance reports and the explicit margin review; v5 uses
+the frozen GPU cluster-bootstrap implementation.
 Unknown `safety_*` row fields fail closed. These unkeyed SHA-256 checks detect
 edits while the recorded digest is retained; they do not authenticate the
 producer. No signing key or trusted attestor is configured. Runtime calibration
@@ -311,7 +397,7 @@ not establish runtime parity or promotion eligibility.
 
 Final-test execution is separate and requires an already promoted scenario,
 the same protocol, and the exact checkpoint bundle recorded at promotion. A
-v3/v4 test includes the selected candidate, its preselected D1/D2 reference, and D0
+v3-v5 test includes the selected candidate, its preselected D1/D2 reference, and D0
 as a separate safety floor; legacy v2 keeps its D0 comparison. Final-test
 results are digest-bound and never change promotion state. Do
 not regenerate or inspect final-test reports while selecting among policy
@@ -327,7 +413,8 @@ the required calibration artifacts, so it always reports qualification
 eligibility as false. Use the qualification protocol and report validators for
 promotion; the training manifest is not a qualification admission path.
 
-New campaign qualification claims require a v4 protocol with the exact
+New five-track Stage 1 campaign qualification claims require a v5 GPU-bootstrap
+protocol with implementation ID `meco-v4-cluster-episode-device-percentile-v1`, the exact
 `matched_reference_variance_and_reviewed_margin_frozen` status and must pass
 the full protocol validator. Legacy v2/v3 protocols remain readable and may
 support explicitly diagnostic validation plans, but those plans are never
