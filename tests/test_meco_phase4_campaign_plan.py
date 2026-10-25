@@ -236,29 +236,83 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
         assert argv[argv.index("--conditions") + 1] == "architecture_matched_cv_k16"
         assert argv[argv.index("--seed-manifest") + 1]
         policies = (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")
+        checkpoint_hashes = {track: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                             for track, path in checkpoints.items()}
+        source_hash = "a" * 64
+        execution_device = {"requested_device": "cuda:1", "execution_device": "cuda:1"}
+        frozen_protocol = json.loads(PROTOCOL.read_text())
+        frozen_protocol_sha = hashlib.sha256(PROTOCOL.read_bytes()).hexdigest()
         rows = []
         for policy in policies:
             for category in manifest["categories"]:
                 for seed in manifest["seed_list"]:
-                    rows.append({"policy": policy, "category": category, "seed": seed,
-                        "phase4_opponent_policy": (None if arm == "no_factor" else {
+                    metrics = {"success": 1, "scores": 2,
+                        "useful_throughput": 3, "completed_cycles": 4}
+                    captured = None
+                    if arm == "factor_treatment" and not trench_interception:
+                        assigned = next(item for item in schedule[
+                            "per_episode_assignment"] if item["seed"] == seed and
+                            item["category"] == category)
+                        slots = assigned["configured_pressure_slots"]
+                        captured = {
                             "policy_id": selected_policy,
                             "factor_id": schedule["factor_id"],
                             "policy_family": schedule["policy_family"],
                             "schedule_sha256": schedule["schedule_sha256"],
+                            "scenario_id": cell["case_axes"]["scenario_id"],
+                            "category": category, "seed": seed,
+                            "condition": "factor_treatment",
+                            "qualification_case": manifest["qualification_case"],
+                            "condition_id": "condition-a",
+                            "source_identity_sha256": source_hash,
+                            "checkpoint_sha256": checkpoint_hashes.get(
+                                policy[:-3] if policy.endswith("_P0") else policy),
+                            "execution_device": execution_device,
+                            "assignment_sha256": assigned["assignment_sha256"],
+                            "configured_slots": slots, "applied_slots": slots,
+                            "applied_command_calls_by_slot": {
+                                str(slot): 500 for slot in slots},
+                            "applied_event_coverage_complete": True,
+                            "episode_outcome_metrics": metrics,
                             "interception_rate": None,
-                            "paired_outcome_by_family": None})})
+                            "paired_outcome_by_family": None}
+                    rows.append({"policy": policy, "category": category, "seed": seed,
+                        "metrics": metrics, "phase4_opponent_policy": captured,
+                        "condition_id": "condition-a", "elapsed_ticks": 500,
+                        "source_identity_sha256": source_hash,
+                        "checkpoint_sha256": checkpoint_hashes.get(
+                            policy[:-3] if policy.endswith("_P0") else policy),
+                        "execution_device": execution_device})
         report_path = output_dir / "condition.json"
-        report_path.write_text(json.dumps({"qualification_eligible": False,
-            "records": rows}))
+        report = {"qualification_eligible": False,
+            "scenario_id": cell["case_axes"]["scenario_id"],
+            "categories": manifest["categories"], "split": "validation",
+            "evaluation_protocol_id": frozen_protocol["protocol_id"],
+            "evaluation_protocol_sha256": frozen_protocol_sha,
+            "exact_episode_seeds": manifest["seed_list"],
+            "execution_device": execution_device,
+            "source_identity_sha256": source_hash,
+            "checkpoint_sha256": checkpoint_hashes, "records": rows}
+        report_path.write_text(json.dumps(report))
+        report_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
         matrix_path = output_dir / "mock.matrix.json"
         matrix_path.write_text(json.dumps({"protocol": {
+            "scenario_id": cell["case_axes"]["scenario_id"],
+            "qualification_protocol_id": frozen_protocol["protocol_id"],
+            "qualification_protocol": {"protocol_id": frozen_protocol["protocol_id"],
+                "protocol_sha256": frozen_protocol_sha},
+            "source_identity_sha256": source_hash,
+            "checkpoint_sha256": checkpoint_hashes,
+            "training_configuration_sha256": "b" * 64,
+            "execution_device": execution_device,
             "qualification_case": case_binding,
             "categories": manifest["categories"], "seed_list": manifest["seed_list"],
             "condition_selection": ["architecture_matched_cv_k16"],
             "conditions": [{"condition_name": "architecture_matched_cv_k16"}],
             "phase4_opponent_schedule": (schedule if arm == "factor_treatment" else None)},
-            "conditions": {"architecture_matched_cv_k16": {"report_path": str(report_path)}}}))
+            "conditions": {"architecture_matched_cv_k16": {
+                "report_path": str(report_path),
+                "evaluation_report_sha256": report_sha}}}))
         observed.append(argv)
         return 0
 
@@ -272,11 +326,12 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
     assert result["dispatch_return_codes"] == {
         "no_factor": 0, "factor_treatment": 0}
     assert result["qualification_eligible"] is False
-    assert result["required_family_outcomes"] == {
-        "interception_rate": None, "policy_family_coverage": None,
-        "paired_outcome_by_family": None}
     assert result["paired_coverage"]["exact_policy_category_seed_pair_coverage"] is True
     assert result["paired_coverage"]["qualification_eligible"] is False
+    if not trench_interception:
+        assert result["required_family_outcomes"]["interception_rate"] is None
+        assert result["required_family_outcomes"]["policy_family_coverage"]
+        assert result["required_family_outcomes"]["paired_outcome_by_family"]
     if trench_interception:
         schedule = json.loads((tmp_path / "dispatch" / "opponent-schedule.json").read_text())
         from frc_defense.meco_track_training import evaluate_meco

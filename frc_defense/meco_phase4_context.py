@@ -784,7 +784,9 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         episode_id: str, scenario_id: str, category: str, seed: int,
         policy_id: str, condition_id: str | None,
         source_identity_sha256: str, outcome_metrics: dict | None = None,
-        expected_action_ticks: int | None = None) -> dict:
+        expected_action_ticks: int | None = None,
+        checkpoint_sha256: str | None = None,
+        execution_device: dict | None = None) -> dict:
     """Bind evaluator action trace to its exact assignment and provenance."""
     assignment = validate_phase4_teammate_behavior_assignment(assignment)
     if (not isinstance(runtime, dict) or
@@ -846,6 +848,11 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
             "assigned_slots": expected_slots}
     if outcome_metrics is not None and not isinstance(outcome_metrics, dict):
         raise ValueError("teammate behavior outcome metrics must be a mapping")
+    if checkpoint_sha256 is not None and (not isinstance(checkpoint_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256) is None):
+        raise ValueError("teammate behavior checkpoint identity is invalid")
+    if execution_device is not None and not isinstance(execution_device, dict):
+        raise ValueError("teammate behavior execution device must be a mapping")
     return {"schema": "phase4-teammate-behavior-runtime-v1",
         "assignments": runtime["assignments"],
         "assignment_applied": runtime["assignment_applied"],
@@ -856,6 +863,8 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         "category": category, "seed": seed, "policy_id": policy_id,
         "condition_id": condition_id,
         "source_identity_sha256": source_identity_sha256,
+        "checkpoint_sha256": checkpoint_sha256,
+        "execution_device": execution_device,
         "protocol_id": assignment["protocol_id"],
         "protocol_sha256": assignment["protocol_sha256"],
         "qualification_case": assignment["qualification_case"],

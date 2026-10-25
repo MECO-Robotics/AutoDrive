@@ -571,6 +571,7 @@ def _schema7_fixture(path):
             "phase4_teammate_behavior_assignment": assignment})
         for row in report["records"]:
             row["episode_id"] = f"episode-{arm}-{row['policy']}-{row['seed']}"
+            row["elapsed_ticks"] = 2
             if arm == "no_factor":
                 runtime = {"schema": "phase4-teammate-behavior-runtime-v1",
                     "arm": arm, "assignments": None, "assignment_applied": False,
@@ -599,7 +600,9 @@ def _schema7_fixture(path):
                 condition_id=condition_id,
                 source_identity_sha256=report["source_identity_sha256"],
                 outcome_metrics=row.get("metrics"),
-                expected_action_ticks=len(runtime["events"]))
+                expected_action_ticks=len(runtime["events"]),
+                checkpoint_sha256=row.get("checkpoint_sha256"),
+                execution_device=row.get("execution_device"))
         report_path = path.parent / f"{arm}.condition.json"
         _write_json(report_path, report)
         condition = dict(old)

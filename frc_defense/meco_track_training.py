@@ -3789,7 +3789,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     source_identity_sha256=source_hash,
                                     outcome_metrics=metrics,
                                     expected_action_ticks=int(
-                                        env.sim.physics_substep_index[0].item()))
+                                        env.sim.physics_substep_index[0].item()),
+                                    checkpoint_sha256=policy_manifest[
+                                        record_policy]["checkpoint_sha256"],
+                                    execution_device=execution_device)
                                 if phase4_teammate_behavior_assignment is not None else None),
                             "phase4_opponent_policy": ({
                                 "policy_id": phase4_opponent_policy_id,
@@ -3799,6 +3802,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "schedule_sha256"],
                                 "policy_config_sha256": phase4_opponent_schedule[
                                     "policy_config_sha256"],
+                                "scenario_id": scenario_id,
+                                "category": category,
+                                "seed": seed,
+                                "condition": "factor_treatment",
+                                "qualification_case": qualification_case,
+                                "condition_id": condition_id,
+                                "source_identity_sha256": source_hash,
+                                "checkpoint_sha256": policy_manifest[record_policy][
+                                    "checkpoint_sha256"],
+                                "execution_device": execution_device,
                                 "assignment_sha256": next(item["assignment_sha256"]
                                     for item in phase4_opponent_schedule[
                                         "per_episode_assignment"]
