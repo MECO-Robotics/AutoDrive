@@ -1,22 +1,19 @@
 # MECO learning tracks plan: execution status
 
-> **Live campaign snapshot — 2026-10-25 00:16 UTC.** User service
-> `meco-five-continuous-20261024.service` is active (supervisor PID `2660362`,
-> started 2026-10-24 23:25:55 UTC). It runs from the main checkout at
-> `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive`, source commit
-> `f7ee92d90`; the generated HIP file is dirty at runtime, and source identity
-> hashes exclude that generated output. Campaign data is under
-> `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/meco-five-continuous-20261024-r3`.
->
-> Cycle 1 targets 100 optimizer updates per track. At this snapshot A1 is
-> 73/100 on `cuda:0` and A2 is 68/100 on `cuda:1`, with both worker processes
-> live. A3, C1, and C2 are queued at 0. The five tracks are planned across two
-> WX9100 devices, so they are not all running concurrently. No tracks, chunks,
-> or cycles are complete yet. Evaluation is idle with no bound protocol; it is
-> queued automatically only after all five checkpoints reach the matched
-> frontier. This is diagnostic training progress, not qualification or
-> held-out evaluation evidence. First-cycle output is pending, and evaluation
-> idleness is expected while the cycle remains incomplete.
+> **Campaign recovery status — 2026-10-25 00:44 UTC.** The
+> `meco-five-continuous-20261024-r3` service terminated with exit status 1 at
+> 00:36:32 UTC. Its supervisor failed the strict worker provenance check:
+> the A1 run record omitted top-level `track`, although its embedded
+> `config.track` was A1. A1 reached 100 optimizer updates and A2 reached 93;
+> A3, C1, and C2 remained at 0. No five-track chunk or cycle completed, and no
+> evaluation ran. These are training updates, not evaluation cases or passes.
+> The failed root and stop marker remain untouched. The manifest launcher only
+> supports fresh roots and binds exact source identity, so this checkpoint set
+> is not being resumed under a different source. The scoped fix was implemented
+> and independently approved at `a4cc6a45ef2b3053bcc70af08ae265801bb74ed4`;
+> new training must use a separately generated source-bound manifest and root.
+> No training is running at this snapshot. The dashboard process remains up,
+> but its campaign status is stale until pointed at a new run.
 
 > **Runtime identity correction — 2026-10-24 23:25 UTC.** The first relaunch
 > passed manifest validation and created its isolated campaign root, but both
