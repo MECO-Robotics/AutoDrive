@@ -74,9 +74,10 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
         raise RuntimeError(
             "GPU-qualifying fuel physics requires HIP graph capture to be enabled")
     if (physics._gpu_qualifying and
-            getattr(env, "_meco_score_event_recorder", None) is not None):
+            getattr(env, "_meco_score_event_recorder", None) is not None and
+            getattr(env, "_meco_gpu_score_event_buffer", None) is None):
         raise RuntimeError(
-            "GPU-qualifying fuel physics cannot use the CPU score-event recorder")
+            "GPU-qualifying score recording requires a bounded device event buffer")
     if physics._gpu_qualifying:
         for name, tensor, shape in (
                 ("commands",commands,

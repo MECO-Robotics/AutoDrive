@@ -10,10 +10,238 @@ from . import tensor_3v3_pickup_grid_hip as _pickup_grid_hip
 from ._tensor_3v3_observation import NUM_ROBOTS
 
 
+_SCORE_SOURCE_SITE_CODES = {
+    "gamepiece_actions.update_fuel_actions.vectorized_score_mutation": 1,
+    "gamepiece_actions.update_fuel_actions.robot_loop_score_mutation": 2,
+}
+
+
+def initialize_fuel_score_event_buffer(env, recorder):
+    """Allocate fixed device event slots for one bounded score episode."""
+    from .meco_simulated_score_ledger import MAX_SCORE_EVENTS_PER_EPISODE
+
+    world_count = int(env.n)
+    horizon = int(env.horizon)
+    robot_count = int(env.sim.num_robots)
+    capacity = world_count * horizon * robot_count
+    if (world_count < 1 or horizon < 1 or robot_count < 1 or
+            capacity > MAX_SCORE_EVENTS_PER_EPISODE):
+        raise ValueError(
+            "GPU score-event buffer bound exceeds the fixed aggregate episode cap")
+    if recorder.context.get("world_count") != world_count:
+        raise ValueError("GPU score-event buffer worlds differ from recorder context")
+    device = env.device
+    shape = (world_count, horizon, robot_count)
+    env._meco_gpu_score_event_buffer = {
+        "event_mask": torch.zeros(shape, device=device, dtype=torch.bool),
+        "tick": torch.zeros(shape, device=device, dtype=torch.long),
+        "match_elapsed_s": torch.zeros(shape, device=device,
+                                        dtype=env.match_elapsed.dtype),
+        "world_slot": torch.zeros(shape, device=device, dtype=torch.long),
+        "alliance": torch.zeros(shape, device=device, dtype=torch.long),
+        "robot_slot": torch.zeros(shape, device=device, dtype=torch.long),
+        "piece_slot": torch.zeros(shape, device=device, dtype=torch.long),
+        "piece_generation": torch.zeros(shape, device=device, dtype=torch.long),
+        "source_site_code": torch.zeros(shape, device=device, dtype=torch.int8),
+        "world_counts": torch.zeros((world_count,), device=device,
+                                    dtype=torch.long),
+        "aggregate_count": torch.zeros((), device=device, dtype=torch.long),
+        "overflow_flags": torch.zeros((), device=device, dtype=torch.long),
+        "capacity": capacity,
+        "episode_binding": {
+            "episode_id": recorder.context["episode_id"],
+            "seed": recorder.context["seed"],
+            "scenario_id": recorder.context["scenario_id"],
+            "source_identity_sha256": recorder.context[
+                "source_identity_sha256"],
+            "estimand_approval_sha256": recorder.approval_sha256,
+        },
+    }
+    env._meco_gpu_score_event_buffer_error = None
+
+
+def reset_fuel_score_event_buffer(env, mask=None):
+    """Clear selected world slots while retaining every other world's rows."""
+    buffer = getattr(env, "_meco_gpu_score_event_buffer", None)
+    if buffer is None:
+        return
+    if mask is None:
+        reset_mask = torch.ones((env.n,), device=env.device, dtype=torch.bool)
+    elif (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+          mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+        raise ValueError("score-event reset mask must be device bool [world]")
+    else:
+        reset_mask = mask
+    if reset_mask.ndim != 1 or reset_mask.shape[0] != env.n:
+        raise ValueError("score-event reset mask must be device bool [world]")
+    rows = reset_mask[:, None, None]
+    for name in ("event_mask", "tick", "match_elapsed_s", "world_slot",
+                 "alliance", "robot_slot", "piece_slot", "piece_generation",
+                 "source_site_code"):
+        buffer[name].masked_fill_(rows, 0)
+    removed = torch.where(reset_mask, buffer["world_counts"],
+                           torch.zeros_like(buffer["world_counts"]))
+    buffer["world_counts"].copy_(torch.where(
+        reset_mask, torch.zeros_like(buffer["world_counts"]),
+        buffer["world_counts"]))
+    buffer["aggregate_count"].sub_(removed.sum())
+
+
+def _capture_gpu_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
+    """Write accepted scorer outputs to fixed slots without host materialization."""
+    buffer = getattr(env, "_meco_gpu_score_event_buffer", None)
+    source_code = _SCORE_SOURCE_SITE_CODES.get(source_site, 0)
+    if buffer is None or source_code == 0:
+        env._meco_gpu_score_event_buffer_error = (
+            "device score-event buffer or supported source site is missing")
+        return
+    if chosen.ndim == 3:
+        world_count, robot_count, _ = chosen.shape
+        if (world_count != env.n or
+                robot_count != buffer["event_mask"].shape[2]):
+            env._meco_gpu_score_event_buffer_error = (
+                "vectorized score-event mask shape changed")
+            return
+        accepted = chosen.any(-1)
+        piece_slots = chosen.to(torch.long).argmax(-1)
+        generations = env._meco_piece_generation.gather(1, piece_slots)
+        for slot in range(robot_count):
+            _write_gpu_score_event_slot(
+                env, buffer, accepted[:, slot], piece_slots[:, slot],
+                generations[:, slot], slot, source_code)
+    elif chosen.ndim == 2 and robot_slot is not None:
+        world_count = chosen.shape[0]
+        if (world_count != env.n or
+                not 0 <= int(robot_slot) < buffer["event_mask"].shape[2]):
+            env._meco_gpu_score_event_buffer_error = (
+                "robot-loop score-event mask shape changed")
+            return
+        piece_slots = chosen.to(torch.long).argmax(-1)
+        generations = env._meco_piece_generation.gather(
+            1, piece_slots[:, None]).squeeze(1)
+        _write_gpu_score_event_slot(
+            env, buffer, chosen.any(-1), piece_slots, generations,
+            int(robot_slot), source_code)
+    else:
+        env._meco_gpu_score_event_buffer_error = (
+            "accepted score mask has an unsupported shape")
+
+
+def _write_gpu_score_event_slot(env, buffer, accepted, piece_slots,
+                                generations, robot_slot, source_code):
+    from .meco_simulated_score_ledger import MAX_SCORE_EVENTS_PER_EPISODE
+
+    world_count, horizon, robot_count = buffer["event_mask"].shape
+    rows = torch.arange(world_count, device=env.device)
+    raw_tick = env.steps.to(torch.long) - 1
+    tick_valid = (raw_tick >= 0) & (raw_tick < horizon)
+    safe_tick = raw_tick.clamp(0, horizon - 1)
+    robot_indices = torch.full_like(rows, int(robot_slot))
+    index = (rows, safe_tick, robot_indices)
+    previous = buffer["event_mask"][index]
+    duplicate = accepted & previous
+    write = accepted & ~previous & tick_valid
+    slot_values = {
+        "tick": raw_tick.clamp_min(0),
+        "match_elapsed_s": env.match_elapsed,
+        "world_slot": rows,
+        "alliance": env.team_ids[robot_slot].expand(world_count),
+        "robot_slot": robot_indices,
+        "piece_slot": piece_slots,
+        "piece_generation": generations,
+        "source_site_code": torch.full_like(rows, source_code,
+                                             dtype=torch.int8),
+    }
+    for name, values in slot_values.items():
+        current = buffer[name][index]
+        buffer[name].index_put_(index, torch.where(write, values, current))
+    buffer["event_mask"].index_put_(index, previous | write)
+    added = write.to(torch.long)
+    buffer["world_counts"].add_(added)
+    aggregate_count = buffer["aggregate_count"] + added.sum()
+    buffer["aggregate_count"].copy_(aggregate_count)
+    flags = ((duplicate | (accepted & ~tick_valid)).any().to(torch.long) * 1)
+    flags = flags | (aggregate_count > MAX_SCORE_EVENTS_PER_EPISODE).to(torch.long) * 2
+    buffer["overflow_flags"].bitwise_or_(flags)
+
+
+def materialize_fuel_score_awards(env, recorder):
+    """Copy bounded event rows at the passive terminal-report boundary."""
+    try:
+        return _materialize_fuel_score_awards(env, recorder)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _materialize_fuel_score_awards(env, recorder):
+    from .meco_simulated_score_ledger import MAX_SCORE_EVENTS_PER_EPISODE
+
+    buffer = getattr(env, "_meco_gpu_score_event_buffer", None)
+    if buffer is None:
+        return False, "device score-event buffer is missing"
+    expected_binding = {
+        "episode_id": recorder.context["episode_id"],
+        "seed": recorder.context["seed"],
+        "scenario_id": recorder.context["scenario_id"],
+        "source_identity_sha256": recorder.context["source_identity_sha256"],
+        "estimand_approval_sha256": recorder.approval_sha256,
+    }
+    if buffer["episode_binding"] != expected_binding:
+        return False, "device score-event episode binding changed"
+    if getattr(env, "_meco_gpu_score_event_buffer_error", None):
+        return False, env._meco_gpu_score_event_buffer_error
+    overflow_flags = int(buffer["overflow_flags"].detach().cpu().item())
+    aggregate_count = int(buffer["aggregate_count"].detach().cpu().item())
+    if overflow_flags or aggregate_count > MAX_SCORE_EVENTS_PER_EPISODE:
+        return False, f"device score-event buffer overflow flags={overflow_flags}"
+    rows = {name: buffer[name].detach().cpu()
+            for name in ("event_mask", "tick", "match_elapsed_s", "world_slot",
+                         "alliance", "robot_slot", "piece_slot",
+                         "piece_generation", "source_site_code")}
+    accepted = torch.nonzero(rows["event_mask"], as_tuple=False).tolist()
+    source_site_by_code = {code: source for source, code in
+                           _SCORE_SOURCE_SITE_CODES.items()}
+    def order_key(position):
+        world, tick, slot = position
+        source_code = int(rows["source_site_code"][world, tick, slot])
+        if source_code == 1:
+            return (tick, 0, world, slot)
+        if source_code == 2:
+            return (tick, slot, world, slot)
+        return (tick, 0, world, slot)
+    accepted.sort(key=order_key)
+    if len(accepted) != aggregate_count:
+        return False, "device score-event count differs from captured rows"
+    for world, tick, slot in accepted:
+        source_site = source_site_by_code.get(
+            int(rows["source_site_code"][world, tick, slot]))
+        if source_site is None:
+            return False, "device score-event source code is unsupported"
+        recorder.record_award(
+            tick=int(rows["tick"][world, tick, slot]),
+            match_elapsed_s=float(rows["match_elapsed_s"][world, tick, slot]),
+            world_slot=int(rows["world_slot"][world, tick, slot]),
+            alliance=int(rows["alliance"][world, tick, slot]),
+            robot_slot=int(rows["robot_slot"][world, tick, slot]),
+            piece_slot=int(rows["piece_slot"][world, tick, slot]),
+            piece_generation=int(rows["piece_generation"][world, tick, slot]),
+            source_site=source_site)
+    return True, None
+
+
 def _capture_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
     """Queue accepted score masks for serialization after gameplay mutation."""
     recorder = getattr(env, "_meco_score_event_recorder", None)
     if recorder is None:
+        return
+    physics = getattr(env, "fuel_physics", None)
+    if physics is not None and getattr(physics, "_gpu_qualifying", False):
+        try:
+            _capture_gpu_fuel_score_awards(
+                env, chosen, source_site=source_site, robot_slot=robot_slot)
+        except Exception as exc:
+            env._meco_gpu_score_event_buffer_error = (
+                f"{type(exc).__name__}: {exc}")
         return
     pending = getattr(env, "_pending_fuel_score_awards", None)
     if pending is None:
@@ -30,8 +258,10 @@ def _flush_fuel_score_awards(env):
     recorder = getattr(env, "_meco_score_event_recorder", None)
     if (physics is not None and getattr(physics, "_gpu_qualifying", False)
             and recorder is not None):
-        raise RuntimeError(
-            "GPU-qualifying fuel physics cannot materialize CPU score events")
+        if getattr(env, "_meco_gpu_score_event_buffer", None) is None:
+            env._meco_gpu_score_event_buffer_error = (
+                "GPU-qualifying score recorder has no device event buffer")
+        return
     pending = getattr(env, "_pending_fuel_score_awards", None)
     if not pending:
         return

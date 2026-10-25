@@ -4132,11 +4132,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         **(qualification_case or {}))
                     score_event_recorder = None
                     if score_estimand_approval is not None:
-                        if getattr(getattr(env, "fuel_physics", None),
-                                   "_gpu_qualifying", False):
-                            raise RuntimeError(
-                                "GPU-qualifying fuel physics cannot use the "
-                                "CPU score-event recorder")
                         from .meco_simulated_score_ledger import MecoScoreEventRecorder
                         score_context = _meco_score_ledger_context(env,
                             episode_id=episode_id, seed=seed, scenario_id=scenario_id,
@@ -4144,6 +4139,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         score_event_recorder = MecoScoreEventRecorder(
                             score_context, score_estimand_approval,
                             score_estimand_approval_sha256)
+                        if getattr(getattr(env, "fuel_physics", None),
+                                   "_gpu_qualifying", False):
+                            from .gamepiece_actions import initialize_fuel_score_event_buffer
+                            initialize_fuel_score_event_buffer(env, score_event_recorder)
                         env._meco_score_event_recorder = score_event_recorder
                     direct_pursuit_capture = None
                     if phase4_direct_pursuit_binding is not None:
@@ -5199,10 +5198,32 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                     else "censored")
                             terminal_score_counts = [int(value) for value in
                                 env.fuel_score_count[0].detach().cpu().tolist()]
-                            score_capture = score_event_recorder.finish(
-                                terminal_tick=final_score_tick,
-                                terminal_state=score_terminal_state,
-                                terminal_score_counts=terminal_score_counts)
+                            capture_complete = score_terminal_state == "complete"
+                            capture_reason = (None if capture_complete else
+                                              "episode score horizon was censored")
+                            if getattr(getattr(env, "fuel_physics", None),
+                                       "_gpu_qualifying", False):
+                                from .gamepiece_actions import materialize_fuel_score_awards
+                                buffer_complete, buffer_reason = (
+                                    materialize_fuel_score_awards(
+                                        env, score_event_recorder))
+                                capture_complete &= buffer_complete
+                                capture_reason = buffer_reason or capture_reason
+                            if score_event_recorder.invalid_reason is not None:
+                                capture_complete = False
+                                capture_reason = capture_reason or (
+                                    "score event recorder was invalidated")
+                            finish_arguments = {
+                                "terminal_tick": final_score_tick,
+                                "terminal_state": score_terminal_state,
+                                "terminal_score_counts": terminal_score_counts,
+                            }
+                            if capture_complete:
+                                score_capture = score_event_recorder.finish(
+                                    **finish_arguments)
+                            else:
+                                score_capture = score_event_recorder.finish_incomplete(
+                                    **finish_arguments, reason=capture_reason)
                             record.update({
                                 "simulated_score_ledger": score_capture["ledger"],
                                 "simulated_match_score": score_capture["ledger"][
@@ -5375,7 +5396,6 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 score_summary = score_capture["ledger"][
                                     "simulated_match_score"]
                                 replay_record.update({
-                                    "score_event_stream": score_capture["event_stream"],
                                     "simulated_score_ledger": score_capture["ledger"],
                                     "simulated_match_score": score_summary,
                                     "score_terminal_counters": score_capture[
@@ -5383,6 +5403,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "score_estimand_approval_sha256":
                                         score_estimand_approval_sha256,
                                 })
+                                if score_capture["event_stream"] is not None:
+                                    replay_record["score_event_stream"] = (
+                                        score_capture["event_stream"])
                                 replay_record["evaluation_record"].update({
                                     "simulated_score_ledger_sha256": score_capture[
                                         "ledger"]["ledger_sha256"],
@@ -5391,11 +5414,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "qualification_eligible": False,
                                     "source_identity_sha256": source_hash,
                                 })
-                                from .meco_simulated_score_ledger import (
-                                    validate_replay_score_binding)
-                                validate_replay_score_binding(replay_record, record,
-                                    score_capture["terminal_score_counts"],
-                                    score_estimand_approval)
+                                if score_capture["event_stream"] is not None:
+                                    from .meco_simulated_score_ledger import (
+                                        validate_replay_score_binding)
+                                    validate_replay_score_binding(replay_record, record,
+                                        score_capture["terminal_score_counts"],
+                                        score_estimand_approval)
                             result_path = Path(replay_output_dir) / f"{simulation_id}.result.json"
                             write_replay_bundle(result_path, replay_record)
                             record["dashboard_replay"] = {

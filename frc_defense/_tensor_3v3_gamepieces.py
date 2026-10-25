@@ -6,7 +6,8 @@ import torch
 
 from .field import grid_array_points
 from ._tensor_3v3_observation import NUM_ROBOTS
-from .gamepiece_actions import update_fuel_actions, _flush_fuel_score_awards
+from .gamepiece_actions import (update_fuel_actions, _flush_fuel_score_awards,
+                                reset_fuel_score_event_buffer)
 
 
 def _edge_biased_unit(unit):
@@ -90,6 +91,7 @@ class TensorThreeVsThreeGamepieceMixin:
             recorder = getattr(self, "_meco_score_event_recorder", None)
             if recorder is not None:
                 recorder.invalidate("episode reset during score event capture")
+            reset_fuel_score_event_buffer(self, mask)
             self._meco_world_reset_generation.add_(mask.long())
             self._meco_piece_generation.masked_fill_(mask[:, None], 0)
         positions = torch.zeros_like(self.piece_pos)

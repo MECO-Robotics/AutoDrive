@@ -452,6 +452,19 @@ class MecoScoreEventRecorder:
         return {"context": context, "event_stream": stream,
                 "ledger": ledger, "terminal_score_counts": list(terminal_score_counts)}
 
+    def finish_incomplete(self, *, terminal_tick, terminal_state,
+                          terminal_score_counts, reason):
+        """Report a fail-closed capture gap without presenting partial events as complete."""
+        context = dict(self.context)
+        context["terminal_tick"] = int(terminal_tick)
+        context["terminal_state"] = terminal_state
+        reasons = [str(reason)]
+        if self.invalid_reason is not None:
+            reasons.append(str(self.invalid_reason))
+        ledger = _incomplete_ledger(context, self.approval_sha256, reasons)
+        return {"context": context, "event_stream": None, "ledger": ledger,
+                "terminal_score_counts": list(terminal_score_counts)}
+
 
 def reconstruct_replay_score(replay, approval):
     """Rebuild score using replay context and event rows, never summary totals."""

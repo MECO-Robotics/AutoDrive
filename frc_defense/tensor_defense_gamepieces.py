@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from .field import ALLIANCE_ZONE_DEPTH, grid_array_points
-from .gamepiece_actions import update_fuel_actions, _flush_fuel_score_awards
+from .gamepiece_actions import (update_fuel_actions, _flush_fuel_score_awards,
+                                reset_fuel_score_event_buffer)
 
 try:
     import torch
@@ -92,6 +93,10 @@ class TensorDefenseGamepieceMixin:
             mask=torch.ones((self.n,),device=self.device,dtype=torch.bool)
         else:
             mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
+        recorder=getattr(self,"_meco_score_event_recorder",None)
+        if recorder is not None:
+            recorder.invalidate("episode reset during score event capture")
+        reset_fuel_score_event_buffer(self,mask)
         positions=torch.zeros_like(self.piece_pos)
         active=torch.zeros_like(self.piece_active)
         owner=torch.full_like(self.piece_owner,-1)
