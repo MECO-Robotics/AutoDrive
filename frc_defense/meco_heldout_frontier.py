@@ -40,6 +40,39 @@ def _require_five_hashes(values: dict, label: str) -> dict[str, str]:
             for track in MECO_TRACKS}
 
 
+def _checkpoint_configuration_provenance(checkpoint_paths: dict[str, str | Path]
+                                         ) -> tuple[dict[str, str], dict[str, str]]:
+    """Read immutable config digests and shared training protocol from checkpoints."""
+    import torch
+
+    config_hashes, protocol_ids = {}, {}
+    for track in MECO_TRACKS:
+        path = Path(checkpoint_paths[track])
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            raise ValueError(f"cannot read {track} MECO checkpoint payload: {path}") from exc
+        if (not isinstance(payload, dict) or payload.get("schema_version") != 1 or
+                not isinstance(payload.get("config"), dict) or
+                payload["config"].get("track") != track):
+            raise ValueError(f"{track} checkpoint is not a supported MECO schema-1 payload with its matching embedded config")
+        protocol_id = payload.get("protocol_id")
+        if not isinstance(protocol_id, str) or not protocol_id:
+            raise ValueError(f"{track} checkpoint lacks its training protocol ID")
+        protocol_ids[track] = protocol_id
+        immutable_config = {key: value for key, value in payload["config"].items()
+                            if key != "updates"}
+        try:
+            encoded = json.dumps(immutable_config, sort_keys=True,
+                                 allow_nan=False).encode()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{track} checkpoint config is not canonical JSON") from exc
+        config_hashes[track] = hashlib.sha256(encoded).hexdigest()
+    if any(value != protocol_ids[MECO_TRACKS[0]] for value in protocol_ids.values()):
+        raise ValueError("five checkpoints do not share one training protocol ID")
+    return config_hashes, protocol_ids
+
+
 def _contrast_roster() -> list[dict[str, str]]:
     """Plan §§3/6/7 roster, limited to registered schema-7 matrix factors."""
     rows = [
@@ -182,9 +215,15 @@ def compile_heldout_frontier(*, protocol_path: str | Path,
     """Bind complete validation inputs into one provisional immutable root object."""
     if not isinstance(checkpoint_paths, dict) or set(checkpoint_paths) != set(MECO_TRACKS):
         raise ValueError("frontier requires checkpoint files for all five tracks")
+    embedded_config_hashes, training_protocol_ids = _checkpoint_configuration_provenance(
+        checkpoint_paths)
+    supplied_config_hashes = _require_five_hashes(
+        training_configuration_sha256, "configuration hash")
+    if embedded_config_hashes != supplied_config_hashes:
+        raise ValueError("supplied training configuration hashes differ from checkpoint embedded immutable configs")
     checkpoints = _require_five_hashes({track: hashlib.sha256(Path(checkpoint_paths[track]).read_bytes()).hexdigest()
                                         for track in checkpoint_paths}, "checkpoint hash")
-    configs = _require_five_hashes(training_configuration_sha256, "configuration hash")
+    configs = supplied_config_hashes
     source = _source_binding(source_identity)
     campaign = compile_validation_campaign(protocol_path=protocol_path,
         checkpoint_paths=checkpoint_paths, source_identity=source_identity,
@@ -209,6 +248,7 @@ def compile_heldout_frontier(*, protocol_path: str | Path,
         "source": source,
         "checkpoints_sha256": checkpoints,
         "training_configuration_sha256": configs,
+        "checkpoint_training_protocol_ids": training_protocol_ids,
         "campaign_plan_digest": campaign["plan_digest"],
         "seed_manifests": [
             {"file": job["seed_manifest_file"], "sha256": job["seed_manifest_sha256"],
@@ -254,6 +294,11 @@ def _validate_frontier_shape(frontier: dict) -> None:
     _validate_sha(frontier["source"].get("sha256"), "source identity hash")
     _require_five_hashes(frontier.get("checkpoints_sha256"), "checkpoint hash")
     _require_five_hashes(frontier.get("training_configuration_sha256"), "configuration hash")
+    training_protocols = frontier.get("checkpoint_training_protocol_ids")
+    if (not isinstance(training_protocols, dict) or set(training_protocols) != set(MECO_TRACKS)
+            or any(not isinstance(value, str) or not value for value in training_protocols.values())
+            or len(set(training_protocols.values())) != 1):
+        raise ValueError("frontier checkpoints must bind one shared training protocol ID")
     if not isinstance(frontier.get("campaign_plan_digest"), str):
         raise ValueError("frontier campaign plan digest is missing")
     _validate_sha(frontier["campaign_plan_digest"], "campaign plan digest")

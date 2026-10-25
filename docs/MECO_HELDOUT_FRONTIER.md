@@ -4,6 +4,14 @@
 campaign. It is a provisional input lock, not a result, qualification, or
 permission to consume final-test seeds. The compiler requires one checkpoint and
 configuration hash for each of A1, A2, A3, C1, and C2, plus a source identity.
+For each checkpoint it reads the supported MECO `schema_version: 1` payload,
+requires its embedded `config.track` to match the assigned track, and recomputes
+the immutable configuration digest from that config with only `updates`
+excluded, using canonical JSON with sorted keys and `allow_nan=False`. It also
+requires all five payloads to bind one shared nonempty training protocol ID. A
+supplied digest that does not match is rejected. Legacy curriculum checkpoints
+and supervisor bundles are not supported.
+
 It binds those values to the exact protocol bytes and the deterministic
 validation campaign's per-job seed-manifest and policy/category/seed coverage
 digests. `qualification_claim` and `qualification_eligible` remain false.
@@ -33,4 +41,5 @@ it later with the same command arguments and `verify` in place of `compile`.
 Verification rebuilds the campaign and rejects any protocol, source,
 checkpoint, configuration, manifest, or coverage drift. This tooling does not
 run a simulator, launch training, or generate a frontier from partial live
-checkpoints.
+checkpoints. Deserialization uses PyTorch's `weights_only=False` loader, as in
+the repository's MECO checkpoint readers; use trusted local training artifacts.

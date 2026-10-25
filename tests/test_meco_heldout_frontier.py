@@ -1,4 +1,7 @@
 import hashlib
+import json
+
+import torch
 
 import pytest
 
@@ -18,9 +21,14 @@ def _inputs(tmp_path):
     configs = {}
     for track in MECO_TRACKS:
         path = tmp_path / f"{track}.pt"
-        path.write_bytes(("checkpoint:" + track).encode())
+        config = {"track": track, "updates": 123, "learning_rate": 0.001,
+                  "device": "cuda:0", "output": f"/runs/{track}"}
+        torch.save({"schema_version": 1, "config": config,
+                    "protocol_id": "fixture-protocol"}, path)
         checkpoints[track] = path
-        configs[track] = hashlib.sha256(("config:" + track).encode()).hexdigest()
+        immutable = {key: value for key, value in config.items() if key != "updates"}
+        configs[track] = hashlib.sha256(json.dumps(
+            immutable, sort_keys=True, allow_nan=False).encode()).hexdigest()
     source = {"checkout": "fixture", "files": ["policy.py", "planner.py"]}
     return protocol_path, checkpoints, source, configs
 
@@ -68,12 +76,16 @@ def test_frontier_rejects_changed_bound_inputs(tmp_path, binding):
     if binding == "source":
         source = {**source, "files": ["changed.py"]}
     elif binding == "checkpoint":
-        checkpoints["C2"].write_bytes(b"changed checkpoint")
+        payload = torch.load(checkpoints["C2"], map_location="cpu", weights_only=False)
+        payload["extra_payload_marker"] = "changed"
+        torch.save(payload, checkpoints["C2"])
     elif binding == "config":
         configs["A2"] = hashlib.sha256(b"changed config").hexdigest()
     else:
         protocol_path.write_text(protocol_path.read_text() + " ")
-    with pytest.raises(ValueError, match="differs from frozen frontier"):
+    expected_error = ("supplied training configuration hashes differ"
+                      if binding == "config" else "differs from frozen frontier")
+    with pytest.raises(ValueError, match=expected_error):
         validate_heldout_frontier(frontier, protocol_path=protocol_path,
             checkpoint_paths=checkpoints, source_identity=source,
             training_configuration_sha256=configs)
@@ -87,3 +99,42 @@ def test_frontier_rejects_missing_track_hash(tmp_path):
             checkpoint_paths=checkpoints, source_identity=source,
             training_configuration_sha256=configs)
 
+
+def test_frontier_rejects_false_checkpoint_config_association(tmp_path):
+    protocol_path, checkpoints, source, configs = _inputs(tmp_path)
+    configs["C1"] = hashlib.sha256(b"unrelated immutable config").hexdigest()
+    with pytest.raises(ValueError, match="differ from checkpoint embedded immutable configs"):
+        compile_heldout_frontier(protocol_path=protocol_path,
+            checkpoint_paths=checkpoints, source_identity=source,
+            training_configuration_sha256=configs)
+
+
+def test_checkpoint_update_count_is_excluded_from_immutable_config_hash(tmp_path):
+    protocol_path, checkpoints, source, configs = _inputs(tmp_path)
+    payload = torch.load(checkpoints["A1"], map_location="cpu", weights_only=False)
+    payload["config"]["updates"] = 999
+    torch.save(payload, checkpoints["A1"])
+    frontier = compile_heldout_frontier(protocol_path=protocol_path,
+        checkpoint_paths=checkpoints, source_identity=source,
+        training_configuration_sha256=configs)
+    assert frontier["training_configuration_sha256"] == configs
+
+
+def test_frontier_rejects_checkpoints_from_different_training_protocols(tmp_path):
+    protocol_path, checkpoints, source, configs = _inputs(tmp_path)
+    payload = torch.load(checkpoints["C2"], map_location="cpu", weights_only=False)
+    payload["protocol_id"] = "other-training-protocol"
+    torch.save(payload, checkpoints["C2"])
+    with pytest.raises(ValueError, match="do not share one training protocol ID"):
+        compile_heldout_frontier(protocol_path=protocol_path,
+            checkpoint_paths=checkpoints, source_identity=source,
+            training_configuration_sha256=configs)
+
+
+def test_frontier_rejects_unsupported_checkpoint_format(tmp_path):
+    protocol_path, checkpoints, source, configs = _inputs(tmp_path)
+    torch.save({"config": {"track": "A1"}}, checkpoints["A1"])
+    with pytest.raises(ValueError, match="supported MECO schema-1 payload"):
+        compile_heldout_frontier(protocol_path=protocol_path,
+            checkpoint_paths=checkpoints, source_identity=source,
+            training_configuration_sha256=configs)
