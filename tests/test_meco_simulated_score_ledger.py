@@ -6,7 +6,7 @@ import pytest
 from frc_defense.meco_simulated_score_ledger import (
     ESTIMAND_SCHEMA, OUTCOME_NAME, PHASE0_PLAN_SHA256, RULES, RULES_ID,
     RULES_SHA256, SOURCE_PLAN_SHA256, build_score_ledger, make_event_stream,
-    reconstruct_replay_score, sha256, validate_estimand_approval,
+    MecoScoreEventRecorder, reconstruct_replay_score, sha256, validate_estimand_approval,
     validate_replay_score_binding,
 )
 
@@ -104,6 +104,30 @@ def test_ledger_aggregates_only_versioned_score_events_deterministically():
         key: value for key, value in first.items() if key != "ledger_sha256"})
 
 
+def test_recorder_assigns_stable_ids_and_keeps_pre_respawn_generation():
+    recorder = MecoScoreEventRecorder(_context(), _approval(), APPROVAL_SHA)
+    recorder.record_award(tick=1, match_elapsed_s=.02, world_slot=0,
+        alliance=0, robot_slot=0, piece_slot=4, piece_generation=0,
+        source_site="gamepiece_actions.update_fuel_actions.vectorized_score_mutation")
+    recorder.record_award(tick=4, match_elapsed_s=.08, world_slot=0,
+        alliance=0, robot_slot=0, piece_slot=4, piece_generation=1,
+        source_site="gamepiece_actions.update_fuel_actions.robot_loop_score_mutation")
+    captured = recorder.finish(terminal_tick=8, terminal_state="complete",
+                               terminal_score_counts=[2, 0])
+    assert [row["piece_generation"] for row in captured["event_stream"]["events"]] == [0, 1]
+    assert [row["event_id"] for row in captured["event_stream"]["events"]] == [
+        "episode-91:w000000:e000000000000",
+        "episode-91:w000000:e000000000001"]
+
+
+def test_recorder_rejects_an_episode_reset_during_capture():
+    recorder = MecoScoreEventRecorder(_context(), _approval(), APPROVAL_SHA)
+    recorder.invalidate("episode reset during score event capture")
+    with pytest.raises(ValueError, match="crossed an episode reset"):
+        recorder.finish(terminal_tick=8, terminal_state="complete",
+                        terminal_score_counts=[0, 0])
+
+
 @pytest.mark.parametrize("mutation, message", [
     (lambda events: events.append(deepcopy(events[0])), "duplicate score event ID"),
     (lambda events: events.__setitem__(2, {**events[2], "piece_generation": 0}),
@@ -118,8 +142,11 @@ def test_ledger_aggregates_only_versioned_score_events_deterministically():
 def test_invalid_event_mutations_fail_closed(mutation, message):
     events = deepcopy(_events())
     mutation(events)
-    with pytest.raises(ValueError, match=message or "score event"):
-        build_score_ledger(_context(), events, _approval(), approval_sha256=APPROVAL_SHA)
+    ledger = build_score_ledger(_context(), events, _approval(),
+                                approval_sha256=APPROVAL_SHA)
+    assert ledger["status"] == "invalid"
+    if message:
+        assert message in ledger["invalid_reason"]
 
 
 def test_missing_context_and_censoring_are_incomplete_not_zero_scores():
@@ -159,12 +186,19 @@ def test_replay_reconstruction_uses_events_and_detects_summary_or_stream_mutatio
         "score_event_stream": make_event_stream(context, events),
         "simulated_score_ledger": ledger,
         "estimand_approval_sha256": APPROVAL_SHA,
+        "source_identity_sha256": SOURCE,
+        "evaluation_record": {
+            "simulated_score_ledger_sha256": ledger["ledger_sha256"],
+            "simulated_match_score": ledger["simulated_match_score"],
+            "source_identity_sha256": SOURCE,
+        },
     }
     record = {
         "simulated_score_ledger": ledger,
         "simulated_match_score": ledger["simulated_match_score"],
         "official_match_points": None,
         "qualification_eligible": False,
+        "source_identity_sha256": SOURCE,
     }
     assert validate_replay_score_binding(replay, record, [2, 1], approval) == ledger
 
@@ -190,10 +224,17 @@ def test_terminal_counters_and_official_or_qualification_claims_are_not_aliases(
                                 approval_sha256=APPROVAL_SHA)
     replay = {"score_event_stream": make_event_stream(context, events),
               "simulated_score_ledger": ledger,
-              "estimand_approval_sha256": APPROVAL_SHA}
+              "estimand_approval_sha256": APPROVAL_SHA,
+              "source_identity_sha256": SOURCE,
+              "evaluation_record": {
+                  "simulated_score_ledger_sha256": ledger["ledger_sha256"],
+                  "simulated_match_score": ledger["simulated_match_score"],
+                  "source_identity_sha256": SOURCE,
+              }}
     record = {"simulated_score_ledger": ledger,
               "simulated_match_score": ledger["simulated_match_score"],
               "official_match_points": None, "qualification_eligible": False,
+              "source_identity_sha256": SOURCE,
               "fuel_score_count": [2, 1], "useful_throughput": 0.0,
               "reward_total": 5.}
     with pytest.raises(ValueError, match="terminal simulator counters"):

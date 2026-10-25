@@ -16,6 +16,7 @@ LEDGER_SCHEMA = "meco-simulated-score-ledger-v1"
 RULES_ID = "meco_simulated_fuel_score_v1"
 EVENT_STREAM_SCHEMA = "meco-score-events-v1"
 ESTIMAND_SCHEMA = "meco-simulated-score-estimand-review-v1"
+MAX_SCORE_EVENTS_PER_EPISODE = 32768
 OUTCOME_NAME = "simulated_match_score"
 SOURCE_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
 PHASE0_PLAN_SHA256 = "95e1b9185509259af952fab7fc956c12974d50aacf43525302275f859f917d49"
@@ -99,6 +100,28 @@ def _incomplete_ledger(context, approval_sha256, missing):
         "status": "incomplete",
         "incomplete_reasons": sorted(set(missing)),
         "context": context_copy,
+        "estimand_approval_sha256": approval_sha256,
+        "rules": RULES,
+        "rules_sha256": RULES_SHA256,
+        "event_rows": [],
+        "event_digests": [],
+        "events_sha256": sha256([]),
+        "simulated_match_score": {"schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
+            "rules_sha256": RULES_SHA256, "red": None, "blue": None,
+            "complete": False},
+        "official_match_points": None,
+        "qualification_eligible": False,
+    }
+    ledger["ledger_sha256"] = sha256(ledger)
+    return ledger
+
+
+def _invalid_ledger(context, approval_sha256, reason):
+    ledger = {
+        "schema": LEDGER_SCHEMA,
+        "status": "invalid",
+        "invalid_reason": reason,
+        "context": dict(context),
         "estimand_approval_sha256": approval_sha256,
         "rules": RULES,
         "rules_sha256": RULES_SHA256,
@@ -223,7 +246,10 @@ def build_score_ledger(context, events, approval, *, approval_sha256):
         missing.append("episode is censored")
     if missing:
         return _incomplete_ledger(context, approval_sha256, missing)
-    rows = _validate_event_rows(context, events)
+    try:
+        rows = _validate_event_rows(context, events)
+    except ValueError as exc:
+        return _invalid_ledger(context, approval_sha256, str(exc))
     totals = [0, 0]
     for row in rows:
         totals[row["alliance"]] += row["score_units"]
@@ -256,6 +282,69 @@ def make_event_stream(context, events):
             "events": normalized, "events_sha256": sha256(normalized)}
 
 
+class MecoScoreEventRecorder:
+    """Opt-in bounded-by-episode capture for accepted simulator score events."""
+
+    def __init__(self, context, approval, approval_sha256):
+        validate_estimand_approval(approval,
+            source_identity_sha256=context.get("source_identity_sha256"))
+        missing = _validate_context(context, approval_sha256)
+        if missing:
+            raise ValueError("score event recorder context is incomplete: " + "; ".join(missing))
+        self.context = dict(context)
+        self.approval = dict(approval)
+        self.approval_sha256 = approval_sha256
+        self.events = []
+        self._sequence = 0
+        self.invalid_reason = None
+
+    def invalidate(self, reason):
+        self.invalid_reason = str(reason)
+
+    def record_award(self, *, tick, match_elapsed_s, world_slot, alliance,
+                     robot_slot, piece_slot, piece_generation, source_site):
+        if len(self.events) >= MAX_SCORE_EVENTS_PER_EPISODE:
+            raise ValueError("score event capture exceeded its fixed episode bound")
+        if not 0 <= world_slot < self.context["world_count"]:
+            raise ValueError("score capture world slot is outside context")
+        event_id = (f"{self.context['episode_id']}:w{world_slot:06d}:"
+                    f"e{self._sequence:012d}")
+        self._sequence += 1
+        self.events.append({
+            "event_id": event_id,
+            "episode_id": self.context["episode_id"],
+            "tick": int(tick),
+            "match_elapsed_s": float(match_elapsed_s),
+            "world_slot": int(world_slot),
+            "alliance": int(alliance),
+            "robot_slot": int(robot_slot),
+            "piece_slot": int(piece_slot),
+            "piece_generation": int(piece_generation),
+            "event_type": RULES["event_type"],
+            "score_units": RULES["score_units_per_event"],
+            "source_site": source_site,
+        })
+
+    def finish(self, *, terminal_tick, terminal_state, terminal_score_counts):
+        if self.invalid_reason is not None:
+            raise ValueError("score event collection crossed an episode reset")
+        context = dict(self.context)
+        context["terminal_tick"] = int(terminal_tick)
+        context["terminal_state"] = terminal_state
+        ledger = build_score_ledger(context, self.events, self.approval,
+                                    approval_sha256=self.approval_sha256)
+        stream = make_event_stream(context, self.events)
+        if ledger["status"] != "complete":
+            raise ValueError("score event collection is blocked for an incomplete episode")
+        if ledger["status"] == "complete":
+            expected = [ledger["simulated_match_score"]["red"],
+                        ledger["simulated_match_score"]["blue"]]
+            if terminal_score_counts != expected:
+                raise ValueError("terminal simulator counters differ from score-event ledger")
+        return {"context": context, "event_stream": stream,
+                "ledger": ledger, "terminal_score_counts": list(terminal_score_counts)}
+
+
 def reconstruct_replay_score(replay, approval):
     """Rebuild score using replay context and event rows, never summary totals."""
     if not isinstance(replay, dict):
@@ -264,6 +353,9 @@ def reconstruct_replay_score(replay, approval):
     if (not isinstance(stream, dict) or stream.get("schema") != EVENT_STREAM_SCHEMA
             or stream.get("rules") != RULES or stream.get("rules_sha256") != RULES_SHA256):
         raise ValueError("MECO score replay has no pinned event stream")
+    if replay.get("source_identity_sha256") != stream.get("context", {}).get(
+            "source_identity_sha256"):
+        raise ValueError("MECO score replay source identity differs from event context")
     events = stream.get("events")
     if stream.get("events_sha256") != sha256(events):
         raise ValueError("MECO score replay event digest mismatch")
@@ -279,10 +371,23 @@ def validate_replay_score_binding(replay, evaluation_record, terminal_score_coun
     rebuilt = reconstruct_replay_score(replay, approval)
     if replay.get("simulated_score_ledger") != rebuilt:
         raise ValueError("replay score ledger differs from event reconstruction")
+    replay_record = replay.get("evaluation_record")
+    if not isinstance(replay_record, dict):
+        raise ValueError("replay evaluation score binding is missing")
+    if replay_record.get("simulated_score_ledger_sha256") != rebuilt["ledger_sha256"]:
+        raise ValueError("replay evaluation score digest differs from event reconstruction")
+    if replay_record.get("simulated_match_score") != rebuilt["simulated_match_score"]:
+        raise ValueError("replay evaluation score summary differs from event reconstruction")
+    if replay_record.get("source_identity_sha256") != rebuilt["context"][
+            "source_identity_sha256"]:
+        raise ValueError("replay evaluation score source differs from event reconstruction")
     if evaluation_record.get("simulated_score_ledger") != rebuilt:
         raise ValueError("evaluation score ledger differs from replay reconstruction")
     if evaluation_record.get("simulated_match_score") != rebuilt["simulated_match_score"]:
         raise ValueError("evaluation score summary differs from replay reconstruction")
+    if evaluation_record.get("source_identity_sha256") != rebuilt["context"][
+            "source_identity_sha256"]:
+        raise ValueError("evaluation score source identity differs from replay reconstruction")
     if (not isinstance(terminal_score_counts, list) or len(terminal_score_counts) != 2
             or terminal_score_counts != [rebuilt["simulated_match_score"]["red"],
                                          rebuilt["simulated_match_score"]["blue"]]):
