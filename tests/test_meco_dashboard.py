@@ -112,10 +112,77 @@ def _report(episodes=2):
 def test_fixed_checkout_roots_and_all_policy_rows(tmp_path):
     payload = json.loads(meco_status_payload(tmp_path))
     assert Path(payload["checkpoint_root"]) == tmp_path / "checkpoints/meco-five"
+    assert Path(payload["evaluation_root"]) == tmp_path / "evaluations/meco-five"
     assert [row["policy_id"] for row in payload["policies"]] == list(
         TRACKS + ABLATIONS + CONTROLS)
     assert payload["policies"][0]["training_state"] == "not_started"
     assert payload["policies"][-1]["training_state"] == "not_applicable"
+
+
+def test_direct_campaign_root_reads_track_runs_queue_scheduler_and_evaluations(tmp_path):
+    checkpoint_root = tmp_path / "checkpoints"
+    evaluation_root = tmp_path / "evaluations"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    for track in TRACKS:
+        run_dir = checkpoint_root / track
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({
+            "run_id": f"run-{track}", "track": track, "status": "complete",
+            "completed_updates": 100}))
+
+    now = datetime.now(timezone.utc)
+    scenario = "offense_vs_scripted_pressure"
+    category = SCENARIOS[scenario].required_categories[0]
+    previous = {"cycle": 1, "scenario_id": scenario, "category": category,
+        "seed": 17, "assignment_id": "previous-1", "sampling_role": "stage_exposure"}
+    assignment = {"cycle": 2, "scenario_id": scenario, "category": category,
+        "seed": 18, "assignment_id": "pending-2", "sampling_role": "stage_exposure"}
+    counts = {"exposure_chunks": {scenario: 1},
+        "category_exposures": {f"{scenario}/{category}": 1},
+        "recovery_pressure": {}, "phase4_exposure_counts": {}}
+    scheduler = {"schema_version": 1, "completed_cycle": 1,
+        "pending_assignment": assignment, **counts,
+        "history": [{"assignment": previous}]}
+    (tmp_path / "task-scheduler-state.json").write_text(json.dumps(scheduler))
+    queue = {"schema_version": 1, "updated_utc": now.isoformat(), "cycle": 2,
+        "task_assignment": assignment,
+        "task_scheduler": {"completed_cycle": 1,
+            "pending_assignment": assignment, **counts},
+        "lanes": [_queue_lane(track) for track in TRACKS]}
+    (tmp_path / "queue-status.json").write_text(json.dumps(queue))
+    (evaluation_root / "matched.json").write_text(json.dumps(_report()))
+
+    payload = json.loads(meco_status_payload(tmp_path))
+
+    assert Path(payload["checkpoint_root"]) == checkpoint_root
+    assert Path(payload["evaluation_root"]) == evaluation_root
+    assert payload["queue"]["state"] == "fresh"
+    assert payload["queue"]["curriculum"]["state"] == "fresh"
+    assert payload["queue"]["curriculum"]["assignment"]["scenario_id"] == scenario
+    assert len(payload["comparison_groups"]) == 1
+    for track in TRACKS:
+        row = next(policy for policy in payload["policies"]
+                   if policy["policy_id"] == track)
+        assert row["training_state"] == "complete"
+        assert row["run"]["completed_updates"] == 100
+
+
+def test_direct_campaign_layout_rejects_partial_track_directories(tmp_path):
+    (tmp_path / "checkpoints" / "A1").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="all five in-root track directories"):
+        meco_status_payload(tmp_path)
+
+
+def test_direct_campaign_layout_rejects_ambiguity_with_legacy_roots(tmp_path):
+    direct_root = tmp_path / "checkpoints"
+    for track in TRACKS:
+        (direct_root / track).mkdir(parents=True)
+    (direct_root / "meco-five").mkdir()
+
+    with pytest.raises(ValueError, match="ambiguous legacy and direct"):
+        meco_status_payload(tmp_path)
 
 
 def test_queued_track_without_manifest_is_visible_without_claiming_liveness(tmp_path):

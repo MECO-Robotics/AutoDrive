@@ -994,6 +994,7 @@ def _qualification_status(project: Path, errors: list, data_root: Path):
 
 def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_root=None, now=None,
                     campaign_passes=None,
+                    queue_root: Path | None = None,
                     process_probe=_process_alive):
     now = time.time() if now is None else float(now)
     root = checkpoint_root.resolve()
@@ -1002,7 +1003,10 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                  else root.parents[1].resolve())
     if not _inside(root, data_root) or not _inside(eval_root, data_root):
         raise ValueError("MECO status roots must remain inside the selected data root")
-    queue = _queue_state(root, now, data_root)
+    queue_path_root = (Path(queue_root).resolve() if queue_root is not None else root)
+    if not _inside(queue_path_root, data_root):
+        raise ValueError("MECO queue root must remain inside the selected data root")
+    queue = _queue_state(queue_path_root, now, data_root)
     run_by_track = {track: [] for track in TRACKS}
     errors = []
     if root.is_dir():
@@ -1231,11 +1235,29 @@ def meco_status_payload(project_root: Path | str, *, data_root: Path | str | Non
     data_project = Path(data_root).resolve() if data_root is not None else project
     if not data_project.is_dir():
         raise ValueError("MECO data root must be an existing directory")
-    checkpoint_root = (data_project / "checkpoints" / "meco-five").resolve()
-    evaluation_root = (data_project / "evaluations" / "meco-five").resolve()
+    legacy_checkpoint_root = data_project / "checkpoints" / "meco-five"
+    legacy_evaluation_root = data_project / "evaluations" / "meco-five"
+    direct_checkpoint_root = data_project / "checkpoints"
+    direct_tracks = [direct_checkpoint_root / track for track in TRACKS]
+    direct_layout_present = any(path.exists() or path.is_symlink() for path in direct_tracks)
+    legacy_layout_present = (legacy_checkpoint_root.exists() or
+                             legacy_evaluation_root.exists())
+    if direct_layout_present and legacy_layout_present:
+        raise ValueError("MECO data root contains ambiguous legacy and direct campaign layouts")
+    if direct_layout_present:
+        if not all(path.is_dir() and _inside(path, data_project) for path in direct_tracks):
+            raise ValueError("direct MECO campaign layout must contain all five in-root track directories")
+        checkpoint_root = direct_checkpoint_root.resolve()
+        evaluation_root = (data_project / "evaluations").resolve()
+        queue_root = data_project
+    else:
+        checkpoint_root = legacy_checkpoint_root.resolve()
+        evaluation_root = legacy_evaluation_root.resolve()
+        queue_root = checkpoint_root
     if not _inside(checkpoint_root, data_project) or not _inside(evaluation_root, data_project):
         raise ValueError("MECO status roots must remain inside the selected data root")
-    payload = _collect_status(checkpoint_root, evaluation_root, project_root=data_project)
+    payload = _collect_status(checkpoint_root, evaluation_root, project_root=data_project,
+                              queue_root=queue_root)
     pass_path = project / "docs" / "MECO_CAMPAIGN_PASSES.json"
     passes, pass_error = _read_json(pass_path)
     valid_passes = None
