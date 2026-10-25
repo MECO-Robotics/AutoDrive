@@ -2369,7 +2369,8 @@ def _materialize_plan_a_p_route_rows(rows, manifest, *, track, train_device):
     device = torch.device(train_device)
     materialized = []
     for row in rows:
-        replay = replay_counterfactual_branch(row, manifest)
+        replay = replay_counterfactual_branch(row, manifest,
+            require_hip_plan_a=True)
         env, graph = replay["env"], replay["graph"]
         try:
             safe = replay["observation"]
