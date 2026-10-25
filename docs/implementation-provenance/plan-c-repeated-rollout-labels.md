@@ -34,8 +34,10 @@ existing v2 fitting path is unchanged.
 
 `R=2` is a bounded replication policy chosen for this tranche. It supports a
 conservative sign-stability rule but does not provide precise variance
-calibration, confidence intervals, or qualification evidence. The added
-synthetic tests validate schema, seed, aggregate, variance, and fitter
-contracts only; all 10 focused tests pass, as do Python compilation and
-`git diff --check`. GPU collection and a representative end-to-end simulator
-evaluation remain unrun; no replay or dashboard-currentness claim is made.
+calibration, confidence intervals, or qualification evidence. Reviewer
+follow-up adds collector-level matched-seed flow coverage using mocked
+environment, graph, reward, and branch interfaces; explicit C1/C2 legacy
+manifest rejection checks; and repeated-artifact metadata tamper rejection
+checks. These tests do not run actual game behavior. GPU collection and a
+representative end-to-end simulator evaluation remain unrun; no replay or
+dashboard-currentness claim is made.
