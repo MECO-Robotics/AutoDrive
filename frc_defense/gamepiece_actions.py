@@ -11,37 +11,69 @@ from ._tensor_3v3_observation import NUM_ROBOTS
 
 
 def _capture_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
-    """Capture only accepted score mutations, and only under explicit opt-in."""
+    """Queue accepted score masks for serialization after gameplay mutation."""
     recorder = getattr(env, "_meco_score_event_recorder", None)
     if recorder is None:
         return
-    if chosen.ndim == 3:
-        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
-        for world, robot, piece in accepted:
-            slot = int(robot)
-            recorder.record_award(
-                tick=max(0, int(env.steps[world].item()) - 1),
-                match_elapsed_s=float(env.match_elapsed[world].item()),
-                world_slot=world,
-                alliance=int(env.team_ids[slot].item()),
-                robot_slot=slot,
-                piece_slot=piece,
-                piece_generation=int(env._meco_piece_generation[world, piece].item()),
-                source_site=source_site)
-    elif chosen.ndim == 2 and robot_slot is not None:
-        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
-        for world, piece in accepted:
-            recorder.record_award(
-                tick=max(0, int(env.steps[world].item()) - 1),
-                match_elapsed_s=float(env.match_elapsed[world].item()),
-                world_slot=world,
-                alliance=int(env.team_ids[robot_slot].item()),
-                robot_slot=robot_slot,
-                piece_slot=piece,
-                piece_generation=int(env._meco_piece_generation[world, piece].item()),
-                source_site=source_site)
-    else:
-        raise ValueError("accepted score mask has an unsupported shape")
+    pending = getattr(env, "_pending_fuel_score_awards", None)
+    if pending is None:
+        pending = []
+        env._pending_fuel_score_awards = pending
+    generation = getattr(env, "_meco_piece_generation", None)
+    pending.append((chosen.detach().clone(), source_site, robot_slot,
+                    None if generation is None else generation.detach().clone()))
+
+
+def _flush_fuel_score_awards(env):
+    """Serialize queued awards after all gameplay and physics updates."""
+    physics = getattr(env, "fuel_physics", None)
+    recorder = getattr(env, "_meco_score_event_recorder", None)
+    if (physics is not None and getattr(physics, "_gpu_qualifying", False)
+            and recorder is not None):
+        raise RuntimeError(
+            "GPU-qualifying fuel physics cannot materialize CPU score events")
+    pending = getattr(env, "_pending_fuel_score_awards", None)
+    if not pending:
+        return
+    env._pending_fuel_score_awards = []
+    recorder = getattr(env, "_meco_score_event_recorder", None)
+    if recorder is None:
+        return
+    try:
+        for chosen, source_site, robot_slot, generation in pending:
+            if chosen.ndim == 3:
+                accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+                for world, slot, piece in accepted:
+                    recorder.record_award(
+                        tick=max(0, int(env.steps[world].item()) - 1),
+                        match_elapsed_s=float(env.match_elapsed[world].item()),
+                        world_slot=world,
+                        alliance=int(env.team_ids[slot].item()),
+                        robot_slot=slot,
+                        piece_slot=piece,
+                        piece_generation=(int(generation[world, piece].item())
+                                         if generation is not None else 0),
+                        source_site=source_site)
+            elif chosen.ndim == 2 and robot_slot is not None:
+                accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+                for world, piece in accepted:
+                    recorder.record_award(
+                        tick=max(0, int(env.steps[world].item()) - 1),
+                        match_elapsed_s=float(env.match_elapsed[world].item()),
+                        world_slot=world,
+                        alliance=int(env.team_ids[robot_slot].item()),
+                        robot_slot=robot_slot,
+                        piece_slot=piece,
+                        piece_generation=(int(generation[world, piece].item())
+                                         if generation is not None else 0),
+                        source_site=source_site)
+            else:
+                raise ValueError("accepted score mask has an unsupported shape")
+    except Exception as exc:
+        # Event capture is optional evidence. Recording failures cannot abort a
+        # completed gameplay/physics transition or affect its RNG/state.
+        env._meco_score_event_recorder_error = (
+            f"{type(exc).__name__}: {exc}")
 
 
 def _invalidate_perceived_contact_tracks(env, active):
@@ -287,70 +319,59 @@ def update_fuel_actions(self, active, score_intent):
     selected_for_pass=(self._fuel_indices==first_held_piece.gather(
         1,safe_owner))
     passed = held & selected_for_pass & robot_pass.gather(1, safe_owner)
-    capturing=(self.device.type=="cuda" and
-               torch.cuda.is_current_stream_capturing())
-    if (not capturing and
-            not bool(passed.any().item())):
-        # Keep the seeded random stream identical to ferry_respawn_targets.
-        torch.rand((self.n,NUM_ROBOTS),device=self.device,generator=self.generator)
-        torch.randint(self._midfield_respawn_positions.shape[0],
-                      (self.n,NUM_ROBOTS),device=self.device,
-                      generator=self.generator)
-        passed_counts=torch.zeros_like(self.fuel_passed_event)
+    pass_destinations,backer_hit=ferry_respawn_targets(
+        self,self.sim.pose[:,:,:2],self.team_ids[None].expand(self.n,-1),
+        return_backer_hits=True)
+    hit_for_piece=backer_hit.gather(1,safe_owner)
+    ordinary_pass=passed & ~hit_for_piece
+    backer_pass=passed & hit_for_piece
+    passed=ordinary_pass|backer_pass
+    pass_positions=pass_destinations[self._world_indices[:,None],safe_owner]
+    if self.fuel_physics is None:
+        torch.where(passed[...,None], pass_positions, self.piece_pos,
+                    out=self.piece_pos)
     else:
-        pass_destinations,backer_hit=ferry_respawn_targets(
-            self,self.sim.pose[:,:,:2],self.team_ids[None].expand(self.n,-1),
-            return_backer_hits=True)
-        hit_for_piece=backer_hit.gather(1,safe_owner)
-        ordinary_pass=passed & ~hit_for_piece
-        backer_pass=passed & hit_for_piece
-        passed=ordinary_pass|backer_pass
-        pass_positions=pass_destinations[self._world_indices[:,None],safe_owner]
-        if self.fuel_physics is None:
-            torch.where(passed[...,None], pass_positions, self.piece_pos,
-                        out=self.piece_pos)
-        else:
-            pass_teams=self.team_ids[safe_owner]
-            hub_origins=self.hub_centers[pass_teams]
-            ferry_origins=self.sim.pose[:,:,:2][self._world_indices[:,None],safe_owner]
-            launch_fuel(self,ordinary_pass,pass_positions,origins=ferry_origins,
-                        flight_time=.5,horizontal_velocity_scale=.1,
-                        respawn_at_destination=True,spawn_positions=pass_positions)
-            # A HUB backer return follows the scored-ball ballistic launch
-            # settings, starting from its resolved midfield respawn point.
-            _,shot_targets=shooter_respawn_cone(self,hub_origins)
-            shot_vectors=shot_targets-hub_origins
-            shot_distances=shot_vectors.norm(dim=-1,keepdim=True).clamp_min(1e-6)
-            shot_vectors=shot_vectors/shot_distances
-            backer_origins=pass_positions
-            backer_targets=backer_origins+shot_vectors*shot_distances
-            launch_fuel(self,backer_pass,backer_targets,origins=backer_origins,
-                        height=1.83,flight_time=1.,horizontal_velocity_scale=.1,
-                        spawn_positions=backer_origins)
-        pass_cell_size=self._pickup_grid_cell_size
-        pass_cell_x=(pass_positions[...,0]/pass_cell_size).floor().long().clamp_(
-            0,self._pickup_grid_nx-1)
-        pass_cell_y=(pass_positions[...,1]/pass_cell_size).floor().long().clamp_(
-            0,self._pickup_grid_ny-1)
-        pass_cell=pass_cell_y*self._pickup_grid_nx+pass_cell_x
-        pass_slot=(self.team_ids[safe_owner]+1).clamp_(1,2)
-        world_index=self._world_indices[:,None].expand_as(safe_owner)
-        piece_index=self._fuel_indices.expand_as(safe_owner)
-        old_cell=self._pickup_possible_cells[world_index,piece_index,pass_slot]
-        self._pickup_possible_cells[world_index,piece_index,pass_slot]=torch.where(
-            passed,pass_cell.to(old_cell.dtype),old_cell)
-        if self.fuel_physics is None:
-            self.piece_vel.masked_fill_(passed[...,None], 0.)
-        self.piece_owner.masked_fill_(passed, -1)
-        pass_team=self.team_ids[safe_owner]
-        in_home=torch.where(pass_team==0,
-                            pass_positions[...,0]<=self.alliance_zone_depth,
-                            pass_positions[...,0]>=self.sim.field_length-self.alliance_zone_depth)
-        home_zone=torch.where(in_home,pass_team+1,torch.zeros_like(pass_team))
-        torch.where(passed,home_zone,self.piece_zone,out=self.piece_zone)
-        passed_counts = torch.zeros_like(self.fuel_passed_event)
-        passed_counts.scatter_add_(1, safe_owner,
-                                   passed.to(self.fuel_passed_event.dtype))
+        pass_teams=self.team_ids[safe_owner]
+        hub_origins=self.hub_centers[pass_teams]
+        ferry_origins=self.sim.pose[:,:,:2][self._world_indices[:,None],safe_owner]
+        launch_fuel(self,ordinary_pass,pass_positions,origins=ferry_origins,
+                    flight_time=.5,horizontal_velocity_scale=.1,
+                    respawn_at_destination=True,spawn_positions=pass_positions)
+        # A HUB backer return follows the scored-ball ballistic launch
+        # settings, starting from its resolved midfield respawn point.
+        _,shot_targets=shooter_respawn_cone(self,hub_origins)
+        shot_vectors=shot_targets-hub_origins
+        shot_distances=shot_vectors.norm(dim=-1,keepdim=True).clamp_min(1e-6)
+        shot_vectors=shot_vectors/shot_distances
+        backer_origins=pass_positions
+        backer_targets=backer_origins+shot_vectors*shot_distances
+        launch_fuel(self,backer_pass,backer_targets,origins=backer_origins,
+                    height=1.83,flight_time=1.,horizontal_velocity_scale=.1,
+                    spawn_positions=backer_origins)
+    pass_cell_size=self._pickup_grid_cell_size
+    pass_cell_x=(pass_positions[...,0]/pass_cell_size).floor().long().clamp_(
+        0,self._pickup_grid_nx-1)
+    pass_cell_y=(pass_positions[...,1]/pass_cell_size).floor().long().clamp_(
+        0,self._pickup_grid_ny-1)
+    pass_cell=pass_cell_y*self._pickup_grid_nx+pass_cell_x
+    pass_slot=(self.team_ids[safe_owner]+1).clamp_(1,2)
+    world_index=self._world_indices[:,None].expand_as(safe_owner)
+    piece_index=self._fuel_indices.expand_as(safe_owner)
+    old_cell=self._pickup_possible_cells[world_index,piece_index,pass_slot]
+    self._pickup_possible_cells[world_index,piece_index,pass_slot]=torch.where(
+        passed,pass_cell.to(old_cell.dtype),old_cell)
+    if self.fuel_physics is None:
+        self.piece_vel.masked_fill_(passed[...,None], 0.)
+    self.piece_owner.masked_fill_(passed, -1)
+    pass_team=self.team_ids[safe_owner]
+    in_home=torch.where(pass_team==0,
+                        pass_positions[...,0]<=self.alliance_zone_depth,
+                        pass_positions[...,0]>=self.sim.field_length-self.alliance_zone_depth)
+    home_zone=torch.where(in_home,pass_team+1,torch.zeros_like(pass_team))
+    torch.where(passed,home_zone,self.piece_zone,out=self.piece_zone)
+    passed_counts = torch.zeros_like(self.fuel_passed_event)
+    passed_counts.scatter_add_(1, safe_owner,
+                               passed.to(self.fuel_passed_event.dtype))
     if curriculum_metrics is not None:
         curriculum_metrics.released(passed, owner_before_pass)
     self.fuel_passed_event.copy_(torch.where(
@@ -465,33 +486,26 @@ def update_fuel_actions(self, active, score_intent):
     if hasattr(self, "_meco_piece_generation"):
         self._meco_piece_generation.add_(newly_scored.long())
     _invalidate_perceived_contact_tracks(self, active)
-    if (self.fuel_physics is not None and not capturing and
-            not bool(newly_scored.any().item())):
-        # shooter_respawn_cone draws exactly one [world,piece] tensor before
-        # doing geometry. Consume it to preserve all subsequent seeded draws.
-        torch.rand((self.n,self.fuel_count),device=self.device,
-                   generator=self.generator)
+    team=original_piece_team
+    origins=self.hub_centers[team]
+    spawn_origins,launch_targets=shooter_respawn_cone(self,origins)
+    if self.fuel_physics is None:
+        torch.where(newly_scored[...,None],spawn_origins,
+                    self.piece_pos,out=self.piece_pos)
+        velocity=(launch_targets-origins)*.1
+        torch.where(newly_scored[...,None],velocity,self.piece_vel,
+                    out=self.piece_vel)
     else:
-        team=original_piece_team
-        origins=self.hub_centers[team]
-        spawn_origins,launch_targets=shooter_respawn_cone(self,origins)
-        if self.fuel_physics is None:
-            torch.where(newly_scored[...,None],spawn_origins,
-                        self.piece_pos,out=self.piece_pos)
-            velocity=(launch_targets-origins)*.1
-            torch.where(newly_scored[...,None],velocity,self.piece_vel,
-                        out=self.piece_vel)
-        else:
-            launch_fuel(self,newly_scored,launch_targets,
-                        origins=origins,height=1.83,flight_time=1.,
-                        horizontal_velocity_scale=.15,
-                        spawn_positions=spawn_origins)
-        torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
-                    self.piece_owner,out=self.piece_owner)
-        torch.where(newly_scored,torch.zeros_like(self.piece_zone),
-                    self.piece_zone,out=self.piece_zone)
-        torch.where(newly_scored[...,None],self._midfield_respawn_cells,
-                    self._pickup_possible_cells,out=self._pickup_possible_cells)
+        launch_fuel(self,newly_scored,launch_targets,
+                    origins=origins,height=1.83,flight_time=1.,
+                    horizontal_velocity_scale=.15,
+                    spawn_positions=spawn_origins)
+    torch.where(newly_scored,torch.full_like(self.piece_owner,-1),
+                self.piece_owner,out=self.piece_owner)
+    torch.where(newly_scored,torch.zeros_like(self.piece_zone),
+                self.piece_zone,out=self.piece_zone)
+    torch.where(newly_scored[...,None],self._midfield_respawn_cells,
+                self._pickup_possible_cells,out=self._pickup_possible_cells)
     self.fuel_acquisition_count += self.fuel_acquired_event*active[:,None]
     return (self.fuel_acquired_event,self.fuel_scored_event,
             self.fuel_denied_event)

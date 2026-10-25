@@ -3867,6 +3867,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
+                        fuel_physics=({"backend": "hip", "gpu_qualifying": True}
+                                      if qualification_case is not None else None),
                         phase4_factor=phase4_factor,
                         phase4_opponent_policy_id=phase4_opponent_policy_id,
                         phase4_opponent_schedule=phase4_opponent_schedule,
@@ -3888,6 +3890,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         **(qualification_case or {}))
                     score_event_recorder = None
                     if score_estimand_approval is not None:
+                        if getattr(getattr(env, "fuel_physics", None),
+                                   "_gpu_qualifying", False):
+                            raise RuntimeError(
+                                "GPU-qualifying fuel physics cannot use the "
+                                "CPU score-event recorder")
                         from .meco_simulated_score_ledger import MecoScoreEventRecorder
                         score_context = _meco_score_ledger_context(env,
                             episode_id=episode_id, seed=seed, scenario_id=scenario_id,
@@ -4694,6 +4701,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         "completed_cycles")},
                                 "qualification_eligible": False,
                             }
+                        fuel_physics = getattr(env, "fuel_physics", None)
+                        physics_config = (vars(fuel_physics.config)
+                                          if fuel_physics is not None else None)
+                        gamepiece_physics_identity = {
+                            "implementation_id": getattr(
+                                env, "_fuel_physics_implementation_id", None),
+                            "rng_contract_version": getattr(
+                                env, "_fuel_gamepiece_rng_contract_version", None),
+                            "backend_requested": (physics_config.get("backend")
+                                if physics_config is not None else None),
+                            "backend_used": (fuel_physics.stats.get("backend")
+                                if fuel_physics is not None else None),
+                            "gpu_qualifying": (physics_config.get("gpu_qualifying")
+                                if physics_config is not None else False),
+                            "config": physics_config,
+                        }
                         record = {"scenario_id": scenario_id, "category": category,
                             "diagnostic_performance": diagnostic_performance,
                             "input_contract_sha256": input_contract_digest(),
@@ -4740,6 +4763,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "policy_id": policy_manifest[record_policy]["policy_id"],
                             "checkpoint_sha256": policy_manifest[record_policy]["checkpoint_sha256"],
                             "execution_device": execution_device,
+                            "gamepiece_physics_identity": gamepiece_physics_identity,
                             "p_mode": ("p0" if policy.endswith("_P0") else
                                        p_mode if policy in ("A1", "A2", "A3") else None),
                             "prediction_mode": decision_prediction_mode,
@@ -5036,6 +5060,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "device": execution_device,
                                 "execution_device": execution_device,
                                 "simulation_device": device,
+                                "gamepiece_physics_identity": gamepiece_physics_identity,
                                 "code_state": code_state,
                                 "evaluation_record": {"scenario_id": scenario_id,
                                     "category": category, "seed": seed,

@@ -12,6 +12,12 @@ import math
 import torch
 
 
+# Fixed-shape masked gamepiece work and cell-permutation placement have a
+# distinct seeded draw schedule from the prior host-conditional implementation.
+FUEL_GAMEPIECE_RNG_CONTRACT_VERSION = "fuel-gamepiece-rng-fixed-mask-v2"
+FUEL_PHYSICS_IMPLEMENTATION_ID = "fuel-physics-fixed-adaptive-loop-v2"
+
+
 @dataclass
 class FuelPhysicsConfig:
     radius: float = .075
@@ -38,6 +44,8 @@ class FuelPhysicsConfig:
     sleep_speed: float = .025
     sleep_angular_speed: float = .5
     adaptive_substeps: bool = True
+    max_adaptive_substeps: int = 64
+    gpu_qualifying: bool = False
     max_compression_fraction: float = .5
     max_translation_per_substep: float | None = None
 
@@ -52,6 +60,10 @@ class FuelPhysicsConfig:
                 raise ValueError(f"{name} must be one of {choices}")
         if not isinstance(self.substeps, int) or isinstance(self.substeps, bool) or not isinstance(self.max_neighbors, int):
             raise ValueError("substeps and max_neighbors must be integers")
+        if (not isinstance(self.max_adaptive_substeps,int) or
+                isinstance(self.max_adaptive_substeps,bool) or
+                self.max_adaptive_substeps<1):
+            raise ValueError("max_adaptive_substeps must be a positive integer")
         numeric = (self.radius,self.mass,self.gravity,self.stiffness,self.damping,self.friction,
                    self.rolling_friction,self.robot_height,self.skin,self.sleep_time,
                    self.sleep_speed,self.sleep_angular_speed,self.max_compression_fraction)
@@ -73,11 +85,22 @@ class FuelPhysics:
     def __init__(self, sim, piece_pos, piece_vel, config=None):
         self.sim = sim
         self.config = FuelPhysicsConfig(**config) if isinstance(config, dict) else (config or FuelPhysicsConfig())
+        self._gpu_qualifying = bool(self.config.gpu_qualifying)
+        self._gpu_config_snapshot = (
+            tuple(self.config.__dict__.items()) if self._gpu_qualifying else None)
         self.piece_pos, self.piece_vel = piece_pos, piece_vel
         if piece_pos.ndim != 3 or piece_pos.shape[-1] != 2 or piece_vel.shape != piece_pos.shape:
             raise ValueError("piece positions and velocities must be [world,piece,2]")
         self.n, self.p = piece_pos.shape[:2]
         self.device = piece_pos.device
+        if self.config.gpu_qualifying and (
+                self.device.type!="cuda" or self.device.index is None or
+                torch.version.hip is None or self.config.backend!="hip"):
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires an explicitly indexed HIP device and backend='hip'")
+        if self.config.gpu_qualifying and self.config.sleep and self.config.sleep_islands:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
         self.pos = torch.zeros((self.n, self.p, 3), device=self.device, dtype=piece_pos.dtype)
         self.vel = torch.zeros_like(self.pos)
         self.angular = torch.zeros_like(self.pos)
@@ -105,6 +128,7 @@ class FuelPhysics:
                     self._hip = None
         if self.config.backend == "hip" and self._hip is None:
             raise RuntimeError("requested HIP fuel backend unavailable")
+        self._validate_qualifying_backend()
         self.reset()
         if self.config.sleep and self.config.sleep_islands:
             from .fuel_physics_sleep import initialize_island_sleep
@@ -113,6 +137,45 @@ class FuelPhysics:
     @property
     def candidate_pairs(self):
         return self._pairs
+
+    def _validate_qualifying_backend(self):
+        """Keep the qualifying path pinned to native HIP after construction."""
+        if self.config.gpu_qualifying != self._gpu_qualifying:
+            raise RuntimeError(
+                "fuel physics qualification mode cannot change after construction")
+        if not self._gpu_qualifying:
+            return
+        if (self.device.type != "cuda" or self.device.index is None or
+                torch.version.hip is None or self.config.backend != "hip" or
+                self._hip is None):
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot select the Torch fallback")
+        if tuple(self.config.__dict__.items()) != self._gpu_config_snapshot:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics configuration cannot change "
+                "after construction")
+        supported = {
+            "broadphase": "grid",
+            "robot_broadphase": "all_pairs",
+            "contact_mode": "fused",
+            "compact_capacity": "bounded",
+            "solver": "jacobi",
+        }
+        unsupported = [name for name, value in supported.items()
+                       if getattr(self.config, name) != value]
+        if unsupported:
+            details = ", ".join(
+                f"{name}={getattr(self.config, name)!r}"
+                for name in unsupported)
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires the statically "
+                f"supported HIP configuration ({details})")
+        if self.config.sleep_islands:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
+        if not self.config.adaptive_substeps:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires adaptive stability bounds")
 
     def _spawn_height(self, xy):
         """Place released ground fuel on the analytic terrain contact plane."""
@@ -133,16 +196,29 @@ class FuelPhysics:
         return height
 
     def reset(self, mask=None):
+        self._validate_qualifying_backend()
+        if (self._gpu_qualifying and mask is not None and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                 mask.shape != (self.n,))):
+            raise ValueError(
+                "GPU-qualifying fuel reset mask must be a device-resident [world] tensor")
         mask = torch.ones(self.n, device=self.device, dtype=torch.bool) if mask is None else torch.as_tensor(mask, device=self.device, dtype=torch.bool)
-        self.pos[mask, :, :2] = self.piece_pos[mask]
-        self.pos[mask, :, 2] = self._spawn_height(self.piece_pos[mask])
-        self.vel[mask, :, :2] = self.piece_vel[mask]
-        self.vel[mask, :, 2] = 0
-        self.angular[mask] = 0
-        self.sleeping[mask] = False
-        self.sleep_clock[mask] = 0
-        self._last_xy[mask] = self.piece_pos[mask]
-        self._last_vxy[mask] = self.piece_vel[mask]
+        mask = mask.reshape(self.n)
+        selected = mask[:, None]
+        self.pos[..., :2].copy_(torch.where(
+            selected[..., None], self.piece_pos, self.pos[..., :2]))
+        spawn_height = self._spawn_height(self.piece_pos)
+        self.pos[..., 2].copy_(torch.where(selected, spawn_height, self.pos[..., 2]))
+        self.vel[..., :2].copy_(torch.where(
+            selected[..., None], self.piece_vel, self.vel[..., :2]))
+        self.vel[..., 2].masked_fill_(selected, 0.)
+        self.angular.masked_fill_(selected[..., None], 0.)
+        self.sleeping.masked_fill_(selected, False)
+        self.sleep_clock.masked_fill_(selected, 0.)
+        self._last_xy.copy_(torch.where(
+            selected[..., None], self.piece_pos, self._last_xy))
+        self._last_vxy.copy_(torch.where(
+            selected[..., None], self.piece_vel, self._last_vxy))
         self._valid_cache = False
         if self._hip is not None:
             self._hip.invalidate()
@@ -152,74 +228,44 @@ class FuelPhysics:
 
     def commit_external(self, mask=None):
         """Accept synchronized state only for the deliberately updated slots."""
+        self._validate_qualifying_backend()
+        if (self._gpu_qualifying and mask is not None and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                 mask.shape != (self.n, self.p))):
+            raise ValueError(
+                "GPU-qualifying external commit mask must be a device-resident "
+                "[world,piece] tensor")
         if mask is None:
             self._last_xy.copy_(self.piece_pos)
             self._last_vxy.copy_(self.piece_vel)
+            selected=torch.ones((self.n,self.p),device=self.device,dtype=torch.bool)
         else:
-            selected=torch.as_tensor(mask,device=self.device,dtype=torch.bool)[...,None]
-            self._last_xy.copy_(torch.where(selected,self.piece_pos,self._last_xy))
-            self._last_vxy.copy_(torch.where(selected,self.piece_vel,self._last_vxy))
+            selected=torch.as_tensor(mask,device=self.device,dtype=torch.bool)
+            expanded=selected[...,None]
+            self._last_xy.copy_(torch.where(expanded,self.piece_pos,self._last_xy))
+            self._last_vxy.copy_(torch.where(expanded,self.piece_vel,self._last_vxy))
+        if self._hip is None:
+            self._valid_cache=False
+        else:
+            torch.maximum(self._hip.rebuild,selected.any(-1).to(torch.int32),
+                          out=self._hip.rebuild)
 
     def separate_spawned(self, selected, free):
         """Nudge crowded spawn contacts apart without adding kinetic energy."""
+        self._validate_qualifying_backend()
+        if self._gpu_qualifying:
+            for name, tensor in (("selected", selected), ("free", free)):
+                if (not isinstance(tensor, torch.Tensor) or
+                        tensor.device != self.device or
+                        tensor.shape != (self.n, self.p)):
+                    raise ValueError(
+                        f"GPU-qualifying {name} spawn mask must be a "
+                        "device-resident [world,piece] tensor")
         selected = torch.as_tensor(selected, device=self.device, dtype=torch.bool)
         free = torch.as_tensor(free, device=self.device, dtype=torch.bool)
         if selected.shape != (self.n, self.p) or free.shape != selected.shape:
             raise ValueError("selected and free masks must have shape [world,piece]")
-        # Stream capture cannot record data-dependent compaction. Use the
-        # fixed-shape masked formulation only while capturing a simulator step.
-        if (self.device.type == "cuda" and
-                torch.cuda.is_current_stream_capturing()):
-            self._separate_spawned_dense(selected, free)
-            return
-        i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
-        pair_selected = selected[:, i] | selected[:, j]
-        valid = free[:, i] & free[:, j] & pair_selected
-        delta = self.pos[:, i, :2] - self.pos[:, j, :2]
-        distance = delta.norm(dim=-1)
-        contact = valid & (distance < 2*self.config.radius)
-        world, row = contact.nonzero(as_tuple=True)
-        if not world.numel():
-            return
-        a, b = i[row], j[row]
-        delta = delta[world, row]
-        distance = distance[world, row]
-        normal = delta / distance.clamp_min(1e-8)[:, None]
-        fallback = torch.zeros_like(normal); fallback[:, 0] = 1.
-        normal = torch.where((distance < 1e-8)[:, None], fallback, normal)
-        penetration = 2*self.config.radius-distance
-        # Apply only a small fraction of each overlap, then cap the combined
-        # displacement per ball. Dense contact counts cannot stack into a kick.
-        correction = (penetration*.10).clamp_max(.005)
-        displacement = correction[:, None]*normal
-        flat_delta = torch.zeros((self.n*self.p, 2), device=self.device,
-                                 dtype=self.pos.dtype)
-        flat_delta.index_add_(0, world*self.p+a, displacement)
-        flat_delta.index_add_(0, world*self.p+b, -displacement)
-        flat_delta = flat_delta.reshape(self.n, self.p, 2)
-        magnitude = flat_delta.norm(dim=-1, keepdim=True)
-        flat_delta *= (.015/magnitude.clamp_min(.015))
-        self.pos[..., :2].add_(flat_delta)
-        self.piece_pos.add_(flat_delta)
-        self._last_xy.copy_(self.piece_pos)
-        affected = flat_delta.norm(dim=-1) > 0
-        self.sleeping &= ~affected
-        self.sleep_clock.masked_fill_(affected, 0.)
-        # Ferry placement can start with a small geometric overlap. Treat
-        # that as a soft landing: absorb most of the carried ball's launch
-        # speed before the ordinary contact solver takes over.
-        spawned_world, spawned_piece = selected.nonzero(as_tuple=True)
-        touching = (free[spawned_world] &
-                    (torch.arange(self.p, device=self.device)[None] !=
-                     spawned_piece[:, None]) &
-                    ((self.pos[spawned_world, spawned_piece, None, :2] -
-                      self.pos[spawned_world, :, :2]).norm(dim=-1) <
-                     2*self.config.radius)).any(-1)
-        self.vel[spawned_world[touching], spawned_piece[touching], :2] *= .2
-        self.piece_vel[spawned_world[touching], spawned_piece[touching]] = \
-            self.vel[spawned_world[touching], spawned_piece[touching], :2]
-        self._last_vxy[spawned_world[touching], spawned_piece[touching]] = \
-            self.piece_vel[spawned_world[touching], spawned_piece[touching]]
+        self._separate_spawned_dense(selected, free)
 
     def _separate_spawned_dense(self, selected, free):
         """Fixed-shape equivalent of ``separate_spawned`` for graph capture."""
@@ -253,6 +299,11 @@ class FuelPhysics:
         affected = flat_delta.norm(dim=-1) > 0
         self.sleeping &= ~affected
         self.sleep_clock.masked_fill_(affected, 0.)
+        if self._hip is None:
+            self._valid_cache=False
+        else:
+            torch.maximum(self._hip.rebuild,affected.any(-1).to(torch.int32),
+                          out=self._hip.rebuild)
 
         delta_to_all = self.pos[:, :, None, :2] - self.pos[:, None, :, :2]
         distance_to_all = delta_to_all.norm(dim=-1)
@@ -284,6 +335,9 @@ class FuelPhysics:
         return changed
 
     def _build_pairs(self, free):
+        if self._gpu_qualifying:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot use Torch CPU pair generation")
         c = self.config
         rebuild = not self._valid_cache or not c.cache
         if not rebuild:
@@ -457,6 +511,9 @@ class FuelPhysics:
         s.velocity.add_(robot_delta)
 
     def _torch_substep(self, free, dt):
+        if self._gpu_qualifying:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics cannot use the Torch reference solver")
         moving = (self.vel.norm(dim=-1)>=self.config.sleep_speed) | (self.angular.norm(dim=-1)>=self.config.sleep_angular_speed)
         self.sleeping &= ~(moving & free)
         awake = free & ~self.sleeping
@@ -530,11 +587,26 @@ class FuelPhysics:
         self.angular.masked_fill_((self.sleeping & free)[...,None],0.)
 
     def required_substeps(self, dt=None, base=None, active_mask=None, piece_active=None, piece_owner=None):
-        """One host reduction per control tick; callers can reuse the result."""
+        """Use a fixed Python loop bound and assert stability capacity on device."""
+        self._validate_qualifying_backend()
+        if self._gpu_qualifying:
+            for name, tensor, shape in (
+                    ("active mask",active_mask,(self.n,)),
+                    ("piece active mask",piece_active,(self.n,self.p)),
+                    ("piece owner",piece_owner,(self.n,self.p))):
+                if tensor is not None and (
+                        not isinstance(tensor,torch.Tensor) or
+                        tensor.device!=self.device or tensor.shape!=shape):
+                    raise ValueError(
+                        f"GPU-qualifying {name} must be a device-resident "
+                        f"tensor with shape {shape}")
         duration=float(self.sim.dt if dt is None else dt)
         count=self.config.substeps if base is None else int(base)
         if not self.config.adaptive_substeps:
             return count
+        limit=self.config.max_adaptive_substeps
+        if count>limit:
+            raise ValueError("base substeps exceed max_adaptive_substeps")
         fuel_speed=torch.maximum(self.vel.norm(dim=-1),self.piece_vel.norm(dim=-1))
         robot_speed=self.sim.velocity[...,:2].norm(dim=-1)+self.sim.velocity[...,2].abs()*.5*(self.sim.length.square()+self.sim.width.square()).sqrt()
         if piece_active is not None: fuel_speed=fuel_speed*piece_active.bool()
@@ -543,12 +615,30 @@ class FuelPhysics:
             fuel_speed=fuel_speed*active_mask[:,None]
             robot_speed=robot_speed*active_mask[:,None]
         speed=torch.maximum(fuel_speed.amax(),robot_speed.amax())
-        duration=float(self.sim.dt if dt is None else dt)
         max_motion=self.config.max_translation_per_substep or self.config.radius*.5
-        bound=2*float(speed.item())+self.config.gravity*duration
-        return max(count,math.ceil(duration*bound/max_motion))
+        bound=2*speed+self.config.gravity*duration
+        required=torch.ceil(duration*bound/max_motion).to(torch.int64).clamp_min(count)
+        torch._assert_async(required<=limit,
+            "adaptive fuel substep capacity exceeded; refusing unstable physics step")
+        return limit
 
-    def step(self, active_mask, piece_active, piece_owner, *, dt=None, substeps=None, adaptive=None):
+    def _step_impl(self, active_mask, piece_active, piece_owner, *,
+                   dt=None, substeps=None, adaptive=None):
+        self._validate_qualifying_backend()
+        if (self._gpu_qualifying and adaptive is False and
+                (substeps != 1 or not torch.cuda.is_current_stream_capturing())):
+            raise RuntimeError(
+                "fixed qualifying fuel steps are restricted to one-step graph capture")
+        if self._gpu_qualifying:
+            for name, tensor, shape in (
+                    ("active mask", active_mask, (self.n,)),
+                    ("piece active mask", piece_active, (self.n, self.p)),
+                    ("piece owner", piece_owner, (self.n, self.p))):
+                if (not isinstance(tensor, torch.Tensor) or
+                        tensor.device != self.device or tensor.shape != shape):
+                    raise ValueError(
+                        f"GPU-qualifying fuel {name} must be a device-resident "
+                        f"tensor with shape {shape}")
         active=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         free=active[:,None] & piece_active.bool() & (piece_owner<0)
         changed=self._sync_external()
@@ -570,3 +660,23 @@ class FuelPhysics:
         self.piece_vel.copy_(self.vel[...,:2])
         self._last_xy.copy_(self.piece_pos); self._last_vxy.copy_(self.piece_vel)
         return self.pos,self.vel
+
+    def step(self, active_mask, piece_active, piece_owner, *, dt=None,
+             substeps=None, adaptive=None):
+        self._validate_qualifying_backend()
+        if self._gpu_qualifying and adaptive is False:
+            raise RuntimeError(
+                "GPU-qualifying fuel steps cannot disable adaptive stability bounds")
+        return self._step_impl(active_mask, piece_active, piece_owner, dt=dt,
+                               substeps=substeps, adaptive=adaptive)
+
+    def _step_graph_capture_substep(self, active_mask, piece_active,
+                                    piece_owner, *, dt):
+        """Run one trusted fixed iteration while a qualifying graph is captured."""
+        self._validate_qualifying_backend()
+        if (not self._gpu_qualifying or
+                not torch.cuda.is_current_stream_capturing()):
+            raise RuntimeError(
+                "fixed fuel substeps are restricted to qualifying graph capture")
+        return self._step_impl(active_mask, piece_active, piece_owner,
+                               dt=dt, substeps=1, adaptive=False)

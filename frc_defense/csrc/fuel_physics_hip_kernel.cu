@@ -18,10 +18,14 @@ __global__ void integrate(float*pos,float*vel,const bool*free,bool*sleep,const f
  if(sleep[i]&&(norm(get(vel,i))>=c.sv||norm(get(angular,i))>=c.sw))sleep[i]=false;
  if(!sleep[i]){V v=get(vel,i);v.z-=c.g*c.dt;put(vel,i,v);put(pos,i,get(pos,i)+v*c.dt);}}
 __global__ void detect(const float*pos,const float*ref,const bool*free,const bool*oldfree,int*rebuild,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P)return;if(!c.cache||free[i]!=oldfree[i]||dot(get(pos,i)-get(ref,i),get(pos,i)-get(ref,i))>.25f*c.skin*c.skin)atomicExch(rebuild+i/c.P,1);}
-__global__ void clear_grid(int*heads,int*overflow,const int*rebuild,const float*reference,C c){
- int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P)return;int w=i/c.P;if(!rebuild[w])return;
- heads[w*c.X*c.Y*c.Z+cell(get(reference,i),c)]=-1;
- if(i%c.P==0)overflow[w]=0;
+__global__ void clear_grid(int*heads,int*overflow,const int*rebuild,C c){
+ int i=blockIdx.x*blockDim.x+threadIdx.x;
+ int cells=c.X*c.Y*c.Z,total=c.N*cells;
+ if(i>=total)return;
+ int w=i/cells;
+ if(!rebuild[w])return;
+ heads[i]=-1;
+ if(i%cells==0)overflow[w]=0;
 }
 __global__ void bin(const float*pos,const bool*free,int*heads,int*next,const int*rebuild,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!free[i]||!rebuild[i/c.P])return;int h=(i/c.P)*c.X*c.Y*c.Z+cell(get(pos,i),c);next[i]=atomicExch(heads+h,i%c.P);}
 __global__ void neighbors(const float*pos,const bool*free,const int*heads,const int*next,int*list,int*counts,int*overflow,const int*rebuild,C c){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=c.N*c.P||!rebuild[i/c.P])return;int w=i/c.P,pi=i%c.P,total=0;counts[i]=0;if(!free[i])return;int cellid=cell(get(pos,i),c),z=cellid%c.Z,y=(cellid/c.Z)%c.Y,x=cellid/(c.Y*c.Z);float cutoff=2*c.r+c.skin;
@@ -118,8 +122,8 @@ int threads=128,blocks=(c.N*c.P+threads-1)/threads;
 
  if(!c.allpairs||c.robotgrid){
 detect<<<blocks,threads,0,stream>>>(pos,reference,free,oldfree,rebuild,c);
-int cells=c.N*c.X*c.Y*c.Z;
-clear_grid<<<blocks,threads,0,stream>>>(heads,overflow,rebuild,reference,c);
+int grid_cells=c.N*c.X*c.Y*c.Z;
+clear_grid<<<(grid_cells+threads-1)/threads,threads,0,stream>>>(heads,overflow,rebuild,c);
 bin<<<blocks,threads,0,stream>>>(pos,free,heads,next,rebuild,c);
 if(!c.allpairs)
 neighbors<<<blocks,threads,0,stream>>>(pos,free,heads,next,list,counts,overflow,rebuild,c);

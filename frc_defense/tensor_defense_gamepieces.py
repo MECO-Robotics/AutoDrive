@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .field import ALLIANCE_ZONE_DEPTH, grid_array_points
-from .gamepiece_actions import update_fuel_actions
+from .gamepiece_actions import update_fuel_actions, _flush_fuel_score_awards
 
 try:
     import torch
@@ -22,6 +22,23 @@ class TensorDefenseGamepieceMixin:
         if side not in ("red","blue"):
             raise ValueError("alliance must be red or blue")
         if count<0: raise ValueError("count must be nonnegative")
+        physics=getattr(self,"fuel_physics",None)
+        qualifying=physics is not None and physics._gpu_qualifying
+        if physics is not None:
+            physics._validate_qualifying_backend()
+        if qualifying:
+            if (mask is not None and
+                    (not isinstance(mask,torch.Tensor) or mask.device!=self.device or
+                     mask.shape!=(self.n,))):
+                raise ValueError(
+                    "GPU-qualifying outpost release mask must be a "
+                    "device-resident [world] tensor")
+            if (not isinstance(position,torch.Tensor) or
+                    position.device!=self.device or
+                    tuple(position.shape) not in ((2,),(self.n,2))):
+                raise ValueError(
+                    "GPU-qualifying outpost position must be a device-resident "
+                    "[2] or [world,2] tensor")
         selected=(torch.ones((self.n,),device=self.device,dtype=torch.bool) if mask is None
                   else torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n))
         point=torch.as_tensor(position,device=self.device,dtype=self.sim.pose.dtype)
@@ -29,17 +46,37 @@ class TensorDefenseGamepieceMixin:
         if tuple(point.shape)!=(self.n,2):raise ValueError(f"position must be {(self.n,2)}")
         zone=3 if side=="red" else 4
         released=torch.zeros((self.n,),device=self.device,dtype=torch.long)
-        rows=torch.arange(self.n,device=self.device)
+        released_slots=torch.zeros_like(self.piece_active)
         for _ in range(min(int(count),24)):
             stock=(self.piece_zone==zone)&~self.piece_active
             available=stock.any(-1)&selected
             index=stock.to(torch.int32).argmax(-1)
-            self.piece_pos[rows[available],index[available]]=point[available]
-            self.piece_vel[rows[available],index[available]]=0.
-            self.piece_zone[rows[available],index[available]]=0
-            self.piece_owner[rows[available],index[available]]=-1
-            self.piece_active[rows[available],index[available]]=True
+            slot=torch.arange(self.fuel_count,device=self.device)[None,:]
+            chosen=(slot==index[:,None])&available[:,None]
+            released_slots|=chosen
+            self.piece_pos.copy_(torch.where(chosen[...,None],point[:,None,:],
+                                             self.piece_pos))
+            self.piece_vel.masked_fill_(chosen[...,None],0.)
+            self.piece_zone.copy_(torch.where(chosen,torch.zeros_like(self.piece_zone),
+                                              self.piece_zone))
+            self.piece_owner.copy_(torch.where(chosen,torch.full_like(self.piece_owner,-1),
+                                               self.piece_owner))
+            self.piece_active|=chosen
             released+=available.long()
+        if physics is not None:
+            physics.piece_pos=self.piece_pos
+            physics.piece_vel=self.piece_vel
+            physics.pos[...,:2].copy_(torch.where(
+                released_slots[...,None],self.piece_pos,physics.pos[...,:2]))
+            physics.pos[...,2].copy_(torch.where(
+                released_slots,physics._spawn_height(self.piece_pos),physics.pos[...,2]))
+            physics.vel[...,:2].copy_(torch.where(
+                released_slots[...,None],self.piece_vel,physics.vel[...,:2]))
+            physics.vel[...,2].masked_fill_(released_slots,0.)
+            physics.angular.masked_fill_(released_slots[...,None],0.)
+            physics.sleeping.masked_fill_(released_slots,False)
+            physics.sleep_clock.masked_fill_(released_slots,0.)
+            physics.commit_external(released_slots)
         return released
 
     def _initialize_gamepieces(self, mask=None):
@@ -106,7 +143,6 @@ class TensorDefenseGamepieceMixin:
         positions[:,neutral_start:neutral_start+neutral_max]=neutral
         neutral_slots=torch.arange(neutral_max,device=self.device)[None,:]<neutral_count[:,None]
         zone[:,neutral_start:neutral_start+neutral_max]=torch.where(neutral_slots,0,-1)
-        rows=torch.arange(self.n,device=self.device)[:,None]
         within=torch.arange(8,device=self.device)[None,:]
         for robot in range(6):
             indices=neutral_start+neutral_count[:,None]+robot*per_robot[:,None]+within
@@ -119,31 +155,37 @@ class TensorDefenseGamepieceMixin:
                 preload_position=torch.zeros((self.n,8,2),device=self.device)
                 preload_position[:,:,0]=x
                 preload_position[:,:,1]=self.sim.field_width/2+(robot-3.5)*.55
-            rr=rows.expand(-1,8)[valid]
-            cc=indices[valid]
-            positions[rr,cc]=preload_position[valid]
-            active[rr,cc]=True
-            zone[rr,cc]=5
-            owner[rr,cc]=robot
+            safe_indices=indices.clamp(0,count-1)
+            slot_match=((torch.arange(count,device=self.device)[None,:,None]==
+                         safe_indices[:,None,:])&valid[:,None,:])
+            has_preload=slot_match.any(-1)
+            slot_weights=slot_match.to(positions.dtype)
+            resolved_position=(slot_weights[...,None]*
+                               preload_position[:,None,:,:]).sum(-2)
+            positions=torch.where(has_preload[...,None],resolved_position,positions)
+            active|=has_preload
+            zone=torch.where(has_preload,torch.full_like(zone,5),zone)
+            owner=torch.where(has_preload,torch.full_like(owner,robot),owner)
         if getattr(self, "random_gamepiece_placement", False):
-            # Scatter all active fuel across the field with ball-diameter spacing.
-            min_distance=2*half_ball
-            for row in range(self.n):
-                active_indices=torch.nonzero(active[row],as_tuple=False).flatten().tolist()
-                accepted=[]
-                attempts=0
-                while len(accepted)<len(active_indices) and attempts<max(10000,len(active_indices)*1000):
-                    attempts+=1
-                    candidate=(half_ball+float(self._random((1,))[0].item())*(self.sim.field_length-2*half_ball),
-                               half_ball+float(self._random((1,))[0].item()*(self.sim.field_width-2*half_ball)))
-                    if all((candidate[0]-x)**2+(candidate[1]-y)**2 >= min_distance**2
-                           for x,y in accepted):
-                        accepted.append(candidate)
-                if len(accepted)!=len(active_indices):
-                    raise RuntimeError("could not place non-overlapping random gamepieces")
-                if accepted:
-                    positions[row,active_indices]=torch.tensor(accepted,device=self.device,
-                                                                  dtype=positions.dtype)
+            # Assign active pieces to a random permutation of separated field
+            # cells. Static grid capacity and device ranks replace host rejection
+            # sampling and variable-length advanced-index writes.
+            spacing=2*half_ball+.01
+            nx=int((self.sim.field_length-2*half_ball)//spacing)+1
+            ny=int((self.sim.field_width-2*half_ball)//spacing)+1
+            capacity=nx*ny
+            if capacity<count:
+                raise RuntimeError("field has insufficient fixed placement capacity")
+            x=half_ball+torch.arange(nx,device=self.device,dtype=positions.dtype)*spacing
+            y=half_ball+torch.arange(ny,device=self.device,dtype=positions.dtype)*spacing
+            gx,gy=torch.meshgrid(x,y,indexing="ij")
+            cells=torch.stack((gx.reshape(-1),gy.reshape(-1)),-1)
+            order=torch.rand((self.n,capacity),device=self.device,
+                             generator=self.generator).argsort(-1)[:,:count]
+            choices=cells[order]
+            ranks=active.long().cumsum(-1)-1
+            assigned=torch.gather(choices,1,ranks.clamp_min(0)[...,None].expand(-1,-1,2))
+            positions=torch.where(active[...,None],assigned,positions)
         active[:,:48]=True
         active[:,neutral_start:neutral_start+neutral_max]|=neutral_slots
         kind[:,:count]=0
@@ -222,4 +264,6 @@ class TensorDefenseGamepieceMixin:
         self._intake_collecting.copy_(torch.where(
             active_mask[:,None],self.last_actions<4,self._intake_collecting))
         score_intent=self.last_actions==4
-        return update_fuel_actions(self,active_mask,score_intent)
+        result=update_fuel_actions(self,active_mask,score_intent)
+        _flush_fuel_score_awards(self)
+        return result
