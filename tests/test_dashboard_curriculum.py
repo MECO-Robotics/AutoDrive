@@ -8,6 +8,7 @@ from urllib.request import urlopen
 from frc_defense.dashboard import create_handler, _merge_meco_track_status
 from frc_defense.dashboard_api import curriculum_status_payload, _category_passes, _curriculum_report_root
 from frc_defense.training_curriculum import CURRICULUM_VERSION, SCENARIOS
+from scripts.report_curriculum_progress import summarize
 
 
 def _run(root, *, qualified=(), diagnostic=False, sources=None):
@@ -235,6 +236,7 @@ def test_dashboard_requires_explicit_curriculum_root_when_run_dir_is_not_one(tmp
 def test_queued_only_lane_is_pending_and_stale_queue_is_reported(tmp_path):
     lane = {"architecture": "fixture", "directory": "runs/queued", "status": "queued",
             "current": "pickup_simple", "completed_updates": 0}
+    (tmp_path / "runs" / "queued").mkdir(parents=True)
     queue = tmp_path / "queue-status.json"
     queue.write_text(json.dumps({"lanes": [lane]}))
     data = _payload(tmp_path)
@@ -244,6 +246,64 @@ def test_queued_only_lane_is_pending_and_stale_queue_is_reported(tmp_path):
     import os, time
     os.utime(queue, (time.time() - 200, time.time() - 200))
     assert _payload(tmp_path)["runs"][0]["status"] == "stale"
+
+
+def test_current_five_track_run_directory_queue_resolves_in_root(tmp_path):
+    tracks = ("A1", "A2", "A3", "C1", "C2")
+    lanes = []
+    for track in tracks:
+        run = tmp_path / track
+        run.mkdir()
+        (run / "stats.json").write_text(json.dumps({
+            "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
+        lanes.append({"track": track, "run_directory": track,
+                      "status": "queued", "completed_updates": 0})
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": lanes}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert {run["run"] for run in report["runs"]} == set(tracks)
+    assert {lane["track"] for lane in report["queue_lanes"]} == set(tracks)
+    assert {Path(run["path"]).resolve() for run in report["runs"]} == {
+        (tmp_path / track).resolve() for track in tracks}
+
+
+def test_queue_directory_conflicts_and_unsafe_paths_fail_closed(tmp_path):
+    for name in ("A1", "other"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "other", target_is_directory=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    queue = tmp_path / "queue-status.json"
+
+    invalid_lanes = [
+        {"track": "A1", "run_directory": "A1", "directory": "other"},
+        {"track": "A1", "run_directory": "../other"},
+        {"track": "A1", "run_directory": "A1", "directory": "linked"},
+        {"track": "A1", "run_directory": "A1", "directory": str(outside)},
+        {"track": "A1", "run_directory": "missing"},
+    ]
+    for lane in invalid_lanes:
+        queue.write_text(json.dumps({"lanes": [lane]}))
+        report = summarize(tmp_path)
+        assert report["errors"]
+        assert report["queue_lanes"] == []
+
+
+def test_matching_legacy_and_current_queue_directories_are_unambiguous(tmp_path):
+    run = tmp_path / "A1"
+    run.mkdir()
+    (run / "stats.json").write_text(json.dumps({
+        "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
+    (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
+        "track": "A1", "run_directory": "A1", "directory": str(run.resolve()),
+        "status": "queued", "completed_updates": 0}]}))
+
+    report = summarize(tmp_path)
+
+    assert report["errors"] == []
+    assert [lane["track"] for lane in report["queue_lanes"]] == ["A1"]
 
 
 def test_only_valid_paired_nondiagnostic_reference_qualified_evidence_qualifies(tmp_path):
@@ -335,6 +395,7 @@ def test_duplicate_scenario_results_cannot_prove_qualification(tmp_path):
 
 
 def test_malformed_and_out_of_root_queue_lanes_are_isolated(tmp_path):
+    (tmp_path / "runs" / "unknown").mkdir(parents=True)
     queue = tmp_path / "orchestration.json"
     queue.write_text(json.dumps({"lanes": [None,
         {"directory": str(tmp_path.parent / "outside"), "status": "running"},
