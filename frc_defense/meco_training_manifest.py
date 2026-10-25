@@ -475,13 +475,22 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
     """Bind a five-track multicase bundle without upgrading target readiness."""
     if binding is None:
         return None
-    required = {"schema", "descriptor_path", "descriptor_sha256", "descriptor_file_sha256",
+    legacy_required = {"schema", "descriptor_path", "descriptor_sha256", "descriptor_file_sha256",
         "bundle_manifest_path", "bundle_manifest_sha256", "case_set_sha256",
         "artifact_sha256_by_track"}
-    if not isinstance(binding, dict) or set(binding) != required:
+    phase0_required = legacy_required | {"phase0_binding", "score_estimand_approval",
+        "tuple_crosswalk", "phase0_binding_sha256", "score_estimand_approval_sha256",
+        "tuple_crosswalk_sha256", "artifact_phase0_envelope_sha256_by_track"}
+    if not isinstance(binding, dict):
         raise ValueError("multi-case warm-start binding must use the exact versioned shape")
-    if binding.get("schema") != "meco-phase2-multi-case-five-track-v1.training-binding":
+    if binding.get("schema") == "meco-phase2-multi-case-five-track-v1.training-binding":
+        required = legacy_required
+    elif binding.get("schema") == "meco-phase2-multi-case-five-track-v1.training-binding-phase0-v2":
+        required = phase0_required
+    else:
         raise ValueError("unsupported multi-case warm-start binding schema")
+    if set(binding) != required:
+        raise ValueError("multi-case warm-start binding must use the exact versioned shape")
     if set(warm_artifacts) != set(MECO_TRACKS) or any(
             not warm_starts[track].get("present") for track in MECO_TRACKS):
         raise ValueError("multi-case binding requires all five present warm-start artifacts")
@@ -513,6 +522,31 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
             bundle.get("phase2_ready") is not False or bundle.get("phase2_complete") is not False or
             bundle.get("qualification_eligible") is not False):
         raise ValueError("multi-case descriptor/bundle case-set binding or conservative gates differ")
+    if binding["schema"].endswith("phase0-v2"):
+        if descriptor.get("schema") != "meco-phase2-multi-case-five-track-phase0-v2":
+            raise ValueError("Phase 0 training binding requires a production descriptor")
+        phase_fields = {key: descriptor.get(key) for key in (
+            "phase0_binding", "score_estimand_approval", "tuple_crosswalk")}
+        if any(binding.get(key) != value for key, value in phase_fields.items()):
+            raise ValueError("training binding Phase 0/approval/crosswalk differs from descriptor")
+        from .meco_phase2_multicase import _digest
+        if (binding.get("phase0_binding_sha256") != _digest(phase_fields["phase0_binding"]) or
+                binding.get("score_estimand_approval_sha256") !=
+                    phase_fields["score_estimand_approval"].get("artifact_sha256") or
+                binding.get("tuple_crosswalk_sha256") !=
+                    phase_fields["tuple_crosswalk"].get("crosswalk_sha256") or
+                bundle.get("phase0_binding") != phase_fields["phase0_binding"] or
+                bundle.get("score_estimand_approval") != phase_fields["score_estimand_approval"] or
+                bundle.get("tuple_crosswalk") != phase_fields["tuple_crosswalk"]):
+            raise ValueError("training binding Phase 0 digests differ from the published bundle")
+        envelopes = {track: bundle.get("artifacts", {}).get(track, {}).get(
+            "phase0_artifact_envelope_sha256") for track in MECO_TRACKS}
+        if (set(binding.get("artifact_phase0_envelope_sha256_by_track", {})) != set(MECO_TRACKS) or
+                binding["artifact_phase0_envelope_sha256_by_track"] != envelopes or
+                any(not isinstance(value, str) or len(value) != 64 for value in envelopes.values())):
+            raise ValueError("training binding does not preserve all five Phase 0 artifact envelopes")
+    elif descriptor.get("schema") == "meco-phase2-multi-case-five-track-phase0-v2":
+        raise ValueError("production Phase 0 bundle requires its explicit v2 training binding")
     artifact_paths = {track: Path(warm_artifacts[track]).expanduser()
         for track in MECO_TRACKS}
     if any(path.is_symlink() or not path.is_file() for path in artifact_paths.values()):
@@ -525,6 +559,17 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
         expected_case_set_sha256=binding["case_set_sha256"],
         artifact_paths=artifact_paths)
     return {key: binding[key] for key in sorted(binding)}
+
+
+def _require_current_phase0_multicase_binding(binding, phase0_binding):
+    """A current Phase 0 campaign cannot carry an archival v1 multicase binding."""
+    if binding is None:
+        return
+    if (not isinstance(binding, dict) or
+            binding.get("schema") !=
+                "meco-phase2-multi-case-five-track-v1.training-binding-phase0-v2" or
+            binding.get("phase0_binding") != phase0_binding):
+        raise ValueError("current Phase 0 campaigns require a matching production Phase 0 multi-case binding")
 
 
 def describe_campaign(config, *, source_root=ROOT, output=None, legacy_diagnostic=False):
@@ -654,6 +699,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None, legacy_diagnosti
         raise ValueError("new five-track manifests require Phase 0 materialization; use the explicit legacy diagnostic path only for archival diagnostics")
     if phase0_binding is not None and legacy_diagnostic:
         raise ValueError("Phase 0 current manifests cannot use the legacy diagnostic path")
+    if phase0_binding is not None:
+        _require_current_phase0_multicase_binding(multicase_binding, phase0_binding)
     manifest = {"schema": PHASE0_SCHEMA if phase0_binding is not None else SCHEMA,
         "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
@@ -730,6 +777,8 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT, allow_legacy_v2=Fa
             manifest.get("phase0_materialization"), source_root)
         if manifest.get("phase0_binding") != binding:
             raise ValueError("campaign manifest Phase 0 freeze/partition binding mismatch")
+        multicase = manifest.get("multicase_warm_start_binding")
+        _require_current_phase0_multicase_binding(multicase, binding)
     else:
         if not allow_legacy_v2:
             raise ValueError("legacy v2 manifests are read-only; pass allow_legacy_v2=True for archival validation")
