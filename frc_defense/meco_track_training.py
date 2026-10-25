@@ -1659,7 +1659,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
             close()
         raise
     run_manifest = {"schema_version": 1, "run_id": run_id,
-        "config": asdict(config), "task_assignment": task_assignment,
+        "track": config.track, "config": asdict(config), "task_assignment": task_assignment,
         "phase4_training": phase4_training,
         "updates_semantics": "updates per invocation chunk",
         "protocol_id": protocol_id,

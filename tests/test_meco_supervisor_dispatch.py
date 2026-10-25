@@ -241,8 +241,14 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
     with pytest.raises(RuntimeError, match="run record does not match"):
         supervisor._verify_worker_provenance("A1", 10, assignment, changed,
             checkpoint=checkpoint)
-    for field, value in (("track", "A2"),
-                         ("task_assignment", {**assignment, "assignment_id": "other"}),
+    # Embedded config track alone does not satisfy the supervisor's top-level
+    # worker-track binding.
+    for changed in ({key: value for key, value in run_record.items() if key != "track"},
+                    {**run_record, "track": "A2"}):
+        with pytest.raises(RuntimeError, match="run record does not match"):
+            supervisor._verify_worker_provenance("A1", 10, assignment, changed,
+                checkpoint=checkpoint)
+    for field, value in (("task_assignment", {**assignment, "assignment_id": "other"}),
                          ("completed_updates", 9)):
         changed = {**run_record, field: value}
         with pytest.raises(RuntimeError, match="run record does not match"):
