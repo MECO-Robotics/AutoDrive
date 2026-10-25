@@ -1176,3 +1176,27 @@ planner approval only: no harness implementation, test, HIP compilation or
 execution, parity/profile result, simulator, training, replay, or dashboard
 validation is claimed. Normal support/training dispatch remains CPU-only and
 `PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED` remains false.
+
+
+## Plan A HIP parity/profile harness implementation pass
+
+Implementation candidate `ca4604e019826cb6b2a010f84872d0eb15f83d16` on
+`codex/plan-a-hip-parity-profile-harness-impl-20261025` was independently
+approved at that exact head. It adds a canonical source-bound offline fixture
+manifest, a 64,000-node × 10-slot 8-heading pose-lattice recipe, and a distinct
+explicit WX9100 candidate mode. Device mode acquires the repository exclusive
+device lock, performs post-lease physical WX9100 attestation before loading the
+HIP extension, and reports the generated lease identity and attestation. It
+requires a clean checkout and checks exact pinned-source and fixture identity
+at entry and before returning a passing result. The normal CPU oracle dispatch
+and false `PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED` constant are unchanged.
+
+Static Python AST parsing and `git diff --check` passed. Fixture generation
+executed the CPU oracle to freeze expected digests; the offline CLI was not run,
+and no tests, HIP import/compile/execution, device or lease inspection/acquisition,
+simulator, training, replay, dashboard, or deployment run occurred. The exact
+head was approved by the independent reviewer, who confirmed lock acquisition,
+post-lease attestation ordering, source/fixture revalidation, and the closed
+production gate. Device parity, support-digest comparison, profiling, and any
+dispatch decision remain deferred until the orchestrator confirms continuous
+training has released both exclusive WX9100 leases and schedules verification.
