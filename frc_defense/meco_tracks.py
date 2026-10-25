@@ -67,9 +67,9 @@ MECO_INFERENCE_OUTCOME_CODES = MappingProxyType({
 })
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
-    "A2": ("node_features", "edges", "edge_mask", "region_ids", "globals_",
+    "A2": ("node_features", "edges", "edge_mask", "node_valid", "region_ids", "globals_",
            "coarse_edges", "coarse_edge_mask", "hidden"),
-    "A3": ("node_features", "edges", "edge_mask", "region_ids", "globals_", "hidden"),
+    "A3": ("node_features", "edges", "edge_mask", "node_valid", "region_ids", "globals_", "hidden"),
     "C1": ("globals_", "candidate_features", "hidden"),
     "C2": ("raster", "globals_", "candidate_features", "hidden"),
 }
@@ -350,7 +350,7 @@ class ProductionMecoAdapter:
                     return None
                 safe_tensors = list(tensors)
             for name, tensor in zip(request.input_names, tensors):
-                if name in ("edge_mask", "coarse_edge_mask") and tensor.dtype != torch.bool:
+                if name in ("edge_mask", "coarse_edge_mask", "node_valid") and tensor.dtype != torch.bool:
                     return None
                 if name in ("edges", "coarse_edges", "region_ids") and tensor.dtype != torch.long:
                     return None
@@ -385,6 +385,10 @@ class ProductionMecoAdapter:
                     or by_name["edges"].shape[:2] != by_name["node_features"].shape[:2]):
                 return None
             if "region_ids" in by_name and by_name["region_ids"].shape != by_name["node_features"].shape[:2]:
+                return None
+            if "node_valid" in by_name and (
+                    by_name["node_valid"].shape != by_name["node_features"].shape[:2]
+                    or by_name["node_valid"].dtype != torch.bool):
                 return None
             if "coarse_edges" in by_name and (by_name["coarse_edges"].ndim != 3
                     or by_name["coarse_edge_mask"].shape != by_name["coarse_edges"].shape):
@@ -944,15 +948,22 @@ class SE2MessageBlock(nn.Module):
         self.update = nn.Sequential(nn.Linear(width * 2, width), nn.SiLU(), nn.Linear(width, width))
         self.norm = nn.LayerNorm(width)
 
-    def forward(self, nodes, edges, edge_mask, *, return_status=False):
+    def forward(self, nodes, edges, edge_mask, *, node_valid=None, return_status=False):
         # edges [B,N,D] contains neighbor node indices; edge_mask marks legal transitions.
         if (nodes.ndim != 3 or edges.ndim != 3 or edge_mask.shape != edges.shape
                 or edges.shape[:2] != nodes.shape[:2] or edges.dtype != torch.long
                 or edge_mask.dtype != torch.bool):
             raise ValueError("invalid SE(2) graph tensor shapes or dtypes")
+        if node_valid is None:
+            node_valid = torch.ones(nodes.shape[:2], device=nodes.device, dtype=torch.bool)
+        if node_valid.shape != nodes.shape[:2] or node_valid.dtype != torch.bool:
+            raise ValueError("SE(2) node validity must match the node batch")
         edge_valid = (edges >= 0) & (edges < nodes.shape[1])
-        status = ~(edge_mask & ~edge_valid).any()
-        safe_mask = edge_mask & edge_valid
+        safe_index = edges.clamp(0, nodes.shape[1] - 1)
+        destination_valid = node_valid.gather(1, safe_index.reshape(nodes.shape[0], -1)).reshape_as(edges)
+        source_valid = node_valid[:, :, None]
+        status = ~(edge_mask & (~edge_valid | ~destination_valid | ~source_valid)).any()
+        safe_mask = edge_mask & edge_valid & destination_valid & source_valid
         safe = torch.where(safe_mask, edges, torch.zeros_like(edges))
         expanded = nodes[:, :, None, :].expand(-1, -1, safe.shape[-1], -1)
         neighbors = expanded.gather(1, safe[..., None].expand(-1, -1, -1, nodes.shape[-1]))
@@ -960,21 +971,28 @@ class SE2MessageBlock(nn.Module):
         mask = safe_mask[..., None].to(messages.dtype)
         aggregate = (messages * mask).sum(2) / mask.sum(2).clamp_min(1.)
         result = self.norm(nodes + self.update(torch.cat((nodes, aggregate), -1)))
+        result = torch.where(node_valid[..., None], result, torch.zeros_like(result))
         return (result, status) if return_status else result
 
 
-def _se2_node_inputs(node_features, globals_, *, return_status=False):
+def _se2_node_inputs(node_features, globals_, node_valid, *, return_status=False):
     """Encode headings as sin/cos so bins 7 and 0 obey angular wraparound."""
     if (node_features.ndim != 3 or node_features.shape[-1] != 9
             or globals_.shape != (node_features.shape[0], 7)):
         raise ValueError("SE(2) nodes require six raster values, x/y, heading-bin and seven globals")
-    finite_nodes = torch.isfinite(node_features).all()
+    if node_valid.shape != node_features.shape[:2] or node_valid.dtype != torch.bool:
+        raise ValueError("SE(2) node validity must match node features")
+    checked_nodes = torch.where(node_valid[..., None], node_features,
+                                torch.zeros_like(node_features))
+    finite_nodes = torch.isfinite(checked_nodes).all()
     finite_globals = torch.isfinite(globals_).all()
-    clean_nodes = torch.nan_to_num(node_features)
+    clean_nodes = torch.nan_to_num(checked_nodes)
     clean_globals = torch.nan_to_num(globals_)
     coords = clean_nodes[..., 6:8]
     heading = clean_nodes[..., 8]
+    prefix_valid = ~(node_valid[..., 1:] & ~node_valid[..., :-1]).any()
     status = (finite_nodes & finite_globals
+        & prefix_valid
         & ((coords >= 0.) & (coords <= 1.)).all()
         & ((heading >= 0.) & (heading <= 7.)
            & (heading == heading.round())).all())
@@ -987,19 +1005,24 @@ def _se2_node_inputs(node_features, globals_, *, return_status=False):
     return (embedded, status) if return_status else embedded
 
 
-def _pool_regions(nodes, region_ids, region_tokens):
+def _pool_regions(nodes, region_ids, region_tokens, node_valid):
     batch, count, width = nodes.shape
     if region_ids.shape != (batch, count) or region_ids.dtype != torch.long:
         raise ValueError("region IDs must be integer indices within the configured regions")
+    if node_valid.shape != (batch, count) or node_valid.dtype != torch.bool:
+        raise ValueError("region pooling node validity must match node rows")
     id_valid = (region_ids >= 0) & (region_ids < region_tokens)
     ids_safe = torch.where(id_valid, region_ids, torch.zeros_like(region_ids))
     pooled = nodes.new_zeros((batch, region_tokens, width))
     counts = nodes.new_zeros((batch, region_tokens, 1))
-    pooled.scatter_add_(1, ids_safe[..., None].expand_as(nodes), nodes)
-    counts.scatter_add_(1, ids_safe[..., None], nodes.new_ones((batch, count, 1)))
+    contribution_valid = node_valid & id_valid
+    pooled.scatter_add_(1, ids_safe[..., None].expand_as(nodes),
+                        nodes * contribution_valid[..., None].to(nodes.dtype))
+    counts.scatter_add_(1, ids_safe[..., None],
+        contribution_valid[..., None].to(nodes.dtype))
     occupied = counts.squeeze(-1) > 0
     has_region = occupied.any(-1)
-    status = id_valid.all() & has_region.all()
+    status = (~(node_valid & ~id_valid).any()) & node_valid.any(-1).all() & has_region.all()
     occupied = occupied.clone()
     occupied[:, 0] |= ~has_region
     pooled = pooled / counts.clamp_min(1.)
@@ -1024,17 +1047,21 @@ class A2StructuredSE2UNetGRU(nn.Module):
         self.behavior_head = nn.Linear(HIDDEN, 5)
 
     def forward(self, node_features, edges, edge_mask, region_ids, globals_,
-                coarse_edges, coarse_edge_mask, hidden=None, **_):
-        node_inputs, status = _se2_node_inputs(node_features, globals_, return_status=True)
+                coarse_edges, coarse_edge_mask, node_valid, hidden=None, **_):
+        node_inputs, status = _se2_node_inputs(node_features, globals_, node_valid,
+                                               return_status=True)
         nodes = self.lift(node_inputs)
+        nodes = torch.where(node_valid[..., None], nodes, torch.zeros_like(nodes))
         for layer in self.fine_layers:
-            nodes, layer_status = layer(nodes, edges, edge_mask, return_status=True)
+            nodes, layer_status = layer(nodes, edges, edge_mask,
+                node_valid=node_valid, return_status=True)
             status = status & layer_status
         batch, count, _ = nodes.shape
-        coarse, occupied, pool_status = _pool_regions(nodes, region_ids, self.region_tokens)
+        coarse, occupied, pool_status = _pool_regions(nodes, region_ids,
+            self.region_tokens, node_valid=node_valid)
         status = status & pool_status
         coarse, coarse_status = self.coarse_layer(coarse, coarse_edges,
-            coarse_edge_mask, return_status=True)
+            coarse_edge_mask, node_valid=occupied, return_status=True)
         status = status & coarse_status
         attended, _ = self.attention(coarse, coarse, coarse,
                                      key_padding_mask=~occupied, need_weights=False)
@@ -1068,14 +1095,19 @@ class A3HierarchicalSE2GNNGRU(nn.Module):
         self.node_head = nn.Linear(HIDDEN, 2)
         self.behavior_head = nn.Linear(HIDDEN, 5)
 
-    def forward(self, node_features, edges, edge_mask, region_ids, globals_, hidden=None, **_):
-        node_inputs, status = _se2_node_inputs(node_features, globals_, return_status=True)
+    def forward(self, node_features, edges, edge_mask, region_ids, globals_,
+                node_valid, hidden=None, **_):
+        node_inputs, status = _se2_node_inputs(node_features, globals_, node_valid,
+                                               return_status=True)
         nodes = self.lift(node_inputs)
+        nodes = torch.where(node_valid[..., None], nodes, torch.zeros_like(nodes))
         for layer in self.layers:
-            nodes, layer_status = layer(nodes, edges, edge_mask, return_status=True)
+            nodes, layer_status = layer(nodes, edges, edge_mask,
+                node_valid=node_valid, return_status=True)
             status = status & layer_status
         batch, count, _ = nodes.shape
-        pooled, occupied, pool_status = _pool_regions(nodes, region_ids, self.region_tokens)
+        pooled, occupied, pool_status = _pool_regions(nodes, region_ids,
+            self.region_tokens, node_valid=node_valid)
         status = status & pool_status
         regions, _ = self.region_attention(pooled, pooled, pooled,
                                            key_padding_mask=~occupied, need_weights=False)

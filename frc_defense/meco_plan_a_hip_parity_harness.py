@@ -150,7 +150,8 @@ def _fixture_tensor_hashes(graph: dict) -> dict[str, str]:
 def _support_digest(graph: dict, result: dict, case_id: str) -> str:
     """Digest a canonical one-behavior support over the fixture route tree."""
     import torch
-    from .meco_plan_a_policy import PlanAActionSupport, plan_a_support_digest
+    from .meco_plan_a_policy import (PlanAActionSupport,
+        plan_a_support_digest_cpu_reference)
     if "xy" not in graph:
         # A geometry identity is required because the support digest binds the
         # graph endpoints, heading bins, edges and edge mask as well as route.
@@ -207,7 +208,7 @@ def _support_digest(graph: dict, result: dict, case_id: str) -> str:
         "heading_bin": heading_bins, "xy": xy_tensor,
         "heading": heading_tensor, "edges": edges_tensor,
         "edge_mask": mask_tensor})()
-    return plan_a_support_digest(support, graph_object)
+    return plan_a_support_digest_cpu_reference(support, graph_object)
 
 
 def _fixture_result(root: Path) -> tuple[dict, list[dict]]:
@@ -352,8 +353,10 @@ def _device_inputs(graph: dict, kind: str, selected, torch, ext):
                               dtype=torch.float64).contiguous()
             heading = torch.tensor(graph["heading"], device=selected,
                                    dtype=torch.float64).contiguous()
+            node_valid = torch.ones((xy.shape[0],), device=selected,
+                                    dtype=torch.bool)
             def invoke():
-                return ext.dijkstra_graph(xy, heading, edge_dst, edge_allowed,
+                return ext.dijkstra_graph(xy, heading, edge_dst, edge_allowed, node_valid,
                     graph["root"], graph["root_start_cost"], graph["root_connector_m"])
             return invoke
         paths["graph_geometry"] = prepare_graph_geometry

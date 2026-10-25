@@ -29,7 +29,7 @@ from .curriculum_scenarios import make_curriculum_env, teacher_actions
 from .meco_candidates import (CANDIDATE_BOUNDARY,
     ROUTE_COST_POINTS_PER_SECOND, build_route_feasible_candidates)
 from .meco_plan_a_policy import (SUPPORT_ORDER, build_plan_a_support,
-    plan_a_support_digest)
+    plan_a_support_digest_cpu_reference)
 from .meco_pose_graph import build_legal_pose_graph
 from .meco_tracks import (PREDICTION_MODES, candidate_digest,
     prediction_contract)
@@ -716,7 +716,7 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     support = build_plan_a_support(env, graph, env._last_obs,
         observation.snapshot_id,
         require_hip_shortest_path=require_hip_plan_a)
-    support_hash = plan_a_support_digest(support, graph)
+    support_hash = plan_a_support_digest_cpu_reference(support, graph)
     if support_hash != support.support_digest:
         raise RuntimeError("Plan A support digest failed self-validation")
 

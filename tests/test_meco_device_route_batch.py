@@ -138,8 +138,8 @@ def test_plan_a_inference_request_keeps_dynamic_support_mask_device_resident(tra
         input_shapes=tuple((1, 6, 32, 32) if name == "raster" else
             (1, 7) if name == "globals_" else (1, 64) if name == "hidden" else
             (1, 24, 9) if name == "node_features" else
-            (1, 24, 4) if name == "edges" or name == "edge_mask" else
-            (1, 24) if name == "region_ids" else (1, 64, 4)
+            (1, 24, 10) if name == "edges" or name == "edge_mask" else
+            (1, 24) if name in ("region_ids", "node_valid") else (1, 64, 64)
             for name in MECO_INPUT_NAMES[track]),
         candidate_ids=candidate_ids, valid_mask=(), fallback_index=-1,
         request_sequence=1, generation_id="generation:plan-a",
@@ -168,6 +168,7 @@ def test_plan_a_adapter_propagates_graph_status_for_each_mask_mode(track, suppor
         "node_features": fake(torch.zeros((1, 2, 9))),
         "edges": fake(torch.zeros((1, 2, 10), dtype=torch.long)),
         "edge_mask": fake(torch.zeros((1, 2, 10), dtype=torch.bool)),
+        "node_valid": fake(torch.ones((1, 2), dtype=torch.bool)),
         "region_ids": fake(torch.tensor([[0, 1]])),
         "globals_": fake(torch.zeros((1, 7))),
         "hidden": fake(torch.zeros((1, 64))),
@@ -251,6 +252,7 @@ def test_table_mask_graph_status_reaches_candidate_fallback(track):
     graph = {"node_features": torch.zeros((1, 2, 9)),
         "edges": torch.zeros((1, 2, 10), dtype=torch.long),
         "edge_mask": torch.zeros((1, 2, 10), dtype=torch.bool),
+        "node_valid": torch.ones((1, 2), dtype=torch.bool),
         "region_ids": torch.tensor([[0, 1]])}
     if track == "A2":
         graph["coarse_edges"] = torch.zeros((1, 64, 64), dtype=torch.long)
@@ -1256,7 +1258,7 @@ def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():
     env = SimpleNamespace(device="cpu", sim=Sim(), planner=Planner(),
         _perceived_robot_obstacles=lambda: torch.zeros((6, 0, 3)))
     class Graph:
-        node_count = 1
+        node_capacity = 1
         resolution_m = 1.
         nx = 2
         ny = 2

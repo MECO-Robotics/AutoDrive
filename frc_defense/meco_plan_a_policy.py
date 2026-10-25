@@ -101,29 +101,67 @@ def _plan_a_support_tensors(support: PlanAActionSupport, graph):
         "goal_heading": support.goal_heading,
         "heading_bin": graph.heading_bin,
         "graph_xy": graph.xy,
+        "lookup": graph.lookup,
         "edges": graph.edges,
         "edge_mask": graph.edge_mask,
+        "node_valid": graph.node_valid,
+        "region_ids": graph.region_ids,
+        "coarse_edges": graph.coarse_edges,
+        "coarse_edge_mask": graph.coarse_edge_mask,
+        "graph_status": graph.graph_status,
     }
 
 
 def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
-    """Recompute the integrity digest for frozen PPO support/path metadata."""
+    """Hash frozen dynamic graph/support bytes on device after action selection."""
+    device = graph.xy.device
+    if device.type != "cuda" or torch.version.hip is None:
+        raise RuntimeError("dynamic Plan A support SHA-256 requires the HIP device path")
+    if not torch.is_tensor(support.root_node) or not torch.is_tensor(support.root_connector_m):
+        raise RuntimeError("dynamic Plan A root provenance must remain device-resident")
+    if not torch.is_tensor(support.fallback_pair_tensor):
+        raise RuntimeError("dynamic Plan A fallback provenance must remain device-resident")
+    tensors = {"root_node": support.root_node.reshape(()),
+        "root_connector_m": support.root_connector_m.reshape(()),
+        "fallback_pair_tensor": support.fallback_pair_tensor,
+        **_plan_a_support_tensors(support, graph)}
+    header_fields = ["plan-a-support-sha256-v1", support.snapshot_id,
+        support.order_digest, f"legacy_fallback={support.fallback_pair}"]
+    payload = [torch.tensor(list(("\n".join(header_fields) + "\n").encode()),
+                            device=device, dtype=torch.uint8)]
+    for name, tensor in tensors.items():
+        if tensor is None:
+            header_fields.append(f"{name}=none")
+            continue
+        if tensor.device != device:
+            raise RuntimeError(f"Plan A digest tensor {name} is not device-resident")
+        header_fields.append(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}")
+        payload.append(tensor.detach().contiguous().view(torch.uint8).reshape(-1))
+    header = torch.tensor(list(("\n".join(header_fields) + "\n").encode()),
+                          device=device, dtype=torch.uint8)
+    payload[0] = header
+    from .meco_plan_a_shortest_path_hip import extension
+    digest_bytes = extension().sha256_bytes(torch.cat(payload).contiguous())
+    # This fixed 32-byte copy is only exposed after the chosen-action boundary.
+    return bytes(digest_bytes.detach().cpu().tolist()).hex()
+
+
+def plan_a_support_digest_cpu_reference(support: PlanAActionSupport, graph) -> str:
+    """SHA-256 oracle for offline CPU fixtures; never called by live decisions."""
+    if graph.xy.device.type != "cpu":
+        raise RuntimeError("CPU Plan A digest oracle only accepts CPU reference graphs")
     digest = hashlib.sha256(SUPPORT_ORDER.encode())
     digest.update(support.snapshot_id.encode())
-    root_node = (int(support.root_node.item()) if torch.is_tensor(support.root_node)
-                 else support.root_node)
-    root_connector = (float(support.root_connector_m.item())
-                      if torch.is_tensor(support.root_connector_m)
-                      else support.root_connector_m)
-    digest.update(f"root_node={root_node};root_connector_m={root_connector:.17g};"
-                  f"fallback_pair={support.fallback_pair}".encode())
+    digest.update(str(support.root_node).encode())
+    digest.update(str(support.root_connector_m).encode())
+    digest.update(f"fallback_pair={support.fallback_pair}".encode())
     digest.update(support.order_digest.encode())
     for name, tensor in _plan_a_support_tensors(support, graph).items():
         if tensor is None:
             digest.update(f"{name}=none".encode())
             continue
         digest.update(name.encode())
-        digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+        digest.update(tensor.detach().contiguous().numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -132,9 +170,11 @@ def plan_a_support_order_digest(support: PlanAActionSupport, graph) -> str:
     digest = hashlib.sha256()
     digest.update(SUPPORT_ORDER.encode())
     digest.update(support.snapshot_id.encode())
-    digest.update((f"plan-a-order-v1;n={graph.node_count};nx={graph.nx};ny={graph.ny};"
-                   f"resolution={float(graph.resolution_m):.17g};pairs={support.pair_count};"
-                   f"rows_per_node=8").encode())
+    digest.update((f"plan-a-order-v2;schema=fixed-capacity-pose-v1;"
+                   f"compact=row-major-valid-prefix;Ncap={graph.node_capacity};"
+                   f"nx={graph.nx};ny={graph.ny};resolution={float(graph.resolution_m):.17g};"
+                   f"headings=8;degree=10;regions={graph.region_count};coarse_width=64;"
+                   f"pairs={support.pair_count};rows_per_node=8").encode())
     return digest.hexdigest()
 
 
@@ -151,17 +191,16 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
     if env.n != 1 or not isinstance(snapshot_id, str) or not snapshot_id:
         raise ValueError("Plan A support requires one world and a snapshot ID")
     device = env.device
-    n = graph.node_count
-    if n < 1:
-        raise ValueError("Plan A legal-pose graph is empty")
+    n = graph.node_capacity
     pose = env.policy_pose[0, 3]
     angle = torch.atan2(torch.sin(graph.heading - pose[2]),
                         torch.cos(graph.heading - pose[2])).abs()
     start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
+    start_cost = start_cost.masked_fill(~graph.node_valid[0], torch.inf)
     root = start_cost.argmin()
     root_connector_m = (pose[:2] - graph.xy.index_select(0,
         root.reshape(1)).reshape(2)).norm().to(torch.float64)
-    if require_hip_shortest_path:
+    if require_hip_shortest_path or torch.device(device).type != "cpu":
         # This mode is used by the Plan A P-route collector. It must not copy
         # graph edges to Python or fall back to the CPU reference when the
         # exact-heap HIP parity/profile gate is closed.
@@ -172,6 +211,8 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
     else:
         from .meco_plan_a_shortest_path import (cached_plan_a_edge_weights,
             plan_a_dijkstra_cpu)
+        if torch.device(device).type != "cpu":
+            raise RuntimeError("Plan A shortest-path CPU oracle is restricted to CPU references")
         edge_dst, edge_costs, edge_translations, edge_allowed = \
             cached_plan_a_edge_weights(graph)
         paths = plan_a_dijkstra_cpu(edge_dst, edge_costs, edge_translations,
@@ -190,6 +231,7 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
                                  device=device, dtype=torch.bool)
     if isinstance(paths, dict) and torch.is_tensor(paths.get("status")):
         reachable = reachable & (paths["status"] == 0)
+    reachable = reachable & graph.node_valid[0] & (graph.graph_status == 0)
     action_mask = observation[0, 3, -8:].bool()
     # Pair constraints reflect the native executor's actual goal semantics.
     # Intake rows bind a sensed target slot and require a bearing-aligned
@@ -256,7 +298,6 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
     intake_mask = ((along >= capture_low) & (along <= capture_radius) &
                    (lateral <= lateral_radius) & fuel_valid[None, :] &
                    action_mask[:4][None, :] & reachable[:, None])
-    safe_points = score_points[score_clear]
     hub = env.hub_centers.index_select(0, team_id.reshape(1)).reshape(2)
     score_bearing = torch.atan2(hub[1] - graph.xy[:, 1],
                                 hub[0] - graph.xy[:, 0])
@@ -264,11 +305,9 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
         torch.sin(graph.heading - score_bearing),
         torch.cos(graph.heading - score_bearing)).abs()
     score_heading_legal = score_heading_error <= math.radians(5.)
-    if safe_points.numel():
-        score_mask = ((graph.xy[:, None] - safe_points[None]).norm(dim=-1).amin(-1)
-                      <= resolution * .72) & reachable & action_mask[4] & score_heading_legal
-    else:
-        score_mask = torch.zeros((n,), device=device, dtype=torch.bool)
+    score_distance = (graph.xy[:, None] - score_points[None]).norm(dim=-1)
+    score_distance = score_distance.masked_fill(~score_clear[None], torch.inf).amin(-1)
+    score_mask = (score_distance <= resolution * .72) & reachable & action_mask[4] & score_heading_legal
     from .fuel_physics_runtime import ferry_aim_targets
     team_nodes = team_id.expand(1, n)
     ferry_aim = ferry_aim_targets(env, graph.xy[None], team_nodes)[0]
@@ -313,7 +352,9 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
     fallback_node = physical_tensor.masked_fill(
         ~valid_matrix.any(dim=-1), torch.inf).argmin()
     fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
-    fallback_pair_tensor = fallback_node * valid_matrix.shape[1] + fallback_slot
+    fallback_pair_tensor = torch.where(valid_matrix.any(),
+        fallback_node * valid_matrix.shape[1] + fallback_slot,
+        torch.full((), -1, device=device, dtype=torch.long))
     fallback_pair = -1
     parent_tensor = torch.where(parents >= 0, parents,
                                 torch.full_like(parents, root))

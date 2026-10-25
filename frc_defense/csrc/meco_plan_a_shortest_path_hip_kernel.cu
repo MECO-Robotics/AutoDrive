@@ -2,6 +2,73 @@
 #include <math.h>
 #include <stdint.h>
 
+__device__ __forceinline__ uint32_t sha_rotr(uint32_t value, uint32_t shift) {
+  return (value >> shift) | (value << (32 - shift));
+}
+
+__global__ void plan_a_sha256_bytes_kernel(const uint8_t* input, int64_t length,
+                                           uint8_t* output) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  const uint32_t k[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+  uint32_t state[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+                       0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+  const int64_t padded = ((length + 9 + 63) / 64) * 64;
+  const uint64_t bit_length = static_cast<uint64_t>(length) * 8;
+  for (int64_t base = 0; base < padded; base += 64) {
+    uint32_t words[64];
+    for (int i = 0; i < 16; ++i) {
+      uint32_t value = 0;
+      for (int j = 0; j < 4; ++j) {
+        const int64_t position = base + i * 4 + j;
+        uint8_t byte = 0;
+        if (position < length) byte = input[position];
+        else if (position == length) byte = 0x80;
+        else if (position >= padded - 8) {
+          const int shift = static_cast<int>((padded - 1 - position) * 8);
+          byte = static_cast<uint8_t>((bit_length >> shift) & 0xff);
+        }
+        value = (value << 8) | byte;
+      }
+      words[i] = value;
+    }
+    for (int i = 16; i < 64; ++i) {
+      const uint32_t s0 = sha_rotr(words[i - 15], 7) ^ sha_rotr(words[i - 15], 18) ^ (words[i - 15] >> 3);
+      const uint32_t s1 = sha_rotr(words[i - 2], 17) ^ sha_rotr(words[i - 2], 19) ^ (words[i - 2] >> 10);
+      words[i] = words[i - 16] + s0 + words[i - 7] + s1;
+    }
+    uint32_t a=state[0], b=state[1], c=state[2], d=state[3];
+    uint32_t e=state[4], f=state[5], g=state[6], h=state[7];
+    for (int i = 0; i < 64; ++i) {
+      const uint32_t s1 = sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25);
+      const uint32_t choice = (e & f) ^ ((~e) & g);
+      const uint32_t temp1 = h + s1 + choice + k[i] + words[i];
+      const uint32_t s0 = sha_rotr(a, 2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22);
+      const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+      const uint32_t temp2 = s0 + majority;
+      h=g; g=f; f=e; e=d+temp1; d=c; c=b; b=a; a=temp1+temp2;
+    }
+    state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+    state[4]+=e; state[5]+=f; state[6]+=g; state[7]+=h;
+  }
+  for (int i = 0; i < 8; ++i)
+    for (int j = 0; j < 4; ++j)
+      output[i * 4 + j] = static_cast<uint8_t>((state[i] >> (24 - j * 8)) & 0xff);
+}
+
+void plan_a_sha256_bytes_launch(const uint8_t* input, int64_t length,
+    uint8_t* output, hipStream_t stream) {
+  hipLaunchKernelGGL(plan_a_sha256_bytes_kernel, dim3(1), dim3(1), 0, stream,
+      input, length, output);
+}
+
 __device__ bool less_pair(double da, int64_t na, double db, int64_t nb) {
   return da < db || (da == db && na < nb);
 }
@@ -107,6 +174,7 @@ __global__ void plan_a_dijkstra_kernel(const int64_t* edge_dst,
 
 __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
     const double* heading, const int64_t* edge_dst, const bool* edge_allowed,
+    const bool* node_valid,
     const int64_t* root_index, const double* root_start_cost_ptr,
     const double* root_connector_m_ptr,
     double* route, double* physical, int64_t* parent, double* parent_length,
@@ -123,7 +191,7 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
   const int64_t root = root_index[0];
   const double root_start_cost = root_start_cost_ptr[0];
   const double root_connector_m = root_connector_m_ptr[0];
-  if (root < 0 || root >= n || !isfinite(root_start_cost) ||
+  if (root < 0 || root >= n || !node_valid[root] || !isfinite(root_start_cost) ||
       !isfinite(root_connector_m) || root_start_cost < 0.0 ||
       root_connector_m < 0.0) {
     *status = 3;
@@ -144,7 +212,7 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
       const int64_t offset = src * slots + slot;
       if (!edge_allowed[offset]) continue;
       const int64_t dst = edge_dst[offset];
-      if (dst < 0 || dst >= n) {
+      if (dst < 0 || dst >= n || !node_valid[dst]) {
         *status = 1;
         return;
       }
@@ -191,7 +259,7 @@ __global__ void plan_a_dijkstra_graph_kernel(const double* xy,
 // Exact ordered connectivity partition used by the Python oracle. A single
 // thread preserves root/edge FIFO order and the historical low-ID tie break.
 __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
-    const bool* edge_allowed, int64_t* region, int64_t* coarse_edges,
+    const bool* edge_allowed, const bool* node_valid, int64_t* region, int64_t* coarse_edges,
     bool* coarse_mask, int64_t* status, int64_t n, int64_t degree,
     int64_t region_count) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
@@ -203,11 +271,12 @@ __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
   bool* adjacency = new bool[region_count * region_count];
   for (int64_t i = 0; i < n; ++i) {
     component[i] = -1;
-    region[i] = -1;
+    region[i] = node_valid[i] ? -1 : 0;
   }
   int64_t component_count = 0;
   int64_t member_count = 0;
   for (int64_t start = 0; start < n; ++start) {
+    if (!node_valid[start]) continue;
     if (component[start] >= 0) continue;
     const int64_t label = component_count++;
     int64_t head = 0, tail = 0;
@@ -222,7 +291,7 @@ __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
         const int64_t offset = current * degree + slot;
         if (!edge_allowed[offset]) continue;
         const int64_t next = edge_dst[offset];
-        if (next < 0 || next >= n) {
+        if (next < 0 || next >= n || !node_valid[next]) {
           *status = 1;
           delete[] component; delete[] queue; delete[] component_sizes;
           delete[] allocations; delete[] members; delete[] adjacency;
@@ -239,6 +308,12 @@ __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
   }
   if (component_count > region_count) {
     *status = 2;
+    delete[] component; delete[] queue; delete[] component_sizes;
+    delete[] allocations; delete[] members; delete[] adjacency;
+    return;
+  }
+  if (component_count == 0) {
+    *status = 3;
     delete[] component; delete[] queue; delete[] component_sizes;
     delete[] allocations; delete[] members; delete[] adjacency;
     return;
@@ -277,7 +352,7 @@ __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
         const int64_t offset = current * degree + slot;
         if (!edge_allowed[offset]) continue;
         const int64_t next = edge_dst[offset];
-        if (region[next] < 0) {
+        if (node_valid[next] && region[next] < 0) {
           region[next] = region[current];
           queue[tail++] = next;
         }
@@ -293,6 +368,7 @@ __global__ void plan_a_pose_regions_kernel(const int64_t* edge_dst,
   // A fixed-width bitmap makes coarse adjacency deterministic and avoids a
   // host read to discover the maximum degree. Write sorted neighbors by scan.
   for (int64_t src = 0; src < n; ++src) {
+    if (!node_valid[src]) continue;
     const int64_t src_region = region[src];
     for (int64_t slot = 0; slot < degree; ++slot) {
       const int64_t offset = src * degree + slot;
@@ -333,23 +409,23 @@ void plan_a_dijkstra_launch(const int64_t* edge_dst, const double* edge_cost,
 }
 
 void plan_a_dijkstra_graph_launch(const double* xy, const double* heading,
-    const int64_t* edge_dst, const bool* edge_allowed,
+    const int64_t* edge_dst, const bool* edge_allowed, const bool* node_valid,
     const int64_t* root_index, const double* root_start_cost,
     const double* root_connector_m, double* route, double* physical,
     int64_t* parent, double* parent_length, int64_t* traversal, int64_t n,
     int64_t slots, int64_t heap_capacity, double* heap_distance,
     int64_t* heap_node, int64_t* status, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_dijkstra_graph_kernel, dim3(1), dim3(1), 0, stream,
-      xy, heading, edge_dst, edge_allowed, root_index, root_start_cost,
+      xy, heading, edge_dst, edge_allowed, node_valid, root_index, root_start_cost,
       root_connector_m, route, physical, parent, parent_length, traversal, n,
       slots, heap_capacity, heap_distance, heap_node, status);
 }
 
 void plan_a_pose_regions_launch(const int64_t* edge_dst,
-    const bool* edge_allowed, int64_t* region, int64_t* coarse_edges,
+    const bool* edge_allowed, const bool* node_valid, int64_t* region, int64_t* coarse_edges,
     bool* coarse_mask, int64_t* status, int64_t n, int64_t degree,
     int64_t region_count, hipStream_t stream) {
   hipLaunchKernelGGL(plan_a_pose_regions_kernel, dim3(1), dim3(1), 0, stream,
-      edge_dst, edge_allowed, region, coarse_edges, coarse_mask, status, n,
+      edge_dst, edge_allowed, node_valid, region, coarse_edges, coarse_mask, status, n,
       degree, region_count);
 }

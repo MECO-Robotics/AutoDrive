@@ -17,6 +17,20 @@ HEADING_BINS = 8
 REGION_COUNT = 64
 
 
+def compact_legal_pose_mask(legal: torch.Tensor):
+    """Return a stable fixed-capacity row-major compaction contract."""
+    if legal.ndim != 3 or legal.shape[0] != HEADING_BINS or legal.dtype != torch.bool:
+        raise ValueError("legal pose mask must be bool [8,nx,ny]")
+    flat = legal.reshape(-1)
+    capacity = flat.numel()
+    original = torch.arange(capacity, device=legal.device, dtype=torch.long)
+    permutation = torch.argsort((~flat).to(torch.long) * capacity + original,
+                                stable=True)
+    inverse = torch.empty_like(permutation).scatter_(0, permutation, original)
+    node_valid = flat[permutation]
+    return permutation, inverse, node_valid
+
+
 @dataclass(frozen=True)
 class LegalPoseGraph:
     xy: torch.Tensor                 # [N,2], field meters
@@ -24,18 +38,24 @@ class LegalPoseGraph:
     heading: torch.Tensor            # [N], radians
     edges: torch.Tensor              # [1,N,D], legal destination node IDs
     edge_mask: torch.Tensor          # [1,N,D]
+    node_valid: torch.Tensor          # [1,N], compact valid prefix, device resident
     region_ids: torch.Tensor         # [1,N], connected graph regions
     coarse_edges: torch.Tensor       # [1,R,Dc], legal inter-region transitions
     coarse_edge_mask: torch.Tensor   # [1,R,Dc]
     lookup: torch.Tensor             # [8,nx,ny], -1 for illegal poses
+    graph_status: torch.Tensor       # scalar device status; nonzero fails closed
     nx: int
     ny: int
     resolution_m: float
     region_count: int
 
     @property
-    def node_count(self) -> int:
+    def node_capacity(self) -> int:
         return self.xy.shape[0]
+
+    @property
+    def valid_count(self) -> torch.Tensor:
+        return self.node_valid.sum()
 
     def node_features(self, env, raster: torch.Tensor, *, world: int = 0,
                       slot: int = 3) -> torch.Tensor:
@@ -51,18 +71,25 @@ class LegalPoseGraph:
         geom = torch.stack((self.xy[:, 0] / field_length,
                             self.xy[:, 1] / field_width,
                             self.heading_bin.to(self.xy.dtype)), -1)
-        return torch.cat((sensed, geom), -1)[None]
+        features = torch.cat((sensed, geom), -1)
+        features = torch.where(self.node_valid[0, :, None], features,
+                               torch.zeros_like(features))
+        return features[None]
 
 
 def _connected_region_ids(edges: list[list[int]], edge_mask: list[list[bool]],
-                          node_xy: torch.Tensor, region_count: int) -> list[int]:
+                          node_xy: torch.Tensor, region_count: int,
+                          node_valid: list[bool] | None = None) -> list[int]:
     """Partition every connected component into connected graph regions."""
     count = len(edges)
+    node_valid = ([True] * count if node_valid is None else node_valid)
     adjacency = [[dst for dst, allowed in zip(row, mask) if allowed]
                  for row, mask in zip(edges, edge_mask)]
     component = [-1] * count
     components: list[list[int]] = []
     for start in range(count):
+        if not node_valid[start]:
+            continue
         if component[start] >= 0:
             continue
         label = len(components)
@@ -72,7 +99,7 @@ def _connected_region_ids(edges: list[list[int]], edge_mask: list[list[bool]],
         for current in queue:
             members.append(current)
             for nxt in adjacency[current]:
-                if component[nxt] < 0:
+                if node_valid[nxt] and component[nxt] < 0:
                     component[nxt] = label
                     queue.append(nxt)
         components.append(members)
@@ -105,8 +132,9 @@ def _connected_region_ids(edges: list[list[int]], edge_mask: list[list[bool]],
                 if labels[nxt] == -1:
                     labels[nxt] = labels[current]
                     queue.append(nxt)
-    if any(label < 0 for label in labels):
+    if any(node_valid[i] and label < 0 for i, label in enumerate(labels)):
         raise RuntimeError("region partition did not reach every legal pose")
+    labels = [max(0, label) for label in labels]
     return labels
 
 
@@ -136,79 +164,68 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
     width = env.sim.width[0, slot].expand(HEADING_BINS).clone()
     blocked = planner._blocked(heading_values, length, width)
     legal = ~blocked
-    lookup = torch.full((HEADING_BINS, nx, ny), -1, device=device, dtype=torch.long)
-    total = int(legal.sum().item())
-    if total == 0:
-        raise ValueError("static field geometry contains no legal SE(2) poses")
-    lookup[legal] = torch.arange(total, device=device)
-    node_grid = xy_grid[None].expand(HEADING_BINS, -1, -1, -1)[legal]
-    heading_bins = torch.arange(HEADING_BINS, device=device)[:, None, None].expand(-1, nx, ny)[legal]
+    # Stable legality sort creates the same row-major legal prefix as boolean
+    # indexing, with a fixed grid-derived output capacity and no dynamic slice.
+    capacity = HEADING_BINS * nx * ny
+    permutation, inverse, node_valid = compact_legal_pose_mask(legal)
+    legal_flat = legal.reshape(-1)
+    all_xy = xy_grid[None].expand(HEADING_BINS, -1, -1, -1).reshape(capacity, 2)
+    all_heading_bins = torch.arange(HEADING_BINS, device=device)[:, None, None].expand(
+        -1, nx, ny).reshape(capacity)
+    node_grid = all_xy[permutation]
+    heading_bins = all_heading_bins[permutation]
     headings = heading_values[heading_bins]
+    lookup_flat = torch.where(legal_flat, inverse, torch.full_like(inverse, -1))
+    lookup = lookup_flat.reshape(HEADING_BINS, nx, ny)
 
+    # Fixed slot order is the historical eight translations followed by the
+    # two heading turns. Padded rows receive safe in-range IDs and false masks.
     offsets = ((1, 0), (-1, 0), (0, 1), (0, -1),
                (1, 1), (1, -1), (-1, 1), (-1, -1))
-    candidate_src: list[torch.Tensor] = []
-    candidate_dst: list[torch.Tensor] = []
-    candidate_slot: list[torch.Tensor] = []
-    candidate_rot: list[torch.Tensor] = []
-    for hbin in range(HEADING_BINS):
-        for slot, (dx, dy) in enumerate(offsets):
-            sx0, sx1 = max(0, -dx), min(nx, nx - dx)
-            sy0, sy1 = max(0, -dy), min(ny, ny - dy)
-            source_legal = legal[hbin, sx0:sx1, sy0:sy1]
-            target_legal = legal[hbin, sx0 + dx:sx1 + dx, sy0 + dy:sy1 + dy]
-            coords = torch.nonzero(source_legal & target_legal, as_tuple=False)
-            if coords.numel():
-                ix, iy = coords[:, 0] + sx0, coords[:, 1] + sy0
-                candidate_src.append(lookup[hbin, ix, iy])
-                candidate_dst.append(lookup[hbin, ix + dx, iy + dy])
-                candidate_slot.append(torch.full_like(candidate_src[-1], slot))
-                candidate_rot.append(torch.zeros_like(candidate_src[-1], dtype=torch.bool))
-        for side, delta in enumerate((-1, 1)):
-            next_h = (hbin + delta) % HEADING_BINS
-            valid = legal[hbin] & legal[next_h]
-            coords = torch.nonzero(valid, as_tuple=False)
-            if coords.numel():
-                ix, iy = coords[:, 0], coords[:, 1]
-                candidate_src.append(lookup[hbin, ix, iy])
-                candidate_dst.append(lookup[next_h, ix, iy])
-                candidate_slot.append(torch.full_like(candidate_src[-1], 8 + side))
-                candidate_rot.append(torch.ones_like(candidate_src[-1], dtype=torch.bool))
-
-    if not candidate_src:
-        raise ValueError("legal pose lattice has no transitions")
-    src = torch.cat(candidate_src)
-    dst = torch.cat(candidate_dst)
-    slots = torch.cat(candidate_slot)
-    is_rotation = torch.cat(candidate_rot)
-    path = torch.stack((node_grid[src], node_grid[dst]), dim=1)
-    # `length`/`width` above are heading-sized vectors used by _blocked;
-    # transition source indices are legal-node IDs, so map them through each
-    # node's heading bin before indexing the footprint dimensions.
-    edge_length = length[heading_bins[src]]
-    edge_width = width[heading_bins[src]]
-    edge_heading = headings[src]
-    edge_clear = planner._footprint_path_clear(path, edge_heading,
-        edge_length, edge_width)
+    original_h = permutation // (nx * ny)
+    original_x = (permutation % (nx * ny)) // ny
+    original_y = permutation % ny
+    dst_columns, candidate_masks = [], []
+    for dx, dy in offsets:
+        target_x, target_y = original_x + dx, original_y + dy
+        in_bounds = ((target_x >= 0) & (target_x < nx) &
+                     (target_y >= 0) & (target_y < ny))
+        target_original = (original_h * (nx * ny) + target_x.clamp(0, nx - 1) * ny
+                           + target_y.clamp(0, ny - 1))
+        target_node = lookup_flat[target_original]
+        dst_columns.append(target_node.clamp_min(0))
+        candidate_masks.append(node_valid & in_bounds & (target_node >= 0))
+    for delta in (-1, 1):
+        target_h = (original_h + delta) % HEADING_BINS
+        target_original = target_h * (nx * ny) + original_x * ny + original_y
+        target_node = lookup_flat[target_original]
+        dst_columns.append(target_node.clamp_min(0))
+        candidate_masks.append(node_valid & (target_node >= 0))
+    edges = torch.stack(dst_columns, -1)
+    candidate_valid = torch.stack(candidate_masks, -1)
+    rotations = torch.tensor((False,) * 8 + (True, True),
+                             device=device, dtype=torch.bool)[None, :]
+    path = torch.stack((node_grid[:, None, :].expand(-1, 10, -1),
+                        node_grid[edges]), dim=2)
+    edge_length = length[heading_bins][:, None].expand(-1, 10)
+    edge_width = width[heading_bins][:, None].expand(-1, 10)
+    edge_heading = headings[:, None].expand(-1, 10)
+    flat_path = path.reshape(-1, 2, 2)
+    flat_length, flat_width = edge_length.reshape(-1), edge_width.reshape(-1)
+    edge_clear = planner._footprint_path_clear(flat_path,
+        edge_heading.reshape(-1), flat_length, flat_width).reshape(capacity, 10)
     # A discrete 45-degree rotation has a 22.5-degree swept midpoint. Check
     # this orientation on the same field grid before admitting the turn edge.
-    mid_heading = torch.atan2(torch.sin(headings[src] +
-        torch.atan2(torch.sin(headings[dst] - headings[src]),
-                    torch.cos(headings[dst] - headings[src])) * .5),
-        torch.cos(headings[src] +
-        torch.atan2(torch.sin(headings[dst] - headings[src]),
-                    torch.cos(headings[dst] - headings[src])) * .5))
-    mid_clear = planner._footprint_path_clear(
-        node_grid[src, None].expand(-1, 2, -1), mid_heading,
-        edge_length, edge_width)
-    edge_clear &= ~is_rotation | mid_clear
-
-    # Store a fixed maximum degree of 10 (8 translations + 2 turns).
-    degree = 10
-    edges = torch.zeros((total, degree), device=device, dtype=torch.long)
-    edge_mask = torch.zeros((total, degree), device=device, dtype=torch.bool)
-    edges[src, slots] = dst
-    edge_mask[src, slots] = edge_clear
+    angle_delta = torch.atan2(torch.sin(headings[edges] - headings[:, None]),
+                              torch.cos(headings[edges] - headings[:, None]))
+    mid_heading = torch.atan2(torch.sin(headings[:, None] + angle_delta * .5),
+                              torch.cos(headings[:, None] + angle_delta * .5))
+    mid_path = torch.stack((node_grid[:, None, :].expand(-1, 10, -1),
+                            node_grid[:, None, :].expand(-1, 10, -1)), dim=2)
+    mid_clear = planner._footprint_path_clear(mid_path.reshape(-1, 2, 2),
+        mid_heading.reshape(-1), flat_length, flat_width).reshape(capacity, 10)
+    edge_mask = candidate_valid & edge_clear & (~rotations | mid_clear)
+    edge_mask &= node_valid[:, None] & node_valid[edges]
     if device.type == "cuda" and torch.version.hip is not None:
         # Preserve the historical ordered directed-BFS partition exactly on
         # device. The fixed 64-wide coarse row is padding-inert for the graph
@@ -216,26 +233,32 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
         from .meco_plan_a_shortest_path_hip import extension
         region_tensor, coarse_edges, coarse_mask, region_status = \
             extension().pose_regions(edges.contiguous(), edge_mask.contiguous(),
-                                     int(region_count))
-        torch._assert_async(region_status == 0,
-            "invalid edge or too many components in Plan A pose graph")
+                                     node_valid.contiguous(), int(region_count))
+        graph_status = region_status
         coarse_degree = region_count
-    else:
+    elif device.type == "cpu":
         edge_rows = edges.cpu().tolist()
         mask_rows = edge_mask.cpu().tolist()
-        regions = _connected_region_ids(edge_rows, mask_rows, node_grid, region_count)
+        valid_rows = node_valid.tolist()
+        if not any(valid_rows):
+            regions = [0] * capacity
+            graph_status = torch.ones((), device=device, dtype=torch.long)
+        else:
+            regions = _connected_region_ids(edge_rows, mask_rows, node_grid, region_count,
+                                            node_valid=valid_rows)
+            graph_status = torch.zeros((), device=device, dtype=torch.long)
         coarse_adj = [set() for _ in range(region_count)]
         region_tensor = torch.tensor(regions, device=device, dtype=torch.long)
         for src_node, row in enumerate(edge_rows):
-            if not any(mask_rows[src_node]):
+            if not valid_rows[src_node] or not any(mask_rows[src_node]):
                 continue
             src_region = regions[src_node]
             for dst_node, allowed in zip(row, mask_rows[src_node]):
-                if allowed:
+                if allowed and valid_rows[dst_node]:
                     dst_region = regions[dst_node]
                     if src_region != dst_region:
                         coarse_adj[src_region].add(dst_region)
-        coarse_degree = max(1, max((len(row) for row in coarse_adj), default=0))
+        coarse_degree = region_count
         coarse_edges = torch.zeros((region_count, coarse_degree), device=device,
                                    dtype=torch.long)
         coarse_mask = torch.zeros_like(coarse_edges, dtype=torch.bool)
@@ -244,12 +267,15 @@ def build_legal_pose_graph(env, *, slot: int = 3, resolution_m: float | None = N
             if ordered:
                 coarse_edges[region, :len(ordered)] = torch.tensor(ordered, device=device)
                 coarse_mask[region, :len(ordered)] = True
+    else:
+        raise RuntimeError("Plan A pose graph requires HIP; CUDA must not use CPU graph fallback")
     return LegalPoseGraph(
         xy=node_grid, heading_bin=heading_bins, heading=headings,
         edges=edges[None],
         edge_mask=edge_mask[None],
+        node_valid=node_valid[None],
         region_ids=region_tensor[None],
         coarse_edges=coarse_edges[None],
         coarse_edge_mask=coarse_mask[None],
         lookup=lookup, nx=nx, ny=ny, resolution_m=planner.resolution,
-        region_count=region_count)
+        region_count=region_count, graph_status=graph_status)

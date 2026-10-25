@@ -1100,7 +1100,7 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
     logits = gather_pose_behavior_logits(track, raw, graph, raster, support,
         field_length=(float(env.sim.field_length) if env is not None else float(planner.length)),
         field_width=(float(env.sim.field_width) if env is not None else float(planner.width)))
-    node_count = graph.node_count
+    node_count = graph.node_capacity
     speed = (env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
              if env is not None else None)
     eta = ((route_batch.distance_m.to(dtype=support.route_cost.dtype) / speed)
@@ -1122,7 +1122,8 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
             field_width = (float(env.sim.field_width) if env is not None
                            else float(planner.width))
             penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
-                planner, field_length, field_width, mode="learned")
+                planner, field_length, field_width, mode="learned",
+                node_valid=graph.node_valid)
         ix = torch.floor(support.goal_xy[:, 0] / graph.resolution_m).long().clamp(0, graph.nx - 1)
         iy = torch.floor(support.goal_xy[:, 1] / graph.resolution_m).long().clamp(0, graph.ny - 1)
         per_node = penalty_map[ix, iy]
@@ -1146,13 +1147,15 @@ def _plan_a_route_support(env, graph, support, snapshot_id, penalty_map, config)
                       learned_cost_scale=1.,
                       learned_cost_provenance="plan_a_current_P_v1")
     routes = evaluate_device_route_chunks(env, queries, support.goal_xy, **kwargs)
-    route_legal = routes.feasible
+    route_legal = routes.feasible & graph.node_valid[0]
     valid_matrix = support.valid_mask.reshape(-1, 8) & route_legal[:, None]
     pair_mask = valid_matrix.reshape(-1)
     fallback_node = routes.distance_m.to(support.distances_m.dtype).masked_fill(
         ~valid_matrix.any(-1), torch.inf).argmin()
     fallback_slot = valid_matrix[fallback_node].to(torch.long).argmax()
-    fallback_pair = fallback_node * valid_matrix.shape[1] + fallback_slot
+    fallback_pair = torch.where(valid_matrix.any(),
+        fallback_node * valid_matrix.shape[1] + fallback_slot,
+        torch.full((), -1, device=valid_matrix.device, dtype=torch.long))
     updated = replace(support, valid_mask=pair_mask,
         fallback_pair_tensor=fallback_pair.reshape(()), support_digest="",
         order_digest=plan_a_support_order_digest(support, graph))
@@ -1166,9 +1169,13 @@ def _plan_a_selection_logits(logits, valid_mask, fallback_index, decision_valid)
             fallback_index.numel() != 1 or fallback_index.device != logits.device):
         raise ValueError("Plan A selector inputs do not match the frozen support")
     masked = logits.masked_fill(~valid_mask, -torch.inf)
-    fallback_available = valid_mask.gather(0, fallback_index.reshape(1)).reshape(())
+    fallback_in_range = (fallback_index.reshape(()) >= 0) & (
+        fallback_index.reshape(()) < valid_mask.numel())
+    safe_fallback_index = fallback_index.reshape(()).clamp(0, valid_mask.numel() - 1)
+    fallback_available = fallback_in_range & valid_mask.gather(
+        0, safe_fallback_index.reshape(1)).reshape(())
     fallback_logits = torch.full_like(logits, -torch.inf).scatter(0,
-        fallback_index.reshape(1), torch.zeros((1,), device=logits.device,
+        safe_fallback_index.reshape(1), torch.zeros((1,), device=logits.device,
         dtype=logits.dtype))
     fallback_logits = torch.where(fallback_available, fallback_logits,
                                   torch.full_like(fallback_logits, -torch.inf))
@@ -1466,7 +1473,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         if track == "A1":
             utility_shape = (1, 8, *raster.shape[-2:])
         else:
-            utility_shape = (1, graph.node_count)
+            utility_shape = (1, graph.node_capacity)
         # Deterministic zero-U/P fallback is prepared while the worker scores.
         raw = {"utility": raster.new_zeros(utility_shape),
                "penalty": raster.new_zeros(utility_shape),
@@ -1480,7 +1487,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     if p_mode == "learned":
         penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
             env.planner, float(env.sim.field_length), float(env.sim.field_width),
-            mode="learned")
+            mode="learned", node_valid=graph.node_valid)
     config = SimpleNamespace(route_cost_points_per_second=route_cost_points_per_second,
         p_mode=p_mode, p_cost_scale=p_cost_scale,
         p_points_per_grid_edge=p_points_per_grid_edge,
@@ -1534,7 +1541,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             if p_mode == "learned":
                 penalty_map = project_pose_penalty(track, raw["penalty"], graph.lookup,
                     env.planner, float(env.sim.field_length), float(env.sim.field_width),
-                    mode="learned")
+                    mode="learned", node_valid=graph.node_valid)
             support, route_batch = _plan_a_route_support(env, graph, support,
                 observation.snapshot_id, penalty_map, config)
             logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
@@ -1676,6 +1683,7 @@ def _graph_inputs(track: str, graph: LegalPoseGraph, env, raster):
         return None
     data = {"node_features": graph.node_features(env, raster),
             "edges": graph.edges, "edge_mask": graph.edge_mask,
+            "node_valid": graph.node_valid,
             "region_ids": graph.region_ids}
     if hasattr(graph, "coarse_edges"):
         data.update(coarse_edges=graph.coarse_edges,
@@ -1723,7 +1731,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             capture_monotonic=candidate_set.observation.capture_monotonic)
         preliminary_map = project_pose_penalty(track, preliminary["raw"]["penalty"],
             graph.lookup, env.planner, path_geometry["field_length_m"],
-            path_geometry["field_width_m"], mode=p_mode)
+            path_geometry["field_width_m"], mode=p_mode,
+            node_valid=graph.node_valid)
         if p_mode == "learned":
             candidate_set = build_route_feasible_candidates(env, observation, graph,
                 episode_id=episode_id, action_ticks=action_ticks,
@@ -2295,7 +2304,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         "source_identity_sha256": source_sha256,
         "supervisor_source_identity_sha256": expected_source_sha256,
         "supervisor_native_extension_attestation": native_extension_attestation,
-        "graph": {"nodes": graph.node_count, "regions": graph.region_count,
+        "graph": {"node_capacity": graph.node_capacity, "regions": graph.region_count,
                   "resolution_m": graph.resolution_m, "heading_bins": 8},
         "candidate_boundary": CANDIDATE_BOUNDARY,
         "actor_execution_contract": (
@@ -2684,7 +2693,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                          learning_rate=config.learning_rate,
                          candidate_k=(None if config.track in ("A1", "A2", "A3")
                                       else config.candidate_k),
-                         graph_nodes=graph.node_count,
+                         graph_node_capacity=graph.node_capacity,
                          update_utc=datetime.now(timezone.utc).isoformat())
             stats["tracking_loss_reset_count"] = tracking_loss_reset_count
             if update_empty_support_events:

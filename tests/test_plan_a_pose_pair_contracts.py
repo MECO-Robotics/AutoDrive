@@ -4,7 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from frc_defense.meco_plan_a_policy import (PlanAActionSupport,
-    gather_pose_behavior_logits, plan_a_support_digest)
+    gather_pose_behavior_logits, plan_a_support_digest_cpu_reference)
 from frc_defense.meco_pose_graph import _connected_region_ids
 from frc_defense.meco_tracks import make_meco_track, sample_candidate_action
 from frc_defense.meco_track_training import (_plan_a_logits,
@@ -55,7 +55,7 @@ def test_plan_a_device_selector_fails_closed_when_no_route_is_feasible():
     logits = torch.tensor((0., 1., 2., 3.))
     valid = torch.zeros(4, dtype=torch.bool)
     selected_logits = _plan_a_selection_logits(logits, valid,
-        torch.tensor(0), torch.tensor(False))
+        torch.tensor(-1), torch.tensor(False))
     assert torch.isneginf(selected_logits).all()
 
 
@@ -63,7 +63,7 @@ def test_plan_a_device_selector_fails_closed_when_no_route_is_feasible():
 def test_plan_a_full_scorer_and_ppo_logprob_share_selected_pair(track):
     support = _pair_support()
     graph = type("Graph", (), {
-        "node_count": 2,
+        "node_capacity": 2,
         "xy": torch.tensor([[1.0, 1.0], [3.0, 1.0]]),
         "heading_bin": torch.tensor([2, 4]),
         "heading": torch.tensor([0.0, 0.0]),
@@ -118,12 +118,25 @@ def test_plan_a_support_digest_binds_device_fallback_pair():
         "xy": support.goal_xy,
         "edges": torch.zeros((1, 2, 1), dtype=torch.long),
         "edge_mask": torch.zeros((1, 2, 1), dtype=torch.bool),
+        "node_valid": torch.ones((1, 2), dtype=torch.bool),
+        "region_ids": torch.zeros((1, 2), dtype=torch.long),
+        "coarse_edges": torch.zeros((1, 64, 64), dtype=torch.long),
+        "coarse_edge_mask": torch.zeros((1, 64, 64), dtype=torch.bool),
+        "graph_status": torch.zeros((), dtype=torch.long),
     })()
-    first = plan_a_support_digest(
+    first = plan_a_support_digest_cpu_reference(
         replace(support, fallback_pair_tensor=torch.tensor(0)), graph)
-    second = plan_a_support_digest(
+    second = plan_a_support_digest_cpu_reference(
         replace(support, fallback_pair_tensor=torch.tensor(12)), graph)
     assert first != second
+    graph_with_changed_lookup = type("Graph", (), {
+        **graph.__dict__,
+        "lookup": torch.ones((8, 2, 4), dtype=torch.long),
+    })()
+    changed_lookup = plan_a_support_digest_cpu_reference(
+        replace(support, fallback_pair_tensor=torch.tensor(0)),
+        graph_with_changed_lookup)
+    assert first != changed_lookup
 
 
 @pytest.mark.parametrize("route_valid", (False, True))
@@ -136,7 +149,7 @@ def test_plan_a_prepare_fails_closed_for_empty_routes_or_invalid_model_input(
     support = replace(_pair_support(), fallback_pair_tensor=torch.tensor(0),
         order_digest="ordered")
     graph = type("Graph", (), {
-        "node_count": 2, "xy": support.goal_xy,
+        "node_capacity": 2, "xy": support.goal_xy,
         "heading": support.goal_heading,
         "heading_bin": torch.tensor([2, 4]),
         "lookup": torch.zeros((8, 2, 4), dtype=torch.long),
@@ -170,7 +183,7 @@ def test_plan_a_prepare_fails_closed_for_empty_routes_or_invalid_model_input(
         lambda _env, _graph, incoming, *_args: (
             replace(incoming, valid_mask=(torch.ones_like(incoming.valid_mask)
                     if route_valid else torch.zeros_like(incoming.valid_mask)),
-                    fallback_pair_tensor=torch.tensor(0)),
+                    fallback_pair_tensor=torch.tensor(0 if route_valid else -1)),
             SimpleNamespace(distance_m=torch.zeros(2),
                             learned_cost_grid_edges=torch.zeros(2))))
     monkeypatch.setattr(training, "_plan_a_logits",
@@ -272,6 +285,7 @@ def test_plan_a_models_have_finite_nonnegative_penalty_on_small_cpu_fixture(trac
             "node_features": torch.zeros(1, nodes, 9),
             "edges": torch.arange(nodes).view(1, nodes, 1),
             "edge_mask": torch.ones(1, nodes, 1, dtype=torch.bool),
+            "node_valid": torch.ones(1, nodes, dtype=torch.bool),
             "region_ids": torch.arange(nodes).view(1, nodes) % 64,
         }
         if track == "A2":

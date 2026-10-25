@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <c10/hip/HIPGuard.h>
 #include <c10/hip/HIPStream.h>
@@ -10,11 +11,12 @@ void plan_a_dijkstra_launch(const int64_t*, const double*, const double*,
     int64_t, int64_t, int64_t, double, double, double*, int64_t*, int64_t*,
     hipStream_t);
 void plan_a_dijkstra_graph_launch(const double*, const double*, const int64_t*,
-    const bool*, const int64_t*, const double*, const double*, double*, double*,
+    const bool*, const bool*, const int64_t*, const double*, const double*, double*, double*,
     int64_t*, double*, int64_t*, int64_t, int64_t, int64_t, double*, int64_t*,
     int64_t*, hipStream_t);
-void plan_a_pose_regions_launch(const int64_t*, const bool*, int64_t*, int64_t*,
+void plan_a_pose_regions_launch(const int64_t*, const bool*, const bool*, int64_t*, int64_t*,
     bool*, int64_t*, int64_t, int64_t, int64_t, hipStream_t);
+void plan_a_sha256_bytes_launch(const uint8_t*, int64_t, uint8_t*, hipStream_t);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor> dijkstra(torch::Tensor edge_dst,
@@ -70,7 +72,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor> dijkstra_graph(torch::Tensor xy,
     torch::Tensor heading, torch::Tensor edge_dst, torch::Tensor edge_allowed,
-    torch::Tensor root, torch::Tensor root_start_cost,
+    torch::Tensor node_valid, torch::Tensor root, torch::Tensor root_start_cost,
     torch::Tensor root_connector_m) {
   TORCH_CHECK(xy.is_cuda() && xy.dim() == 2 && xy.size(1) == 2 &&
       (xy.scalar_type() == at::kFloat || xy.scalar_type() == at::kDouble),
@@ -86,6 +88,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   TORCH_CHECK(edge_allowed.is_cuda() && edge_allowed.scalar_type() == at::kBool &&
       edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
       edge_allowed.device() == xy.device(), "edge_allowed must be HIP bool [N,S]");
+  TORCH_CHECK(node_valid.is_cuda() && node_valid.scalar_type() == at::kBool &&
+      node_valid.dim() == 1 && node_valid.size(0) == xy.size(0) &&
+      node_valid.is_contiguous() && node_valid.device() == xy.device(),
+      "node_valid must be contiguous HIP bool [N]");
   const auto n = edge_dst.size(0), slots = edge_dst.size(1);
   TORCH_CHECK(n > 0 && slots > 0, "invalid graph shape");
   TORCH_CHECK(n <= (std::numeric_limits<int64_t>::max() - 1) / slots,
@@ -118,6 +124,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
   auto status = torch::zeros({}, edge_dst.options());
   plan_a_dijkstra_graph_launch(xy64.data_ptr<double>(), heading64.data_ptr<double>(),
       edge_dst.data_ptr<int64_t>(), edge_allowed.data_ptr<bool>(),
+      node_valid.data_ptr<bool>(),
       root.data_ptr<int64_t>(), root_start_cost.data_ptr<double>(),
       root_connector_m.data_ptr<double>(),
       route.data_ptr<double>(), physical.data_ptr<double>(), parent.data_ptr<int64_t>(),
@@ -131,7 +138,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 pose_regions(torch::Tensor edge_dst, torch::Tensor edge_allowed,
-             int64_t region_count) {
+             torch::Tensor node_valid, int64_t region_count) {
   TORCH_CHECK(edge_dst.is_cuda() && edge_dst.scalar_type() == at::kLong &&
       edge_dst.dim() == 2 && edge_dst.is_contiguous(),
       "edge_dst must be contiguous HIP int64 [N,D]");
@@ -139,6 +146,10 @@ pose_regions(torch::Tensor edge_dst, torch::Tensor edge_allowed,
       edge_allowed.sizes() == edge_dst.sizes() && edge_allowed.is_contiguous() &&
       edge_allowed.device() == edge_dst.device(),
       "edge_allowed must be matching contiguous HIP bool [N,D]");
+  TORCH_CHECK(node_valid.is_cuda() && node_valid.scalar_type() == at::kBool &&
+      node_valid.dim() == 1 && node_valid.size(0) == edge_dst.size(0) &&
+      node_valid.is_contiguous() && node_valid.device() == edge_dst.device(),
+      "node_valid must be contiguous HIP bool [N]");
   const auto n = edge_dst.size(0), degree = edge_dst.size(1);
   TORCH_CHECK(n > 0 && degree > 0 && region_count > 0,
       "pose region graph dimensions must be positive");
@@ -148,12 +159,25 @@ pose_regions(torch::Tensor edge_dst, torch::Tensor edge_allowed,
   auto coarse_mask = torch::zeros({region_count, region_count}, edge_allowed.options());
   auto status = torch::zeros({}, edge_dst.options());
   plan_a_pose_regions_launch(edge_dst.data_ptr<int64_t>(),
-      edge_allowed.data_ptr<bool>(), region.data_ptr<int64_t>(),
+      edge_allowed.data_ptr<bool>(), node_valid.data_ptr<bool>(),
+      region.data_ptr<int64_t>(),
       coarse_edges.data_ptr<int64_t>(), coarse_mask.data_ptr<bool>(),
       status.data_ptr<int64_t>(), n, degree, region_count,
       c10::cuda::getCurrentCUDAStream(edge_dst.get_device()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {region, coarse_edges, coarse_mask, status};
+}
+
+torch::Tensor sha256_bytes(torch::Tensor bytes) {
+  TORCH_CHECK(bytes.is_cuda() && bytes.scalar_type() == at::kByte &&
+      bytes.dim() == 1 && bytes.is_contiguous(),
+      "SHA-256 input must be contiguous HIP uint8 [M]");
+  c10::cuda::CUDAGuard guard(bytes.device());
+  auto output = torch::empty({32}, bytes.options());
+  plan_a_sha256_bytes_launch(bytes.data_ptr<uint8_t>(), bytes.numel(),
+      output.data_ptr<uint8_t>(), c10::cuda::getCurrentCUDAStream(bytes.get_device()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -162,4 +186,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       "Plan A device-resident graph geometry and deterministic Dijkstra prototype");
   module.def("pose_regions", &pose_regions,
       "Exact ordered Plan A connected-region partition on HIP");
+  module.def("sha256_bytes", &sha256_bytes,
+      "SHA-256 over fixed-shape device bytes for post-decision artifacts");
 }

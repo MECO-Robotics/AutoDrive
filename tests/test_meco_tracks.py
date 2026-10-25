@@ -68,6 +68,7 @@ def test_five_architecture_outputs_and_candidate_logits():
             graph = {"node_features": node_features,
                      "edges": torch.arange(nodes).view(1, nodes, 1),
                      "edge_mask": torch.ones(1, nodes, 1, dtype=torch.bool),
+                     "node_valid": torch.ones(1, nodes, dtype=torch.bool),
                      "region_ids": torch.arange(nodes).view(1, nodes) % 64}
             if track == "A2":
                 graph["coarse_edges"] = torch.arange(64).view(1, 64, 1)
@@ -195,12 +196,13 @@ def test_se2_heading_embedding_wraps_and_marks_bad_bins_invalid():
 
     features = torch.zeros(1, 3, 9)
     features[0, :, 8] = torch.tensor((7., 0., 1.))
-    embedded = _se2_node_inputs(features, torch.zeros(1, 7))[0, :, 8:10]
+    node_valid = torch.ones(1, 3, dtype=torch.bool)
+    embedded = _se2_node_inputs(features, torch.zeros(1, 7), node_valid)[0, :, 8:10]
     # Bin 7 and bin 0 are one heading step apart under circular encoding.
     assert torch.allclose((embedded[0] - embedded[1]).norm(),
                           (embedded[1] - embedded[2]).norm(), atol=1e-6)
     features[0, 0, 8] = 8.
-    embedded, status = _se2_node_inputs(features, torch.zeros(1, 7),
+    embedded, status = _se2_node_inputs(features, torch.zeros(1, 7), node_valid,
                                         return_status=True)
     assert not status.item()
     assert torch.isfinite(embedded).all()
@@ -212,7 +214,7 @@ def test_a23_invalid_region_and_edge_status_fail_closed_without_host_checks(trac
 
     nodes = torch.ones(1, 2, 4)
     pooled, occupied, region_status = _pool_regions(
-        nodes, torch.tensor([[0, 64]]), 64)
+        nodes, torch.tensor([[0, 64]]), 64, torch.ones(1, 2, dtype=torch.bool))
     assert not region_status.item()
     assert occupied[0, 0]
     assert torch.isfinite(pooled).all()
@@ -229,6 +231,7 @@ def test_a23_invalid_region_and_edge_status_fail_closed_without_host_checks(trac
         edges=torch.tensor([[[2], [0]]]),
         edge_mask=torch.ones(1, 2, 1, dtype=torch.bool),
         region_ids=torch.tensor([[0, 64]]), globals_=torch.zeros(1, 7),
+        node_valid=torch.ones(1, 2, dtype=torch.bool),
         coarse_edges=torch.zeros(1, 64, 1, dtype=torch.long),
         coarse_edge_mask=torch.zeros(1, 64, 1, dtype=torch.bool))
     assert not output["device_input_valid"].item()
@@ -303,6 +306,47 @@ def test_transition_mask_blocks_messages_and_heading_wrap_is_continuous():
 
     features = torch.zeros(1, 3, 9)
     features[0, :, 8] = torch.tensor((7., 0., 1.))
-    headings = _se2_node_inputs(features, torch.zeros(1, 7))[0, :, 8:10]
+    headings = _se2_node_inputs(features, torch.zeros(1, 7),
+                                torch.ones(1, 3, dtype=torch.bool))[0, :, 8:10]
     assert torch.allclose((headings[0] - headings[1]).norm(),
                           (headings[1] - headings[2]).norm(), atol=1e-6)
+
+
+@pytest.mark.parametrize("track", ("A2", "A3"))
+def test_a23_padded_node_values_are_inert_and_validity_is_required(track):
+    import pytest
+
+    torch.manual_seed(41)
+    model = make_meco_track(track).eval()
+    valid = torch.tensor([[True, True, False, False]])
+    features = torch.zeros(1, 4, 9)
+    features[0, :, 6:8] = .5
+    features[0, :, 8] = torch.tensor([0., 1., 2., 3.])
+    edges = torch.tensor([[[1], [0], [0], [1]]])
+    edge_mask = torch.tensor([[[True], [True], [False], [False]]])
+    region_ids = torch.tensor([[0, 1, 63, 62]])
+    inputs = dict(node_features=features, edges=edges, edge_mask=edge_mask,
+        node_valid=valid, region_ids=region_ids, globals_=torch.zeros(1, 7),
+        hidden=torch.zeros(1, 64))
+    if track == "A2":
+        inputs.update(coarse_edges=torch.zeros(1, 64, 64, dtype=torch.long),
+            coarse_edge_mask=torch.zeros(1, 64, 64, dtype=torch.bool))
+    first = model(**inputs)
+    changed = dict(inputs)
+    changed_features = features.clone()
+    changed_features[:, 2:] = torch.tensor(float("nan"))
+    changed["node_features"] = changed_features
+    changed["region_ids"] = torch.tensor([[0, 1, 999, -55]])
+    second = model(**changed)
+
+    assert first["device_input_valid"].item()
+    assert second["device_input_valid"].item()
+    assert torch.allclose(first["utility"][:, :2], second["utility"][:, :2])
+    assert torch.allclose(first["penalty"][:, :2], second["penalty"][:, :2])
+    assert torch.allclose(first["behavior_logits"], second["behavior_logits"])
+    assert torch.allclose(first["hidden"], second["hidden"])
+    broken_order = dict(inputs)
+    broken_order["node_valid"] = torch.tensor([[True, False, True, False]])
+    assert not model(**broken_order)["device_input_valid"].item()
+    with pytest.raises(TypeError):
+        model(**{key: value for key, value in inputs.items() if key != "node_valid"})
