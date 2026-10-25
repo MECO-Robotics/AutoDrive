@@ -91,10 +91,15 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
     assert plan["episode_rows_materialized"] is False
     assert plan["final_test_rows_or_seed_values_included"] is False
     assert plan["design_only_cells_executable"] is False
+    assert plan["executable_cell_count"] == 0
+    assert plan["qualification_executable_cell_count"] == 0
     assert plan["executable_cell_count"] == sum(
-        cell["executable"] for requirement in plan["requirements"]
+        cell["qualification_executable"] for requirement in plan["requirements"]
         for cell in requirement["cells"])
-    assert plan["executable_cell_count"] > 0
+    assert plan["dispatchable_cell_count"] == sum(
+        cell["dispatchable"] for requirement in plan["requirements"]
+        for cell in requirement["cells"])
+    assert plan["dispatchable_cell_count"] > 0
     assert plan["qualification_eligible"] is False
     assert plan["runtime_capture_schema"] == "meco-phase4-realized-stimulus-capture-v1"
     assert plan["policies"] == list(POLICIES)
@@ -158,10 +163,14 @@ def test_phase4_plan_has_exact_compact_paired_schedule():
                 else:
                     assert cell["status"] == "design_only_unassigned_to_protocol_case"
                 assert cell["executable"] is False
+                assert cell["dispatchable"] == bool(
+                    cell["runtime_stimulus_supported"] and
+                    cell["scheduler_assignment_supported"])
             else:
-                # The field means campaign dispatchability for this planner
-                # schema. Qualification remains globally disabled above.
-                assert cell["executable"] is True
+                assert cell["dispatchable"] == cell["runtime_stimulus_supported"]
+            assert cell["qualification_executable"] is False
+            assert cell["executable"] is False
+            assert cell["replay_dashboard_review_accepted"] is False
     assert "seeds" not in set(_walk_keys(plan))
     assert "final_test" not in set(_walk_keys(plan))
 
