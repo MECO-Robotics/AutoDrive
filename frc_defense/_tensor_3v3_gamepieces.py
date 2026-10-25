@@ -6,7 +6,7 @@ import torch
 
 from .field import grid_array_points
 from ._tensor_3v3_observation import NUM_ROBOTS
-from .gamepiece_actions import update_fuel_actions
+from .gamepiece_actions import update_fuel_actions, _flush_fuel_score_awards
 
 
 def _edge_biased_unit(unit):
@@ -23,7 +23,9 @@ class TensorThreeVsThreeGamepieceMixin:
     _fuel_radius = .0825
 
     def _update_fuel(self, active, score_intent):
-        return update_fuel_actions(self, active, score_intent)
+        result = update_fuel_actions(self, active, score_intent)
+        _flush_fuel_score_awards(self)
+        return result
 
     def _randomize_pass_zone_positions(self, active=None):
         """Scatter passed fuel through alliance zones with an edge/corner bias."""
