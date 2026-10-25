@@ -1277,3 +1277,9 @@ post-lease attestation ordering, source/fixture revalidation, and the closed
 production gate. Device parity, support-digest comparison, profiling, and any
 dispatch decision remain deferred until the orchestrator confirms continuous
 training has released both exclusive WX9100 leases and schedules verification.
+
+## Plan C route-device provenance checkpoint E — candidate pending second review
+
+The Plan C route-device source/code candidate C (`cdeb9391bf23e5c2460527959132008aee6f8eb1`) has a separate approved exact-head code review. Ledger candidate D (`8d64233d4573600321956c74391842e7623f18f7`) was independently approved for ledger correctness; E records that D approval separately from C's code review. E remains a finalizer candidate awaiting its second exact-head review and integration. No E SHA or second-review verdict is recorded in the digest-pinned ledger.
+
+This status records code and ledger review only. It does not establish Plan C simulator behavior, a fresh replay, GPU/HIP parity or profiling, training, qualification, or whole-system GPU-only execution. See the [Plan C ledger candidate summary](implementation-provenance/plan-c-device-resident-selection-ledger-candidate-20261025.md), [D ledger review summary](implementation-provenance/plan-c-device-resident-selection-ledger-review-20261025.md), and [pending dashboard currentness note](implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md). Dashboard service, API, and frontend asset currentness remain unverified; no service action was performed for E.
