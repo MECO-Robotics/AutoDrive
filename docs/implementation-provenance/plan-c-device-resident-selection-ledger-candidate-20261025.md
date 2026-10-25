@@ -25,6 +25,6 @@ paths:
 - `docs/implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md`
 - `docs/plans/meco-plan-c-route-device-residency-ledger-currentness-20261025.md`
 
-No D SHA is recorded in this artifact or in its ledger row. D awaits an
-independent exact-head Pass 3 ledger review before a separate E finalizer can
-record the approval.
+No D SHA is recorded in this artifact or in its ledger row. At the D checkpoint this review was pending. Independent exact-head Pass 3
+subsequently approved D; its persisted review summary is recorded separately
+in `docs/implementation-provenance/plan-c-device-resident-selection-ledger-review-20261025.md`. E records that approval.

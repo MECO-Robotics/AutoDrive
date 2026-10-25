@@ -37,8 +37,7 @@ def evidence_case(tmp_path, monkeypatch):
             destination = tmp_path / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((REPO / relative).read_bytes())
-    # Exercise the previously approved prefix as a validated summary while D
-    # remains intentionally pending in the actual repository manifest.
+    # Exercise the preserved previously approved 88-row prefix independently.
     data["tranches"] = data["tranches"][:-1]
     return tmp_path, data
 
@@ -49,8 +48,13 @@ def validate(project, data):
 
 def test_prior_manifest_prefix_remains_validated_as_summary_only(evidence_case):
     current = dashboard_api._three_pass_provenance()
-    assert current["status"] == "untrusted"
-    assert "reviewer evidence" in current["untrusted_reason"]
+    assert current["validation_status"] == "validated_summary_only"
+    assert current["status"] == "scoped-transcript-summaries"
+    assert current["evidence_class"] == "scoped_transcript_summary"
+    assert len(current["tranches"]) == 89
+    assert current["tranches"][-1]["requirement_id"] == (
+        "meco-plan-c-route-device-residency")
+    assert "untrusted_reason" not in current
     project, data = evidence_case
     result = validate(project, data)
     assert result["validation_status"] == "validated_summary_only"
@@ -415,7 +419,7 @@ def test_prior_manifest_prefix_remains_validated_as_summary_only(evidence_case):
 
 
 
-def test_plan_c_checkpoint_d_is_pending_and_fail_closed():
+def test_plan_c_checkpoint_e_records_d_approval_and_pending_mutation_fails():
     data = json.loads(MANIFEST.read_text())
     assert len(data["tranches"]) == 89
     row = data["tranches"][-1]
@@ -426,37 +430,54 @@ def test_plan_c_checkpoint_d_is_pending_and_fail_closed():
         "kind": "scoped-transcript-summary",
         "status": "transcript-summary",
     }
+    assert hashlib.sha256(json.dumps(
+        data["tranches"][:88], sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest() == (
+        "af5303953982a989276a62bcc47abb78700e5d5b4273f93796fcc3a356423829")
     implementer = row["implementer"]
+    d_commit = "8d64233d4573600321956c74391842e7623f18f7"
+    assert implementer["candidate_commit"] == d_commit
+    assert row["reviewer"]["approved_commit"] == d_commit
     assert implementer["code_candidate_commit"] == (
         "cdeb9391bf23e5c2460527959132008aee6f8eb1")
     assert implementer["code_review_approved_commit"] == (
         implementer["code_candidate_commit"])
     assert implementer["code_review_verdict"] == "approved"
-    assert implementer["code_review_artifact"]["status"] == "review-summary"
     code_review = REPO / implementer["code_review_artifact"]["path"]
     assert hashlib.sha256(code_review.read_bytes()).hexdigest() == (
         implementer["code_review_artifact"]["sha256"])
+    assert implementer["code_candidate_paths"] == implementer["paths"]
+    assert len(implementer["code_candidate_paths"]) == 6
     d_summary = REPO / implementer["ledger_candidate_summary_artifact"]["path"]
     assert hashlib.sha256(d_summary.read_bytes()).hexdigest() == (
         implementer["ledger_candidate_summary_artifact"]["sha256"])
-    assert (REPO / "docs/implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md").is_file()
     status_text = (REPO / "docs/MECO_FULL_PLAN_EXECUTION_STATUS.md").read_text()
-    assert "Ledger checkpoint D records that C approval but remains pending" in status_text
-    assert implementer["code_candidate_paths"] == implementer["paths"]
-    assert len(implementer["code_candidate_paths"]) == 6
-    assert "candidate_commit" not in implementer
-    assert "approved_commit" not in row["reviewer"]
-    assert "artifact" not in row["reviewer"]
-    assert row["reviewer"]["status"] == "pending"
+    assert "was independently approved for ledger correctness" in status_text
+    assert "currentness remain unverified" in status_text
+    assert row["reviewer"]["status"] == "approved-summary"
+    assert row["reviewer"]["verdict"] == "approved"
+    d_review_artifact = row["reviewer"]["artifact"]
+    assert d_review_artifact["path"] == (
+        "docs/implementation-provenance/plan-c-device-resident-selection-ledger-review-20261025.md")
+    d_review_path = REPO / d_review_artifact["path"]
+    assert hashlib.sha256(d_review_path.read_bytes()).hexdigest() == d_review_artifact["sha256"]
+    assert d_commit in d_review_path.read_text()
     assert hashlib.sha256(MANIFEST.read_bytes()).hexdigest() == (
         dashboard_api._EXPECTED_THREE_PASS_PROVENANCE_SHA256)
-    result = validate(REPO, data)
-    assert result["status"] == "untrusted"
-    assert "reviewer evidence" in result["untrusted_reason"]
     api_result = dashboard_api._three_pass_provenance()
-    assert api_result["status"] == "untrusted"
-    assert api_result["tranches"] == []
-    assert "reviewer evidence" in api_result["untrusted_reason"]
+    assert api_result["validation_status"] == "validated_summary_only"
+    assert api_result["tranches"][-1]["reviewer"]["approved_commit"] == d_commit
+
+    pending = copy.deepcopy(data)
+    pending_row = pending["tranches"][-1]
+    pending_row["implementer"].pop("candidate_commit")
+    pending_row["reviewer"] = {
+        "status": "pending", "verdict": "pending",
+        "verdict_detail": "D review not yet recorded"}
+    rejected = validate(REPO, pending)
+    assert rejected["status"] == "untrusted"
+    assert "reviewer evidence" in rejected["untrusted_reason"]
+    assert rejected["tranches"] == []
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
     project, data = evidence_case

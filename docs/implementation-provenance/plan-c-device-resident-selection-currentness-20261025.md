@@ -1,11 +1,11 @@
 # Plan C dashboard currentness evidence — pending
 
 Status: **not verified**. This note is a pending checklist for the post-merge
-currentness stage in the approved plan. No dashboard service was restarted or
-queried for this D candidate. Do not treat the API digest pin or local
+currentness stage in the approved plan. D was approved and E is the separate
+finalizer candidate; no dashboard service was restarted or queried for E. Do not treat the API digest pin or local
 provenance tests as evidence that a running dashboard serves this checkout.
 
-After E is approved and integrated, record the UTC timestamp, active service
+After E receives its second exact-head approval and is integrated, record the UTC timestamp, active service
 PID/invocation, working directory, integrated source identity, HTTP results for
 `/api/curriculum-status` and `/api/meco-status`, and all eight frontend route
 hash comparisons specified in the approved plan. The curriculum response must
