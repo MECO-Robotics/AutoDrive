@@ -43,6 +43,7 @@ MAX_DASHBOARD_SUMMARY_RECORDS_PER_SCAN = 50_000
 DASHBOARD_SUMMARY_SCHEMA_VERSION = 1
 DASHBOARD_SUMMARY_SUFFIX = ".dashboard-summary.json"
 _DASHBOARD_SUMMARY_READS = threading.BoundedSemaphore(2)
+_DASHBOARD_SUMMARY_WRITES = threading.BoundedSemaphore(1)
 DIAGNOSTIC_MONITOR_ERROR_LIMIT = 300
 DIAGNOSTIC_MONITOR_FRONTIER_LIMIT = 100
 
@@ -1128,7 +1129,7 @@ def _atomic_summary_write(path: Path, data: bytes):
             os.unlink(temporary_name)
 
 
-def _write_dashboard_comparison_summary(report_path: Path, report: dict) -> bool:
+def _write_dashboard_comparison_summary_unlocked(report_path: Path, report: dict) -> bool:
     """Atomically publish a bounded projection derived by the dashboard validator."""
     report_path = Path(report_path)
     records = report.get("records") if isinstance(report, dict) else None
@@ -1169,6 +1170,16 @@ def _write_dashboard_comparison_summary(report_path: Path, report: dict) -> bool
         return False
     _atomic_summary_write(Path(str(report_path) + DASHBOARD_SUMMARY_SUFFIX), data)
     return True
+
+
+def _write_dashboard_comparison_summary(report_path: Path, report: dict) -> bool:
+    """Allow one bounded projection writer per process at a time."""
+    if not _DASHBOARD_SUMMARY_WRITES.acquire(blocking=False):
+        return False
+    try:
+        return _write_dashboard_comparison_summary_unlocked(report_path, report)
+    finally:
+        _DASHBOARD_SUMMARY_WRITES.release()
 
 
 def _copy_dashboard_comparison_summary(source_path: Path, destination_path: Path) -> bool:

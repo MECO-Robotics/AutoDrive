@@ -213,6 +213,19 @@ def test_incomplete_report_cannot_produce_dashboard_summary(tmp_path):
     assert not Path(str(source) + ".dashboard-summary.json").exists()
 
 
+def test_summary_writer_concurrency_is_bounded(tmp_path):
+    import frc_defense.meco_dashboard as dashboard
+
+    report = _report()
+    source = tmp_path / "evaluation.json"
+    source.write_text(json.dumps(report))
+    assert dashboard._DASHBOARD_SUMMARY_WRITES.acquire(blocking=False)
+    try:
+        assert not _write_dashboard_comparison_summary(source, report)
+    finally:
+        dashboard._DASHBOARD_SUMMARY_WRITES.release()
+
+
 def test_direct_campaign_layout_rejects_partial_track_directories(tmp_path):
     (tmp_path / "checkpoints" / "A1").mkdir(parents=True)
 
