@@ -618,6 +618,20 @@ annotation manifest binds the new source bytes separately while legal-node
 support remains bound to its original v3 source. Static checks only; no
 collection, replay, or simulator evaluation has been run.
 
+### Signed Plan A human-choice authority contract
+
+Added a separate Ed25519 authority validator for human-selected feasible
+`(node_id, behavior_id)` decisions. Its signed payload pins the key ID, author,
+selection basis, sidecar hash, source and source-manifest hashes, and replay and
+replay-manifest hashes. The validator requires exact decision-key coverage,
+train split, state/snapshot/support binding, a currently available support
+pair, canonical support pose derivation, and matching actual-execution evidence
+with no failure, remasking, target loss, or planner preemption. The existing
+minimum-route expert-goal producer remains a deterministic baseline and is not
+relabeled as human choice. This is a contract layer; it is not yet wired into
+the production warm-start fitter and no real simulator replay has been run.
+Focused CPU contract tests and runtime execution qualification are pending.
+
 ### C2 deterministic PPO replay on ROCm
 
 The preserved C2 update-20 replay failure had identical model, observation,
