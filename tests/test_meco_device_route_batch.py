@@ -151,6 +151,59 @@ def test_plan_a_inference_request_keeps_dynamic_support_mask_device_resident(tra
     assert request.candidate_support_mode == "device-mask"
 
 
+@pytest.mark.parametrize("track", ("A2", "A3"))
+def test_plan_a_adapter_propagates_model_graph_status_to_inference_valid(track):
+    candidate_ids = ("plan-a-row:0", "plan-a-row:1")
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.device = torch.device("cuda:0")
+    adapter.checkpoint_sha256 = "c" * 64
+    adapter.protocol_id = "plan-a-device-status"
+    adapter._last_inference_exception_type = None
+    fake = lambda tensor: tensor.as_subclass(_CudaContractTensor)
+    inputs = {
+        "node_features": fake(torch.zeros((1, 2, 9))),
+        "edges": fake(torch.zeros((1, 2, 10), dtype=torch.long)),
+        "edge_mask": fake(torch.zeros((1, 2, 10), dtype=torch.bool)),
+        "region_ids": fake(torch.tensor([[0, 1]])),
+        "globals_": fake(torch.zeros((1, 7))),
+        "hidden": fake(torch.zeros((1, 64))),
+    }
+    if track == "A2":
+        inputs["coarse_edges"] = fake(torch.zeros((1, 64, 64), dtype=torch.long))
+        inputs["coarse_edge_mask"] = fake(torch.zeros((1, 64, 64), dtype=torch.bool))
+    # Preserve canonical request key order for the adapter's schema check.
+    inputs = {name: inputs[name] for name in MECO_INPUT_NAMES[track]}
+    capture = time.monotonic() - .01
+    request = MecoInferenceRequest(track=track, snapshot_id="status:1",
+        checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
+        observation_schema=1, observation_timestamp=1., capture_monotonic=capture,
+        dispatch_monotonic=capture, expires_monotonic=capture + MECO_MAX_INFERENCE_AGE_S,
+        input_names=MECO_INPUT_NAMES[track],
+        input_shapes=tuple(tuple(inputs[name].shape) for name in MECO_INPUT_NAMES[track]),
+        candidate_ids=candidate_ids, valid_mask=(), fallback_index=-1,
+        request_sequence=1, generation_id="status-generation",
+        candidate_mask_digest=ordered_candidate_order_digest(candidate_ids),
+        legal_pose_order_digest="d" * 64,
+        input_contract_sha256=input_contract_digest(), model_id=f"meco:{track}",
+        candidate_support_mode="device-mask")
+
+    def invalid_model(**_inputs):
+        return {"utility": fake(torch.ones((1, 2))),
+            "penalty": fake(torch.ones((1, 2))),
+            "behavior_logits": fake(torch.ones((1, 5))),
+            "hidden": fake(torch.ones((1, 64))),
+            "device_input_valid": fake(torch.tensor(False))}
+
+    adapter.model = invalid_model
+    response = adapter._infer_sync(request,
+        {**inputs, "__candidate_valid_mask": fake(torch.tensor([[True, True]]))},
+        now=time.monotonic())
+    assert response is not None, adapter._last_inference_exception_type
+    assert not response.outputs["__inference_valid"].item()
+    assert torch.equal(response.outputs["utility"], torch.zeros_like(response.outputs["utility"]))
+
+
 class _NoHostScalarSync(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if func._schema.name == "aten::_local_scalar_dense":

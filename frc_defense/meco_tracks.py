@@ -393,6 +393,17 @@ class ProductionMecoAdapter:
                         else ("candidate_utility", "uncertainty", "hidden"))
             if not isinstance(outputs, Mapping) or any(name not in outputs for name in expected):
                 return None
+            if self.track in ("A2", "A3"):
+                model_input_valid = outputs.get("device_input_valid")
+                if (not isinstance(model_input_valid, torch.Tensor)
+                        or model_input_valid.dtype != torch.bool
+                        or model_input_valid.numel() != 1
+                        or model_input_valid.device != self.device):
+                    return None
+                if device_validity_mode:
+                    inference_valid &= model_input_valid.reshape(())
+                elif not bool(model_input_valid.reshape(())):
+                    return None
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
                    or value.device != self.device or value.device.type != "cuda"
