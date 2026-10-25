@@ -1071,11 +1071,26 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                 if arm == "no_factor" and captured is not None:
                     raise ValueError("no-factor control unexpectedly applied a reactive policy")
                 if arm == "factor_treatment":
+                    expected_assignment = next((item for item in schedule.get(
+                        "per_episode_assignment", ()) if item.get("seed") == key[2]
+                            and item.get("category") == key[1]), None)
                     if (not isinstance(captured, dict)
                             or captured.get("policy_id") != schedule["policy_id"]
                             or captured.get("factor_id") != schedule["factor_id"]
                             or captured.get("policy_family") != schedule["policy_family"]
                             or captured.get("schedule_sha256") != schedule["schedule_sha256"]
+                            or not isinstance(expected_assignment, dict)
+                            or captured.get("assignment_sha256") != expected_assignment.get(
+                                "assignment_sha256")
+                            or captured.get("configured_slots") != expected_assignment.get(
+                                "configured_pressure_slots")
+                            or captured.get("applied_slots") != expected_assignment.get(
+                                "configured_pressure_slots")
+                            or captured.get("applied_event_coverage_complete") is not True
+                            or captured.get("episode_outcome_metrics") != {
+                                name: row.get("metrics", {}).get(name) for name in (
+                                    "success", "scores", "useful_throughput",
+                                    "completed_cycles")}
                             or captured.get("interception_rate") is not None
                             or captured.get("paired_outcome_by_family") is not None):
                         raise ValueError(f"Phase 4 treatment row lacks policy provenance/null outcomes: {key}")
@@ -1089,6 +1104,7 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         matrix_files[arm] = paths[0]
     pair_counts = {}
     direct_paired = []
+    reactive_paired = []
     for condition_name in sorted(condition_names):
         control = reports_by_arm["no_factor"][condition_name]
         treatment = reports_by_arm["factor_treatment"][condition_name]
@@ -1101,6 +1117,22 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                 direct_paired.append(paired_direct_pursuit_outcomes(
                     control[key]["phase4_direct_pursuit"],
                     treatment[key]["phase4_direct_pursuit"]))
+        elif schedule.get("factor_id") == "defender.reactive_pool":
+            for key in sorted(control):
+                captured = treatment[key].get("phase4_opponent_policy")
+                if not isinstance(captured, dict):
+                    raise ValueError(f"reactive treatment lacks applied policy capture: {key}")
+                family = captured["policy_family"]
+                reactive_paired.append({"policy_id": key[0],
+                    "policy_family": family, "category": key[1], "seed": key[2],
+                    "control_episode_outcome": {name: control[key].get(
+                        "metrics", {}).get(name) for name in ("success", "scores",
+                            "useful_throughput", "completed_cycles")},
+                    "treatment_episode_outcome": captured["episode_outcome_metrics"],
+                    "outcome_semantics": "whole-team paired episode outcome while the policy was assigned; association by policy family, not per-policy causal contribution"})
+    reactive_by_family = {}
+    for row in reactive_paired:
+        reactive_by_family.setdefault(row["policy_family"], []).append(row)
     pairing = {"schema": ("meco-phase4-direct-pursuit-pair-outcomes-v1" if direct_pursuit
                            else "meco-phase4-reactive-opponent-pair-coverage-v1"),
         "policy_id": schedule["policy_id"],
@@ -1116,6 +1148,14 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         "simulator_behavior_validated": False,
         "outcome_signals_complete": bool(direct_pursuit and direct_paired),
         "paired_outcome_by_family": None,
+        "policy_family_coverage": ({family: {
+            "policy_ids": sorted({row["policy_id"] for row in rows}),
+            "paired_episode_rows": len(rows)}
+            for family, rows in sorted(reactive_by_family.items())}
+            if schedule.get("factor_id") == "defender.reactive_pool" else None),
+        "paired_outcome_by_family_association": ({family: rows for family, rows in
+            sorted(reactive_by_family.items())}
+            if schedule.get("factor_id") == "defender.reactive_pool" else None),
         "interception_rate": ({
             "numerator_intercepted_episodes": sum(
                 row["interception_episode_numerator"] for row in direct_paired),

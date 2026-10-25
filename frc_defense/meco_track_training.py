@@ -3796,10 +3796,35 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "schedule_sha256"],
                                 "policy_config_sha256": phase4_opponent_schedule[
                                     "policy_config_sha256"],
+                                "assignment_sha256": next(item["assignment_sha256"]
+                                    for item in phase4_opponent_schedule[
+                                        "per_episode_assignment"]
+                                    if item["seed"] == seed and
+                                       item["category"] == category),
                                 "inputs": "own policy_pose plus validity-masked sensed opponent_pose/opponent_velocity and static scenario configuration",
                                 "runtime": env.phase4_opponent_runtime,
+                                "configured_slots": phase4_opponent_schedule[
+                                    "configured_pressure_slots"][category],
+                                "applied_slots": env.phase4_opponent_runtime[
+                                    "applied_slots"],
+                                "applied_command_calls_by_slot": env.phase4_opponent_runtime[
+                                    "applied_command_calls_by_slot"],
+                                "applied_event_coverage_complete": bool(
+                                    env.phase4_opponent_runtime["applied_slots"] ==
+                                    phase4_opponent_schedule[
+                                        "configured_pressure_slots"][category] and
+                                    all(env.phase4_opponent_runtime[
+                                        "applied_command_calls_by_slot"].get(str(slot)) ==
+                                        int(env.sim.physics_substep_index[0].item())
+                                        for slot in phase4_opponent_schedule[
+                                            "configured_pressure_slots"][category])),
+                                "episode_outcome_metrics": {name: metrics.get(name)
+                                    for name in ("success", "scores",
+                                        "useful_throughput", "completed_cycles")},
                                 "interception_rate": None,
                                 "paired_outcome_by_family": None,
+                                "qualification_eligible": False,
+                                "outcome_semantics": "whole-team episode metrics while this policy was assigned; no interception or per-policy causal contribution is inferred",
                                 "qualification_eligible": False,
                             } if phase4_opponent_schedule is not None else None),
                             "phase4_direct_pursuit": (
