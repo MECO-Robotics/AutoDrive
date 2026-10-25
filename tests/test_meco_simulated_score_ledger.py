@@ -67,6 +67,8 @@ def _context(**overrides):
                 "bump_clearance_source": "TensorThreeVsThreeEnv._robots_clear_of_bumps"},
             "score_intent_source": "effective policy action trace passed to update_fuel_actions",
             "score_rules_id": RULES_ID,
+            "robot_team_slots": [0, 0, 0, 1, 1, 1],
+            "fuel_count": 32,
         },
         "effective_scoring_configuration_sha256": None,
         "fuel_count": 32,
@@ -216,6 +218,20 @@ def test_missing_context_and_censoring_are_incomplete_not_zero_scores():
         assert ledger["simulated_match_score"]["red"] is None
         assert ledger["simulated_match_score"]["blue"] is None
         assert ledger["simulated_match_score"]["complete"] is False
+
+
+@pytest.mark.parametrize("mutation, reason", [
+    (lambda context: context.update(robot_team_slots=[0, 0, 1, 0, 1, 1]),
+     "alliance map differs"),
+    (lambda context: context.update(fuel_count=31), "FUEL count differs"),
+])
+def test_context_rejects_top_level_effective_configuration_disagreement(mutation, reason):
+    context = _context()
+    mutation(context)
+    ledger = build_score_ledger(context, _events(), _approval(),
+                                approval_sha256=APPROVAL_SHA)
+    assert ledger["status"] == "incomplete"
+    assert any(reason in item for item in ledger["incomplete_reasons"])
 
 
 @pytest.mark.parametrize("field,value,message", [

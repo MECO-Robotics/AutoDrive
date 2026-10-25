@@ -182,11 +182,15 @@ def _validate_context(context, approval_sha256):
         required_config = ("dt", "robot_control_modes", "robot_types", "robot_roles",
             "robot_fuel_capacities", "robot_score_interval_s", "robot_readiness",
             "score_intent_source", "alliance_zone_depth_m", "hub_schedule",
-            "robot_dimensions_m", "field_geometry")
+            "robot_dimensions_m", "field_geometry", "robot_team_slots", "fuel_count")
         missing.extend(f"effective scoring configuration missing: {key}"
                        for key in required_config if key not in config)
         if context["effective_scoring_configuration_sha256"] != sha256(config):
             missing.append("effective scoring configuration digest mismatch")
+        if config.get("robot_team_slots") != teams:
+            missing.append("top-level alliance map differs from effective configuration")
+        if config.get("fuel_count") != context.get("fuel_count"):
+            missing.append("top-level FUEL count differs from effective configuration")
         for key, allowed in (("robot_control_modes", {"none", "nn", "deterministic"}),
                               ("robot_types", {"dumper", "turret"}),
                               ("robot_roles", {"offense", "defense"})):
