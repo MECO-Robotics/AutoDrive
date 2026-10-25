@@ -60,6 +60,11 @@ def managed_meco_adapters():
 
 MECO_INFERENCE_SCHEMA = "meco-inference-v2"
 MECO_MAX_INFERENCE_AGE_S = 0.25
+MECO_INFERENCE_OUTCOME_CODES = MappingProxyType({
+    "accepted": 0,
+    "deterministic_fallback": 1,
+    "no_feasible_candidate": 2,
+})
 MECO_INPUT_NAMES = {
     "A1": ("raster", "globals_", "hidden"),
     "A2": ("node_features", "edges", "edge_mask", "region_ids", "globals_",
@@ -94,6 +99,7 @@ class MecoInferenceRequest:
     input_contract_sha256: str = ""
     model_id: str = ""
     schema: str = MECO_INFERENCE_SCHEMA
+    candidate_support_mode: str = "table-mask"
 
     def __post_init__(self):
         if (self.schema != MECO_INFERENCE_SCHEMA or self.track not in MECO_TRACKS
@@ -117,13 +123,21 @@ class MecoInferenceRequest:
         if (not self.candidate_ids or any(not isinstance(item, str) or not item for item in self.candidate_ids)
                 or len(set(self.candidate_ids)) != len(self.candidate_ids)
                 or any(not shape or any(type(size) is not int or size <= 0 for size in shape)
-                       for shape in self.input_shapes)
-                or len(self.candidate_ids) != len(self.valid_mask)
-                or any(type(v) is not bool for v in self.valid_mask)
-                or not 0 <= self.fallback_index < len(self.candidate_ids)
-                or not self.valid_mask[self.fallback_index]):
+                       for shape in self.input_shapes)):
             raise ValueError("candidate ordering, mask, or deterministic fallback is invalid")
-        expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
+        if self.candidate_support_mode == "table-mask":
+            if (len(self.candidate_ids) != len(self.valid_mask)
+                    or any(type(v) is not bool for v in self.valid_mask)
+                    or not 0 <= self.fallback_index < len(self.candidate_ids)
+                    or not self.valid_mask[self.fallback_index]):
+                raise ValueError("candidate ordering, mask, or deterministic fallback is invalid")
+            expected_mask_digest = ordered_candidate_mask_digest(self.candidate_ids, self.valid_mask)
+        elif self.candidate_support_mode == "device-mask":
+            if self.valid_mask or self.fallback_index != -1:
+                raise ValueError("device candidate support cannot contain a host mask or fallback")
+            expected_mask_digest = ordered_candidate_order_digest(self.candidate_ids)
+        else:
+            raise ValueError("unsupported candidate support mode")
         if self.candidate_mask_digest != expected_mask_digest:
             raise ValueError("candidate IDs/mask digest does not match request ordering")
         from .meco_input_provenance import input_contract_digest
@@ -164,12 +178,21 @@ def ordered_candidate_mask_digest(candidate_ids, valid_mask):
                            ensure_ascii=False).encode()).hexdigest()
 
 
+def ordered_candidate_order_digest(candidate_ids):
+    """Digest stable row identity when the authoritative mask stays on device."""
+    payload = {"candidate_ids": tuple(candidate_ids),
+               "support_mode": "device-mask"}
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":"),
+                           ensure_ascii=False).encode()).hexdigest()
+
+
 def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
                                 table: CandidateTable,
                                 observation_timestamp: float,
                                 capture_monotonic: float,
                                 inputs: Mapping[str, torch.Tensor],
-                                legal_pose_order_digest: str = "") -> MecoInferenceRequest:
+                                legal_pose_order_digest: str = "",
+                                candidate_batch=None) -> MecoInferenceRequest:
     """Freeze request identity/order/shapes from current planner tensors."""
     names = MECO_INPUT_NAMES[adapter.track]
     if tuple(inputs) != names:
@@ -178,6 +201,15 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
     contract_digest = validate_serialized_inputs(adapter.track, inputs)
     dispatch = time.monotonic()
     sequence, generation = adapter.next_request_identity()
+    device_support = candidate_batch is not None
+    if device_support and (adapter.track not in ("C1", "C2") or
+            tuple(candidate_batch.candidate_ids) != tuple(table.candidate_ids)):
+        raise ValueError("device candidate support requires aligned C1/C2 candidate rows")
+    request_mask = () if device_support else table.valid_mask
+    request_fallback = -1 if device_support else next(
+        (i for i, valid in enumerate(table.valid_mask) if valid), -1)
+    if not device_support and request_fallback < 0:
+        raise ValueError("request requires a valid deterministic fallback")
     return MecoInferenceRequest(track=adapter.track, snapshot_id=table.snapshot_id,
         checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
         observation_schema=1, observation_timestamp=float(observation_timestamp),
@@ -185,12 +217,14 @@ def make_meco_inference_request(adapter: "ProductionMecoAdapter", *,
         expires_monotonic=float(capture_monotonic) + MECO_MAX_INFERENCE_AGE_S,
         input_names=names,
         input_shapes=tuple(tuple(inputs[name].shape) for name in names),
-        candidate_ids=table.candidate_ids, valid_mask=table.valid_mask,
-        fallback_index=next((i for i, valid in enumerate(table.valid_mask) if valid), -1),
+        candidate_ids=table.candidate_ids, valid_mask=request_mask,
+        fallback_index=request_fallback,
         request_sequence=sequence, generation_id=generation,
-        candidate_mask_digest=ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask),
+        candidate_mask_digest=(ordered_candidate_order_digest(table.candidate_ids)
+            if device_support else ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask)),
         legal_pose_order_digest=legal_pose_order_digest,
-        input_contract_sha256=contract_digest, model_id=f"meco:{adapter.track}")
+        input_contract_sha256=contract_digest, model_id=f"meco:{adapter.track}",
+        candidate_support_mode=("device-mask" if device_support else "table-mask"))
 
 
 class ProductionMecoAdapter:
@@ -244,7 +278,9 @@ class ProductionMecoAdapter:
         if "MECO_REQUEST_CAPTURE_DIR" in os.environ or "MECO_REQUEST_CAPTURE_MAX" in os.environ:
             try:
                 from .meco_request_capture import capture_request
-                capture_request(request, inputs,
+                capture_inputs = {name: inputs[name] for name in request.input_names
+                                  if name in inputs}
+                capture_request(request, capture_inputs,
                     source_snapshot_sha256=self.source_snapshot_sha256)
             except Exception as exc:
                 warnings.warn(f"MECO production request capture failed: {type(exc).__name__}: {exc}",
@@ -262,6 +298,10 @@ class ProductionMecoAdapter:
         self._last_inference_exception_type = None
         try:
             from .meco_input_provenance import input_contract_digest
+            support_key = "__candidate_valid_mask"
+            candidate_mask = inputs.get(support_key)
+            model_inputs = {name: inputs[name] for name in request.input_names
+                            if name in inputs}
             if (request.track != self.track or request.model_id != f"meco:{self.track}"
                     or request.checkpoint_sha256 != self.checkpoint_sha256
                     or request.protocol_id != self.protocol_id or request.observation_schema != 1
@@ -269,23 +309,55 @@ class ProductionMecoAdapter:
                     or now - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or now > request.expires_monotonic
                     or request.input_contract_sha256 != input_contract_digest()
-                    or tuple(inputs) != request.input_names):
+                    or tuple(model_inputs) != request.input_names
+                    or set(inputs) != (set(request.input_names) |
+                        ({support_key} if candidate_mask is not None else set()))):
                 return None
-            tensors = tuple(inputs[name] for name in request.input_names)
+            if (request.candidate_support_mode == "device-mask" and
+                    (self.track not in ("C1", "C2") or candidate_mask is None)):
+                return None
+            tensors = tuple(model_inputs[name] for name in request.input_names)
             if tuple(tuple(t.shape) for t in tensors) != request.input_shapes:
                 return None
             if any(not isinstance(t, torch.Tensor) for t in tensors):
                 return None
             if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
-            if any(t.is_floating_point() and not bool(torch.isfinite(t).all()) for t in tensors):
-                return None
+            device_validity_mode = self.track in ("C1", "C2")
+            inference_valid = None
+            if device_validity_mode:
+                # Plan C device-mask requests cannot synchronize dynamic CUDA
+                # predicates. Carry validity to its selector and sanitize.
+                inference_valid = torch.isfinite(tensors[0]).all()
+                safe_tensors = []
+                for tensor in tensors:
+                    if tensor.is_floating_point():
+                        inference_valid &= torch.isfinite(tensor).all()
+                        safe_tensors.append(torch.where(torch.isfinite(tensor), tensor,
+                                                        torch.zeros_like(tensor)))
+                    else:
+                        safe_tensors.append(tensor)
+            else:
+                # Preserve the established A1/A2/A3 adapter contract from
+                # mainline; Plan C's no-sync change does not modify Plan A.
+                if any(tensor.is_floating_point() and
+                       not bool(torch.isfinite(tensor).all()) for tensor in tensors):
+                    return None
+                safe_tensors = list(tensors)
             for name, tensor in zip(request.input_names, tensors):
                 if name in ("edge_mask", "coarse_edge_mask") and tensor.dtype != torch.bool:
                     return None
                 if name in ("edges", "coarse_edges", "region_ids") and tensor.dtype != torch.long:
                     return None
-            by_name = dict(inputs)
+            by_name = dict(zip(request.input_names, safe_tensors))
+            if candidate_mask is not None:
+                if (self.track not in ("C1", "C2") or request.candidate_support_mode != "device-mask"
+                        or not isinstance(candidate_mask, torch.Tensor)
+                        or candidate_mask.dtype != torch.bool
+                        or candidate_mask.device != self.device
+                        or candidate_mask.shape != (1, len(request.candidate_ids))):
+                    return None
+                by_name["candidate_mask"] = candidate_mask
             batch = tensors[0].shape[0]
             if by_name["globals_"].shape != (batch, 7):
                 return None
@@ -312,7 +384,7 @@ class ProductionMecoAdapter:
             if "coarse_edges" in by_name and (by_name["coarse_edges"].ndim != 3
                     or by_name["coarse_edge_mask"].shape != by_name["coarse_edges"].shape):
                 return None
-            outputs = self.model(**dict(inputs))
+            outputs = self.model(**by_name)
             expected = (("utility", "penalty", "behavior_logits", "hidden") if self.track.startswith("A")
                         else ("candidate_utility", "uncertainty", "hidden"))
             if not isinstance(outputs, Mapping) or any(name not in outputs for name in expected):
@@ -320,8 +392,12 @@ class ProductionMecoAdapter:
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
                    or value.device != self.device or value.device.type != "cuda"
-                   or not bool(torch.isfinite(value).all()) for value in values.values()):
+                   or (not device_validity_mode and not bool(torch.isfinite(value).all()))
+                   for value in values.values()):
                 return None
+            if device_validity_mode:
+                for value in values.values():
+                    inference_valid &= torch.isfinite(value).all()
             if values["hidden"].shape != (batch, HIDDEN):
                 return None
             if self.track.startswith("A"):
@@ -331,13 +407,22 @@ class ProductionMecoAdapter:
                     if self.track == "A1" else
                     values["utility"].ndim == 2 and values["utility"].shape == by_name["node_features"].shape[:2])
                 if (not utility_shape_ok or values["penalty"].shape != values["utility"].shape
-                        or values["behavior_logits"].shape != (batch, 5)
-                        or bool((values["penalty"] < 0).any())):
+                        or values["behavior_logits"].shape != (batch, 5)):
+                    return None
+                if device_validity_mode:
+                    inference_valid &= (values["penalty"] >= 0).all()
+                elif bool((values["penalty"] < 0).any()):
                     return None
             elif (values["candidate_utility"].shape != (batch, len(request.candidate_ids))
-                  or values["uncertainty"].shape != values["candidate_utility"].shape
-                  or bool((values["uncertainty"] < 0).any())):
+                  or values["uncertainty"].shape != values["candidate_utility"].shape):
                 return None
+            else:
+                inference_valid &= (values["uncertainty"] >= 0).all()
+            if device_validity_mode:
+                values = {name: torch.where(inference_valid, value,
+                                            torch.zeros_like(value))
+                          for name, value in values.items()}
+                values["__inference_valid"] = inference_valid
             done = time.monotonic()
             if (done - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or done > request.expires_monotonic):
@@ -1011,14 +1096,26 @@ class C2MapCrossAttentionGRU(nn.Module):
         self.scorer = nn.Sequential(nn.Linear(HIDDEN * 3, HIDDEN), nn.SiLU(), nn.Linear(HIDDEN, 1))
         self.uncertainty = nn.Linear(HIDDEN * 3, 1)
 
-    def forward(self, raster, globals_, candidate_features, hidden=None, **_):
+    def forward(self, raster, globals_, candidate_features, hidden=None,
+                candidate_mask=None, **_):
         map_tokens = self.map_encoder(raster).flatten(2).transpose(1, 2)
         if map_tokens.shape[1] > self.tokens:
             map_tokens = F.adaptive_avg_pool1d(map_tokens.transpose(1, 2), self.tokens).transpose(1, 2)
         global_state = self.global_encoder(globals_)
         candidate = self.candidate_encoder(candidate_features)
         queried, _ = self.cross_attention(candidate, map_tokens, map_tokens, need_weights=False)
-        state = self.context(global_state + queried.mean(1), hidden)
+        if candidate_mask is None:
+            candidate_mask = torch.ones(candidate_features.shape[:2],
+                device=candidate_features.device, dtype=torch.bool)
+        if (candidate_mask.shape != candidate_features.shape[:2]
+                or candidate_mask.dtype != torch.bool
+                or candidate_mask.device != candidate_features.device):
+            raise ValueError("C2 candidate mask must be bool [B,C] on the candidate device")
+        # Preserve the original all-query context. Support masks gate action
+        # selection; using them to reweight this pooled state changes C2's
+        # recurrent context whenever any candidate is infeasible.
+        candidate_context = queried.mean(1)
+        state = self.context(global_state + candidate_context, hidden)
         fused = torch.cat((queried, state[:, None].expand(-1, queried.shape[1], -1), candidate), -1)
         scored = F.silu(_fixed_order_candidate_linear(fused, self.scorer[0]))
         utility = _fixed_order_candidate_linear(scored, self.scorer[2]).squeeze(-1)
@@ -1114,36 +1211,69 @@ def make_scorer_snapshot(model_id: str, observation: ObservationSnapshot,
 def candidate_policy_logits(utility: torch.Tensor, valid_mask: torch.Tensor,
                             route_cost: torch.Tensor | None = None,
                             risk_cost: torch.Tensor | None = None,
-                            path_cost: torch.Tensor | None = None) -> torch.Tensor:
+                            path_cost: torch.Tensor | None = None, *,
+                            validate_inputs: bool = True) -> torch.Tensor:
     """Gross reward minus ETA, risk, and integrated Plan A path costs once."""
     if utility.shape != valid_mask.shape or valid_mask.dtype != torch.bool:
         raise ValueError("utility and boolean feasibility mask shapes must match")
-    if not bool(torch.isfinite(utility[valid_mask]).all()):
+    if validate_inputs and not bool(torch.isfinite(utility[valid_mask]).all()):
         raise ValueError("valid candidate utilities must be finite")
-    value = utility
+    utility_finite = torch.isfinite(utility)
+    valid_mask = valid_mask & utility_finite
+    value = torch.where(utility_finite, utility, torch.zeros_like(utility))
     if route_cost is not None:
-        if route_cost.shape != value.shape or not bool(torch.isfinite(route_cost[valid_mask]).all()):
+        if route_cost.shape != value.shape:
+            raise ValueError("route costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(route_cost[valid_mask]).all()):
             raise ValueError("valid route costs must be finite and match utility")
-        value = value - route_cost
+        route_finite = torch.isfinite(route_cost)
+        valid_mask = valid_mask & route_finite
+        value = value - torch.where(route_finite, route_cost,
+                                    torch.zeros_like(route_cost))
     if risk_cost is not None:
-        if risk_cost.shape != value.shape or not bool(torch.isfinite(risk_cost[valid_mask]).all()):
+        if risk_cost.shape != value.shape:
+            raise ValueError("risk costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(risk_cost[valid_mask]).all()):
             raise ValueError("valid risk costs must be finite and match utility")
-        value = value - risk_cost
+        risk_finite = torch.isfinite(risk_cost)
+        valid_mask = valid_mask & risk_finite
+        value = value - torch.where(risk_finite, risk_cost,
+                                    torch.zeros_like(risk_cost))
     if path_cost is not None:
-        if path_cost.shape != value.shape or not bool(torch.isfinite(path_cost[valid_mask]).all()):
+        if path_cost.shape != value.shape:
+            raise ValueError("path costs must match utility")
+        if validate_inputs and not bool(torch.isfinite(path_cost[valid_mask]).all()):
             raise ValueError("valid path costs must be finite and match utility")
-        value = value - path_cost
-    if not bool(valid_mask.any(dim=-1).all()):
+        path_finite = torch.isfinite(path_cost)
+        valid_mask = valid_mask & path_finite
+        value = value - torch.where(path_finite, path_cost,
+                                    torch.zeros_like(path_cost))
+    if validate_inputs and not bool(valid_mask.any(dim=-1).all()):
         raise ValueError("each row must include at least one feasible candidate")
     return value.masked_fill(~valid_mask, -torch.inf)
 
 
-def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float32):
+def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float32,
+                             raw_features: torch.Tensor | None = None,
+                             missing_mask: torch.Tensor | None = None):
     """Numerically encode named candidate rows and append missingness indicators.
 
     Missing estimates stay distinguishable from a real zero. The returned
     feature names and unavailable masks are part of the evaluation record.
     """
+    if raw_features is not None or missing_mask is not None:
+        if (not isinstance(raw_features, torch.Tensor) or
+                not isinstance(missing_mask, torch.Tensor)):
+            raise ValueError("raw_features and missing_mask must be supplied together")
+        expected = (len(table.candidate_ids), len(table.feature_names))
+        if (raw_features.shape != expected or missing_mask.shape != expected or
+                raw_features.device != torch.device(device) or
+                missing_mask.device != torch.device(device) or
+                raw_features.dtype != dtype or missing_mask.dtype != dtype or
+                not raw_features.is_floating_point() or
+                not missing_mask.is_floating_point()):
+            raise ValueError("pre-encoded candidate tensors differ from the table contract")
+        return raw_features, missing_mask
     values = []
     missing = []
     for row in table.features:
@@ -1155,6 +1285,7 @@ def candidate_feature_tensor(table: CandidateTable, *, device, dtype=torch.float
 
 def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                      globals_: torch.Tensor, table: CandidateTable,
+                     candidate_batch=None,
                      hidden: torch.Tensor | None = None,
                      graph: Mapping[str, torch.Tensor] | None = None,
                      route_cost: torch.Tensor | None = None,
@@ -1179,8 +1310,30 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         if (tuple(table.feature_names) != expected_features or
                 any(len(row) != MECO_CANDIDATE_RAW_FEATURE_COUNT for row in table.features)):
             raise ValueError("C1/C2 candidate rows differ from the registered shared feature schema")
-    candidate, unavailable = candidate_feature_tensor(table, device=raster.device, dtype=raster.dtype)
-    candidate = torch.cat((candidate, unavailable), -1)[None]
+    if candidate_batch is None:
+        candidate, unavailable = candidate_feature_tensor(
+            table, device=raster.device, dtype=raster.dtype)
+        candidate = torch.cat((candidate, unavailable), -1)[None]
+        valid_candidates = torch.tensor(table.valid_mask, device=raster.device,
+                                        dtype=torch.bool)[None]
+    else:
+        if (tuple(candidate_batch.candidate_ids) != tuple(table.candidate_ids) or
+                tuple(candidate_batch.feature_names) != tuple(table.feature_names)):
+            raise ValueError("device candidate metadata differs from CandidateTable order/schema")
+        candidate_feature_tensor(table,
+            device=raster.device, dtype=raster.dtype,
+            raw_features=candidate_batch.raw_features[0],
+            missing_mask=candidate_batch.missing_mask[0])
+        candidate = candidate_batch.candidate_features
+        if (candidate.shape != (1, len(table.candidate_ids),
+                                MECO_CANDIDATE_MODEL_INPUT_WIDTH) or
+                candidate.device != raster.device or candidate.dtype != raster.dtype):
+            raise ValueError("device candidate feature tensor violates model input contract")
+        valid_candidates = candidate_batch.valid_mask
+        if (valid_candidates.shape != (1, len(table.candidate_ids)) or
+                valid_candidates.dtype != torch.bool or
+                valid_candidates.device != raster.device):
+            raise ValueError("device candidate validity mask violates decision contract")
     if isinstance(model, ProductionMecoAdapter) and hidden is None:
         hidden = raster.new_zeros((raster.shape[0], HIDDEN))
     inputs = {"raster": raster, "globals_": globals_, "candidate_features": candidate,
@@ -1208,35 +1361,55 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 try:
                     inference_request = make_meco_inference_request(model, table=table,
                         observation_timestamp=observation_timestamp,
-                        capture_monotonic=capture_monotonic, inputs=ordered_inputs)
+                        capture_monotonic=capture_monotonic, inputs=ordered_inputs,
+                        candidate_batch=candidate_batch)
                 except Exception:
                     inference_request = None
+        expected_support_mode = ("device-mask" if candidate_batch is not None else "table-mask")
+        expected_candidate_digest = (ordered_candidate_order_digest(table.candidate_ids)
+            if candidate_batch is not None else
+            ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask))
         request_matches = (inference_request is not None and track == model.track
             and inference_request.track == track
             and inference_request.snapshot_id == table.snapshot_id
             and inference_request.candidate_ids == table.candidate_ids
-            and inference_request.valid_mask == table.valid_mask
-            and inference_request.candidate_mask_digest ==
-                ordered_candidate_mask_digest(table.candidate_ids, table.valid_mask))
+            and inference_request.candidate_support_mode == expected_support_mode
+            and (candidate_batch is not None or inference_request.valid_mask == table.valid_mask)
+            and inference_request.candidate_mask_digest == expected_candidate_digest)
         if request_matches:
             ordered_inputs = {name: inputs[name] for name in inference_request.input_names
                               if name in inputs}
-            broker_handle = model.submit_inference(inference_request, ordered_inputs)
+            broker_inputs = dict(ordered_inputs)
+            if track in ("C1", "C2") and candidate_batch is not None:
+                broker_inputs["__candidate_valid_mask"] = valid_candidates
+            broker_handle = model.submit_inference(inference_request, broker_inputs)
 
         # Compute the complete deterministic decision while accelerator
         # inference is in flight. A missing result uses this exact fallback.
         utility = torch.zeros((len(table.candidate_ids),), device=raster.device, dtype=raster.dtype)
-        valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
+        valid = valid_candidates.to(device=utility.device)
         if route_cost is not None or risk_cost is not None:
-            fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+            fallback_logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost,
+                validate_inputs=candidate_batch is None)
+            fallback_available = valid.any(dim=-1)
         else:
             fallback = (inference_request.fallback_index if inference_request is not None else
                         next((i for i, ok in enumerate(table.valid_mask) if ok), -1))
             fallback_logits = torch.full((1, len(table.candidate_ids)), -torch.inf,
                                          device=utility.device, dtype=utility.dtype)
-            if fallback < 0 or not table.valid_mask[fallback]:
+            if candidate_batch is not None:
+                fallback = candidate_batch.fallback_index
+                in_range = (fallback >= 0) & (fallback < len(table.candidate_ids))
+                support = torch.zeros_like(fallback_logits, dtype=torch.bool)
+                support.scatter_(1, fallback.clamp(0, len(table.candidate_ids) - 1).reshape(1, 1), True)
+                support = support & valid & in_range.reshape(1, 1)
+                fallback_logits = fallback_logits.masked_fill(support, 0.)
+                fallback_available = support.any(dim=-1)
+            elif fallback < 0 or not table.valid_mask[fallback]:
                 raise ValueError("invalid deterministic fallback for failed inference")
-            fallback_logits[0, fallback] = 0.
+            else:
+                fallback_logits[0, fallback] = 0.
+                fallback_available = torch.ones((1,), device=utility.device, dtype=torch.bool)
 
         if request_matches:
             response = model.poll_inference(inference_request, broker_handle)
@@ -1284,19 +1457,80 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 "counters": model.inference_counters}
             return {"logits": fallback_logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
-                    "inference_status": "deterministic_fallback",
+                    "inference_status": ("device_outcome" if candidate_batch is not None
+                                         else "deterministic_fallback"),
+                    "inference_status_code": torch.where(fallback_available,
+                        torch.ones((), device=utility.device, dtype=torch.uint8),
+                        torch.full((), 2, device=utility.device, dtype=torch.uint8)),
+                    "inference_status_codes": dict(MECO_INFERENCE_OUTCOME_CODES),
                     "inference_provenance": provenance}
         output = response.outputs
     else:
-        output = model(**inputs)
+        if track == "C2" and candidate_batch is not None:
+            output = model(**inputs, candidate_mask=valid_candidates)
+        else:
+            output = model(**inputs)
     if track in ("C1", "C2"):
         utility = output["candidate_utility"][0]
     elif track == "A1":
         utility = _gather_dense_candidates(output, table, raster.shape[-2:])[0]
     else:
         utility = _gather_graph_candidates(output, table)[0]
-    valid = torch.tensor(table.valid_mask, device=utility.device, dtype=torch.bool)[None]
-    logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+    valid = valid_candidates.to(device=utility.device)
+    if candidate_batch is not None:
+        valid = valid & torch.isfinite(utility[None])
+        logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost,
+                                         validate_inputs=False)
+    else:
+        logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+    inference_valid = output.get("__inference_valid")
+    if inference_valid is not None:
+        # Invalid numeric responses must be one-hot at the precomputed fallback
+        # index. Route-cost logits are not sufficient: stochastic sampling
+        # could otherwise select a different action after an inference fault.
+        fallback_index = (candidate_batch.fallback_index if candidate_batch is not None
+                          else torch.tensor(inference_request.fallback_index,
+                              device=utility.device, dtype=torch.long))
+        if candidate_batch is None:
+            # Keep the established table-mask fallback behavior used by
+            # A1/A2/A3, including route/risk-cost selection when supplied.
+            logits = torch.where(inference_valid.reshape(1, 1), logits,
+                                 fallback_logits)
+            inference_status_code = torch.where(inference_valid,
+                torch.zeros((), device=utility.device, dtype=torch.uint8),
+                torch.ones((), device=utility.device, dtype=torch.uint8))
+        else:
+            candidate_count = logits.shape[-1]
+            fallback_in_range = (fallback_index >= 0) & (fallback_index < candidate_count)
+            safe_fallback_index = fallback_index.clamp(0, candidate_count - 1)
+            fallback_support = torch.zeros_like(logits, dtype=torch.bool)
+            fallback_support.scatter_(1, safe_fallback_index.reshape(1, 1), True)
+            # A placeholder index (currently zero) may exist when route
+            # construction found no feasible candidate. It cannot become
+            # selectable unless the device feasibility mask authorizes it.
+            fallback_support = (fallback_support & valid_candidates &
+                                fallback_in_range.reshape(1, 1))
+            numeric_fallback_logits = torch.full_like(logits, -torch.inf)
+            numeric_fallback_logits = numeric_fallback_logits.masked_fill(fallback_support, 0.)
+            fallback_available = fallback_support.any(dim=-1, keepdim=True)
+            logits = torch.where(inference_valid.reshape(1, 1), logits,
+                                 numeric_fallback_logits)
+            no_feasible_candidates = ~valid_candidates.any(dim=-1)
+            inference_status_code = torch.where(no_feasible_candidates.squeeze(0),
+                torch.full((), 2, device=utility.device, dtype=torch.uint8),
+                torch.where(inference_valid,
+                    torch.zeros((), device=utility.device, dtype=torch.uint8),
+                    torch.where(fallback_available.squeeze(-1),
+                        torch.ones((), device=utility.device, dtype=torch.uint8),
+                        torch.full((), 2, device=utility.device, dtype=torch.uint8))))
+        output_hidden = torch.where(inference_valid, output["hidden"], hidden)
+        inference_status = ("device_outcome" if candidate_batch is not None
+                            else "device_validated")
+    else:
+        output_hidden = output["hidden"]
+        inference_status_code = None
+        inference_status = ("accepted" if isinstance(model, ProductionMecoAdapter)
+                            else "trainer_direct")
     provenance = ({"schema": MECO_INFERENCE_SCHEMA,
         "model_id": inference_request.model_id,
         "checkpoint_sha256": inference_request.checkpoint_sha256,
@@ -1312,9 +1546,11 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         "expires_monotonic": inference_request.expires_monotonic,
         "counters": model.inference_counters}
         if isinstance(model, ProductionMecoAdapter) else None)
-    return {"logits": logits, "utility": utility, "hidden": output["hidden"],
+    return {"logits": logits, "utility": utility, "hidden": output_hidden,
             "uncertainty": output.get("uncertainty"), "raw": output,
-            "inference_status": "accepted" if isinstance(model, ProductionMecoAdapter) else "trainer_direct",
+            "inference_status": inference_status,
+            "inference_status_code": inference_status_code,
+            "inference_status_codes": dict(MECO_INFERENCE_OUTCOME_CODES),
             "inference_provenance": provenance}
 
 
@@ -1409,13 +1645,18 @@ def categorical_from_candidate_logits(logits: torch.Tensor):
     if logits.ndim < 1:
         raise ValueError("candidate logits must have an action dimension")
     centered_logits = logits - logits.amax(dim=-1, keepdim=True)
-    return torch.distributions.Categorical(logits=centered_logits)
+    # The async assertion above is the device-safe validity check. PyTorch's
+    # default distribution validation converts that predicate to a host bool.
+    return torch.distributions.Categorical(logits=centered_logits,
+                                           validate_args=False)
 
 
 def sample_candidate_action(logits: torch.Tensor, *, deterministic=False):
     """Sample a legal categorical choice and return action and PPO log-probability."""
-    if logits.ndim != 2 or not bool(torch.isfinite(torch.logsumexp(logits, dim=-1)).all()):
+    if logits.ndim != 2:
         raise ValueError("each decision requires at least one finite candidate logit")
+    torch._assert_async(torch.isfinite(torch.logsumexp(logits, dim=-1)).all(),
+                        "each decision requires at least one finite candidate logit")
     distribution = categorical_from_candidate_logits(logits)
     action = logits.argmax(-1) if deterministic else distribution.sample()
     return action, distribution.log_prob(action), distribution.entropy()
