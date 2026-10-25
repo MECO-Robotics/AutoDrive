@@ -26,7 +26,7 @@ This is the next narrow code gate because the current source explicitly rejects 
 Expected implementation owners:
 
 1. `frc_defense/gamepiece_actions.py`: write already-accepted score masks to fixed-shape device buffers, in deterministic event order, without Python pending tensors, host scalar reads, or host branches on device outcomes.
-2. `frc_defense/_tensor_3v3_gamepieces.py` and the defense wrapper that invokes `_flush_fuel_score_awards`: preserve both roster call paths and define a passive reporting drain boundary.
+2. `frc_defense/_tensor_3v3_gamepieces.py` and `frc_defense/tensor_defense_gamepieces.py`: preserve both roster call paths and define a passive reporting drain boundary in the 3v3 and defense wrappers.
 3. `frc_defense/fuel_physics_runtime.py`: remove the recorder-only rejection after verifying the qualifying buffer contract; retain all unrelated backend/device/shape/graph guards.
 4. `frc_defense/meco_track_training.py`: bind per-episode buffer lifecycle to the existing episode ID, seed, scenario, source identity, estimand approval digest, evaluation record, and replay export; materialize only after the episode's gameplay and physics decisions have completed.
 5. `frc_defense/meco_simulated_score_ledger.py`: only if required to add a deterministic ordered-batch ingestion API that preserves the existing event validation/digest contract. Do not change score rules, included outcomes, schema semantics, or approval requirements.
@@ -36,11 +36,11 @@ Do not alter physics kernels, scorer acceptance masks, rewards, score counters, 
 
 ## Required buffer contract
 
-- Use fixed device tensors indexed by world and event slot, with a device-side per-world count and overflow flag. No device-derived dynamic allocation or host branch is permitted during a simulation decision.
-- Capacity must be derived and justified per episode/world against the existing 32,768-event contract and the configured horizon/maximum score acceptance rate. If the bound cannot be proven for a supported configuration, retain the existing fail-closed qualification rejection for that configuration.
+- Use fixed device tensors indexed by world and event slot, with device-side per-world counts plus an aggregate event count and sticky aggregate overflow flag. No device-derived dynamic allocation or host branch is permitted during a simulation decision.
+- `MAX_SCORE_EVENTS_PER_EPISODE = 32768` is one aggregate cap across all worlds belonging to the episode, matching the existing recorder's single `len(events)` limit. It is not a per-world allowance. Derive a fixed layout and prove the aggregate bound against the configured horizon and maximum score acceptance rate. If that bound cannot be proven for a supported configuration, retain the existing fail-closed qualification rejection for that configuration.
 - Record only events whose existing accepted-score mask is true. Store all ledger fields losslessly: tick, match elapsed time, world slot, alliance, robot slot, piece slot, generation, and a deterministic source-site code mapped to the existing static source-site string on host.
 - Preserve the current recorder's stable ordering: the same tick/update call order, then the existing world/slot/piece order for each accepted mask. Store enough sequence information to reconstruct that ordering exactly.
-- A device-side capacity overflow must never truncate silently or affect gameplay. It sets a sticky per-world overflow status; terminal report construction then marks the score outcome incomplete and qualification-ineligible. Do not throw or read the status in the live step path.
+- A device-side capacity overflow must never truncate silently or affect gameplay. It sets a sticky aggregate overflow status (and may retain per-world diagnostics); terminal report construction then marks the episode score outcome incomplete and qualification-ineligible. Do not throw or read the status in the live step path.
 - Event buffers are episode-scoped. Reset only the selected world's buffer at its accepted episode boundary; preserve other worlds' pending rows and counters. Bind rows to the same episode, seed, scenario, source identity, and approval digest used by the existing score context.
 - Drain/materialization is a passive episode-report boundary after the last score/physics mutation for that episode. Only there may code copy the bounded event rows and overflow status to CPU and call the existing recorder/ledger contract. The drain must not decide whether an award occurs, reset physics, advance RNG, affect another world, or change a later action.
 - Preserve current fail-closed behavior for unsupported shapes, devices, missing graph capture, missing approval, invalid source binding, and malformed report/replay data.
@@ -75,7 +75,7 @@ Runtime validation is not authorized by this plan. Before any qualifying simulat
 
 ## Risks and stop conditions
 
-- **Capacity uncertainty:** the 32,768 bound may not cover every supported episode configuration. Require a mathematical/config-derived bound or keep unsupported configurations rejected.
+- **Capacity uncertainty:** the aggregate 32,768-event bound may not cover every supported episode configuration. Require a mathematical/config-derived bound across all worlds in an episode or keep unsupported configurations rejected.
 - **Ordering drift:** vectorized writes can reorder simultaneous awards and change the event digest. Sequence by existing update/source call order and canonical indices, then prove exact parity.
 - **Episode reuse:** vectorized training can auto-reset individual worlds while other worlds continue. Any ambiguity about the report boundary or buffer lifetime is a blocker; never drain/reset all worlds together.
 - **False telemetry influence:** an overflow check or failed drain must not alter live score, reward, physics, or RNG. It only makes the passive evidence incomplete and qualification-ineligible.
@@ -83,4 +83,3 @@ Runtime validation is not authorized by this plan. Before any qualifying simulat
 - Stop if the implementer must alter score rules or a game decision, if a buffer can overflow without a report-visible fail-closed state, if event order cannot be preserved, if episode-level drain cannot be separated from live decisions, or if device ownership/checkpoint continuity is unresolved.
 
 This plan is a bounded source-code proposal only. It establishes no runtime behavior, score outcome, training continuation, replay, device parity, dashboard currentness, promotion, or qualification.
-
