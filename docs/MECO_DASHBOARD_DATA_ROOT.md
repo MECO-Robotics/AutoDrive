@@ -29,9 +29,11 @@ two layouts:
   `evaluations/`, with `queue-status.json` and
   `task-scheduler-state.json` directly under the selected data root.
 
-The direct layout is selected when its track directories are present, and all
-five must be real directories (not symlinks, including symlinks to in-root
-targets). Partial track layouts and roots that contain both legacy and direct
+The direct layout is selected when its track directories are present. Its
+`checkpoints/` parent and any existing `evaluations/` root must be real in-root
+directories. All five track directories must also be real directories; none of
+these layout directories may be symlinks, including symlinks to in-root
+targets. Partial track layouts and roots that contain both legacy and direct
 layouts are rejected as ambiguous. With neither layout present, the dashboard
 uses the legacy paths so an empty checkout reports its normal not-started
 state. Every resolved status root must remain inside the selected data root.

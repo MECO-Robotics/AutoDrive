@@ -187,6 +187,28 @@ def test_direct_campaign_layout_rejects_in_root_track_symlink(tmp_path):
         meco_status_payload(tmp_path)
 
 
+def test_direct_campaign_layout_rejects_in_root_checkpoints_parent_symlink(tmp_path):
+    target = tmp_path / "checkpoints-target"
+    for track in TRACKS:
+        (target / track).mkdir(parents=True)
+    (tmp_path / "checkpoints").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="checkpoints root must be a real in-root directory"):
+        meco_status_payload(tmp_path)
+
+
+def test_direct_campaign_layout_rejects_in_root_evaluations_root_symlink(tmp_path):
+    direct_root = tmp_path / "checkpoints"
+    for track in TRACKS:
+        (direct_root / track).mkdir(parents=True)
+    evaluations_target = tmp_path / "evaluations-target"
+    evaluations_target.mkdir()
+    (tmp_path / "evaluations").symlink_to(evaluations_target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="evaluations root must be a real in-root directory"):
+        meco_status_payload(tmp_path)
+
+
 def test_direct_campaign_layout_rejects_ambiguity_with_legacy_roots(tmp_path):
     direct_root = tmp_path / "checkpoints"
     for track in TRACKS:
