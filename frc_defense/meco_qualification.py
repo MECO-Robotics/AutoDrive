@@ -20,6 +20,10 @@ import uuid
 from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
     CurriculumState, EvaluationResult, GPU_NUMERIC_GATE_PROTOCOL_VERSION,
     SCENARIOS, _ancestors, evaluate_promotion, seed_partition)
+from .meco_stage1_preflight_contract import (MATCHED_REFERENCE_CANDIDATE_K,
+    MATCHED_REFERENCE_VARIANCE_VERSION, ROUTE_COST_POINTS_PER_SECOND,
+    validate_matched_reference_calibration_metadata, validate_phase0_chain,
+    validate_phase0_identity_binding, validate_phase0_index)
 
 PROTOCOL_VERSION = "meco-qualification-v1"
 LEGACY_CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
@@ -425,58 +429,26 @@ def _reference_variance_report_index(reports, scenarios, *, source_hash,
 
 def _validate_matched_reference_variance_report(report):
     """Revalidate raw repeated rows and summaries before protocol binding."""
-    if (not isinstance(report, dict)
-            or report.get("artifact_type") != MATCHED_REFERENCE_VARIANCE_VERSION
-            or report.get("schema_version") != 1
-            or report.get("calibration") is not True):
-        raise ValueError("unsupported matched reference variance report")
-    config = report.get("config")
-    scenario = report.get("scenario_id")
-    if not isinstance(config, dict) or config.get("scenario_id") != scenario:
-        raise ValueError("matched reference variance config is invalid")
-    variant = _reference_variant(config.get("reference_selection_id"))
-    policy, policy_id, mode = MATCHED_REFERENCE_VARIANTS[variant]
-    identity = _matched_reference_identity(variant)
-    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
-    candidate_configuration = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
-        "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
-        "action_ticks": 12}
-    if (config.get("reference_policy") != policy
-            or config.get("reference_policy_id") != policy_id
-            or config.get("prediction_mode") != mode
-            or config.get("prediction_contract") != identity["prediction_contract"]
-            or config.get("candidate_configuration") != candidate_configuration
-            or config.get("safety_floor_policy") != REFERENCE_POLICY
-            or config.get("required_safety_metrics") != sorted(SAFETY_METRIC_NAMES)
-            or config.get("split") != "calibration"
-            or type(config.get("episodes_per_category_stratum")) is not int
-            or config["episodes_per_category_stratum"] < MIN_EPISODES
-            or type(config.get("repetitions")) is not int or config["repetitions"] < 2
-            or type(config.get("master_seed")) is not int or config["master_seed"] < 0):
-        raise ValueError("matched reference variance policy, mode, seed, or runtime settings are invalid")
-    cases = protocol_cases(scenario, "calibration",
-        episodes=config["episodes_per_category_stratum"], master_seed=config["master_seed"])
-    expected_cases = [{"category": case.category, "layout_id": case.layout_id,
-        "defender_family": case.defender_family, "start_condition": case.start_condition,
-        "sensor_profile": case.sensor_profile, "seeds": list(case.seeds),
-        "reference_policy": policy} for case in cases]
-    if report.get("case_ids") != expected_cases:
-        raise ValueError("matched reference variance case/seed table differs from the frozen calibration protocol")
-    _validate_d0_calibration_case_table(scenario, config["episodes_per_category_stratum"],
-        config["master_seed"], [{key: value for key, value in row.items()
-            if key != "reference_policy"} for row in expected_cases])
-    source_hash = report.get("source_identity_sha256")
-    runtime = report.get("runtime_device")
-    normalized_runtime = _normalized_calibration_runtime(runtime)
-    if (report.get("normalized_runtime_identity") != normalized_runtime
-            or report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
-            or report.get("safety_metrics_source_identity_sha256") != source_hash):
-        raise ValueError("matched reference variance source/runtime/safety identity is invalid")
-    expected_protocol = _canonical_sha256({"version": MATCHED_REFERENCE_VARIANCE_VERSION,
-        "config": config, "case_table": expected_cases,
-        "source_identity_sha256": source_hash, "runtime_identity": normalized_runtime})
-    if report.get("protocol_identity_sha256") != expected_protocol:
-        raise ValueError("matched reference variance protocol identity is invalid")
+    metadata = validate_matched_reference_calibration_metadata(report,
+        variant_table=MATCHED_REFERENCE_VARIANTS,
+        variant_normalizer=_reference_variant,
+        identity_builder=_matched_reference_identity,
+        protocol_cases_builder=protocol_cases,
+        d0_case_validator=_validate_d0_calibration_case_table,
+        runtime_normalizer=_normalized_calibration_runtime,
+        minimum_episodes=MIN_EPISODES,
+        candidate_k=MATCHED_REFERENCE_CANDIDATE_K,
+        route_cost=ROUTE_COST_POINTS_PER_SECOND,
+        safety_metric_names=SAFETY_METRIC_NAMES,
+        safety_metrics_schema=SAFETY_METRICS_SCHEMA,
+        safety_floor_policy=REFERENCE_POLICY)
+    config, scenario = metadata["config"], metadata["scenario"]
+    variant, policy, policy_id, mode = (metadata[key] for key in
+        ("variant", "policy", "policy_id", "mode"))
+    identity = metadata["identity"]
+    candidate_configuration = metadata["candidate_configuration"]
+    cases, expected_cases = metadata["cases"], metadata["expected_cases"]
+    source_hash, runtime = metadata["source_hash"], metadata["runtime"]
     manifest = report.get("policy_manifest")
     if (not isinstance(manifest, dict)
             or manifest.get(REFERENCE_POLICY, {}).get("policy_id") != "D0_production_deterministic"
@@ -592,7 +564,8 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
                       safety_noninferiority_margins: dict[str, float] | None = None,
                       reference_policy: str = "D1/current",
                       matched_reference_calibration_report: dict | None = None,
-                      reference_margin_review: dict | None = None) -> dict:
+                      reference_margin_review: dict | None = None,
+                      phase0_identity_binding: dict | None = None) -> dict:
     """Canonical target-scoped protocol; the digest is the protocol identity."""
     if scenario_id is not None and scenario_id not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario_id}")
@@ -644,6 +617,8 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
         return body
     if calibrated:
+        if target == "pickup_simple" and phase0_identity_binding is None:
+            raise ValueError("pickup_simple Stage 1 v5 protocol requires a Phase 0 identity binding")
         reports = ({calibration_report["scenario_id"]: calibration_report}
                    if isinstance(calibration_report, dict) and "scenario_id" in calibration_report
                    else calibration_report)
@@ -679,6 +654,10 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
             "seed_table_sha256": {name: _canonical_sha256(reference_reports[name]["case_ids"])
                                   for name in scenarios},
             "margin_review": reviewed}
+        if phase0_identity_binding is not None:
+            validate_phase0_identity_binding(phase0_identity_binding)
+            if phase0_identity_binding["source_identity_sha256"] != source_hash:
+                raise ValueError("Phase 0 evaluator source identity does not match calibration reports")
     else:
         calibration_ids, calibration_seed_pools, calibration_report_hashes, source_hash, baseline_id = {}, {}, {}, None, None
         reference_reports, reference_ids, reference_hashes = {}, {}, {}
@@ -735,6 +714,8 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         "promotion_gates": {scenario: asdict(SCENARIOS[scenario].gate) for scenario in scenarios},
         "cases": cases}
     if calibrated:
+        if phase0_identity_binding is not None:
+            body["phase0_identity_binding"] = dict(phase0_identity_binding)
         body["safety_metrics_schema"] = SAFETY_METRICS_SCHEMA
         body["safety_metrics_source_identity_sha256"] = source_hash
         body["gpu_statistics_implementation"] = _gpu_statistics_implementation(
@@ -819,6 +800,10 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or protocol.get("safety_metrics_source_identity_sha256")
                 != protocol.get("calibration_source_identity_sha256")):
         raise ValueError("calibrated protocol safety schema/source binding is invalid")
+    if "phase0_identity_binding" in protocol:
+        validate_phase0_identity_binding(protocol["phase0_identity_binding"])
+        if protocol["phase0_identity_binding"]["source_identity_sha256"] != protocol["calibration_source_identity_sha256"]:
+            raise ValueError("calibrated protocol Phase 0 evaluator source identity is invalid")
     if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
         reference_runtime = protocol.get("matched_reference_variance_calibration", {}).get(
             "normalized_runtime_identity")
@@ -1684,10 +1669,6 @@ def run_d0_calibration(*, scenario_id: str, episodes: int, repetitions: int,
     return body
 
 
-MATCHED_REFERENCE_VARIANCE_VERSION = "meco-matched-reference-variance-v1"
-MATCHED_REFERENCE_CANDIDATE_K = 16
-
-
 def _matched_reference_variance_summary(cases, repetitions, records):
     metrics = ("useful_throughput", *sorted(SAFETY_METRIC_NAMES))
     summary = {}
@@ -1753,7 +1734,6 @@ def run_matched_reference_variance_calibration(*, scenario_id: str, episodes: in
          for row in case_table])
     source_hash = _calibration_source_identity_sha256()
     identity = _matched_reference_identity(variant)
-    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
     candidate_configuration = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
         "action_ticks": 12}
@@ -1941,7 +1921,6 @@ def _paired_worker_assignments(assignments):
 
 
 def _paired_control_specs():
-    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
     from .meco_prediction_contract import prediction_contract
 
     candidate = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
@@ -4472,10 +4451,13 @@ def _load_json(path):
 
 
 _STAGE1_PREFLIGHT_ARTIFACTS = (
-    "effective_freeze", "seed_partition", "score_estimand_review",
+    "capture_receipt", "effective_snapshot", "effective_freeze",
+    "tuple_registry", "partition_materialization", "score_estimand_review",
     "d0_calibration_bundle", "matched_reference_calibration_bundle",
     "margin_review",
 )
+_STAGE1_CHAIN_ARTIFACTS = ("capture_receipt", "effective_snapshot",
+    "effective_freeze", "tuple_registry", "partition_materialization")
 _STAGE1_PREFLIGHT_SCHEMA = "meco-stage1-readiness-preflight-v1"
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -4556,6 +4538,7 @@ def _stage1_save_report(destination, report):
 def _stage1_blocked_report(destination, checks, blocker_codes):
     report = {"schema": _STAGE1_PREFLIGHT_SCHEMA, "status": "blocked",
         "scope": "metadata_consistent_only", "ready": False,
+        "current_source_factory_reproduction": "not_performed",
         "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
         "checkpoint_bytes_opened": False, "outcomes_read": False,
         "curriculum_state_changed": False, "qualification_decision": False,
@@ -4568,56 +4551,6 @@ def _stage1_blocked_report(destination, checks, blocker_codes):
 def _stage1_check_phase0_artifact(name, value, protocol):
     if not isinstance(value, dict):
         raise ValueError(f"Phase 0 {name} artifact is malformed")
-    if name == "effective_freeze":
-        if value.get("schema") != "meco-baseline-freeze-v3":
-            raise ValueError("effective freeze schema is not the current effective-freeze schema")
-        digest = _stage1_digest(value.get("freeze_sha256"), "effective freeze digest")
-        body = {key: item for key, item in value.items() if key != "freeze_sha256"}
-        if _canonical_sha256(body) != digest or value.get("qualification_eligible") is not False:
-            raise ValueError("effective freeze digest or eligibility marker is invalid")
-        if not isinstance(value.get("source"), dict) or not isinstance(value.get("runtime"), dict):
-            raise ValueError("effective freeze lacks source/runtime identity")
-        return {"freeze_sha256": digest}
-    if name == "seed_partition":
-        if value.get("schema") != "meco-heldout-partitions-v2":
-            raise ValueError("seed partition schema is not the current materialized partition schema")
-        digest = _stage1_digest(value.get("partition_sha256"), "seed partition digest")
-        from .meco_baseline_freeze import (TUPLE_FIELDS,
-            validate_tuple_partition_materialization)
-        freeze_digest = _stage1_digest(value.get("baseline_freeze_sha256"),
-            "partition baseline freeze digest")
-        if (value.get("allocation_authorized") is not True
-                or value.get("qualification_eligible") is not False):
-            raise ValueError("partition lacks trusted allocation authorization")
-        registry = value.get("tuple_registry")
-        assignments = value.get("assignment_table")
-        if not isinstance(registry, dict) or not isinstance(assignments, dict):
-            raise ValueError("partition tuple registry or assignment table is missing")
-        raw_registry = {"schema": registry.get("schema"), "tuples": [
-            {key: row[key] for key in (*TUPLE_FIELDS, "eligible")}
-            | ({"exclusion_reason": row["exclusion_reason"]}
-                if row.get("eligible") is False else {})
-            for row in registry.get("tuples", [])]}
-        validate_tuple_partition_materialization(value,
-            freeze_sha256=freeze_digest, registry=raw_registry,
-            assignment_table=assignments)
-        rows = {row.get("tuple_id"): row for row in registry.get("tuples", [])}
-        derived = {}
-        partitions = value.get("partitions", {})
-        for split, phase in (("validation", "validation"), ("final_test", "final_test")):
-            entry = partitions.get(phase, {}) if isinstance(partitions, dict) else {}
-            tuple_ids = entry.get("tuple_ids") if isinstance(entry, dict) else None
-            if not isinstance(tuple_ids, list) or not tuple_ids:
-                raise ValueError(f"partition {phase} tuple IDs are missing")
-            seeds = {row.get("seed") for tuple_id in tuple_ids
-                if isinstance((row := rows.get(tuple_id)), dict)
-                and row.get("scenario_id") == "pickup_simple"
-                and row.get("evaluation_phase") == phase and row.get("eligible") is True}
-            if not seeds or any(type(seed) is not int for seed in seeds):
-                raise ValueError(f"partition has no valid pickup_simple {phase} seeds")
-            derived[f"{split}_seeds"] = sorted(seeds)
-        return {"partition_sha256": digest, **derived,
-            "baseline_freeze_sha256": freeze_digest}
     if name == "score_estimand_review":
         from .meco_simulated_score_ledger import validate_estimand_approval
         validate_estimand_approval(value,
@@ -4828,14 +4761,6 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
     try:
         if phase0_load_error:
             raise ValueError("phase0_index_json_invalid")
-        if set(phase0) != {"schema", "source_identity_sha256", "config_sha256", "artifacts", "index_sha256"} or phase0.get("schema") != "meco-stage1-phase0-evidence-index-v1":
-            raise ValueError("phase0_index_schema_invalid")
-        index_digest = _stage1_digest(phase0.get("index_sha256"), "Phase 0 index digest")
-        if _canonical_sha256({key: value for key, value in phase0.items() if key != "index_sha256"}) != index_digest:
-            raise ValueError("phase0_index_digest_invalid")
-        if (phase0.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256")
-                or _stage1_digest(phase0.get("config_sha256"), "Phase 0 config digest") != campaign.get("config_sha256")):
-            raise ValueError("phase0_source_or_config_binding_invalid")
         artifacts = phase0.get("artifacts")
         if not isinstance(artifacts, dict) or set(artifacts) != set(_STAGE1_PREFLIGHT_ARTIFACTS):
             raise ValueError("phase0_artifact_set_incomplete")
@@ -4856,6 +4781,7 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
         if len(set(refs.values())) != len(_STAGE1_PREFLIGHT_ARTIFACTS):
             raise ValueError("phase0_artifact_reference_duplicate")
         loaded_artifacts = {}
+        artifact_raw_sha256 = {}
         phase0_evidence = []
         for name, path in refs.items():
             artifact, raw_sha = _stage1_json(path, label=f"Phase 0 {name}",
@@ -4864,18 +4790,40 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
             if _stage1_digest(artifacts[name]["sha256"], f"{name} file digest") != raw_sha:
                 raise ValueError("phase0_artifact_digest_mismatch")
             loaded_artifacts[name] = artifact
+            artifact_raw_sha256[name] = raw_sha
             phase0_evidence.append({"artifact": name, "evidence_path": str(path),
                 "evidence_sha256": raw_sha})
-            _stage1_check_phase0_artifact(name, artifact, protocol)
-        partition_binding = _stage1_check_phase0_artifact("seed_partition",
-            loaded_artifacts["seed_partition"], protocol)
-        if partition_binding["baseline_freeze_sha256"] != loaded_artifacts["effective_freeze"].get("freeze_sha256"):
-            raise ValueError("phase0_freeze_partition_binding_invalid")
-        phase0["_verified_stage1_seeds"] = partition_binding
+        chain = {name: loaded_artifacts[name] for name in _STAGE1_CHAIN_ARTIFACTS}
+        chain_binding = validate_phase0_chain(chain)
+        if chain_binding["allocation_authorized"] is not True:
+            raise ValueError("phase0_allocation_authorization_not_validated")
+        phase0_binding = validate_phase0_index(phase0, chain, artifact_raw_sha256)
+        if (phase0_binding["source_identity_sha256"] != protocol.get("calibration_source_identity_sha256")
+                or protocol.get("phase0_identity_binding") != {
+                    "effective_freeze_sha256": phase0_binding["effective_freeze_sha256"],
+                    "source_commit": phase0_binding["source"]["commit"],
+                    "source_tree": phase0_binding["source"]["tree"],
+                    "source_plan_path": phase0_binding["source"]["source_plan_path"],
+                    "source_plan_sha256": phase0_binding["source"]["source_plan_sha256"],
+                    "runtime_sha256": phase0_binding["runtime_sha256"],
+                    "dependency_lock_sha256": phase0_binding["dependency_lock_sha256"],
+                    "normalized_runtime_sha256": phase0_binding["normalized_runtime_sha256"],
+                    "config_sha256": phase0_binding["config_sha256"],
+                    "configuration_artifacts": phase0_binding["configuration_artifacts"],
+                    "source_identity_sha256": phase0_binding["source_identity_sha256"]}):
+            raise ValueError("phase0_protocol_identity_binding_mismatch")
+        if campaign.get("phase0_identity_binding") != protocol.get("phase0_identity_binding"):
+            raise ValueError("phase0_campaign_identity_binding_mismatch")
+        phase0["_verified_stage1_seeds"] = {"validation_seeds": chain_binding["validation_seeds"],
+            "final_test_seeds": chain_binding["final_test_seeds"],
+            "baseline_freeze_sha256": chain_binding["effective_freeze_sha256"]}
+        for name in ("score_estimand_review", "d0_calibration_bundle",
+                "matched_reference_calibration_bundle", "margin_review"):
+            _stage1_check_phase0_artifact(name, loaded_artifacts[name], protocol)
         review = loaded_artifacts["score_estimand_review"]
-        if review.get("simulator_source_sha256") != phase0["source_identity_sha256"]:
+        if review.get("simulator_source_sha256") != phase0_binding["source_identity_sha256"]:
             raise ValueError("phase0_estimand_source_binding_invalid")
-        if campaign.get("source_identity_sha256") != phase0["source_identity_sha256"]:
+        if campaign.get("source_identity_sha256") != phase0_binding["source_identity_sha256"]:
             raise ValueError("phase0_campaign_source_binding_invalid")
         record("phase0_prerequisites", inputs[1], phase0_sha,
             related=phase0_evidence)
@@ -4913,6 +4861,7 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
     report = {"schema": _STAGE1_PREFLIGHT_SCHEMA,
         "status": "ready" if not blockers else "blocked",
         "scope": "metadata_consistent_only",
+        "current_source_factory_reproduction": "not_performed",
         "ready": not blockers,
         "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
         "checkpoint_bytes_opened": False, "outcomes_read": False,
@@ -4944,7 +4893,7 @@ def _stage1_validate_campaign_and_checkpoints(campaign, checkpoints, protocol, p
         "scenario_id", "scenario_version", "protocol_id", "source_identity_sha256",
         "config_sha256", "promotion_comparator", "safety_floor_policy",
         "validation_seeds", "final_test_seeds", "matched_campaign_ancestry",
-        "campaign_roots", "checkpoint_roots"}
+        "campaign_roots", "checkpoint_roots", "phase0_identity_binding"}
     if (set(campaign) != campaign_fields
             or campaign.get("schema") != "meco-five-track-stage1-campaign-manifest-v1"):
         raise ValueError("campaign_manifest_schema_invalid")
@@ -4958,6 +4907,9 @@ def _stage1_validate_campaign_and_checkpoints(campaign, checkpoints, protocol, p
     source = protocol.get("calibration_source_identity_sha256")
     if campaign.get("source_identity_sha256") != source:
         raise ValueError("campaign_source_mismatch")
+    binding = protocol.get("phase0_identity_binding")
+    if not isinstance(binding, dict) or campaign.get("phase0_identity_binding") != binding:
+        raise ValueError("campaign_phase0_identity_binding_mismatch")
     if campaign.get("promotion_comparator") != protocol.get("paired_reference_variant"):
         raise ValueError("campaign_comparator_mismatch")
     if campaign.get("safety_floor_policy") != REFERENCE_POLICY:
@@ -4986,6 +4938,8 @@ def _stage1_validate_campaign_and_checkpoints(campaign, checkpoints, protocol, p
         raise ValueError("campaign_protocol_seed_mismatch")
     ancestry = campaign.get("matched_campaign_ancestry")
     config_digest = _stage1_digest(campaign.get("config_sha256"), "campaign config digest")
+    if config_digest != binding.get("config_sha256"):
+        raise ValueError("campaign_phase0_config_mismatch")
     if not isinstance(ancestry, str) or not ancestry.strip():
         raise ValueError("campaign_ancestry_missing")
     found = {}
@@ -5061,6 +5015,8 @@ def main(argv=None):
         help="matched-reference variance reports for the exact prerequisite closure")
     create.add_argument("--reference-margin-review-json",
         help="explicit reviewed final useful-gain and safety margins bound to matched-reference variance reports")
+    create.add_argument("--phase0-identity-binding-json",
+        help="validated Stage 1 Phase 0 identity binding; required for pickup_simple v5")
     create.add_argument("--reference-policy",
         choices=(*MATCHED_REFERENCE_VARIANTS, "D1", "D2"),
         default="D1/current",
@@ -5151,13 +5107,16 @@ def main(argv=None):
             if args.matched_reference_calibration_bundle_json else None)
         margin_review = (_load_json(args.reference_margin_review_json)
             if args.reference_margin_review_json else None)
+        phase0_binding = (_load_json(args.phase0_identity_binding_json)
+            if args.phase0_identity_binding_json else None)
         write_immutable_report(args.output, protocol_document(
             scenario_id=args.scenario, episodes=args.episodes, master_seed=args.master_seed,
             calibration_report=calibration, minimum_useful_gain=gain_margins,
             safety_noninferiority_margins=safety_margins,
             reference_policy=args.reference_policy,
             matched_reference_calibration_report=reference_calibration,
-            reference_margin_review=margin_review))
+            reference_margin_review=margin_review,
+            phase0_identity_binding=phase0_binding))
         return
     if args.command == "calibrate-d0":
         report = run_d0_calibration(scenario_id=args.scenario, episodes=args.episodes,
