@@ -255,7 +255,7 @@ def test_teammate_behavior_assignment_is_exact_validation_pair_and_fails_closed(
     record = phase4_teammate_behavior_record(treatment, runtime,
         episode_id="episode-11", scenario_id="full_match_offense",
         category="level_1", seed=11, policy_id="D0", condition_id="condition-a",
-        source_identity_sha256="c" * 64)
+        source_identity_sha256="c" * 64, expected_action_ticks=0)
     assert record["source_identity_sha256"] == "c" * 64
     assert record["protocol_sha256"] == "a" * 64
     assert record["assignment_pair_sha256"] == treatment["pair_sha256"]
@@ -266,7 +266,7 @@ def test_teammate_behavior_assignment_is_exact_validation_pair_and_fails_closed(
         phase4_teammate_behavior_record(treatment, runtime,
             episode_id="episode-11", scenario_id="full_match_offense",
             category="level_1", seed=99, policy_id="D0", condition_id="condition-a",
-            source_identity_sha256="c" * 64)
+            source_identity_sha256="c" * 64, expected_action_ticks=0)
 
 
 def _observation():

@@ -188,6 +188,20 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
     else:
         configured_pressure_slots = registered_pressure_slots
         preserved_scripted_slots = {category: [] for category in categories}
+    per_episode_assignment = []
+    for category in categories:
+        for seed, identity in zip(seeds,
+                identities[list(categories).index(category) * len(seeds):
+                    (list(categories).index(category) + 1) * len(seeds)]):
+            row = {"scenario_id": scenario_id, "category": category, "seed": seed,
+                "split": split, "factor_id": factor_id, "policy_id": policy_id,
+                "policy_family": POLICY_FACTOR_IDS[policy_id],
+                "policy_config_sha256": identity["policy_config_sha256"],
+                "stimulus_identity_sha256": identity["stimulus_identity_sha256"],
+                "configured_pressure_slots": configured_pressure_slots[category]}
+            row["assignment_sha256"] = hashlib.sha256(json.dumps(row,
+                sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            per_episode_assignment.append(row)
     if factor_id == "opponent.direct_pursuit":
         identities = [{**identity,
             "category": category,
@@ -209,6 +223,7 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         "configured_pressure_slots": configured_pressure_slots,
         "split": split, "seed_list": list(seeds),
         "policy_config_sha256": policy_pool_identity()["config_sha256"],
+        "per_episode_assignment": per_episode_assignment,
         "per_episode_assignment_sha256": hashlib.sha256(json.dumps(identities,
             sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
         "policy_inputs": POLICY_CONFIG["sensing_boundary"],

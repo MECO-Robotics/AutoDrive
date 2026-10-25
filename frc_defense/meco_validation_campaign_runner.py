@@ -201,7 +201,11 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
             pairing.get("outcome_signals_complete")),
         "qualification_eligible": False,
         "required_family_outcomes": ({"interception_rate": None,
-            "policy_family_coverage": None, "paired_outcome_by_family": None}
+            "policy_family_coverage": pairing.get("policy_family_coverage"),
+            "paired_outcome_by_family": pairing.get("paired_outcome_by_family")}
+            if (not direct_pursuit and not trench_interception and pairing) else
+            {"interception_rate": None, "policy_family_coverage": None,
+             "paired_outcome_by_family": None}
             if not direct_pursuit and not trench_interception else None),
         "paired_coverage": pairing,
         "promotion_gate": ({"simulator_outcomes_captured": bool(pairing and
@@ -539,8 +543,9 @@ def run_phase4_context_cell(plan: dict, cell_key: str, *, factor: str,
             for arm, assignment in assignments.items()},
         "dispatch_binding": dispatch_binding,
         "runtime_status": "scheduled_not_simulator_validated",
-        "simulator_behavior_validated": False, "outcomes": {
-            field: None for field in outcome_fields}, "qualification_eligible": False,
+        "simulator_behavior_validated": False,
+        "outcomes": (pairing.get("outcomes") if pairing is not None else {
+            field: None for field in outcome_fields}), "qualification_eligible": False,
         "paired_coverage": pairing, "dispatch_return_code": return_code,
         "executed": return_code == 0}
 
@@ -653,14 +658,70 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
                         captured.get("arm") != expected_assignment["arm"] or
                         captured.get("assignments") != expected_behaviors or
                         captured.get("assignment_applied") != (expected_behaviors is not None) or
+                        captured.get("scenario_id") != row.get("scenario_id") or
+                        captured.get("category") != key[1] or
+                        captured.get("seed") != key[2] or
+                        captured.get("policy_id") != row.get("policy_id") or
+                        captured.get("evaluation_policy_key") != key[0] or
+                        captured.get("condition_id") != row.get("condition_id") or
+                        captured.get("protocol_id") != protocol_id or
+                        captured.get("protocol_sha256") != protocol_sha256 or
+                        captured.get("qualification_case") != expected_assignment[
+                            "qualification_case"] or
+                        captured.get("action_event_coverage", {}).get("complete") is not True or
+                        captured.get("whole_team_episode_outcome_metrics") != {
+                            name: row.get("metrics", {}).get(name) for name in (
+                                "success", "scores", "useful_throughput",
+                                "completed_cycles")} or
+                        captured.get("source_identity_sha256") != row.get(
+                            "source_identity_sha256") or
+                        captured.get("checkpoint_sha256") != row.get(
+                            "checkpoint_sha256") or
+                        captured.get("execution_device") != row.get(
+                            "execution_device") or
+                        captured.get("teammate_collision_rate") is not None or
+                        captured.get("score_contribution") is not None or
                         captured.get("qualification_eligible") is not False):
                     raise ValueError(f"Phase 4 context row lacks exact teammate-behavior evidence: {key}")
-                for field in outcome_fields:
-                    if captured.get(field) is not None:
-                        raise ValueError(f"Phase 4 teammate outcome {field} must remain unavailable")
+                if arm == "factor_treatment" and (
+                        captured["action_event_coverage"].get("observed_action_ticks") !=
+                        captured["action_event_coverage"].get("expected_action_ticks") or
+                        captured["action_event_coverage"].get("expected_action_ticks") !=
+                        row.get("elapsed_ticks") or
+                        captured.get("outcome_semantics") !=
+                        "whole-team paired episode outcome while this behavior assignment was active; not an individual causal contribution"):
+                    raise ValueError(f"Phase 4 teammate treatment action coverage is incomplete: {key}")
         rows_by_arm[arm] = rows
     if set(rows_by_arm["no_factor"]) != set(rows_by_arm["factor_treatment"]):
         raise ValueError("Phase 4 context arms have missing or unexpected paired rows")
+    paired_behavior_outcomes = None
+    if factor == "teammate_behavior":
+        behavior_rows = []
+        expected_behavior_keys = set()
+        expected_behaviors = set()
+        for key in sorted(expected_keys):
+            treatment = rows_by_arm["factor_treatment"][key][
+                "phase4_teammate_behavior"]
+            control_metrics = rows_by_arm["no_factor"][key].get("metrics", {})
+            for slot_text, behavior in treatment["assignments"].items():
+                expected_behaviors.add(behavior)
+                expected_behavior_keys.add((*key, behavior))
+                behavior_rows.append({
+                    "policy_id": key[0], "category": key[1], "seed": key[2],
+                    "behavior": behavior,
+                    "slot": int(slot_text),
+                    "control_whole_team_outcome": {name: control_metrics.get(name)
+                        for name in ("success", "scores", "useful_throughput",
+                                     "completed_cycles")},
+                    "treatment_whole_team_outcome": treatment[
+                        "whole_team_episode_outcome_metrics"],
+                    "outcome_semantics": "paired whole-team episode outcomes while this behavior was present; concurrent behavior slots prevent individual score attribution"})
+        from .meco_phase4_outcome_bridge import reduce_teammate_behavior_outcomes
+        paired_behavior_outcomes = reduce_teammate_behavior_outcomes(
+            behavior_rows, expected_keys=expected_behavior_keys,
+            expected_behaviors=expected_behaviors)
+    else:
+        paired_behavior_outcomes = {field: None for field in outcome_fields}
     return {"schema": "meco-phase4-context-pair-coverage-v1", "factor": factor,
         "condition_names": condition_names, "categories": categories,
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
@@ -671,8 +732,8 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
         "matrix_sha256": _file_sha(paths[0]), "checkpoint_sha256":
             expected_binding["checkpoint_sha256"], "source_identity_sha256":
             expected_binding["source_identity_sha256"], "execution_device":
-            expected_binding["execution_device"], "outcomes": {
-                field: None for field in outcome_fields}, "qualification_eligible": False}
+            expected_binding["execution_device"], "outcomes":
+            paired_behavior_outcomes, "qualification_eligible": False}
 
 
 def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
@@ -879,7 +940,6 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
         "paired_rows_per_condition": {
             "architecture_matched_cv_k16": len(expected_keys)},
-        "paired_outcome_by_family": None,
         "profile_config_sha256": assignment["profile_config_sha256"],
         "assignment_sha256": assignment["assignment_sha256"],
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
@@ -1013,9 +1073,16 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
             raise ValueError(f"Phase 4 {arm} matrix has no condition reports")
         arm_reports = {}
         for condition_name, entry in condition_map.items():
-            report = _read_json(Path(entry["report_path"]).resolve())
-            if direct_pursuit and (
-                    report.get("scenario_id") != protocol.get("scenario_id")
+            report_path = Path(entry["report_path"]).resolve(strict=True)
+            try:
+                report_path.relative_to(case_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("Phase 4 opponent report escapes the fresh case directory") from exc
+            report_sha = _file_sha(report_path)
+            if entry.get("evaluation_report_sha256") != report_sha:
+                raise ValueError("Phase 4 opponent report bytes differ from the matrix digest")
+            report = _read_json(report_path)
+            if (report.get("scenario_id") != protocol.get("scenario_id")
                     or report.get("categories") != categories
                     or report.get("split") != "validation"
                     or report.get("evaluation_protocol_id") !=
@@ -1035,6 +1102,13 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
             if report.get("qualification_eligible") is not False:
                 raise ValueError("Phase 4 opponent outputs cannot be qualification eligible")
             for key, row in rows.items():
+                track = key[0][:-3] if key[0].endswith("_P0") else key[0]
+                if (row.get("source_identity_sha256") != protocol.get(
+                        "source_identity_sha256") or
+                        row.get("checkpoint_sha256") != protocol.get(
+                            "checkpoint_sha256", {}).get(track) or
+                        row.get("execution_device") != protocol.get("execution_device")):
+                    raise ValueError(f"Phase 4 opponent row has mismatched source/checkpoint/device: {key}")
                 captured = row.get("phase4_opponent_policy")
                 if direct_pursuit:
                     outcome = row.get("phase4_direct_pursuit")
@@ -1071,11 +1145,41 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                 if arm == "no_factor" and captured is not None:
                     raise ValueError("no-factor control unexpectedly applied a reactive policy")
                 if arm == "factor_treatment":
+                    expected_assignment = next((item for item in schedule.get(
+                        "per_episode_assignment", ()) if item.get("seed") == key[2]
+                            and item.get("category") == key[1]), None)
                     if (not isinstance(captured, dict)
                             or captured.get("policy_id") != schedule["policy_id"]
                             or captured.get("factor_id") != schedule["factor_id"]
                             or captured.get("policy_family") != schedule["policy_family"]
                             or captured.get("schedule_sha256") != schedule["schedule_sha256"]
+                            or captured.get("scenario_id") != protocol.get("scenario_id")
+                            or captured.get("category") != key[1]
+                            or captured.get("seed") != key[2]
+                            or captured.get("condition") != arm
+                            or captured.get("qualification_case") != qualification_case
+                            or captured.get("condition_id") != row.get("condition_id")
+                            or captured.get("source_identity_sha256") != row.get(
+                                "source_identity_sha256")
+                            or captured.get("checkpoint_sha256") != row.get(
+                                "checkpoint_sha256")
+                            or captured.get("execution_device") != row.get(
+                                "execution_device")
+                            or not isinstance(expected_assignment, dict)
+                            or captured.get("assignment_sha256") != expected_assignment.get(
+                                "assignment_sha256")
+                            or captured.get("configured_slots") != expected_assignment.get(
+                                "configured_pressure_slots")
+                            or captured.get("applied_slots") != expected_assignment.get(
+                                "configured_pressure_slots")
+                            or captured.get("applied_event_coverage_complete") is not True
+                            or captured.get("applied_command_calls_by_slot") != {
+                                str(slot): row.get("elapsed_ticks") for slot in
+                                expected_assignment.get("configured_pressure_slots", ())}
+                            or captured.get("episode_outcome_metrics") != {
+                                name: row.get("metrics", {}).get(name) for name in (
+                                    "success", "scores", "useful_throughput",
+                                    "completed_cycles")}
                             or captured.get("interception_rate") is not None
                             or captured.get("paired_outcome_by_family") is not None):
                         raise ValueError(f"Phase 4 treatment row lacks policy provenance/null outcomes: {key}")
@@ -1089,6 +1193,7 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         matrix_files[arm] = paths[0]
     pair_counts = {}
     direct_paired = []
+    reactive_paired = []
     for condition_name in sorted(condition_names):
         control = reports_by_arm["no_factor"][condition_name]
         treatment = reports_by_arm["factor_treatment"][condition_name]
@@ -1101,6 +1206,27 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                 direct_paired.append(paired_direct_pursuit_outcomes(
                     control[key]["phase4_direct_pursuit"],
                     treatment[key]["phase4_direct_pursuit"]))
+        elif schedule.get("factor_id") == "defender.reactive_pool":
+            for key in sorted(control):
+                captured = treatment[key].get("phase4_opponent_policy")
+                if not isinstance(captured, dict):
+                    raise ValueError(f"reactive treatment lacks applied policy capture: {key}")
+                family = captured["policy_family"]
+                reactive_paired.append({"policy_id": key[0],
+                    "opponent_policy_id": schedule["policy_id"],
+                    "policy_family": family, "category": key[1], "seed": key[2],
+                    "control_episode_outcome": {name: control[key].get(
+                        "metrics", {}).get(name) for name in ("success", "scores",
+                            "useful_throughput", "completed_cycles")},
+                    "treatment_episode_outcome": captured["episode_outcome_metrics"],
+                    "outcome_semantics": "whole-team paired episode outcome while the policy was assigned; association by policy family, not per-policy causal contribution"})
+    reactive_family_summary = None
+    if schedule.get("factor_id") == "defender.reactive_pool":
+        from .meco_phase4_outcome_bridge import reduce_policy_family_outcomes
+        reactive_family_summary = reduce_policy_family_outcomes(reactive_paired,
+            expected_policy_ids=policy_names, categories=categories, seeds=seeds,
+            family_by_policy={policy: schedule["policy_family"]
+                for policy in policy_names})
     pairing = {"schema": ("meco-phase4-direct-pursuit-pair-outcomes-v1" if direct_pursuit
                            else "meco-phase4-reactive-opponent-pair-coverage-v1"),
         "policy_id": schedule["policy_id"],
@@ -1115,7 +1241,12 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                             else "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
         "outcome_signals_complete": bool(direct_pursuit and direct_paired),
-        "paired_outcome_by_family": None,
+        "paired_outcome_by_family": (reactive_family_summary[
+            "paired_outcome_by_family"] if reactive_family_summary else None),
+        "policy_family_coverage": (reactive_family_summary[
+            "policy_family_coverage"] if reactive_family_summary else None),
+        "paired_outcome_semantics": (reactive_family_summary[
+            "paired_outcome_semantics"] if reactive_family_summary else None),
         "interception_rate": ({
             "numerator_intercepted_episodes": sum(
                 row["interception_episode_numerator"] for row in direct_paired),

@@ -2,10 +2,14 @@
 
 The validation plan now carries a machine-checked requirement → factor →
 runtime-event → required-signal binding for all eleven registry requirements.
-The campaign compiler marks a cell executable only when its stimulus is wired
-and every required outcome signal has an authoritative source. At this revision
-there are **zero executable qualification cells**. A planned row is not an
-executed or qualified episode.
+It reports dispatchability separately from qualification executability:
+`dispatchable_cell_count` counts cells with a wired stimulus and any required
+assignment path, while `qualification_executable_cell_count` (also exposed as
+`executable_cell_count`) requires a wired stimulus, authoritative sources for
+all required outcome signals, and accepted source-bound replay/dashboard
+review for that cell. At this revision there are **zero executable
+qualification cells**. A dispatchable planned row is not an executed or
+qualified episode, and qualification eligibility remains false.
 
 | Requirement | Factor ID | Runtime event | Required signals | Current status |
 | --- | --- | --- | --- | --- |
@@ -13,9 +17,9 @@ executed or qualified episode.
 | direct pursuit | `opponent.direct_pursuit` | none | interception, time lost to opponents, robot contact | Sensed-state policy helper exists, but validation slot assignment is not wired; signals unavailable |
 | trench interception | `opponent.trench_interception` | none | interception, alternate crossing, trench crossing time | Sensed-state policy helper exists, but validation slot assignment is not wired; signals unavailable |
 | feints | `opponent.feint_reversal` | `feint_reversal_tick` plus route-goal lifecycle endpoint record | reaction latency, interception, route completion | Existing factor capture can retain a fully observed, exact-bound route completion diagnostic; reaction latency/interception remain unavailable, no representative replay has validated it, and qualification is disabled |
-| reactive defenders and opponent pools | `defender.reactive_pool` | none | interception, policy-family coverage, paired outcome by family | Seven-policy helper exists, but validation schedule is not wired; signals unavailable |
+| reactive defenders and opponent pools | `defender.reactive_pool` | `records[].phase4_opponent_policy.applied_event_coverage_complete` | interception, policy-family coverage, paired outcome by family | Validation rows bind exact per-seed policy/family/slot assignments and require applied command coverage. Exact paired whole-team outcomes can be grouped by policy family as an association. Interception remains unavailable because no approved reactive-pool interception criterion/signal exists; qualification remains disabled. |
 | multiple legal team start states | `start.legal_team_poses` | none | legal start validation, outcome by start state | Start-pose helpers exist, but validation reset is not wired; signals unavailable |
-| teammate behaviors | `teammate.behavior_pool` | none | outcome by behavior, teammate collision, score contribution | Schedule helper exists, but validation action assignment is not wired; signals unavailable |
+| teammate behaviors | `teammate.behavior_pool` | `records[].phase4_teammate_behavior.action_event_coverage.complete` | outcome by behavior, teammate collision, score contribution | Exact assigned/requested/helper-selected/actually-applied action traces are checked for every episode tick and paired by identical policy/category/seed. Reported behavior outcomes are whole-team paired episode metrics while behaviors were present, not individual causal credit. No slot-pair-specific collision ledger or robot-attributed score ledger exists, so teammate collision and score contribution remain null; qualification remains disabled. |
 | sensor delay and low confidence | `sensor.delay_120ms`, `sensor.low_confidence` | delayed-observation ticks, confidence-cap refresh/reduction | outcome by sensor condition, stale-observation reaction latency, outcome by confidence band | Existing factors capture stimulus; required outcome signals unavailable |
 | abrupt opponent change | `opponent.abrupt_policy_change` | `policy_change_tick` plus route-goal lifecycle endpoint record | reaction latency, interception, route completion | Existing factor capture can retain a fully observed, exact-bound route completion diagnostic; reaction latency/interception remain unavailable, no representative replay has validated it, and qualification is disabled |
 | bumps and contact | `contact.robot_bump` | `phase4_contact_exposure`, `phase4_pair_contact_event`, `first_route_progress_interval`, `selected_goal_endpoint_completion_rate` | robot contact rate, recovery time, route completion | Three registered geometries flow through diagnostic matrix conditions and reset; slot 2 receives the sensed-target approach while slot 3 remains the evaluated policy. Records separate exposure, solver-confirmed pair (2,3) contact, route crossing, an outer-tick interval-censored route-progress observation, and an episode-wide selected-goal endpoint diagnostic. Neither diagnostic is contact-caused recovery or registry route completion; D0 has no selected-goal ledger, and qualification stays disabled. |
@@ -66,6 +70,19 @@ contact timestamp; route-distance observation bounds are outer ticks. It
 records route fingerprints and censors changed goals or invalid clocks,
 counts, or routes. It is not `route_completion_rate`,
 `recovery_time_after_bump_s`, or qualification evidence.
+
+The reactive-pool and teammate-behavior outcome bridge is implemented as a
+diagnostic evidence interface. Reactive rows retain canonical per-seed policy
+assignment digests, configured/applied slot identity, and full physics-tick
+command coverage; paired validation reports retain whole-team episode outcome
+contrasts grouped by policy family. These contrasts do not claim physical
+interception or policy-specific causal contribution. Teammate rows bind the
+two scheduled slots to complete per-tick requested/helper-selected/applied
+action records and pair exact same-policy/category/seed episode outcomes by
+behavior association. Teammate collision and individual score contribution
+remain null because the simulator does not expose those slot-specific ledgers.
+No representative simulator campaign or replay review has been accepted, and
+the Phase 4 qualification gate remains closed.
 
 The nested `selected_goal_endpoint_completion_rate` is computed from valid
 goal-attempt ledger rows across the episode while a contact geometry is

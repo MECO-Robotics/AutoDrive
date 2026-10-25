@@ -3062,6 +3062,64 @@
         "status": "approved-summary"
       },
       "limits": "Gated offline fixture/device-candidate utility only. No tests, offline CLI, HIP import/compile, WX9100 lease acquisition, parity/profile, simulator, replay, training, deployment, or qualification evidence is claimed here; device verification remains deferred and normal Plan A dispatch stays on the CPU oracle."
+    },
+    {
+      "requirement_id": "phase4-reactive-pool-outcome-bridge",
+      "title": "Phase 4 reactive opponent and teammate behavior-pool outcome bridge",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/plans/phase4-reactive-pool-outcome-bridge-20261025.md",
+          "sha256": "14724b735c5114252a6f46ef9bbf2796a0420aa374e1094feda07624f7b3a0af",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "candidate_commit": "ceaac65dcc7cbe1a5217c6fae7b3ac0548d36edf",
+        "integration_commit": "ceaac65dcc7cbe1a5217c6fae7b3ac0548d36edf",
+        "source_commits": [
+          "14035881b",
+          "2c43d1df9",
+          "74afe66db",
+          "20a31aadf",
+          "1a4b05e9a",
+          "34f13c445",
+          "638a6fbea",
+          "3a9ef3d00",
+          "eb01c5d3a",
+          "ceaac65dc"
+        ],
+        "paths": [
+          "docs/MECO_PHASE4_RUNTIME_STATUS.md",
+          "frc_defense/meco_phase4_campaign_plan.py",
+          "frc_defense/meco_phase4_context.py",
+          "frc_defense/meco_phase4_opponents.py",
+          "frc_defense/meco_phase4_outcome_bridge.py",
+          "frc_defense/meco_phase4_runtime_adapter.py",
+          "frc_defense/meco_track_training.py",
+          "frc_defense/meco_validation_campaign_runner.py",
+          "scripts/summarize_meco_ablation_matrix.py",
+          "tests/test_meco_phase4_campaign_plan.py",
+          "tests/test_meco_phase4_context.py",
+          "tests/test_meco_phase4_outcome_bridge.py",
+          "tests/test_summarize_meco_ablation_matrix.py"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-reactive-pool-outcome-bridge-20261025.md",
+          "sha256": "816bda52dc8b00803c5998c247088dd7d7c6bdb3812693ea29cfdf4b5e6e4a7e",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "ceaac65dcc7cbe1a5217c6fae7b3ac0548d36edf",
+        "verdict": "approved",
+        "verdict_detail": "Independent exact-candidate review approved ceaac65dcc7cbe1a5217c6fae7b3ac0548d36edf; the scoped implementation record reports 109 checks and the independent review record reports 20 checks. These counts were not rerun for this ledger update.",
+        "status": "approved-summary"
+      },
+      "limits": "Scoped code implementation/review summary only; no simulator run, fresh replay, dashboard replay review, GPU/training/device evidence, qualification, or promotion is claimed. Reactive-pool and teammate behavior outcomes remain diagnostic until current-source paired simulator evidence and inspected fresh replay/dashboard evidence are accepted."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
