@@ -20,7 +20,8 @@ from .meco_phase4_context import (CONTACT_GEOMETRIES,
     apply_full_team_start_profile, phase4_context_identity,
     full_team_start_profile_legality,
     validate_phase4_start_profile_assignment,
-    validate_phase4_focal_pose_assignment, apply_phase4_focal_pose_assignment)
+    validate_phase4_focal_pose_assignment, apply_phase4_focal_pose_assignment,
+    apply_phase4_focal_pose_assignment_reset)
 from .tensor_3v3 import TensorThreeVsThreeEnv
 from .training_curriculum import get_scenario
 
@@ -31,13 +32,47 @@ _PHASE4_SENSOR_STATE_FIELDS = (
     'perception_quality_state', 'opponent_pose', 'opponent_velocity',
     'opponent_size', 'opponent_valid', 'opponent_age',
 )
+PRESSURE_ANCHOR_SCHEMA = 'meco-phase4-pressure-anchor-v1'
 
 
 class CurriculumEnv(TensorThreeVsThreeEnv):
-    def _phase4_apply_confidence_cap(self):
+    def _phase4_apply_confidence_cap(self, *, reset_mask=None):
         """Cap only sensed FUEL confidence for the learner robot."""
         cap = getattr(self, 'phase4_confidence_cap', None)
         if cap is None:
+            return
+        if reset_mask is not None:
+            if (not isinstance(reset_mask, torch.Tensor) or
+                    reset_mask.device != self.device or reset_mask.dtype is not torch.bool or
+                    tuple(reset_mask.shape) != (self.n,)):
+                raise ValueError('confidence reset mask must be device bool [world]')
+            selected = reset_mask
+            sensed_all = self.track_mask[:, 3]
+            sensed = sensed_all & selected[:, None]
+            confidence = self.track_confidence[:, 3]
+            reduced = sensed & (confidence > float(cap))
+            capped = torch.where(sensed_all, confidence.clamp(max=float(cap)), confidence)
+            confidence.copy_(torch.where(selected[:, None], capped, confidence))
+            count = sensed.sum(-1)
+            reduced_count = reduced.sum(-1)
+            final_sum = (confidence * sensed.to(confidence.dtype)).sum(-1)
+            final_mean = torch.where(count > 0,
+                final_sum / count.clamp_min(1).to(final_sum.dtype),
+                torch.full_like(final_sum, float('nan')))
+            defaults = (
+                ('phase4_reset_confidence_cap_refresh_count', torch.zeros(
+                    self.n, device=self.device, dtype=torch.long)),
+                ('phase4_reset_confidence_cap_sensed_track_count', torch.zeros(
+                    self.n, device=self.device, dtype=torch.long)),
+                ('phase4_reset_confidence_cap_reduced_track_count', torch.zeros(
+                    self.n, device=self.device, dtype=torch.long)),
+                ('phase4_reset_confidence_cap_final_mean', torch.zeros(
+                    self.n, device=self.device, dtype=confidence.dtype)),
+            )
+            updates = (torch.ones_like(count), count, reduced_count, final_mean)
+            for (name, default), update in zip(defaults, updates):
+                prior = getattr(self, name, default)
+                setattr(self, name, torch.where(selected, prior + update, prior))
             return
         sensed = self.track_mask[:, 3]
         confidence = self.track_confidence[:, 3]
@@ -54,6 +89,12 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
     def _update_perception(self, active, active_count=None):
         result = super()._update_perception(active, active_count=active_count)
         self._phase4_apply_confidence_cap()
+        return result
+
+    def _update_perception_for_reset(self, active):
+        """Refresh selected reset worlds without host confidence reductions."""
+        result = super()._update_perception(active)
+        self._phase4_apply_confidence_cap(reset_mask=active)
         return result
 
     def _phase4_capture_sensor_frame(self, observation=None):
@@ -249,7 +290,7 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
             if level == 2 or (level == 5 and slot == 0) or pressure['family'] == 'orbiting_interceptor':
                 phase = self.match_elapsed * 1.2 + pressure['phase']
                 target = self.policy_pose[:, slot, :2].clone()
-                target[:, 1] = pressure['anchor_y'] + torch.sin(phase) * .6
+                target[:, 1] = self.phase4_pressure_anchor_y_m + torch.sin(phase) * .6
                 if pressure['family'] == 'orbiting_interceptor':
                     target[:, 0] = 10.8 + torch.cos(phase * .7 + slot) * .8
                     target[:, 1] += slot * .45
@@ -268,12 +309,42 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                 commands[:, slot, :2] = torch.where(valid[:, None], delta.clamp(-1.5, 1.5), 0.)
         return torch.where(active[:, None, None], commands, 0.)
 
-    def _reset_phase4_observation_buffer(self, observation=None):
+    def _reset_phase4_observation_buffer(self, observation=None, *, mask=None):
         delay = int(getattr(self, 'phase4_observation_delay_ticks', 0))
         current = self._phase4_capture_sensor_frame(observation)
-        self._phase4_current_sensor_frame = current
-        self._phase4_observation_history = [self._phase4_capture_sensor_frame(
-            current['observation']) for _ in range(delay + 1)]
+        if mask is None:
+            self._phase4_current_sensor_frame = current
+            self._phase4_observation_history = [self._phase4_capture_sensor_frame(
+                current['observation']) for _ in range(delay + 1)]
+            return
+        if (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (self.n,)):
+            raise ValueError('sensor history reset mask must be device bool [world]')
+        if not hasattr(self, '_phase4_observation_history'):
+            self._phase4_current_sensor_frame = current
+            self._phase4_observation_history = [self._phase4_capture_sensor_frame(
+                current['observation']) for _ in range(delay + 1)]
+            return
+        history = self._phase4_observation_history
+        if len(history) != delay + 1:
+            raise RuntimeError('sensor history depth differs from the static delay contract')
+        row_mask = mask.reshape((self.n,) + (1,) * (self._last_obs.ndim - 1))
+
+        def merge_frame(destination, source):
+            for name in _PHASE4_SENSOR_STATE_FIELDS:
+                field = getattr(self, name)
+                field_mask = mask.reshape((self.n,) + (1,) * (field.ndim - 1))
+                destination[name].copy_(torch.where(field_mask, source[name],
+                                                     destination[name]))
+            destination['observation'].copy_(torch.where(row_mask,
+                source['observation'], destination['observation']))
+
+        if getattr(self, '_phase4_current_sensor_frame', None) is None:
+            self._phase4_current_sensor_frame = current
+        else:
+            merge_frame(self._phase4_current_sensor_frame, current)
+        for frame in history:
+            merge_frame(frame, current)
 
 
 def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=None,
@@ -451,6 +522,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         # Native simulator kernels use the current device/stream at setup.
         torch.cuda.set_device(requested_device)
     env = CurriculumEnv(**env_kwargs)
+    env.phase4_pressure_anchor_y_m = torch.full((env.n,), 4.035,
+        device=env.device, dtype=env.sim.pose.dtype)
     env.phase4_factor_config = phase4_factor
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
     env.phase4_opponent_schedule = trench_schedule
@@ -525,6 +598,10 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'recovery_time_after_bump_s': None,
         'route_completion_rate': None,
     }
+    env.phase4_pressure_anchor_capture_stage = (
+        'post_start_profile_pose' if (start_profile_assignment is not None or
+                                      contact_geometry_id is not None)
+        else 'pre_blocker_pose')
     env.phase4_observation_delay_ticks = (phase4_factor['delay_ticks']
         if phase4_factor and phase4_factor['kind'] == 'observation_delay' else 0)
     env.phase4_confidence_cap = (phase4_factor['fuel_confidence_cap']
@@ -625,6 +702,7 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
     """Export the normalized object passed to CurriculumEnv without constructing it."""
     from pathlib import Path
     from .meco_baseline_freeze import (EFFECTIVE_SNAPSHOT_SCHEMA,
+        PRESSURE_ANCHOR_RUNTIME_STATE_SCHEMA,
         canonical_sha256, capture_source_identity, _validate_effective_runtime)
 
     root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
@@ -738,9 +816,18 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
             "content_sha256": hashlib.sha256(content).hexdigest()}
     producer = {"module": "frc_defense.curriculum_scenarios",
         "function": "make_curriculum_env", "source_identity_sha256": canonical_sha256(source)}
+    dynamic_runtime_state = {"phase4_pressure_anchor": {
+        "schema": PRESSURE_ANCHOR_RUNTIME_STATE_SCHEMA,
+        "shape": ["world"], "dtype": "same_as_sim_pose",
+        "device_owner": "CurriculumEnv.device",
+        "tensor_owner": "CurriculumEnv.phase4_pressure_anchor_y_m",
+        "capture_stages": ["pre_blocker_pose", "post_start_profile_pose"],
+        "reset_mask_semantics": "selected_world_rows_only",
+        "static_snapshot_contains_numeric_values": False}}
     body = {"schema": EFFECTIVE_SNAPSHOT_SCHEMA, "producer": producer,
         "factory_arguments": factory_arguments,
         "resolved_fields": resolved_fields, "configuration_artifacts": artifacts,
+        "dynamic_runtime_state": dynamic_runtime_state,
         "runtime_identity": runtime}
     body["snapshot_sha256"] = canonical_sha256(body)
     return body
@@ -752,7 +839,7 @@ def _pressure(category, seed, family='category_scripted'):
     if family in ('orbiting_interceptor', 'split_chaser'):
         level = max(level, 4)
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
-            'phase': (int(seed) % 1000) / 1000 * 2 * math.pi, 'anchor_y': 4.035,
+            'phase': (int(seed) % 1000) / 1000 * 2 * math.pi,
             'family': family}
 
 
@@ -775,7 +862,72 @@ def _pressure_level(category):
         return 0
 
 
-def _refresh(env):
+def _refresh(env, *, mask=None):
+    if mask is not None:
+        if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+            raise ValueError('reset refresh mask must be device bool [world]')
+        env.synchronize_policy_pose(mask)
+        focal_pose_assignment = getattr(env, 'phase4_focal_pose_assignment', None)
+        if focal_pose_assignment is not None:
+            applied, truth_preserved = apply_phase4_focal_pose_assignment_reset(
+                env, focal_pose_assignment, mask)
+        else:
+            applied = mask
+            truth_preserved = torch.ones_like(mask)
+            prior = getattr(env, 'phase4_focal_pose_reset_applied', None)
+            if not isinstance(prior, torch.Tensor) or tuple(prior.shape) != (env.n,):
+                prior = torch.zeros_like(mask)
+            env.phase4_focal_pose_reset_applied = torch.where(mask, applied, prior)
+            prior_truth = getattr(env, 'phase4_focal_pose_truth_preserved', None)
+            if not isinstance(prior_truth, torch.Tensor) or tuple(prior_truth.shape) != (env.n,):
+                prior_truth = torch.zeros_like(mask)
+            env.phase4_focal_pose_truth_preserved = torch.where(mask, truth_preserved,
+                                                                prior_truth)
+        env.sim.velocity.copy_(torch.where(mask[:, None, None],
+            torch.zeros_like(env.sim.velocity), env.sim.velocity))
+        env._target_collect_heading.copy_(torch.where(mask[:, None],
+            env.policy_pose[:, :, 2], env._target_collect_heading))
+        env._target_turn_anchor.copy_(torch.where(mask[:, None, None],
+            env.policy_pose[:, :, :2], env._target_turn_anchor))
+        cursor = env._closest_raster_indices(env.policy_pose[:, :, :2])
+        env._raster_cursor.copy_(torch.where(mask[:, None], cursor, env._raster_cursor))
+        env._raster_reanchor.copy_(torch.where(mask[:, None],
+            torch.ones_like(env._raster_reanchor), env._raster_reanchor))
+        for name in ('last_path', 'last_lengths', 'last_intercept', 'last_intercept_time',
+                     'last_start', 'last_goal', 'last_heading', 'last_progress',
+                     'last_trench_alignment', 'last_speed_profile', 'potential'):
+            value = getattr(env.planner, name)
+            row_mask = mask.reshape((env.n,) + (1,) * (value.ndim - 1))
+            value.copy_(torch.where(row_mask, torch.zeros_like(value), value))
+        env._planner_controller_modes_dirty_mask |= mask
+        cells_x = (env.piece_pos[..., 0] / env._pickup_grid_cell_size).floor().long()
+        cells_y = (env.piece_pos[..., 1] / env._pickup_grid_cell_size).floor().long()
+        cells = (cells_y.clamp(0, env._pickup_grid_ny-1) * env._pickup_grid_nx + cells_x.clamp(0, env._pickup_grid_nx-1))
+        env._pickup_possible_cells[:, :, 0].copy_(torch.where(mask[:, None],
+            cells.to(torch.int16), env._pickup_possible_cells[:, :, 0]))
+        reset_fuel_physics(env, mask)
+        for name in ('track_pos', 'track_vel', 'track_mask', 'track_confidence',
+                     'track_spatial_extent', 'track_angular_extent', 'track_merged',
+                     '_current_fuel_visibility', 'perception_quality_state',
+                     'opponent_valid', 'opponent_pose', 'opponent_velocity', 'opponent_size'):
+            value = getattr(env, name)
+            row_mask = mask.reshape((env.n,) + (1,) * (value.ndim - 1))
+            value.copy_(torch.where(row_mask, torch.zeros_like(value), value))
+        env.track_age.copy_(torch.where(mask[:, None],
+            torch.full_like(env.track_age, float('inf')), env.track_age))
+        env.opponent_age.copy_(torch.where(mask[:, None],
+            torch.full_like(env.opponent_age, float('inf')), env.opponent_age))
+        env._update_perception_for_reset(mask)
+        fresh = env.observe()
+        if env._last_obs is None:
+            env._last_obs = fresh
+        else:
+            env._last_obs = torch.where(mask[:, None, None], fresh, env._last_obs)
+        env._reset_phase4_observation_buffer(env._last_obs, mask=mask)
+        return env._last_obs
+
+    # Preserve the existing unmasked refresh API for non-reset callers.
     env.synchronize_policy_pose()
     focal_pose_assignment = getattr(env, 'phase4_focal_pose_assignment', None)
     if focal_pose_assignment is not None:
@@ -807,37 +959,49 @@ def _refresh(env):
     return env._last_obs
 
 
-def reset_curriculum_scenario(env, seed):
+def reset_curriculum_scenario(env, seed, *, mask=None):
     """Clear all physics/planner/sensor state, then expose ordinary perception."""
     config = env.curriculum
+    if mask is None:
+        reset_mask = torch.ones((env.n,), device=env.device, dtype=torch.bool)
+    elif (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+            mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+        raise ValueError('curriculum reset mask must be device bool [world]')
+    else:
+        reset_mask = mask
+    def write_rows(destination, values):
+        values = torch.as_tensor(values, device=destination.device,
+                                 dtype=destination.dtype).expand_as(destination)
+        row_mask = reset_mask.reshape((env.n,) + (1,) * (destination.ndim - 1))
+        destination.copy_(torch.where(row_mask, values, destination))
+
     config['seed'] = int(seed)
     if getattr(env, 'contact_geometry_id', None) is not None:
-        env.contact_geometry_runtime['route_seen'].zero_()
-        env.contact_geometry_runtime['route_seen_time_s'].fill_(-1.)
-        env.contact_geometry_runtime['approach_action_ticks'].zero_()
+        write_rows(env.contact_geometry_runtime['route_seen'], False)
+        write_rows(env.contact_geometry_runtime['route_seen_time_s'], -1.)
+        write_rows(env.contact_geometry_runtime['approach_action_ticks'], 0)
     # Architecture reset already clears the ordinary core state and caches.
-    # Disable old metrics while it resets; no old lifecycle survives an episode.
-    if hasattr(env, 'curriculum_metrics'):
-        del env.curriculum_metrics
     env.curriculum_schedule = None
     # The curriculum reset performs its own final _refresh below. Defer the
     # base reset's perception/observation so a registered full-team start
     # profile can be applied before any policy-facing state is generated.
-    reset_scenario(env, 'pickup_scattered', seed, refresh_perception=False)
+    reset_scenario(env, 'pickup_scattered', seed, refresh_perception=False,
+                   mask=(reset_mask if mask is not None else None))
     env.architecture_pickup_only = False
     name, category, route = config['scenario_id'], config['category'], config['route']
-    generator = torch.Generator(device=env.device).manual_seed(int(seed))
     def rand(shape):
-        return torch.rand(shape, device=env.device, generator=generator)
-    env.piece_active.zero_()
-    env.piece_owner.fill_(-1)
-    env.piece_zone.fill_(-1)
-    env.piece_pos.zero_()
-    env.piece_vel.zero_()
+        shape = tuple(shape)
+        return env._random_active(reset_mask, shape[1:],
+                                  stream='scenario_reset')
+    write_rows(env.piece_active, False)
+    write_rows(env.piece_owner, -1)
+    write_rows(env.piece_zone, -1)
+    write_rows(env.piece_pos, 0.)
+    write_rows(env.piece_vel, 0.)
     y = {'open': 4.035, 'trench': .8, 'bump': 2.5}[route]
-    env.sim.pose[:, 3] = env.sim.pose.new_tensor((8., y, 0.))
-    env.curriculum_finished = torch.zeros(env.n, device=env.device, dtype=torch.bool)
-    env.curriculum_teacher_delivering = torch.zeros_like(env.curriculum_finished)
+    write_rows(env.sim.pose[:, 3], env.sim.pose.new_tensor((8., y, 0.)))
+    write_rows(env.curriculum_finished, False)
+    write_rows(env.curriculum_teacher_delivering, False)
     config['targets'] = {'amount': 4, 'batch_size': 2, 'cycles': 2}
     config['allowed_actions'] = (0, 1, 2, 3, 4, 6, 7)
     active = not (name.startswith('inactive_') or category.startswith('inactive/'))
@@ -845,8 +1009,8 @@ def reset_curriculum_scenario(env, seed):
     preload = 0
     count, origin = 18, (8.8, y)
     if name == 'pickup_simple':
-        env.sim.pose[:, 3, 0] += (rand((env.n,))-.5)*.3
-        env.sim.pose[:, 3, 2] = (rand((env.n,))-.5)*.6
+        write_rows(env.sim.pose[:, 3, 0], env.sim.pose[:, 3, 0] + ((rand((env.n,))-.5)*.3))
+        write_rows(env.sim.pose[:, 3, 2], (rand((env.n,))-.5)*.6)
         count = 1 if category == 'single' else 6
         config['targets']['amount'] = count
         config['allowed_actions'] = (0, 1, 2, 3, 7)
@@ -858,42 +1022,42 @@ def reset_curriculum_scenario(env, seed):
         config['allowed_actions'] = (0, 1, 2, 3, 7)
         if category == 'initially_hidden':
             config['allowed_actions'] = (0, 1, 2, 3, 6, 7)
-            env.sim.pose[:, 3, 2] = math.pi
+            write_rows(env.sim.pose[:, 3, 2], math.pi)
     elif name == 'pickup_multi_zone':
         count = 24
         origin = (7.8, .8)
-        env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((7., .8))
+        write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((7., .8)))
         config['allowed_actions'] = (0, 1, 2, 3, 6, 7)
         config['targets']['amount'] = 14
     elif name == 'active_carry_to_zone':
         count, preload = 0, 6
         config['allowed_actions'] = (4, 7)
-        env.sim.pose[:, 3, 0] = 10.5
+        write_rows(env.sim.pose[:, 3, 0], 10.5)
     elif name == 'active_shoot_preloaded':
         count, preload = 0, 6
         config['allowed_actions'] = (4, 7)
-        env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((14., 4.035))
-        env.sim.pose[:, 3, 2] = math.pi
+        write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((14., 4.035)))
+        write_rows(env.sim.pose[:, 3, 2], math.pi)
         if category.endswith('approach'):
-            env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((15., 6.7))
+            write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((15., 6.7)))
         if category.endswith('heading_error'):
-            env.sim.pose[:, 3, 2] = math.pi/2
+            write_rows(env.sim.pose[:, 3, 2], math.pi/2)
     elif name == 'inactive_ferry_preloaded':
         count, preload = 0, (3 if category.endswith('partial_load') else 6)
         config['targets']['amount'] = 2 if preload == 3 else 4
         config['allowed_actions'] = (6, 7)
-        env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((8.8, 4.035))
+        write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((8.8, 4.035)))
         if category.endswith('approach'):
-            env.sim.pose[:, 3, 0] = 6.8
+            write_rows(env.sim.pose[:, 3, 0], 6.8)
         if category.endswith('alignment'):
-            env.sim.pose[:, 3, 2] = math.pi
+            write_rows(env.sim.pose[:, 3, 2], math.pi)
         if category.endswith('landing'):
-            env.sim.pose[:, 3, 1] = 6.8
+            write_rows(env.sim.pose[:, 3, 1], 6.8)
     elif name == 'active_collect_carry_score' and route == 'open':
         # Open collection/scoring is within the alliance zone. Cross-boundary
         # carry gates separately require actual trench or bump traversal.
-        env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((14., 6.8))
-        env.sim.pose[:, 3, 2] = math.pi
+        write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((14., 6.8)))
+        write_rows(env.sim.pose[:, 3, 2], math.pi)
         origin = (13., 6.8)
     elif name == 'hub_transition_cycles':
         if '/' not in category:
@@ -901,7 +1065,7 @@ def reset_curriculum_scenario(env, seed):
             # until activation instead of demanding an impossible transfer.
             preload = 4
             count = 0
-            env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((14., 6.8))
+            write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((14., 6.8)))
             schedule = ((0., False), (4., True))
             config['targets']['cycles'] = 1
         else:
@@ -912,11 +1076,11 @@ def reset_curriculum_scenario(env, seed):
             schedule = ((0., first_active), (transition, not first_active),
                         (transition + 20., first_active), (transition + 40., True))
             if situation in ('approaching_shot', 'staged_at_home'):
-                env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((14., 6.8))
-                env.sim.pose[:, 3, 2] = math.pi
+                write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((14., 6.8)))
+                write_rows(env.sim.pose[:, 3, 2], math.pi)
                 origin = (13., 6.8)
             if situation == 'carrying_home':
-                env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((10.5, .8))
+                write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((10.5, .8)))
             if situation == 'staged_at_home':
                 origin = (13.2, 6.8)
             # after_release is initialized as physical airborne outside-origin
@@ -926,8 +1090,8 @@ def reset_curriculum_scenario(env, seed):
             config['targets']['cycles'] = 1
     if name in ('offense_vs_scripted_pressure', 'team_delivery_cycles', 'full_match_offense'):
         if route == 'open' and active:
-            env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((14., 6.8))
-            env.sim.pose[:, 3, 2] = math.pi
+            write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((14., 6.8)))
+            write_rows(env.sim.pose[:, 3, 2], math.pi)
             origin = (13., 6.8)
         if name == 'full_match_offense':
             schedule = None
@@ -935,9 +1099,9 @@ def reset_curriculum_scenario(env, seed):
             schedule = ((0., False), (45., True))
         for slot in (4, 5):
             if env.control_modes[slot] != 'none':
-                env.sim.pose[:, slot] = env.sim.pose.new_tensor((14.5, 2. + (slot-4)*4., math.pi))
+                write_rows(env.sim.pose[:, slot], env.sim.pose.new_tensor((14.5, 2. + (slot-4)*4., math.pi)))
         if name == 'team_delivery_cycles' and env.control_modes[0] != 'none':
-            env.sim.pose[:, 0] = env.sim.pose.new_tensor((7., 4., 0.))
+            write_rows(env.sim.pose[:, 0], env.sim.pose.new_tensor((7., 4., 0.)))
     # Separated FUEL grids with seeded jitter; category density and zone gaps
     # change actual layouts rather than only metadata labels.
     if count:
@@ -957,65 +1121,74 @@ def reset_curriculum_scenario(env, seed):
             if category in ('empty', 'depleted'):
                 positions[:, :count//2, 0] = 9.2 + (idx[:count//2] % 6).float()*.32
                 positions[:, :count//2, 1] = 3.7 + (idx[:count//2]//6).float()*.32
-                env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((6.5, 6.8))
+                write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((6.5, 6.8)))
             if category == 'depleted':
                 # A small remnant in the starting zone; the required amount
                 # forces leaving it and finding a productive zone.
                 positions[:, :2] = env.sim.pose[:, 3, None, :2] + env.piece_pos.new_tensor((.8, 0.))
-        env.piece_pos[:, :count] = positions
-        env.piece_active[:, :count] = True
-        env.piece_zone[:, :count] = 0
+        write_rows(env.piece_pos[:, :count], positions)
+        write_rows(env.piece_active[:, :count], True)
+        write_rows(env.piece_zone[:, :count], 0)
     if preload:
-        env.piece_active[:, count:count+preload] = True
-        env.piece_owner[:, count:count+preload] = 3
-        env.piece_pos[:, count:count+preload] = env.sim.pose[:, 3, None, :2]
-        env.piece_zone[:, count:count+preload] = 6
+        write_rows(env.piece_active[:, count:count+preload], True)
+        write_rows(env.piece_owner[:, count:count+preload], 3)
+        write_rows(env.piece_pos[:, count:count+preload], env.sim.pose[:, 3, None, :2])
+        write_rows(env.piece_zone[:, count:count+preload], 6)
     if route in ('trench', 'bump') and not active and name in ('inactive_collect_ferry', 'offense_vs_scripted_pressure', 'team_delivery_cycles', 'full_match_offense'):
-        env.sim.pose[:, 3, :2] = env.sim.pose.new_tensor((13.3, y))
-        env.sim.pose[:, 3, 2] = math.pi
+        write_rows(env.sim.pose[:, 3, :2], env.sim.pose.new_tensor((13.3, y)))
+        write_rows(env.sim.pose[:, 3, 2], math.pi)
         if count:
-            env.piece_pos[:, :count, 0] = 9.8 + (torch.arange(count, device=env.device)%6).float()*.3
+            write_rows(env.piece_pos[:, :count, 0], 9.8 + (torch.arange(count, device=env.device)%6).float()*.3)
     if name == 'full_match_offense':
         for slot in range(3):
             if env.control_modes[slot] == 'deterministic':
-                env.sim.pose[:, slot] = env.sim.pose.new_tensor((5.5+slot*.9, .8+slot*2.5, math.pi))
+                write_rows(env.sim.pose[:, slot], env.sim.pose.new_tensor((5.5+slot*.9, .8+slot*2.5, math.pi)))
     env.planner.avoid_bumps = route != 'bump'
     pressure = config['pressure'] = _pressure(category, seed, config['defender_family']) if name in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, config['defender_family'])
     if pressure['level'] == 3 and not active and route == 'open':
         blocked_y = .8 if pressure['style'] != 'level_3_bump' else 2.5
         if pressure['style'] == 'level_3_seeded_choice':
             blocked_y = .8 if int(seed)%2 else 2.5
-        env.sim.pose[:, 3] = env.sim.pose.new_tensor((13.3, blocked_y, math.pi))
-        env.piece_pos[:, :count, 1] = blocked_y
-        env.piece_pos[:, :count, 0] = 9.8 + (torch.arange(count, device=env.device)%6).float()*.3
-    pressure['anchor_y'] = float(env.sim.pose[0, 3, 1])
-    for slot in pressure['slots']:
-        blocker_y = pressure['anchor_y']
-        if pressure['style'] == 'level_3_trench': blocker_y = .8
-        if pressure['style'] == 'level_3_bump': blocker_y = 2.5
-        if pressure['style'] == 'level_3_seeded_choice': blocker_y = .8 if int(seed)%2 else 2.5
-        blocker_x = 11.9 if pressure['level'] == 3 else (13.6 if active and route == 'open' else 9.8)
-        env.sim.pose[:, slot] = env.sim.pose.new_tensor((blocker_x, blocker_y + (slot*.9), math.pi))
-    env.curriculum_action_mask = torch.ones((env.n, 6, 8), device=env.device, dtype=torch.bool)
-    env.curriculum_action_mask[:, 3] = False
-    env.curriculum_action_mask[:, 3, list(config['allowed_actions'])] = True
+        write_rows(env.sim.pose[:, 3], env.sim.pose.new_tensor((13.3, blocked_y, math.pi)))
+        write_rows(env.piece_pos[:, :count, 1], blocked_y)
+        write_rows(env.piece_pos[:, :count, 0], 9.8 + (torch.arange(count, device=env.device)%6).float()*.3)
+    write_rows(env.phase4_pressure_anchor_y_m, env.sim.pose[:, 3, 1])
+    blocker_y = env.phase4_pressure_anchor_y_m
+    if pressure['style'] == 'level_3_trench':
+        blocker_y = torch.full_like(blocker_y, .8)
+    if pressure['style'] == 'level_3_bump':
+        blocker_y = torch.full_like(blocker_y, 2.5)
+    if pressure['style'] == 'level_3_seeded_choice':
+        blocker_y = torch.full_like(blocker_y, .8 if int(seed) % 2 else 2.5)
+    action_mask = torch.ones((env.n, 6, 8), device=env.device, dtype=torch.bool)
+    action_mask[:, 3] = False
+    action_mask[:, 3, list(config['allowed_actions'])] = True
+    if not isinstance(getattr(env, 'curriculum_action_mask', None), torch.Tensor):
+        env.curriculum_action_mask = action_mask
+    else:
+        write_rows(env.curriculum_action_mask, action_mask)
     if config['start_condition'] in ('offset_upper_lane', 'offset_lower_lane'):
         offset = .25 if config['start_condition'] == 'offset_upper_lane' else -.25
         on_field = ((env.sim.pose[..., 0] >= 0.) & (env.sim.pose[..., 0] <= env.field_length)
                     & (env.sim.pose[..., 1] >= 0.) & (env.sim.pose[..., 1] <= env.sim.field_width))
-        env.sim.pose[..., 1] += on_field.to(env.sim.pose.dtype) * offset
-        env.piece_pos[..., 1] += env.piece_active.to(env.piece_pos.dtype) * offset
+        write_rows(env.sim.pose[..., 1], env.sim.pose[..., 1] + (on_field.to(env.sim.pose.dtype) * offset))
+        write_rows(env.piece_pos[..., 1], env.piece_pos[..., 1] + (env.piece_active.to(env.piece_pos.dtype) * offset))
     start_assignment = getattr(env, 'phase4_start_profile_assignment', None)
-    reset_mask = torch.ones((env.n,), device=env.device, dtype=torch.bool)
-    env.phase4_start_profile_applied = torch.zeros_like(reset_mask)
-    env.phase4_start_profile_legality = torch.zeros_like(reset_mask)
-    env.phase4_start_profile_failure_mask = torch.zeros_like(reset_mask)
-    env.phase4_reset_failure_mask = torch.zeros_like(reset_mask)
-    env.phase4_contact_profile_legality = torch.zeros_like(reset_mask)
-    env.phase4_start_profile_validation_rate = torch.zeros(
-        (env.n,), device=env.device, dtype=torch.float32)
-    env.phase4_start_profile_validated_world_count = torch.zeros(
-        (env.n,), device=env.device, dtype=torch.long)
+    def reset_status(name, initial):
+        prior = getattr(env, name, None)
+        if not isinstance(prior, torch.Tensor) or tuple(prior.shape) != tuple(initial.shape):
+            prior = initial
+        row_mask = reset_mask.reshape((env.n,) + (1,) * (prior.ndim - 1))
+        setattr(env, name, torch.where(row_mask, initial, prior))
+    reset_status('phase4_start_profile_applied', torch.zeros_like(reset_mask))
+    reset_status('phase4_start_profile_legality', torch.zeros_like(reset_mask))
+    reset_status('phase4_start_profile_failure_mask', torch.zeros_like(reset_mask))
+    reset_status('phase4_reset_failure_mask', torch.zeros_like(reset_mask))
+    reset_status('phase4_contact_profile_legality', torch.zeros_like(reset_mask))
+    reset_status('phase4_start_profile_validation_rate', torch.zeros(
+        (env.n,), device=env.device, dtype=torch.float32))
+    reset_status('phase4_start_profile_validated_world_count', torch.zeros(
+        (env.n,), device=env.device, dtype=torch.long))
     if env.contact_geometry_id is not None:
         contact_poses = contact_exposure_profile(env, env.contact_geometry_id,
             mask=reset_mask)
@@ -1024,54 +1197,75 @@ def reset_curriculum_scenario(env, seed):
         env.sim.velocity.copy_(torch.where(reset_mask[:, None, None],
             torch.zeros_like(env.sim.velocity), env.sim.velocity))
         contact_legal = full_team_start_profile_legality(env, env.sim.pose)
-        env.phase4_contact_profile_legality = contact_legal
-        env.phase4_reset_failure_mask = reset_mask & ~contact_legal
+        write_rows(env.phase4_contact_profile_legality, contact_legal)
+        write_rows(env.phase4_reset_failure_mask,
+            env.phase4_reset_failure_mask | ~contact_legal)
+        write_rows(env.phase4_pressure_anchor_y_m, env.sim.pose[:, 3, 1])
     if start_assignment is not None:
         start_assignment = validate_phase4_start_profile_assignment(start_assignment)
         apply_full_team_start_profile(env,
             start_assignment['runtime_profile_name'], mask=reset_mask)
-        pressure['anchor_y'] = float(env.sim.pose[0, 3, 1])
+        write_rows(env.phase4_pressure_anchor_y_m, env.sim.pose[:, 3, 1])
         config['phase4_start_profile'] = {
             'factor_id': start_assignment['factor_id'],
             'registry_profile_id': start_assignment['registry_profile_id'],
             'runtime_profile_name': start_assignment['runtime_profile_name'],
             'profile_config_sha256': start_assignment['profile_config_sha256'],
             'assignment_sha256': start_assignment['assignment_sha256']}
+    for slot in pressure['slots']:
+        blocker_x = 11.9 if pressure['level'] == 3 else (13.6 if active and route == 'open' else 9.8)
+        blocker_pose = torch.stack((torch.full_like(blocker_y, blocker_x),
+            blocker_y + slot * .9, torch.full_like(blocker_y, math.pi)), dim=-1)
+        write_rows(env.sim.pose[:, slot], blocker_pose)
     if (env.phase4_factor_config is not None and
             env.phase4_factor_config['kind'] == 'stationary_blockage'):
         factor = env.phase4_factor_config
         slot = factor['blocker_slot']
-        env.sim.pose[:, slot] = env.sim.pose.new_tensor((
-            factor['blocker_x_m'], pressure['anchor_y'], math.pi))
-        env.stationary_blockage_assigned_pose = env.sim.pose[:, slot].clone()
+        anchor_y = env.phase4_pressure_anchor_y_m
+        blocker_pose = torch.stack((torch.full_like(anchor_y, factor['blocker_x_m']),
+            anchor_y, torch.full_like(anchor_y, math.pi)), dim=-1)
+        write_rows(env.sim.pose[:, slot], blocker_pose)
+        assigned_pose = env.sim.pose[:, slot].clone()
+        prior_assigned_pose = getattr(env, 'stationary_blockage_assigned_pose',
+                                      torch.zeros_like(assigned_pose))
+        write_rows(prior_assigned_pose, assigned_pose)
+        env.stationary_blockage_assigned_pose = prior_assigned_pose
         env.phase4_runtime_metrics['stationary_blockage_assigned'] = True
-        env.phase4_runtime_metrics['stationary_blockage_pose_valid'] = torch.ones(
-            env.n, device=env.device, dtype=torch.bool)
+        prior_valid = env.phase4_runtime_metrics['stationary_blockage_pose_valid']
+        env.phase4_runtime_metrics['stationary_blockage_pose_valid'] = torch.where(
+            reset_mask, torch.ones_like(reset_mask), prior_valid)
     config['schedule'] = schedule
     env.curriculum_schedule = schedule
-    env.match_elapsed.fill_(-env.dt)
-    env._update_match(torch.ones(env.n, device=env.device, dtype=torch.bool))
-    _refresh(env)
-    env.curriculum_metrics = CurriculumMetrics(env)
+    write_rows(env.match_elapsed, -env.dt)
+    env._update_match(reset_mask)
+    prior_generation = getattr(env, 'curriculum_episode_generation', None)
+    if not isinstance(prior_generation, torch.Tensor) or tuple(prior_generation.shape) != (env.n,):
+        prior_generation = torch.zeros((env.n,), device=env.device, dtype=torch.long)
+    env.curriculum_episode_generation = prior_generation + reset_mask.long()
+    if hasattr(env, 'curriculum_metrics'):
+        env.curriculum_metrics.reset(reset_mask)
+    else:
+        env.curriculum_metrics = CurriculumMetrics(env)
+    _refresh(env, mask=reset_mask)
     if name == 'hub_transition_cycles' and '/' in category:
         situation = category.split('/')[-1]
         if situation == 'staged_at_home':
             # Initial useful stock represents a documented earlier external
             # delivery; no acquisition or delivery reward is paid at reset.
             staged = slice(80, 84)
-            env.piece_active[:, staged] = True
-            env.piece_owner[:, staged] = -1
-            env.piece_pos[:, staged, 0] = 13.4
-            env.piece_pos[:, staged, 1] = 6.2 + torch.arange(4, device=env.device)*.3
-            env.curriculum_metrics.ferry_credit[:, staged] = True
-            env.curriculum_metrics.initial_staged[:, staged] = True
-            env.curriculum_metrics.inactive_origin[:, staged] = True
+            write_rows(env.piece_active[:, staged], True)
+            write_rows(env.piece_owner[:, staged], -1)
+            write_rows(env.piece_pos[:, staged, 0], 13.4)
+            write_rows(env.piece_pos[:, staged, 1], 6.2 + torch.arange(4, device=env.device)*.3)
+            write_rows(env.curriculum_metrics.ferry_credit[:, staged], True)
+            write_rows(env.curriculum_metrics.initial_staged[:, staged], True)
+            write_rows(env.curriculum_metrics.inactive_origin[:, staged], True)
         elif situation == 'after_release':
             from .fuel_physics_runtime import launch_fuel
             selected = torch.zeros_like(env.piece_active)
-            selected[:, 80:82] = True
+            selected[:, 80:82] = reset_mask[:, None]
             env.piece_active |= selected
-            env.piece_pos[:, 80:82] = env.piece_pos.new_tensor((9., 4.))
+            write_rows(env.piece_pos[:, 80:82], env.piece_pos.new_tensor((9., 4.)))
             env.curriculum_metrics.external |= selected
             owners = torch.full_like(env.piece_owner, 3)
             env.curriculum_metrics.released(selected, owners)
@@ -1079,12 +1273,17 @@ def reset_curriculum_scenario(env, seed):
                         origins=env.piece_pos, height=.4, flight_time=1.)
         # Refresh normal sensing after additional physically staged pieces.
         if situation == 'staged_at_home':
-            _refresh(env)
+            _refresh(env, mask=reset_mask)
         else:
-            env._update_perception(torch.ones(env.n, device=env.device, dtype=torch.bool))
-            env._last_obs = env.observe()
-    env.phase4_defender_anchor = env.policy_pose.clone()
-    env._reset_phase4_observation_buffer(env._last_obs)
+            env._update_perception_for_reset(reset_mask)
+            fresh = env.observe()
+            env._last_obs = torch.where(reset_mask[:, None, None], fresh, env._last_obs)
+    prior_defender_anchor = getattr(env, 'phase4_defender_anchor', None)
+    if not isinstance(prior_defender_anchor, torch.Tensor) or tuple(prior_defender_anchor.shape) != tuple(env.policy_pose.shape):
+        prior_defender_anchor = env.policy_pose.clone()
+    env.phase4_defender_anchor = torch.where(reset_mask[:, None, None],
+        env.policy_pose, prior_defender_anchor)
+    env._reset_phase4_observation_buffer(env._last_obs, mask=reset_mask)
     return env._last_obs
 
 

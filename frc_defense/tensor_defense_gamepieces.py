@@ -65,7 +65,7 @@ class TensorDefenseGamepieceMixin:
         # Default to a randomized preload count for the six-robot alliance; a
         # fixed per-robot count can be supplied for controlled experiments.
         max_preload=min(8,max(0,(count-96)//6))
-        per_robot=(self._random_active(mask,(),high=max_preload+1).long()
+        per_robot=(self._random_active(mask,(),high=max_preload+1,stream="gamepiece").long()
                    if self.preloaded_per_robot is None else
                    torch.full((self.n,),self.preloaded_per_robot,device=self.device,dtype=torch.long))
         neutral_count=count-96-6*per_robot

@@ -22,7 +22,7 @@ from ._tensor_3v3_constants import TEAM_IDS
 from ._tensor_3v3_gamepieces import TensorThreeVsThreeGamepieceMixin
 from ._tensor_3v3_navigation import TensorThreeVsThreeNavigationMixin
 from ._tensor_3v3_observation import (
-    ACTION_DIM, NUM_ROBOTS, OBS_DIM, TensorThreeVsThreeObservationMixin,
+    ACTION_DIM, NUM_ROBOTS, OBS_DIM, ENV_RNG_STREAMS, TensorThreeVsThreeObservationMixin,
     _assert_device_condition,
 )
 
@@ -118,9 +118,6 @@ class TensorThreeVsThreeEnv(
         self.position_noise, self.velocity_noise = float(position_noise), float(velocity_noise)
         self.replan_interval = max(1, int(replan_interval))
         self.perception_interval = max(1, int(perception_interval))
-        self._planner_tick_scalar=self.replan_interval-1
-        self._planner_tick_aligned=True
-        self._full_batch_step_scalar=0
         self._vectorized_scoring_enabled=True
         self.normalize_observations = bool(normalize_observations)
         modes = list(control_modes or ("deterministic",) * NUM_ROBOTS)
@@ -235,6 +232,10 @@ class TensorThreeVsThreeEnv(
         self.pass_zone_positions=torch.zeros(
             (self.n,2,self.fuel_count,2),device=self.device)
         self.generator = torch.Generator(device=self.device).manual_seed(int(seed or 0))
+        world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+        self._world_rng_seed = (world_ids * 0x1F123BB5 + int(seed or 0)) & 0x7fffffff
+        self._world_rng_counters = torch.zeros((self.n, len(ENV_RNG_STREAMS)),
+                                               device=self.device, dtype=torch.long)
         self._perception_rng_seed = int(seed or 0) & 0xffffffff
         self._perception_rng_ticks = torch.zeros(
             self.n, device=self.device, dtype=torch.long)
@@ -408,6 +409,8 @@ class TensorThreeVsThreeEnv(
         self._planner_controller_mode_key=tuple(
             i for i,mode in enumerate(modes) if mode!="none")
         self._planner_controller_modes_dirty=False
+        self._planner_controller_modes_dirty_mask=torch.zeros(
+            self.n,device=self.device,dtype=torch.bool)
         self._planner_traversal_request_signature=None
         self._last_applied_planner_traversal_signature=None
         self._planner_traversal_pending=torch.zeros((self.n,),device=self.device,
@@ -523,6 +526,9 @@ class TensorThreeVsThreeEnv(
         if seed is not None:
             self.generator.manual_seed(int(seed))
             self._perception_rng_seed = int(seed) & 0xffffffff
+            world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+            self._world_rng_seed.copy_((world_ids * 0x1F123BB5 + int(seed)) & 0x7fffffff)
+        self._world_rng_counters.zero_()
         self._perception_rng_ticks.zero_()
         self.sim.reset(seed)
         self.sim.field_contact.zero_()
@@ -550,11 +556,11 @@ class TensorThreeVsThreeEnv(
         self._raster_reanchor.fill_(True)
         self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
         self.steps.zero_(); self.planner_ticks.fill_(self.replan_interval-1)
-        self._planner_tick_scalar=self.replan_interval-1; self._planner_tick_aligned=True
-        self._full_batch_step_scalar=0
         self._planner_traversal_request_signature=None
         self._last_applied_planner_traversal_signature=None
         self._planner_traversal_pending.zero_()
+        self._planner_controller_modes_dirty=False
+        self._planner_controller_modes_dirty_mask.zero_()
         self.hub_active.fill_(True); self.auto_fuel_scores.zero_(); self.fuel_score_count.zero_()
         for tensor in (self.fuel_acquisition_count, self.fuel_denied_count,
                        self.fuel_acquired_event, self.fuel_scored_event,
@@ -584,7 +590,9 @@ class TensorThreeVsThreeEnv(
         self._last_obs = self.observe()
         return self._last_obs, {"field_layout": self.field_layout_id, "robots": NUM_ROBOTS}
 
-    def reset_done(self, mask):
+    def reset_done(self, mask, *, defer_perception=False):
+        if type(defer_perception) is not bool:
+            raise ValueError("defer_perception must be boolean")
         if (self.device.type != "cpu" and
                 (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
             raise ValueError("GPU reset mask must already reside on the environment device")
@@ -595,6 +603,7 @@ class TensorThreeVsThreeEnv(
             self._planner_traversal_request_signature=None
             self._last_applied_planner_traversal_signature=None
         self._planner_traversal_pending &= ~mask
+        self._planner_controller_modes_dirty_mask |= mask
         pose=self._hub_line_spawn_poses()
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
@@ -621,10 +630,9 @@ class TensorThreeVsThreeEnv(
             tensor.masked_fill_(mask, 0)
         self.planner_ticks.copy_(torch.where(mask,
             torch.full_like(self.planner_ticks,self.replan_interval-1),self.planner_ticks))
-        # Keep reset scheduling per world; do not inspect a device mask to
-        # restore the host scalar fast path.
-        self._planner_tick_aligned=False
-        self._full_batch_step_scalar=None
+        # Planner/perception cadence is derived from per-world device clocks.
+        # A partial reset must not invalidate host-side scalar caches, including
+        # on an all-false mask.
         self.match_remaining.copy_(torch.where(mask, torch.full_like(self.match_remaining, 160.),
                                                self.match_remaining))
         for tensor in (self.auto_fuel_scores, self.fuel_score_count, self.fuel_acquisition_count,
@@ -646,11 +654,12 @@ class TensorThreeVsThreeEnv(
         self.track_angular_extent[mask] = 0.; self.track_merged[mask] = False
         self.opponent_valid[mask] = False; self.opponent_age[mask] = float("inf")
         self.opponent_size[mask] = 0.
-        self._update_perception(mask)
         self.last_actions[mask] = 7
         self._intake_collecting[mask] = False
         self._last_score_intent[mask] = False
-        self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
+        if not defer_perception:
+            self._update_perception(mask)
+            self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
         return self._last_obs
 
     def _target_for_actions_step(self, actions, active, full_batch,
@@ -743,10 +752,6 @@ class TensorThreeVsThreeEnv(
              planner_force_goal_replan=False,
              policy_action_override=None):
         full_batch=active_mask is None
-        if full_batch and self._full_batch_step_scalar is not None:
-            self._full_batch_step_scalar+=1
-        elif not full_batch:
-            self._full_batch_step_scalar=None
         if (not full_batch and self.device.type != "cpu" and
                 (not isinstance(active_mask, torch.Tensor) or active_mask.device != self.device)):
             raise ValueError("GPU active mask must already reside on the environment device")
@@ -979,11 +984,12 @@ class TensorThreeVsThreeEnv(
         self._planner_controller_modes_dirty=False
         # Replanning cadence is maintained per world. Host scheduler counts
         # remain metadata only; planner eligibility comes from device masks.
-        self._planner_tick_aligned=False
         self.planner_ticks.copy_(torch.where(active,self.planner_ticks+1,self.planner_ticks))
         replan=active&((self.planner_ticks%self.replan_interval)==0)
         if planner_modes_dirty:
             replan=active
+        replan |= active & self._planner_controller_modes_dirty_mask
+        self._planner_controller_modes_dirty_mask &= ~active
         flat_active=(replan[:,None]&planner_robot_mask[None]).reshape(-1)
         focal_override=(planner_goal_override_mask[:,3] & replan &
                         planner_robot_mask[3])
@@ -1415,29 +1421,6 @@ class TensorThreeVsThreeEnv(
         self._update_fuel(active,score_intent=self._last_score_intent)
         if self.perception_interval == 1:
             self._update_perception(active,active_count=active_count)
-        elif full_batch and self._full_batch_step_scalar is not None:
-            if self._full_batch_step_scalar % self.perception_interval == 0:
-                self._update_perception(active,active_count=self.n)
-            else:
-                from . import tensor_perception
-                fused_aging=tensor_perception.age_tracks_3v3(
-                    self.track_pos,self.track_vel,self.track_age,self.track_mask,
-                    self.opponent_age,self.opponent_valid,active,self.dt,
-                    self.perception_track_timeout)
-                if not fused_aging:
-                    self.track_age.copy_(torch.where(
-                        active[:, None, None] & self.track_mask,
-                        self.track_age + self.dt, self.track_age))
-                    self.track_pos.add_(torch.where(
-                        (active[:, None, None] & self.track_mask)[..., None],
-                        self.track_vel * self.dt,
-                        torch.zeros_like(self.track_vel)))
-                    self.track_mask &= ~((self.track_age > self.perception_track_timeout) &
-                                         active[:, None, None])
-                    self.opponent_age.copy_(torch.where(
-                        active[:, None] & self.opponent_valid,
-                        self.opponent_age + self.dt, self.opponent_age))
-                    self.opponent_valid &= ~((self.opponent_age > 1.) & active[:, None])
         else:
             perception_tick = (self.steps % self.perception_interval) == 0
             update_active = active & perception_tick

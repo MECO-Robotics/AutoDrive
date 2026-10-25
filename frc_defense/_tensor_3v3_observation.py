@@ -7,12 +7,15 @@ import operator
 import torch
 
 from .tensor_sim import normalize_tensor_observation_batch_in_place
+from .tensor_physics import counter_normal, counter_uniform
 from . import tensor_fuel_candidate_rank as _fuel_candidate_rank_hip
 
 
 NUM_ROBOTS = 6
 OBS_DIM = 137
 ACTION_DIM = 8
+ENV_RESET_RNG_SCHEMA_ID = "meco-3v3-per-world-rng-v1"
+ENV_RNG_STREAMS = ("perception", "gamepiece", "scenario_reset")
 
 
 def _assert_device_condition(device, condition, message):
@@ -105,14 +108,84 @@ class TensorThreeVsThreeObservationMixin:
         return torch.rand(shape, device=self.device, generator=self.generator)
 
     def _random_active(self, active, tail_shape, *, normal=False, dtype=None,
-                       active_count=None):
-        """Draw a fixed batch and mask inactive worlds without reading the mask on CPU."""
+                       active_count=None, stream="perception"):
+        """Draw from an isolated per-world stream without advancing inactive rows."""
         active=torch.as_tensor(active,device=self.device,dtype=torch.bool).reshape(self.n)
-        shape=(self.n,*tail_shape)
-        sample=(torch.randn(shape,device=self.device,generator=self.generator)
-                if normal else torch.rand(shape,device=self.device,generator=self.generator))
-        return torch.where(active.reshape(self.n,*([1]*len(tail_shape))),sample,
-                           torch.zeros_like(sample)).to(dtype=dtype or sample.dtype)
+        try:
+            stream_index = ENV_RNG_STREAMS.index(stream)
+        except ValueError as exc:
+            raise ValueError("unknown 3v3 per-world RNG stream") from exc
+        counter = self._world_rng_counters[:, stream_index]
+        stream_seed = self._world_rng_seed ^ ((stream_index + 1) * 0x6A09E667)
+        sample = (counter_normal(stream_seed, counter, active,
+                    tail_shape, dtype=dtype or torch.float32) if normal else
+                  counter_uniform(stream_seed, counter, active,
+                    tail_shape, dtype=dtype or torch.float32))
+        counter.add_(active.long())
+        return sample
+
+    def reset_rng_state_dict(self):
+        return {"schema_id": ENV_RESET_RNG_SCHEMA_ID,
+            "streams": list(ENV_RNG_STREAMS),
+            "world_seed": self._world_rng_seed.detach().clone(),
+            "world_counters": self._world_rng_counters.detach().clone(),
+            "perception_seed": int(self._perception_rng_seed),
+            "perception_ticks": self._perception_rng_ticks.detach().clone(),
+            "fuel_generator_state": self.generator.get_state().clone(),
+            "simulator": {"schema_id": self.sim.reset_rng_schema_id,
+                "world_seed": self.sim._reset_rng_seed.detach().clone(),
+                "world_counter": self.sim._reset_rng_counter.detach().clone()}}
+
+    def reseed_world_rng(self, mask, seed):
+        if (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (self.n,)):
+            raise ValueError("per-world reset RNG mask must be device bool [world]")
+        generation = getattr(self, "curriculum_episode_generation", None)
+        if not isinstance(generation, torch.Tensor) or tuple(generation.shape) != (self.n,):
+            generation = torch.zeros((self.n,), device=self.device, dtype=torch.long)
+        world_ids = torch.arange(self.n, device=self.device, dtype=torch.long)
+        new_seed = (world_ids * 0x1F123BB5 + int(seed) +
+                    (generation + 1) * 0x9E3779B1) & 0x7fffffff
+        self._world_rng_seed.copy_(torch.where(mask, new_seed, self._world_rng_seed))
+        self._world_rng_counters.copy_(torch.where(mask[:, None],
+            torch.zeros_like(self._world_rng_counters), self._world_rng_counters))
+        self.sim.reseed_reset_rng(mask, seed, generation)
+
+    def load_reset_rng_state_dict(self, state):
+        expected = {"schema_id", "streams", "world_seed", "world_counters",
+                    "perception_seed", "perception_ticks", "fuel_generator_state",
+                    "simulator"}
+        if (not isinstance(state, dict) or set(state) != expected or
+                state.get("schema_id") != ENV_RESET_RNG_SCHEMA_ID or
+                state.get("streams") != list(ENV_RNG_STREAMS)):
+            raise ValueError("incompatible 3v3 per-world RNG checkpoint schema")
+        seed = torch.as_tensor(state["world_seed"], device=self.device, dtype=torch.long)
+        counters = torch.as_tensor(state["world_counters"], device=self.device, dtype=torch.long)
+        perception_ticks = torch.as_tensor(state["perception_ticks"],
+            device=self.device, dtype=torch.long)
+        if (tuple(seed.shape) != (self.n,) or
+                tuple(counters.shape) != (self.n, len(ENV_RNG_STREAMS)) or
+                tuple(perception_ticks.shape) != (self.n,) or
+                type(state["perception_seed"]) is not int or
+                state["perception_seed"] < 0):
+            raise ValueError("3v3 per-world RNG checkpoint shape mismatch")
+        simulator = state["simulator"]
+        if (not isinstance(simulator, dict) or set(simulator) != {
+                "schema_id", "world_seed", "world_counter"} or
+                simulator.get("schema_id") != self.sim.reset_rng_schema_id):
+            raise ValueError("incompatible simulator reset RNG checkpoint schema")
+        sim_seed = torch.as_tensor(simulator["world_seed"], device=self.device, dtype=torch.long)
+        sim_counter = torch.as_tensor(simulator["world_counter"], device=self.device, dtype=torch.long)
+        if tuple(sim_seed.shape) != (self.n,) or tuple(sim_counter.shape) != (self.n,):
+            raise ValueError("simulator reset RNG checkpoint shape mismatch")
+        self._world_rng_seed.copy_(seed)
+        self._world_rng_counters.copy_(counters)
+        self._perception_rng_seed = state["perception_seed"]
+        self._perception_rng_ticks.copy_(perception_ticks)
+        self.generator.set_state(torch.as_tensor(state["fuel_generator_state"],
+            device="cpu", dtype=torch.uint8))
+        self.sim._reset_rng_seed.copy_(sim_seed)
+        self.sim._reset_rng_counter.copy_(sim_counter)
 
     def _update_perception(self, active, active_count=None):
         """Update per-robot free-FUEL and nearest-opponent tracks."""

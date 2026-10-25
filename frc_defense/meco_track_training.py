@@ -24,7 +24,8 @@ import uuid
 import torch
 from torch import nn
 
-from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
+from .curriculum_scenarios import (make_curriculum_env, reset_curriculum_scenario,
+    PRESSURE_ANCHOR_SCHEMA)
 from .curriculum_training import source_identity, source_tree_identity
 from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
@@ -80,7 +81,8 @@ class PlanADeviceSelectionOutcome:
 
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
     "shared scheduled task seed initializes the episode; subsequent episode seeds "
-    "are task seed + global episode index")
+    "are task seed + global episode index; selected rows use "
+    "meco-3v3-per-world-rng-v1 and meco-per-world-reset-rng-v1")
 TRACK_LOSS_RESET_POLICY = {
     "id": "opponent-track-loss-v1",
     "signal": "opponent-confidence-and-signed-time observation raster channels 4 and 5",
@@ -2260,9 +2262,12 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
     resume_rng_python = None
     resume_rng_device = None
     resume_task_progress = None
+    resume_payload = None
+    resume_pressure_anchor_state = None
+    resume_reset_rng_state = None
     if resume:
         payload = torch.load(resume, map_location="cpu", weights_only=False)
-        if payload.get("schema_version") != 1 or payload.get("sources") != sources:
+        if payload.get("schema_version") != 3 or payload.get("sources") != sources:
             raise ValueError("MECO checkpoint source/schema mismatch; refusing incompatible resume")
         if payload.get("protocol_id") != protocol_id:
             raise ValueError("MECO checkpoint protocol mismatch; refusing incompatible resume")
@@ -2274,10 +2279,30 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         requested_config.pop("updates", None)
         if saved_config != requested_config:
             raise ValueError("MECO immutable run configuration mismatch")
-        model.load_state_dict(payload["model"])
-        initialization_record = payload.get("initialization") or {"mode": "random_initialization"}
-        value_head.load_state_dict(payload["value_head"])
-        optimizer.load_state_dict(payload["optimizer"])
+        anchor_state = payload.get("pressure_anchor_reset_state")
+        if (not isinstance(anchor_state, dict) or set(anchor_state) != {
+                "schema", "anchor_schema", "reset_seed", "capture_stage",
+                "world_values_m", "reset_generation"} or
+                anchor_state.get("schema") != "meco-pressure-anchor-reset-checkpoint-v1" or
+                anchor_state.get("anchor_schema") != PRESSURE_ANCHOR_SCHEMA or
+                anchor_state.get("reset_seed") != task_seed or
+                anchor_state.get("capture_stage") not in (
+                    "pre_blocker_pose", "post_start_profile_pose")):
+            raise ValueError("MECO checkpoint pressure-anchor reset contract is missing or incompatible")
+        values = anchor_state.get("world_values_m")
+        generations = anchor_state.get("reset_generation")
+        if (not isinstance(values, list) or len(values) != 1 or
+                any(type(value) not in (int, float) or not math.isfinite(value)
+                    for value in values) or
+                not isinstance(generations, list) or len(generations) != 1 or
+                any(type(value) is not int or value < 0 for value in generations)):
+            raise ValueError("MECO checkpoint pressure-anchor rows are malformed")
+        resume_payload = payload
+        resume_pressure_anchor_state = anchor_state
+        resume_reset_rng_state = payload.get("reset_rng_state")
+        if (not isinstance(resume_reset_rng_state, dict) or
+                resume_reset_rng_state.get("schema_id") != "meco-3v3-per-world-rng-v1"):
+            raise ValueError("MECO checkpoint reset RNG schema is missing or incompatible")
         update, episode, history = payload["update"], payload["episode"], payload["history"]
         prior_task = payload.get("task_assignment") or {}
         if (task_assignment.get("assignment_id") is not None
@@ -2295,6 +2320,32 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         config.device, task_seed, phase4_factor=phase4_factor)
     chunk_seed = task_seed
     _reset_episode(env, chunk_seed)
+    chunk_pressure_anchor_state = {
+        "schema": "meco-pressure-anchor-reset-checkpoint-v1",
+        "anchor_schema": PRESSURE_ANCHOR_SCHEMA,
+        "reset_seed": int(chunk_seed),
+        "capture_stage": env.phase4_pressure_anchor_capture_stage,
+        "world_values_m": env.phase4_pressure_anchor_y_m.detach().cpu().reshape(-1).tolist(),
+        "reset_generation": env.curriculum_episode_generation.detach().cpu().reshape(-1).tolist(),
+    }
+    if resume_payload is not None:
+        expected_values = torch.as_tensor(resume_pressure_anchor_state["world_values_m"],
+            device=env.device, dtype=env.phase4_pressure_anchor_y_m.dtype)
+        expected_generation = torch.as_tensor(
+            resume_pressure_anchor_state["reset_generation"],
+            device=env.device, dtype=env.curriculum_episode_generation.dtype)
+        if (resume_pressure_anchor_state["capture_stage"] !=
+                chunk_pressure_anchor_state["capture_stage"] or
+                not torch.equal(env.phase4_pressure_anchor_y_m.reshape(-1), expected_values) or
+                not torch.equal(env.curriculum_episode_generation.reshape(-1),
+                                expected_generation)):
+            raise ValueError("MECO checkpoint pressure-anchor reset state differs from deterministic chunk reset")
+        env.load_reset_rng_state_dict(resume_reset_rng_state)
+        model.load_state_dict(resume_payload["model"])
+        initialization_record = (resume_payload.get("initialization") or
+                                 {"mode": "random_initialization"})
+        value_head.load_state_dict(resume_payload["value_head"])
+        optimizer.load_state_dict(resume_payload["optimizer"])
     if resume_rng_torch is not None:
         torch.set_rng_state(resume_rng_torch)
         random.setstate(resume_rng_python)
@@ -2730,7 +2781,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                     row["candidate_recall"]["candidate_recall"]
                     for row in rows) / len(rows)
             history.append(stats)
-            payload = {"schema_version": 1, "config": asdict(config),
+            payload = {"schema_version": 3, "config": asdict(config),
                 "prediction_contract": prediction_contract(config.prediction_mode),
                 "qualification_protocol_id": qualification_protocol_id,
                 "qualification_protocol_sha256": qualification_protocol_sha256,
@@ -2740,6 +2791,8 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
                 "task_assignment": task_assignment,
                 "phase4_training": run_manifest["phase4_training"],
                 "chunk_reset_policy": CHUNK_RESET_POLICY,
+                "pressure_anchor_reset_state": chunk_pressure_anchor_state,
+                "reset_rng_state": env.reset_rng_state_dict(),
                 "sources": sources, "run_id": run_id, "update": update,
                 "episode": episode, "model": model.state_dict(),
                 "task_progress": task_progress_payload(),
@@ -3872,8 +3925,25 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     phase4_focal_pose_record = None
                     if phase4_focal_pose_assignment is not None:
                         from .meco_phase4_context import phase4_focal_pose_evaluator_diagnostics
+                        focal_assignment = env.phase4_focal_pose_assignment
+                        focal_applied = env.phase4_focal_pose_reset_applied.detach().cpu().tolist()
+                        focal_truth_preserved = env.phase4_focal_pose_truth_preserved.detach().cpu().tolist()
+                        focal_event = {
+                            "assignment_sha256": focal_assignment["assignment_sha256"],
+                            "pair_assignment_sha256": focal_assignment["pair_assignment_sha256"],
+                            "arm": focal_assignment["arm"],
+                            "requested_offset_name": focal_assignment["requested_offset_name"],
+                            "requested_offset_config_sha256": focal_assignment[
+                                "requested_offset_config_sha256"],
+                            "applied_before_policy_observation": focal_applied,
+                            "physical_truth_unchanged": focal_truth_preserved,
+                            "relocalization_time_s": None,
+                            "pose_error_recovery_rate": None,
+                            "safety_contact_rate": None,
+                            "qualification_eligible": False,
+                        }
                         phase4_focal_pose_record = phase4_focal_pose_evaluator_diagnostics(
-                            env, env.phase4_focal_pose_runtime)
+                            env, focal_event)
                     episode_metric_ledger = None
                     replay_frames = []
                     try:
@@ -4500,6 +4570,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         metric_ledger_record = episode_metric_ledger.to_record()
                         metrics.update(metric_ledger_record["safety_metrics"])
                         phase4_runtime_record = dict(env.phase4_runtime_metrics)
+                        pressure_anchor_record = {
+                            "schema": "meco-phase4-pressure-anchor-report-v1",
+                            "anchor_schema": PRESSURE_ANCHOR_SCHEMA,
+                            "values_m": env.phase4_pressure_anchor_y_m.detach().cpu().tolist(),
+                            "world_indices": list(range(env.n)),
+                            "world_coverage": "all_environment_rows",
+                            "capture_stage": env.phase4_pressure_anchor_capture_stage,
+                            "reset_generation": env.curriculum_episode_generation.detach().cpu().tolist(),
+                            "source_identity_sha256": source_hash,
+                        }
                         if (phase4_factor and phase4_factor.get("kind") ==
                                 "stationary_blockage"):
                             slot = phase4_factor["blocker_slot"]
@@ -4702,6 +4782,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 **phase4_start_profile_report,
                             } if phase4_start_profile_report is not None else None),
                             "phase4_focal_pose": phase4_focal_pose_record,
+                            "phase4_pressure_anchor": pressure_anchor_record,
                             "phase4_teammate_behavior": (
                                 phase4_teammate_behavior_record(
                                     phase4_teammate_behavior_assignment,

@@ -151,7 +151,21 @@ class TensorDefenseResetMixin:
         planner.plan(starts,self._attacker_objective(),self.sim.pose[:,1,2],self.sim.length[:,1],
                      self.sim.width[:,1],active_mask=selected,
                      static_active_mask=True)
-        candidate=planner.defender_spawn(starts,selected,self.generator)
+        # Preserve defender_spawn's eligible-rank, route fallback and jitter
+        # semantics while drawing from each selected world's reset stream.
+        distance=(planner.last_path-starts[:,None,:]).norm(dim=-1)
+        valid=(torch.arange(planner.max_points,device=self.device)[None,:] <
+               planner.last_lengths[:,None])
+        eligible=valid&(distance>=1.25)&(distance<=2.75)
+        weights=self._random_active(selected,(planner.max_points,))
+        weights=weights.masked_fill(~(eligible&selected[:,None]),-1.)
+        index=weights.argmax(-1)
+        fallback=(valid&(distance>=1.1)).float().argmax(-1)
+        index=torch.where((eligible&selected[:,None]).any(-1),index,fallback)
+        row=torch.arange(self.n,device=self.device)
+        point=planner.last_path[row,index]
+        jitter=self._random_active(selected,(2,))-.5
+        candidate=torch.where(selected[:,None],point+jitter*.18,starts)
         self.sim.pose[:,0,:2]=torch.where(selected[:,None],candidate,self.sim.pose[:,0,:2])
 
     def _move_adstar_defenders_to_clear_start(self, mask=None):
@@ -220,7 +234,12 @@ class TensorDefenseResetMixin:
                                       "could not place defender in a clear start position")
 
     def reset(self,seed=None,options=None):
-        if seed is not None:self.generator.manual_seed(int(seed))
+        self._ensure_world_rng_state()
+        if seed is not None:
+            self.generator.manual_seed(int(seed))
+            world_ids=torch.arange(self.n,device=self.device,dtype=torch.long)
+            self._world_rng_seed.copy_((world_ids*0x1F123BB5+int(seed))&0x7fffffff)
+        self._world_rng_counters.zero_()
         self.sim.reset(seed); self.steps.zero_(); self.last_contact.zero_()
         self._sample_static_opponents(torch.ones(self.n,device=self.device,dtype=torch.bool))
         self.last_static_contact.zero_()
@@ -234,9 +253,10 @@ class TensorDefenseResetMixin:
         self.goal.copy_(goal)
         self.sim.pose[:, pidx, :2] = start
         if self.randomize:
-            self.sim.velocity[:,:,:2]=(torch.rand((self.n,2,2),device=self.device,generator=self.generator)*2-1)*.25*self.sim.speed[:,:,None]
-            self.sim.velocity[:,:,2]=(torch.rand((self.n,2),device=self.device,generator=self.generator)*2-1)*.2*self.sim.omega_limit
-            self.goal_radius=.3+torch.rand((self.n,),device=self.device,generator=self.generator)*.5
+            full_mask=torch.ones((self.n,),device=self.device,dtype=torch.bool)
+            self.sim.velocity[:,:,:2]=(self._random_active(full_mask,(2,2))*2-1)*.25*self.sim.speed[:,:,None]
+            self.sim.velocity[:,:,2]=(self._random_active(full_mask,(2,))*2-1)*.2*self.sim.omega_limit
+            self.goal_radius=.3+self._random_active(full_mask,())*.5
         else:
             self.goal_radius.fill_(self.base_goal_radius)
         self.sim.velocity[:,1]=torch.where(self.static_opponent_mask[:,None],
@@ -245,7 +265,8 @@ class TensorDefenseResetMixin:
             self.goal_radius.copy_(torch.as_tensor(options["goal_radius"],device=self.device,dtype=self.goal.dtype).expand_as(self.goal_radius))
         self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
         self.hub_active.fill_(True)
-        self.hub_inactive_first=torch.randint(2,(self.n,),device=self.device,generator=self.generator)
+        self.hub_inactive_first=self._random_active(
+            torch.ones(self.n,device=self.device,dtype=torch.bool),(),high=2).long()
         self.auto_fuel_scores.zero_()
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
@@ -271,10 +292,14 @@ class TensorDefenseResetMixin:
         self.action_history.zero_()
         self.control_delay.zero_()
         if self.randomize and self.max_control_latency_steps:
-            self.control_delay.random_(self.max_control_latency_steps+1,generator=self.generator)
+            self.control_delay.copy_(self._random_active(
+                torch.ones(self.n,device=self.device,dtype=torch.bool),(),
+                high=self.max_control_latency_steps+1).long())
         self.observation_delay.zero_()
         if self.randomize and self.max_observation_latency_steps:
-            self.observation_delay.random_(self.max_observation_latency_steps+1,generator=self.generator)
+            self.observation_delay.copy_(self._random_active(
+                torch.ones(self.n,device=self.device,dtype=torch.bool),(),
+                high=self.max_observation_latency_steps+1).long())
         attacker_index=0 if self.task=="counter_defense" else 1
         self.previous.copy_((self._attacker_objective()-self.sim.pose[:,attacker_index,:2]).norm(dim=-1))
         self.initial_distance.copy_(self.previous)

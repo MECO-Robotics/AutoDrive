@@ -311,6 +311,67 @@ def apply_phase4_focal_pose_assignment(env, assignment: dict) -> dict:
 
 
 @torch.no_grad()
+def apply_phase4_focal_pose_assignment_reset(env, assignment: dict, mask) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply a focal estimate assignment once to selected reset worlds."""
+    validate_phase4_focal_pose_assignment(assignment)
+    if not hasattr(env, "sim") or not hasattr(env, "estimated_pose") or not hasattr(env, "policy_pose"):
+        raise ValueError("environment lacks physical and policy pose state")
+    if (env.estimated_pose.data_ptr() == env.sim.pose.data_ptr() or
+            env.policy_pose.data_ptr() == env.sim.pose.data_ptr()):
+        raise ValueError("policy pose state aliases simulator truth")
+    if (env.estimated_pose.shape != env.sim.pose.shape or
+            env.policy_pose.shape != env.sim.pose.shape or env.sim.pose.ndim != 3 or
+            env.sim.pose.shape[1] <= 3 or env.sim.pose.shape[2] != 3):
+        raise ValueError("environment pose tensors do not satisfy the six-robot pose contract")
+    if (not isinstance(mask, torch.Tensor) or mask.device != env.device or
+            mask.dtype is not torch.bool or tuple(mask.shape) != (env.n,)):
+        raise ValueError("focal reset mask must be a device bool vector [world]")
+    if not isinstance(getattr(env, "curriculum_episode_generation", None), torch.Tensor):
+        raise ValueError("focal reset requires per-world episode generation state")
+    generation = env.curriculum_episode_generation
+    if generation.device != env.device or generation.dtype != torch.long or tuple(generation.shape) != (env.n,):
+        raise ValueError("focal reset episode generation must be device long [world]")
+
+    applied_generation = getattr(env, "phase4_focal_pose_applied_generation", None)
+    if not isinstance(applied_generation, torch.Tensor) or tuple(applied_generation.shape) != (env.n,):
+        applied_generation = torch.full((env.n,), -1, device=env.device, dtype=torch.long)
+    apply_mask = mask & (applied_generation != generation)
+    truth = env.sim.pose[:, 3].clone()
+    focal = env.estimated_pose[:, 3].clone()
+    if assignment["requested_offset_name"] is not None:
+        config = FOCAL_POSE_OFFSETS[assignment["requested_offset_name"]]
+        dx, dy = config["offset_xy_m"]
+        focal[..., 0] += dx
+        focal[..., 1] += dy
+        focal[..., 2] += config["heading_offset_rad"]
+        focal[..., 2] = torch.atan2(torch.sin(focal[..., 2]),
+                                    torch.cos(focal[..., 2]))
+    env.estimated_pose[:, 3].copy_(torch.where(apply_mask[:, None], focal,
+                                                env.estimated_pose[:, 3]))
+    selected = mask[:, None, None]
+    env.policy_pose.copy_(torch.where(selected, env.estimated_pose,
+                                      env.policy_pose))
+    applied_generation = torch.where(mask, generation, applied_generation)
+    env.phase4_focal_pose_applied_generation = applied_generation
+    truth_preserved = (truth == env.sim.pose[:, 3]).all(dim=-1)
+    prior_truth = getattr(env, "phase4_focal_pose_truth_preserved", None)
+    if not isinstance(prior_truth, torch.Tensor) or tuple(prior_truth.shape) != (env.n,):
+        prior_truth = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_focal_pose_truth_preserved = torch.where(mask, truth_preserved, prior_truth)
+    applied = mask & (applied_generation == generation)
+    prior_applied = getattr(env, "phase4_focal_pose_reset_applied", None)
+    if not isinstance(prior_applied, torch.Tensor) or tuple(prior_applied.shape) != (env.n,):
+        prior_applied = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_focal_pose_reset_applied = torch.where(mask, applied, prior_applied)
+    prior_failure = getattr(env, "phase4_reset_failure_mask", None)
+    if not isinstance(prior_failure, torch.Tensor) or tuple(prior_failure.shape) != (env.n,):
+        prior_failure = torch.zeros((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_reset_failure_mask = torch.where(mask,
+        prior_failure | ~truth_preserved | ~applied, prior_failure)
+    return applied, truth_preserved
+
+
+@torch.no_grad()
 def phase4_focal_pose_evaluator_diagnostics(env, runtime_event: dict) -> dict:
     """Create truth/estimate diagnostics for evaluator serialization only."""
     truth = env.sim.pose[:, 3].clone()

@@ -9,9 +9,23 @@ except ImportError:  # Keep package imports usable without the training extra.
     torch = None
 
 from .observation import normalize_tensor_observation_batch_in_place
+from .tensor_physics import counter_normal, counter_uniform
+
+
+_DEFENSE_RNG_STREAMS = ("perception", "reset", "gamepiece")
 
 
 class TensorDefenseObservationMixin:
+    def _ensure_world_rng_state(self):
+        if (isinstance(getattr(self, "_world_rng_seed", None), torch.Tensor) and
+                isinstance(getattr(self, "_world_rng_counters", None), torch.Tensor)):
+            return
+        world_ids=torch.arange(self.n,device=self.device,dtype=torch.long)
+        seed=int(self.generator.initial_seed())
+        self._world_rng_seed=(world_ids*0x1F123BB5+seed)&0x7fffffff
+        self._world_rng_counters=torch.zeros((self.n,len(_DEFENSE_RNG_STREAMS)),
+            device=self.device,dtype=torch.long)
+
     def perception_state(self, focal):
         """Per-robot controller view; contains no simulator piece-owner data."""
         from .tensor_sim import PerceptionState
@@ -47,18 +61,24 @@ class TensorDefenseObservationMixin:
         return torch.stack((valid,age),dim=-1)
 
     def _random_active(self, active_mask, tail_shape, *, normal=False, high=None,
-                       active_count=None):
+                       active_count=None, stream="reset"):
+        self._ensure_world_rng_state()
         active_mask=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)
         dtype=torch.long if high is not None else self.sim.pose.dtype
-        shape=(self.n,*tail_shape)
-        if normal:
-            values=torch.randn(shape,device=self.device,generator=self.generator)
-        elif high is not None:
-            values=torch.randint(high,shape,device=self.device,generator=self.generator)
-        else:
-            values=torch.rand(shape,device=self.device,generator=self.generator)
-        return torch.where(active_mask.reshape(self.n,*([1]*len(tail_shape))),values,
-                           torch.zeros_like(values)).to(dtype=dtype)
+        try:
+            stream_index=_DEFENSE_RNG_STREAMS.index(stream)
+        except ValueError as exc:
+            raise ValueError("unknown defense per-world RNG stream") from exc
+        counter=self._world_rng_counters[:,stream_index]
+        stream_seed=self._world_rng_seed^((stream_index+4)*0x6A09E667)
+        values=(counter_normal(stream_seed,counter,active_mask,
+                    tail_shape,dtype=dtype) if normal else
+                counter_uniform(stream_seed,counter,active_mask,
+                    tail_shape,dtype=(torch.float32 if high is not None else dtype)))
+        counter.add_(active_mask.long())
+        if high is not None:
+            values=(values*int(high)).floor().long().clamp_max(int(high)-1)
+        return values.to(dtype=dtype)
 
     def _update_perception(self, reset_mask=None, active_mask=None, active_count=None):
         """Advance simple per-robot FUEL tracking from simulated sensor detections."""
@@ -139,10 +159,10 @@ class TensorDefenseObservationMixin:
                 occluded=((closest-other_pos[:,None,:]).norm(dim=-1)<=other_radius[:,None]) & (t>.02) & (t<.98)
                 visible &= ~occluded
             if self.perception_dropout:
-                detected=self._random_active(active_mask,visible.shape[1:],active_count=active_count)>=self.perception_dropout
+                detected=self._random_active(active_mask,visible.shape[1:],active_count=active_count,stream="perception")>=self.perception_dropout
                 visible &= detected
             noise=self._random_active(active_mask,self.piece_pos.shape[1:],normal=True,
-                                      active_count=active_count)*(self.perception_position_noise *
+                                      active_count=active_count,stream="perception")*(self.perception_position_noise *
                                       (1.+delta.norm(dim=-1)/8.)[...,None])
             measured=self.piece_pos+noise
             prior_position=self._track_pos[:,robot].clone()
@@ -154,7 +174,7 @@ class TensorDefenseObservationMixin:
                                          torch.zeros_like(estimated_velocity))
             if self.perception_velocity_noise:
                 updated_velocity += self._random_active(active_mask,self.piece_vel.shape[1:],normal=True,
-                    active_count=active_count)*self.perception_velocity_noise
+                    active_count=active_count,stream="perception")*self.perception_velocity_noise
             self._track_pos[:,robot]=torch.where((visible&active_mask[:,None])[...,None],measured,self._track_pos[:,robot])
             self._track_vel[:,robot]=torch.where((visible&active_mask[:,None])[...,None],updated_velocity,self._track_vel[:,robot])
             self._track_age[:,robot]=torch.where(visible&active_mask[:,None],torch.zeros_like(self._track_age[:,robot]),self._track_age[:,robot])
@@ -164,7 +184,7 @@ class TensorDefenseObservationMixin:
             robot_bearing=torch.atan2(robot_delta[:,1],robot_delta[:,0])
             bearing_error=torch.atan2(torch.sin(robot_bearing-self.sim.pose[:,robot,2]),
                 torch.cos(robot_bearing-self.sim.pose[:,robot,2])).abs()
-            detected=(self._random_active(active_mask,(),active_count=active_count)>=self.perception_dropout)
+            detected=(self._random_active(active_mask,(),active_count=active_count,stream="perception")>=self.perception_dropout)
             detected &= (robot_delta.norm(dim=-1)<=self.perception_range)
             detected &= bearing_error<=math.radians(self.perception_fov)*.5
             if occ.numel():
@@ -179,12 +199,12 @@ class TensorDefenseObservationMixin:
                 detected &= ~blocked.any(-1)
             opponent_range=robot_delta.norm(dim=-1)
             position_noise=self._random_active(active_mask,(2,),normal=True,
-                active_count=active_count)*(self.perception_position_noise *
+                active_count=active_count,stream="perception")*(self.perception_position_noise *
                 (1.+opponent_range/8.)[:,None])
-            heading_noise=self._random_active(active_mask,(),normal=True,active_count=active_count)*min(
+            heading_noise=self._random_active(active_mask,(),normal=True,active_count=active_count,stream="perception")*min(
                 .05,self.perception_position_noise)
             velocity_noise=self._random_active(active_mask,(3,),normal=True,
-                                               active_count=active_count)*self.perception_velocity_noise
+                                               active_count=active_count,stream="perception")*self.perception_velocity_noise
             observed_pose[:,:2]+=position_noise
             observed_pose[:,2]+=heading_noise
             detected &= active_mask
@@ -497,9 +517,9 @@ class TensorDefenseObservationMixin:
             # whose intermediate results the trainer discards.
             if self.randomize and self.observation_noise>0:
                 self._random_active(active_mask,(18,),normal=True,
-                                    active_count=active_count)
+                                    active_count=active_count,stream="perception")
             if self.randomize and self.observation_dropout>0:
-                self._random_active(active_mask,(18,),active_count=active_count)
+                self._random_active(active_mask,(18,),active_count=active_count,stream="perception")
             return self._last_observation
         read_index=(self._observation_history_index-self.observation_delay).remainder(history_length)
         obs=self.observation_history.gather(
@@ -509,9 +529,9 @@ class TensorDefenseObservationMixin:
             # Mutate only its physical-state slice to avoid rebuilding all 137
             # features. Keep noise before dropout and preserve both RNG calls.
             obs[:,:18].add_(self._random_active(
-                active_mask,(18,),normal=True,active_count=active_count)*self.observation_noise)
+                active_mask,(18,),normal=True,active_count=active_count,stream="perception")*self.observation_noise)
         if self.randomize and self.observation_dropout>0:
-            keep=self._random_active(active_mask,(18,),active_count=active_count)>=self.observation_dropout
+            keep=self._random_active(active_mask,(18,),active_count=active_count,stream="perception")>=self.observation_dropout
             obs[:,:18].mul_(keep)
         if obs.device != self.device or tuple(obs.shape) != (self.n, self.obs_dim):
             raise RuntimeError("policy observation has an invalid device or batch shape")

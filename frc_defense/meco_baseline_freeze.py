@@ -142,9 +142,14 @@ REQUIRED_CONFIGURATION_ARTIFACT_IDS = frozenset({
     "sensor_profile",
 })
 
-CAPTURE_RECEIPT_SCHEMA = "meco-effective-capture-receipt-v1"
-EFFECTIVE_SNAPSHOT_SCHEMA = "meco-effective-configuration-snapshot-v1"
-EFFECTIVE_FREEZE_SCHEMA = "meco-baseline-freeze-v3"
+CAPTURE_RECEIPT_SCHEMA_V1 = "meco-effective-capture-receipt-v1"
+CAPTURE_RECEIPT_SCHEMA = "meco-effective-capture-receipt-v2"
+EFFECTIVE_SNAPSHOT_SCHEMA_V1 = "meco-effective-configuration-snapshot-v1"
+EFFECTIVE_SNAPSHOT_SCHEMA = "meco-effective-configuration-snapshot-v2"
+EFFECTIVE_FREEZE_SCHEMA_V3 = "meco-baseline-freeze-v3"
+EFFECTIVE_FREEZE_SCHEMA = "meco-baseline-freeze-v4"
+SNAPSHOT_SCHEMA_SOURCE_PATHS = ("frc_defense/meco_baseline_freeze.py",)
+PRESSURE_ANCHOR_RUNTIME_STATE_SCHEMA = "meco-phase4-pressure-anchor-v1"
 TUPLE_REGISTRY_SCHEMA = "meco-evaluation-tuple-registry-v1"
 PARTITION_MATERIALIZATION_SCHEMA = "meco-heldout-partitions-v2"
 FIVE_TRACK_IDS = ("A1", "A2", "A3", "C1", "C2")
@@ -557,7 +562,8 @@ def _validate_factory_module_origins(factory: Any, repo_root: str | Path) -> Non
     module_path = Path(importlib.import_module(factory.__module__).__file__).resolve()
     if filename != expected_factory or module_path != expected_factory:
         raise ValueError("loaded curriculum factory does not originate from the captured source root")
-    authoritative = {path for paths in AUTHORITATIVE_FIELD_SOURCES.values() for path in paths}
+    authoritative = ({path for paths in AUTHORITATIVE_FIELD_SOURCES.values() for path in paths}
+        | set(SNAPSHOT_SCHEMA_SOURCE_PATHS))
     for relative_path in authoritative:
         path = (root / relative_path).resolve()
         if not path.is_file():
@@ -583,6 +589,11 @@ def _validate_factory_module_origins(factory: Any, repo_root: str | Path) -> Non
             origin.relative_to(package_root)
         except ValueError as exc:
             raise ValueError(f"loaded behavior module {module_name} comes from another checkout") from exc
+
+
+def _snapshot_schema_source_hashes(root: Path) -> dict[str, str]:
+    return {path: hashlib.sha256(_repo_path(root, path).read_bytes()).hexdigest()
+            for path in SNAPSHOT_SCHEMA_SOURCE_PATHS}
 
 
 def _strict_utc_timestamp(value: Any, name: str) -> str:
@@ -623,11 +634,26 @@ def _validate_effective_runtime(runtime: Mapping[str, Any]) -> dict[str, Any]:
 def _effective_snapshot_body(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, Mapping) or set(snapshot) != {
             "schema", "producer", "factory_arguments", "resolved_fields", "configuration_artifacts",
-            "runtime_identity", "snapshot_sha256"}:
+            "dynamic_runtime_state", "runtime_identity", "snapshot_sha256"}:
         raise ValueError("effective snapshot has missing or unexpected fields")
     body = {key: snapshot[key] for key in snapshot if key != "snapshot_sha256"}
     if snapshot["schema"] != EFFECTIVE_SNAPSHOT_SCHEMA:
         raise ValueError("unsupported effective configuration snapshot schema")
+    runtime_state = snapshot["dynamic_runtime_state"]
+    expected_runtime_state = {
+        "phase4_pressure_anchor": {
+            "schema": PRESSURE_ANCHOR_RUNTIME_STATE_SCHEMA,
+            "shape": ["world"],
+            "dtype": "same_as_sim_pose",
+            "device_owner": "CurriculumEnv.device",
+            "tensor_owner": "CurriculumEnv.phase4_pressure_anchor_y_m",
+            "capture_stages": ["pre_blocker_pose", "post_start_profile_pose"],
+            "reset_mask_semantics": "selected_world_rows_only",
+            "static_snapshot_contains_numeric_values": False,
+        },
+    }
+    if runtime_state != expected_runtime_state:
+        raise ValueError("effective snapshot dynamic runtime-state contract mismatch")
     producer = snapshot["producer"]
     if (not isinstance(producer, Mapping) or set(producer) != {
             "module", "function", "source_identity_sha256"}
@@ -740,10 +766,11 @@ def compile_effective_capture_receipt(
     captured = captured_at_utc or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     _strict_utc_timestamp(captured, "capture time")
     receipt_body = {"schema": CAPTURE_RECEIPT_SCHEMA,
-        "capture_tool_version": 1, "captured_at_utc": captured,
+        "capture_tool_version": 2, "captured_at_utc": captured,
         "source": {**source, "authoritative_source_sha256": {
             path: hashlib.sha256(_repo_path(root, path).read_bytes()).hexdigest()
-            for path in sorted({p for paths in AUTHORITATIVE_FIELD_SOURCES.values() for p in paths})}},
+            for path in sorted({p for paths in AUTHORITATIVE_FIELD_SOURCES.values() for p in paths})},
+            "snapshot_schema_source_sha256": _snapshot_schema_source_hashes(root)},
         "effective_snapshot_sha256": effective_snapshot["snapshot_sha256"],
         "effective_snapshot": effective_snapshot,
         "fields": clean_fields, "configuration_artifacts": clean_artifacts,
@@ -762,18 +789,24 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
         "runtime", "qualification_eligible", "receipt_sha256"}
     if set(receipt) != expected or receipt["schema"] != CAPTURE_RECEIPT_SCHEMA:
         raise ValueError("unsupported or noncanonical capture receipt")
-    if receipt["qualification_eligible"] is not False or receipt["capture_tool_version"] != 1:
+    if receipt["qualification_eligible"] is not False or receipt["capture_tool_version"] != 2:
         raise ValueError("capture receipt cannot claim eligibility")
     source = receipt["source"]
     current = capture_source_identity(repo_root, source["source_plan_path"])
     if any(source.get(key) != value for key, value in current.items()):
         raise ValueError("capture receipt source tree or plan drifted")
+    if set(source) != set(current) | {
+            "authoritative_source_sha256", "snapshot_schema_source_sha256"}:
+        raise ValueError("capture receipt source manifest has missing or unexpected fields")
     for path, digest in source.get("authoritative_source_sha256", {}).items():
         if hashlib.sha256(_repo_path(Path(repo_root).resolve(), path).read_bytes()).hexdigest() != digest:
             raise ValueError(f"capture receipt authoritative source drifted: {path}")
     if set(source.get("authoritative_source_sha256", {})) != {
             p for paths in AUTHORITATIVE_FIELD_SOURCES.values() for p in paths}:
         raise ValueError("capture receipt omits authoritative source hashes")
+    if source.get("snapshot_schema_source_sha256") != _snapshot_schema_source_hashes(
+            Path(repo_root).resolve()):
+        raise ValueError("capture receipt snapshot-schema source drifted")
     snapshot = receipt["effective_snapshot"]
     snapshot_body = _effective_snapshot_body(snapshot)
     if (snapshot.get("snapshot_sha256") != receipt["effective_snapshot_sha256"]
@@ -851,8 +884,131 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
     return dict(receipt)
 
 
+def validate_archived_v1_effective_capture_receipt(
+        receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Check canonical v1 receipt integrity without authorizing current use.
+
+    The archived source files are not assumed to be available. Consequently,
+    recorded source hashes remain unauthenticated historical claims and the
+    result is explicitly marked archived-unverifiable.
+    """
+    expected = {"schema", "capture_tool_version", "captured_at_utc", "source",
+        "effective_snapshot_sha256", "effective_snapshot", "fields",
+        "configuration_artifacts", "runtime", "qualification_eligible", "receipt_sha256"}
+    if (not isinstance(receipt, Mapping) or set(receipt) != expected or
+            receipt.get("schema") != CAPTURE_RECEIPT_SCHEMA_V1 or
+            receipt.get("capture_tool_version") != 1 or
+            receipt.get("qualification_eligible") is not False):
+        raise ValueError("unsupported or noncanonical archived v1 receipt")
+    _strict_utc_timestamp(receipt["captured_at_utc"], "archived capture time")
+    snapshot = receipt["effective_snapshot"]
+    if (not isinstance(snapshot, Mapping) or set(snapshot) != {
+            "schema", "producer", "factory_arguments", "resolved_fields",
+            "configuration_artifacts", "runtime_identity", "snapshot_sha256"} or
+            snapshot.get("schema") != EFFECTIVE_SNAPSHOT_SCHEMA_V1):
+        raise ValueError("archived v1 snapshot schema mismatch")
+    snapshot_body = {key: snapshot[key] for key in snapshot if key != "snapshot_sha256"}
+    if snapshot.get("snapshot_sha256") != canonical_sha256(snapshot_body):
+        raise ValueError("archived v1 snapshot digest mismatch")
+    producer = snapshot["producer"]
+    if (not isinstance(producer, Mapping) or set(producer) != {
+            "module", "function", "source_identity_sha256"} or
+            producer.get("module") != "frc_defense.curriculum_scenarios" or
+            producer.get("function") != "make_curriculum_env"):
+        raise ValueError("archived v1 snapshot producer schema mismatch")
+    _strict_digest(producer["source_identity_sha256"], "archived v1 producer source identity")
+    _validate_effective_runtime(snapshot["runtime_identity"])
+    if _validate_effective_runtime(receipt["runtime"]) != _validate_effective_runtime(
+            snapshot["runtime_identity"]):
+        raise ValueError("archived v1 receipt runtime binding mismatch")
+    if receipt.get("effective_snapshot_sha256") != snapshot.get("snapshot_sha256"):
+        raise ValueError("archived v1 snapshot receipt binding mismatch")
+    source = receipt["source"]
+    if not isinstance(source, Mapping) or set(source) != {
+            "commit", "tree", "clean", "source_plan_path", "source_plan_sha256",
+            "authoritative_source_sha256"}:
+        raise ValueError("archived v1 source schema mismatch")
+    if (not isinstance(source["commit"], str) or not _HEX_40.fullmatch(source["commit"])
+            or not isinstance(source["tree"], str) or not _HEX_40.fullmatch(source["tree"])
+            or source["clean"] is not True or
+            not isinstance(source["source_plan_path"], str) or
+            not _SAFE_RELATIVE_PATH.fullmatch(source["source_plan_path"])):
+        raise ValueError("archived v1 source identity is malformed")
+    _strict_digest(source["source_plan_sha256"], "archived source plan hash")
+    source_identity = {key: source[key] for key in (
+        "commit", "tree", "clean", "source_plan_path", "source_plan_sha256")}
+    if producer["source_identity_sha256"] != canonical_sha256(source_identity):
+        raise ValueError("archived v1 producer source binding mismatch")
+    source_hashes = source["authoritative_source_sha256"]
+    expected_source_paths = {path for paths in AUTHORITATIVE_FIELD_SOURCES.values()
+                             for path in paths}
+    if not isinstance(source_hashes, Mapping) or set(source_hashes) != expected_source_paths:
+        raise ValueError("archived v1 source hash closure mismatch")
+    for path, digest in source_hashes.items():
+        if not isinstance(path, str):
+            raise ValueError("archived v1 source path is malformed")
+        _strict_digest(digest, f"archived source hash {path}")
+    fields = receipt["fields"]
+    if not isinstance(fields, Mapping) or set(fields) != set(AUTHORITATIVE_FIELD_SOURCES):
+        raise ValueError("archived v1 field closure mismatch")
+    normalized_fields = {}
+    for name, record in fields.items():
+        if not isinstance(record, Mapping) or set(record) != {
+                "value", "value_sha256", "selector", "runtime_owner",
+                "resolution_state", "derivation", "sources"}:
+            raise ValueError(f"archived v1 field schema mismatch: {name}")
+        if canonical_sha256(record["value"]) != record["value_sha256"]:
+            raise ValueError(f"archived v1 field digest mismatch: {name}")
+        derivation = record["derivation"]
+        if (not isinstance(derivation, Mapping) or set(derivation) != {"kind", "input_sha256"}
+                or derivation["kind"] not in {"factory_argument", "resolved_scenario", "runtime_object"}):
+            raise ValueError(f"archived v1 field derivation mismatch: {name}")
+        _strict_digest(derivation["input_sha256"], f"archived {name} derivation")
+        sources = record["sources"]
+        expected_paths = set(AUTHORITATIVE_FIELD_SOURCES[name])
+        if (not isinstance(sources, list) or len(sources) != len(expected_paths) or
+                {item.get("path") for item in sources if isinstance(item, Mapping)} != expected_paths):
+            raise ValueError(f"archived v1 field source closure mismatch: {name}")
+        for item in sources:
+            if (not isinstance(item, Mapping) or set(item) != {"path", "sha256"} or
+                    source_hashes.get(item["path"]) != item["sha256"]):
+                raise ValueError(f"archived v1 field source binding mismatch: {name}")
+        normalized_fields[name] = {key: record[key] for key in (
+            "value", "selector", "runtime_owner", "resolution_state", "derivation")}
+    if normalized_fields != snapshot["resolved_fields"]:
+        raise ValueError("archived v1 fields differ from snapshot")
+    artifacts = receipt["configuration_artifacts"]
+    if (not isinstance(artifacts, list) or
+            {item.get("artifact_id") for item in artifacts if isinstance(item, Mapping)}
+                != REQUIRED_CONFIGURATION_ARTIFACT_IDS):
+        raise ValueError("archived v1 configuration artifact closure mismatch")
+    for item in artifacts:
+        if not isinstance(item, Mapping) or set(item) != {
+                "artifact_id", "content_sha256", "content_base64"}:
+            raise ValueError("archived v1 configuration artifact schema mismatch")
+        try:
+            raw = base64.b64decode(item["content_base64"], validate=True)
+            decoded = json.loads(raw)
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("archived v1 configuration artifact is malformed") from exc
+        if (_canonical_json_bytes(decoded) != raw or
+                hashlib.sha256(raw).hexdigest() != item["content_sha256"]):
+            raise ValueError("archived v1 configuration artifact digest mismatch")
+    receipt_artifacts = {item["artifact_id"]: {
+        "content_base64": item["content_base64"],
+        "content_sha256": item["content_sha256"]} for item in artifacts}
+    if receipt_artifacts != snapshot["configuration_artifacts"]:
+        raise ValueError("archived v1 configuration artifacts differ from snapshot")
+    receipt_body = {key: receipt[key] for key in expected if key != "receipt_sha256"}
+    if receipt.get("receipt_sha256") != canonical_sha256(receipt_body):
+        raise ValueError("archived v1 receipt digest mismatch")
+    return {"status": "archived_unverifiable", "schema": CAPTURE_RECEIPT_SCHEMA_V1,
+        "receipt_sha256": receipt["receipt_sha256"], "qualification_eligible": False,
+        "source_hashes_authenticated": False}
+
+
 def compile_effective_baseline_freeze(receipt: Mapping[str, Any], repo_root: str | Path) -> dict[str, Any]:
-    """Compile the v3 freeze from a fully verified capture receipt."""
+    """Compile the current v4 freeze from a fully verified v2 receipt."""
     validated = validate_effective_capture_receipt(receipt, repo_root)
     body = {"schema": EFFECTIVE_FREEZE_SCHEMA,
         "status": "complete_source_runtime_bound_effective_baseline",
@@ -875,6 +1031,31 @@ def validate_effective_baseline_freeze(freeze: Mapping[str, Any], receipt: Mappi
     if dict(freeze) != expected_freeze:
         raise ValueError("effective baseline freeze differs from its validated receipt")
     return dict(freeze)
+
+
+def validate_archived_v3_effective_baseline_freeze(
+        freeze: Mapping[str, Any], receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Check a legacy v3 freeze only as non-authoritative archive evidence."""
+    expected = {"schema", "status", "capture_receipt_sha256", "source", "runtime",
+        "fields", "configuration_artifacts", "qualification_eligible", "freeze_sha256"}
+    if (not isinstance(freeze, Mapping) or set(freeze) != expected or
+            freeze.get("schema") != EFFECTIVE_FREEZE_SCHEMA_V3 or
+            freeze.get("status") != "complete_source_runtime_bound_effective_baseline" or
+            freeze.get("qualification_eligible") is not False):
+        raise ValueError("unsupported archived v3 effective baseline freeze")
+    archived_receipt = validate_archived_v1_effective_capture_receipt(receipt)
+    if (freeze.get("capture_receipt_sha256") != archived_receipt["receipt_sha256"] or
+            freeze.get("source") != receipt.get("source") or
+            freeze.get("runtime") != receipt.get("runtime") or
+            freeze.get("fields") != receipt.get("fields") or
+            freeze.get("configuration_artifacts") != receipt.get("configuration_artifacts")):
+        raise ValueError("archived v3 freeze differs from its archived v1 receipt")
+    body = {key: freeze[key] for key in expected if key != "freeze_sha256"}
+    if freeze.get("freeze_sha256") != canonical_sha256(body):
+        raise ValueError("archived v3 freeze digest mismatch")
+    return {"status": "archived_unverifiable", "schema": EFFECTIVE_FREEZE_SCHEMA_V3,
+        "freeze_sha256": freeze["freeze_sha256"], "qualification_eligible": False,
+        "current_phase0_eligible": False}
 
 
 def validate_effective_phase0_bundle(bundle: Mapping[str, Any], repo_root: str | Path) -> dict[str, str]:
