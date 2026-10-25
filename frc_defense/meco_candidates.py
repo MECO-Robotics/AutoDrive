@@ -210,6 +210,14 @@ class DeviceCandidateBatch:
                 tuple(query.candidate_id for query in self.route_batch.queries) !=
                 tuple(self.candidate_ids)):
             raise ValueError("route batch must align with device candidate order")
+        torch._assert_async(self.valid_mask.any(),
+            "device candidate batch has no feasible candidate")
+        torch._assert_async((self.fallback_index >= 0) &
+            (self.fallback_index < count),
+            "device candidate fallback index is out of range")
+        safe_fallback = self.fallback_index.clamp(0, count - 1)
+        torch._assert_async(self.valid_mask[0, safe_fallback],
+            "device candidate fallback is not feasible")
 
     @property
     def device(self):
@@ -353,14 +361,17 @@ def _goal_nodes_batch(env, graph: LegalPoseGraph, xy, heading, intake_mask):
 
 
 def _candidate_geometry_device(env, graph, specs, fuel_xy, fuel_available,
-                               base_valid):
+                               base_valid, *, action_indices=None):
     """Build route goals/capture masks as tensors after the host spec list."""
     device = torch.device(env.device)
     dtype = env.sim.pose.dtype
     count = len(specs)
     if fuel_xy.shape != (count, 2) or fuel_available.shape != (count,):
         raise ValueError("candidate fuel tensors must align with the ordered spec list")
-    actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
+    actions = (torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
+               if action_indices is None else action_indices)
+    if actions.shape != (count,) or actions.device != device:
+        raise ValueError("candidate action indices must align with the device spec batch")
     variants = torch.tensor([row[1] for row in specs], device=device, dtype=torch.long)
     forward_offsets = torch.tensor([row[2] for row in specs], device=device, dtype=dtype)
     lateral_offsets = torch.tensor([row[3] for row in specs], device=device, dtype=dtype)
@@ -550,44 +561,110 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
     base_tracks = {int(base.table.features[i][1]) for i in range(4)
                    if base.table.features[i][1] is not None}
     ids = []
+    used = set()
     for row_index, (action, variant, _forward, _lateral, target_track) in enumerate(specs):
         is_continue = continue_index is not None and row_index == continue_index
         if is_continue:
-            ids.append("continue:" + active_commitment.candidate_id)
+            candidate_id = ("continue:inactive" if active_commitment is None else
+                            "continue:" + active_commitment.candidate_id)
         elif target_track is not None:
-            ids.append(base.table.candidate_ids[action] if not variant and
-                target_track in base_tracks else
+            candidate_id = (base.table.candidate_ids[action]
+                if not variant and target_track in base_tracks else
                 f"collect:track:{target_track}" if not variant else
                 f"collect:track:{target_track}:approach:{variant}")
         else:
-            ids.append(base.table.candidate_ids[action] if not variant else
-                       f"{base.table.candidate_ids[action]}:approach:{variant}")
-    if len(set(ids)) != len(ids):
-        raise ValueError("device candidate specification produced duplicate IDs")
+            candidate_id = base.table.candidate_ids[action] if not variant else \
+                           f"{base.table.candidate_ids[action]}:approach:{variant}"
+        # Fixed-capacity expansion carries masked padding and can contain
+        # duplicate base/oracle targets. Preserve the first canonical label;
+        # give only later padded/duplicate rows a deterministic row suffix.
+        if candidate_id in used:
+            candidate_id = f"{candidate_id}:expanded:{row_index}"
+        used.add(candidate_id)
+        ids.append(candidate_id)
     return tuple(ids)
 
 
 @torch.no_grad()
-def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
+def _build_device_candidate_set(env, base, graph, specs, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
+        extra_track_start=None, extra_track_indices=None,
+        extra_candidate_mask=None,
+        policy_offset_start=None,
+        oracle_track_start=None, oracle_track_indices=None,
+        oracle_variant_count=0, continue_action_tensor=None,
+        continue_track_tensor=None,
         oracle_capacity, learned_traversal_cost, learned_cost_scale):
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
     dtype = env.sim.pose.dtype
+    if continue_index is None:
+        raise RuntimeError("device candidate construction requires its reserved continuation row")
     ids = _device_candidate_ids(base, specs, continue_index, active_commitment)
     count = len(specs)
     actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
-    track_values = [(-1 if row[4] is None else int(row[4])) for row in specs]
-    track_indices = torch.tensor(track_values, device=device, dtype=torch.long)
+    track_indices = torch.full((count,), -1, device=device, dtype=torch.long)
+    base_collect_rows = torch.tensor(
+        [row[0] < 4 and row[4] is None for row in specs],
+        device=device, dtype=torch.bool)
+    safe_actions = actions.clamp(0, 3)
+    base_target_present = base.device_missing_mask.index_select(0, safe_actions)[:, 1] < .5
+    base_target_ids = base.device_track_indices.index_select(0, safe_actions)
+    track_indices = torch.where(base_collect_rows & base_target_present,
+                                base_target_ids, track_indices)
+    if extra_track_indices is not None:
+        if (extra_track_indices.device != device or extra_track_indices.ndim != 1
+                or extra_track_start is None or extra_track_start < 0
+                or extra_track_start + extra_track_indices.numel() > count):
+            raise RuntimeError("extra target tensor does not align with the candidate specification")
+        extra_slice = slice(extra_track_start,
+                            extra_track_start + extra_track_indices.numel())
+        if (extra_candidate_mask is None
+                or extra_candidate_mask.device != device
+                or extra_candidate_mask.shape != extra_track_indices.shape):
+            raise RuntimeError("extra target eligibility mask is not aligned with its fixed-capacity rows")
+        track_indices[extra_slice] = torch.where(
+            extra_candidate_mask, extra_track_indices,
+            torch.full_like(extra_track_indices, -1))
+    if oracle_track_indices is not None:
+        oracle_count = oracle_track_indices.numel() * oracle_variant_count
+        if (oracle_track_indices.device != device or oracle_track_indices.ndim != 1
+                or oracle_track_start is None or oracle_track_start < 0
+                or oracle_track_start + oracle_count > count):
+            raise RuntimeError("oracle target tensor does not align with its candidate specifications")
+        oracle_slice = slice(oracle_track_start, oracle_track_start + oracle_count)
+        track_indices[oracle_slice] = oracle_track_indices.repeat(oracle_variant_count)
+    if (continue_action_tensor is None or continue_action_tensor.device != device
+            or continue_action_tensor.numel() != 1):
+        raise RuntimeError("commitment action tensor is not a device scalar")
+    if (continue_track_tensor is None or continue_track_tensor.device != device
+            or continue_track_tensor.numel() != 1):
+        raise RuntimeError("commitment target tensor is not a device scalar")
+    actions[continue_index] = continue_action_tensor.reshape(())
+    track_indices[continue_index] = continue_track_tensor.reshape(())
     target_available = ((track_indices >= 0) &
                         (track_indices < env.track_pos.shape[2]))
     safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
-    base_track_ids = {int(base.table.features[i][1]) for i in range(4)
-                      if base.table.features[i][1] is not None}
-    extra_flags = torch.tensor([value >= 0 and value not in base_track_ids
-                                for value in track_values],
-                               device=device, dtype=torch.bool)
+    if (base.device_track_indices is None or base.device_valid_mask is None
+            or base.device_features is None or base.device_missing_mask is None
+            or base.device_fallback_index is None):
+        raise RuntimeError("device candidate construction requires the tensor base action table")
+    if (base.device_track_indices.device != device
+            or base.device_valid_mask.device != device
+            or base.device_features.device != device
+            or base.device_missing_mask.device != device
+            or base.device_fallback_index.device != device):
+        raise RuntimeError("base action table tensors are not on the assigned device")
+    base_track_present = base.device_missing_mask[:4, 1] < .5
+    extra_flags = ((track_indices[:, None] != base.device_track_indices[:4][None, :]) |
+        ~base_track_present[None, :]).all(dim=-1) & (track_indices >= 0)
+    first_legal_collect = base.device_valid_mask[:4].to(torch.long).argmax()
+    actions = torch.where(extra_flags, first_legal_collect.expand_as(actions), actions)
+    if oracle_track_indices is not None:
+        row_ids = torch.arange(count, device=device)
+        oracle_rows = row_ids >= int(oracle_track_start)
+        actions = torch.where(oracle_rows, first_legal_collect.expand_as(actions), actions)
     fuel_xy = env.track_pos[0, 3].index_select(0, safe_tracks)
     sensed_points, _, sensed_mask = env._perceived_fuel(3)
     sensed_points, sensed_mask = sensed_points[0], sensed_mask[0]
@@ -602,9 +679,9 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         target_available &= ~extra_flags
     fuel_xy = torch.where(target_available[:, None], fuel_xy,
                           torch.full_like(fuel_xy, float("nan")))
-    base_valid = torch.tensor(base.table.valid_mask, device=device, dtype=torch.bool)
+    base_valid = base.device_valid_mask
     geometry = _candidate_geometry_device(env, graph, specs, fuel_xy,
-                                          target_available, base_valid)
+        target_available, base_valid, action_indices=actions)
     query_rows = tuple(DeviceRouteQuery(ids[index], base.observation.snapshot_id,
         0, 3, bool(specs[index][0] < 4)) for index in range(count))
     route_goals = torch.where(geometry["allowed"][:, None], geometry["targets"],
@@ -616,11 +693,14 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         learned_cost_scale=learned_cost_scale,
         learned_cost_provenance="meco_legal_heading_penalty_projection_v1")
     route_available = geometry["allowed"] & route_full.feasible
-    if continue_index is not None and commitment_match_valid is not None:
-        route_available = route_available & torch.where(
-            torch.arange(count, device=device) == continue_index,
-            commitment_match_valid.to(device=device, dtype=torch.bool),
-            torch.ones(count, device=device, dtype=torch.bool))
+    if oracle_track_indices is not None:
+        oracle_rows = torch.arange(count, device=device) >= int(oracle_track_start)
+        oracle_track_available = (oracle_track_indices >= 0).repeat(oracle_variant_count)
+        route_available = route_available & (~oracle_rows | oracle_track_available)
+    route_available = route_available & torch.where(
+        torch.arange(count, device=device) == continue_index,
+        commitment_match_valid.to(device=device, dtype=torch.bool),
+        torch.ones(count, device=device, dtype=torch.bool))
     distance = torch.where(route_available, route_full.distance_m.to(dtype),
                            torch.zeros(count, device=device, dtype=dtype))
     heading_delta = geometry["headings"] - env.policy_pose[0, 3, 2]
@@ -633,8 +713,8 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         env, geometry["targets"], eta, route_available, prediction_mode)
     risk = torch.where(forecast_valid, risk_raw.to(dtype), torch.zeros_like(eta))
 
-    base_values, base_missing = candidate_feature_tensor(base.table,
-        device=device, dtype=dtype)
+    base_values = base.device_features.to(dtype=dtype)
+    base_missing = base.device_missing_mask.to(dtype=dtype)
     raw = base_values.index_select(0, actions).clone()
     missing = base_missing.index_select(0, actions).clone()
     extra = extra_flags & geometry["collect"]
@@ -669,10 +749,8 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
     raw[:, 4] = geometry["heading_bins"].to(dtype)
     raw[:, 13] = eta
     missing[:, 13] = (~route_available).to(dtype)
-    continue_mask = torch.tensor([continue_index == i for i in range(count)],
-                                 device=device, dtype=torch.bool)
-    commitment_live = (route_available[continue_index] if continue_index is not None
-                       else torch.zeros((), device=device, dtype=torch.bool))
+    continue_mask = torch.arange(count, device=device) == continue_index
+    commitment_live = route_available[continue_index]
     switch_cost = (commitment_live & ~continue_mask).to(dtype)
     raw = torch.cat((raw, torch.stack((geometry["nodes"].clamp_min(0).to(dtype),
         distance, risk, geometry["headings"].to(dtype),
@@ -682,10 +760,29 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         torch.zeros_like(route_available), torch.zeros_like(route_available)), dim=-1)
     missing = torch.cat((missing, extra_missing.to(dtype)), dim=-1)
     raw = torch.nan_to_num(raw, nan=0., posinf=0., neginf=0.)
-    policy_indices = list(range(candidate_k))
-    if continue_index is not None:
-        policy_indices.append(continue_index)
-    selected = torch.tensor(policy_indices, device=device, dtype=torch.long)
+    if (extra_candidate_mask is None or policy_offset_start is None
+            or extra_track_start is None or extra_track_indices is None):
+        raise RuntimeError("fixed-capacity policy ordering requires device expansion masks and offsets")
+    # Preserve the legacy policy prefix: base actions, eligible sensed goals
+    # in device distance order, then the fixed legacy approach-offset block.
+    # Masked capacity rows remain in the evaluated pool but do not displace
+    # offsets when fewer sensed targets are eligible.
+    ranks = torch.full((count,), 2**60, device=device, dtype=torch.long)
+    ranks[:8] = torch.arange(8, device=device, dtype=torch.long)
+    extra_count = extra_track_indices.numel()
+    extra_rank = extra_candidate_mask.to(torch.long).cumsum(0) - 1
+    extra_rows = torch.arange(extra_count, device=device, dtype=torch.long)
+    ranks[extra_track_start:extra_track_start + extra_count] = torch.where(
+        extra_candidate_mask, 8 + extra_rank, 2**50 + extra_rows)
+    offset_count = 4 * 6
+    offset_ranks = (8 + extra_candidate_mask.sum() +
+                    torch.arange(offset_count, device=device, dtype=torch.long))
+    ranks[policy_offset_start:policy_offset_start + offset_count] = offset_ranks
+    selected_policy = torch.argsort(ranks, stable=True)[:candidate_k]
+    policy_indices = selected_policy.detach().to(device="cpu").tolist()
+    policy_indices.append(continue_index)
+    selected = torch.cat((selected_policy,
+        torch.tensor([continue_index], device=device, dtype=torch.long)))
     policy_ids = tuple(ids[index] for index in policy_indices)
     policy_queries = tuple(query_rows[index] for index in policy_indices)
     policy_routes = DeviceRouteBatch(policy_queries,
@@ -704,19 +801,16 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
     route_points = (eta.index_select(0, selected) * ROUTE_COST_POINTS_PER_SECOND)[None]
     risk_points = risk.index_select(0, selected)[None]
     route_cost_for_fallback = route_points[0] + risk_points[0]
-    fallback_index = next((i for i, candidate_id in enumerate(policy_ids)
-                           if candidate_id == base.fallback_candidate_id), -1)
-    if fallback_index < 0:
-        fallback_index = next((i for i, candidate_id in enumerate(policy_ids)
-                               if candidate_id == "hold"), 0)
-    fallback = torch.tensor(fallback_index, device=device, dtype=torch.long)
+    fallback = base.device_fallback_index.to(device=device, dtype=torch.long)
+    fallback_index = int(fallback.detach().to(device="cpu").item())
+    if fallback_index >= len(policy_ids):
+        raise RuntimeError("base fallback index lies outside the candidate policy prefix")
     fallback_valid = valid[0].gather(0, fallback.reshape(1)).squeeze(0)
     valid_cost = route_cost_for_fallback.masked_fill(~valid[0], float("inf"))
     cheapest = valid_cost.argmin()
-    hold_index = next((i for i, candidate_id in enumerate(policy_ids)
-                       if candidate_id == "hold"), fallback_index)
+    hold_index = torch.tensor(7, device=device, dtype=torch.long)
     fallback = torch.where(fallback_valid, fallback,
-        torch.where(valid[0, hold_index], torch.tensor(hold_index, device=device), cheapest))
+        torch.where(valid[0, hold_index], hold_index, cheapest))
     # With no feasible route, ``cheapest`` is the argmin of all +inf and is
     # only a structural placeholder. Consumers must intersect fallback support
     # with ``valid`` before making it selectable; the inference adapter does so.
@@ -735,16 +829,19 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
             "expires_sequence": active_commitment.expires_sequence},
             sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
             if active_commitment is not None else ""))
+    variant_flags = torch.tensor([bool(row[1]) for row in specs],
+                                 device=device, dtype=torch.bool)
+    route_override_flags = torch.stack((
+        torch.cat((variant_flags.index_select(0, selected_policy),
+                   variant_flags[continue_index].reshape(1))),
+        continue_mask.index_select(0, selected)), dim=-1)
     device_batch = DeviceCandidateBatch(policy_ids, feature_names,
         torch.arange(len(policy_indices), device=device, dtype=torch.long),
         actions.index_select(0, selected), track_indices.index_select(0, selected),
         torch.nan_to_num(fuel_xy.index_select(0, selected)),
         geometry["targets"].index_select(0, selected),
         geometry["headings"].index_select(0, selected).to(dtype),
-        torch.stack((torch.tensor([bool(specs[i][1]) for i in policy_indices],
-                                  device=device),
-                     torch.tensor([continue_index == i for i in policy_indices],
-                                  device=device)), dim=-1),
+        route_override_flags,
         policy_raw, policy_missing, valid, eta.index_select(0, selected)[None],
         route_points, risk_points, policy_routes, fallback,
         prediction.index_select(0, selected)[None],
@@ -752,18 +849,19 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         geometry["capture_inside"].index_select(0, selected)[None])
     oracle_mask = route_available & ~continue_mask
     oracle_count = oracle_mask.sum()
-    requested_mask = route_available[:candidate_k]
+    requested_rows = torch.zeros(count, device=device, dtype=torch.bool).scatter(
+        0, selected_policy, True)
+    requested_mask = route_available & requested_rows
     requested_count = requested_mask.sum()
     total_cost = eta * ROUTE_COST_POINTS_PER_SECOND + risk
     oracle_cost_sum = torch.where(oracle_mask, total_cost,
                                   torch.zeros_like(total_cost)).sum()
     oracle_mean = oracle_cost_sum / oracle_count.clamp_min(1)
     oracle_min = total_cost.masked_fill(~oracle_mask, float("inf")).amin()
-    selected_cost = total_cost[:candidate_k]
-    selected_cost_sum = torch.where(requested_mask, selected_cost,
-                                    torch.zeros_like(selected_cost)).sum()
+    selected_cost_sum = torch.where(requested_mask, total_cost,
+                                    torch.zeros_like(total_cost)).sum()
     selected_mean = selected_cost_sum / requested_count.clamp_min(1)
-    selected_min = selected_cost.masked_fill(~requested_mask, float("inf")).amin()
+    selected_min = total_cost.masked_fill(~requested_mask, float("inf")).amin()
     candidate_recall = {"candidate_capacity": candidate_k,
         "prediction_mode": prediction_mode,
         "reference_pool_capacity": oracle_capacity,
@@ -1019,6 +1117,9 @@ def _world_zero_perceived_fuel(env):
             or points.shape[-1] != 2 or velocities.shape != points.shape
             or sensed.shape != points.shape[:2]):
         raise ValueError("slot-3 perceived FUEL buffers have misaligned batched shapes")
+    if any(value.device != torch.device(env.device)
+           for value in (points, velocities, sensed)):
+        raise ValueError("slot-3 perceived FUEL buffers are not on the assigned device")
     # Keep the native accessor's [world, track, ...] contract intact, then
     # select the sole supported world explicitly for candidate construction.
     return points[0], velocities[0], sensed[0]
@@ -1080,24 +1181,28 @@ def _additional_sensed_target_rows(env, base: SafeActionCandidates):
 
 def _additional_sensed_target_specs(env, base: SafeActionCandidates):
     """Return stable action/track identities without host feature-row building."""
-    base_track_ids = {int(base.table.features[i][1]) for i in range(4)
-                      if base.table.valid_mask[i] and
-                      base.table.features[i][1] is not None}
-    valid_collect = [i for i in range(4) if base.table.valid_mask[i]]
-    if not valid_collect:
-        return []
+    if (base.device_track_indices is None or base.device_valid_mask is None
+            or base.device_missing_mask is None
+            or base.device_track_indices.device != torch.device(env.device)
+            or base.device_valid_mask.device != torch.device(env.device)
+            or base.device_missing_mask.device != torch.device(env.device)):
+        raise RuntimeError("device target expansion requires a same-device base action table")
+    if base.device_track_indices.shape != (4,) or base.device_valid_mask.shape != (8,):
+        raise RuntimeError("device base action table has an invalid fixed-capacity shape")
     points, _, sensed = _world_zero_perceived_fuel(env)
     distances = torch.linalg.vector_norm(points - env.policy_pose[0, 3, :2], dim=-1)
-    eligible = sensed.clone()
-    if base_track_ids:
-        ids = torch.tensor(sorted(base_track_ids), device=points.device, dtype=torch.long)
-        eligible[ids] = False
+    eligible = sensed & torch.isfinite(points).all(dim=-1)
+    buffer_ids = torch.arange(points.shape[0], device=points.device, dtype=torch.long)
+    in_base = ((buffer_ids[:, None] == base.device_track_indices[:4][None, :]) &
+               (base.device_missing_mask[:4, 1] < .5)[None, :]).any(dim=-1)
+    eligible &= ~in_base
+    # Keep a fixed row for every sensor slot. Device eligibility sorts valid
+    # rows first and carries invalid/base rows as masked capacity; the host
+    # copy below is only stable identity metadata after order is fixed.
     order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
-    # Track indices are host identity metadata for stable candidate IDs; all
-    # candidate coordinates and features remain tensors in the device path.
-    ordered = order[eligible[order]].detach().to(device="cpu").tolist()
-    action = valid_collect[0]
-    return [(action, None, int(track)) for track in ordered]
+    ordered_indices = order
+    ordered = ordered_indices.detach().to(device="cpu").tolist()
+    return [(0, None, int(track)) for track in ordered], ordered_indices, eligible.index_select(0, order)
 
 
 @torch.no_grad()
@@ -1130,7 +1235,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     if prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     base = build_safe_action_candidates(env, observation, world=0, slot=3,
-                                        episode_id=episode_id)
+                                        episode_id=episode_id,
+                                        device_resident=device_resident)
     sequence = int(env.steps[0].item())
     if base.observation.sequence != sequence:
         raise ValueError("candidate snapshot does not match current simulator step")
@@ -1140,42 +1246,114 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         CandidateTable(snapshot.snapshot_id, base.table.candidate_ids,
             base.table.features, base.table.valid_mask, base.table.feature_names,
             route_costs=base.table.route_costs),
-        base.fallback_candidate_id, base.action_indices)
-    target_rows = {int(base.table.features[action][1]): base.table.features[action]
-                   for action in range(4) if base.table.valid_mask[action] and
-                   base.table.features[action][1] is not None}
-    specs = [(action, 0, 0., 0.,
-              (int(base.table.features[action][1])
-               if action < 4 and base.table.features[action][1] is not None else None))
-             for action in range(8)]
-    additional_targets = (_additional_sensed_target_specs(env, base)
-                          if device_resident else
-                          _additional_sensed_target_rows(env, base))
+        base.fallback_candidate_id, base.action_indices, base.device_features,
+        base.device_missing_mask, base.device_valid_mask,
+        base.device_track_indices, base.device_fallback_index)
+    target_rows = ({} if device_resident else {
+        int(base.table.features[action][1]): base.table.features[action]
+        for action in range(4) if base.table.valid_mask[action] and
+        base.table.features[action][1] is not None})
+    specs = [(action, 0, 0., 0., None) for action in range(8)]
+    additional_track_indices = None
+    additional_candidate_mask = None
+    additional_track_start = None
+    policy_offset_start = None
+    if device_resident:
+        (additional_targets, additional_track_indices,
+         additional_candidate_mask) = _additional_sensed_target_specs(env, base)
+        additional_track_start = len(specs)
+    else:
+        additional_targets = _additional_sensed_target_rows(env, base)
     for action, row, track in additional_targets:
-        if row is not None or device_resident:
+        if not device_resident:
             target_rows[track] = row
         specs.append((action, 0, 0., 0., track))
     offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
                (.34, 0.), (-.34, 0.))
+    if device_resident:
+        policy_offset_start = len(specs)
     for variant, (forward, lateral) in enumerate(offsets, 1):
         for action in range(4):
-            track = (int(base.table.features[action][1])
-                     if base.table.features[action][1] is not None else None)
+            track = None
             specs.append((action, variant, forward, lateral, track))
     # Reconcile a carried task against this snapshot before adding it. Intake
     # commitments follow the same sensed target by position, not a transient
-    # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
+    # top-four buffer index. The device row remains fixed-capacity and masks
+    # lost, illegal, or expired commitments from selection.
     active_commitment = commitment
     continue_spec = None
-    commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
-    if active_commitment is not None:
+    continue_action_tensor = None
+    continue_track_tensor = None
+    commitment_match_valid = torch.zeros((), device=env.device, dtype=torch.bool)
+    if device_resident:
+        # The device candidate pool always reserves exactly one continuation
+        # row. Presence, expiry, legal action support, and target revalidation
+        # form a same-device eligibility scalar; inactive rows remain masked.
+        action_index = (7 if active_commitment is None else
+                        min(max(int(active_commitment.action_index), 0), 7))
+        goal_variant = (0 if active_commitment is None else
+                        int(active_commitment.goal_variant))
+        continue_spec = (action_index, goal_variant, 0., 0., None)
+        continue_action_tensor = torch.tensor(action_index, device=env.device,
+                                               dtype=torch.long)
+        continue_track_tensor = torch.full((), -1, device=env.device,
+                                            dtype=torch.long)
+        commitment_present = torch.tensor(active_commitment is not None,
+                                           device=env.device, dtype=torch.bool)
+        expires_sequence = (sequence if active_commitment is None else
+                            active_commitment.expires_sequence)
+        source = (None if active_commitment is None else
+                  active_commitment.source_xy_m)
+        source_present = torch.tensor(source is not None, device=env.device,
+                                      dtype=torch.bool)
+        source_xy = torch.as_tensor((0., 0.) if source is None else source,
+            device=env.device, dtype=env.sim.pose.dtype)
+        live = (env.steps[0].to(device=env.device, dtype=torch.long) <
+                torch.tensor(expires_sequence, device=env.device, dtype=torch.long))
+        requested_action = torch.tensor(
+            7 if active_commitment is None else active_commitment.action_index,
+            device=env.device, dtype=torch.long)
+        action_in_range = (requested_action >= 0) & (requested_action < 8)
+        safe_action = requested_action.clamp(0, 7)
+        collect_action = requested_action < 4
+        first_legal_collect = base.device_valid_mask[:4].to(torch.long).argmax()
+        collect_supported = base.device_valid_mask[:4].any()
+        direct_supported = (action_in_range &
+                            base.device_valid_mask.index_select(
+                                0, safe_action.reshape(1)).reshape(()))
+        continue_action_tensor = torch.where(collect_action,
+            first_legal_collect, safe_action)
+        points, _, sensed = _world_zero_perceived_fuel(env)
+        if points.shape[0]:
+            gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+            nearest_gap, nearest_track = gaps.masked_fill(
+                ~sensed, float("inf")).min(dim=0)
+            target_match = (torch.isfinite(nearest_gap) &
+                (nearest_gap <= CANDIDATE_BOUNDARY[
+                    "commitment_target_matching_tolerance_m"]))
+        else:
+            nearest_gap = torch.full((), float("inf"), device=env.device)
+            nearest_track = torch.zeros((), device=env.device, dtype=torch.long)
+            target_match = torch.zeros((), device=env.device, dtype=torch.bool)
+        commitment_match_valid = (commitment_present & live & action_in_range &
+            torch.where(collect_action,
+                collect_supported & source_present & target_match,
+                direct_supported))
+        continue_track_tensor = torch.where(
+            collect_action & source_present & target_match, nearest_track,
+            torch.full_like(nearest_track, -1))
+        continue_index = len(specs)
+        specs.append(continue_spec)
+    else:
+        commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
+    if active_commitment is not None and not device_resident:
         action = active_commitment.action_index
         if sequence >= active_commitment.expires_sequence:
             active_commitment = None
         elif action < 4:
             source = active_commitment.source_xy_m
-            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
             points, _, sensed = _world_zero_perceived_fuel(env)
+            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
             if source is not None and points.shape[0] and action is not None:
                 source_xy = torch.as_tensor(source, device=points.device,
                                             dtype=points.dtype)
@@ -1185,7 +1363,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                 commitment_match_valid = (torch.isfinite(nearest_gap) &
                     (nearest_gap <= CANDIDATE_BOUNDARY[
                         "commitment_target_matching_tolerance_m"]))
-                # Transfer only the selected stable sensed-track identity.
+                # Legacy candidate IDs require a scalar sensor identity.
                 track = int(nearest_track.item())
             else:
                 commitment_match_valid = torch.zeros((), device=env.device,
@@ -1200,30 +1378,57 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                 active_commitment = None
             else:
                 continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
-    continue_index = None
-    if continue_spec is not None:
-        continue_index = len(specs)
-        specs.append(continue_spec)
+    if not device_resident:
+        continue_index = None
+        if continue_spec is not None:
+            continue_index = len(specs)
+            specs.append(continue_spec)
     oracle_offsets = ((.50, 0.), (-.50, 0.), (0., .50), (0., -.50),
         (.50, .50), (.50, -.50), (-.50, .50), (-.50, -.50),
         (.68, 0.), (-.68, 0.), (0., .68), (0., -.68),
         (.68, .25), (.68, -.25), (-.68, .25), (-.68, -.25),
         (.25, .68), (-.25, .68))
     oracle_start_index = len(specs)
-    oracle_track_ids = sorted(target_rows)
+    if device_resident:
+        base_oracle_tracks = torch.where(
+            base.device_missing_mask[:4, 1] < .5,
+            base.device_track_indices[:4],
+            torch.full_like(base.device_track_indices[:4], -1))
+        oracle_track_indices = torch.cat((base_oracle_tracks,
+            torch.where(additional_candidate_mask, additional_track_indices,
+                        torch.full_like(additional_track_indices, -1))))
+        oracle_sentinel = max(env.track_pos.shape[2],
+                              additional_track_indices.numel()) + 1
+        oracle_order = torch.argsort(
+            oracle_track_indices.masked_fill(oracle_track_indices < 0, oracle_sentinel),
+            stable=True)
+        oracle_track_indices = oracle_track_indices.index_select(0, oracle_order)
+        oracle_track_indices = torch.where(oracle_track_indices == oracle_sentinel,
+            torch.full_like(oracle_track_indices, -1), oracle_track_indices)
+        oracle_track_ids = oracle_track_indices.clamp_min(0).detach().to(device="cpu").tolist()
+    else:
+        oracle_track_indices = None
+        oracle_track_ids = sorted(target_rows)
     for variant, (forward, lateral) in enumerate(oracle_offsets, 7):
         for track in oracle_track_ids:
-            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
-            if action is not None:
-                specs.append((action, variant, forward, lateral, track))
+            specs.append((0, variant, forward, lateral, track))
     if device_resident:
-        oracle_capacity = (8 + len(additional_targets) + 4 * len(offsets) +
-                           len(oracle_track_ids) * len(oracle_offsets))
-        return _build_device_candidate_set(env, base, graph, specs, target_rows,
+        oracle_capacity = (8 + additional_track_indices.numel() + 4 * len(offsets) +
+                           oracle_track_indices.numel() * len(oracle_offsets))
+        return _build_device_candidate_set(env, base, graph, specs,
             candidate_k=candidate_k, action_ticks=action_ticks,
             prediction_mode=prediction_mode, active_commitment=active_commitment,
             continue_index=continue_index,
             commitment_match_valid=commitment_match_valid,
+            extra_track_start=additional_track_start,
+            extra_track_indices=additional_track_indices,
+            extra_candidate_mask=additional_candidate_mask,
+            policy_offset_start=policy_offset_start,
+            oracle_track_start=oracle_start_index,
+            oracle_track_indices=oracle_track_indices,
+            oracle_variant_count=len(oracle_offsets),
+            continue_action_tensor=continue_action_tensor,
+            continue_track_tensor=continue_track_tensor,
             oracle_capacity=oracle_capacity,
             learned_traversal_cost=learned_traversal_cost,
             learned_cost_scale=learned_cost_scale)
