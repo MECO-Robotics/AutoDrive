@@ -574,6 +574,7 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
 def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
+        extra_track_start=None, extra_track_indices=None,
         oracle_capacity, learned_traversal_cost, learned_cost_scale):
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
@@ -581,8 +582,7 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
     ids = _device_candidate_ids(base, specs, continue_index, active_commitment)
     count = len(specs)
     actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
-    track_values = [(-1 if row[4] is None else int(row[4])) for row in specs]
-    track_indices = torch.tensor(track_values, device=device, dtype=torch.long)
+    track_indices = torch.full((count,), -1, device=device, dtype=torch.long)
     base_collect_rows = torch.tensor(
         [row[0] < 4 and row[4] is None for row in specs],
         device=device, dtype=torch.bool)
@@ -591,6 +591,14 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
     base_target_ids = base.device_track_indices.index_select(0, safe_actions)
     track_indices = torch.where(base_collect_rows & base_target_present,
                                 base_target_ids, track_indices)
+    if extra_track_indices is not None:
+        if (extra_track_indices.device != device or extra_track_indices.ndim != 1
+                or extra_track_start is None or extra_track_start < 0
+                or extra_track_start + extra_track_indices.numel() > count):
+            raise RuntimeError("extra target tensor does not align with the candidate specification")
+        extra_slice = slice(extra_track_start,
+                            extra_track_start + extra_track_indices.numel())
+        track_indices[extra_slice] = extra_track_indices
     target_available = ((track_indices >= 0) &
                         (track_indices < env.track_pos.shape[2]))
     safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
@@ -1117,9 +1125,10 @@ def _additional_sensed_target_specs(env, base: SafeActionCandidates):
     order = torch.argsort(distances.masked_fill(~eligible, float("inf")), stable=True)
     # Track indices are host identity metadata for stable candidate IDs; all
     # candidate coordinates and features remain tensors in the device path.
-    ordered = order[eligible[order]].detach().to(device="cpu").tolist()
+    ordered_indices = order[eligible[order]]
+    ordered = ordered_indices.detach().to(device="cpu").tolist()
     # Action selection for expansion is resolved on-device in the batch builder.
-    return [(0, None, int(track)) for track in ordered]
+    return [(0, None, int(track)) for track in ordered], ordered_indices
 
 
 @torch.no_grad()
@@ -1169,9 +1178,13 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
                    for action in range(4) if base.table.valid_mask[action] and
                    base.table.features[action][1] is not None}
     specs = [(action, 0, 0., 0., None) for action in range(8)]
-    additional_targets = (_additional_sensed_target_specs(env, base)
-                          if device_resident else
-                          _additional_sensed_target_rows(env, base))
+    additional_track_indices = None
+    additional_track_start = None
+    if device_resident:
+        additional_targets, additional_track_indices = _additional_sensed_target_specs(env, base)
+        additional_track_start = len(specs)
+    else:
+        additional_targets = _additional_sensed_target_rows(env, base)
     for action, row, track in additional_targets:
         if row is not None or device_resident:
             target_rows[track] = row
@@ -1244,6 +1257,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             prediction_mode=prediction_mode, active_commitment=active_commitment,
             continue_index=continue_index,
             commitment_match_valid=commitment_match_valid,
+            extra_track_start=additional_track_start,
+            extra_track_indices=additional_track_indices,
             oracle_capacity=oracle_capacity,
             learned_traversal_cost=learned_traversal_cost,
             learned_cost_scale=learned_cost_scale)
