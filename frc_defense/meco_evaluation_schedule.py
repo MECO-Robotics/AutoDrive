@@ -236,7 +236,8 @@ class MecoEvaluationSchedule:
         item = self.head()
         if item is None or item["status"] != "running":
             raise ValueError("no running evaluation schedule attempt to fail")
-        item["attempts"][-1].update(status="failed", error=str(error))
+        item["attempts"][-1].update(status="failed", error=str(error),
+            failed_at_unix=time.time())
         item.update(status="failed", last_error=str(error))
         self._save()
         return item

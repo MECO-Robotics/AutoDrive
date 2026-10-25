@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from frc_defense import meco_training_manifest as manifest_api
+from frc_defense import meco_supervisor as supervisor_api
 from frc_defense.meco_tracks import MECO_TRACKS
 
 
@@ -144,6 +145,61 @@ def test_optional_evaluation_schedule_is_frozen_and_validated(campaign):
     bad = _seal(bad)
     with pytest.raises(ValueError, match="leaks"):
         manifest_api.validate_campaign_manifest(bad, source_root=tmp_path)
+
+
+def test_manifest_supervisor_constructor_keeps_roots_absent_until_claim(campaign, monkeypatch):
+    tmp_path, config = campaign
+    protocol_path = Path(config["evaluation_protocol"])
+    protocol = json.loads(protocol_path.read_text())
+    config = copy.deepcopy(config)
+    config["evaluation_schedule"] = [{
+        "scenario_id": "pickup_simple", "category": "single", "seeds": [101],
+        "split": "diagnostic", "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": hashlib.sha256(protocol_path.read_bytes()).hexdigest()}]
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}
+    monkeypatch.setattr(supervisor_api, "source_identity", lambda: {"source": "fixture"})
+    monkeypatch.setattr(supervisor_api, "_validate_runtime_source_binding",
+        lambda *_args, **_kwargs: "c" * 64)
+    monkeypatch.setattr("frc_defense.meco_device.require_indexed_cuda_device",
+        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("frc_defense.fuel_physics_hip.prepare_native_fuel_extension",
+        lambda _device: identity)
+    monkeypatch.setattr("frc_defense.fuel_physics_hip.native_extension_identity",
+        lambda: identity)
+
+    cfg = manifest["tracks"][MECO_TRACKS[0]]["config"]
+    supervisor = supervisor_api.MecoSupervisor(output=manifest["campaign"]["root"],
+        evaluation_output=manifest["campaign"]["evaluation_output"],
+        devices=tuple(manifest["devices"]["training_pool"]),
+        scenario=cfg["scenario_id"], category=cfg["category"], seed=cfg["seed"],
+        chunk_updates=cfg["updates"], rollout_steps=cfg["rollout_steps"],
+        epochs=cfg["epochs"], action_ticks=cfg["action_ticks"],
+        learning_rate=cfg["learning_rate"], gamma=cfg["gamma"],
+        gae_lambda=cfg["gae_lambda"], clip_coef=cfg["clip_coef"],
+        entropy_coef=cfg["entropy_coef"], value_coef=cfg["value_coef"],
+        max_grad_norm=cfg["max_grad_norm"],
+        route_cost_weight=cfg["route_cost_points_per_second"],
+        candidate_k=cfg["candidate_k"], evaluation_categories=("single",),
+        evaluation_episodes=1, evaluation_seed=101,
+        evaluation_device=manifest["devices"]["evaluation"], cycles=0,
+        stop_file=None, p_mode=cfg["p_mode"], p_cost_scale=cfg["p_cost_scale"],
+        p_points_per_grid_edge=cfg["p_points_per_grid_edge"],
+        prediction_mode=cfg["prediction_mode"],
+        qualification_protocol=manifest["qualification_protocol"]["path"],
+        evaluation_split="diagnostic", campaign_manifest=manifest)
+
+    campaign_root = Path(manifest["campaign"]["root"])
+    evaluation_root = Path(manifest["campaign"]["evaluation_output"])
+    assert not campaign_root.exists()
+    assert not evaluation_root.exists()
+    supervisor._claim_fresh_manifest_roots()
+    assert supervisor._campaign_roots_claimed is True
+    assert campaign_root.is_dir()
+    assert evaluation_root.is_dir()
 
 
 def test_rejects_cpu_unindexed_and_duplicate_devices(campaign):

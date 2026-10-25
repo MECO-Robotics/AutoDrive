@@ -1432,10 +1432,10 @@ class MecoSupervisor:
             if item["status"] == "running":
                 raise RuntimeError("scheduled evaluator is marked running without a process handle")
             if item["status"] == "failed" and item["attempts"]:
-                last_attempt = item["attempts"][-1].get("started_at_unix")
-                if isinstance(last_attempt, (int, float)) and not isinstance(last_attempt, bool):
+                failed_at = item["attempts"][-1].get("failed_at_unix")
+                if isinstance(failed_at, (int, float)) and not isinstance(failed_at, bool):
                     retry_delay = min(64., 2. ** min(len(item["attempts"]), 6))
-                    if time.time() < last_attempt + retry_delay:
+                    if time.time() < failed_at + retry_delay:
                         return
             schedule_case = item["schedule_case"]
             checkpoints = {row["track"]: Path(row["path"])

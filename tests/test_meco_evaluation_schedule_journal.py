@@ -54,6 +54,24 @@ def test_slow_evaluator_keeps_every_cycle_and_retries_same_head(tmp_path):
     assert journal.summary()["pending_count"] == 2
 
 
+def test_long_running_attempt_persists_failure_time_separately_from_start(tmp_path,
+                                                                          monkeypatch):
+    from frc_defense import meco_evaluation_schedule as schedule_module
+
+    schedule = [_case(0)]
+    journal = _journal(tmp_path, schedule)
+    rows = _snapshots(tmp_path)
+    journal.enqueue(0, 1, schedule[0], rows)
+    clock = [10.]
+    monkeypatch.setattr(schedule_module.time, "time", lambda: clock[0])
+    journal.begin_attempt(tmp_path / "long-attempt.json")
+    clock[0] = 1010.
+    journal.fail_attempt("evaluator failed after a long run")
+    attempt = journal.head()["attempts"][0]
+    assert attempt["started_at_unix"] == 10.
+    assert attempt["failed_at_unix"] == 1010.
+
+
 def test_restart_reconciles_verified_history_and_retries_interrupted_attempt(tmp_path):
     schedule = [_case(i) for i in range(2)]
     journal = _journal(tmp_path, schedule)
@@ -107,8 +125,11 @@ def test_evaluator_spawn_failure_retains_same_schedule_index(tmp_path, monkeypat
     supervisor.last_evaluation = None
 
     launches = []
+    clock = [supervisor_module.time.time()]
+    monkeypatch.setattr(supervisor_module.time, "time", lambda: clock[0])
     def fail_spawn(*_args, **_kwargs):
         launches.append(1)
+        clock[0] += 1000  # Simulate elapsed time before failure is recorded.
         raise OSError("simulated spawn failure")
 
     monkeypatch.setattr(supervisor_module.subprocess, "Popen", fail_spawn)
@@ -116,11 +137,14 @@ def test_evaluator_spawn_failure_retains_same_schedule_index(tmp_path, monkeypat
     assert journal.head()["index"] == 0
     assert journal.head()["status"] == "failed"
     assert journal.head()["attempts"][0]["status"] == "failed"
-    started_at = journal.head()["attempts"][0]["started_at_unix"]
-    monkeypatch.setattr(supervisor_module.time, "time", lambda: started_at + 1)
+    attempt = journal.head()["attempts"][0]
+    started_at = attempt["started_at_unix"]
+    failed_at = attempt["failed_at_unix"]
+    assert failed_at == started_at + 1000
+    clock[0] = failed_at + 1
     supervisor._start_next_evaluation()
     assert len(launches) == 1
-    monkeypatch.setattr(supervisor_module.time, "time", lambda: started_at + 2)
+    clock[0] = failed_at + 2
     supervisor._start_next_evaluation()
     assert len(launches) == 2
 
@@ -155,6 +179,47 @@ def test_manifest_state_initialization_requires_claimed_roots(tmp_path):
         supervisor._read_or_create_runs()
     assert not supervisor.output.exists()
     assert not supervisor.evaluation_output.exists()
+
+
+def test_run_acquires_lease_claims_fresh_roots_then_initializes(tmp_path, monkeypatch):
+    from frc_defense.meco_supervisor import MecoSupervisor
+
+    supervisor = object.__new__(MecoSupervisor)
+    supervisor.devices = ("cuda:0",)
+    supervisor.evaluation_device = "cuda:1"
+    supervisor.manifest_digest = "m" * 64
+    supervisor.manifest = {"campaign": {"id": "fixture"}}
+    supervisor.resume_campaign = False
+    supervisor._campaign_roots_claimed = False
+    supervisor.output = tmp_path / "campaign"
+    supervisor.evaluation_output = tmp_path / "evaluations"
+    events = []
+
+    class FakeLease:
+        def acquire(self):
+            events.append("lease")
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr("frc_defense.meco_device_lease.lease_devices",
+        lambda *_args, **_kwargs: FakeLease())
+    claim_roots = supervisor._claim_fresh_manifest_roots
+    def record_claim():
+        claim_roots()
+        events.append("claim")
+    supervisor._claim_fresh_manifest_roots = record_claim
+    def run_locked():
+        assert supervisor._campaign_roots_claimed
+        assert supervisor.output.is_dir()
+        assert supervisor.evaluation_output.is_dir()
+        events.append("initialize")
+        return {"status": "stub"}
+    supervisor._run_locked = run_locked
+
+    assert not supervisor.output.exists()
+    assert not supervisor.evaluation_output.exists()
+    assert supervisor.run() == {"status": "stub"}
+    assert events == ["lease", "claim", "initialize", "release"]
 
 
 def test_restart_recovers_last_completed_cycle_missing_queue_snapshot(tmp_path, monkeypatch):
