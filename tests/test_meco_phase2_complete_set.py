@@ -1,5 +1,5 @@
 import hashlib
-import json
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -101,12 +101,16 @@ def test_injected_restart_reuses_validated_c_stage(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="injected stop"):
         coordinator.execute_complete_set(descriptor, c_execute=count_c,
             a_execute=fail_a, lease_factory=lease)
+    first_c = next(item for item in coordinator._read_stage_journal(
+        Path(descriptor["outputs"]["stage_journal"])) if item["stage"] == "C")
     result = coordinator.execute_complete_set(descriptor, c_execute=count_c,
         a_execute=a_run, lease_factory=lease)
     assert len(c_calls) == 1
     assert set(result["warm_start_artifacts"]) == set(MECO_TRACKS)
     records = coordinator._read_stage_journal(Path(descriptor["outputs"]["stage_journal"]))
     assert {record["stage"] for record in records} == {"C", "A"}
+    assert next(item for item in records if item["stage"] == "C")["attempt_id"] == \
+        first_c["attempt_id"]
 
 
 def test_tampered_c_output_fails_closed_on_resume(tmp_path, monkeypatch):
@@ -145,6 +149,82 @@ def test_output_parent_symlink_created_during_lease_is_rejected(tmp_path, monkey
     with pytest.raises(ValueError, match="symlink"):
         coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
             a_execute=lambda *_a, **_kw: None, lease_factory=swap_parent)
+
+
+def test_root_replacement_during_stage_aborts_before_next_stage(tmp_path, monkeypatch):
+    descriptor = _descriptor(tmp_path)
+    _install_adapters(monkeypatch)
+
+    @contextmanager
+    def lease(_devices, owner=None):
+        yield
+
+    def replace_after_c(desc):
+        output = Path(desc["outputs"]["root"])
+        output.mkdir()
+        for key in ("dataset", "C1", "C2", "report"):
+            Path(desc["outputs"][key]).write_text(key)
+        Path(desc["outputs"]["dataset"] + ".manifest.json").write_text("manifest")
+        moved = output.with_name("detached-attempt")
+        output.rename(moved)
+        output.symlink_to(moved, target_is_directory=True)
+
+    called_a = []
+    with pytest.raises(ValueError, match="replaced after pinning"):
+        coordinator.execute_complete_set(descriptor, c_execute=replace_after_c,
+            a_execute=lambda *_a, **_kw: called_a.append(True), lease_factory=lease)
+    assert called_a == []
+
+
+def test_stage_journal_rejects_tampered_receipt(tmp_path):
+    path = tmp_path / "stage-receipts.jsonl"
+    receipt = {"schema": coordinator.SCHEMA + ".stage-receipt", "stage": "C",
+        "attempt_id": "attempt-a", "status": "validated", "inputs": {}, "outputs": {}}
+    coordinator._append_stage_receipt(path, receipt)
+    raw = path.read_text().replace('"validated"', '"tampered"')
+    path.write_text(raw)
+    with pytest.raises(ValueError, match="malformed"):
+        coordinator._read_stage_journal(path)
+
+
+def test_seal_binding_rejects_tampered_receipt_summary(tmp_path):
+    descriptor = _descriptor(tmp_path)
+    outputs = descriptor["outputs"]
+    source = {"dataset_sha256": "a" * 64, "dataset_manifest_sha256": "b" * 64}
+    c_validators = {track: {"artifact_sha256": track.lower() * 64}
+        for track in ("C1", "C2")}
+    a_validators = {track: {"sha256": track.lower() * 64}
+        for track in ("A1", "A2", "A3")}
+    c = {"inputs": {"protocol": descriptor["qualification_protocol"],
+            "seeds": descriptor["seeds"], "scenario_id": descriptor["scenario_id"],
+            "category": descriptor["category"], "device": descriptor["device"]},
+        "outputs": {"source_dataset": {"path": outputs["source_dataset"],
+                "sha256": source["dataset_sha256"]},
+            "source_manifest": {"path": outputs["source_manifest"],
+                "sha256": source["dataset_manifest_sha256"]},
+            "report": {"path": outputs["c_campaign_report"], "sha256": "r" * 64},
+            "artifacts": {track: {"path": outputs["artifacts"][track],
+                "sha256": c_validators[track]["artifact_sha256"]} for track in c_validators}},
+        "validator_summary": c_validators}
+    a = {"inputs": {"source_dataset": {"path": outputs["source_dataset"],
+                "sha256": source["dataset_sha256"]},
+            "source_manifest": {"path": outputs["source_manifest"],
+                "sha256": source["dataset_manifest_sha256"]},
+            "protocol": descriptor["qualification_protocol"],
+            "scenario_id": descriptor["scenario_id"], "category": descriptor["category"],
+            "seeds": descriptor["seeds"], "device": descriptor["device"]},
+        "outputs": {"bundle": {"path": outputs["a_bundle"], "sha256": "q" * 64},
+            "artifacts": {track: {"path": outputs["artifacts"][track],
+                "sha256": a_validators[track]["sha256"]} for track in a_validators}},
+        "validator_summary": a_validators}
+    stages = {"C": {"report_sha256": "r" * 64}, "A": {"bundle_sha256": "q" * 64}}
+    coordinator._validate_stage_receipt_bindings({"C": c, "A": a}, descriptor,
+        stages["C"], stages["A"], source, c_validators, a_validators)
+    tampered = copy.deepcopy(c)
+    tampered["validator_summary"]["C1"]["artifact_sha256"] = "x" * 64
+    with pytest.raises(ValueError, match="stage journal receipts"):
+        coordinator._validate_stage_receipt_bindings({"C": tampered, "A": a}, descriptor,
+            stages["C"], stages["A"], source, c_validators, a_validators)
 
 
 def test_manifest_warm_start_map_requires_all_five_exact_paths(tmp_path):

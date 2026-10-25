@@ -12,8 +12,10 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import uuid
+import weakref
 from datetime import datetime, timezone
 
 from .meco_phase2_campaign import (_protocol, _source_snapshot, _sha,
@@ -76,6 +78,25 @@ def _open_pinned_directory(path: Path) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+def _verify_output_namespace(path: Path) -> None:
+    """Fail closed on writable non-sticky ancestors; trust the coordinator UID."""
+    path = Path(path).absolute()
+    cursor = Path(path.anchor)
+    euid = os.geteuid()
+    for part in path.parts[1:]:
+        cursor /= part
+        stat = cursor.stat(follow_symlinks=False)
+        if not cursor.is_dir() or cursor.is_symlink():
+            raise ValueError(f"output namespace contains a non-directory or symlink: {cursor}")
+        mode = stat.st_mode
+        writable_by_others = bool(mode & 0o022)
+        sticky = bool(mode & 0o1000)
+        if writable_by_others and not sticky:
+            raise ValueError(f"output namespace ancestor is writable by other users: {cursor}")
+        if stat.st_uid not in (0, euid) and writable_by_others:
+            raise ValueError(f"untrusted output namespace owner: {cursor}")
 
 
 def _nonoverlap(path: Path, protected: Path) -> bool:
@@ -343,46 +364,8 @@ def validate_complete_set_manifest(manifest: dict, descriptor: dict) -> dict:
                 _digest(latest[stage]) != stages[stage].get("receipt_sha256")
                 for stage in ("C", "A"))):
         raise ValueError("complete-set manifest does not bind the immutable stage journal")
-    c_record, a_record = latest["C"], latest["A"]
-    if (c_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
-            c_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
-            c_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
-            c_record.get("inputs", {}).get("category") != descriptor["category"] or
-            c_record.get("inputs", {}).get("device") != descriptor["device"] or
-            c_record.get("outputs", {}).get("source_dataset") != {
-                "path": descriptor["outputs"]["source_dataset"],
-                "sha256": source_binding["dataset_sha256"]} or
-            c_record.get("outputs", {}).get("source_manifest") != {
-                "path": descriptor["outputs"]["source_manifest"],
-                "sha256": source_binding["dataset_manifest_sha256"]} or
-            c_record.get("outputs", {}).get("report") != {
-                "path": descriptor["outputs"]["c_campaign_report"],
-                "sha256": c_stage["report_sha256"]} or
-            c_record.get("outputs", {}).get("artifacts") != {
-                track: {"path": descriptor["outputs"]["artifacts"][track],
-                    "sha256": c_validators[track]["artifact_sha256"]}
-                for track in ("C1", "C2")} or
-            c_record.get("validator_summary") != c_validators or
-            a_record.get("inputs", {}).get("source_dataset") != {
-                "path": descriptor["outputs"]["source_dataset"],
-                "sha256": source_binding["dataset_sha256"]} or
-            a_record.get("inputs", {}).get("source_manifest") != {
-                "path": descriptor["outputs"]["source_manifest"],
-                "sha256": source_binding["dataset_manifest_sha256"]} or
-            a_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
-            a_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
-            a_record.get("inputs", {}).get("category") != descriptor["category"] or
-            a_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
-            a_record.get("inputs", {}).get("device") != descriptor["device"] or
-            a_record.get("outputs", {}).get("bundle") != {
-                "path": descriptor["outputs"]["a_bundle"],
-                "sha256": a_stage["bundle_sha256"]} or
-            a_record.get("outputs", {}).get("artifacts") != {
-                track: {"path": descriptor["outputs"]["artifacts"][track],
-                    "sha256": a_validators[track]["sha256"]}
-                for track in ("A1", "A2", "A3")} or
-            a_record.get("validator_summary") != a_validators):
-        raise ValueError("immutable stage journal receipts differ from revalidated stage bindings")
+    _validate_stage_receipt_bindings(latest, descriptor, c_stage, a_stage,
+        source_binding, c_validators, a_validators)
     if c_stage.get("validators") != c_validators or a_stage.get("validators") != a_validators:
         raise ValueError("complete-set stage validator receipts differ from live validation")
     expected_receipts = {}
@@ -521,6 +504,67 @@ def _read_stage_journal(path: Path) -> list[dict]:
         attempt_ids.add(value["attempt_id"])
         records.append(value)
     return records
+
+
+def _validate_stage_receipt_bindings(latest: dict, descriptor: dict, c_stage: dict,
+        a_stage: dict, source_binding: dict, c_validators: dict,
+        a_validators: dict) -> None:
+    c_record, a_record = latest["C"], latest["A"]
+    if (c_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
+            c_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
+            c_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
+            c_record.get("inputs", {}).get("category") != descriptor["category"] or
+            c_record.get("inputs", {}).get("device") != descriptor["device"] or
+            c_record.get("outputs", {}).get("source_dataset") != {
+                "path": descriptor["outputs"]["source_dataset"],
+                "sha256": source_binding["dataset_sha256"]} or
+            c_record.get("outputs", {}).get("source_manifest") != {
+                "path": descriptor["outputs"]["source_manifest"],
+                "sha256": source_binding["dataset_manifest_sha256"]} or
+            c_record.get("outputs", {}).get("report") != {
+                "path": descriptor["outputs"]["c_campaign_report"],
+                "sha256": c_stage["report_sha256"]} or
+            c_record.get("outputs", {}).get("artifacts") != {
+                track: {"path": descriptor["outputs"]["artifacts"][track],
+                    "sha256": c_validators[track]["artifact_sha256"]}
+                for track in ("C1", "C2")} or
+            c_record.get("validator_summary") != c_validators or
+            a_record.get("inputs", {}).get("source_dataset") != {
+                "path": descriptor["outputs"]["source_dataset"],
+                "sha256": source_binding["dataset_sha256"]} or
+            a_record.get("inputs", {}).get("source_manifest") != {
+                "path": descriptor["outputs"]["source_manifest"],
+                "sha256": source_binding["dataset_manifest_sha256"]} or
+            a_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
+            a_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
+            a_record.get("inputs", {}).get("category") != descriptor["category"] or
+            a_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
+            a_record.get("inputs", {}).get("device") != descriptor["device"] or
+            a_record.get("outputs", {}).get("bundle") != {
+                "path": descriptor["outputs"]["a_bundle"],
+                "sha256": a_stage["bundle_sha256"]} or
+            a_record.get("outputs", {}).get("artifacts") != {
+                track: {"path": descriptor["outputs"]["artifacts"][track],
+                    "sha256": a_validators[track]["sha256"]}
+                for track in ("A1", "A2", "A3")} or
+            a_record.get("validator_summary") != a_validators):
+        raise ValueError("immutable stage journal receipts differ from revalidated stage bindings")
+
+
+def _record_or_reuse_stage_receipt(path: Path, receipt: dict) -> tuple[str, str]:
+    """Preserve an identical validated receipt on restart; append only new identity."""
+    records = _read_stage_journal(path) if Path(path).exists() else []
+    stage = receipt["stage"]
+    prior = [item for item in records if item.get("stage") == stage]
+    candidate = {key: value for key, value in receipt.items() if key != "attempt_id"}
+    if prior:
+        latest = prior[-1]
+        comparable = {key: value for key, value in latest.items() if key != "attempt_id"}
+        if comparable == candidate:
+            return latest["attempt_id"], _digest(latest)
+    receipt = dict(receipt)
+    receipt["attempt_id"] = uuid.uuid4().hex
+    return receipt["attempt_id"], _append_stage_receipt(Path(path), receipt)
 
 
 def _load_c_stage(descriptor: dict, *, expected_sources: dict) -> tuple[dict, dict]:
@@ -668,7 +712,14 @@ def _load_a_stage(descriptor: dict, *, expected_sources: dict,
 
 def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
         c_execute=None, a_execute=None, lease_factory=None) -> dict:
-    """Run/resume complete C and Plan A stages, publish manifest after five validators."""
+    """Run/resume C and Plan A, sealing only after five validators pass.
+
+    Output paths stay pathname-based for the existing stage APIs. The pinned
+    directory descriptors and ownership/permission checks detect namespace
+    substitution at every stage boundary and before coordinator writes. As
+    with other same-account project files, a hostile process running under the
+    coordinator's own UID is trusted and may still race a pathname operation.
+    """
     validate_descriptor(descriptor, repo_root=repo_root)
     outputs = descriptor["outputs"]
     root = Path(outputs["root"])
@@ -704,6 +755,7 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
         validate_descriptor(descriptor, repo_root=repo_root)
         _reject_symlink_path(root.parent, allow_missing_leaf=False)
         _reject_symlink_path(root)
+        _verify_output_namespace(root.parent)
         if not root.parent.is_dir():
             raise ValueError("complete-set output parent disappeared before lease acquisition")
         parent_fd = _open_pinned_directory(root.parent)
@@ -717,16 +769,30 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 os.mkdir(root.name, mode=0o700, dir_fd=parent_fd)
                 root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                     getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
-        finally:
-            os.close(parent_fd)
-        try:
             root_identity = os.fstat(root_fd)
-        finally:
-            os.close(root_fd)
+        except BaseException:
+            os.close(parent_fd)
+            raise
+        # Keep both directory descriptors alive until this execution returns.
+        # CPython finalizes these guards on exceptional exits as well.
+        class _FDGuard:
+            pass
+        parent_guard, root_guard = _FDGuard(), _FDGuard()
+        parent_finalizer = weakref.finalize(parent_guard, os.close, parent_fd)
+        root_finalizer = weakref.finalize(root_guard, os.close, root_fd)
         def check_pinned_root():
+            current_parent = root.parent.stat(follow_symlinks=False)
+            pinned_parent = os.fstat(parent_fd)
+            root_entry = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (current_parent.st_dev != pinned_parent.st_dev or
+                    current_parent.st_ino != pinned_parent.st_ino or
+                    root_entry.st_dev != root_identity.st_dev or
+                    root_entry.st_ino != root_identity.st_ino or
+                    not stat.S_ISDIR(root_entry.st_mode)):
+                raise ValueError("output parent/root was replaced after pinning")
             _reject_symlink_path(root, allow_missing_leaf=False)
             current = root.stat(follow_symlinks=False)
-            if (not root.is_dir() or current.st_dev != root_identity.st_dev or
+            if (current.st_dev != root_identity.st_dev or
                     current.st_ino != root_identity.st_ino):
                 raise ValueError("complete-set output root changed after it was pinned")
         if root.exists():
@@ -741,6 +807,7 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 "status": "running", "completed_stages": []}
             check_pinned_root()
             _atomic_json(state_path, state)
+            check_pinned_root()
 
         _reject_symlink_path(c_root)
         c_complete = c_report_path.is_file() and c_root.is_dir()
@@ -752,10 +819,13 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 raise ValueError("partial C campaign exists; refusing to overwrite or infer completion")
             borrowed_lease = lambda devices, owner=None: nullcontext()
             if c_execute is None:
+                check_pinned_root()
                 execute_campaign(descriptor["c_campaign_descriptor"],
                     lease_factory=borrowed_lease)
             else:
+                check_pinned_root()
                 c_execute(descriptor["c_campaign_descriptor"])
+            check_pinned_root()
             source_binding, c_validators = _load_c_stage(descriptor,
                 expected_sources=expected_sources)
             c_attempt_id = uuid.uuid4().hex
@@ -777,13 +847,15 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                         for track in ("C1", "C2")}},
                 "validator_summary": c_validators}
             check_pinned_root()
-            c_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), c_receipt)
+            c_attempt_id, c_receipt_sha = _record_or_reuse_stage_receipt(
+                Path(outputs["stage_journal"]), c_receipt)
             state.setdefault("stage_receipts", {})["C"] = {
                 "attempt_id": c_attempt_id, "receipt_sha256": c_receipt_sha}
             check_pinned_root()
             state["completed_stages"] = ["C1", "C2"]
             state["c_campaign_id"] = descriptor["c_campaign_descriptor"]["campaign_id"]
             _replace_json(state_path, state)
+            check_pinned_root()
         if c_complete:
             c_attempt_id = uuid.uuid4().hex
             c_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "C",
@@ -803,10 +875,12 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                         "sha256": c_validators[track]["artifact_sha256"]}
                         for track in ("C1", "C2")}},
                 "validator_summary": c_validators}
-            c_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), c_receipt)
+            c_attempt_id, c_receipt_sha = _record_or_reuse_stage_receipt(
+                Path(outputs["stage_journal"]), c_receipt)
             state.setdefault("stage_receipts", {})["C"] = {
                 "attempt_id": c_attempt_id, "receipt_sha256": c_receipt_sha}
             _replace_json(state_path, state)
+            check_pinned_root()
 
         a_root = Path(descriptor["plan_a_ubp"]["output_dir"])
         a_bundle_path = Path(outputs["a_bundle"])
@@ -823,13 +897,16 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
             if a_execute is None:
                 adapters = _load_adapters()
                 adapters["lease_devices"] = borrowed_lease
+                check_pinned_root()
                 runner(Path(outputs["source_dataset"]),
                     Path(descriptor["qualification_protocol"]["path"]), a_root,
                     device=descriptor["device"], _adapters=adapters)
             else:
+                check_pinned_root()
                 runner(Path(outputs["source_dataset"]),
                     Path(descriptor["qualification_protocol"]["path"]), a_root,
                     device=descriptor["device"])
+            check_pinned_root()
             a_artifacts = _load_a_stage(descriptor, expected_sources=expected_sources,
                                         source_binding=source_binding)
             a_attempt_id = uuid.uuid4().hex
@@ -852,12 +929,14 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                         for track in ("A1", "A2", "A3")}},
                 "validator_summary": a_artifacts}
             check_pinned_root()
-            a_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), a_receipt)
+            a_attempt_id, a_receipt_sha = _record_or_reuse_stage_receipt(
+                Path(outputs["stage_journal"]), a_receipt)
             state.setdefault("stage_receipts", {})["A"] = {
                 "attempt_id": a_attempt_id, "receipt_sha256": a_receipt_sha}
             check_pinned_root()
             state["completed_stages"] = ["C1", "C2", "A1", "A2", "A3"]
             _replace_json(state_path, state)
+            check_pinned_root()
         if a_complete:
             a_attempt_id = uuid.uuid4().hex
             a_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "A",
@@ -878,10 +957,12 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                         "sha256": a_artifacts[track]["sha256"]}
                         for track in ("A1", "A2", "A3")}},
                 "validator_summary": a_artifacts}
-            a_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), a_receipt)
+            a_attempt_id, a_receipt_sha = _record_or_reuse_stage_receipt(
+                Path(outputs["stage_journal"]), a_receipt)
             state.setdefault("stage_receipts", {})["A"] = {
                 "attempt_id": a_attempt_id, "receipt_sha256": a_receipt_sha}
             _replace_json(state_path, state)
+            check_pinned_root()
 
         artifact_records = {}
         for track in MECO_TRACKS:
@@ -943,9 +1024,12 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
             "claims": {"simulator_outcome_qualified": False,
                 "training_readiness_proven": False}}
         validate_complete_set_manifest(complete, descriptor)
+        check_pinned_root()
         _atomic_json(manifest_path, complete)
+        check_pinned_root()
         state["status"] = "complete_validated_artifact_set"
         _replace_json(state_path, state)
+        check_pinned_root()
         return complete
 
 def main(argv=None):
