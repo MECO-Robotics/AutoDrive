@@ -228,7 +228,7 @@ def test_phase4_reactive_cell_dispatch_threads_exact_schedule_to_matrix_cli(
         for policy in policies:
             for category in manifest["categories"]:
                 for seed in manifest["seed_list"]:
-                    metrics = {"success": 1, "scores": 2,
+                    metrics = {"success": True, "scores": 2,
                         "useful_throughput": 3, "completed_cycles": 4}
                     captured = None
                     if arm == "factor_treatment" and not trench_interception:
