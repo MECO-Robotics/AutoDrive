@@ -149,7 +149,8 @@ class TensorDefenseResetMixin:
                   else torch.as_tensor(mask,device=self.device,dtype=torch.bool))
         planner=self._adstar_planners
         planner.plan(starts,self._attacker_objective(),self.sim.pose[:,1,2],self.sim.length[:,1],
-                     self.sim.width[:,1],active_mask=selected)
+                     self.sim.width[:,1],active_mask=selected,
+                     static_active_mask=True)
         candidate=planner.defender_spawn(starts,selected,self.generator)
         self.sim.pose[:,0,:2]=torch.where(selected[:,None],candidate,self.sim.pose[:,0,:2])
 

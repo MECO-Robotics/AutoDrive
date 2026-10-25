@@ -480,8 +480,8 @@ class TensorThreeVsThreeEnv(
             raise ValueError("world/slot is outside the policy-pose state")
         value = torch.as_tensor(estimate, device=self.device,
                                 dtype=self.policy_pose.dtype).reshape(3)
-        if not bool(torch.isfinite(value).all()):
-            raise ValueError("pose estimate must be finite")
+        _assert_device_condition(self.device,torch.isfinite(value).all(),
+                                 "pose estimate must be finite")
         self.estimated_pose[world, slot].copy_(value)
         self.policy_pose[world, slot].copy_(value)
 

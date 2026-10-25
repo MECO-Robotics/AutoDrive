@@ -70,3 +70,7 @@ to the existing one-point stop route; the CPU local repair path remains intact.
 Route extraction runs its fixed iteration count rather than stopping early
 from a host reduction. Static checks only; runtime parity and throughput remain
 unverified.
+
+Reset-time defender planning also uses a static full-shape active mask, and the
+focal pose-estimate hook validates finite values with the device assertion
+helper because it writes directly into policy-visible pose state.
