@@ -1,0 +1,103 @@
+# Pass 1 plan: GPU-resident Plan A decision path
+
+**Role:** Pass 1 implementation plan
+**Status:** Proposed; implementation waits for exact-head independent Pass 3 approval
+**Base:** `dd6ca02af38d998eec8f956645de88065c19f7b0` (`origin/main`)
+**Source evaluation plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
+
+## Objective and boundary
+
+After the separate Plan C device-resident route-decision slice is implemented, reviewed, and integrated, carry A1/A2/A3 through a shared GPU-resident route and selection boundary in the actual MECO training and evaluation paths. Preserve Plan A's dense legal-pose `U`, nonnegative `P`, and behavior-logit semantics, its all-legal-node support (no Plan C K cap), action/descriptor identity, native focal-slot route override, PPO density, deterministic fallback, and all safety authorities.
+
+This tranche is Plan A only. It does not extend or replace the C-only scope in `docs/plans/gpu-resident-route-decision-slice-20261025.md` (SHA-256 `8c6c67ffb2934fa3a4ce40b54c5cc2f2e2cb4877b5eedac9c31a2936a6879b5a`). It must consume the shared device route/evaluation contract produced by that slice rather than duplicate a route kernel. The C1/C2/D1/D2 implementation remains governed by the C plan. An all-five live boundary exists only after both slices are integrated and separately reviewed.
+
+The residency claim is limited to Plan A legal-pose support construction, route metrics, `U/P` scoring, risk/cost combination, masked stochastic/deterministic selection, and selection metadata until the action is chosen. A single compact chosen-action payload may cross to Python for the existing simulator call. Simulator physics, native safety/remasking, observation extraction, host dispatch, process orchestration, and post-decision report/replay serialization remain CPU boundaries. This tranche does not complete the user's whole-system GPU-only request.
+
+## Source audit and exact pins
+
+The audited source frontier is `origin/main` at `dd6ca02af38d998eec8f956645de88065c19f7b0`. Exact mainline source commits for the decision path and launch dependencies are:
+
+- `frc_defense/meco_plan_a_policy.py` — `ade65b20f8aba6229d0d64207ed832ee2a1ed1ef`.
+- `frc_defense/meco_plan_a_shortest_path.py` — `fa59b2dcda336585d266137603ebd586be3f1d70`.
+- `frc_defense/meco_plan_a_shortest_path_hip.py` — `eae7c8ebfea8dce971845b95597ee95ca90a157d`.
+- `frc_defense/meco_plan_a_hip_parity_harness.py` — `ca4604e019826cb6b2a010f84872d0eb15f83d16`.
+- `frc_defense/meco_pose_graph.py` — `a9071b6bf1cdc55f22881e579dbf1bf875d497f9`.
+- `frc_defense/meco_track_training.py` — `fd544a8dfcd43eb144aff284d03c3b714354f092`.
+- `frc_defense/meco_tracks.py` — `fd7afd224dd2daf902156fff0f5c7b04caba199d`.
+- Shared route references `frc_defense/experimental_route_evaluation.py` and `frc_defense/tensor_adstar.py` — `6ddc7157ebf2fce4da45fec9411fdfc87ce6d30a`.
+- `frc_defense/meco_supervisor.py` — `4714bab0b7bbae89c780893ef428c57d0fe87b7e`.
+- `frc_defense/meco_training_manifest.py` — `4a4e4687d5587030aa1585346cbb2528724a4480`.
+- Phase 2 artifact prerequisites: `frc_defense/meco_phase2_multicase.py` — `d20a55a18259c4dc41e01b8040c8c2826ebc6833`; `frc_defense/meco_phase2_complete_set.py` — `dd529484795856530e9be18e933206b108a7ee7a`.
+
+Relevant isolated GPU prototypes are not source authority and are not approved for wholesale reuse: candidate geometry/risk batch `01a000f231e8f5bb79497091094054c5b8f4dd8f` on `codex/gpu-meco-candidate-batch` (tip `4b6bf3fbbb53b43524a54325a365a0e10bdff191`); weighted route-cost math `8372b58de47489949f7c13b4cc20c489b718b9a2`; D1/D2 score work `bd15e50721c8739a2adba5bdfdb1d35208e0cd69`; and pose-connectivity work `002396b5369f3b897ab34354150edb15d8f5c286`. Audit exact hunks against this scope and the integrated C API before any reuse; do not cherry-pick a mixed branch.
+
+Pass 3's finding on `48dd075983bfa66dd4de74cd1f9f8e24a7ef7cbc` (`origin/codex/plan-c-device-resident-selection-20261025`) is that it adds scaffolding only; live C/D decision paths still use legacy CPU behavior. That seam is not an implementation or a satisfied C-slice prerequisite. The C slice must first reach its live route evaluator, candidate builder, and scorer/selection paths and be integrated/reviewed before this Plan A follow-up starts.
+
+## Current Plan A path and CPU synchronization to remove
+
+The live shared entry is `frc_defense/meco_track_training.py::_prepare_decision`, which dispatches A1/A2/A3 to `_prepare_plan_a_decision`; both training and evaluation use this decision path. It calls `build_plan_a_support` in `meco_plan_a_policy.py`, scores dense A1 map outputs or A2/A3 graph-node outputs, combines utility, behavior, route ETA/risk and optional `P`, then samples via the masked policy adapter.
+
+The current HIP shortest-path option is an important existing prototype, but it is not the entire device decision path. Its parity/profile dispatch gate is currently false, while the live `_prepare_plan_a_decision` call requires that gated path; current-main A decisions therefore fail closed until the hardware gate is cleared:
+
+- `build_plan_a_support` derives the root with `argmin().item()` and converts the root connector to a Python float before shortest-path dispatch. The live training/evaluation caller requests the HIP path, but these host scalar extractions still synchronize.
+- Legal pose-graph construction uses Python/CPU edge processing (`edges.cpu().tolist()` and `edge_mask.cpu().tolist()`); the separate pose-connectivity branch is not integrated.
+- The HIP support builder is followed by multiple host projections. `_prepare_plan_a_decision` converts node, behavior, descriptor and validity tensors to CPU tuples to form inference request metadata. `plan_a_support_digest` copies every support tensor to CPU for hashing.
+- Decision preparation performs Python truth conversion of a device finite check before sampling. The caller then extracts the sampled index, action, node, goal XY, and heading with individual `.item()`/`.tolist()` calls.
+- Route and risk preparation, prediction-risk helpers, graph-input preparation, model/broker output validation, and P projection must be inspected for additional scalar reads or device/host crossings in the exact integrated C-slice API; this file inventory is not permission to overlook nested synchronization.
+- PPO rollout/replay and dashboards need support identity and log-probability evidence. Those projections may be batched after selection/dispatch for persistence, but cannot determine which node/action is selected.
+
+## Required vertical slice
+
+### 1. Shared device route contract
+
+Consume the exact reviewed C-slice route result type and device. Require the device route batch to cover Plan A's stable all-node support ordering, including reachable status, path/length, endpoint and footprint/safety predicates, distance, learned/bump cost, and risk inputs required by A selection. Where Plan A routes do not map one-to-one to C candidate queries, add a typed Plan-A mapping tensor from support row to node/action descriptor; do not duplicate route integration or change route semantics.
+
+The interface must explicitly preserve the route source: the legal-graph path used to define the Plan A support tree is not the simulator's XY AD* execution path. The native executor and collision checks remain final authority. Preserve the current focal slot-3 P-map override and eligible depot retry behavior. A non-finite or unavailable device result fails closed through the existing typed fallback/abort contract; no silent CPU support or Python route-list fallback is allowed on the live path.
+
+### 2. Device-resident Plan A support and selection
+
+Add a typed `DevicePlanASupport` (or equivalent shared support contract) for canonical `(legal node, behavior, descriptor)` rows. Move legal graph edge/connectivity construction, root selection/connector costs, shortest-path distances/parents/reachability, behavior eligibility, and support masks/order onto the explicitly selected HIP/CUDA `env.device`. Reuse the gated HIP shortest-path kernel only after exact semantic/parity audit; adapt its ABI if the root and connector currently require host values. Keep all three models on the same support order and fallback row.
+
+Keep A1's dense `[B, 8, H, W]` utility/penalty outputs and A2/A3's per-node outputs semantically unchanged. Gather legal-pose utility, integrate `P` along the exact supported path contract, combine selected behavior logit and deterministic route/risk costs with the existing units, then compute masked categorical logits, action sample/argmax, log probability and entropy on device. Preserve deterministic tie order, stochastic distribution, selected action's PPO log probability, and fallback behavior. Do not introduce a Plan C K cap or rewrite A U/P as candidate-level utility.
+
+### 3. Live training/evaluation and chosen-action boundary
+
+Route both training `_prepare_decision` and evaluation `evaluate_meco` through the same device support/selection implementation for A1/A2/A3. Preserve recurrent hidden-state resets, stale inference rejection, snapshot generation binding, native action remasking, route override, and actor/critic treatment of remasked samples. Production adapter requests must not force a device validity mask or all support descriptors to host before selection; use a device-compatible adapter contract or fail closed until that contract is available. Do not fall back to the old CPU route/support path in production.
+
+After the selected index exists on device, gather one compact payload with selected action, goal node/XY/heading, behavior/descriptor ID, route-override flags, and the minimal target identity required by the simulator interface. Transfer this payload once if Python dispatch needs it. Batch-copy PPO/replay/audit evidence after the action is determined; evidence serialization cannot feed back into selection. Keep C1/C2/D1/D2 on the C-slice path and verify the shared contract did not alter their candidate ordering, logits, costs or selected rows.
+
+## Dependency and staged delivery order
+
+1. **C-slice prerequisite:** require the C route/evaluation contract to be integrated and exact-head approved, with its API/schema pinned. The C implementation must actually reach the live evaluator and candidate builder; a type/API seam alone is insufficient. Pass 3 on the A candidate must inspect the exact shared contract and its use by all three Plan A tracks.
+2. **A device support:** implement graph/connectivity tensors, device root/connector, all-node shortest path, support eligibility/order and fallback, then integrate A1/A2/A3 scoring and selection in the actual training and evaluation entry points. Preserve the C tracks unchanged and run cross-track support-contract tests.
+3. **Phase 0 trusted calibration and evaluation binding (required before Phase 2 collection or held-out claims):** complete the baseline freeze, matched D0 variance calibration, operational margin review artifact, and approved trusted evaluation protocol binding. The current manifest launcher hard-codes `launch_ready: false` and starts manifest mode only under `--diagnostic-launch`; add a separately reviewed production non-diagnostic launch path that requires calibrated trusted evaluation binding, exact current source identity, and no final-test access. Do not relax current fail-closed checks to make a manifest appear ready.
+4. **Phase 2 readiness workstream (required before production-source training):** create replay-bound datasets and approved weights-only fits for **all five** A1/A2/A3/C1/C2 tracks; validate exact source, legal support, protocol, target authority, replay and fit bindings; produce and verify the complete-set seal. The current checkout has collector/fitter/coordinator code, but no Phase 2 warm-start artifact set or seal. Do not treat optimizer updates from the active diagnostic campaign as Phase 2 artifacts.
+5. **Source-bound production manifest and continuous monitoring:** produce a new manifest from the integrated source and validated Phase 0/Phase 2 bundles; bind all five warm-start hashes, exact two-device map, held-out evaluation protocol, and status paths. Keep the required exclusive leases and post-lease physical attestation for both pinned WX9100s (`cuda:0` and `cuda:1`); no P600, one-card, or CPU substitution. Add held-out validation monitoring through a bounded, non-preemptive scheduler: queue/defer evaluation when the devices are busy, do not stop, kill, or invalidate training workers/checkpoints, record monitor freshness and backlog, and run only when the lease scheduler grants a safe window. If safe monitoring cannot be scheduled without preempting active training, report it as pending rather than interrupting training.
+6. **Production run:** only after stages 1–5 pass their independent reviews, launch a new source-bound non-diagnostic campaign in a fresh output root. Preserve the current r4 campaign and checkpoints; do not resume them under a changed source identity. Require correct five-track assignment and matched held-out validation plus current dashboard status/asset evidence. Training progress alone is not a qualification result.
+
+## Tests and evidence gates
+
+### Code-only contracts that may run before GPU availability
+
+Implementer may add/run focused CPU-side synthetic contract tests while the active r4 campaign holds devices, provided they do not launch a simulator, touch checkpoints, probe/acquire GPUs, or claim behavior validation. Relevant starting suites are `tests/test_meco_plan_a_shortest_path_prototype.py`, `tests/test_plan_a_pose_pair_contracts.py`, `tests/test_meco_plan_a_penalty_contract.py`, `tests/test_meco_tracks.py`, `tests/test_meco_c1_ppo_replay.py`, `tests/test_meco_training_manifest.py`, `tests/test_meco_phase2_multicase.py`, `tests/test_meco_phase2_complete_set.py`, and `tests/test_meco_supervisor_dispatch.py`. Cover canonical node/behavior/descriptor order, graph fixture topology, root connector semantics, behavior/goal masks, empty-support typed failure, U/P units and exactly-once route cost, selected log-probability reconstruction, deterministic tie/fallback rules, snapshot freshness, and C/A shared interface shape. These tests demonstrate software contracts only; no simulated-game behavior claim is permitted from them alone.
+
+### Deferred device, simulation, and dashboard gates
+
+Do not run any HIP/CUDA compile/import/parity/profile, GPU test, simulator behavior test, training launch, or competing device workload while r4 supervisor PID `2750253` or child workers own either WX9100. After the user manually stops that campaign and its supervisor is terminal, independently confirm both exclusive device leases are released before proceeding.
+
+After release, require all of these:
+
+1. **HIP/device parity:** build the supported extension from a clean source identity on the verified WX9100 pair; compare device graph/root/support/path results to the CPU reference for deterministic fixtures including heading wrap, disconnected poses, root connector, blocked/empty support, all behaviors, loaded/unloaded mechanisms, non-finite costs and tie cases. Record exact device, kernel, source and fixture hashes. No CPU/P600/single-card substitute.
+2. **No-host-sync trace:** instrument the complete A decision window from graph/support construction through selected index; fail on `.item()`, `.tolist()`, `.cpu()`, NumPy conversion, implicit scalar truth testing or Python per-node loops. Profile that graph/connectivity, root/support, U/P gathers, route/risk terms, logits, categorical distribution and selected index stay device resident. Record the single chosen-action handoff separately and list post-decision evidence transfers. Source grep alone is insufficient.
+3. **Focused suite:** run route parity, pose-graph/support, A1/A2/A3 scorer parity, PPO log-probability/replay, fallback/remask and shared C/A API tests. Include proof that C1/C2/D1/D2 live behavior is unchanged by the Plan A integration.
+4. **Representative simulator behavior:** once code is integrated, run reproducible seeded end-to-end simulator evaluations exercising A1, A2, A3 and paired C1/C2 plus D1/D2 controls on the shared route boundary, with fixed checkpoint/source/config frontiers. Retain per-track route/support decisions, selected action/goal, legal and executed route, route/P/risk costs, contacts, pickup/score/ferry outcomes, remasks/fallbacks and terminal results. Inspect the actual simulator record/replay. Unit tests alone do not validate simulated behavior.
+5. **Fresh dashboard and replay:** restart the relevant dashboard service(s) from the exact integrated checkout after code changes. Verify service PID/workdir/head and `/api/meco-status`, `/api/curriculum-status`; require validated current three-pass status. Fetch `/`, `/meco`, `/assets/dashboard.css`, `/assets/dashboard.js`, `/assets/meco.css`, `/assets/meco.js`, `/assets/field_rendering.js`, `/assets/training_rendering.js`; compare every served body byte-for-byte/SHA-256 with the same checkout. Generate fresh A-track and paired-control replay(s) only after restart; bind source/checkpoint/seed hashes and inspect records/replays. Mark older-code replay IDs outdated. Do not claim replay/currentness until these checks pass.
+6. **Independent Pass 3:** review the exact pushed implementation candidate and all available evidence for A1/A2/A3 production training/evaluation integration, route and U/P semantics, no-host-sync guard, two-WX9100 identity, unchanged C path, simulator outcomes, replay provenance, and current dashboard. A partial residency improvement is not whole-system GPU-only completion or qualification.
+
+## Stop rules and nonclaims
+
+- If the C API is not integrated, the HIP parity/profile gate is closed, or an exact Plan A support invariant cannot be preserved, stop and amend Pass 1; do not add a second CPU route implementation or silently broaden the C slice.
+- If any per-node/candidate host synchronization remains before selection, name the site and report the residency gate failed. The chosen-action payload is the only permitted decision-time D2H transfer in this tranche.
+- Keep the active r4 run, its checkpoints, manifest, source checkout, and both WX9100 leases unchanged. The active diagnostic run is not Phase 2 readiness, trusted held-out validation, or qualification.
+- The staged Phase 2/calibration/production-launch work is a prerequisite workstream, not evidence delivered by Plan A route code. No production training launch is allowed until its artifact, manifest, trusted evaluation, and lease gates are reviewed.
+- This plan claims no completed training, simulator outcome, fresh replay, dashboard currentness, Hailo support, deployment readiness, whole-system GPU-only compliance, qualification, or five-track promotion.
