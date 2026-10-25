@@ -33,3 +33,21 @@ All routes returned HTTP 200 and the served bodies matched the corresponding fil
 | `/assets/training_rendering.js` | `frc_defense/dashboard_static/training_rendering.js` | `500b29c6a0fb679762d668a7bd2224020ec18c16f41bdf7577922d20eaf03950` | yes |
 
 This records dashboard/API/frontend currentness only. It does not establish simulation behavior, fresh replay outcomes, GPU residency, training qualification, or completion of the evaluation plan.
+
+## Held-action optional-count fix restart — 2026-10-25 19:19 UTC
+
+After integrating the reviewed held-action compatibility fix at
+`c399f66a68200fe7b8b78c5ab9bddc37ceb3b236`, the dashboard was restarted again
+from the serving checkout.
+
+- Service `frc-defense-dashboard.service`: active; invocation
+  `31c627f6d8204adb9fbefda3ff6e9057`; PID `3895290`.
+- `/api/curriculum-status` and `/api/meco-status`: HTTP 200. The curriculum
+  provenance remains `validated_summary_only` with 91 rows and no top-level or
+  endpoint error. All five runs still have empty qualification lists. The MECO
+  status API has six unrelated existing evaluation-data errors, described
+  above.
+- All eight frontend routes listed above returned HTTP 200 and still matched
+  checkout bytes exactly; their SHA-256 values were unchanged.
+
+This was a service/source-currentness check only, not a behavior evaluation.
