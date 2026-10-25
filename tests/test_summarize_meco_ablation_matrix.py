@@ -602,7 +602,8 @@ def _schema7_fixture(path):
                 outcome_metrics=row.get("metrics"),
                 expected_action_ticks=len(runtime["events"]),
                 checkpoint_sha256=row.get("checkpoint_sha256"),
-                execution_device=row.get("execution_device"))
+                execution_device=row.get("execution_device"),
+                evaluation_policy_key=row["policy"])
         report_path = path.parent / f"{arm}.condition.json"
         _write_json(report_path, report)
         condition = dict(old)

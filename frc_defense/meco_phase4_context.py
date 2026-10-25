@@ -786,7 +786,8 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         source_identity_sha256: str, outcome_metrics: dict | None = None,
         expected_action_ticks: int | None = None,
         checkpoint_sha256: str | None = None,
-        execution_device: dict | None = None) -> dict:
+        execution_device: dict | None = None,
+        evaluation_policy_key: str | None = None) -> dict:
     """Bind evaluator action trace to its exact assignment and provenance."""
     assignment = validate_phase4_teammate_behavior_assignment(assignment)
     if (not isinstance(runtime, dict) or
@@ -801,6 +802,10 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
             not isinstance(source_identity_sha256, str) or
             re.fullmatch(r"[0-9a-f]{64}", source_identity_sha256) is None):
         raise ValueError("teammate behavior record provenance is not assignment-bound")
+    if evaluation_policy_key is None:
+        evaluation_policy_key = policy_id
+    if not isinstance(evaluation_policy_key, str) or not evaluation_policy_key:
+        raise ValueError("teammate behavior evaluator policy key is invalid")
     expected_assignments = (None if assignment["arm"] == "no_factor" else
         {str(slot): behavior for slot, behavior in
          assignment["behavior_schedule"][assignment["seeds"].index(seed)]["assignments"].items()})
@@ -861,6 +866,7 @@ def phase4_teammate_behavior_record(assignment: dict, runtime: dict, *,
         "assignment_pair_sha256": assignment["pair_sha256"],
         "episode_id": episode_id, "scenario_id": scenario_id,
         "category": category, "seed": seed, "policy_id": policy_id,
+        "evaluation_policy_key": evaluation_policy_key,
         "condition_id": condition_id,
         "source_identity_sha256": source_identity_sha256,
         "checkpoint_sha256": checkpoint_sha256,

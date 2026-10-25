@@ -662,6 +662,7 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
                         captured.get("category") != key[1] or
                         captured.get("seed") != key[2] or
                         captured.get("policy_id") != row.get("policy_id") or
+                        captured.get("evaluation_policy_key") != key[0] or
                         captured.get("condition_id") != row.get("condition_id") or
                         captured.get("protocol_id") != protocol_id or
                         captured.get("protocol_sha256") != protocol_sha256 or

@@ -83,7 +83,12 @@ def _validate_teammate_runtime_record(row: dict, assignment: dict, *,
             episode_id=row.get("episode_id"), scenario_id=scenario_id,
             category=row.get("category"), seed=row.get("seed"),
             policy_id=row.get("policy_id"), condition_id=condition_id,
-            source_identity_sha256=report.get("source_identity_sha256"))
+            source_identity_sha256=report.get("source_identity_sha256"),
+            outcome_metrics=row.get("metrics"),
+            expected_action_ticks=row.get("elapsed_ticks"),
+            checkpoint_sha256=row.get("checkpoint_sha256"),
+            execution_device=row.get("execution_device"),
+            evaluation_policy_key=row.get("policy"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"{where} teammate runtime binding is invalid: {exc}") from exc
     if captured != expected:
