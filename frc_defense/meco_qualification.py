@@ -1803,6 +1803,289 @@ def run_matched_reference_variance_calibration(*, scenario_id: str, episodes: in
     return body
 
 
+# Versioned extension used by the resumable paired D0/D1/D2 campaign. The
+# historical D0-only and single-reference artifacts above remain readable.
+PAIRED_CALIBRATION_VERSION = "meco-paired-d0-d2-calibration-v1"
+PAIRED_CALIBRATION_CAMPAIGN = "meco-paired-calibration-campaign-v1"
+PAIRED_CALIBRATION_SHARD = "meco-paired-calibration-shard-manifest-v1"
+PAIRED_CALIBRATION_ARTIFACT = "meco-paired-calibration-shard-v1"
+PAIRED_CALIBRATION_PROGRESS = "meco-paired-calibration-shard-progress-v1"
+PAIRED_CALIBRATION_CONTROLS = (
+    "D0", "D1/current", "D2/cv", "D2/multi_model_v1",
+)
+_PAIRED_CALIBRATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+
+
+def _paired_artifact_binding(value, *, kind):
+    fields = {"path", "artifact_sha256", "schema"}
+    identity_field = {"baseline freeze": "freeze_sha256",
+        "partition": "partition_sha256", "estimand approval": "approval_sha256"}.get(kind)
+    if identity_field is None:
+        raise ValueError("unknown paired calibration gate artifact kind")
+    fields.add(identity_field)
+    if kind == "partition":
+        fields.add("baseline_freeze_sha256")
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(f"paired calibration {kind} binding is incomplete")
+    path = value.get("path")
+    if (not isinstance(path, str) or not _PAIRED_CALIBRATION_ID.fullmatch(path)
+            or path.startswith("/") or ".." in Path(path).parts
+            or "\\" in path):
+        raise ValueError(f"paired calibration {kind} artifact path is unsafe")
+    for key in fields.intersection({"artifact_sha256", identity_field,
+                                   "baseline_freeze_sha256"}):
+        if not isinstance(value.get(key), str) or re.fullmatch(
+                r"[0-9a-f]{64}", value[key]) is None:
+            raise ValueError(f"paired calibration {kind} artifact digest is invalid")
+    if not isinstance(value.get("schema"), str) or not value["schema"]:
+        raise ValueError(f"paired calibration {kind} artifact schema is missing")
+    return dict(value)
+
+
+def _paired_worker_assignments(assignments):
+    if not isinstance(assignments, list) or len(assignments) != 2:
+        raise ValueError("paired calibration requires exactly two explicit WX9100 workers")
+    normalized = []
+    for assignment in assignments:
+        required = {"worker_id", "device", "device_index", "device_model",
+                    "device_uuid", "backend", "backend_version", "torch_version"}
+        if not isinstance(assignment, dict) or set(assignment) != required:
+            raise ValueError("paired calibration worker identity is incomplete")
+        if (not isinstance(assignment["worker_id"], str)
+                or not assignment["worker_id"].strip()
+                or type(assignment["device_index"]) is not int
+                or assignment["device_index"] < 0
+                or assignment["device"] != f"cuda:{assignment['device_index']}"
+                or not isinstance(assignment["device_model"], str)
+                or "wx9100" not in assignment["device_model"].lower()
+                or not isinstance(assignment["device_uuid"], str)
+                or not assignment["device_uuid"].strip()
+                or assignment["backend"] != "hip"
+                or any(not isinstance(assignment[key], str) or not assignment[key].strip()
+                       for key in ("backend_version", "torch_version"))):
+            raise ValueError("paired calibration worker must bind an indexed WX9100 HIP device")
+        normalized.append(dict(assignment))
+    if (len({row["worker_id"] for row in normalized}) != 2
+            or len({row["device_index"] for row in normalized}) != 2
+            or len({row["device_uuid"] for row in normalized}) != 2):
+        raise ValueError("paired calibration workers must identify two distinct devices")
+    if len({(row["backend"], row["backend_version"], row["torch_version"])
+            for row in normalized}) != 1:
+        raise ValueError("paired calibration workers have mixed runtime identities")
+    return sorted(normalized, key=lambda row: row["device_index"])
+
+
+def _paired_control_specs():
+    from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
+
+    candidate = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
+        "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
+        "action_ticks": 12}
+    rows = [{"control_id": "D0", "policy": "D0",
+        "policy_id": "D0_production_deterministic", "prediction_mode": "current",
+        "prediction_contract": None, "candidate_configuration": candidate,
+        "execution_supported": True, "support_limit": None}]
+    for variant in PAIRED_CALIBRATION_CONTROLS[1:]:
+        if variant == "D2/multi_model_v1":
+            # Keep the preregistered cell explicit and blocked. Current
+            # prediction_contract/opponent_forecast implementations accept
+            # only current/cv; never invent a multi-model predictor identity.
+            rows.append({"control_id": variant, "policy": "D2",
+                "policy_id": "D2_kinematic_prediction",
+                "prediction_mode": "multi_model_v1", "prediction_contract": None,
+                "candidate_configuration": candidate, "execution_supported": False,
+                "support_limit": "runtime predictor contract is not implemented"})
+            continue
+        identity = _matched_reference_identity(variant)
+        rows.append({"control_id": variant, "policy": identity["policy"],
+            "policy_id": identity["policy_id"],
+            "prediction_mode": identity["prediction_mode"],
+            "prediction_contract": identity["prediction_contract"],
+            "candidate_configuration": candidate, "execution_supported": True,
+            "support_limit": None})
+    return rows
+
+
+def _paired_calibration_work_units(*, episodes, repetitions, master_seed):
+    if type(episodes) is not int or episodes < MIN_EPISODES:
+        raise ValueError(f"paired calibration requires at least {MIN_EPISODES} episodes per stratum")
+    if type(repetitions) is not int or repetitions < 2:
+        raise ValueError("paired calibration requires at least two repetitions")
+    if type(master_seed) is not int or master_seed < 0:
+        raise ValueError("paired calibration master seed must be nonnegative")
+    units = []
+    for scenario_id in SCENARIOS:
+        for case in protocol_cases(scenario_id, "calibration", episodes=episodes,
+                                   master_seed=master_seed):
+            if any(seed % 4 != 3 for seed in case.seeds):
+                raise ValueError("paired calibration schedule contains a non-calibration seed")
+            tuple_fields = {"scenario_id": scenario_id,
+                "category": case.category, "layout_id": case.layout_id,
+                "defender_family": case.defender_family,
+                "start_condition": case.start_condition,
+                "sensor_profile": case.sensor_profile}
+            for repetition in range(repetitions):
+                for seed in case.seeds:
+                    pair = {**tuple_fields, "seed": seed,
+                        "repetition": repetition, "split": "calibration"}
+                    pair_id = _canonical_sha256(pair)
+                    for control_id in PAIRED_CALIBRATION_CONTROLS[1:]:
+                        units.append({**pair, "control_id": control_id,
+                            "pair_id": pair_id})
+    return units
+
+
+def _paired_shard_assignments(units, shard_count, campaign_identity):
+    if type(shard_count) is not int or shard_count < 2:
+        raise ValueError("paired calibration needs at least two shards")
+    if shard_count > len(units):
+        raise ValueError("paired calibration shard count exceeds work-unit count")
+    ranked = sorted(units, key=lambda unit: _canonical_sha256({
+        "campaign": campaign_identity, "unit": unit}))
+    buckets = [[] for _ in range(shard_count)]
+    for index, unit in enumerate(ranked):
+        buckets[index % shard_count].append(unit)
+    return buckets
+
+
+def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
+        shard_count, source_identity_sha256, baseline_freeze_binding,
+        partition_binding, estimand_approval_binding, worker_assignments):
+    """Build an immutable paired schedule after callers validate gate artifacts.
+
+    This pure compiler accepts identities only. Execution must separately call
+    ``validate_paired_calibration_gate_artifacts`` to validate their exact bytes.
+    """
+    for value, label in ((source_identity_sha256, "source identity"),):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"paired calibration {label} digest is invalid")
+    freeze = _paired_artifact_binding(baseline_freeze_binding, kind="baseline freeze")
+    partition = _paired_artifact_binding(partition_binding, kind="partition")
+    approval = _paired_artifact_binding(estimand_approval_binding, kind="estimand approval")
+    if (freeze["schema"] != "meco-baseline-freeze-v2"
+            or partition["schema"] != "meco-heldout-partitions-v1"
+            or approval["schema"] != "meco-simulated-score-estimand-review-v1"):
+        raise ValueError("paired calibration gate artifact schema is unsupported")
+    if partition["baseline_freeze_sha256"] != freeze["freeze_sha256"]:
+        raise ValueError("paired calibration partition is not bound to the selected baseline freeze")
+    worker_rows = _paired_worker_assignments(worker_assignments)
+    from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
+        RULES_ID, RULES_SHA256, OUTCOME_NAME, RULES)
+    scoring = {"ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
+        "rules_sha256": RULES_SHA256, "rules": RULES,
+        "event_stream_schema": EVENT_STREAM_SCHEMA,
+        "estimand_approval_sha256": approval["approval_sha256"],
+        "outcome_name": OUTCOME_NAME, "unit": RULES["unit"],
+        "official_match_points": None}
+    controls = _paired_control_specs()
+    units = _paired_calibration_work_units(episodes=episodes,
+        repetitions=repetitions, master_seed=master_seed)
+    if shard_count < len(worker_rows):
+        raise ValueError("each paired calibration worker must receive a shard")
+    config = {"split": "calibration", "episodes_per_category_stratum": episodes,
+        "repetitions": repetitions, "master_seed": master_seed,
+        "shard_count": shard_count, "control_ids": list(PAIRED_CALIBRATION_CONTROLS),
+        "repeat_semantics": "identical frozen tuple and seed, independently repeated",
+        "summary_method": "paired_seed_cluster_bootstrap_v1",
+        "bootstrap_replicates": BOOTSTRAP_REPLICATES}
+    schedule_sha = _canonical_sha256(units)
+    body = {"schema_version": 1, "campaign_type": PAIRED_CALIBRATION_VERSION,
+        "artifact_type": PAIRED_CALIBRATION_CAMPAIGN, "config": config,
+        "source_identity_sha256": source_identity_sha256,
+        "baseline_freeze": freeze, "partition": partition,
+        "estimand_approval": approval, "scoring": scoring,
+        "controls": controls, "worker_assignments": worker_rows,
+        "work_unit_count": len(units), "schedule_sha256": schedule_sha}
+    campaign_identity = _canonical_sha256(body)
+    buckets = _paired_shard_assignments(units, shard_count, campaign_identity)
+    shards = []
+    for index, assigned in enumerate(buckets):
+        worker = worker_rows[index % len(worker_rows)]
+        shard_body = {"schema_version": 1,
+            "artifact_type": PAIRED_CALIBRATION_SHARD,
+            "campaign_id": campaign_identity, "shard_index": index,
+            "shard_count": shard_count, "worker_id": worker["worker_id"],
+            "worker_assignment_sha256": _canonical_sha256(worker),
+            "work_units": assigned}
+        shards.append({**shard_body, "manifest_id": _canonical_sha256(shard_body)})
+    campaign = {**body, "campaign_id": campaign_identity, "shards": shards}
+    return validate_paired_calibration_campaign(campaign)
+
+
+def validate_paired_calibration_campaign(campaign):
+    if (not isinstance(campaign, dict)
+            or campaign.get("artifact_type") != PAIRED_CALIBRATION_CAMPAIGN
+            or campaign.get("campaign_type") != PAIRED_CALIBRATION_VERSION):
+        raise ValueError("unsupported paired calibration campaign schema")
+    config = campaign.get("config")
+    if not isinstance(config, dict) or config.get("split") != "calibration":
+        raise ValueError("paired calibration campaign config is invalid")
+    units = _paired_calibration_work_units(
+        episodes=config.get("episodes_per_category_stratum"),
+        repetitions=config.get("repetitions"), master_seed=config.get("master_seed"))
+    if (campaign.get("work_unit_count") != len(units)
+            or campaign.get("schedule_sha256") != _canonical_sha256(units)):
+        raise ValueError("paired calibration frozen schedule is incomplete or altered")
+    if (config.get("control_ids") != list(PAIRED_CALIBRATION_CONTROLS)
+            or campaign.get("controls") != _paired_control_specs()):
+        raise ValueError("paired calibration control set or predictor identity changed")
+    workers = _paired_worker_assignments(campaign.get("worker_assignments"))
+    if workers != campaign["worker_assignments"]:
+        raise ValueError("paired calibration worker assignments are not canonical")
+    for key, schema in (("baseline_freeze", "meco-baseline-freeze-v2"),
+                        ("partition", "meco-heldout-partitions-v1"),
+                        ("estimand_approval", "meco-simulated-score-estimand-review-v1")):
+        kind = {"baseline_freeze": "baseline freeze",
+                "estimand_approval": "estimand approval"}.get(key, key)
+        binding = _paired_artifact_binding(campaign.get(key), kind=kind)
+        if binding["schema"] != schema:
+            raise ValueError(f"paired calibration {key} schema changed")
+    if (campaign["partition"].get("baseline_freeze_sha256")
+            != campaign["baseline_freeze"].get("freeze_sha256")):
+        raise ValueError("paired calibration partition is not bound to the selected baseline freeze")
+    from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
+        RULES_ID, RULES_SHA256, OUTCOME_NAME, RULES)
+    expected_scoring = {"ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
+        "rules_sha256": RULES_SHA256, "rules": RULES,
+        "event_stream_schema": EVENT_STREAM_SCHEMA,
+        "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
+        "outcome_name": OUTCOME_NAME, "unit": RULES["unit"],
+        "official_match_points": None}
+    if campaign.get("scoring") != expected_scoring:
+        raise ValueError("paired calibration score/replay/approval contract changed")
+    body = {key: value for key, value in campaign.items()
+        if key not in ("campaign_id", "shards")}
+    identity = _canonical_sha256(body)
+    if campaign.get("campaign_id") != identity:
+        raise ValueError("paired calibration campaign digest is invalid")
+    shard_count = config.get("shard_count")
+    if type(shard_count) is not int or shard_count < 2 or len(campaign.get("shards", [])) != shard_count:
+        raise ValueError("paired calibration shard set is incomplete")
+    expected_buckets = _paired_shard_assignments(units, shard_count, identity)
+    seen = set()
+    for index, (shard, expected_units) in enumerate(zip(campaign["shards"], expected_buckets)):
+        if (not isinstance(shard, dict)
+                or shard.get("campaign_id") != identity
+                or shard.get("shard_index") != index
+                or shard.get("shard_count") != shard_count
+                or shard.get("work_units") != expected_units):
+            raise ValueError("paired calibration shard assignment is invalid")
+        worker = workers[index % len(workers)]
+        body = {key: value for key, value in shard.items() if key != "manifest_id"}
+        if (shard.get("worker_id") != worker["worker_id"]
+                or shard.get("worker_assignment_sha256") != _canonical_sha256(worker)
+                or shard.get("manifest_id") != _canonical_sha256(body)):
+            raise ValueError("paired calibration shard worker or manifest identity is invalid")
+        for unit in shard["work_units"]:
+            unit_id = _canonical_sha256(unit)
+            if unit_id in seen:
+                raise ValueError("paired calibration shards overlap")
+            seen.add(unit_id)
+    if seen != {_canonical_sha256(unit) for unit in units}:
+        raise ValueError("paired calibration shards do not cover the frozen schedule")
+    return campaign
+
+
 def bundle_identity(policy_manifest: dict) -> str:
     """Hash the exact policy checkpoint bundle used by a qualification round."""
     if not isinstance(policy_manifest, dict):
