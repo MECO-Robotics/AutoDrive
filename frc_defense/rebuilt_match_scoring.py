@@ -330,7 +330,8 @@ def _normalize_events(events: Sequence[Mapping[str, Any]], context: dict[str, An
             violating, beneficiary = event["violating_alliance"], event["beneficiary_alliance"]
             team, severity = event["team_id"], event["severity"]
             if (violating not in ALLIANCES or beneficiary not in ALLIANCES
-                    or beneficiary == violating or team not in roster[violating]):
+                    or beneficiary == violating
+                    or team not in context["active_lineups"][violating]):
                 raise ValueError("FOUL award must credit the opponent of the violating alliance")
             points = {"minor": 5, "major": 15}.get(severity)
             if points is None:
@@ -341,8 +342,8 @@ def _normalize_events(events: Sequence[Mapping[str, Any]], context: dict[str, An
         elif kind == "disqualification":
             occurred = _require_time(event["occurred_time_s"], "occurred_time_s")
             alliance, team = event["alliance"], event["team_id"]
-            if alliance not in ALLIANCES or team not in roster[alliance]:
-                raise ValueError("DISQUALIFICATION must identify an alliance roster team")
+            if alliance not in ALLIANCES or team not in context["active_lineups"][alliance]:
+                raise ValueError("DISQUALIFICATION must identify a team in the active match lineup")
             if team in disqualified:
                 raise ValueError("team has duplicate DISQUALIFICATION events")
             disqualified.add(team)
@@ -352,8 +353,8 @@ def _normalize_events(events: Sequence[Mapping[str, Any]], context: dict[str, An
         elif kind == "ranking_points":
             occurred = _require_time(event["occurred_time_s"], "occurred_time_s", 163.)
             alliance, team = event["alliance"], event["team_id"]
-            if alliance not in ALLIANCES or team not in roster[alliance]:
-                raise ValueError("RANKING POINTS must identify an alliance roster team")
+            if alliance not in ALLIANCES or team not in context["active_lineups"][alliance]:
+                raise ValueError("RANKING POINTS must identify a team in the active match lineup")
             if type(event["points"]) is not int or event["points"] < 0:
                 raise ValueError("ranking-point awards must be nonnegative integers")
             _require_text(event["rp_type"], "rp_type")

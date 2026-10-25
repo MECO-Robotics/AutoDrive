@@ -168,6 +168,12 @@ def test_championship_four_team_roster_has_three_slots_and_mutation_rejected():
     assert len(ledger["match_context"]["active_lineups"]["red"]) == 3
     assert len(ledger["match_context"]["robot_slots"]) == 6
     assert validate_score_ledger(ledger) == ledger
+    inactive_dq = {"event_id": "inactive-dq", "event_type": "disqualification",
+                    "occurred_time_s": 159, "alliance": "red", "team_id": "R4",
+                    "adjudicator_id": "ref-1", "adjudication_id": "dq-4",
+                    "evidence_ref": "record-4", "rule_ref": "GM 10.6"}
+    with pytest.raises(ValueError, match="active match lineup"):
+        build([inactive_dq], ctx=context(competition="championship_playoff"))
     altered = deepcopy(ledger)
     altered["events"][0]["severity"] = "major"
     with pytest.raises(ValueError, match="changed"):
