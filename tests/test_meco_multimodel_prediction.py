@@ -51,10 +51,13 @@ def test_multimodel_forecast_is_bounded_deterministic_and_risk_uses_mixture():
     dict(valid=True, position_xy=(1., 2.), velocity_xy=(float("nan"), 0.), age_s=.1),
 ])
 def test_multimodel_stale_or_nonfinite_motion_falls_back_to_finite_pose(kwargs):
-    result = opponent_forecast(mode="multi_model_v1", horizon_s=1., **kwargs)
+    result = opponent_forecast(mode="multi_model_v1", horizon_s=4., **kwargs)
     assert result["xy"] == (1., 2.)
     assert result["fallback"] == "observed_current_pose"
     assert result["used_multimodel"] is False
+    assert result["horizon_s"] == 2.5
+    assert result["requested_horizon_s"] == 4.
+    assert result["horizon_clamped"] is True
     assert result["hypotheses"] == [{"id": "observed_current_pose",
                                      "weight": 1., "xy": (1., 2.)}]
     assert opponent_risk_penalty((1., 2.), result) == pytest.approx(.75)

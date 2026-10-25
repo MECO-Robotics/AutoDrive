@@ -901,6 +901,39 @@ def test_matched_prediction_interval_uses_cv_minus_current_metrics(tmp_path):
     assert row["ci_95"] == [2.0, 2.0]
 
 
+def test_produced_multimodel_control_contrast_is_consumed_by_summarizer(tmp_path):
+    from frc_defense.meco_ablation_matrix import _contrast_pair
+
+    path = _fixture(tmp_path)
+    matrix = json.loads(path.read_text())
+    condition = matrix["conditions"]["architecture_matched_cv_k16"]
+    report = json.loads(Path(condition["report_path"]).read_text())
+    records = {(row["policy"], row["category"], row["seed"]): row
+               for row in report["records"]}
+    generated = _contrast_pair(name="D1_vs_D2_multi_model_v1",
+        condition_id=condition["condition_id"], report=report,
+        records=records, candidate_policy="D1", reference_policy="D2")
+    generated["common_bundle_provenance"] = {
+        key: matrix[key] for key in ("checkpoint_sha256",
+            "training_configuration_sha256", "training_protocol_ids",
+            "source_identity_sha256", "execution_device", "evaluation_design",
+            "evaluation_split", "qualification_protocol_id",
+            "qualification_protocol", "qualification_case", "seed_split_assignments")}
+    generated["common_bundle_provenance"]["scenario_id"] = "pickup_simple"
+    matrix["contrasts"].append(generated)
+    matrix.pop("report_sha256", None)
+    matrix["report_sha256"] = _canonical_hash(matrix)
+    _write_json(path, matrix)
+
+    result = summarize_matrix(path, bootstrap_seed=3, replicates=500)
+    row = next(row for row in result["summaries"]
+        if row.get("contrast") == "D1_vs_D2_multi_model_v1"
+        and row.get("candidate_policy") == "D1"
+        and row.get("metric") == "score")
+    assert row["difference_direction"] == "candidate_minus_reference"
+    assert row["mean_difference"] == pytest.approx(0.)
+
+
 def test_phase4_multiple_factors_keep_distinct_paired_intervals(tmp_path):
     path = _phase4_fixture(tmp_path)
     result = summarize_matrices([path], bootstrap_seed=7, replicates=500)
