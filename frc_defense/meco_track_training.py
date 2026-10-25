@@ -3810,6 +3810,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                     is_production_d0 = policy == "D0"
                     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                         production_d0=is_production_d0,
+                        fuel_physics=({"backend": "hip", "gpu_qualifying": True}
+                                      if qualification_case is not None else None),
                         phase4_factor=phase4_factor,
                         phase4_opponent_policy_id=phase4_opponent_policy_id,
                         phase4_opponent_schedule=phase4_opponent_schedule,
