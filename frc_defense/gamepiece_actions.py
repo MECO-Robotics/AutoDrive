@@ -59,10 +59,42 @@ def _invalidate_perceived_contact_tracks(env, active):
     env.track_age.masked_fill_(intersected, float("inf"))
 
 
+def _capture_fuel_proxy_score_slots(env, active, piece_ids, *, robot_slot=None):
+    """Keep scorer-selected local piece IDs for the later per-world ledger."""
+    if not getattr(env, "fuel_proxy_enabled", False):
+        return
+    if robot_slot is None:
+        if piece_ids.shape != env._fuel_proxy_step_piece_ids.shape:
+            raise ValueError("proxy scorer output must provide all six simulation slots")
+        valid = active[:, None] & (piece_ids >= 0)
+        env._fuel_proxy_step_piece_ids.copy_(torch.where(
+            valid, piece_ids, env._fuel_proxy_step_piece_ids))
+    else:
+        if type(robot_slot) is not int or not 0 <= robot_slot < NUM_ROBOTS:
+            raise ValueError("proxy scorer slot must identify one of six simulation slots")
+        valid = active & (piece_ids >= 0)
+        env._fuel_proxy_step_piece_ids[:, robot_slot] = torch.where(
+            valid, piece_ids, env._fuel_proxy_step_piece_ids[:, robot_slot])
+
+
+def _capture_fuel_proxy_step_events(env, active):
+    """Persist current scorer rows at their per-world source physics ticks."""
+    if not getattr(env, "fuel_proxy_enabled", False):
+        return
+    source_ticks = (env.steps - 1).clamp(0, env.horizon - 1)
+    worlds = env._world_indices
+    prior = env._fuel_proxy_piece_events[worlds, source_ticks]
+    env._fuel_proxy_piece_events[worlds, source_ticks] = torch.where(
+        active[:, None], env._fuel_proxy_step_piece_ids, prior)
+
+
 def update_fuel_actions(self, active, score_intent):
+    proxy_enabled = getattr(self, "fuel_proxy_enabled", False)
+    match_end_time_s = getattr(self, "match_end_time_s", None)
+    auto_period_end_time_s = getattr(self, "auto_period_end_time_s", None)
     self.fuel_acquired_event[active]=0; self.fuel_scored_event[active]=0
     self.fuel_passed_event[active]=0; self.fuel_denied_event[active]=0
-    if self.fuel_proxy_enabled:
+    if proxy_enabled:
         self._fuel_proxy_step_piece_ids[active] = -1
     if hasattr(self,"fuel_abandoned_event"):
         self.fuel_abandoned_event[active]=0
@@ -359,19 +391,22 @@ def update_fuel_actions(self, active, score_intent):
         self.fuel_denied_event.copy_(torch.where(
             active[:,None],entering.long(),self.fuel_denied_event))
         self.fuel_denied_count+=entering.long()
+        match_time_valid = (torch.ones_like(self.match_elapsed, dtype=torch.bool)
+            if match_end_time_s is None else self.match_elapsed < match_end_time_s)
+        auto_time_valid = (self.match_elapsed <= 20.+self.dt
+            if auto_period_end_time_s is None else
+            self.match_elapsed < auto_period_end_time_s)
         can_score=(ready&score_intent&robot_hub_active&in_alliance_zone&
-            active[:,None]&
-            (self.match_elapsed[:,None] < 160.)&
+            active[:,None]&match_time_valid[:,None]&
             (self.match_elapsed[:,None]+1e-6>=self.next_score))
         eligible=held&can_score[...,None]
         first=eligible.to(torch.int64).argmax(-1,keepdim=True)
         chosen=eligible&(self._fuel_indices[:,None,:]==first)
         count=chosen.sum(-1)
         newly_scored=chosen.any(1)
-        if self.fuel_proxy_enabled:
-            selected = first.squeeze(-1)
-            self._fuel_proxy_step_piece_ids.copy_(torch.where(
-                count > 0, selected, self._fuel_proxy_step_piece_ids))
+        if proxy_enabled:
+            selected = torch.where(count > 0, first.squeeze(-1), -1)
+            _capture_fuel_proxy_score_slots(self, active, selected)
         self.fuel_scored_event.copy_(torch.where(
             active[:,None],count,self.fuel_scored_event))
         team_scores=torch.zeros_like(self.fuel_score_count)
@@ -379,7 +414,7 @@ def update_fuel_actions(self, active, score_intent):
         self.fuel_score_count+=team_scores
         auto_scores=torch.zeros_like(self.auto_fuel_scores)
         auto_scores.scatter_add_(1,self.team_ids[None].expand(self.n,-1),
-            count*(self.match_elapsed[:,None] < 20.).long())
+            count*auto_time_valid[:,None].long())
         self.auto_fuel_scores+=auto_scores
         self.next_score.copy_(torch.where(count>0,
             self.match_elapsed[:,None]+self.robot_score_intervals[None],
@@ -413,21 +448,27 @@ def update_fuel_actions(self, active, score_intent):
             self.fuel_denied_event[:,robot]=torch.where(active,entering.long(),
                                                          self.fuel_denied_event[:,robot])
             self.fuel_denied_count[:,robot]+=entering.long()
+            match_time_valid = (torch.ones_like(self.match_elapsed, dtype=torch.bool)
+                if match_end_time_s is None else self.match_elapsed < match_end_time_s)
+            auto_time_valid = (self.match_elapsed <= 20.+self.dt
+                if auto_period_end_time_s is None else
+                self.match_elapsed < auto_period_end_time_s)
             can_score=(ready&score_intent[:,robot]&
                 (self.match_elapsed+1e-6>=self.next_score[:,robot])&
-                (self.match_elapsed < 160.)&
+                match_time_valid&
                 self.hub_active[:,team]&in_alliance_zone&active)
             eligible=held&can_score[:,None]
             chosen=eligible&(self._fuel_indices==eligible.to(torch.int64).argmax(-1,keepdim=True))
             count=chosen.sum(-1); newly_scored|=chosen
-            if self.fuel_proxy_enabled:
-                selected = eligible.to(torch.int64).argmax(-1)
-                self._fuel_proxy_step_piece_ids[:,robot] = torch.where(
-                    count > 0, selected, self._fuel_proxy_step_piece_ids[:,robot])
+            if proxy_enabled:
+                selected = torch.where(count > 0,
+                    eligible.to(torch.int64).argmax(-1), -1)
+                _capture_fuel_proxy_score_slots(
+                    self, active, selected, robot_slot=robot)
             self.fuel_scored_event[:,robot]=torch.where(active,count,
                                                          self.fuel_scored_event[:,robot])
             self.fuel_score_count[:,team]+=count
-            self.auto_fuel_scores[:,team]+=count*(self.match_elapsed<20.).long()
+            self.auto_fuel_scores[:,team]+=count*auto_time_valid.long()
             self.next_score[:,robot]=torch.where(
                 count>0,self.match_elapsed+self.robot_score_interval_values[robot],
                 self.next_score[:,robot])

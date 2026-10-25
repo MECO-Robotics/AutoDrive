@@ -17,6 +17,31 @@ def make_env(kind="3v3", worlds=2):
     return TensorDefenseEnv(**kwargs, task="counter_defense", action_mode="strategic")
 
 
+@pytest.mark.parametrize(("event_time", "expected_auto"), [
+    (19.98, 1), (20.0, 0), (20.02, 0),
+])
+def test_auto_fuel_count_uses_half_open_event_time(event_time, expected_auto):
+    env = make_env(worlds=1)
+    env.piece_active.zero_()
+    env.piece_owner.fill_(-1)
+    env.piece_active[0, 0] = True
+    env.piece_owner[0, 0] = 0
+    env.sim.pose[0, 0, :2] = torch.tensor([2., 2.])
+    env.match_elapsed.fill_(event_time)
+    env.hub_active.fill_(True)
+    env.next_score.zero_()
+    env.fuel_physics.reset()
+    env.fuel_physics.sleeping[0, 0] = True
+    score_intent = torch.zeros((1, 6), dtype=torch.bool)
+    score_intent[0, 0] = True
+
+    env._update_fuel(torch.ones(1, dtype=torch.bool), score_intent)
+
+    assert env.fuel_scored_event[0, 0].item() == 1
+    assert env.fuel_score_count[0, 0].item() == 1
+    assert env.auto_fuel_scores[0, 0].item() == expected_auto
+
+
 @pytest.mark.parametrize("kind", ["2robot", "3v3"])
 def test_default_environment_steps_moving_fuel_and_preserves_inactive_world(kind):
     env = make_env(kind)
