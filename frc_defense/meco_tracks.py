@@ -1619,7 +1619,8 @@ def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
             forecast = pose
             fallback = "observed_current_pose"
     hypotheses = []
-    horizon_clamped = False
+    horizon_clamped = bool(mode == "multi_model_v1" and
+                           horizon > MULTIMODEL_MAX_HORIZON_S)
     if mode == "multi_model_v1" and pose is not None:
         fresh_motion = (velocity_xy is not None and age_s is not None
             and math.isfinite(float(age_s)) and 0. <= float(age_s) <= PREDICTION_MAX_AGE_S
@@ -1627,7 +1628,6 @@ def opponent_forecast(*, mode: str, valid, position_xy, velocity_xy,
             and all(math.isfinite(float(v)) for v in velocity_xy))
         if fresh_motion:
             t = min(horizon, MULTIMODEL_MAX_HORIZON_S)
-            horizon_clamped = t != horizon
             vx, vy = map(float, velocity_xy)
             speed = math.hypot(vx, vy)
             scale = min(1., PREDICTION_MAX_SPEED_MPS / max(speed, 1e-8))

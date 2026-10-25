@@ -322,6 +322,7 @@ def _validate_required_contrasts(contrasts: list[dict]) -> None:
                    for track in MECO_TRACKS}
     expected_standard = expected_named | expected_d0
     allowed_other = {"candidate_recall_K_sweep", "matched_prediction_current_vs_cv",
+                     "D1_vs_D2_multi_model_v1",
                      "phase4_factor_vs_no_factor"}
     observed_named, observed_d0 = set(), set()
     for contrast in contrasts:
