@@ -7,11 +7,14 @@ from frc_defense.rebuilt_match_scoring import (
     ALLIANCES,
     PROXY_CONTRACT_ID,
     RULES_SNAPSHOT_SHA256,
+    build_fuel_proxy_ledger,
     build_score_ledger,
     canonical_sha256,
+    derive_simulation_tie_selection,
     hub_is_active,
     match_period,
     shift_1_inactive_alliance,
+    validate_fuel_proxy_ledger,
     validate_score_ledger,
 )
 
@@ -192,3 +195,99 @@ def test_incomplete_coverage_returns_null_not_zero_complete_score():
     assert ledger["official_match_points_complete"] is False
     assert len(ledger["official_match_points_incompleteness"]) == len(coverage)
     assert ledger["qualification_eligible"] is False
+
+
+def fuel_proxy_event(tick, slot, alliance, piece=0):
+    event_id = f"episode/w0/g0/t{tick}/r{slot}/p{piece}"
+    return {"event_id": event_id, "event_type": "fuel_action_score",
+            "event_time_s": (tick + 1) * .02, "source_tick": tick,
+            "source_event_id": event_id, "alliance": alliance,
+            "robot_slot": slot, "piece_id": piece, "hub_active": True,
+            "event_semantics": "abstract_score_action_not_sensor_crossing"}
+
+
+def test_proxy_only_ledger_has_six_simulation_slots_and_no_official_identity():
+    tie = derive_simulation_tie_selection("match-1", 42)
+    events = [fuel_proxy_event(0, 0, "red"), fuel_proxy_event(1, 3, "blue")]
+    ledger = build_fuel_proxy_ledger(
+        simulation_episode_id="episode-1", simulation_match_id="match-1",
+        seed=42, world_index=0, reset_generation=0, time_step_s=.02,
+        slot_alliances=("red", "red", "red", "blue", "blue", "blue"),
+        events=events,
+    )
+    assert validate_fuel_proxy_ledger(ledger) == ledger
+    assert ledger["scope"] == "six_slot_2d_simulation"
+    assert ledger["simulation_tie_selection"] == tie
+    assert ledger["simulation_tie_selection"]["simulation_only"] is True
+    assert ledger["alliance_points"] == {"red": 1, "blue": 1}
+    assert ledger["alliance_roster_complete"] is False
+    assert ledger["official_fms_record_present"] is False
+    assert ledger["qualification_eligible"] is False
+    assert "official_match_points" not in ledger
+    assert "team_id" not in ledger["events"][0]
+
+
+def test_proxy_tie_derivation_is_seeded_isolated_and_rejects_tampering():
+    base = derive_simulation_tie_selection("match-1", 42)
+    assert derive_simulation_tie_selection("match-1", 42) == base
+    assert derive_simulation_tie_selection("match-1", 43) != base
+    next_generation = derive_simulation_tie_selection(
+        "match-1", 42, reset_generation=1)
+    assert next_generation["alliance"] != base["alliance"]
+    ledger = build_fuel_proxy_ledger(
+        simulation_episode_id="episode-1", simulation_match_id="match-1",
+        seed=42, world_index=0, reset_generation=0, time_step_s=.02,
+        slot_alliances=("red", "red", "red", "blue", "blue", "blue"),
+        events=[fuel_proxy_event(0, 0, "red")],
+    )
+    tampered = deepcopy(ledger)
+    tampered["official_match_points"] = None
+    with pytest.raises(ValueError, match="official context"):
+        validate_fuel_proxy_ledger(tampered)
+
+
+def test_proxy_uses_simulation_tie_selection_and_marks_diagnostic_override():
+    slots = ("red", "red", "red", "blue", "blue", "blue")
+    tie = derive_simulation_tie_selection("match-1", 42)
+    active_alliance = "blue" if tie["alliance"] == "red" else "red"
+    active_slot = 3 if active_alliance == "blue" else 0
+    tied_events = [fuel_proxy_event(0, 0, "red"),
+                   fuel_proxy_event(1, 3, "blue"),
+                   fuel_proxy_event(1499, active_slot, active_alliance, 2)]
+    common = {"simulation_episode_id": "episode-1", "simulation_match_id": "match-1",
+              "seed": 42, "world_index": 0, "reset_generation": 0,
+              "time_step_s": .02, "slot_alliances": slots}
+    result = build_fuel_proxy_ledger(**common, events=tied_events)
+    assert result["simulation_tie_selection"]["alliance"] == tie["alliance"]
+    inactive_alliance = tie["alliance"]
+    inactive_slot = 0 if inactive_alliance == "red" else 3
+    invalid_events = tied_events[:-1] + [
+        fuel_proxy_event(1499, inactive_slot, inactive_alliance, 2)]
+    with pytest.raises(ValueError, match="inactive HUB"):
+        build_fuel_proxy_ledger(**common, events=invalid_events)
+
+    override = build_fuel_proxy_ledger(
+        **common,
+        events=[fuel_proxy_event(0, 0, "red"),
+                fuel_proxy_event(1, 3, "blue"),
+                fuel_proxy_event(1499, 0, "red", 2)],
+        schedule_override="curriculum_schedule",
+    )
+    assert override["schedule_override"] == "curriculum_schedule"
+    assert override["rules_compliant_schedule"] is False
+
+
+def test_proxy_rejects_duplicate_rows_wrong_tick_or_wrong_slot_alliance():
+    slots = ("red", "red", "red", "blue", "blue", "blue")
+    row = fuel_proxy_event(0, 0, "red")
+    kwargs = {"simulation_episode_id": "episode-1", "simulation_match_id": "match-1",
+              "seed": 42, "world_index": 0, "reset_generation": 0,
+              "time_step_s": .02, "slot_alliances": slots}
+    with pytest.raises(ValueError, match="unique"):
+        build_fuel_proxy_ledger(**kwargs, events=[row, row])
+    wrong_time = dict(row, event_time_s=.04)
+    with pytest.raises(ValueError, match="exact source physics tick"):
+        build_fuel_proxy_ledger(**kwargs, events=[wrong_time])
+    wrong_slot = dict(row, alliance="blue")
+    with pytest.raises(ValueError, match="match its simulation slot"):
+        build_fuel_proxy_ledger(**kwargs, events=[wrong_slot])

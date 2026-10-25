@@ -71,6 +71,41 @@ def rules_snapshot_sha256() -> str:
     return RULES_SNAPSHOT_SHA256
 
 
+def derive_simulation_tie_selection(
+    simulation_match_id: str,
+    seed: int,
+    *,
+    world_index: int = 0,
+    reset_generation: int = 0,
+) -> dict[str, Any]:
+    """Derive a reproducible simulation tie choice without consuming an RNG."""
+    match_id = _require_text(simulation_match_id, "simulation_match_id")
+    if type(seed) is not int or seed < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    if type(world_index) is not int or world_index < 0:
+        raise ValueError("world_index must be a nonnegative integer")
+    if type(reset_generation) is not int or reset_generation < 0:
+        raise ValueError("reset_generation must be a nonnegative integer")
+    base_payload = {
+        "algorithm": "sha256_match_seed_world_low_bit_v1",
+        "simulation_match_id": match_id,
+        "seed": seed,
+        "world_index": world_index,
+    }
+    base_digest = canonical_sha256(base_payload)
+    selected_bit = (int(base_digest[-1], 16) & 1) ^ (reset_generation & 1)
+    return {
+        "alliance": ALLIANCES[selected_bit],
+        "simulation_only": True,
+        "derivation": "sha256_match_seed_world_low_bit_xor_reset_generation_parity_v1",
+        "base_derivation_sha256": base_digest,
+        "simulation_match_id": match_id,
+        "seed": seed,
+        "world_index": world_index,
+        "reset_generation": reset_generation,
+    }
+
+
 def _number(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
@@ -434,6 +469,218 @@ def _normalize_proxy_events(proxy_events: Sequence[Mapping[str, Any]]) -> list[d
             "source_event_id": source_id,
             "event_semantics": "abstract_score_action_not_sensor_crossing"})
     return result
+
+
+def _normalize_fuel_proxy_events(
+    events: Sequence[Mapping[str, Any]],
+    *,
+    slot_alliances: Sequence[str],
+    auto_counts: Mapping[str, int],
+    tie_selection: str,
+    schedule_override: bool,
+    time_step_s: float,
+) -> list[dict[str, Any]]:
+    if not isinstance(events, (list, tuple)):
+        raise ValueError("fuel proxy events must be an ordered list")
+    expected_keys = {
+        "event_id", "event_type", "event_time_s", "source_tick",
+        "source_event_id", "alliance", "robot_slot", "piece_id",
+        "hub_active", "event_semantics",
+    }
+    normalized: list[dict[str, Any]] = []
+    event_ids: set[str] = set()
+    source_ids: set[str] = set()
+    last_key: tuple[int, int, int] | None = None
+    for raw in events:
+        if (not isinstance(raw, Mapping)
+                or set(raw) not in (expected_keys, expected_keys | {"proxy_points"})):
+            raise ValueError("fuel proxy event has missing or unexpected fields")
+        if "proxy_points" in raw and raw["proxy_points"] != 1:
+            raise ValueError("each abstract score-action event has exactly one proxy point")
+        if raw["event_type"] != "fuel_action_score":
+            raise ValueError("fuel proxy accepts only explicit abstract fuel score actions")
+        if raw["event_semantics"] != "abstract_score_action_not_sensor_crossing":
+            raise ValueError("fuel proxy event must identify abstract score-action semantics")
+        event_id = _require_text(raw["event_id"], "event_id")
+        source_id = _require_text(raw["source_event_id"], "source_event_id")
+        if event_id in event_ids or source_id in source_ids:
+            raise ValueError("fuel proxy event and source IDs must be unique")
+        event_ids.add(event_id)
+        source_ids.add(source_id)
+        if type(raw["source_tick"]) is not int or raw["source_tick"] < 0:
+            raise ValueError("source_tick must be a nonnegative integer")
+        time_s = _require_time(raw["event_time_s"], "event_time_s")
+        expected_time = (raw["source_tick"] + 1) * time_step_s
+        if time_s != expected_time:
+            raise ValueError("event_time_s must match its exact source physics tick")
+        if time_s >= 160.:
+            raise ValueError("proxy score-action event must be inside the half-open match clock")
+        slot = raw["robot_slot"]
+        if type(slot) is not int or not 0 <= slot < len(slot_alliances):
+            raise ValueError("robot_slot must identify one of the six simulation slots")
+        alliance = raw["alliance"]
+        if alliance not in ALLIANCES or slot_alliances[slot] != alliance:
+            raise ValueError("proxy event alliance must match its simulation slot")
+        if type(raw["piece_id"]) is not int or raw["piece_id"] < 0:
+            raise ValueError("piece_id must be a nonnegative simulator-local integer")
+        if raw["hub_active"] is not True:
+            raise ValueError("a scored abstract FUEL action must have an active HUB")
+        key = (raw["source_tick"], slot, raw["piece_id"])
+        if last_key is not None and key < last_key:
+            raise ValueError("fuel proxy events must be in source tick/slot/piece order")
+        last_key = key
+        if not schedule_override:
+            expected_active = hub_is_active(
+                alliance, time_s, auto_counts,
+                fms_tie_selection=tie_selection)
+            if not expected_active:
+                raise ValueError("fuel proxy event is scored in an inactive HUB")
+        normalized.append({
+            "event_id": event_id,
+            "event_type": "fuel_action_score",
+            "event_time_s": time_s,
+            "source_tick": raw["source_tick"],
+            "source_event_id": source_id,
+            "alliance": alliance,
+            "robot_slot": slot,
+            "piece_id": raw["piece_id"],
+            "hub_active": True,
+            "event_semantics": "abstract_score_action_not_sensor_crossing",
+            "proxy_points": 1,
+        })
+    return normalized
+
+
+def build_fuel_proxy_ledger(
+    *,
+    simulation_episode_id: str,
+    simulation_match_id: str,
+    seed: int,
+    world_index: int,
+    reset_generation: int,
+    time_step_s: float,
+    slot_alliances: Sequence[str],
+    events: Sequence[Mapping[str, Any]],
+    schedule_override: str | None = None,
+) -> dict[str, Any]:
+    """Build an abstract six-slot proxy without official roster or match context.
+
+    This API deliberately has no team IDs, official FMS result, or official
+    score field. Its tie selection is a deterministic simulation stand-in.
+    """
+    episode_id = _require_text(simulation_episode_id, "simulation_episode_id")
+    match_id = _require_text(simulation_match_id, "simulation_match_id")
+    if type(seed) is not int or seed < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    if type(world_index) is not int or world_index < 0:
+        raise ValueError("world_index must be a nonnegative integer")
+    if type(reset_generation) is not int or reset_generation < 0:
+        raise ValueError("reset_generation must be a nonnegative integer")
+    if not _number(time_step_s) or time_step_s <= 0:
+        raise ValueError("time_step_s must be finite and positive")
+    if (not isinstance(slot_alliances, (list, tuple)) or len(slot_alliances) != 6
+            or set(slot_alliances) != {"red", "blue"}
+            or slot_alliances.count("red") != 3
+            or slot_alliances.count("blue") != 3):
+        raise ValueError("slot_alliances must map exactly three of six simulation slots to each alliance")
+    if schedule_override is not None:
+        schedule_override = _require_text(schedule_override, "schedule_override")
+        if schedule_override not in ("curriculum_schedule", "behavior_probe"):
+            raise ValueError("schedule_override must be a known diagnostic override or null")
+    tie = derive_simulation_tie_selection(
+        match_id, seed, world_index=world_index,
+        reset_generation=reset_generation)
+    preliminary = {alliance: 0 for alliance in ALLIANCES}
+    if not isinstance(events, (list, tuple)):
+        raise ValueError("fuel proxy events must be an ordered list")
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            raise ValueError("fuel proxy event must be an object")
+        # The row is validated below; only count candidates with a valid time
+        # and alliance here so malformed events still fail closed in order.
+        time_s = _require_time(raw.get("event_time_s"), "event_time_s")
+        if time_s < 20. and raw.get("alliance") in ALLIANCES:
+            preliminary[raw["alliance"]] += 1
+    clean_events = _normalize_fuel_proxy_events(
+        events, slot_alliances=slot_alliances, auto_counts=preliminary,
+        tie_selection=tie["alliance"], schedule_override=schedule_override is not None,
+        time_step_s=float(time_step_s))
+    points = {alliance: sum(
+        1 for row in clean_events if row["alliance"] == alliance)
+        for alliance in ALLIANCES}
+    missing_evidence = [
+        "official_match_context", "official_roster_identity",
+        "official_fms_tie_record", "fuel_sensor_crossings",
+        "fuel_score_window_coverage", "tower_adjudications",
+        "referee_penalty_coverage", "disqualification_coverage",
+    ]
+    body = {
+        "schema": "rebuilt-active-hub-fuel-proxy-ledger-v1",
+        "contract_id": PROXY_CONTRACT_ID,
+        "scope": "six_slot_2d_simulation",
+        "rules_snapshot_sha256": RULES_SNAPSHOT_SHA256,
+        "simulation_identity": {
+            "episode_id": episode_id,
+            "match_id": match_id,
+            "seed": seed,
+            "world_index": world_index,
+            "reset_generation": reset_generation,
+            "simulation_only": True,
+        },
+        "time_step_s": float(time_step_s),
+        "slot_alliances": list(slot_alliances),
+        "simulation_tie_selection": tie,
+        "auto_fuel_counts": preliminary,
+        "schedule_override": schedule_override,
+        "rules_compliant_schedule": schedule_override is None,
+        "event_semantics": "abstract_score_action_not_sensor_crossing",
+        "events": clean_events,
+        "events_sha256": canonical_sha256(clean_events),
+        "event_count": len(clean_events),
+        "alliance_points": points,
+        "tower_points_complete": False,
+        "fouls_complete": False,
+        "alliance_roster_complete": False,
+        "fuel_sensor_crossings_complete": False,
+        "score_window_coverage_complete": False,
+        "official_match_context_complete": False,
+        "official_fms_record_present": False,
+        "missing_official_evidence": missing_evidence,
+        "qualification_eligible": False,
+    }
+    body["ledger_sha256"] = canonical_sha256(body)
+    return body
+
+
+def validate_fuel_proxy_ledger(ledger: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild and compare a simulation-only proxy ledger."""
+    if not isinstance(ledger, Mapping):
+        raise ValueError("fuel proxy ledger must be an object")
+    forbidden = {"match_points", "official_match_points", "team_id",
+                 "alliance_rosters", "active_lineups", "competition_context",
+                 "fms_tie_selection"}
+    if forbidden & set(ledger):
+        raise ValueError("simulation-only proxy ledger contains official context or score fields")
+    identity = ledger.get("simulation_identity")
+    if not isinstance(identity, Mapping) or set(identity) != {
+            "episode_id", "match_id", "seed", "world_index",
+            "reset_generation", "simulation_only"}:
+        raise ValueError("simulation-only identity is incomplete")
+    if identity.get("simulation_only") is not True:
+        raise ValueError("proxy identity must be simulation-only")
+    expected = build_fuel_proxy_ledger(
+        simulation_episode_id=identity["episode_id"],
+        simulation_match_id=identity["match_id"], seed=identity["seed"],
+        world_index=identity["world_index"],
+        reset_generation=identity["reset_generation"],
+        time_step_s=ledger.get("time_step_s"),
+        slot_alliances=ledger.get("slot_alliances"),
+        events=ledger.get("events"),
+        schedule_override=ledger.get("schedule_override"),
+    )
+    if dict(ledger) != expected:
+        raise ValueError("fuel proxy ledger digest, rows, or scope changed")
+    return dict(ledger)
 
 
 def _validate_coverage(coverage: Mapping[str, Any]) -> dict[str, bool]:
