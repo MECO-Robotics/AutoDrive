@@ -211,11 +211,17 @@ the integration checkout/mainline:
 
 During this period, **do not** modify the live training checkout or campaign
 root, stop/start/reconfigure the supervisor, move or relabel checkpoints,
-touch active outputs, run training/evaluation/collection/fitting, inspect GPU
-utilization, invoke device APIs, run a simulator or behavior test, build/compile
-GPU kernels, restart the dashboard or generate a replay. Do not run dashboard
-currentness actions while prohibited by the user's active-campaign instruction.
-Any dashboard or runtime evidence needed later is an explicit post-stop gate.
+touch active outputs, inspect campaign/checkpoint payloads, run
+training/evaluation/collection/fitting, invoke any device API that initializes
+a compute context or can acquire/reconfigure a device or submit work, run a
+simulator or behavior test, build/compile GPU kernels, restart the dashboard
+or generate a replay. Read-only device-status/utilization queries are allowed
+for progress reporting only when they do not initialize a compute context,
+acquire/reconfigure a device, submit work, or inspect campaign/checkpoint
+payloads. Missing telemetry or low utilization is not evidence that training
+stopped or a lease was released. Do not run dashboard currentness actions while
+prohibited by the user's active-campaign instruction. Any dashboard or runtime
+evidence needed later is an explicit post-stop gate.
 
 Integration being safe to commit does not mean its code is safe to execute.
 Source integration must not be represented as runtime readiness. The diagnostic
@@ -227,8 +233,10 @@ current-source Stage 1 pass.
 1. Do not request or infer a stop. Wait for the user's manual stop instruction.
 2. After that instruction, independently confirm the supervisor is terminal,
    its owned child workers exited, and both assigned physical WX9100 leases
-   are free. A stale status file, missing heartbeat, expired poll or lower GPU
-   utilization is not release evidence. Never use the P600.
+   are free. A stale status file, missing heartbeat, expired poll, missing
+   utilization telemetry or low GPU utilization is not release evidence.
+   Read-only status may help observe utilization but does not establish lease
+   release. Never use the P600.
 3. Only then run the approved device/static test sequence and source-matched
    seeded simulator evaluation; restart/verify the dashboard and generate a
    fresh replay as specified above. Report tests, simulator scenario/seed and
