@@ -1,3 +1,16 @@
+> **Phase 5 capture-bound scorer profiling implemented — 2026-10-25.** The
+> reviewed software tranche is integrated at
+> `7f374320011ce2579893b23adf190610e1a6740d`. It validates five track captures
+> against selected checkpoints and requires an exclusive lease and physical
+> attestation for both WX9100s before capture-backed scorer timing. Reports
+> record distinct model-source and profiler-source identity and publish
+> without overwriting existing paths. Contract tests were added but not run;
+> Python compilation and diff checks passed. The dashboard three-pass ledger
+> now contains 72 summaries, but its digest pin must be revalidated after the
+> ledger update. No production captures, trained five-checkpoint bundle, GPU
+> profile, simulator/replay, Hailo, or qualification evidence exists. The
+> r4 training campaign was not interrupted.
+>
 > **Phase 5 capture-backed scorer profiler implementation — 2026-10-25.** An
 > isolated implementation adds a separate all-five production-capture profile
 > mode, bound to selected checkpoint/source/protocol and a clean profiler Git
