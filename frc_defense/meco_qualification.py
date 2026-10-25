@@ -1891,7 +1891,7 @@ def _paired_control_specs():
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
         "action_ticks": 12}
     rows = [{"control_id": "D0", "policy": "D0",
-        "policy_id": "D0_production_deterministic", "prediction_mode": "current",
+        "policy_id": "D0_production_deterministic", "prediction_mode": None,
         "prediction_contract": None, "prediction_contract_sha256": None,
         "candidate_configuration": candidate,
         "execution_supported": True, "support_limit": None}]

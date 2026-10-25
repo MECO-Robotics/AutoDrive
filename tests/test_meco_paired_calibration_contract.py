@@ -196,6 +196,13 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
     units = [unit for shard in campaign["shards"] for unit in shard["work_units"]]
     assert campaign["campaign_type"] == q.PAIRED_CALIBRATION_VERSION
     assert campaign["config"]["control_ids"] == list(q.PAIRED_CALIBRATION_CONTROLS)
+    d0 = next(row for row in campaign["controls"] if row["control_id"] == "D0")
+    assert d0["prediction_mode"] is None
+    assert d0["prediction_contract"] is None
+    assert d0["prediction_contract_sha256"] is None
+    assert d0["control_binding_sha256"] == q._canonical_sha256(
+        {key: value for key, value in d0.items()
+            if key != "control_binding_sha256"})
     multi_model = next(row for row in campaign["controls"]
         if row["control_id"] == "D2/multi_model_v1")
     assert multi_model["execution_supported"] is False
