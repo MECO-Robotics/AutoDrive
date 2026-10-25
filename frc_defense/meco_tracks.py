@@ -318,14 +318,24 @@ class ProductionMecoAdapter:
                 return None
             if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
-            if any(t.is_floating_point() and not bool(torch.isfinite(t).all()) for t in tensors):
-                return None
+            # Dynamic CUDA predicates must not synchronize back to Python here.
+            # Carry validity as a tensor and sanitize before inference; the
+            # selector will choose its already-built deterministic fallback.
+            inference_valid = torch.isfinite(tensors[0]).all()
+            safe_tensors = []
+            for tensor in tensors:
+                if tensor.is_floating_point():
+                    inference_valid &= torch.isfinite(tensor).all()
+                    safe_tensors.append(torch.where(torch.isfinite(tensor), tensor,
+                                                    torch.zeros_like(tensor)))
+                else:
+                    safe_tensors.append(tensor)
             for name, tensor in zip(request.input_names, tensors):
                 if name in ("edge_mask", "coarse_edge_mask") and tensor.dtype != torch.bool:
                     return None
                 if name in ("edges", "coarse_edges", "region_ids") and tensor.dtype != torch.long:
                     return None
-            by_name = dict(model_inputs)
+            by_name = dict(zip(request.input_names, safe_tensors))
             if candidate_mask is not None:
                 if (self.track not in ("C1", "C2") or request.candidate_support_mode != "device-mask"
                         or not isinstance(candidate_mask, torch.Tensor)
@@ -368,8 +378,10 @@ class ProductionMecoAdapter:
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
                    or value.device != self.device or value.device.type != "cuda"
-                   or not bool(torch.isfinite(value).all()) for value in values.values()):
+                   for value in values.values()):
                 return None
+            for value in values.values():
+                inference_valid &= torch.isfinite(value).all()
             if values["hidden"].shape != (batch, HIDDEN):
                 return None
             if self.track.startswith("A"):
@@ -379,13 +391,18 @@ class ProductionMecoAdapter:
                     if self.track == "A1" else
                     values["utility"].ndim == 2 and values["utility"].shape == by_name["node_features"].shape[:2])
                 if (not utility_shape_ok or values["penalty"].shape != values["utility"].shape
-                        or values["behavior_logits"].shape != (batch, 5)
-                        or bool((values["penalty"] < 0).any())):
+                        or values["behavior_logits"].shape != (batch, 5)):
                     return None
+                inference_valid &= (values["penalty"] >= 0).all()
             elif (values["candidate_utility"].shape != (batch, len(request.candidate_ids))
-                  or values["uncertainty"].shape != values["candidate_utility"].shape
-                  or bool((values["uncertainty"] < 0).any())):
+                  or values["uncertainty"].shape != values["candidate_utility"].shape):
                 return None
+            else:
+                inference_valid &= (values["uncertainty"] >= 0).all()
+            values = {name: torch.where(inference_valid, value,
+                                        torch.zeros_like(value))
+                      for name, value in values.items()}
+            values["__inference_valid"] = inference_valid
             done = time.monotonic()
             if (done - request.capture_monotonic > MECO_MAX_INFERENCE_AGE_S
                     or done > request.expires_monotonic):
@@ -1434,6 +1451,14 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                                          validate_inputs=False)
     else:
         logits = candidate_policy_logits(utility[None], valid, route_cost, risk_cost)
+    inference_valid = output.get("__inference_valid")
+    if inference_valid is not None:
+        # A device-side producer validity bit avoids a scalar host read while
+        # retaining the adapter's deterministic failure behavior.
+        logits = torch.where(inference_valid.reshape(1, 1), logits, fallback_logits)
+        output_hidden = torch.where(inference_valid, output["hidden"], hidden)
+    else:
+        output_hidden = output["hidden"]
     provenance = ({"schema": MECO_INFERENCE_SCHEMA,
         "model_id": inference_request.model_id,
         "checkpoint_sha256": inference_request.checkpoint_sha256,
@@ -1449,7 +1474,7 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
         "expires_monotonic": inference_request.expires_monotonic,
         "counters": model.inference_counters}
         if isinstance(model, ProductionMecoAdapter) else None)
-    return {"logits": logits, "utility": utility, "hidden": output["hidden"],
+    return {"logits": logits, "utility": utility, "hidden": output_hidden,
             "uncertainty": output.get("uncertainty"), "raw": output,
             "inference_status": "accepted" if isinstance(model, ProductionMecoAdapter) else "trainer_direct",
             "inference_provenance": provenance}

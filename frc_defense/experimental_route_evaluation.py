@@ -127,7 +127,7 @@ class DeviceRouteBatch:
             rows.append(RouteResult(query.candidate_id, query.snapshot_id,
                 query.world, query.slot, labels.get(code, "invalid"),
                 bool(feasible[index]), distances[index] if feasible[index] else None,
-                path if count else None, costs[index], self.cost_units,
+                path if count else None, costs[index] if count else None, self.cost_units,
                 self.cost_provenance))
         return tuple(rows)
 

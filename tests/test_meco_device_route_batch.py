@@ -16,12 +16,15 @@ from frc_defense.experimental_route_evaluation import (
 import frc_defense.meco_candidates as meco_candidates
 from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
                                          _goal_nodes_batch)
+from frc_defense.meco_pose_graph import build_legal_pose_graph
 from frc_defense.meco_track_training import _d1_d2_scores
 from types import SimpleNamespace
 from frc_defense.learning_contract import CandidateTable
 from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_WIDTH,
                                      SAFE_ACTION_FEATURES,
                                      ProductionMecoAdapter, SafeActionCandidates,
+                                     candidate_feature_tensor,
+                                     build_safe_action_candidates,
                                      make_meco_track, sample_candidate_action,
                                      make_meco_inference_request, score_candidates)
 from frc_defense.curriculum_scenarios import make_curriculum_env
@@ -250,10 +253,22 @@ def test_c1_production_worker_accepts_device_mask_and_returns_model_response():
     response = adapter._infer_sync(request,
         {**inputs, "__candidate_valid_mask": mask}, now=time.monotonic())
 
-    assert response is not None
+    assert response is not None, adapter._last_inference_exception_type
     assert response.track == "C1"
     assert response.candidate_mask_digest == request.candidate_mask_digest
     assert response.outputs["candidate_utility"].shape == (1, 2)
+
+    bad_inputs = dict(inputs)
+    bad_inputs["globals_"] = fake(torch.full((1, 7), float("nan")))
+    bad_request = make_meco_inference_request(adapter, table=table,
+        observation_timestamp=1., capture_monotonic=capture,
+        inputs=bad_inputs, candidate_batch=candidate_batch)
+    guarded = adapter._infer_sync(bad_request,
+        {**bad_inputs, "__candidate_valid_mask": mask}, now=time.monotonic())
+    assert guarded is not None
+    assert not guarded.outputs["__inference_valid"].item()
+    assert torch.equal(guarded.outputs["candidate_utility"],
+                       torch.zeros_like(guarded.outputs["candidate_utility"]))
 
 
 def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_support():
@@ -381,10 +396,19 @@ def test_c1_c2_device_candidate_scores_and_logprob_match_legacy_with_continue(
     raw = torch.randn((1, count, len(names)))
     raw[:, :, 0] = torch.arange(count, dtype=raw.dtype)
     raw[:, -1, names.index("is_continue")] = 1.
-    missing = torch.zeros_like(raw)
     valid = torch.ones((1, count), dtype=torch.bool)
     valid[0, 1] = False
-    rows = tuple(tuple(value for value in row) for row in raw[0].tolist())
+    missing = torch.zeros_like(raw)
+    confidence_column = names.index("track_confidence")
+    opponent_gap_column = names.index("opponent_distance_m")
+    raw[0, 2, confidence_column] = 0.
+    raw[0, 5, opponent_gap_column] = 0.
+    missing[0, 2, confidence_column] = 1.
+    missing[0, 5, opponent_gap_column] = 1.
+    rows = [list(row) for row in raw[0].tolist()]
+    rows[2][confidence_column] = None
+    rows[5][opponent_gap_column] = None
+    rows = tuple(tuple(value for value in row) for row in rows)
     table = CandidateTable("parity:device", ids, rows,
         tuple(bool(value) for value in valid[0].tolist()), names)
     queries = tuple(DeviceRouteQuery(item, "parity:device", 0, 3) for item in ids)
@@ -400,6 +424,15 @@ def test_c1_c2_device_candidate_scores_and_logprob_match_legacy_with_continue(
         torch.zeros((count, 2), dtype=torch.bool), raw, missing, valid,
         torch.zeros((1, count)), route_cost, risk_cost, route,
         torch.tensor(0))
+    legacy_raw, legacy_missing = candidate_feature_tensor(table, device="cpu",
+        dtype=raw.dtype)
+    assert torch.equal(legacy_raw, batch.raw_features[0])
+    assert torch.equal(legacy_missing, batch.missing_mask[0])
+    device_raw, device_missing = candidate_feature_tensor(table, device="cpu",
+        dtype=raw.dtype, raw_features=batch.raw_features[0],
+        missing_mask=batch.missing_mask[0])
+    assert torch.equal(device_raw, legacy_raw)
+    assert torch.equal(device_missing, legacy_missing)
     model = make_meco_track(track).eval()
     raster = torch.randn((1, 6, 16, 16))
     globals_ = torch.randn((1, 7))
@@ -588,15 +621,73 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
     device_queries = tuple(DeviceRouteQuery(query.candidate_id,
         query.snapshot_id, query.world, query.slot) for query in queries)
     goals = torch.tensor([query.goal_xy for query in queries], dtype=env.policy_pose.dtype)
+    learned_cost = torch.full((env.planner.nx, env.planner.ny), .2,
+                              dtype=env.policy_pose.dtype)
 
-    legacy = evaluate_routes(env, queries)
-    device = evaluate_device_routes(env, device_queries, goals).project_results()
+    # This guard spans the real evaluator, including TensorADStar planning,
+    # endpoint/collision checks, and cost integration. Projection is allowed
+    # only after the decision-valued tensors have left that guarded section.
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        batch = evaluate_device_routes(env, device_queries, goals,
+            learned_traversal_cost=learned_cost,
+            learned_cost_provenance="projection-guard-contract")
+    device = batch.project_results()
+    legacy = evaluate_routes(env, queries, learned_traversal_cost=learned_cost,
+        learned_cost_provenance="projection-guard-contract")
 
     assert [result.status for result in device] == [result.status for result in legacy]
     assert [result.feasible for result in device] == [result.feasible for result in legacy]
-    for left, right in zip(device, legacy):
+    for index, (left, right) in enumerate(zip(device, legacy)):
         if left.distance_m is not None or right.distance_m is not None:
             assert left.distance_m == pytest.approx(right.distance_m, abs=1e-6)
+        if left.path_points_m is not None and right.path_points_m is not None:
+            assert len(left.path_points_m) == len(right.path_points_m)
+            for left_point, right_point in zip(left.path_points_m, right.path_points_m):
+                assert left_point == pytest.approx(right_point, abs=1e-6)
+        assert left.weighted_cost == pytest.approx(right.weighted_cost, abs=1e-6)
+        assert left.cost_provenance.startswith("projection-guard-contract")
+        assert right.cost_provenance.startswith("projection-guard-contract")
+        assert left.cost_units == right.cost_units
+        if right.feasible and right.status == "feasible":
+            endpoint = right.path_points_m[-1]
+            goal = queries[index].goal_xy
+            expected_error = math.dist(endpoint, goal)
+            assert batch.endpoint_error_m[index].item() == pytest.approx(
+                expected_error, abs=1e-6)
+
+
+def test_live_route_candidate_scorer_and_sampler_path_has_no_projection():
+    """Actual route/candidate/model/sampler path; execution is E2E-gated."""
+    env = make_curriculum_env("pickup_simple", "single", 1, "cpu", 73,
+                              horizon=10, fuel_physics=False)
+    env.set_focal_pose_estimate((10., 4., 0.))
+    observation = env.observe()
+    safe = build_safe_action_candidates(env, observation, world=0, slot=3,
+                                        episode_id="live-device-route")
+    graph = build_legal_pose_graph(env, slot=3)
+    target_rows = {int(safe.table.features[i][1]): safe.table.features[i]
+                   for i in range(4) if safe.table.valid_mask[i]
+                   and safe.table.features[i][1] is not None}
+    specs = [(action, 0, 0., 0.,
+              (int(safe.table.features[action][1])
+               if action < 4 and safe.table.features[action][1] is not None else None))
+             for action in range(8)]
+    with _NoHostTensorProjection(), _NoHostScalarSync():
+        candidate_set = meco_candidates._build_device_candidate_set(env, safe,
+            graph, specs, target_rows, candidate_k=8, action_ticks=1,
+            prediction_mode="current", active_commitment=None,
+            continue_index=None, oracle_capacity=len(specs),
+            learned_traversal_cost=None, learned_cost_scale=1.)
+        result = score_candidates("C1", make_meco_track("C1").eval(),
+            raster=observation, globals_=torch.zeros((1, 7)),
+            table=candidate_set.table,
+            candidate_batch=candidate_set.device_batch,
+            route_cost=candidate_set.route_cost_points[None],
+            risk_cost=candidate_set.risk_cost_points[None])
+        selected, logprob, _ = sample_candidate_action(result["logits"],
+                                                         deterministic=True)
+    assert candidate_set.device_batch is not None
+    assert selected.shape == logprob.shape == (1,)
 
 
 def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():
