@@ -40,3 +40,15 @@ This branch has not run tests, simulators, runtime workloads, or GPU/device
 commands. The required review after campaign lease release must verify sensor
 RNG semantics, active/inactive row values, initialization, cadence, and seeded
 end-to-end replay provenance as specified in the approved plan.
+
+## Approved plan extension and follow-on changes
+
+The subsequent Pass 1-approved plan is `2d67e108da7dd99ddf353cd5d5d25261c48abc06`,
+artifact SHA `4517ca3fcf0970dc0466287e3889d7e9b3de4a47fa9999647b30f79ee4b0e5c0`.
+It extends this tranche to active-derived planner/reset predicates and the
+`TensorSim.step` active-mask contract. `TensorSim.reset_done` and randomized
+physics parameters now draw fixed `[N, ...]` batches and mask writes, changing
+RNG consumption for inactive rows and partial resets; seeded parity is not
+claimed. Empty active masks proceed through fixed-shape masked physics rather
+than a host early return. These changes have static checks only and require
+runtime review after campaign access is released.

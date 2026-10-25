@@ -268,15 +268,15 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
 
     def reset_done(self, mask):
         """Reset selected worlds in place without disturbing the other worlds."""
+        if (self.device.type != "cpu" and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU reset mask must already reside on the simulator device")
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
         if self.randomize: self._randomize(mask)
-        count=int(mask.sum().item())
-        x=torch.zeros((self.n,self.num_robots),device=self.device)
-        y=torch.zeros_like(x); a=torch.zeros_like(x)
-        if count:
-            x[mask]=torch.rand((count,self.num_robots),device=self.device,generator=self.generator)
-            y[mask]=torch.rand((count,self.num_robots),device=self.device,generator=self.generator)
-            a[mask]=torch.rand((count,self.num_robots),device=self.device,generator=self.generator)
+        shape=(self.n,self.num_robots)
+        x=torch.rand(shape,device=self.device,generator=self.generator)
+        y=torch.rand(shape,device=self.device,generator=self.generator)
+        a=torch.rand(shape,device=self.device,generator=self.generator)
         margin=.9
         self.pose[:,:,0]=torch.where(mask[:,None],margin+x*(self.field_length-2*margin),self.pose[:,:,0])
         self.pose[:,:,1]=torch.where(mask[:,None],margin+y*(self.field_width-2*margin),self.pose[:,:,1])
@@ -311,15 +311,13 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
 
     def _randomize(self, mask, nominal=False):
         """Sample or restore physical parameters using device-side tensors only."""
+        if (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                mask.dtype is not torch.bool or tuple(mask.shape) != (self.n,)):
+            raise ValueError("randomization mask must be a device bool vector [N]")
         def sample(base, shape, lo, hi):
             if nominal: return torch.full(shape,float(base),device=self.device)
-            value=torch.full(shape,float(base),device=self.device)
-            count=int(mask.sum().item())
-            if count:
-                sample_shape=(count,*shape[1:])
-                value[mask]=float(base)*(lo+torch.rand(
-                    sample_shape,device=self.device,generator=self.generator)*(hi-lo))
-            return value
+            multiplier=lo+torch.rand(shape,device=self.device,generator=self.generator)*(hi-lo)
+            return float(base)*multiplier
         pair=(self.n,self.num_robots)
         for name,base,lo,hi in (("length",self._base['length'],.82,1.2),("width",self._base['width'],.82,1.2),
                                 ("mass",self._base['mass'],.65,1.45),("speed",self._base['speed'],.75,1.3),
@@ -346,12 +344,11 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         accel=torch.minimum(self.accel,torch.minimum(motor_accel,tire_accel))
         self.accel.copy_(torch.where(mask[:,None],accel,self.accel))
 
-    def step(self, command, active_mask=None, *, _active_nonempty=False):
+    def step(self, command, active_mask=None):
         """Advance physics, optionally compiling the complete physics step.
 
-        The full-step route is only selected for explicit-mask callers that
-        guarantee a nonempty active batch. This removes the tensor-to-host
-        empty-mask check from the captured graph. The fixed tensor shapes and
+        The full-step route accepts fixed-shape masks including empty batches;
+        all persistent writes are masked on device. The fixed tensor shapes and
         static collider/contact configuration are guarded by Dynamo; changing
         them can trigger recompilation. The compiled path mutates state tensors
         in place, so state parity must be checked before enabling it for runs.
@@ -362,8 +359,15 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         scripts/benchmark_tensor_scaling.py --envs 1024 --decisions 256
         --physics-ticks 12 --device cuda:0 --seed 9001``.
         """
-        if (self.num_robots == 2 and self._torch_compile_step_enabled and not self._torch_compile_step_failed
-                and _active_nonempty and active_mask is not None):
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU active mask must already reside on the simulator device")
+        if active_mask is not None:
+            active_mask=torch.as_tensor(active_mask,device=self.device,
+                                        dtype=torch.bool).reshape(self.n)
+        if (self.num_robots == 2 and self._torch_compile_step_enabled and
+                not self._torch_compile_step_failed and active_mask is not None):
             if self._torch_compiled_step is None:
                 try:
                     self._torch_compiled_step = torch.compile(
@@ -373,29 +377,25 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
                     )
                 except Exception as exc:
                     self._disable_compiled_step(exc)
-                    self._step_eager(command, active_mask, _active_nonempty=True,
-                                     _use_compiled_swerve=False)
+                    self._step_eager(command, active_mask, _use_compiled_swerve=False)
                     return self.state
             try:
                 self._torch_compiled_step(command, active_mask)
             except Exception as exc:
                 if self._is_compile_time_failure(exc):
                     self._disable_compiled_step(exc)
-                    self._step_eager(command, active_mask, _active_nonempty=True,
-                                     _use_compiled_swerve=False)
+                    self._step_eager(command, active_mask, _use_compiled_swerve=False)
                     return self.state
                 # A compiled execution can fail after mutating some state.
                 # Do not apply the same physics step again through eager code.
                 raise
             return self.state
-        self._step_eager(command, active_mask, _active_nonempty=_active_nonempty,
-                         _use_compiled_swerve=True)
+        self._step_eager(command, active_mask, _use_compiled_swerve=True)
         return self.state
 
     def _step_compiled_eager(self, command, active_mask):
         """Compilation entry point; bypasses the separately compiled swerve."""
-        self._step_eager(command, active_mask, _active_nonempty=True,
-                         _use_compiled_swerve=False)
+        self._step_eager(command, active_mask, _use_compiled_swerve=False)
         return self.pose, self.velocity
 
     def _disable_compiled_step(self, exc):
@@ -408,8 +408,11 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
             stacklevel=2,
         )
 
-    def _step_eager(self, command, active_mask=None, *, _active_nonempty=False,
-                    _use_compiled_swerve=True):
+    def _step_eager(self, command, active_mask=None, *, _use_compiled_swerve=True):
+        if (active_mask is not None and self.device.type != "cpu" and
+                (not isinstance(active_mask, torch.Tensor) or
+                 active_mask.device != self.device)):
+            raise ValueError("GPU active mask must already reside on the simulator device")
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool)
                      if active_mask is None else
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
@@ -424,8 +427,6 @@ class TensorVectorizedSimulator(TensorPhysicsCollisionMixin):
         # module velocity vectors and preserves feasible combined motion.
         translation_scale=(self.speed/translation_speed).clamp(max=1.)
         cmd=torch.cat((cmd[...,:2]*translation_scale[...,None],omega[...,None]),-1)
-        if not _active_nonempty and not bool(active_mask.any()):
-            return self.state
         field_sweep_pose=(self.pose.clone() if self.field_colliders.shape[0] else None)
         fused_swerve_pose = False
         if (self.num_robots in (2, 6) and _use_compiled_swerve and self._fused_swerve_pose_hip_enabled and

@@ -15,8 +15,21 @@ except ImportError:  # Keep package imports usable without the training extra.
 class TensorDefenseResetMixin:
     """Sample episode layouts and reset full or partial environment batches."""
 
+    def _assert_device_condition(self, condition, message):
+        """Queue a fail-closed tensor assertion without reading its value on CPU."""
+        if (not isinstance(condition, torch.Tensor) or condition.device != self.device or
+                condition.numel() != 1):
+            raise ValueError("reset validation must be a device scalar tensor")
+        assert_async=getattr(torch,"_assert_async",None)
+        if assert_async is None:
+            raise RuntimeError("device-side reset validation is unavailable")
+        assert_async(condition,message)
+
     def _sample_episode_endpoints(self, goal_override=None, start_zone=None, goal_zone=None, mask=None):
         """Sample endpoints in requested zones, or random distinct field zones."""
+        if (mask is not None and self.device.type != "cpu" and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU endpoint mask must already reside on the environment device")
         mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if mask is None
               else torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n))
         length, width = self.sim.field_length, self.sim.field_width
@@ -34,8 +47,10 @@ class TensorDefenseResetMixin:
                 return torch.full((self.n,),zone_ids[value.lower()],device=self.device,dtype=torch.long)
             zones=torch.as_tensor(value,device=self.device,dtype=torch.long).reshape(-1)
             if zones.numel()==1: zones=zones.expand(self.n)
-            if zones.numel()!=self.n or bool(((zones<0)|(zones>2)).any().item()):
+            if zones.numel()!=self.n:
                 raise ValueError("zone ids must contain one value per environment in 0..2")
+            self._assert_device_condition(((zones>=0)&(zones<=2)).all(),
+                                          "zone ids must be in 0..2")
             return zones
         requested_start=zone_tensor(start_zone)
         requested_goal=zone_tensor(goal_zone)
@@ -47,8 +62,8 @@ class TensorDefenseResetMixin:
             if requested_goal is not None:
                 goal_zone=requested_goal
                 same=start_zone==goal_zone
-                if bool(same.any().item()):
-                    raise ValueError("start and goal zones must be different")
+                self._assert_device_condition((~same).all(),
+                                              "start and goal zones must be different")
             elif requested_start is not None:
                 goal_zone=(start_zone+self._random_active(mask,(),high=2).long()+1)%3
             else:
@@ -63,8 +78,9 @@ class TensorDefenseResetMixin:
                 choices = self._random_active(mask,(),high=2).long()
                 start_zone = torch.where(goal_zone == 0, choices + 1,
                              torch.where(goal_zone == 1, choices * 2, choices))
-            elif bool((start_zone==goal_zone).any().item()):
-                raise ValueError("start and goal zones must be different")
+            elif isinstance(start_zone,torch.Tensor) and isinstance(goal_zone,torch.Tensor):
+                self._assert_device_condition((start_zone!=goal_zone).all(),
+                                              "start and goal zones must be different")
 
         def sample_points(zones, avoid=None):
             low, high = edges[zones] + margin, edges[zones + 1] - margin
@@ -88,31 +104,31 @@ class TensorDefenseResetMixin:
             # random choice from a legal 0.2 m lattice; never return the last
             # unchecked sample. If the 3 m separation preference leaves no
             # legal point, relax only that preference, not collider clearance.
-            if bool(unresolved.any().item()):
-                xs=torch.arange(margin,self.sim.field_length-margin+.001,.2,
+            xs=torch.arange(margin,self.sim.field_length-margin+.001,.2,
                                 device=self.device,dtype=self.sim.pose.dtype)
-                ys=torch.arange(margin,width-margin+.001,.2,
+            ys=torch.arange(margin,width-margin+.001,.2,
                                 device=self.device,dtype=self.sim.pose.dtype)
-                gx,gy=torch.meshgrid(xs,ys,indexing="ij")
-                lattice=torch.stack((gx.flatten(),gy.flatten()),-1)
-                zone_of=torch.where(lattice[:,0]<depth,0,
+            gx,gy=torch.meshgrid(xs,ys,indexing="ij")
+            lattice=torch.stack((gx.flatten(),gy.flatten()),-1)
+            zone_of=torch.where(lattice[:,0]<depth,0,
                          torch.where(lattice[:,0]>=length-depth,2,1))
-                clear=torch.ones((lattice.shape[0],),device=self.device,dtype=torch.bool)
-                for box in self.sim.field_colliders:
-                    clear &= ((lattice[:,0]-box[0]).abs()>box[2]+.8)|((lattice[:,1]-box[1]).abs()>box[3]+.8)
-                for obstacle in self.sim.obstacles:
-                    clear &= ((lattice-obstacle[:2]).square().sum(-1)>(obstacle[2]+.8)**2)
-                allowed=clear[None,:]&(zone_of[None,:]==zones[:,None])
-                if avoid is not None:
-                    separated=allowed&((lattice[None,:,:]-avoid[:,None,:]).square().sum(-1)>=9.)
-                    allowed=torch.where(separated.any(-1,keepdim=True),separated,allowed)
-                has_legal_point=allowed.any(-1)
-                if not bool(has_legal_point[unresolved].all().item()):
-                    raise RuntimeError("no legal endpoint exists in the selected field zone")
-                random_rank=self._random_active(mask,(lattice.shape[0],))
-                fallback_index=random_rank.masked_fill(~allowed,-1.).argmax(-1)
-                fallback=lattice[fallback_index]
-                points=torch.where(unresolved[:,None],fallback,points)
+            clear=torch.ones((lattice.shape[0],),device=self.device,dtype=torch.bool)
+            for box in self.sim.field_colliders:
+                clear &= ((lattice[:,0]-box[0]).abs()>box[2]+.8)|((lattice[:,1]-box[1]).abs()>box[3]+.8)
+            for obstacle in self.sim.obstacles:
+                clear &= ((lattice-obstacle[:2]).square().sum(-1)>(obstacle[2]+.8)**2)
+            allowed=clear[None,:]&(zone_of[None,:]==zones[:,None])
+            if avoid is not None:
+                separated=allowed&((lattice[None,:,:]-avoid[:,None,:]).square().sum(-1)>=9.)
+                has_separated=separated.any(-1,keepdim=True)
+                allowed=torch.where(has_separated,separated,allowed)
+            has_legal_point=allowed.any(-1)
+            self._assert_device_condition((has_legal_point | ~unresolved).all(),
+                                          "no legal endpoint exists in a selected field zone")
+            random_rank=self._random_active(mask,(lattice.shape[0],))
+            fallback_index=random_rank.masked_fill(~allowed,-1.).argmax(-1)
+            fallback=lattice[fallback_index]
+            points=torch.where(unresolved[:,None],fallback,points)
             return points
 
         start = sample_points(start_zone)
@@ -126,6 +142,9 @@ class TensorDefenseResetMixin:
         if self._adstar_planners is None or not self.adstar_spawn_hint:
             return
         starts=self.sim.pose[:,1,:2]
+        if (mask is not None and self.device.type != "cpu" and
+                (not isinstance(mask,torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU defender placement mask must already reside on the environment device")
         selected=(torch.ones(self.n,device=self.device,dtype=torch.bool) if mask is None
                   else torch.as_tensor(mask,device=self.device,dtype=torch.bool))
         planner=self._adstar_planners
@@ -139,6 +158,9 @@ class TensorDefenseResetMixin:
         bumps=self.sim.bump_regions
         if self._adstar_defender_planners is None or not bumps.numel():
             return
+        if (mask is not None and self.device.type != "cpu" and
+                (not isinstance(mask,torch.Tensor) or mask.device != self.device)):
+            raise ValueError("GPU defender placement mask must already reside on the environment device")
         selected=(torch.ones(self.n,device=self.device,dtype=torch.bool) if mask is None
                   else torch.as_tensor(mask,device=self.device,dtype=torch.bool))
         position=self.sim.pose[:,1,:2]
@@ -193,8 +215,8 @@ class TensorDefenseResetMixin:
             place=needs_move&clear
             position.copy_(torch.where(place[:,None],candidate,position))
             needs_move&=~place
-            if not bool(needs_move.any().item()):
-                break
+        self._assert_device_condition((~needs_move).all(),
+                                      "could not place defender in a clear start position")
 
     def reset(self,seed=None,options=None):
         if seed is not None:self.generator.manual_seed(int(seed))
@@ -315,8 +337,7 @@ class TensorDefenseResetMixin:
         self._intake_collecting[mask]=False
         self._planner_tick=torch.where(mask,torch.full_like(self._planner_tick,
             self.adstar_replan_interval-1),self._planner_tick)
-        if full_reset:
-            self._planner_tick_scalar=self.adstar_replan_interval-1
+        # Per-world cadence remains active for full and partial reset batches.
         radii=.3+self._random_active(mask,())*.5
         self.goal_radius=torch.where(mask,radii if self.randomize else torch.full_like(radii,self.base_goal_radius),self.goal_radius)
         self.steps=torch.where(mask,torch.zeros_like(self.steps),self.steps)

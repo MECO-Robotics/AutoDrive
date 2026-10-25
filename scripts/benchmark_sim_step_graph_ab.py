@@ -61,7 +61,7 @@ def run_block(env, mode, graph, commands, active, ticks, device):
     start = time.perf_counter()
     if mode == "eager":
         for _ in range(ticks):
-            env.sim.step(commands, active, _active_nonempty=True)
+            env.sim.step(commands, active)
     else:
         for _ in range(ticks):
             graph.replay()
@@ -90,12 +90,12 @@ def main():
     # Warm lazy extensions and allocation paths, then capture with persistent
     # fixed-shape action and active-mask buffers.
     for _ in range(4):
-        env.sim.step(commands, active, _active_nonempty=True)
+        env.sim.step(commands, active)
     env.reset(seed=args.seed)
     torch.cuda.synchronize(device)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        env.sim.step(commands, active, _active_nonempty=True)
+        env.sim.step(commands, active)
     torch.cuda.synchronize(device)
 
     report = {
@@ -109,7 +109,7 @@ def main():
     try:
         env.reset(seed=args.seed)
         for _ in range(args.parity_ticks):
-            env.sim.step(commands, active, _active_nonempty=True)
+            env.sim.step(commands, active)
         eager_final = state_snapshot(env.sim)
 
         env.reset(seed=args.seed)

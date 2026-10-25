@@ -70,12 +70,12 @@ def main() -> None:
         sim._fused_robot_collision_multi_hip_enabled = enabled
         restore()
         for _ in range(args.warmup):
-            sim.step(command, active, _active_nonempty=True)
+            sim.step(command, active)
         torch.cuda.synchronize(device)
         restore()
         started = time.perf_counter()
         for _ in range(args.ticks):
-            sim.step(command, active, _active_nonempty=True)
+            sim.step(command, active)
         torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - started
         state = {key: value.clone() for key, value in vars(sim).items()

@@ -167,7 +167,7 @@ def benchmark(args, variant, scene, substeps):
             actual_substeps.append(count)
             sim.dt = .02/count
             for _ in range(count):
-                sim.step(command, active, _active_nonempty=True)
+                sim.step(command, active)
                 if variant != "robot_only":
                     fuel.step(active, pa, owner, dt=.02/count, substeps=1, adaptive=False)
         # Warm on disposable state: timing starts from exactly the same seed.
@@ -210,7 +210,7 @@ def benchmark(args, variant, scene, substeps):
             for _ in range(parity_ticks):
                 replay.replay()
                 for _ in range(substeps):
-                    reference[0].step(reference[5], reference[2], _active_nonempty=True)
+                    reference[0].step(reference[5], reference[2])
                     reference[1].step(reference[2], reference[3], reference[4],
                                       dt=.02/substeps, substeps=1, adaptive=False)
             short_delta = max(float((a-b).abs().max()) for a,b in
@@ -234,7 +234,7 @@ def benchmark(args, variant, scene, substeps):
             ref_sim, ref_fuel, ref_active, ref_pa, ref_owner, ref_command = initialize(args, config, scene)
             for _ in range(args.ticks):
                 for _ in range(substeps):
-                    ref_sim.step(ref_command, ref_active, _active_nonempty=True)
+                    ref_sim.step(ref_command, ref_active)
                     ref_fuel.step(ref_active, ref_pa, ref_owner, dt=.02/substeps, substeps=1, adaptive=False)
             reference = (ref_fuel.pos.cpu(), ref_fuel.vel.cpu(), ref_sim.velocity.cpu())
             graph_delta = max(float((a-b).abs().max()) for a,b in zip(states[-1], reference))

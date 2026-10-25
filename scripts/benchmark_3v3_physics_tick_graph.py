@@ -33,7 +33,7 @@ def eager_tick(env, command, active):
     try:
         env.sim.dt = dt
         for _ in range(count):
-            env.sim.step(command, active, _active_nonempty=True)
+            env.sim.step(command, active)
             physics.step(active, env.piece_active, env.piece_owner,
                          dt=dt, substeps=1, adaptive=False)
     finally:
@@ -108,7 +108,7 @@ def main():
         try:
             graphed.sim.dt = dt
             with torch.cuda.graph(graph):
-                graphed.sim.step(graph_command, graph_active, _active_nonempty=True)
+                graphed.sim.step(graph_command, graph_active)
                 graphed.fuel_physics.step(
                     graph_active, graphed.piece_active, graphed.piece_owner,
                     dt=dt, substeps=1, adaptive=False)

@@ -163,9 +163,9 @@ def _integrated_sim_contact_parity(worlds=64, ticks=64, device="cuda:0"):
             active = torch.zeros(worlds, dtype=torch.bool, device=device)
         else:
             active = torch.arange(worlds, device=device).remainder(4).ne(tick % 4)
-        reference._step_eager(command_bank[tick], active, _active_nonempty=True,
+        reference._step_eager(command_bank[tick], active,
                               _use_compiled_swerve=False)
-        candidate._step_eager(command_bank[tick], active, _active_nonempty=True,
+        candidate._step_eager(command_bank[tick], active,
                               _use_compiled_swerve=True)
         for name in state_names:
             _same(getattr(reference, name), getattr(candidate, name),
