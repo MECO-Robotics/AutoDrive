@@ -1712,7 +1712,9 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
-        commitment=commitment, device_resident=track in ("C1", "C2"))
+        commitment=commitment, device_resident=track in ("C1", "C2", "D1", "D2"))
+    if track in ("C1", "C2", "D1", "D2"):
+        _require_device_candidate_batch(candidate_set, env, track)
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
         hidden, tracking_was_available, raster)
@@ -1752,19 +1754,17 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     else:
         device_batch = candidate_set.device_batch
         if device_batch is None:
-            route_cost = _route_cost_tensor(candidate_set,
-                route_cost_points_per_second, device=env.device)
-            risk_cost = candidate_set.risk_cost_points.unsqueeze(0)
-        else:
-            route_cost = (device_batch.eta_s *
-                float(route_cost_points_per_second))
-            risk_cost = device_batch.risk_cost_points
+            raise RuntimeError(f"{track} requires device-resident candidate scoring")
+        route_cost = (device_batch.eta_s * float(route_cost_points_per_second))
+        risk_cost = device_batch.risk_cost_points
         decision = score_candidates(track, model, raster=raster, globals_=globals_,
             table=candidate_set.table, hidden=hidden_before, graph=graph_data,
             route_cost=route_cost, risk_cost=risk_cost,
             candidate_batch=device_batch,
             observation_timestamp=candidate_set.observation.timestamp,
             capture_monotonic=candidate_set.observation.capture_monotonic)
+        if decision["logits"].device != torch.device(env.device):
+            raise RuntimeError(f"{track} scorer returned logits off its assigned GPU")
         decision["logits"] = _apply_candidate_hysteresis(
             decision["logits"], candidate_set.table, candidate_batch=device_batch)
         path_cost = None
@@ -2788,9 +2788,10 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
                   prediction_mode: str | None = None,
                   route_cost_points_per_second=ROUTE_COST_POINTS_PER_SECOND):
     device_batch = getattr(candidate_set, "device_batch", None)
+    if policy not in ("D1", "D2"):
+        raise ValueError("deterministic comparator policy must be D1 or D2")
+    _require_device_candidate_batch(candidate_set, env, policy)
     if device_batch is not None:
-        if policy not in ("D1", "D2"):
-            raise ValueError("deterministic comparator policy must be D1 or D2")
         names = tuple(device_batch.feature_names)
         columns = {name: index for index, name in enumerate(names)}
         required = ("action_index", "track_confidence", "track_age_s",
@@ -2829,34 +2830,43 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
         valid = device_batch.valid_mask[0] & finite_raw & finite_costs
         scores = scores.masked_fill(~valid | ~torch.isfinite(scores), -torch.inf)
         return scores[None]
-    table = candidate_set.table
-    cols = {name: i for i, name in enumerate(table.feature_names)}
-    values = []
-    for index, (name, row, feasible) in enumerate(zip(table.candidate_ids,
-                                                      table.features,
-                                                      table.valid_mask)):
-        if not feasible:
-            values.append(float("-inf"))
-            continue
-        action = int(row[cols["action_index"]])
-        conf = row[cols["track_confidence"]]
-        age = row[cols["track_age_s"]]
-        nearby = row[cols["nearby_sensed_track_count"]]
-        if action < 4:
-            score = (1. + .2 * float(nearby or 0.) + .25 * float(conf or 0.)
-                     - .04 * float(age or 0.))
-        else:
-            score = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}.get(name, 0.)
-        route_cost = (float(candidate_set.route_cost_points[index].item()) /
-                      ROUTE_COST_POINTS_PER_SECOND * route_cost_points_per_second)
-        score -= (route_cost +
-                  float(candidate_set.risk_cost_points[index].item()))
-        switch_col = cols.get("commitment_switch_cost")
-        if switch_col is not None:
-            score -= (float(row[switch_col] or 0.) *
-                      CANDIDATE_BOUNDARY["commitment_switch_cost_points"])
-        values.append(score)
-    return torch.tensor(values, device=env.device, dtype=torch.float32)[None]
+    raise RuntimeError("device candidate batch is required for D1/D2 scoring")
+
+
+def _require_device_candidate_batch(candidate_set, env, policy):
+    """Fail closed at the qualifying-policy boundary; never host-score candidates."""
+    batch = getattr(candidate_set, "device_batch", None)
+    if batch is None:
+        raise RuntimeError(f"{policy} requires a device-resident candidate batch")
+    expected = torch.device(env.device)
+    tensors = (batch.candidate_index, batch.action_index,
+        batch.target_track_index, batch.target_xy, batch.goal_xy,
+        batch.goal_heading, batch.raw_features, batch.missing_mask,
+        batch.valid_mask, batch.eta_s, batch.route_cost_points,
+        batch.risk_cost_points, batch.fallback_index)
+    if any(value.device != expected for value in tensors):
+        raise RuntimeError(f"{policy} candidate batch is not on expected device {expected}")
+    count = len(batch.candidate_ids)
+    if (batch.valid_mask.shape != (1, count)
+            or batch.raw_features.shape[0] != 1
+            or batch.raw_features.shape[1] != count
+            or batch.missing_mask.shape != batch.raw_features.shape
+            or batch.action_index.shape != (count,)
+            or batch.route_cost_points.shape != (1, count)
+            or batch.risk_cost_points.shape != (1, count)
+            or batch.route_batch.feasible.device != expected
+            or batch.route_batch.queries[0].snapshot_id != candidate_set.observation.snapshot_id
+            or any(query.snapshot_id != candidate_set.observation.snapshot_id
+                   for query in batch.route_batch.queries)):
+        raise RuntimeError(f"{policy} candidate batch shape or snapshot contract is invalid")
+    torch._assert_async(torch.isfinite(batch.raw_features).all(),
+        f"{policy} candidate batch contains non-finite features")
+    torch._assert_async(torch.isfinite(batch.route_cost_points).all(),
+        f"{policy} candidate batch contains non-finite route costs")
+    torch._assert_async(torch.isfinite(batch.risk_cost_points).all(),
+        f"{policy} candidate batch contains non-finite risk costs")
+    torch._assert_async(batch.valid_mask.any(),
+        f"{policy} candidate batch has no feasible action")
 
 
 def _timing_sync(env):
@@ -4049,14 +4059,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     prediction_mode=(effective_prediction_mode if use_d1_fallback
                                         else effective_control_modes.get(policy, "current")),
                                     route_cost_points_per_second=route_weight)
-                                if candidate_set.device_batch is not None:
-                                    choice_tensor = logits.argmax(-1)
-                                    device_dispatch_payload = candidate_set.device_batch.gather_action_payload(
-                                        choice_tensor).detach().to(device="cpu").reshape(-1).tolist()
-                                    choice = int(device_dispatch_payload[0])
-                                    candidate_set = materialize_device_candidate_evidence(candidate_set)
-                                else:
-                                    choice = int(logits.argmax(-1).item())
+                                _require_device_candidate_batch(candidate_set, env,
+                                    "D1" if use_d1_fallback else policy)
+                                if logits.device != torch.device(env.device):
+                                    raise RuntimeError("D1/D2 selector logits left the assigned GPU")
+                                choice_tensor = logits.argmax(-1)
+                                device_dispatch_payload = candidate_set.device_batch.gather_action_payload(
+                                    choice_tensor).detach().to(device="cpu").reshape(-1).tolist()
+                                choice = int(device_dispatch_payload[0])
+                                candidate_set = materialize_device_candidate_evidence(candidate_set)
                                 last_candidate_recall = candidate_set.candidate_recall
                                 _timing_sync(env)
                                 decision_latency = (time.perf_counter() - fallback_started) * 1000.
