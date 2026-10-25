@@ -106,17 +106,23 @@ provenance tranche.
      passing at this stage.
    - **Post-review finalization commit:** only after the candidate is approved,
      update the new entry's `reviewer.approved_commit` to the exact candidate
-     SHA, record the candidate/integration distinction in the implementer
-     fields, update the reviewer summary with the actual approval, recompute
-     the ledger SHA, and update the dashboard pin. Run the focused offline
-     contract tests and diff checks on this finalization state, then request a
-     second exact-head Pass 3 review of the finalization commit. That review
-     must verify both the earlier candidate approval and the exact finalizer
-     state. Do not integrate until the finalization review passes.
+     SHA and set `implementer.candidate_commit` to that same SHA. Keep only
+     this reviewed candidate SHA plus the two already-known prior status
+     integration SHAs in the digest-pinned ledger; do not put the finalizer or
+     main integration SHA in that ledger. Update the reviewer summary to
+     capture the first approval, recompute the ledger SHA, and update the
+     dashboard pin. Run the focused offline contract tests and diff checks on
+     this finalization state, then request a second exact-head Pass 3 review of
+     the finalization commit. That review must verify both the earlier
+     candidate approval and the exact finalizer state. Do not integrate until
+     the finalization review passes.
    - A final valid ledger entry must have its `reviewer.approved_commit`
      pointing to the reviewed candidate, never to a prior status-document
-     commit or to the finalization/integration commit itself. The metadata
-     finalization does not change runtime behavior.
+     commit or to the finalization/integration commit itself. Record the
+     finalizer commit SHA, main integration commit SHA, and second exact-head
+     reviewer verdict in the separate post-merge currentness evidence note;
+     do not add them to the digest-pinned ledger. The metadata finalization
+     does not change runtime behavior.
    The new entry must say summary-only and must not imply whole-plan approval.
 5. Preserve every existing ledger object and order. Update top-level scope,
    artifact-origin, and limits only enough to record this one additional
@@ -174,14 +180,19 @@ check against the exact current checkout:
   compare the served body SHA-256 byte-for-byte with the corresponding file
   from the same checkout.
 - Save these service, API, ledger, and eight-asset results in a separate
-  currentness evidence note linked from the top-level execution status. If
-  this evidence note is committed after the service check, state its commit
-  separately; it does not change application code or the ledger digest.
+  currentness evidence note linked from the top-level execution status. Include
+  the finalizer commit SHA, main integration commit SHA, and second exact-head
+  reviewer verdict here, since the ledger deliberately records only the first
+  approved candidate. If this evidence note is committed after the service
+  check, state its commit separately; it does not change application code or
+  the ledger digest.
 
 Acceptance requires independent exact-head approval of both the candidate and
 post-review finalization, with the final ledger row's `reviewer.approved_commit`
-equal to the candidate SHA and the finalizer SHA stored separately. Preserve
-the original 87 entries, produce a valid 88-entry ledger and matching API pin,
+equal to the candidate SHA; the ledger also records both prior status
+integration SHAs, while finalizer/main integration SHAs and the second review
+verdict are stored in the separate currentness evidence note. Preserve the
+original 87 entries, produce a valid 88-entry ledger and matching API pin,
 retain status-only execution-plan wording with all outcome/qualification
 limits intact, and complete post-merge API/asset verification from the current
 checkout. Report implementation tests separately from service checks.
