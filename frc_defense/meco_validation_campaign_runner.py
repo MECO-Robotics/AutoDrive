@@ -107,7 +107,18 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
             or schedule["per_episode_assignment_sha256"] !=
                 assignment.get("factor_treatment_seeded_assignment_sha256")
             or schedule["configured_pressure_slots"].get(case_axes["category"])
-                != assignment.get("configured_pressure_slots")):
+                != assignment.get("configured_pressure_slots")
+            or (direct_pursuit and (
+                schedule.get("registered_pressure_slots", {}).get(case_axes["category"])
+                    != assignment.get("registered_pressure_slots")
+                or schedule.get("preserved_scripted_slots", {}).get(case_axes["category"])
+                    != assignment.get("preserved_scripted_slots")
+                or assignment.get("assigned_pursuit_slot") not in
+                    assignment.get("configured_pressure_slots", ())
+                or assignment.get("configured_pressure_slots") !=
+                    [assignment.get("assigned_pursuit_slot")]
+                or assignment.get("control_policy_ids") != sorted(
+                    (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))))):
         raise ValueError("runtime schedule differs from the planner's exact policy/config/seed assignment")
     case_dir = Path(output_dir).resolve()
     case_dir.mkdir(parents=True, exist_ok=True)

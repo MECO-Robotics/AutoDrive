@@ -31,9 +31,17 @@ class DirectPursuitEpisodeCapture:
                 or split != "validation" or condition not in ("no_factor", "factor_treatment")):
             raise ValueError("direct-pursuit capture requires the exact validation schedule binding")
         slots = binding.get("configured_pressure_slots", {}).get(category)
-        if (not isinstance(slots, list) or not slots or slots != sorted(set(slots))
+        registered_slots = binding.get("registered_pressure_slots", {}).get(category)
+        preserved_slots = binding.get("preserved_scripted_slots", {}).get(category)
+        if (not isinstance(slots, list) or len(slots) != 1 or slots != sorted(set(slots))
                 or any(type(slot) is not int or slot not in (0, 1, 2, 4, 5)
-                       for slot in slots)):
+                       for slot in slots)
+                or not isinstance(registered_slots, list)
+                or registered_slots != sorted(set(registered_slots))
+                or not isinstance(preserved_slots, list)
+                or preserved_slots != sorted(set(preserved_slots))
+                or set(registered_slots) != set(slots) | set(preserved_slots)
+                or set(slots) & set(preserved_slots)):
             raise ValueError("direct-pursuit binding has invalid pressure slot identities")
         if (binding.get("scenario_id") != scenario_id
                 or category not in binding.get("categories", ())

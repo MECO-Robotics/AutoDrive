@@ -167,15 +167,25 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         opponent_runtime = getattr(self, 'phase4_opponent_runtime', None)
         opponent_slots = (set(opponent_runtime['configured_slots'])
                           if opponent_runtime is not None else set())
-        if opponent_runtime is not None and set(pressure['slots']) != opponent_slots:
-            raise RuntimeError('runtime pressure slots differ from validation-bound opponent assignment')
+        direct_pursuit = (opponent_runtime is not None and
+                          opponent_runtime.get('policy_id') == 'direct_pursuit')
+        if opponent_runtime is not None:
+            pressure_slots = set(pressure['slots'])
+            if direct_pursuit:
+                registered = set(opponent_runtime.get('registered_pressure_slots', ()))
+                preserved = set(opponent_runtime.get('preserved_scripted_slots', ()))
+                if (len(opponent_slots) != 1 or not opponent_slots.issubset(pressure_slots)
+                        or registered != pressure_slots or preserved != pressure_slots - opponent_slots):
+                    raise RuntimeError('direct-pursuit assignment must replace one registered pressure slot')
+            elif pressure_slots != opponent_slots:
+                raise RuntimeError('runtime pressure slots differ from validation-bound opponent assignment')
         for slot in pressure['slots']:
             if slot == stationary_slot:
                 commands[:, slot] = 0.
                 continue
             commands[:, slot] = 0.
             policy_id = getattr(self, 'phase4_opponent_policy_id', None)
-            if policy_id is not None:
+            if policy_id is not None and (not direct_pursuit or slot in opponent_slots):
                 # The policy sees its own controller pose and only its noisy,
                 # validity-masked opponent track. Static anchor/objective data
                 # are scenario configuration, not simulator truth state.
@@ -399,6 +409,11 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'factor_id': trench_schedule['factor_id'],
         'category': category, 'seed': int(phase4_opponent_seed),
         'configured_slots': trench_schedule['configured_pressure_slots'][category],
+        'registered_pressure_slots': trench_schedule.get(
+            'registered_pressure_slots', {}).get(category,
+            trench_schedule['configured_pressure_slots'][category]),
+        'preserved_scripted_slots': trench_schedule.get(
+            'preserved_scripted_slots', {}).get(category, []),
         'applied_slots': [], 'applied_command_calls': 0,
         'applied_command_calls_by_slot': {
             str(slot): 0 for slot in trench_schedule['configured_pressure_slots'][category]},

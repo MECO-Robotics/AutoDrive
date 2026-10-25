@@ -32,6 +32,7 @@ from .meco_phase4_context import phase4_start_profile_assignment
 
 PLAN_SCHEMA = "meco-phase4-validation-campaign-plan-v1"
 POLICIES = ("D0", "D1", "D2", "A1", "A2", "A3", "C1", "C2")
+DIRECT_PURSUIT_POLICY_IDS = tuple(sorted((*POLICIES, "A1_P0", "A2_P0", "A3_P0")))
 CONDITIONS = ("no_factor", "factor_treatment")
 EXPECTED_FACTOR_CASE_AXIS_CELLS = 6488
 VALIDATION_SEEDS_PER_CASE = 100
@@ -59,7 +60,7 @@ def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
     replay = row.get("replay_review")
     outcomes = row.get("paired_outcomes")
     paired_replays = replay.get("paired_replays") if isinstance(replay, dict) else None
-    pair_count = seed_count * len(POLICIES)
+    pair_count = seed_count * len(DIRECT_PURSUIT_POLICY_IDS)
     schedule_sha256 = row.get("schedule_sha256")
     seed_manifest_sha256 = row.get("seed_manifest_sha256")
     interception = outcomes.get("interception_rate") if isinstance(outcomes, dict) else None
@@ -78,6 +79,11 @@ def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
         and isinstance(schedule_sha256, str) and bool(schedule_sha256)
         and isinstance(seed_manifest_sha256, str) and bool(seed_manifest_sha256)
         and row.get("configured_pressure_slots") == configured_pressure_slots
+        and row.get("control_policy_ids") == list(DIRECT_PURSUIT_POLICY_IDS)
+        and isinstance(row.get("paired_rows_per_condition"), dict)
+        and bool(row["paired_rows_per_condition"])
+        and all(value == pair_count
+                for value in row["paired_rows_per_condition"].values())
         and isinstance(row.get("source_identity_sha256"), str)
         and bool(row.get("source_identity_sha256"))
         and isinstance(row.get("checkpoint_bundle_sha256"), dict)
@@ -152,7 +158,7 @@ def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
             and item.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
             and item.get("policy_id") == "direct_pursuit"
             and item.get("configured_slots") == configured_pressure_slots
-            and item.get("policy_ids") == list(POLICIES)
+            and item.get("policy_ids") == list(DIRECT_PURSUIT_POLICY_IDS)
             and ((item.get("condition") == "no_factor" and item.get("applied_slots") == [])
                 or (item.get("condition") == "factor_treatment" and
                     item.get("applied_slots") == configured_pressure_slots))
@@ -362,25 +368,42 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                                     "layout_id", "defender_family", "start_condition",
                                     "sensor_profile")}, "split": "validation",
                                 "validation_seed_assignment_sha256": seed_info["seed_sha256"]}
+                            registered_pressure_slots = list(opponent_policy_runtime_slots(
+                                case["category"]))
+                            if not registered_pressure_slots:
+                                raise ValueError("direct pursuit requires registered pressure slots")
+                            assigned_pursuit_slot = registered_pressure_slots[0]
                             direct_pursuit_assignment = {
                                 "schema": "meco-phase4-direct-pursuit-assignment-v1",
                                 "policy_id": "direct_pursuit", "factor_id": factor,
                                 "policy_config_sha256": policy_pool_identity()["config_sha256"],
-                                "configured_pressure_slots": list(opponent_policy_runtime_slots(
-                                    case["category"])),
+                                "registered_pressure_slots": registered_pressure_slots,
+                                "assigned_pursuit_slot": assigned_pursuit_slot,
+                                "configured_pressure_slots": [assigned_pursuit_slot],
+                                "preserved_scripted_slots": registered_pressure_slots[1:],
+                                "control_policy_ids": list(DIRECT_PURSUIT_POLICY_IDS),
+                                "paired_control_category_seed_coverage_sha256": _sha256(
+                                    _canonical_bytes([[control, case["category"], seed, condition]
+                                        for control in DIRECT_PURSUIT_POLICY_IDS
+                                        for seed in seed_info["_seed_values_internal"]
+                                        for condition in CONDITIONS])),
                                 "protocol_bound_evaluation_case": case_payload,
                                 "factor_treatment_seeded_assignment_sha256": _sha256(
-                                    _canonical_bytes([policy_assignment_identity(
+                                    _canonical_bytes([{**policy_assignment_identity(
                                         policy_id="direct_pursuit",
                                         scenario_id=case["scenario_id"],
                                         category=case["category"],
                                         qualification_case=case_payload[
                                             "qualification_case"], seed=seed,
-                                        condition="factor_treatment", factor_id=factor)
+                                        condition="factor_treatment", factor_id=factor),
+                                        "category": case["category"],
+                                        "registered_pressure_slots": registered_pressure_slots,
+                                        "configured_pressure_slots": [assigned_pursuit_slot],
+                                        "preserved_scripted_slots": registered_pressure_slots[1:]}
                                         for seed in seed_info["_seed_values_internal"]])),
                                 "runtime_domain_supported": True,
                                 "paired_control_category_seed_row_count": (
-                                    len(POLICIES) * seed_info["seed_count"] * len(CONDITIONS)),
+                                    len(DIRECT_PURSUIT_POLICY_IDS) * seed_info["seed_count"] * len(CONDITIONS)),
                                 "exact_pair_coverage": True,
                                 "executed": False, "qualification_eligible": False,
                             }

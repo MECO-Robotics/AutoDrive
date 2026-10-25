@@ -114,9 +114,17 @@ the controller-visible, validity-masked sensed observation. No truth-state
 fallback is allowed.
 
 The no-factor pair must retain the registered category opponent. The
-factor-treatment pair replaces only the designated pressure slot with direct
-pursuit; all other participants and conditions stay fixed. Preserve exact
-track/control/category/seed pairing and source/checkpoint/device provenance.
+factor-treatment pair replaces exactly one preregistered pressure slot per
+category with direct pursuit; if the registered category has another pressure
+slot, that slot retains its registered scripted behavior. Freeze the assigned
+slot as the first sorted registered pressure slot and bind both the full
+registered slot set and preserved scripted-slot complement into the schedule.
+Preserve exact track/control/category/seed pairing and
+source/checkpoint/device provenance. The direct-pursuit evidence matrix is all
+eleven policy IDs (D0/D1/D2, A1/A2/A3, C1/C2, A1_P0/A2_P0/A3_P0) across all 100
+validation seeds in each arm: 1,100 policy/seed rows per arm and 2,200 rows
+across the paired arms. The eight-policy generic campaign grid does not satisfy
+this direct-pursuit gate.
 
 ### 2. Add source-grounded outcomes
 

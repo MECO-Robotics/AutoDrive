@@ -175,6 +175,28 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         qualification_case=qualification_case, seed=seed,
         condition="factor_treatment", factor_id=factor_id)
         for category in categories for seed in seeds]
+    registered_pressure_slots = {category: list(opponent_policy_runtime_slots(
+        category, allow_level_zero=(factor_id == "opponent.trench_interception")))
+        for category in categories}
+    if factor_id == "opponent.direct_pursuit":
+        if any(not slots for slots in registered_pressure_slots.values()):
+            raise ValueError("direct pursuit requires registered pressure slots")
+        configured_pressure_slots = {category: [slots[0]]
+            for category, slots in registered_pressure_slots.items()}
+        preserved_scripted_slots = {category: slots[1:]
+            for category, slots in registered_pressure_slots.items()}
+    else:
+        configured_pressure_slots = registered_pressure_slots
+        preserved_scripted_slots = {category: [] for category in categories}
+    if factor_id == "opponent.direct_pursuit":
+        identities = [{**identity,
+            "category": category,
+            "registered_pressure_slots": registered_pressure_slots[category],
+            "configured_pressure_slots": configured_pressure_slots[category],
+            "preserved_scripted_slots": preserved_scripted_slots[category]}
+            for category in categories for identity in identities[
+                list(categories).index(category) * len(seeds):
+                (list(categories).index(category) + 1) * len(seeds)]]
     payload = {"schema": "meco-phase4-opponent-evaluator-schedule-v1",
         "policy_id": policy_id, "scenario_id": scenario_id,
         "categories": list(categories), "qualification_case": dict(qualification_case),
@@ -184,10 +206,7 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
             if factor_id == "opponent.trench_interception" else
             list(categories) if factor_id == "opponent.direct_pursuit" else None),
         "policy_family": POLICY_FACTOR_IDS[policy_id],
-        "configured_pressure_slots": {category: list(opponent_policy_runtime_slots(
-                                      category, allow_level_zero=(
-                                          factor_id == "opponent.trench_interception")))
-                                      for category in categories},
+        "configured_pressure_slots": configured_pressure_slots,
         "split": split, "seed_list": list(seeds),
         "policy_config_sha256": policy_pool_identity()["config_sha256"],
         "per_episode_assignment_sha256": hashlib.sha256(json.dumps(identities,
@@ -195,6 +214,9 @@ def compile_opponent_policy_schedule(*, policy_id: str, scenario_id: str,
         "policy_inputs": POLICY_CONFIG["sensing_boundary"],
         "runtime_status": "scheduled_not_simulator_validated",
         "executable": True, "qualification_eligible": False}
+    if factor_id == "opponent.direct_pursuit":
+        payload["registered_pressure_slots"] = registered_pressure_slots
+        payload["preserved_scripted_slots"] = preserved_scripted_slots
     payload["schedule_sha256"] = hashlib.sha256(json.dumps(payload,
         sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return payload
