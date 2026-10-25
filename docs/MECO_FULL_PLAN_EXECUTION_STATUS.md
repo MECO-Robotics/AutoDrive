@@ -1319,3 +1319,21 @@ This verifies provenance and dashboard currentness only. No replay was
 generated or reviewed. Plan C simulator behavior, GPU/HIP parity or profiling,
 training outcomes, qualification, and whole-system GPU-only execution remain
 unverified.
+
+## V4 GPU cluster-bootstrap and dashboard provenance — 2026-10-25
+
+The v4 GPU category-level and final-test cluster-bootstrap source implementation
+was integrated at `9497615c9cbd355b8b065e9ccd9b7ead87ad00be` and approved by an
+exact-head Pass 3 review against the recorded plan. Its scoped ledger summary
+and API digest pin were integrated and pushed; the ledger now contains 91
+summary rows and the bootstrap requirement once. The dashboard service was
+restarted and its backend/frontend currentness was verified after integration.
+See [bootstrap provenance](implementation-provenance/v4-gpu-cluster-bootstrap-20261026.md),
+[review summary](implementation-provenance/v4-gpu-cluster-bootstrap-pass3-review-20261026.md),
+and [dashboard currentness evidence](implementation-provenance/v4-gpu-bootstrap-dashboard-currentness-20261025.md).
+
+This is source and provenance evidence only. No tests, physical WX9100
+execution, parity/profile, source-bound calibration, training/evaluation,
+promotion, or qualification result is established. Runtime/device evidence
+and qualification remain pending; this tranche does not establish whole-plan
+or whole-compute GPU-only completion.
