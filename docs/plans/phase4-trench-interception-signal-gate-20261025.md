@@ -108,12 +108,56 @@ proxy-derived values.
    censor. Do not report a completion-only mean as the population crossing
    time.
 
-For fixed-window crossing rate and restricted-mean time, publish separate
-control and treatment summaries and the same-seed paired deltas. Reconcile
-each aggregate to its row-level outcomes. Keep physical interception incidence
-separate from number of contact substeps. A missed horizon crossing is a
-valid fixed-window zero and a time censor, not evidence that the robot never
-could cross.
+### Denominators, pair validity, and promotion gate
+
+The assignment denominator is exactly 1,100 policy/seed episodes per arm
+(eleven policy IDs times 100 seeds). For each arm and metric, publish the
+assigned count (1,100), full-horizon-valid count, invalid/censored count by
+reason, and metric denominator. Interception incidence and alternate crossing
+success use the full-horizon-valid count in that arm; a fully observed
+non-crosser remains in the alternate-crossing denominator as a zero. RMST uses
+the full-horizon-valid count in that arm. Report these per-arm denominators
+even when they are equal.
+
+Define a valid policy/seed pair as the same exact policy ID and seed present
+once in each arm, with both rows matching the frozen case, schedule/source,
+checkpoint, device and slot bindings, and both records carrying continuous
+finite full-horizon physics-clock and focal-pose coverage plus complete contact
+event coverage. A normal episode reaching the registered horizon without
+crossing is valid (crossing success zero; crossing time censored at the
+horizon). A missing/duplicate row, invalid or discontinuous clock, missing
+pose/contact coverage, early reset/termination, or provenance mismatch makes
+that arm row invalid and its policy/seed pair invalid. Keep invalid rows and
+reasons in the artifacts; never drop them and silently shrink the paired
+denominator. Per-arm metric rates may be described over their full-horizon-
+valid rows, but paired deltas include only exact valid pairs and must report
+their count.
+
+The minimum promotion validity is all 1,100 valid pairs for every required
+outcome and exactly 1,100 valid rows in each arm, with zero invalid pairs and
+zero unaccounted assignments. Any invalid row or pair fails the candidate
+executability/review gate; it does not get repaired by excluding the seed,
+substituting another seed, imputing an outcome, or weakening the denominator.
+The campaign may retain diagnostic aggregates with their explicit smaller
+descriptive denominator, but such aggregates cannot satisfy the gate. This is
+a validity rule, not a policy-performance threshold: valid non-crossings and
+valid no-contact episodes are outcomes, not invalid data.
+
+For each full-horizon-valid episode, define the time-to-crossing duration from
+scenario reset as `d_i = t_exit_i - t_reset_i` when a complete physical
+crossing occurs by horizon `H`; otherwise set `d_i = H` and mark that episode
+right-censored at `H`. The fixed-horizon restricted mean is the explicit
+arithmetic `RMST(H) = (sum(d_i for crossing events) + sum(H for horizon-censored
+episodes)) / N_full_horizon_valid`. Thus every valid episode contributes once;
+completion-only averaging is prohibited. Invalid rows are outside
+`N_full_horizon_valid`, are reported separately, and force the promotion gate
+to fail. Publish arm-specific RMST/event/censor counts and same-policy,
+same-seed paired differences only across the 1,100 valid pairs.
+
+Reconcile each aggregate to its row-level outcomes. Keep physical interception
+incidence separate from number of contact substeps. A missed horizon crossing
+is a valid fixed-window zero and contributes `H` as a time censor; it is not
+evidence that the robot never could cross.
 
 ## Implementation tranche
 
