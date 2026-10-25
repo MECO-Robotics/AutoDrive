@@ -1,3 +1,14 @@
+> **Dashboard refreshed for provenance ledger 73 — 2026-10-25 06:27 UTC.**
+> Restarted `frc-defense-dashboard.service` from current `main` (PID `3090951`;
+> active). `/`, `/api/meco-status`, `/api/curriculum-status`, `/assets/meco.js`,
+> and `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 73
+> three-pass provenance tranches; `/api/meco-status` exposes the campaign ledger
+> path in this checkout. Both served asset SHA-256 hashes match `main`:
+> `meco.js` `51a67f3f77d38b23dad046b2189921724417ccc9cd581d3f9d8864573b32f3a2`,
+> `dashboard.js` `487dff5cfb48d4d7e6d419be343d5e1149c291b4ba9866d227fa312972867219`.
+> No replay was generated, no simulator evidence is claimed, and active training
+> was left untouched.
+
 > **Phase 4 direct-pursuit runtime wiring integrated — 2026-10-25 06:24 UTC.**
 > Reviewed code is on `main` at `42a57af12`. The runtime now captures exact
 > simulator pair-contact events and fixed-objective progress, checks matched
