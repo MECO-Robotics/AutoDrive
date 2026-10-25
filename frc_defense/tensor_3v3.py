@@ -427,8 +427,10 @@ class TensorThreeVsThreeEnv(
 
 
 
-    def _hub_line_spawn_poses(self):
+    def _hub_line_spawn_poses(self, mask=None):
         """Place each alliance's three robots against its HUB-side zone line."""
+        active=(torch.ones(self.n,device=self.device,dtype=torch.bool) if mask is None
+                else torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n))
         pose=torch.zeros((self.n,NUM_ROBOTS,3),device=self.device,
                          dtype=self.sim.pose.dtype)
         lane_offsets=torch.tensor((-2.685,0.,2.665, -2.685,0.,2.665),
@@ -436,8 +438,10 @@ class TensorThreeVsThreeEnv(
         pose[:,:,1]=self.sim.field_width*.5+lane_offsets[None]
         pose[:,:,2]=torch.where(self.team_ids[None]==0,0.,math.pi)
         if self.randomize:
-            pose[:,:,1]+=(self._random((self.n,NUM_ROBOTS))-.5)*.3
-            pose[:,:,2]+=(self._random((self.n,NUM_ROBOTS))-.5)*.2
+            pose[:,:,1]+=(self._random_active(active,(NUM_ROBOTS,),
+                stream="scenario_reset")-.5)*.3
+            pose[:,:,2]+=(self._random_active(active,(NUM_ROBOTS,),
+                stream="scenario_reset")-.5)*.2
         # The front support point of the oriented chassis touches the vertical
         # alliance-side HUB face. Account for randomized size and yaw so every
         # robot remains on the same field line after reset.
@@ -604,7 +608,7 @@ class TensorThreeVsThreeEnv(
             self._last_applied_planner_traversal_signature=None
         self._planner_traversal_pending &= ~mask
         self._planner_controller_modes_dirty_mask |= mask
-        pose=self._hub_line_spawn_poses()
+        pose=self._hub_line_spawn_poses(mask)
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
         self.synchronize_policy_pose(mask)
