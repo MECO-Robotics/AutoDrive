@@ -1,6 +1,6 @@
 # Pass 1 plan: GPU-resident five-track PPO numerics
 
-**Status:** plan only. This worktree contains no implementation changes. No tests, runtime, device probing, simulator, dashboard, replay, training, fitting, evaluation, or campaign operation is part of Pass 1.  
+**Status:** Superseded by the proposed expanded Pass 1 plan gpu-five-track-ppo-batched-residency-expansion-20261026.md. Pass 2 stopped before source edits at the batching/dispatch stop condition described there. This document remains as the original approved scope and audit trail; do not implement it independently.
 **Planning base:** `origin/main` at `b56048e9c2ea1e7d5bd9bf6e383f4dbd8f4cc9ef`.  
 **Source requirement:** `docs/plans/whole-compute-gpu-only-meco-plan-20261025.md`, step 6, requires GAE, rollout storage, PPO objective, minibatch order, replay validation, and optimizer updates to remain device-derived. The evaluation plan §5 requires PPO to preserve a valid stochastic distribution and its sampled log probabilities for all five architectures.
 
