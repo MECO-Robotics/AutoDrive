@@ -251,6 +251,22 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
         q.validate_paired_calibration_campaign(altered)
 
 
+def test_paired_runner_groups_exact_case_seed_tuples_and_stays_blocked(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    shard = campaign["shards"][0]
+    groups = q._paired_calibration_evaluation_groups(shard)
+    assert groups
+    for group in groups:
+        assert group["seeds"] == [3, 7]
+        assert set(group["controls"]) == {"D0", group["key"][-1]}
+        for control_id, units in group["controls"].items():
+            assert [unit["seed"] for unit in units] == group["seeds"]
+    with pytest.raises(ValueError, match="execution blocked by controls: D2/multi_model_v1"):
+        q.run_paired_calibration_shard(campaign, 0, repo_root="unavailable",
+            replay_root="unavailable", output_root="unavailable",
+            configuration_artifacts={})
+
+
 @pytest.mark.parametrize("field,value", [
     ("repeat_semantics", "resample rows"),
     ("summary_method", "choose-best-observed"),

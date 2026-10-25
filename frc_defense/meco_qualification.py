@@ -1981,12 +1981,22 @@ def _paired_shard_assignments(units, shard_count, campaign_identity):
     if any({unit["control_id"] for unit in group} != {"D0", group[0]["paired_control_id"]}
             or len(group) != 2 for group in pair_groups.values()):
         raise ValueError("paired calibration schedule has an incomplete control pair")
-    ranked = sorted(pair_groups.values(), key=lambda group: _canonical_sha256({
-        "campaign": campaign_identity, "pair_id": group[0]["pair_id"]}))
+    evaluation_groups = {}
+    case_fields = ("scenario_id", "category", "layout_id", "defender_family",
+        "start_condition", "sensor_profile", "repetition", "paired_control_id")
+    for pair_group in pair_groups.values():
+        representative = pair_group[0]
+        evaluation_key = _canonical_sha256({field: representative[field]
+            for field in case_fields})
+        evaluation_groups.setdefault(evaluation_key, []).extend(pair_group)
+    if shard_count > len(evaluation_groups):
+        raise ValueError("paired calibration shard count exceeds complete evaluation-group count")
+    ranked = sorted(evaluation_groups.items(), key=lambda item: _canonical_sha256({
+        "campaign": campaign_identity, "evaluation_group": item[0]}))
     buckets = [[] for _ in range(shard_count)]
-    for index, group in enumerate(ranked):
+    for index, (_, group) in enumerate(ranked):
         buckets[index % shard_count].extend(sorted(group,
-            key=lambda unit: unit["control_id"]))
+            key=lambda unit: (unit["seed"], unit["control_id"])))
     return buckets
 
 
@@ -2203,6 +2213,187 @@ def paired_calibration_condition_id(binding):
         raise ValueError("paired calibration replay binding identity is inconsistent")
     return (f"paired-cal-{binding['campaign_id'][:12]}-{binding['pair_id'][:16]}-"
         f"{control.replace('/', '-')}-r{unit['repetition']:04d}")
+
+
+def _paired_calibration_evaluation_groups(shard):
+    """Group seed rows that one exact protocol-case evaluation call scores."""
+    if not isinstance(shard, dict) or not isinstance(shard.get("work_units"), list):
+        raise ValueError("paired calibration shard work units are malformed")
+    groups = {}
+    fields = ("scenario_id", "category", "layout_id", "defender_family",
+        "start_condition", "sensor_profile", "repetition", "paired_control_id")
+    for unit in shard["work_units"]:
+        key = tuple(unit.get(field) for field in fields)
+        groups.setdefault(key, {}).setdefault(unit.get("control_id"), []).append(unit)
+    normalized = []
+    for key, controls in groups.items():
+        if set(controls) != {"D0", key[-1]}:
+            raise ValueError("paired calibration evaluation group has incomplete controls")
+        controls = {control: sorted(rows, key=lambda row: row["seed"])
+            for control, rows in controls.items()}
+        seed_lists = [tuple(row["seed"] for row in rows) for rows in controls.values()]
+        if (seed_lists[0] != seed_lists[1]
+                or len(seed_lists[0]) != len(set(seed_lists[0]))):
+            raise ValueError("paired calibration evaluation group has unpaired seed coverage")
+        for rows in controls.values():
+            if any(tuple(row.get(field) for field in fields) != key for row in rows):
+                raise ValueError("paired calibration evaluation group case tuple changed")
+        normalized.append({"key": key, "controls": controls,
+            "seeds": list(seed_lists[0])})
+    return sorted(normalized, key=lambda group: repr(group["key"]))
+
+
+def _paired_prepare_output_directory(path):
+    path = Path(path).absolute()
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise ValueError("paired calibration output directory uses a symlink")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ValueError("paired calibration output directory became a symlink")
+    return path
+
+
+def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
+        replay_root, output_root, configuration_artifacts):
+    """Run/resume one shard after every actual Pass 1 gate is revalidated.
+
+    The coordinator refuses work while any preregistered control lacks a
+    reviewed execution contract. Device availability and identity are checked
+    again inside the evaluator against this shard's exact assignment.
+    """
+    validate_paired_calibration_campaign(campaign)
+    blockers = paired_calibration_execution_blockers(campaign)
+    if blockers:
+        raise ValueError("paired calibration execution blocked by controls: "
+            + ", ".join(blockers))
+    gate = validate_paired_calibration_gate_artifacts(campaign,
+        repo_root=repo_root, configuration_artifacts=configuration_artifacts)
+    shard = _paired_shard_for_index(campaign, shard_index)
+    worker = campaign["worker_assignments"][shard_index %
+        len(campaign["worker_assignments"])]
+    from .meco_track_training import evaluate_meco
+
+    output_root, replay_root = Path(output_root), Path(replay_root)
+    output_root = _paired_prepare_output_directory(output_root)
+    replay_root = _paired_prepare_output_directory(replay_root)
+    progress_path = output_root / f"shard-{shard_index:04d}.progress.json"
+    final_path = output_root / f"shard-{shard_index:04d}.final.json"
+    completed_rows, previous_progress_id = [], None
+    if progress_path.exists() or progress_path.is_symlink():
+        if progress_path.is_symlink():
+            raise ValueError("paired calibration progress path is symlinked")
+        previous_raw = progress_path.read_bytes()
+        previous = json.loads(previous_raw)
+        if previous_raw != json.dumps(previous, sort_keys=True,
+                separators=(",", ":"), allow_nan=False).encode("utf-8"):
+            raise ValueError("existing paired calibration progress bytes are not canonical")
+        validate_paired_calibration_progress(campaign, shard_index, previous,
+            replay_root=replay_root, approval=gate["approval"])
+        completed_rows = list(previous["completed_rows"])
+        previous_progress_id = previous["progress_id"]
+    completed_ids = {row["work_unit_id"] for row in completed_rows}
+    control_by_id = {control["control_id"]: control for control in campaign["controls"]}
+    for group in _paired_calibration_evaluation_groups(shard):
+        comparator_id = group["key"][-1]
+        comparator = control_by_id[comparator_id]
+        if comparator.get("execution_supported") is not True:
+            raise ValueError(f"paired calibration control is not executable: {comparator_id}")
+        if len(group["seeds"]) != campaign["config"]["episodes_per_category_stratum"]:
+            raise ValueError("paired calibration group differs from frozen case seed count")
+        qualification_case = dict(zip(("layout_id", "defender_family",
+            "start_condition", "sensor_profile"), group["key"][2:6]))
+        scenario_id, category = group["key"][:2]
+        for selected_control_id in ("D0", comparator_id):
+            selected = control_by_id[selected_control_id]
+            units = group["controls"][selected_control_id]
+            bindings = {unit["seed"]: paired_calibration_replay_binding(
+                campaign, shard_index, unit) for unit in units}
+            missing = [unit for unit in units
+                if _canonical_sha256(unit) not in completed_ids]
+            if not missing:
+                continue
+            policy = selected["policy"]
+            replay_selection = {policy: list(group["seeds"])}
+            group_digest = _canonical_sha256({"campaign_id": campaign["campaign_id"],
+                "shard_index": shard_index, "group": group["key"],
+                "selected_control_id": selected_control_id})
+            replay_dir = replay_root / f"group-{group_digest}"
+            _paired_prepare_output_directory(replay_dir)
+            eval_dir = _paired_prepare_output_directory(output_root / "evaluations")
+            attempt_id = uuid.uuid4().hex
+            eval_path = eval_dir / f"group-{group_digest}-{attempt_id}.json"
+            replay_dir = _paired_prepare_output_directory(replay_dir / attempt_id)
+            result = evaluate_meco({}, scenario_id=scenario_id,
+                categories=(category,), episodes=len(group["seeds"]),
+                master_seed=campaign["config"]["master_seed"],
+                episode_seeds=tuple(group["seeds"]), device=worker["device"],
+                split="calibration", include_controls=True, output=str(eval_path),
+                qualification_case=qualification_case, evaluation_policies=(),
+                control_policies=("D0", comparator["policy"]),
+                control_prediction_modes={comparator["policy"]: comparator["prediction_mode"]},
+                calibration_control_policy=comparator["policy"],
+                candidate_k_override=comparator["candidate_configuration"]["candidate_k"],
+                calibration_route_cost_points_per_second=
+                    comparator["candidate_configuration"]["route_cost_points_per_second"],
+                replay_output_dir=replay_dir, replay_selection=replay_selection,
+                simulated_score_estimand=str(Path(repo_root) /
+                    campaign["estimand_approval"]["path"]),
+                paired_calibration_bindings=bindings,
+                paired_calibration_worker_identity=worker,
+                paired_calibration_campaign=campaign,
+                paired_calibration_shard_index=shard_index,
+                paired_calibration_configuration_artifacts=configuration_artifacts)
+            records = result.get("records") if isinstance(result, dict) else None
+            selected_records = {}
+            for record in records if isinstance(records, list) else ():
+                if record.get("policy") == policy and record.get("seed") in group["seeds"]:
+                    if record["seed"] in selected_records:
+                        raise ValueError("paired calibration evaluator returned duplicate policy/seed rows")
+                    selected_records[record["seed"]] = record
+            if set(selected_records) != set(group["seeds"]):
+                raise ValueError("paired calibration evaluator did not return exact selected policy/seed coverage")
+            for unit in missing:
+                record = selected_records[unit["seed"]]
+                replay_ref = record.get("dashboard_replay")
+                if not isinstance(replay_ref, dict):
+                    raise ValueError("paired calibration selected row lacks replay provenance")
+                result_path = Path(replay_ref.get("result_path", ""))
+                try:
+                    relative_path = (result_path.absolute().relative_to(replay_root.absolute())
+                        if result_path.is_absolute() else result_path)
+                except ValueError as exc:
+                    raise ValueError("paired calibration replay output escaped replay root") from exc
+                relative = relative_path.as_posix()
+                _, replay_raw, _ = _paired_repo_json_file(replay_root, relative,
+                    kind="paired replay output")
+                normalized_ref = {"simulation_id": replay_ref.get("simulation_id"),
+                    "result_path": relative,
+                    "evaluation_record_digest": replay_ref.get("evaluation_record_digest")}
+                row = build_paired_calibration_outcome_row(campaign, shard_index,
+                    unit, record, replay_raw, normalized_ref, gate["approval"])
+                completed_rows.append(row)
+                completed_ids.add(row["work_unit_id"])
+            progress = build_paired_calibration_progress(campaign, shard_index,
+                completed_rows, replay_root=replay_root, approval=gate["approval"])
+            validate_paired_calibration_progress(campaign, shard_index, progress,
+                replay_root=replay_root, approval=gate["approval"])
+            write_paired_calibration_progress_atomic(progress_path, progress,
+                expected_previous_progress_id=previous_progress_id)
+            previous_progress_id = progress["progress_id"]
+    progress = build_paired_calibration_progress(campaign, shard_index,
+        completed_rows, replay_root=replay_root, approval=gate["approval"])
+    validate_paired_calibration_progress(campaign, shard_index, progress,
+        replay_root=replay_root, approval=gate["approval"])
+    if not progress_path.exists():
+        write_paired_calibration_progress_atomic(progress_path, progress)
+    final = build_paired_calibration_final_shard(campaign, shard_index, progress,
+        replay_root=replay_root, approval=gate["approval"])
+    digest = write_paired_calibration_artifact_immutable(final_path, final)
+    return {"campaign_id": campaign["campaign_id"], "shard_index": shard_index,
+        "worker_id": worker["worker_id"], "completed_work_units": len(completed_rows),
+        "progress_id": progress["progress_id"], "final_shard_sha256": digest,
+        "final_shard": str(final_path)}
 
 
 def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,

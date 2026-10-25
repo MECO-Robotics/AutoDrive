@@ -428,6 +428,14 @@ def main(argv=None):
     paired_merge.add_argument("--estimand-approval", required=True)
     paired_merge.add_argument("--configuration-artifact-index", required=True)
     paired_merge.add_argument("--output", required=True)
+    paired_run = sub.add_parser("paired-run",
+        help="run or resume one paired shard after exact gate/device checks")
+    paired_run.add_argument("--repo-root", default=str(ROOT))
+    paired_run.add_argument("--campaign", required=True)
+    paired_run.add_argument("--shard-index", type=int, required=True)
+    paired_run.add_argument("--replay-root", required=True)
+    paired_run.add_argument("--output-root", required=True)
+    paired_run.add_argument("--configuration-artifact-index", required=True)
     args = parser.parse_args(argv)
     if args.command == "describe":
         schedule = describe_campaign(episodes=args.episodes,
@@ -462,12 +470,20 @@ def main(argv=None):
             episodes=args.episodes, repetitions=args.repetitions,
             master_seed=args.master_seed, shard_count=args.shard_count,
             output=args.output), indent=2))
-    else:
+    elif args.command == "paired-merge":
         print(json.dumps(merge_paired_campaign(repo_root=args.repo_root,
             campaign_path=args.campaign, final_shard_root=args.final_shard_root,
             replay_root=args.replay_root, approval_path=args.estimand_approval,
             configuration_artifact_index=args.configuration_artifact_index,
             output=args.output), indent=2))
+    else:
+        configuration_artifacts = _load_config_artifact_bytes(
+            args.configuration_artifact_index)
+        campaign = q._load_json(args.campaign)
+        print(json.dumps(q.run_paired_calibration_shard(campaign,
+            args.shard_index, repo_root=args.repo_root,
+            replay_root=args.replay_root, output_root=args.output_root,
+            configuration_artifacts=configuration_artifacts), indent=2))
 
 
 if __name__ == "__main__":
