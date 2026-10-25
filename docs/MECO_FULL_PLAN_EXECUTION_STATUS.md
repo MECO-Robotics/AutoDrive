@@ -70,7 +70,9 @@
 
 > **Plan C repeated-label implementation candidate — 2026-10-25.** An isolated
 > implementation based on source `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`
-> adds two common-random-number repeats for each archived Plan C candidate
+> is committed at `3186636a559a7729387a4b7989ca6caee0569b4d` on branch
+> `codex/meco-plan-c-repeated-labels`.
+> It adds two common-random-number repeats for each archived Plan C candidate
 > branch, with repeat seed derivation and protocol identity recorded in the
 > dataset. C1/C2 pair labels require the same strict preference sign in both
 > matched repeats; mixed-sign or tied evidence is retained and excluded from

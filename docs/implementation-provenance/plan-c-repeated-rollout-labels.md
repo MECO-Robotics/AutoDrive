@@ -6,6 +6,8 @@ is based on source commit `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d` and is an
 offline implementation candidate. It does not collect labels, fit checkpoints,
 run the simulator, or establish policy quality.
 
+Implementation commit: `3186636a559a7729387a4b7989ca6caee0569b4d`.
+
 For each archived Plan C candidate and eligible prefix, the collector now runs
 exactly two branch repeats. Every candidate at the same prefix shares the same
 two repeat RNG seeds. Each branch first reconstructs the archived prefix from
@@ -34,5 +36,6 @@ existing v2 fitting path is unchanged.
 conservative sign-stability rule but does not provide precise variance
 calibration, confidence intervals, or qualification evidence. The added
 synthetic tests validate schema, seed, aggregate, variance, and fitter
-contracts only. GPU collection and a representative end-to-end simulator
+contracts only; all 10 focused tests pass, as do Python compilation and
+`git diff --check`. GPU collection and a representative end-to-end simulator
 evaluation remain unrun; no replay or dashboard-currentness claim is made.
