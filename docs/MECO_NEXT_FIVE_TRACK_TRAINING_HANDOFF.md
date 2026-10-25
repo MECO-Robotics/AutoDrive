@@ -20,9 +20,11 @@ were not changed or restarted during this integration.
 An offline manifest API now describes the five-track configuration and
 validates source, protocol, device inventory, and isolated output paths. The
 supervisor now consumes that manifest and acquires shared device leases with
-the validation runner. Launch requires explicit `--diagnostic-launch`, and
-manifest mode claims fresh roots only; it cannot resume an existing campaign.
-Phase 2 coverage stays false until bound dataset/replay evidence is validated.
+the validation runner. Launch requires explicit `--diagnostic-launch`.
+Fresh manifest roots are claimed only after device leases; explicit
+`--resume-campaign` now resumes only when campaign roots, runtime/config/source
+bindings, and durable evaluation state validate. Phase 2 coverage stays false
+until bound dataset/replay evidence is validated.
 See `frc_defense.meco_training_manifest`, `frc_defense.meco_supervisor`, and
 provenance tranches #44 and #46.
 
