@@ -67,11 +67,13 @@ def test_paired_merge_publishes_each_control_bundle_before_report(tmp_path, monk
         "bundle_id": bundle["bundle_id"], "artifact_sha256": digest}],
         "_control_bundle_artifacts": [bundle]}
     output = tmp_path / "merged.json"
-    cli._publish_paired_control_bundles(output, report)
+    published = cli._publish_paired_control_bundles(output, report)
 
     bundle_path = tmp_path / "merged.control-D1-current.json"
     assert json.loads(bundle_path.read_bytes()) == bundle
     assert hashlib.sha256(bundle_path.read_bytes()).hexdigest() == digest
+    assert published == [{"control_id": "D1/current", "bundle_id": bundle["bundle_id"],
+        "artifact_sha256": digest, "output": str(bundle_path)}]
     assert "_control_bundle_artifacts" not in report
 
     monkeypatch.setattr(q, "write_paired_calibration_artifact_immutable",

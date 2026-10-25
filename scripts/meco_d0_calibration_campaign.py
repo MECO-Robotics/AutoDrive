@@ -374,10 +374,11 @@ def merge_paired_campaign(*, repo_root, campaign_path, final_shard_root,
         raws.append(path.read_bytes())
     report = q.build_paired_calibration_merged_report(campaign, raws,
         replay_root=replay_root, approval=gate["approval"])
-    _publish_paired_control_bundles(output, report)
+    bundle_outputs = _publish_paired_control_bundles(output, report)
     digest = q.write_paired_calibration_artifact_immutable(output, report)
     return {"campaign_id": campaign["campaign_id"], "report_id": report["report_id"],
         "report_sha256": digest, "output": str(output),
+        "control_bundles": bundle_outputs,
         "official_match_points": None, "qualification_eligible": False}
 
 
@@ -386,6 +387,7 @@ def _publish_paired_control_bundles(output, report):
     if len(control_artifacts) != len(report["control_bundles"]):
         raise ValueError("paired calibration control bundle references are incomplete")
     output_path = Path(output)
+    published = []
     for artifact, reference in zip(control_artifacts, report["control_bundles"]):
         control_id = artifact["control_id"]
         if reference["control_id"] != control_id or reference["bundle_id"] != artifact["bundle_id"]:
@@ -395,6 +397,9 @@ def _publish_paired_control_bundles(output, report):
         digest = q.write_paired_calibration_artifact_immutable(bundle_path, artifact)
         if digest != reference["artifact_sha256"]:
             raise ValueError("paired calibration control bundle digest mismatch")
+        published.append({"control_id": control_id, "bundle_id": artifact["bundle_id"],
+            "artifact_sha256": digest, "output": str(bundle_path)})
+    return published
 
 
 def main(argv=None):

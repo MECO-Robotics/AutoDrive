@@ -2530,7 +2530,8 @@ def _paired_control_summary(campaign, control_id, pairs):
             "defender_family", "start_condition", "sensor_profile"))
         deltas = {side: candidate["simulated_match_score"][side]
             - baseline["simulated_match_score"][side] for side in ("red", "blue")}
-        strata.setdefault(stratum, {side: [] for side in ("red", "blue")})
+        strata.setdefault(stratum, {**{side: [] for side in ("red", "blue")},
+            "safety": {name: [] for name in sorted(SAFETY_METRIC_NAMES)}})
         for side in ("red", "blue"):
             strata[stratum][side].append(float(deltas[side]))
             outcome_deltas[side].append(float(deltas[side]))
@@ -2539,8 +2540,9 @@ def _paired_control_summary(campaign, control_id, pairs):
         for side in ("red", "blue"):
             seed_groups[seed_key][side].append(float(deltas[side]))
         for name in safety_deltas:
-            safety_deltas[name].append(candidate["safety_metrics"][name]
-                - baseline["safety_metrics"][name])
+            safety_delta = candidate["safety_metrics"][name] - baseline["safety_metrics"][name]
+            safety_deltas[name].append(safety_delta)
+            strata[stratum]["safety"][name].append(safety_delta)
         throughput_deltas.append(candidate["useful_throughput"]
             - baseline["useful_throughput"])
     if not outcome_deltas["red"]:
@@ -2563,6 +2565,25 @@ def _paired_control_summary(campaign, control_id, pairs):
             "between_seed_variance": _paired_variance(seed_means)}
     summary["safety_rate_difference"] = {name: {
         "mean": sum(values) / len(values)} for name, values in safety_deltas.items()}
+    stratum_summaries = []
+    for stratum in sorted(strata, key=repr):
+        stratum_key = dict(zip(("category", "layout_id", "defender_family",
+            "start_condition", "sensor_profile"), stratum))
+        values = strata[stratum]
+        score_differences = {}
+        for side in ("red", "blue"):
+            seed = int(_canonical_sha256({"campaign_id": campaign["campaign_id"],
+                "control_id": control_id, "stratum": stratum_key,
+                "alliance": side})[:16], 16)
+            score_differences[side] = {"mean": sum(values[side]) / len(values[side]),
+                "cluster_bootstrap_ci": _cluster_bootstrap_ci(
+                    {repr(stratum): values[side]}, seed=seed,
+                    replicates=BOOTSTRAP_REPLICATES)}
+        stratum_summaries.append({**stratum_key, "pair_count": len(values["red"]),
+            "simulated_match_score_difference": score_differences,
+            "safety_rate_difference": {name: {"mean": sum(deltas) / len(deltas)}
+                for name, deltas in values["safety"].items()}})
+    summary["stratum_summaries"] = stratum_summaries
     summary["useful_throughput_difference_mean"] = (
         sum(throughput_deltas) / len(throughput_deltas))
     return summary

@@ -379,6 +379,12 @@ def test_paired_control_summary_uses_same_tuple_and_separate_alliance_deltas(mon
     assert summary["simulated_match_score_difference"]["red"]["mean"] == 2.0
     assert summary["simulated_match_score_difference"]["blue"]["mean"] == -1.0
     assert summary["safety_rate_difference"][next(iter(q.SAFETY_METRIC_NAMES))]["mean"] == -0.1
+    assert len(summary["stratum_summaries"]) == 1
+    stratum = summary["stratum_summaries"][0]
+    assert stratum["pair_count"] == 1
+    assert stratum["category"] == candidate["category"]
+    assert stratum["simulated_match_score_difference"]["red"]["mean"] == 2.0
+    assert stratum["safety_rate_difference"][next(iter(q.SAFETY_METRIC_NAMES))]["mean"] == -0.1
 
 
 def test_paired_control_bundle_is_individually_digest_bound_and_nonqualifying(monkeypatch):
