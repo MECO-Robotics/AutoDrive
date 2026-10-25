@@ -49,6 +49,89 @@ class RouteResult:
     cost_provenance: str = "legacy_bump_cost_path_integral_v1"
 
 
+@dataclass(frozen=True, slots=True)
+class DeviceRouteQuery:
+    """Host identity for a route whose numeric goal remains on the device."""
+
+    candidate_id: str
+    snapshot_id: str
+    world: int
+    slot: int
+    intake_extended: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRouteBatch:
+    """Fixed-shape numeric route result; all decision values stay device-side."""
+
+    queries: tuple[DeviceRouteQuery, ...]
+    status_code: torch.Tensor
+    feasible: torch.Tensor
+    path_xy: torch.Tensor
+    path_length: torch.Tensor
+    distance_m: torch.Tensor
+    endpoint_error_m: torch.Tensor
+    weighted_cost_grid_edges: torch.Tensor
+    candidate_index: torch.Tensor
+    cost_units: str = "normalized_grid_edge_units"
+    cost_provenance: str = "legacy_bump_cost_path_integral_v2"
+
+    INVALID = 0
+    AT_GOAL = 1
+    NO_PATH = 2
+    FEASIBLE = 3
+
+    def __post_init__(self):
+        count = len(self.queries)
+        if self.status_code.shape != (count,) or self.status_code.dtype != torch.long:
+            raise ValueError("status_code must be int64 [Q]")
+        if self.feasible.shape != (count,) or self.feasible.dtype != torch.bool:
+            raise ValueError("feasible must be bool [Q]")
+        if self.path_xy.ndim != 3 or self.path_xy.shape[0] != count or self.path_xy.shape[2] != 2:
+            raise ValueError("path_xy must have shape [Q, P, 2]")
+        if self.path_length.shape != (count,) or self.path_length.dtype != torch.long:
+            raise ValueError("path_length must be int64 [Q]")
+        for name, value in (("distance_m", self.distance_m),
+                            ("endpoint_error_m", self.endpoint_error_m),
+                            ("weighted_cost_grid_edges", self.weighted_cost_grid_edges)):
+            if value.shape != (count,) or not value.is_floating_point():
+                raise ValueError(f"{name} must be a floating [Q] tensor")
+        if self.candidate_index.shape != (count,) or self.candidate_index.dtype != torch.long:
+            raise ValueError("candidate_index must be int64 [Q]")
+        tensors = (self.feasible, self.path_xy, self.path_length, self.distance_m,
+                   self.endpoint_error_m, self.weighted_cost_grid_edges,
+                   self.candidate_index)
+        if any(value.device != self.status_code.device for value in tensors):
+            raise ValueError("DeviceRouteBatch tensors must share one device")
+
+    @property
+    def device(self):
+        return self.status_code.device
+
+    def project_results(self) -> tuple[RouteResult, ...]:
+        """Materialize report records after selection, never in the live path."""
+        status = self.status_code.detach().to(device="cpu").tolist()
+        feasible = self.feasible.detach().to(device="cpu").tolist()
+        lengths = self.path_length.detach().to(device="cpu").tolist()
+        distances = self.distance_m.detach().to(device="cpu", dtype=torch.float64).tolist()
+        endpoint_errors = self.endpoint_error_m.detach().to(device="cpu", dtype=torch.float64).tolist()
+        costs = self.weighted_cost_grid_edges.detach().to(device="cpu", dtype=torch.float64).tolist()
+        paths = self.path_xy.detach().to(device="cpu", dtype=torch.float64).tolist()
+        labels = {self.INVALID: "invalid", self.AT_GOAL: "at_goal",
+                  self.NO_PATH: "no_path", self.FEASIBLE: "feasible"}
+        rows = []
+        for index, query in enumerate(self.queries):
+            code = status[index]
+            count = lengths[index]
+            path = tuple((point[0], point[1]) for point in paths[index][:count])
+            rows.append(RouteResult(query.candidate_id, query.snapshot_id,
+                query.world, query.slot, labels.get(code, "invalid"),
+                bool(feasible[index]), distances[index] if feasible[index] else None,
+                path if count else None, costs[index], self.cost_units,
+                self.cost_provenance))
+        return tuple(rows)
+
+
 def _finite_pair(value) -> bool:
     try:
         return len(value) == 2 and all(math.isfinite(float(item)) for item in value)
@@ -159,6 +242,54 @@ def _path_weighted_cost(scratch, points, learned_cost, scale: float) -> float:
     return total
 
 
+def _path_weighted_cost_device(scratch, path_xy: torch.Tensor,
+                               path_length: torch.Tensor, learned_cost,
+                               scale: float) -> torch.Tensor:
+    """Integrate padded route batches without converting route data to host."""
+    device = path_xy.device
+    dtype = torch.float64
+    count, point_count = path_xy.shape[:2]
+    if point_count < 2:
+        return torch.zeros((count,), device=device, dtype=dtype)
+    path = path_xy.to(dtype=dtype)
+    terrain = scratch._bump_cost.to(device=device, dtype=dtype)
+    if learned_cost is not None:
+        terrain = terrain + learned_cost.to(device=device, dtype=dtype) * scale
+    resolution = float(scratch.resolution)
+    starts, ends = path[:, :-1], path[:, 1:]
+    delta = ends - starts
+    dx, dy = delta[..., 0:1], delta[..., 1:2]
+    x_boundaries = (torch.arange(scratch.nx + 1, device=device, dtype=dtype) *
+                    resolution).reshape(1, 1, -1)
+    y_boundaries = (torch.arange(scratch.ny + 1, device=device, dtype=dtype) *
+                    resolution).reshape(1, 1, -1)
+    safe_dx = torch.where(dx != 0., dx, torch.ones_like(dx))
+    safe_dy = torch.where(dy != 0., dy, torch.ones_like(dy))
+    tx = (x_boundaries - starts[..., 0:1]) / safe_dx
+    ty = (y_boundaries - starts[..., 1:2]) / safe_dy
+    tx = torch.where((dx != 0.) & (tx > 0.) & (tx < 1.), tx,
+                     torch.ones_like(tx))
+    ty = torch.where((dy != 0.) & (ty > 0.) & (ty < 1.), ty,
+                     torch.ones_like(ty))
+    zero = torch.zeros_like(tx[..., :1])
+    one = torch.ones_like(tx[..., :1])
+    crossings = torch.cat((zero, one, tx, ty), dim=-1).sort(dim=-1).values
+    begin, end = crossings[..., :-1], crossings[..., 1:]
+    midpoint = (begin + end) * .5
+    location = starts[..., None, :] + midpoint[..., None] * delta[..., None, :]
+    ix = torch.floor(location[..., 0] / resolution).to(torch.long).clamp(0, scratch.nx - 1)
+    iy = torch.floor(location[..., 1] / resolution).to(torch.long).clamp(0, scratch.ny - 1)
+    flat_index = ix * scratch.ny + iy
+    values = terrain.reshape(-1)[flat_index]
+    interval = (values * (end - begin)).sum(dim=-1)
+    segment_steps = torch.linalg.vector_norm(delta, dim=-1) / resolution
+    segment_valid = (torch.arange(point_count - 1, device=device)[None, :] <
+                     (path_length - 1).clamp_min(0)[:, None])
+    per_segment = torch.where(segment_valid, interval * segment_steps,
+                              torch.zeros_like(interval))
+    return per_segment.sum(dim=-1)
+
+
 def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> TensorADStar:
     """Build a fresh planner workspace; never borrow live planner buffers."""
     live = env.planner
@@ -190,6 +321,200 @@ def _scratch_planner(env, query_rows: list[tuple[RouteQuery, torch.Tensor]]) -> 
     # Occupancy behavior and geometry must match the active implementation.
     planner._fused_blocked_hip_enabled = live._fused_blocked_hip_enabled
     return planner
+
+
+@torch.no_grad()
+def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[DeviceRouteQuery],
+                           goal_xy: torch.Tensor, *, goal_tolerance_m: float = 0.05,
+                           endpoint_tolerance_m: float = 0.05,
+                           learned_traversal_cost=None,
+                           learned_cost_scale: float = 1.0,
+                           learned_cost_provenance: str = "caller_supplied") -> DeviceRouteBatch:
+    """Evaluate numeric route goals on device and retain fixed-shape tensor rows.
+
+    Query identity and order are immutable host metadata. Goal coordinates,
+    route status, path, endpoint checks, distance, and weighted cost remain
+    tensors on ``env.device``. Call ``DeviceRouteBatch.project_results`` only
+    after the decision when report-compatible ``RouteResult`` objects are
+    needed.
+    """
+    items = tuple(queries)
+    device = torch.device(env.device)
+    if not math.isfinite(goal_tolerance_m) or goal_tolerance_m < 0:
+        raise ValueError("goal_tolerance_m must be finite and nonnegative")
+    if not math.isfinite(endpoint_tolerance_m) or endpoint_tolerance_m < 0:
+        raise ValueError("endpoint_tolerance_m must be finite and nonnegative")
+    learned_cost_scale = float(learned_cost_scale)
+    if not math.isfinite(learned_cost_scale) or learned_cost_scale < 0:
+        raise ValueError("learned_cost_scale must be finite and nonnegative")
+    if not isinstance(learned_cost_provenance, str) or not learned_cost_provenance:
+        raise ValueError("learned_cost_provenance must be a nonempty string")
+    if not items:
+        empty_float = torch.empty((0,), device=device, dtype=torch.float64)
+        return DeviceRouteBatch((), torch.empty((0,), device=device, dtype=torch.long),
+            torch.empty((0,), device=device, dtype=torch.bool),
+            torch.empty((0, 0, 2), device=device, dtype=env.policy_pose.dtype),
+            torch.empty((0,), device=device, dtype=torch.long), empty_float,
+            empty_float.clone(), empty_float.clone(),
+            torch.empty((0,), device=device, dtype=torch.long),
+            cost_provenance=("legacy_bump_cost_path_integral_v2"
+                if learned_traversal_cost is None else learned_cost_provenance))
+    if len(items) > MAX_ROUTE_QUERY_BATCH:
+        raise ValueError(f"route batch exceeds {MAX_ROUTE_QUERY_BATCH} queries")
+    if any(not isinstance(query, DeviceRouteQuery) for query in items):
+        raise TypeError("queries must contain DeviceRouteQuery values")
+    snapshot_ids = {query.snapshot_id for query in items
+                    if isinstance(query.snapshot_id, str)}
+    if len(snapshot_ids) > 1:
+        raise ValueError("one route batch must use a single snapshot_id")
+    seen = set()
+    metadata_valid = []
+    worlds, slots, intake = [], [], []
+    for query in items:
+        key = ((query.world, query.slot, query.candidate_id)
+               if isinstance(query.candidate_id, str) and type(query.world) is int
+               and type(query.slot) is int else None)
+        valid = (isinstance(query.candidate_id, str) and bool(query.candidate_id)
+                 and isinstance(query.snapshot_id, str) and bool(query.snapshot_id)
+                 and type(query.world) is int and 0 <= query.world < env.n
+                 and type(query.slot) is int and 0 <= query.slot < 6
+                 and type(query.intake_extended) is bool and key is not None
+                 and key not in seen)
+        if valid:
+            seen.add(key)
+        metadata_valid.append(valid)
+        worlds.append(query.world if valid else 0)
+        slots.append(query.slot if valid else 0)
+        intake.append(query.intake_extended if valid else False)
+    count = len(items)
+    if (not isinstance(goal_xy, torch.Tensor) or goal_xy.shape != (count, 2)
+            or goal_xy.device != device or not goal_xy.is_floating_point()):
+        raise ValueError("goal_xy must be floating [Q,2] on env.device")
+    goals = goal_xy.to(dtype=env.policy_pose.dtype)
+    world_index = torch.tensor(worlds, device=device, dtype=torch.long)
+    slot_index = torch.tensor(slots, device=device, dtype=torch.long)
+    query_mask = torch.tensor(metadata_valid, device=device, dtype=torch.bool)
+    intake_mask = torch.tensor(intake, device=device, dtype=torch.bool)
+    obstacle_snapshot = env._perceived_robot_obstacles()
+    flat_robot = world_index * 6 + slot_index
+    starts = env.policy_pose[world_index, slot_index, :2]
+    headings = env.policy_pose[world_index, slot_index, 2]
+    lengths = env.sim.length[world_index, slot_index] + intake_mask.to(
+        env.sim.length.dtype) * 0.6096
+    widths = env.sim.width[world_index, slot_index]
+    speed = env.sim.speed[world_index, slot_index]
+    friction = env.sim.lateral_mu[world_index, slot_index]
+    acceleration = env.sim.accel[world_index, slot_index]
+    obstacles = obstacle_snapshot[flat_robot]
+    inside_goal = ((goals[:, 0] >= 0.) & (goals[:, 0] <= float(env.sim.field_length)) &
+                   (goals[:, 1] >= 0.) & (goals[:, 1] <= float(env.sim.field_width)))
+    finite = (torch.isfinite(starts).all(-1) & torch.isfinite(headings) &
+        torch.isfinite(goals).all(-1) & torch.isfinite(lengths) &
+        torch.isfinite(widths) & torch.isfinite(speed) &
+        torch.isfinite(friction) & torch.isfinite(acceleration) &
+        torch.isfinite(obstacles).all(dim=(-1, -2)) & inside_goal &
+        (lengths > 0.) & (widths > 0.) & (speed > 0.) &
+        (friction > 0.) & (acceleration > 0.) &
+        (starts[:, 0] >= 0.) & (starts[:, 0] <= float(env.sim.field_length)) &
+        (starts[:, 1] >= 0.) & (starts[:, 1] <= float(env.sim.field_width)))
+    active = query_mask & finite
+    safe_start = torch.nan_to_num(starts, nan=0., posinf=0., neginf=0.)
+    safe_goal = torch.nan_to_num(goals, nan=0., posinf=0., neginf=0.)
+    safe_heading = torch.nan_to_num(headings, nan=0., posinf=0., neginf=0.)
+    safe_length = torch.where(torch.isfinite(lengths) & (lengths > 0.), lengths,
+                              torch.ones_like(lengths))
+    safe_width = torch.where(torch.isfinite(widths) & (widths > 0.), widths,
+                             torch.ones_like(widths))
+    safe_obstacles = torch.nan_to_num(obstacles, nan=0., posinf=0., neginf=0.)
+    goal_distance = torch.linalg.vector_norm(safe_goal - safe_start, dim=-1)
+    at_goal = active & (goal_distance <= goal_tolerance_m)
+    query_rows = [(query, safe_goal[index]) for index, query in enumerate(items)]
+    scratch = _scratch_planner(env, query_rows)
+    gx, gy = scratch._indices(safe_goal)
+    blocked = scratch._blocked(safe_heading, safe_length, safe_width)
+    blocked = scratch._block_robot_obstacles(blocked, safe_length, safe_width,
+                                             safe_obstacles)
+    row_index = torch.arange(count, device=device)
+    goal_blocked = blocked[row_index, gx, gy]
+    at_goal_clear = at_goal & _pose_clear(scratch, safe_start, safe_heading,
+        safe_length, safe_width, safe_obstacles)
+    at_goal_clear &= _pose_clear(scratch, safe_goal, safe_heading,
+        safe_length, safe_width, safe_obstacles)
+    route_active = active & ~at_goal & ~goal_blocked
+    planner_kwargs = dict(speed=torch.where(torch.isfinite(speed) & (speed > 0.),
+        speed, torch.ones_like(speed)), lateral_friction=torch.where(
+        torch.isfinite(friction) & (friction > 0.), friction,
+        torch.ones_like(friction)), acceleration=torch.where(
+        torch.isfinite(acceleration) & (acceleration > 0.), acceleration,
+        torch.ones_like(acceleration)), active_mask=route_active,
+        robot_obstacles=safe_obstacles)
+    learned_map = None
+    cost_provenance = "legacy_bump_cost_path_integral_v2"
+    if learned_traversal_cost is not None:
+        learned_map = torch.as_tensor(learned_traversal_cost, device=device,
+                                      dtype=env.policy_pose.dtype)
+        if learned_map.shape != (env.planner.nx, env.planner.ny):
+            raise ValueError("learned_traversal_cost has the wrong route-grid shape")
+        cost_provenance = learned_cost_provenance
+        scratch.plan(safe_start, safe_goal, safe_heading, safe_length, safe_width,
+            learned_traversal_cost=learned_map,
+            learned_cost_scale=learned_cost_scale, **planner_kwargs)
+    else:
+        scratch.plan(safe_start, safe_goal, safe_heading, safe_length, safe_width,
+                     **planner_kwargs)
+    planned_length = scratch.last_lengths
+    route_has_path = route_active & (planned_length > 1)
+    route_diagnostic = route_active & (planned_length > 1)
+    raw_path = torch.cat((safe_start[:, None, :], scratch.last_path), dim=1)
+    path_length = torch.where(route_diagnostic, planned_length + 1,
+                              torch.zeros_like(planned_length))
+    path_length = torch.where(at_goal_clear, torch.ones_like(path_length), path_length)
+    at_goal_path = safe_start[:, None, :].expand(-1, raw_path.shape[1], -1)
+    path_xy = torch.where(at_goal_clear[:, None, None], at_goal_path, raw_path)
+    last_index = (planned_length - 1).clamp(0, scratch.max_points - 1)
+    endpoint = scratch.last_path.gather(1,
+        last_index[:, None, None].expand(-1, 1, 2)).squeeze(1)
+    endpoint = torch.where(at_goal_clear[:, None], safe_start, endpoint)
+    tail_index = torch.arange(path_xy.shape[1], device=device)[None, :]
+    padded_tail = tail_index >= path_length[:, None]
+    path_xy = torch.where(padded_tail[:, :, None], endpoint[:, None, :], path_xy)
+    endpoint_error = torch.linalg.vector_norm(endpoint - safe_goal, dim=-1)
+    path_for_clear = torch.where((path_length > 0)[:, None, None], path_xy,
+                                 safe_start[:, None, :].expand_as(path_xy))
+    static_clear = scratch._footprint_path_clear(path_for_clear, safe_heading,
+        safe_length, safe_width)
+    endpoint_circles = torch.cat((scratch._extra_circles.reshape(1, -1, 3).expand(
+        count, -1, -1), safe_obstacles), dim=1)
+    circle_clear = _pose_clear_of_circles(endpoint[:, None, :],
+        safe_heading, safe_length, safe_width, endpoint_circles)
+    segment_lengths = torch.linalg.vector_norm(path_xy[:, 1:] - path_xy[:, :-1], dim=-1)
+    segment_mask = (torch.arange(path_xy.shape[1] - 1, device=device)[None, :] <
+                    (path_length - 1).clamp_min(0)[:, None])
+    distance = torch.where(segment_mask, segment_lengths,
+                           torch.zeros_like(segment_lengths)).sum(dim=-1)
+    endpoint_ok = endpoint_error <= endpoint_tolerance_m
+    route_feasible = (route_has_path & static_clear & circle_clear & endpoint_ok &
+                      torch.isfinite(distance))
+    feasible = at_goal_clear | route_feasible
+    status = torch.full((count,), DeviceRouteBatch.NO_PATH, device=device,
+                        dtype=torch.long)
+    status = torch.where(~active, torch.full_like(status, DeviceRouteBatch.INVALID), status)
+    status = torch.where(at_goal_clear, torch.full_like(status, DeviceRouteBatch.AT_GOAL), status)
+    status = torch.where(route_feasible, torch.full_like(status, DeviceRouteBatch.FEASIBLE), status)
+    path_length = torch.where(~active, torch.zeros_like(path_length), path_length)
+    path_length = torch.where(route_has_path | at_goal_clear, path_length,
+                              torch.zeros_like(path_length))
+    path_xy = torch.where((path_length > 0)[:, None, None], path_xy,
+                          torch.zeros_like(path_xy))
+    distance = torch.where(feasible, distance, distance)
+    endpoint_error = torch.where(at_goal_clear, torch.zeros_like(endpoint_error),
+                                 endpoint_error)
+    weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
+                                               learned_map, learned_cost_scale)
+    return DeviceRouteBatch(items, status, feasible, path_xy, path_length,
+        distance.to(torch.float64), endpoint_error.to(torch.float64),
+        weighted_cost, torch.arange(count, device=device, dtype=torch.long),
+        cost_provenance=cost_provenance)
 
 
 @torch.no_grad()
