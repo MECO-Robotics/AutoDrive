@@ -1,9 +1,9 @@
 # MECO learning tracks plan: execution status
 
-> **Live r4 and durable-evaluation update — 2026-10-25 03:34 UTC.** The
+> **Live r4 and durable-evaluation update — 2026-10-25 03:46 UTC.** The
 > supervisor PID `2750253` is active with both WX9100 lanes. Its queue
-> heartbeat at `2026-10-25T03:34:20Z` shows A1, A2, A3, and C1 complete at
-> 100/100; C2 is running at 11/100 on `cuda:0`. It is cycle 1, with no matched
+> heartbeat at `2026-10-25T03:46:36Z` shows A1, A2, A3, and C1 complete at
+> 100/100; C2 is running at 35/100 on `cuda:0`. It is cycle 1, with no matched
 > cycle completion or evaluation. This is still the older single-scenario
 > `pickup_simple/cluster` diagnostic, without an evaluation binding, warm
 > starts, or Phase 4 exposure. The five model tracks are being exercised, but
@@ -23,16 +23,35 @@
 > focused CPU source-contract tests passed; runtime support construction still
 > uses the CPU oracle, and the WX9100 parity/profile gate remains closed. No
 > HIP compile, device parity/profile, or simulator replay has been completed.
+> The Plan C repeated-label corpus audit is integrated as `70397a016` and
+> `5389e618a`, with independent exact-head approval of `dbf1da3b`. Twenty-two
+> focused offline tests passed. No real Plan C dataset has been audited, so
+> this provides neither labels or warm starts nor simulator outcomes.
 > No simulator evaluation or replay was run. After the route-prototype source
-> update, the r5 manifest was regenerated and validated offline at clean source
-> `85618385dee59dc2676c2b80a6ce7a5797c5c05d`, canonical digest
-> `d55e22d9cc2d2d099d17ee25d63f129f9132583c988e6aea9718e795fe7ee507`.
+> updates, the r5 manifest was regenerated and validated offline at clean
+> source `5389e618a5aad99b32753de20fb9c1d47cdce888`, canonical digest
+> `87c5abcb30cacaa6b4cd612d31028a9c1ab5215950a12be46a57b7c40c73c542`.
 > The current config/manifest are
-> `meco-five-continuous-20261025-r5-device-route-856.config.json` and
-> `meco-five-continuous-20261025-r5-device-route-856.json`. The manifest binds
+> `meco-five-continuous-20261025-r5-plan-c-audit-5389.config.json` and
+> `meco-five-continuous-20261025-r5-plan-c-audit-5389.json`. The manifest binds
 > all 466 validation cases and 46,600 exact seeds; both campaign output roots
 > are absent. Launch, Phase 2, validation, qualification, and warm-start
 > readiness remain false. It is not launched while r4 holds both WX9100 leases.
+
+> **Why the overall goal is still incomplete — 2026-10-25 03:46 UTC.** The
+> goal has been active about 45 hours, while the current uninterrupted r4
+> service has run about 3 hours. The four `100/100` values are one diagnostic
+> optimizer chunk per track, not 100 evaluation cases or curriculum passes;
+> C2 has not finished that first chunk. The active run covers only
+> `pickup_simple/cluster`, has no matched evaluation, no warm starts, and no
+> Phase 4 exposure. The plan's remaining work includes usable Plan A/C data
+> and warm starts, broad matched held-out evaluation with inspected fresh
+> replays, Phase 4 generalization, and deployment/qualification evidence.
+> Recent elapsed effort also went into source-bound manifests, training
+> orchestration, dashboard/provenance support, and scoped Plan A/C tooling;
+> those are prerequisites and do not count as model-performance evidence.
+> Therefore elapsed time cannot be reported as plan completion, and the
+> current training run alone will not finish the full plan.
 > r4 was not changed or interrupted.
 >
 > The user dashboard was restarted on the integrated checkout at 03:33 UTC

@@ -2,15 +2,16 @@
 
 An offline r5 config and manifest are prepared at
 `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/manifests/`.
-The earlier r5 manifests bound to `b02db09f3` and `9830c2647` are stale after
-the reviewed Plan A device-route source update. The current files are
-`meco-five-continuous-20261025-r5-device-route-856.config.json` and
-`meco-five-continuous-20261025-r5-device-route-856.json`, generated and
+The earlier r5 manifests bound to `b02db09f3`, `9830c2647`, and `85618385` are
+stale after the reviewed Plan A route and Plan C corpus-audit source updates.
+The current files are
+`meco-five-continuous-20261025-r5-plan-c-audit-5389.config.json` and
+`meco-five-continuous-20261025-r5-plan-c-audit-5389.json`, generated and
 validated against clean source commit
-`85618385dee59dc2676c2b80a6ce7a5797c5c05d` in worktree
-`/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-current-source-856`.
+`5389e618a5aad99b32753de20fb9c1d47cdce888` in worktree
+`/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-current-source-5389`.
 The canonical manifest digest is
-`d55e22d9cc2d2d099d17ee25d63f129f9132583c988e6aea9718e795fe7ee507`.
+`87c5abcb30cacaa6b4cd612d31028a9c1ab5215950a12be46a57b7c40c73c542`.
 Do not launch a new campaign while r4 owns the two WX9100 leases. The integrated source includes the
 reviewed A1/A2/A3 action/log-probability fix, Plan A P-map propagation into
 focal-robot AD* replanning, Phase 2 Plan A v3 warm-start support, Phase 4
