@@ -49,9 +49,30 @@ def test_full_team_start_profiles_are_legal_and_apply_only_at_reset(profile):
     applied = apply_full_team_start_profile(env, profile)
     assert torch.equal(env.sim.pose, applied)
     assert not env.sim.velocity.any()
-    assert env.phase4_start_profile_legality == [True, True]
-    assert env.phase4_start_profile_validated_world_count == 2
-    assert env.phase4_start_profile_validation_rate == 1.
+    assert torch.equal(env.phase4_start_profile_legality,
+                       torch.ones((2,), dtype=torch.bool))
+    assert torch.equal(env.phase4_start_profile_validated_world_count,
+                       torch.ones((2,), dtype=torch.long))
+    assert torch.equal(env.phase4_start_profile_validation_rate,
+                       torch.ones((2,)))
+
+
+@pytest.mark.parametrize("profile", START_PROFILE_NAMES)
+def test_start_profile_selected_mask_preserves_unselected_pose_velocity_and_report(profile):
+    env = _env()
+    env.sim.pose[1] = torch.tensor(((-2., 3., .2),) * 6)
+    env.sim.velocity[1] = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+    pose_before = env.sim.pose[1].clone()
+    velocity_before = env.sim.velocity[1].clone()
+    poses = apply_full_team_start_profile(env, profile,
+        mask=torch.tensor([True, False]))
+    assert torch.equal(env.sim.pose[0], poses[0])
+    assert torch.equal(env.sim.pose[1], pose_before)
+    assert torch.equal(env.sim.velocity[1], velocity_before)
+    assert torch.equal(env.phase4_start_profile_validated_world_count,
+                       torch.tensor([1, 0]))
+    assert torch.equal(env.phase4_start_profile_applied,
+                       torch.tensor([True, False]))
 
 
 @pytest.mark.parametrize("geometry", CONTACT_GEOMETRIES)
@@ -79,6 +100,21 @@ def test_contact_geometries_are_physically_distinct():
     assert not torch.equal(profiles[0], profiles[1])
     assert not torch.equal(profiles[0], profiles[2])
     assert not torch.equal(profiles[1], profiles[2])
+
+
+@pytest.mark.parametrize("geometry", CONTACT_GEOMETRIES)
+def test_contact_profile_uses_each_world_radius_and_returns_fixed_shape(geometry):
+    env = _env()
+    env.sim.length[1, 2:4] = torch.tensor([1.4, 1.0])
+    env.sim.width[1, 2:4] = torch.tensor([1.0, 1.2])
+    poses = contact_exposure_profile(env, geometry,
+        mask=torch.tensor([True, False]))
+    assert poses.shape == (2, 6, 3)
+    delta = poses[:, 3, :2] - poses[:, 2, :2]
+    distance = torch.linalg.vector_norm(delta, dim=-1)
+    radii = .5 * (env.sim.length[:, 2].square() + env.sim.width[:, 2].square()).sqrt()
+    radii += .5 * (env.sim.length[:, 3].square() + env.sim.width[:, 3].square()).sqrt()
+    assert torch.allclose(distance, radii + .08, atol=1e-5)
 
 
 def test_contact_actions_require_fresh_track_directed_at_focal_and_use_defend_motion():

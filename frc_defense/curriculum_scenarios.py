@@ -18,6 +18,7 @@ from .meco_phase4_opponents import POLICY_POOL, opponent_velocity_command
 from .meco_phase4_context import (CONTACT_GEOMETRIES,
     contact_exposure_actions, contact_exposure_profile,
     apply_full_team_start_profile, phase4_context_identity,
+    full_team_start_profile_legality,
     validate_phase4_start_profile_assignment,
     validate_phase4_focal_pose_assignment, apply_phase4_focal_pose_assignment)
 from .tensor_3v3 import TensorThreeVsThreeEnv
@@ -1004,19 +1005,31 @@ def reset_curriculum_scenario(env, seed):
                     & (env.sim.pose[..., 1] >= 0.) & (env.sim.pose[..., 1] <= env.sim.field_width))
         env.sim.pose[..., 1] += on_field.to(env.sim.pose.dtype) * offset
         env.piece_pos[..., 1] += env.piece_active.to(env.piece_pos.dtype) * offset
-    if env.contact_geometry_id is not None:
-        env.sim.pose.copy_(contact_exposure_profile(env, env.contact_geometry_id))
-        env.sim.velocity.zero_()
     start_assignment = getattr(env, 'phase4_start_profile_assignment', None)
-    env.phase4_start_profile_applied = False
-    env.phase4_start_profile_legality = None
-    env.phase4_start_profile_validation_rate = None
-    env.phase4_start_profile_validated_world_count = 0
+    reset_mask = torch.ones((env.n,), device=env.device, dtype=torch.bool)
+    env.phase4_start_profile_applied = torch.zeros_like(reset_mask)
+    env.phase4_start_profile_legality = torch.zeros_like(reset_mask)
+    env.phase4_start_profile_failure_mask = torch.zeros_like(reset_mask)
+    env.phase4_reset_failure_mask = torch.zeros_like(reset_mask)
+    env.phase4_contact_profile_legality = torch.zeros_like(reset_mask)
+    env.phase4_start_profile_validation_rate = torch.zeros(
+        (env.n,), device=env.device, dtype=torch.float32)
+    env.phase4_start_profile_validated_world_count = torch.zeros(
+        (env.n,), device=env.device, dtype=torch.long)
+    if env.contact_geometry_id is not None:
+        contact_poses = contact_exposure_profile(env, env.contact_geometry_id,
+            mask=reset_mask)
+        env.sim.pose.copy_(torch.where(reset_mask[:, None, None], contact_poses,
+                                       env.sim.pose))
+        env.sim.velocity.copy_(torch.where(reset_mask[:, None, None],
+            torch.zeros_like(env.sim.velocity), env.sim.velocity))
+        contact_legal = full_team_start_profile_legality(env, env.sim.pose)
+        env.phase4_contact_profile_legality = contact_legal
+        env.phase4_reset_failure_mask = reset_mask & ~contact_legal
     if start_assignment is not None:
         start_assignment = validate_phase4_start_profile_assignment(start_assignment)
         apply_full_team_start_profile(env,
-            start_assignment['runtime_profile_name'])
-        env.phase4_start_profile_applied = True
+            start_assignment['runtime_profile_name'], mask=reset_mask)
         pressure['anchor_y'] = float(env.sim.pose[0, 3, 1])
         config['phase4_start_profile'] = {
             'factor_id': start_assignment['factor_id'],

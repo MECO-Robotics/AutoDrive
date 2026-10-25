@@ -1407,7 +1407,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              route_cost_points_per_second, action_ticks,
                              candidate_k, deterministic, value_head,
                              p_mode, p_cost_scale, p_points_per_grid_edge,
-                             prediction_mode="cv", tracking_was_available=None):
+                             prediction_mode="cv", tracking_was_available=None,
+                             action_generator=None):
     """Build stable full-pose support and sample from its exact masked softmax."""
     # Plan A needs the canonical observation provenance, but has no candidate
     # table, teacher action, or candidate feature rows. Capture only that
@@ -1588,7 +1589,8 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     categorical_logits = torch.where(has_legal_support, selection_logits,
                                       torch.zeros_like(selection_logits))
     action, logprob, entropy = sample_candidate_action(categorical_logits[None],
-        deterministic=(True if production_inference_failed else deterministic))
+        deterministic=(True if production_inference_failed else deterministic),
+        generator=action_generator)
     selected_index = torch.where(has_legal_support, action.reshape(()),
                                  torch.full((), -1, device=action.device,
                                             dtype=action.dtype))
@@ -1698,7 +1700,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                       p_mode="learned", p_cost_scale=1., p_points_per_grid_edge=.05,
                       prediction_mode="cv",
                       commitment: CandidateCommitment | None = None,
-                      tracking_was_available=None):
+                      tracking_was_available=None, action_generator=None):
     observation = env._last_obs
     if track in ("A1", "A2", "A3"):
         return _prepare_plan_a_decision(track, model, env, graph, episode_id,
@@ -1708,7 +1710,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
             p_mode=p_mode, p_cost_scale=p_cost_scale,
             p_points_per_grid_edge=p_points_per_grid_edge,
             prediction_mode=prediction_mode,
-            tracking_was_available=tracking_was_available)
+            tracking_was_available=tracking_was_available,
+            action_generator=action_generator)
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
@@ -1770,7 +1773,8 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
         path_cost = None
     action, logprob, entropy = sample_candidate_action(decision["logits"],
         deterministic=(True if decision.get("inference_status") ==
-                       "deterministic_fallback" else deterministic))
+                       "deterministic_fallback" else deterministic),
+        generator=action_generator)
     selected_action_payload = (None if candidate_set.device_batch is None else
         candidate_set.device_batch.gather_action_payload(action))
     candidate_set = materialize_device_candidate_evidence(candidate_set)
@@ -4583,6 +4587,33 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                             "goal_attempt_coverage_available") is True})
                             for factor_id in phase4_route_outcome_factor_ids
                         } if phase4_route_outcome_factor_ids else None)
+                        phase4_start_profile_report = None
+                        if phase4_start_profile_assignment is not None:
+                            legal_rows = env.phase4_start_profile_legality.detach().cpu().tolist()
+                            applied_rows = env.phase4_start_profile_applied.detach().cpu().tolist()
+                            validated_rows = env.phase4_start_profile_validated_world_count.detach().cpu().tolist()
+                            legal_world_count = sum(int(legal and validated)
+                                for legal, validated in zip(legal_rows, validated_rows))
+                            validated_world_count = sum(int(value) for value in validated_rows)
+                            phase4_start_profile_report = {
+                                "schema": "meco-phase4-start-profile-report-v2",
+                                "profile_applied_before_observation": bool(all(applied_rows)),
+                                "validated_pose_world_count": validated_world_count,
+                                "validated_pose_legal_world_count": legal_world_count,
+                                "validated_pose_world_indices": [index for index, value
+                                    in enumerate(validated_rows) if value],
+                                "validated_pose_world_index_semantics":
+                                    "zero_based_simulator_batch_index",
+                                "per_world_legal": legal_rows,
+                                "legal_start_validation_rate": (
+                                    legal_world_count / validated_world_count
+                                    if validated_world_count else None),
+                                "outcome_metrics": {
+                                    name: metrics[name] for name in (
+                                        "success", "scores", "useful_throughput",
+                                        "completed_cycles")},
+                                "qualification_eligible": False,
+                            }
                         record = {"scenario_id": scenario_id, "category": category,
                             "diagnostic_performance": diagnostic_performance,
                             "input_contract_sha256": input_contract_digest(),
@@ -4668,26 +4699,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "profile_config_sha256"],
                                 "assignment_sha256": phase4_start_profile_assignment[
                                     "assignment_sha256"],
-                                "profile_applied_before_observation": bool(
-                                    env.phase4_start_profile_applied),
-                                "validated_pose_world_count": int(
-                                    env.phase4_start_profile_validated_world_count),
-                                "validated_pose_legal_world_count": int(sum(
-                                    env.phase4_start_profile_legality or ())),
-                                "validated_pose_world_indices": list(range(
-                                    int(env.phase4_start_profile_validated_world_count))),
-                                "validated_pose_world_index_semantics":
-                                    "zero_based_simulator_batch_index",
-                                "per_world_legal": list(
-                                    env.phase4_start_profile_legality or ()),
-                                "legal_start_validation_rate": float(
-                                    env.phase4_start_profile_validation_rate),
-                                "outcome_metrics": {
-                                    name: metrics[name] for name in (
-                                        "success", "scores", "useful_throughput",
-                                        "completed_cycles")},
-                                "qualification_eligible": False,
-                            } if phase4_start_profile_assignment is not None else None),
+                                **phase4_start_profile_report,
+                            } if phase4_start_profile_report is not None else None),
                             "phase4_focal_pose": phase4_focal_pose_record,
                             "phase4_teammate_behavior": (
                                 phase4_teammate_behavior_record(
