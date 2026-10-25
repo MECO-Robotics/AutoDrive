@@ -79,6 +79,8 @@ def validate_device_route_batch(batch: "DeviceRouteBatch", queries, *, device):
     target = torch.device(device)
     if batch.device != target:
         raise ValueError("route batch is on the wrong device")
+    if batch.cost_units != "normalized_grid_edge_units":
+        return torch.zeros((), device=target, dtype=torch.bool)
     count = len(items)
     expected_shapes = ((count,), (count,), (count, 2), (count,), (count,),
                        (count,), (count,))
@@ -652,6 +654,8 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
             common_metadata = metadata
         elif metadata != common_metadata:
             contract_ok = torch.zeros_like(contract_ok)
+        if chunk.cost_units != "normalized_grid_edge_units":
+            contract_ok = torch.zeros_like(contract_ok)
         all_chunks_valid = all_chunks_valid & contract_ok
         # A malformed or non-finite chunk invalidates the complete route batch.
         # Keep that decision on device so no good chunk can remain selectable.
@@ -662,6 +666,7 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
             chunk.distance_m, chunk.endpoint_error_m,
             chunk.weighted_cost_grid_edges,
             torch.arange(stop - start, device=goal_xy.device, dtype=torch.long),
+            cost_units=chunk.cost_units,
             cost_provenance=chunk.cost_provenance,
             bump_cost_grid_edges=chunk.bump_cost_grid_edges,
             learned_cost_grid_edges=chunk.learned_cost_grid_edges)
@@ -683,7 +688,8 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         torch.cat([batch.distance_m for batch in chunks]),
             torch.cat([batch.endpoint_error_m for batch in chunks]),
             torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
-            mapping.global_row, cost_provenance=chunks[0].cost_provenance,
+            mapping.global_row, cost_units=chunks[0].cost_units,
+            cost_provenance=chunks[0].cost_provenance,
             bump_cost_grid_edges=concatenate_optional("bump_cost_grid_edges"),
             learned_cost_grid_edges=concatenate_optional("learned_cost_grid_edges"))
     result_contract_ok = validate_device_route_batch(result, items,
@@ -695,6 +701,7 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         result.feasible & batch_valid, result.path_xy,
         result.path_length, result.distance_m, result.endpoint_error_m,
         result.weighted_cost_grid_edges, result.candidate_index,
+        cost_units=result.cost_units,
         cost_provenance=result.cost_provenance,
         bump_cost_grid_edges=result.bump_cost_grid_edges,
         learned_cost_grid_edges=result.learned_cost_grid_edges)
