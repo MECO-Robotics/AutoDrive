@@ -105,6 +105,9 @@ class TensorThreeVsThreeObservationMixin:
 
     def _update_perception(self, active, active_count=None):
         """Update per-robot free-FUEL and nearest-opponent tracks."""
+        if (not isinstance(active, torch.Tensor) or active.device != self.device or
+                active.dtype is not torch.bool or tuple(active.shape) != (self.n,)):
+            raise ValueError("perception active mask must be a device bool vector [N]")
         # This is the physical camera/chassis pose used only to render
         # simulated measurements. Policy-visible localization is assembled
         # later from ``policy_pose``; keep sensor generation and policy state
@@ -862,6 +865,8 @@ class TensorThreeVsThreeObservationMixin:
                          candidates, action_mask.to(p.dtype)), -1)
         if obs.shape[-1] != OBS_DIM:
             raise RuntimeError(f"3v3 observation width {obs.shape[-1]} != {OBS_DIM}")
+        if obs.device != self.device or tuple(obs.shape) != (self.n, NUM_ROBOTS, OBS_DIM):
+            raise RuntimeError("3v3 policy observation has an invalid device or batch shape")
         if self.normalize_observations:
             flat = obs.reshape(-1, OBS_DIM)
             sp = torch.stack((self.sim.speed, self.sim.speed), -1).reshape(-1, 2)
