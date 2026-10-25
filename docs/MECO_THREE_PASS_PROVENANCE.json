@@ -1401,7 +1401,7 @@
         ],
         "status": "approved-summary"
       },
-      "limits": "19 focused CPU contract tests passed; py_compile and git diff --check passed. Diagnostic only. Configured pressure slots are slot 0 for levels 1–4 and slots 0/1 for level 5; slot 2 is out of scope. No simulator behavior validation or replay was run, so runtime slot application and outcomes remain unverified. Family-specific outcome signals remain null/unavailable and qualification eligibility remains false. No GPU, training, dashboard, or qualification action was performed."
+      "limits": "19 focused CPU contract tests passed; py_compile and git diff --check passed. Diagnostic only. Configured pressure slots are slot 0 for levels 1\u20134 and slots 0/1 for level 5; slot 2 is out of scope. No simulator behavior validation or replay was run, so runtime slot application and outcomes remain unverified. Family-specific outcome signals remain null/unavailable and qualification eligibility remains false. No GPU, training, dashboard, or qualification action was performed."
     },
     {
       "requirement_id": "phase4-legal-team-start-profiles",
@@ -2172,6 +2172,42 @@
         "status": "approved-summary"
       },
       "limits": "Offline input compiler only. Thirteen focused tests, Python compilation, and diff checks were reported passing. No simulator, training, dashboard, held-out results, qualification, or deployment evidence; only trusted local MECO schema-1 checkpoints are supported."
+    },
+    {
+      "requirement_id": "dashboard-direct-campaign-roots",
+      "title": "Dashboard direct campaign roots",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/dashboard-direct-campaign-roots.md",
+          "sha256": "099196b00f97334611fc46a44c1a272a5ce3ee9678df47367814a9edf8e3e1c6",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "d23b22d20352d22eccaf5986c421a624335cb7db",
+        "candidate_integration_commit": "3b202576747dcd6078dad8c554bda2b396523918",
+        "paths": [
+          "frc_defense/meco_dashboard.py",
+          "tests/test_meco_dashboard.py",
+          "docs/MECO_DASHBOARD_DATA_ROOT.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/dashboard-direct-campaign-roots.md",
+          "sha256": "099196b00f97334611fc46a44c1a272a5ce3ee9678df47367814a9edf8e3e1c6",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "d23b22d20352d22eccaf5986c421a624335cb7db",
+        "verdict": "approved",
+        "verdict_detail": "Independent review approved the exact implementation head and confirmed legacy compatibility, direct five-track projection, and fail-closed symlink/partial/ambiguous layout handling.",
+        "status": "approved-summary"
+      },
+      "limits": "Twenty-seven focused dashboard tests, Python compilation, and diff checks were reported passing. Live API/currentness verification is separate; this tranche provides no simulator, training, held-out evaluation, qualification, or deployment evidence."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
@@ -2197,7 +2233,7 @@
     "The paired matrix-effects analyzer supplies diagnostic intervals only; it does not establish promotion, qualification, deployment readiness, or completion of the evaluation plan.",
     "The Phase 5 ONNX Runtime parity follow-up validates synthetic graph execution only; real production capture, trained-checkpoint parity, Hailo, device, and deployment qualification remain unverified.",
     "The Phase 2 Plan A matched-rollout U oracle contract was implemented and reviewed, but no rollout labels, dataset, fitted weights, simulator evaluation, replay, or GPU training were generated; the bounded U estimand is not a global-optimality claim, and P remains P0.",
-    "Phase 4 reactive-opponent validation wiring has focused contract/review evidence only; configured slots are level 1–4 slot 0 and level 5 slots 0/1, slot 2 is out of scope, simulator/replay evidence is absent, family-specific outcomes remain null, and qualification eligibility is false.",
+    "Phase 4 reactive-opponent validation wiring has focused contract/review evidence only; configured slots are level 1\u20134 slot 0 and level 5 slots 0/1, slot 2 is out of scope, simulator/replay evidence is absent, family-specific outcomes remain null, and qualification eligibility is false.",
     "Phase 4 legal full-team start-profile contracts are reviewed, but simulator behavior and legal-start rate remain unverified; outcome_by_start_state is null/unavailable and qualification eligibility remains false. No simulator, GPU/HIP, training, campaign, replay, or dashboard validation was performed.",
     "The Phase 4 action-7 remask taxonomy corrects diagnostic record classification only; it does not show action 7 was learned, and has no simulator, replay, or qualification evidence.",
     "The dashboard curriculum external-root tranche verifies path handling and post-integration endpoint/frontend currentness only; it does not establish simulator behavior, replay outcomes, five-track completion, or qualification.",
@@ -2205,6 +2241,6 @@
     "The Phase 4 focal-pose assignment is protocol-bound and records initial truth-versus-estimate diagnostics only; it has 131 focused CPU contract tests but no simulator/E2E replay, GPU/HIP, training, dashboard-currentness, or qualification evidence. Generic Phase 4 factor capture does not support this dedicated assignment path; relocalization, recovery, and safety outcomes remain unavailable, and qualification is false.",
     "The Phase 4 teammate-behavior tranche records paired validation assignments and post-remask strategic macro-actions only; authoritative behavior/score/collision outcomes, simulator replay, GPU/HIP, training, dashboard currentness, and qualification remain absent.",
     "The trench-interceptor tranche wires protocol-bound per-category validation schedules over the exact 14-category domain; focused contract checks are not simulator validation, outcome signals remain null, and qualification remains false.",
-    "Tranches #44–#47 are scoped implementation and metadata/contract evidence only; they require later runtime evidence. C1/C2 campaign execution remains pending lease availability, and Plan A U/B/P orchestration/evidence remains outstanding."
+    "Tranches #44\u2013#47 are scoped implementation and metadata/contract evidence only; they require later runtime evidence. C1/C2 campaign execution remains pending lease availability, and Plan A U/B/P orchestration/evidence remains outstanding."
   ]
 }

@@ -1,5 +1,17 @@
 # MECO learning tracks plan: execution status
 
+> **Live throughput check — 2026-10-25 00:57 UTC.** The r4 service remains
+> active (PID `2750253`; started 00:46:34 UTC). Both WX9100 workers are alive.
+> From update timestamps, A1 is completing about 90–100 optimizer updates/hour
+> and A2 about 83–90/hour; their current counts are 10/100 and 9/100. A3, C1, and C2 are
+> queued. At this early rate, a matched five-track 100-update cycle is roughly
+> 2.5–3.5 hours before evaluation overhead; C-track rates and later-cycle
+> throughput are unknown, so this is not an ETA for the full plan. Both GPUs
+> report 98–99% utilization, while workers also consume CPU for simulator,
+> planning, and control work. This is mixed CPU/GPU execution, not CPU-free.
+> No five-track chunk, cycle, or evaluation has yet completed. The dashboard
+> direct-campaign status projection remains under repair.
+
 > **Live recovery campaign — 2026-10-25 00:51 UTC.** The failed
 > `meco-five-continuous-20261024-r3` root remains archived and untouched. Its
 > supervisor failed at 00:36:32 UTC because the worker run record omitted
