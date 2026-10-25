@@ -223,7 +223,10 @@ def test_signed_choice_flows_through_v2_replay_and_fitter(tmp_path, monkeypatch)
         authority_json=authority_path, output=out, signed_choice_sidecar=sidecar)
     materialized = json.loads(out.read_text())
     assert materialized["signed_human_choice"]["node_id"] == 1
+    assert materialized["goal_preference_tiers"] == []
+    assert materialized["goal_preferences"] == []
     assert materialized["action_pair_preferences"][0]["preferred_node_id"] == 1
+    assert materialized["action_pair_preferences"][0]["right_node_id"] == 2
 
     support = SimpleNamespace(valid_mask=torch.tensor([True, True, True, True]),
         pair_node_ids=torch.tensor([1, 1, 2, 1]),

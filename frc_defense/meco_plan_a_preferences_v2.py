@@ -232,9 +232,11 @@ def materialize_plan_a_preferences_v2(*, source_dataset: Path,
             if (any(not _int_id(value) for value in (*selected, *baseline)) or
                     selected == baseline or selected not in available or baseline not in available):
                 raise ValueError("signed choice and comparison baseline must be distinct feasible support pairs")
-            tiers = [[selected[0]], [baseline[0]]] if selected[0] != baseline[0] else []
             authored[key] = {**dict(zip(IDENTITY, key)),
-                "goal_preference_tiers": tiers, "behavior_preferences": [],
+                # A complete-action choice does not independently identify a
+                # U-only goal ranking; keep its supervision in the joint U+B
+                # action-pair target below.
+                "goal_preference_tiers": [], "behavior_preferences": [],
                 "action_pair_preferences": [{
                     "left_node_id": selected[0], "left_behavior_id": selected[1],
                     "right_node_id": baseline[0], "right_behavior_id": baseline[1],
