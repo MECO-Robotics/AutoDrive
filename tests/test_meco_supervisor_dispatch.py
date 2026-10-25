@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import hashlib
 
 import pytest
 
@@ -478,6 +479,15 @@ def test_manifest_mode_propagates_phase4_train_exposure(tmp_path, monkeypatch,
         "devices": {"training_pool": ["cuda:0", "cuda:1"],
             "evaluation": "cuda:1"},
         "qualification_protocol": {"path": str(tmp_path / "protocol.json")}}
+    warm_starts = {}
+    expected_warm_paths = {}
+    for track in MECO_TRACKS:
+        artifact = tmp_path / f"{track}.pt"
+        artifact.write_bytes(track.encode())
+        expected_warm_paths[track] = str(artifact.resolve())
+        warm_starts[track] = {"present": True, "binding_valid": True,
+            "path": str(artifact), "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
+    manifest["warm_starts"] = warm_starts
     manifest_path.write_text(json.dumps(manifest))
     monkeypatch.setattr("frc_defense.meco_training_manifest.validate_campaign_manifest",
         lambda _manifest: {"valid": True, "canonical_sha256": "a" * 64,
@@ -494,6 +504,7 @@ def test_manifest_mode_propagates_phase4_train_exposure(tmp_path, monkeypatch,
         "--diagnostic-launch"])
     assert captured["phase4_train_exposure"] is enabled
     assert captured["campaign_manifest"]["campaign"]["phase4_train_exposure"] is enabled
+    assert captured["warm_start_artifacts"] == expected_warm_paths
     assert result == {"status": "stub"}
     assert json.loads(capsys.readouterr().out) == {"status": "stub"}
 

@@ -401,42 +401,64 @@ def test_hardware_inventory_requires_matching_wx9100_evidence(campaign, monkeypa
 def test_fabricated_target_coverage_never_qualifies(campaign, monkeypatch):
     tmp_path, config = campaign
     import torch
-    path = tmp_path / "fabricated.pt"
-    path.write_bytes(b"not a torch artifact")
-    payload = {"track": "A1", "schema": "fake",
-        "source_identity_sha256": _canonical({"source": "fixture"}),
-        "protocol_id": _protocol(tmp_path / "protocol.json")["protocol_id"],
-        "protocol_sha256": manifest_api._file_sha(tmp_path / "protocol.json"),
-        "target_coverage": {name: {"coverage_valid": True, "labeled_count": 100,
-            "target_schema": "invented", "dataset_sha256": "a" * 64,
-            "source_dataset_sha256": "b" * 64, "label_provenance": "invented"}
-            for name in ("U", "P", "behavior")}}
-    monkeypatch.setattr(torch, "load", lambda *args, **kwargs: payload)
-    from frc_defense import meco_supervised
-    monkeypatch.setattr(meco_supervised, "validate_warm_start_artifact",
-        lambda *args, **kwargs: payload)
-    config["warm_start_artifacts"] = {"A1": str(path)}
+    protocol = _protocol(tmp_path / "protocol.json")
+    payloads = {}
+    paths = {}
+    payload_sources = {"source": "fixture", "_native_fuel_extension": {
+        "status": "present", "module": "autodrive_fuel_physics_hip",
+        "path": "/native/fuel.so", "sha256": "a" * 64,
+        "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
+        "size": 3, "mtime_ns": 4}}
+    for track in MECO_TRACKS:
+        path = tmp_path / f"fabricated-{track}.pt"
+        path.write_bytes(f"not a torch artifact {track}".encode())
+        paths[track] = str(path)
+        payloads[str(path.resolve())] = {"track": track, "schema": "fake",
+            "sources": payload_sources,
+            "source_identity_sha256": manifest_api._source_artifact_hash(payload_sources),
+            "protocol_id": protocol["protocol_id"],
+            "protocol_sha256": manifest_api._file_sha(tmp_path / "protocol.json"),
+            "target_coverage": {name: {"coverage_valid": True, "labeled_count": 100,
+                "target_schema": "invented", "dataset_sha256": "a" * 64,
+                "source_dataset_sha256": "b" * 64, "label_provenance": "invented"}
+                for name in ("U", "P", "behavior")}}
+    monkeypatch.setattr(torch, "load", lambda path, **kwargs: payloads[str(Path(path).resolve())])
+    config["warm_start_artifacts"] = paths
     manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
-    assert manifest["warm_starts"]["A1"]["phase2_covered"] is False
-    assert not any(row["valid"] for row in manifest["warm_starts"]["A1"]["targets"].values())
+    for track in MECO_TRACKS:
+        assert manifest["warm_starts"][track]["phase2_covered"] is False
+        assert not any(row["valid"] for row in manifest["warm_starts"][track]["targets"].values())
     assert manifest["readiness"]["phase2_ready"] is False
 
 
 def test_validate_rehashes_warm_start_bytes(campaign, monkeypatch):
     tmp_path, config = campaign
-    artifact = tmp_path / "warm.pt"
-    artifact.write_bytes(b"stable-artifact")
-    config["warm_start_artifacts"] = {"A1": str(artifact)}
+    artifacts = {}
+    config["warm_start_artifacts"] = {}
+    for track in MECO_TRACKS:
+        artifact = tmp_path / f"warm-{track}.pt"
+        artifact.write_bytes(f"stable-{track}".encode())
+        artifacts[track] = artifact
+        config["warm_start_artifacts"][track] = str(artifact)
     monkeypatch.setattr(manifest_api, "_warm_start", lambda path, track, expected_sources,
         protocol_path, protocol_id, protocol_sha: {
-            "present": True, "path": str(artifact.resolve()), "sha256": manifest_api._file_sha(artifact),
+            "present": True, "path": str(Path(path).resolve()), "sha256": manifest_api._file_sha(path),
             "binding_valid": True, "targets": {"U": {"valid": False},
                 "P": {"valid": False}, "behavior": {"valid": False}},
             "phase2_covered": False, "reason": None})
     base = manifest_api.describe_campaign(config, source_root=tmp_path)
-    artifact.write_bytes(b"mutated-artifact")
+    artifacts["A1"].write_bytes(b"mutated-artifact")
     with pytest.raises(ValueError, match="warm-start bytes"):
         manifest_api.validate_campaign_manifest(base, source_root=tmp_path)
+
+
+def test_partial_five_track_warm_start_set_is_rejected(campaign):
+    tmp_path, config = campaign
+    artifact = tmp_path / "warm-A1.pt"
+    artifact.write_bytes(b"warm-start")
+    config["warm_start_artifacts"] = {"A1": str(artifact)}
+    with pytest.raises(ValueError, match="all five tracks or none"):
+        manifest_api.describe_campaign(config, source_root=tmp_path)
 
 
 def test_source_projection_excludes_only_native_state_and_accepts_prepare_transition(
