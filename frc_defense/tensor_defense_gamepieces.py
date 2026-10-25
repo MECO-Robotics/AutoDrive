@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .field import ALLIANCE_ZONE_DEPTH, grid_array_points
-from .gamepiece_actions import update_fuel_actions
+from .gamepiece_actions import update_fuel_actions, _flush_fuel_score_awards
 
 try:
     import torch
@@ -270,4 +270,6 @@ class TensorDefenseGamepieceMixin:
         self._intake_collecting.copy_(torch.where(
             active_mask[:,None],self.last_actions<4,self._intake_collecting))
         score_intent=self.last_actions==4
-        return update_fuel_actions(self,active_mask,score_intent)
+        result=update_fuel_actions(self,active_mask,score_intent)
+        _flush_fuel_score_awards(self)
+        return result
