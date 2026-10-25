@@ -199,7 +199,15 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
     multi_model = next(row for row in campaign["controls"]
         if row["control_id"] == "D2/multi_model_v1")
     assert multi_model["execution_supported"] is False
-    assert "not implemented" in multi_model["support_limit"]
+    assert "independent review" in multi_model["support_limit"]
+    assert multi_model["prediction_contract"]
+    assert multi_model["prediction_contract_sha256"] == q._canonical_sha256(
+        multi_model["prediction_contract"])
+    for shard in campaign["shards"]:
+        assert shard["control_bindings"]["D2/multi_model_v1"] == \
+            multi_model["control_binding_sha256"]
+        assert shard["control_binding_sha256"] == q._canonical_sha256(
+            shard["control_bindings"])
     assert {unit["control_id"] for unit in units} == set(q.PAIRED_CALIBRATION_CONTROLS)
     assert len(units) == campaign["work_unit_count"] == 12 * 2 * 2 * 3 * 2
     assert {unit["split"] for unit in units} == {"calibration"}
@@ -235,6 +243,11 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
     altered = copy.deepcopy(campaign)
     altered["partition"]["baseline_freeze_sha256"] = "2" * 64
     with pytest.raises(ValueError, match="not bound"):
+        q.validate_paired_calibration_campaign(altered)
+
+    altered = copy.deepcopy(campaign)
+    altered["controls"][2]["prediction_contract"]["max_speed_mps"] = 999.
+    with pytest.raises(ValueError, match="predictor identity"):
         q.validate_paired_calibration_campaign(altered)
 
 
@@ -291,6 +304,31 @@ def test_paired_artifact_writer_is_atomic_idempotent_and_never_overwrites(tmp_pa
     with pytest.raises(ValueError, match="conflicting bytes"):
         q.write_paired_calibration_artifact_immutable(path,
             {"schema": q.PAIRED_CALIBRATION_PROGRESS, "progress_id": "b" * 64})
+
+
+def test_progress_writer_is_atomic_monotonic_and_compare_and_swap(tmp_path):
+    path = tmp_path / "shard.progress.json"
+
+    def progress(ids):
+        body = {"schema": q.PAIRED_CALIBRATION_PROGRESS,
+            "campaign_id": "campaign", "shard_index": 0,
+            "shard_manifest_id": "manifest",
+            "completed_work_unit_ids": ids, "completed_rows": [],
+            "complete": False}
+        return {**body, "progress_id": q._canonical_sha256(body)}
+
+    first = progress(["a"])
+    q.write_paired_calibration_progress_atomic(path, first)
+    second = progress(["a", "b"])
+    q.write_paired_calibration_progress_atomic(path, second,
+        expected_previous_progress_id=first["progress_id"])
+    assert json.loads(path.read_bytes()) == second
+    with pytest.raises(ValueError, match="CAS token is stale"):
+        q.write_paired_calibration_progress_atomic(path, progress(["a", "b", "c"]),
+            expected_previous_progress_id=first["progress_id"])
+    with pytest.raises(ValueError, match="not monotonic"):
+        q.write_paired_calibration_progress_atomic(path, progress(["b"]),
+            expected_previous_progress_id=second["progress_id"])
 
 
 def test_paired_merge_stays_blocked_until_every_registered_control_is_executable(monkeypatch):

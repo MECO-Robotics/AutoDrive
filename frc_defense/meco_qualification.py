@@ -1885,33 +1885,37 @@ def _paired_worker_assignments(assignments):
 
 def _paired_control_specs():
     from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
+    from .meco_tracks import prediction_contract
 
     candidate = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
         "action_ticks": 12}
     rows = [{"control_id": "D0", "policy": "D0",
         "policy_id": "D0_production_deterministic", "prediction_mode": "current",
-        "prediction_contract": None, "candidate_configuration": candidate,
+        "prediction_contract": None, "prediction_contract_sha256": None,
+        "candidate_configuration": candidate,
         "execution_supported": True, "support_limit": None}]
     for variant in PAIRED_CALIBRATION_CONTROLS[1:]:
-        if variant == "D2/multi_model_v1":
-            # Keep the preregistered cell explicit and blocked. Current
-            # prediction_contract/opponent_forecast implementations accept
-            # only current/cv; never invent a multi-model predictor identity.
-            rows.append({"control_id": variant, "policy": "D2",
-                "policy_id": "D2_kinematic_prediction",
-                "prediction_mode": "multi_model_v1", "prediction_contract": None,
-                "candidate_configuration": candidate, "execution_supported": False,
-                "support_limit": "runtime predictor contract is not implemented"})
-            continue
         identity = _matched_reference_identity(variant)
-        rows.append({"control_id": variant, "policy": identity["policy"],
+        supported = variant != "D2/multi_model_v1"
+        body = {"control_id": variant, "policy": identity["policy"],
             "policy_id": identity["policy_id"],
             "prediction_mode": identity["prediction_mode"],
             "prediction_contract": identity["prediction_contract"],
+            "prediction_contract_sha256": _canonical_sha256(identity["prediction_contract"]),
             "candidate_configuration": candidate, "execution_supported": True,
-            "support_limit": None})
+            "support_limit": None if supported else
+                "awaiting exact-head independent review of the multi-model predictor"}
+        body["execution_supported"] = supported
+        body["control_binding_sha256"] = _canonical_sha256(body)
+        rows.append(body)
+    rows[0]["control_binding_sha256"] = _canonical_sha256(rows[0])
     return rows
+
+
+def _paired_shard_control_bindings(controls):
+    return {control["control_id"]: control["control_binding_sha256"]
+        for control in controls}
 
 
 def _paired_calibration_work_units(*, episodes, repetitions, master_seed):
@@ -2049,6 +2053,9 @@ def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
             "campaign_id": campaign_identity, "shard_index": index,
             "shard_count": shard_count, "worker_id": worker["worker_id"],
             "worker_assignment_sha256": _canonical_sha256(worker),
+            "control_binding_sha256": _canonical_sha256(
+                _paired_shard_control_bindings(controls)),
+            "control_bindings": _paired_shard_control_bindings(controls),
             "work_units": assigned}
         shards.append({**shard_body, "manifest_id": _canonical_sha256(shard_body)})
     campaign = {**body, "campaign_id": campaign_identity, "shards": shards}
@@ -2125,11 +2132,15 @@ def validate_paired_calibration_campaign(campaign):
     expected_buckets = _paired_shard_assignments(units, shard_count, identity)
     seen = set()
     for index, (shard, expected_units) in enumerate(zip(campaign["shards"], expected_buckets)):
+        expected_control_bindings = _paired_shard_control_bindings(campaign["controls"])
         if (not isinstance(shard, dict)
                 or shard.get("campaign_id") != identity
                 or shard.get("shard_index") != index
                 or shard.get("shard_count") != shard_count
-                or shard.get("work_units") != expected_units):
+                or shard.get("work_units") != expected_units
+                or shard.get("control_bindings") != expected_control_bindings
+                or shard.get("control_binding_sha256")
+                    != _canonical_sha256(expected_control_bindings)):
             raise ValueError("paired calibration shard assignment is invalid")
         worker = workers[index % len(workers)]
         body = {key: value for key, value in shard.items() if key != "manifest_id"}
@@ -2166,6 +2177,8 @@ def paired_calibration_replay_binding(campaign, shard_index, work_unit):
     shard = _paired_shard_for_index(campaign, shard_index)
     if work_unit not in shard["work_units"]:
         raise ValueError("paired calibration binding work unit is outside its shard")
+    control = next(item for item in campaign["controls"]
+        if item["control_id"] == work_unit["control_id"])
     return {"campaign_id": campaign["campaign_id"],
         "shard_index": shard_index, "shard_manifest_id": shard["manifest_id"],
         "work_unit_id": _canonical_sha256(work_unit), "work_unit": work_unit,
@@ -2174,6 +2187,8 @@ def paired_calibration_replay_binding(campaign, shard_index, work_unit):
         "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
         "partition_sha256": campaign["partition"]["partition_sha256"],
         "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
+        "control_binding": control,
+        "control_binding_sha256": control["control_binding_sha256"],
         "scoring": campaign["scoring"]}
 
 
@@ -2285,7 +2300,10 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
         "partition_sha256": campaign["partition"]["partition_sha256"],
         "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
-        "scoring": campaign["scoring"], "progress_id": progress["progress_id"],
+        "scoring": campaign["scoring"],
+        "control_bindings": shard["control_bindings"],
+        "control_binding_sha256": shard["control_binding_sha256"],
+        "progress_id": progress["progress_id"],
         "completed_work_unit_ids": progress["completed_work_unit_ids"],
         "completed_rows": progress["completed_rows"], "complete": True}
     return {**body, "final_shard_id": _canonical_sha256(body)}
@@ -2390,7 +2408,8 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         expected_fields = {"schema", "campaign_id", "shard_index",
             "shard_manifest_id", "worker_id", "worker_assignment_sha256",
             "source_binding", "baseline_freeze_sha256", "partition_sha256",
-            "estimand_approval_sha256", "scoring", "progress_id",
+            "estimand_approval_sha256", "scoring", "control_bindings",
+            "control_binding_sha256", "progress_id",
             "completed_work_unit_ids", "completed_rows", "complete", "final_shard_id"}
         if (set(artifact) != expected_fields
                 or artifact.get("schema") != PAIRED_CALIBRATION_FINAL_SHARD
@@ -2404,6 +2423,8 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
                 or artifact.get("partition_sha256") != campaign["partition"]["partition_sha256"]
                 or artifact.get("estimand_approval_sha256") != campaign["estimand_approval"]["approval_sha256"]
                 or artifact.get("scoring") != campaign["scoring"]
+                or artifact.get("control_bindings") != shard["control_bindings"]
+                or artifact.get("control_binding_sha256") != shard["control_binding_sha256"]
                 or artifact.get("complete") is not True):
             raise ValueError("paired calibration final shard identity or bindings changed")
         expected_ids = sorted(_canonical_sha256(unit) for unit in shard["work_units"])
@@ -2443,6 +2464,8 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         for control_id in PAIRED_CALIBRATION_CONTROLS[1:]]
     body = {"schema": "meco-paired-calibration-merged-report-v1",
         "campaign_id": campaign["campaign_id"],
+        "control_binding_sha256": _canonical_sha256(
+            _paired_shard_control_bindings(campaign["controls"])),
         "final_shard_sha256": [final_hashes[index]
             for index in range(len(campaign["shards"]))],
         "work_unit_count": len(all_rows), "control_summaries": summaries,
@@ -2495,6 +2518,84 @@ def write_paired_calibration_artifact_immutable(path, artifact):
     return hashlib.sha256(raw).hexdigest()
 
 
+def write_paired_calibration_progress_atomic(path, progress, *,
+        expected_previous_progress_id=None):
+    """Atomically advance one validated progress file with compare-and-swap.
+
+    Callers must first validate the campaign, approval, and every replay row.
+    Progress is mutable only by monotonic row addition; immutable final and
+    campaign artifacts continue to use ``write_paired_calibration_artifact_immutable``.
+    """
+    if not isinstance(progress, dict) or progress.get("schema") != PAIRED_CALIBRATION_PROGRESS:
+        raise ValueError("paired calibration progress schema is unsupported")
+    body = {key: value for key, value in progress.items() if key != "progress_id"}
+    if progress.get("progress_id") != _canonical_sha256(body):
+        raise ValueError("paired calibration progress digest is invalid")
+    path = Path(path)
+    parent = path.parent.absolute()
+    for part in (parent, *parent.parents):
+        if part.is_symlink():
+            raise ValueError("paired calibration progress path uses a symlink")
+    parent.mkdir(parents=True, exist_ok=True)
+    lock_path = parent / f".{path.name}.lock"
+    if lock_path.is_symlink():
+        raise ValueError("paired calibration progress lock is symlinked")
+    lock_flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        lock_flags |= os.O_NOFOLLOW
+    lock_fd = os.open(lock_path, lock_flags, 0o600)
+    import fcntl
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if path.is_symlink():
+            raise ValueError("paired calibration progress destination is symlinked")
+        existing = None
+        if path.exists():
+            try:
+                existing = json.loads(path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("existing paired calibration progress is unreadable") from exc
+        actual_previous = None if existing is None else existing.get("progress_id")
+        if actual_previous != expected_previous_progress_id:
+            raise ValueError("paired calibration progress changed concurrently or CAS token is stale")
+        if existing is not None:
+            if (existing.get("campaign_id") != progress.get("campaign_id")
+                    or existing.get("shard_index") != progress.get("shard_index")
+                    or existing.get("shard_manifest_id") != progress.get("shard_manifest_id")
+                    or not set(existing.get("completed_work_unit_ids", [])).issubset(
+                        progress.get("completed_work_unit_ids", []))):
+                raise ValueError("paired calibration progress advance is not monotonic")
+        raw = json.dumps(progress, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")
+        temporary = parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        temporary_fd = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(temporary_fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path.is_symlink():
+                raise ValueError("paired calibration progress destination became symlinked")
+            os.replace(temporary, path)
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return hashlib.sha256(raw).hexdigest()
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
         evaluation_record, replay_raw, replay_ref, approval):
     """Bind one evaluated work unit to exact replay bytes and reconstructed score."""
@@ -2515,6 +2616,13 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
     if any(evaluation_record.get(key) != control.get(key) for key in
             ("policy", "policy_id", "prediction_mode", "prediction_contract")):
         raise ValueError("paired calibration evaluation control differs from frozen registry")
+    contract = evaluation_record.get("prediction_contract")
+    if (control.get("prediction_contract_sha256") !=
+            (None if contract is None else _canonical_sha256(contract))
+            or control.get("control_binding_sha256") != _canonical_sha256(
+                {key: value for key, value in control.items()
+                    if key != "control_binding_sha256"})):
+        raise ValueError("paired calibration predictor contract digest differs from frozen control")
     source_hash = campaign["source"]["source_identity_sha256"]
     if evaluation_record.get("source_identity_sha256") != source_hash:
         raise ValueError("paired calibration evaluation source identity changed")
@@ -2608,6 +2716,8 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
         "evaluation_record_sha256": replay_record_digest,
         "worker_assignment": worker,
         "worker_assignment_sha256": _canonical_sha256(worker),
+        "control_binding": control,
+        "control_binding_sha256": control["control_binding_sha256"],
         "paired_calibration_binding": paired_calibration_replay_binding(
             campaign, shard_index, work_unit),
         "paired_calibration_binding_sha256": _canonical_sha256(
@@ -2646,7 +2756,8 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
     expected_fields = {"schema", "campaign_id", "shard_index", "shard_manifest_id",
         "work_unit_id", "work_unit", "pair_id", "control_id", "replay_id",
         "replay_path", "replay_sha256", "evaluation_record_sha256",
-        "worker_assignment", "worker_assignment_sha256", "ledger_schema", "rules_id",
+        "worker_assignment", "worker_assignment_sha256", "control_binding",
+        "control_binding_sha256", "ledger_schema", "rules_id",
         "paired_calibration_binding", "paired_calibration_binding_sha256",
         "rules_sha256", "event_stream_schema", "replay_contract_schema",
         "event_stream_sha256", "ledger_sha256", "estimand_approval_sha256",
@@ -2681,6 +2792,12 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
     if (row.get("worker_assignment") != worker
             or row.get("worker_assignment_sha256") != _canonical_sha256(worker)):
         raise ValueError("paired calibration outcome worker/device identity changed")
+    if (row.get("control_binding") != control
+            or row.get("control_binding_sha256") != control["control_binding_sha256"]
+            or control.get("control_binding_sha256") != _canonical_sha256(
+                {key: value for key, value in control.items()
+                    if key != "control_binding_sha256"})):
+        raise ValueError("paired calibration outcome predictor/control identity changed")
     replay_binding = paired_calibration_replay_binding(campaign, shard_index, unit)
     if (row.get("paired_calibration_binding") != replay_binding
             or row.get("paired_calibration_binding_sha256") != _canonical_sha256(replay_binding)):
