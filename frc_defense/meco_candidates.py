@@ -21,8 +21,7 @@ from .experimental_route_evaluation import (MAX_ROUTE_QUERY_BATCH, RouteQuery,
 from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
-    opponent_forecast, prediction_contract, PREDICTION_MODES,
-    PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
+    opponent_forecast, opponent_risk_penalty, prediction_contract, PREDICTION_MODES,
     SAFE_ACTION_FEATURES, EXTRA_FEATURES)
 
 
@@ -304,8 +303,11 @@ def _opponent_prediction(env, slot=3, horizon=0., mode="cv"):
     age = float(env.opponent_age[0, slot])
     position = env.opponent_pose[0, slot, :2].detach().cpu().tolist()
     velocity = env.opponent_velocity[0, slot, :2].detach().cpu().tolist()
+    angular_velocity = (float(env.opponent_velocity[0, slot, 2])
+                        if env.opponent_velocity.shape[-1] > 2 else None)
     return opponent_forecast(mode=mode, valid=valid, position_xy=position,
-        velocity_xy=velocity, age_s=age, horizon_s=max(0., float(horizon)))
+        velocity_xy=velocity, age_s=age, horizon_s=max(0., float(horizon)),
+        angular_velocity_rad_s=angular_velocity)
 
 
 def _world_zero_perceived_fuel(env):
@@ -609,9 +611,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         goal_xy = targets[row_index]
         separation = None if predicted is None else math.hypot(
             float(goal_xy[0]) - predicted[0], float(goal_xy[1]) - predicted[1])
-        risk = (None if separation is None else PREDICTION_MAX_PENALTY_POINTS *
-                max(0., min(1., (PREDICTION_THREAT_RADIUS_M - separation) /
-                            PREDICTION_THREAT_RADIUS_M)))
+        risk = opponent_risk_penalty(goal_xy, forecast)
         valid = bool(base.table.valid_mask[action] and route_ok)
         valid_mask.append(valid)
         # Update the shared target to the legal route endpoint, and preserve
@@ -653,9 +653,11 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             "legal_node_index": goal_nodes[row_index], "distance_m": distance,
             "eta_s": eta, "predicted_opponent_xy_m": predicted,
             "opponent_prediction": {**forecast,
-                "contract": prediction_contract(prediction_mode,
+            "contract": prediction_contract(prediction_mode,
                     horizon_s=(eta if eta is not None else None))},
             "endpoint_separation_m": separation, "risk_penalty_points": risk,
+            **({"expected_risk_semantics": "weighted_expectation_over_prediction_hypotheses"}
+               if prediction_mode == "multi_model_v1" else {}),
             "intake_extended": action < 4,
             "path_points_m": (None if result is None else result.path_points_m),
             "weighted_route_cost_grid_edges": (None if result is None
