@@ -2,9 +2,12 @@
 
 This tranche implements the Plan §5 requirement to account for simulator
 variability when generating candidate gross-return preferences for C1/C2. It
-is based on source commit `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d` and is an
-offline implementation candidate. It does not collect labels, fit checkpoints,
-run the simulator, or establish policy quality.
+is based on source commit `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`. Its code
+and synthetic-test commits were ported to current `main` in the isolated
+integration branch `codex/meco-plan-c-repeated-labels-integration`; it is not
+yet merged into the main checkout. The active campaign remains pinned to source
+`9bf7d8d55` and does not load this change. This tranche does not collect labels,
+fit checkpoints, run the simulator, or establish policy quality.
 
 Implementation commit: `3186636a559a7729387a4b7989ca6caee0569b4d`.
 
@@ -34,8 +37,13 @@ existing v2 fitting path is unchanged.
 
 `R=2` is a bounded replication policy chosen for this tranche. It supports a
 conservative sign-stability rule but does not provide precise variance
-calibration, confidence intervals, or qualification evidence. Reviewer
-follow-up adds collector-level matched-seed flow coverage using mocked
+calibration, confidence intervals, or qualification evidence. The scoped
+planner identified the Plan C single-rollout variability gap. The implementer
+added matched repeats, validators, fitting rules, and synthetic contracts.
+Independent review approved the exact candidate code/test head
+`6c397fe17570363cc3d14f7232bc8c660b076eb3`; the current-main integration review
+confirmed that the production and test patch is byte-identical to that
+approved head. Reviewer follow-up adds collector-level matched-seed flow coverage using mocked
 environment, graph, reward, and branch interfaces; explicit C1/C2 legacy
 manifest rejection checks; and repeated-artifact metadata tamper rejection
 checks. These tests do not run actual game behavior. GPU collection and a

@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 56
+    assert len(result["tranches"]) == 57
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -65,6 +65,15 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "not whole-plan approval" in result["message"]
     assert all(t["planner"]["artifact"]["kind"] == "scoped-transcript-summary"
                for t in result["tranches"])
+    plan_c_repeats = next(t for t in result["tranches"]
+                          if t["requirement_id"] == "plan-c-matched-repeated-rollout-labels")
+    assert plan_c_repeats["implementer"]["candidate_implementation_commit"] == (
+        "3186636a559a7729387a4b7989ca6caee0569b4d")
+    assert plan_c_repeats["implementer"]["coverage_followup_commit"] == (
+        "6c397fe17570363cc3d14f7232bc8c660b076eb3")
+    assert plan_c_repeats["reviewer"]["approved_commit"] == (
+        "6c397fe17570363cc3d14f7232bc8c660b076eb3")
+    assert "No Plan C labels were collected" in plan_c_repeats["limits"]
     contact_geometry = next(t for t in result["tranches"]
         if t["requirement_id"] == "phase4-contact-geometry-path")
     assert contact_geometry["implementer"]["commit"] == (
