@@ -869,7 +869,7 @@ def _pressure(category, seed, family='category_scripted'):
     if family in ('orbiting_interceptor', 'split_chaser'):
         level = max(level, 4)
     return {'level': level, 'style': marker, 'slots': (0, 1) if level == 5 else ((0,) if level else ()),
-            'family': family}
+            'family': family, 'phase': _pressure_phase(seed)}
 
 
 def _pressure_phase(seed):
@@ -1177,7 +1177,11 @@ def reset_curriculum_scenario(env, seed, *, mask=None):
             if env.control_modes[slot] == 'deterministic':
                 write_rows(env.sim.pose[:, slot], env.sim.pose.new_tensor((5.5+slot*.9, .8+slot*2.5, math.pi)))
     env.planner.avoid_bumps = route != 'bump'
-    pressure = config['pressure'] = _pressure(category, seed, config['defender_family']) if name in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, config['defender_family'])
+    pressure = _pressure(category, seed, config['defender_family']) if name in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, config['defender_family'])
+    # The snapshot-bound pressure phase is immutable static configuration. Per-world
+    # selected reset phases are carried by phase4_pressure_phase below.
+    pressure['phase'] = config['pressure']['phase']
+    config['pressure'] = pressure
     if pressure['level'] == 3 and not active and route == 'open':
         blocked_y = .8 if pressure['style'] != 'level_3_bump' else 2.5
         if pressure['style'] == 'level_3_seeded_choice':
