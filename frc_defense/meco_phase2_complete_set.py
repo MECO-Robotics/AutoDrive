@@ -732,7 +732,8 @@ def _load_a_stage(descriptor: dict, *, expected_sources: dict,
 
 
 def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
-        c_execute=None, a_execute=None, lease_factory=None) -> dict:
+        c_execute=None, a_execute=None, lease_factory=None,
+        device_identity_verifier=None) -> dict:
     """Run/resume C and Plan A, sealing only after five validators pass.
 
     Output paths stay pathname-based for the existing stage APIs. The pinned
@@ -763,9 +764,15 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
     from .meco_phase2_campaign import execute_campaign
     from .meco_supervised import _read_counterfactual_dataset
     from .curriculum_training import source_identity
+    injected_lease_factory = lease_factory is not None
+    if device_identity_verifier is not None and not injected_lease_factory:
+        raise ValueError("identity-verifier injection requires an injected test lease factory")
     if lease_factory is None:
         from .meco_device_lease import lease_devices
         lease_factory = lease_devices
+    if device_identity_verifier is None:
+        from .meco_gpu_attestation import verify_post_lease_wx9100
+        device_identity_verifier = verify_post_lease_wx9100
     expected_sources = source_identity()
     c_root = Path(descriptor["c_campaign_descriptor"]["outputs"]["root"])
     c_report_path = Path(outputs["c_campaign_report"])
@@ -773,7 +780,9 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
     # Acquire the exclusive device lease before reserving the numbered attempt
     # directory or its mutable state journal. Nested APIs borrow this lease.
     with lease_factory([descriptor["device"]],
-            owner=f"phase2-five-track-{descriptor['attempt_number']:04d}"):
+            owner=f"phase2-five-track-{descriptor['attempt_number']:04d}") as acquired_lease:
+        device_identity_attestation = device_identity_verifier(
+            acquired_lease, [descriptor["device"]])
         validate_descriptor(descriptor, repo_root=repo_root)
         _reject_symlink_path(root.parent, allow_missing_leaf=False)
         _reject_symlink_path(root)
@@ -828,11 +837,30 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
             if (state.get("schema") != SCHEMA or
                     state.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
                 raise ValueError("attempt state changed while acquiring device lease")
+            attestations = state.get("device_identity_attestations", [])
+            if (not isinstance(attestations, list) or
+                    any(not isinstance(item, dict) or
+                        not isinstance(item.get("logical_lease"), dict)
+                        for item in attestations)):
+                raise ValueError("attempt state device identity attestations are malformed")
+            lease_id = device_identity_attestation["logical_lease"]["lease_id"]
+            existing = [item for item in attestations
+                if isinstance(item, dict) and
+                   item.get("logical_lease", {}).get("lease_id") == lease_id]
+            if existing and existing != [device_identity_attestation]:
+                raise ValueError("attempt state conflicts with the current lease attestation")
+            if not existing:
+                attestations.append(device_identity_attestation)
+            state["device_identity_attestations"] = attestations
+            check_pinned_root()
+            _replace_json(state_path, state)
+            check_pinned_root()
         else:
             state = {"schema": SCHEMA,
                 "descriptor_sha256": descriptor["descriptor_sha256"],
                 "attempt_number": descriptor["attempt_number"],
-                "status": "running", "completed_stages": []}
+                "status": "running", "completed_stages": [],
+                "device_identity_attestations": [device_identity_attestation]}
             check_pinned_root()
             _atomic_json(state_path, state)
             check_pinned_root()

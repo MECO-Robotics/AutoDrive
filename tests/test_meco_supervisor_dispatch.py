@@ -520,6 +520,32 @@ def _fresh_manifest_supervisor(output, evaluation_output):
     return supervisor
 
 
+class _InjectedDeviceLease:
+    def __init__(self, devices, owner):
+        self.devices = tuple(devices)
+        self.owner = owner
+        self.lease_id = "test-lease"
+        self.acquired = False
+
+    def acquire(self):
+        self.acquired = True
+        return self
+
+    def release(self):
+        self.acquired = False
+
+
+def _run_with_test_identity(supervisor):
+    def device_identity_verifier(_lease, devices):
+        return {"schema": "test-only-device-attestation",
+            "logical_lease": {"lease_id": "test-lease",
+                "owner": "unit-test", "devices": list(devices)}}
+
+    return supervisor.run(
+        lease_factory=lambda devices, owner: _InjectedDeviceLease(devices, owner),
+        device_identity_verifier=device_identity_verifier)
+
+
 def test_run_rejects_campaign_root_created_after_construction(tmp_path, monkeypatch):
     output = tmp_path / "fresh"
     evaluation = output / "evaluations"
@@ -528,7 +554,7 @@ def test_run_rejects_campaign_root_created_after_construction(tmp_path, monkeypa
     monkeypatch.setattr(supervisor, "_run_locked",
         lambda: pytest.fail("must reject the newly appeared campaign root"))
     with pytest.raises(ValueError, match="roots must remain absent"):
-        supervisor.run()
+        _run_with_test_identity(supervisor)
     from frc_defense.meco_device_lease import lease_devices
     with lease_devices(("cuda:0", "cuda:1"), owner="after-rejected-run"):
         pass
@@ -550,7 +576,7 @@ def test_run_rejects_evaluation_root_claimed_during_campaign_claim(tmp_path, mon
 
     monkeypatch.setattr(Path, "mkdir", competing_mkdir)
     with pytest.raises(ValueError, match="evaluation root appeared"):
-        supervisor.run()
+        _run_with_test_identity(supervisor)
     assert output.is_dir() and evaluation.is_dir()
 
 
@@ -570,5 +596,5 @@ def test_run_removes_empty_campaign_claim_if_evaluation_claim_fails(
 
     monkeypatch.setattr(Path, "mkdir", failing_evaluation_mkdir)
     with pytest.raises(PermissionError, match="simulated"):
-        supervisor.run()
+        _run_with_test_identity(supervisor)
     assert not output.exists()

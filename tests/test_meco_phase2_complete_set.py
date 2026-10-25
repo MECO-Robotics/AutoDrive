@@ -88,6 +88,12 @@ def _install_adapters(monkeypatch):
 _descriptor_value = None
 
 
+def _test_device_identity_attestation(_lease, devices):
+    return {"schema": "test-only-device-attestation",
+        "logical_lease": {"lease_id": "test-lease",
+            "owner": "unit-test", "devices": list(devices)}}
+
+
 def test_injected_restart_reuses_validated_c_stage(tmp_path, monkeypatch):
     global _descriptor_value
     descriptor = _descriptor(tmp_path)
@@ -109,11 +115,13 @@ def test_injected_restart_reuses_validated_c_stage(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="injected stop"):
         coordinator.execute_complete_set(descriptor, c_execute=count_c,
-            a_execute=fail_a, lease_factory=lease)
+            a_execute=fail_a, lease_factory=lease,
+            device_identity_verifier=_test_device_identity_attestation)
     first_c = next(item for item in coordinator._read_stage_journal(
         Path(descriptor["outputs"]["stage_journal"])) if item["stage"] == "C")
     result = coordinator.execute_complete_set(descriptor, c_execute=count_c,
-        a_execute=a_run, lease_factory=lease)
+        a_execute=a_run, lease_factory=lease,
+        device_identity_verifier=_test_device_identity_attestation)
     assert len(c_calls) == 1
     assert set(result["warm_start_artifacts"]) == set(MECO_TRACKS)
     records = coordinator._read_stage_journal(Path(descriptor["outputs"]["stage_journal"]))
@@ -135,11 +143,13 @@ def test_tampered_c_output_fails_closed_on_resume(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         coordinator.execute_complete_set(descriptor, c_execute=c_run,
             a_execute=lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("stop")),
-            lease_factory=lease)
+            lease_factory=lease,
+            device_identity_verifier=_test_device_identity_attestation)
     Path(descriptor["outputs"]["artifacts"]["C1"]).write_text("changed")
     with pytest.raises(ValueError, match="output changed"):
         coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
-            a_execute=lambda *_a, **_kw: None, lease_factory=lease)
+            a_execute=lambda *_a, **_kw: None, lease_factory=lease,
+            device_identity_verifier=_test_device_identity_attestation)
 
 
 def test_output_parent_symlink_created_during_lease_is_rejected(tmp_path, monkeypatch):
@@ -158,7 +168,8 @@ def test_output_parent_symlink_created_during_lease_is_rejected(tmp_path, monkey
 
     with pytest.raises(ValueError, match="symlink"):
         coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
-            a_execute=lambda *_a, **_kw: None, lease_factory=swap_parent)
+            a_execute=lambda *_a, **_kw: None, lease_factory=swap_parent,
+            device_identity_verifier=_test_device_identity_attestation)
 
 
 def test_resume_rejects_preseeded_permissive_attempt_root(tmp_path, monkeypatch):
@@ -232,7 +243,8 @@ def test_root_replacement_during_stage_aborts_before_next_stage(tmp_path, monkey
     called_a = []
     with pytest.raises(ValueError, match="replaced after pinning"):
         coordinator.execute_complete_set(descriptor, c_execute=replace_after_c,
-            a_execute=lambda *_a, **_kw: called_a.append(True), lease_factory=lease)
+            a_execute=lambda *_a, **_kw: called_a.append(True), lease_factory=lease,
+            device_identity_verifier=_test_device_identity_attestation)
     assert called_a == []
 
 

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 from datetime import datetime, timezone
+import uuid
 
 
 def _index(device: str) -> int:
@@ -37,10 +38,16 @@ class DeviceLease(AbstractContextManager):
         self.lock_root = Path(lock_root or
             (Path(tempfile.gettempdir()) / "autodrive-meco-device-leases"))
         self._handles = []
+        self.lease_id = None
+
+    @property
+    def acquired(self):
+        return len(self._handles) == len(self.devices) and bool(self._handles)
 
     def acquire(self):
         if self._handles:
             raise RuntimeError("device lease is already acquired")
+        self.lease_id = uuid.uuid4().hex
         self.lock_root.mkdir(parents=True, exist_ok=True)
         try:
             for device in self.devices:
@@ -56,6 +63,7 @@ class DeviceLease(AbstractContextManager):
                 handle.seek(0)
                 handle.truncate()
                 json.dump({"device": device, "owner": self.owner, "pid": os.getpid(),
+                    "lease_id": self.lease_id,
                     "acquired_at": datetime.now(timezone.utc).isoformat()}, handle,
                     sort_keys=True)
                 handle.write("\n")

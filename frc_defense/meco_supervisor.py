@@ -437,6 +437,7 @@ class MecoSupervisor:
         self.manifest = None
         self.manifest_validation = None
         self.manifest_digest = None
+        self.device_identity_attestation = None
         self.manifest_configs = None
         self.evaluation_schedule = None
         self.evaluation_schedule_sha256 = None
@@ -725,6 +726,8 @@ class MecoSupervisor:
             "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
             "native_extension_attestation": self.native_extension_attestation,
+            "device_identity_attestation": getattr(
+                self, "device_identity_attestation", None),
             "qualification_protocol_id": self.qualification_protocol_id,
             "qualification_protocol_sha256": self.qualification_protocol_sha256,
             "evaluation_split": self.evaluation_split,
@@ -762,6 +765,8 @@ class MecoSupervisor:
             "prediction_contract": prediction_contract(self.prediction_mode),
             "source_identity_sha256": self.source_hash,
             "native_extension_attestation": self.native_extension_attestation,
+            "device_identity_attestation": getattr(
+                self, "device_identity_attestation", None),
             "qualification_protocol_id": self.qualification_protocol_id,
             "qualification_protocol_sha256": self.qualification_protocol_sha256,
             "evaluation_split": self.evaluation_split,
@@ -2004,12 +2009,26 @@ class MecoSupervisor:
             raise
         self._campaign_roots_claimed = True
 
-    def run(self):
-        from .meco_device_lease import lease_devices
-        device_lease = lease_devices(tuple(sorted(set(self.devices) | {self.evaluation_device})),
+    def run(self, *, lease_factory=None, device_identity_verifier=None):
+        injected_lease_factory = lease_factory is not None
+        if device_identity_verifier is not None and not injected_lease_factory:
+            raise ValueError("identity-verifier injection requires an injected test lease factory")
+        if lease_factory is None:
+            from .meco_device_lease import lease_devices
+            lease_factory = lease_devices
+        if device_identity_verifier is None:
+            from .meco_gpu_attestation import verify_post_lease_wx9100
+            device_identity_verifier = verify_post_lease_wx9100
+        device_lease = lease_factory(tuple(sorted(set(self.devices) | {self.evaluation_device})),
             owner=(f"supervisor:{self.manifest_digest}" if self.manifest_digest else "supervisor"))
         device_lease.acquire()
         try:
+            leased_devices = tuple(sorted(set(self.devices) | {self.evaluation_device},
+                key=lambda item: int(item.split(":", 1)[1])))
+            if leased_devices != ("cuda:0", "cuda:1"):
+                raise RuntimeError("fresh five-track supervisor requires both pinned WX9100 leases")
+            self.device_identity_attestation = device_identity_verifier(
+                device_lease, leased_devices)
             self._claim_fresh_manifest_roots()
             lock_handle = (self.output / ".supervisor.lock").open("a+")
             try:
