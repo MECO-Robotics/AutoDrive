@@ -22,6 +22,23 @@ class TensorDefenseGamepieceMixin:
         if side not in ("red","blue"):
             raise ValueError("alliance must be red or blue")
         if count<0: raise ValueError("count must be nonnegative")
+        physics=getattr(self,"fuel_physics",None)
+        qualifying=physics is not None and physics._gpu_qualifying
+        if physics is not None:
+            physics._validate_qualifying_backend()
+        if qualifying:
+            if (mask is not None and
+                    (not isinstance(mask,torch.Tensor) or mask.device!=self.device or
+                     mask.shape!=(self.n,))):
+                raise ValueError(
+                    "GPU-qualifying outpost release mask must be a "
+                    "device-resident [world] tensor")
+            if (not isinstance(position,torch.Tensor) or
+                    position.device!=self.device or
+                    tuple(position.shape) not in ((2,),(self.n,2))):
+                raise ValueError(
+                    "GPU-qualifying outpost position must be a device-resident "
+                    "[2] or [world,2] tensor")
         selected=(torch.ones((self.n,),device=self.device,dtype=torch.bool) if mask is None
                   else torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n))
         point=torch.as_tensor(position,device=self.device,dtype=self.sim.pose.dtype)
@@ -46,7 +63,6 @@ class TensorDefenseGamepieceMixin:
                                                self.piece_owner))
             self.piece_active|=chosen
             released+=available.long()
-        physics=getattr(self,"fuel_physics",None)
         if physics is not None:
             physics.piece_pos=self.piece_pos
             physics.piece_vel=self.piece_vel
