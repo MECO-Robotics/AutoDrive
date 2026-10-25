@@ -5,6 +5,9 @@ is a diagnostic baseline, not a qualified reference or imitation dataset.
 """
 from __future__ import annotations
 import math
+import base64
+import hashlib
+import json
 import torch
 
 from .architecture_scenarios import reset_scenario
@@ -272,16 +275,23 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
             current['observation']) for _ in range(delay + 1)]
 
 
-def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=True,
-                        production_d0=False, layout_id='2026_rebuilt',
-                        defender_family='category_scripted', start_condition='scenario_defined',
-                        sensor_profile='standard', phase4_factor=None,
+def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizon=None, fuel_physics=None,
+                        production_d0=None, layout_id=None,
+                        defender_family=None, start_condition=None,
+                        sensor_profile=None, phase4_factor=None,
                         contact_geometry_id=None, contact_geometry_config=None,
                         phase4_opponent_policy_id=None,
                         phase4_opponent_schedule=None, phase4_opponent_seed=None,
                         phase4_start_profile_assignment=None,
                         phase4_focal_pose_assignment=None,
-                        phase4_teammate_behavior_assignment=None):
+                        phase4_teammate_behavior_assignment=None,
+                        _effective_snapshot_only=False,
+                        _effective_snapshot_runtime_identity=None,
+                        _effective_snapshot_repo_root=None,
+                        _effective_snapshot_source_plan_path="docs/MECO_AutoDrive_Learning_Tracks_Evaluation_Plan.md",
+                        evaluation_protocol_content_base64=None,
+                        evaluation_protocol_object=None,
+                        evaluation_protocol_content_sha256=None):
     """Build a curriculum environment, optionally running production D0 in slot 3.
 
     ``production_d0`` changes only the learner slot's controller from the
@@ -289,6 +299,21 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     Scenario-specific teammate and scripted pressure/blocker assignments are
     still applied below, and the same reset path is used in either mode.
     """
+    requested_values = {"fuel_physics": fuel_physics, "production_d0": production_d0,
+        "layout_id": layout_id, "defender_family": defender_family,
+        "start_condition": start_condition, "sensor_profile": sensor_profile}
+    if fuel_physics is None:
+        fuel_physics = True
+    if production_d0 is None:
+        production_d0 = False
+    if layout_id is None:
+        layout_id = '2026_rebuilt'
+    if defender_family is None:
+        defender_family = 'category_scripted'
+    if start_condition is None:
+        start_condition = 'scenario_defined'
+    if sensor_profile is None:
+        sensor_profile = 'standard'
     definition = get_scenario(scenario_id)
     if defender_family not in ('none', 'category_scripted', 'orbiting_interceptor', 'split_chaser'):
         raise ValueError('unknown scripted defender family')
@@ -367,10 +392,6 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
             'offense_vs_scripted_pressure', 'full_match_offense')
             or pressure_level not in (1, 2, 3, 4, 5)):
         raise ValueError('Phase 4 adversarial factors require a registered level_1 through level_5 pressure category')
-    requested_device = torch.device(device)
-    if requested_device.type == 'cuda' and requested_device.index is not None:
-        # Native simulator kernels use the current device/stream at setup.
-        torch.cuda.set_device(requested_device)
     modes = ['none'] * 6
     modes[3] = 'deterministic' if production_d0 else 'nn'
     pressure = _pressure(category, seed, defender_family) if scenario_id in ('offense_vs_scripted_pressure', 'full_match_offense') else _pressure('', seed, defender_family)
@@ -390,7 +411,7 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         # NN mode makes TensorThreeVsThreeEnv consume that action rather than
         # replacing it with an unrelated scripted deterministic offense action.
         modes[2] = 'nn'
-    env = CurriculumEnv(num_envs=num_envs, device=device, seed=seed, control_modes=modes,
+    env_kwargs = dict(num_envs=num_envs, device=device, seed=seed, control_modes=modes,
         robot_roles=('defense', 'offense', 'offense', 'offense', 'offense', 'offense'),
         allow_nn_offense=True, dt=.02, horizon=horizon or math.ceil(definition.time_budget_s/.02),
         randomize=False, fuel_count=96, max_fuel_capacity=(30 if scenario_id.startswith('pickup_') else 6), fuel_physics=fuel_physics,
@@ -400,6 +421,35 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         velocity_noise=.10 if sensor_profile == 'noisy' else .05,
         field_layout=layout_id,
         replan_interval=10)
+    if _effective_snapshot_only:
+        if any(value is None for value in requested_values.values()):
+            raise ValueError('effective capture requires explicit overrides for every material setting')
+        if phase4_focal_pose_assignment is not None or phase4_teammate_behavior_assignment is not None:
+            raise ValueError('effective capture for focal/teammate validation assignments is not registered')
+        snapshot_locals = locals()
+        factory_arguments = {name: snapshot_locals[name]
+            for name, parameter in __import__('inspect').signature(make_curriculum_env).parameters.items()
+            if not name.startswith('_')}
+        selected_runtime_identity = _discover_effective_runtime_identity(device,
+            _effective_snapshot_repo_root)
+        return _effective_curriculum_snapshot(scenario_id, category, seed, definition,
+            defender_family, start_condition, sensor_profile, production_d0, pressure,
+            phase4_factor, phase4_opponent_policy_id, trench_schedule,
+            contact_geometry_id, contact_geometry_config, env_kwargs,
+            requested_values=requested_values,
+            evaluation_protocol_content_base64=evaluation_protocol_content_base64,
+            evaluation_protocol_object=evaluation_protocol_object,
+            evaluation_protocol_content_sha256=evaluation_protocol_content_sha256,
+            factory_arguments=factory_arguments,
+            selected_runtime_identity=selected_runtime_identity,
+            runtime_identity=_effective_snapshot_runtime_identity,
+            repo_root=_effective_snapshot_repo_root,
+            source_plan_path=_effective_snapshot_source_plan_path)
+    requested_device = torch.device(device)
+    if requested_device.type == 'cuda' and requested_device.index is not None:
+        # Native simulator kernels use the current device/stream at setup.
+        torch.cuda.set_device(requested_device)
+    env = CurriculumEnv(**env_kwargs)
     env.phase4_factor_config = phase4_factor
     env.phase4_opponent_policy_id = phase4_opponent_policy_id
     env.phase4_opponent_schedule = trench_schedule
@@ -504,6 +554,195 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
                         'Uncontrolled robot bodies remain off-field and are restored after each step.']}
     reset_curriculum_scenario(env, seed)
     return env
+
+
+def _discover_effective_runtime_identity(device, repo_root=None):
+    """Collect runtime identity from loaded Python/Torch and the selected accelerator."""
+    import importlib.metadata
+    import platform
+    import re
+    from pathlib import Path
+    selected = torch.device(device)
+    if selected.type != 'cuda' or selected.index is None:
+        raise ValueError('effective capture requires an explicitly indexed CUDA/ROCm device')
+    try:
+        properties = torch.cuda.get_device_properties(selected.index)
+    except Exception as exc:
+        raise ValueError('effective capture could not discover the selected accelerator') from exc
+    uuid = getattr(properties, 'uuid', None)
+    name = getattr(properties, 'name', None)
+    if not isinstance(uuid, str) or not uuid.strip() or not isinstance(name, str) or not name.strip():
+        raise ValueError('selected accelerator must expose a stable UUID and model name')
+    root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
+    simulator_paths = ('frc_defense/tensor_3v3.py', 'frc_defense/tensor_sim.py',
+        'frc_defense/tensor_physics.py')
+    simulator_hashes = {path: hashlib.sha256((root / path).read_bytes()).hexdigest()
+        for path in simulator_paths}
+    pyproject_bytes = (root / 'pyproject.toml').read_bytes()
+    project_match = re.search(r"^version\s*=\s*['\"]([^'\"]+)['\"]\s*$",
+        pyproject_bytes.decode('utf-8'), re.MULTILINE)
+    if project_match is None:
+        raise ValueError('effective capture cannot resolve the simulator project version')
+    simulator_version = project_match.group(1)
+    dependency_specs = {'pyproject.toml': hashlib.sha256(pyproject_bytes).hexdigest()}
+    requirements_path = root / 'requirements-rocm-gfx900.txt'
+    if requirements_path.is_file():
+        dependency_specs['requirements-rocm-gfx900.txt'] = hashlib.sha256(
+            requirements_path.read_bytes()).hexdigest()
+    installed = sorted((distribution.metadata.get('Name', '').lower(), distribution.version)
+        for distribution in importlib.metadata.distributions()
+        if distribution.metadata.get('Name'))
+    dependency_digest = hashlib.sha256(json.dumps({"spec_artifacts": dependency_specs,
+        "installed_distributions": installed}, sort_keys=True, separators=(',', ':'))
+        .encode('utf-8')).hexdigest()
+    if torch.version.hip:
+        backend, backend_version = 'ROCm', str(torch.version.hip)
+    elif torch.version.cuda:
+        backend, backend_version = 'CUDA', str(torch.version.cuda)
+    else:
+        raise ValueError('effective capture requires an initialized CUDA/ROCm runtime')
+    return {'simulator_id': 'autodrive.TensorThreeVsThreeEnv',
+        'simulator_version': simulator_version,
+        'simulator_build_sha256': hashlib.sha256(json.dumps(simulator_hashes,
+            sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest(),
+        'python_version': platform.python_version(), 'torch_version': str(torch.__version__),
+        'backend': backend, 'backend_version': backend_version,
+        'device_id': uuid.strip(), 'device_index': selected.index,
+        'device_model': name.strip(), 'dependency_lock_sha256': dependency_digest}
+
+
+def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
+        defender_family, start_condition, sensor_profile, production_d0, pressure,
+        phase4_factor, phase4_opponent_policy_id, opponent_schedule,
+        contact_geometry_id, contact_geometry_config, env_kwargs, *,
+        requested_values, evaluation_protocol_content_base64,
+        evaluation_protocol_object,
+        evaluation_protocol_content_sha256,
+        factory_arguments,
+        selected_runtime_identity,
+        runtime_identity, repo_root, source_plan_path):
+    """Export the normalized object passed to CurriculumEnv without constructing it."""
+    from pathlib import Path
+    from .meco_baseline_freeze import (EFFECTIVE_SNAPSHOT_SCHEMA,
+        canonical_sha256, capture_source_identity, _validate_effective_runtime)
+
+    root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
+    source = capture_source_identity(root, source_plan_path)
+    observed_runtime = _validate_effective_runtime(selected_runtime_identity)
+    runtime = observed_runtime
+    if runtime_identity is not None and _validate_effective_runtime(runtime_identity) != observed_runtime:
+        raise ValueError('caller runtime identity differs from runtime discovered by the factory')
+    resolved = {"scenario_id": scenario_id, "scenario_version": definition.version,
+        "scenario_time_budget_s": definition.time_budget_s, "category": category,
+        "seed": int(seed), "defender_family": defender_family,
+        "start_condition": start_condition, "sensor_profile": sensor_profile,
+        "production_d0": bool(production_d0), "pressure": pressure,
+        "phase4_factor": phase4_factor, "phase4_opponent_policy_id": phase4_opponent_policy_id,
+        "phase4_opponent_schedule": opponent_schedule,
+        "contact_geometry_id": contact_geometry_id,
+        "contact_geometry_config": contact_geometry_config,
+        "environment_constructor": env_kwargs,
+        "requested_values": requested_values}
+    dynamics = {key: env_kwargs[key] for key in (
+        "dt", "horizon", "fuel_physics", "fuel_count", "max_fuel_capacity")}
+    field = {key: env_kwargs[key] for key in ("field_layout",)}
+    geometry = {**field, "field_length_m": 16.54, "field_width_m": 8.07}
+    values = {
+        "robot_dynamics": {**dynamics, "constructor": "TensorThreeVsThreeEnv"},
+        "field_geometry": geometry,
+        "legal_connectivity": {"field_layout": env_kwargs["field_layout"],
+            "replan_interval_ticks": env_kwargs["replan_interval"],
+            "navigation_implementation": "TensorThreeVsThreeNavigationMixin"},
+        "opponent_controllers": {"control_modes": list(env_kwargs["control_modes"]),
+            "pressure": pressure, "family": defender_family,
+            "phase4_policy_id": phase4_opponent_policy_id,
+            "schedule": opponent_schedule},
+        "action_update_cadence": {"physics_dt_s": env_kwargs["dt"],
+            "action_replan_interval_ticks": env_kwargs["replan_interval"],
+            "horizon_ticks": env_kwargs["horizon"]},
+        "sensor_noise_profiles": {"profile": sensor_profile,
+            "perception_dropout": env_kwargs["perception_dropout"],
+            "position_noise_m": env_kwargs["position_noise"],
+            "velocity_noise_mps": env_kwargs["velocity_noise"]},
+        "scoring_observation_semantics": {"simulator_metric": "fuel_score_count",
+            "metric_semantics": "scored_fuel_piece_count",
+            "official_match_points_available": False,
+            "fuel_count": env_kwargs["fuel_count"],
+            "max_fuel_capacity": env_kwargs["max_fuel_capacity"]},
+        "safety_event_semantics": {"phase4_factor": phase4_factor,
+            "contact_geometry_id": contact_geometry_id,
+            "contact_geometry_config": contact_geometry_config,
+            "native_collision_and_route_guards": True}}
+    resolved_fields = {}
+    for field_name, value in values.items():
+        resolved_fields[field_name] = {"value": value,
+            "selector": f"make_curriculum_env.effective.{field_name}",
+            "runtime_owner": "CurriculumEnv/TensorThreeVsThreeEnv",
+            "resolution_state": "overridden" if field_name == "sensor_noise_profiles" else "resolved",
+            "derivation": {"kind": "runtime_object",
+                "input_sha256": canonical_sha256({"effective_configuration": resolved,
+                    "field": field_name, "value": value})}}
+    config_values = {
+        "campaign_assignment": {"scenario_id": scenario_id, "category": category,
+            "seed": int(seed), "control_modes": list(env_kwargs["control_modes"]),
+            "robot_roles": list(env_kwargs["robot_roles"]), "production_d0": bool(production_d0)},
+        "evaluation_protocol": {"scenario_id": scenario_id, "category": category,
+            "seed": int(seed), "time_budget_s": definition.time_budget_s,
+            "horizon_ticks": env_kwargs["horizon"]},
+        "drivetrain_physics": dynamics,
+        "gamepiece_rules": {"fuel_count": env_kwargs["fuel_count"],
+            "max_fuel_capacity": env_kwargs["max_fuel_capacity"],
+            "fuel_physics": env_kwargs["fuel_physics"]},
+        "field_layout": geometry,
+        "scenario_registry": {"scenario_id": scenario_id, "version": definition.version,
+            "category": category, "required_categories": list(definition.required_categories),
+            "time_budget_s": definition.time_budget_s},
+        "opponent_schedule": {"defender_family": defender_family, "pressure": pressure,
+            "policy_id": phase4_opponent_policy_id, "schedule": opponent_schedule},
+        "sensor_profile": values["sensor_noise_profiles"]}
+    if evaluation_protocol_content_base64 is None:
+        raise ValueError('effective capture requires the exact evaluator-loaded protocol bytes')
+    try:
+        evaluation_protocol_content = base64.b64decode(
+            evaluation_protocol_content_base64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError('evaluator-loaded protocol bytes are invalid') from exc
+    if not isinstance(evaluation_protocol_object, dict):
+        raise ValueError('evaluator-loaded protocol must be an object')
+    def reject_duplicate_json_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f'duplicate key in evaluator-loaded protocol: {key}')
+            result[key] = value
+        return result
+    try:
+        decoded_protocol_object = json.loads(evaluation_protocol_content,
+            object_pairs_hook=reject_duplicate_json_keys,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f'invalid JSON constant: {value}')))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError('evaluator-loaded protocol bytes are not valid JSON') from exc
+    if decoded_protocol_object != evaluation_protocol_object:
+        raise ValueError('evaluator-loaded protocol object differs from its exact bytes')
+    if hashlib.sha256(evaluation_protocol_content).hexdigest() != evaluation_protocol_content_sha256:
+        raise ValueError('evaluator-loaded protocol bytes differ from their loaded digest')
+    config_values["evaluation_protocol"] = evaluation_protocol_object
+    artifacts = {}
+    for name, value in config_values.items():
+        content = (evaluation_protocol_content if name == "evaluation_protocol" else
+            json.dumps(value, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        artifacts[name] = {"content_base64": base64.b64encode(content).decode("ascii"),
+            "content_sha256": hashlib.sha256(content).hexdigest()}
+    producer = {"module": "frc_defense.curriculum_scenarios",
+        "function": "make_curriculum_env", "source_identity_sha256": canonical_sha256(source)}
+    body = {"schema": EFFECTIVE_SNAPSHOT_SCHEMA, "producer": producer,
+        "factory_arguments": factory_arguments,
+        "resolved_fields": resolved_fields, "configuration_artifacts": artifacts,
+        "runtime_identity": runtime}
+    body["snapshot_sha256"] = canonical_sha256(body)
+    return body
 
 
 def _pressure(category, seed, family='category_scripted'):

@@ -140,17 +140,19 @@ def test_manifest_freezes_monitor_case_and_rejects_split_overlap(campaign):
     digest = hashlib.sha256(open(protocol_path, "rb").read()).hexdigest()
     config = copy.deepcopy(config)
     config["diagnostic_monitor"] = _monitor(protocol, digest)
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path,
+        legacy_diagnostic=True)
     assert manifest["diagnostic_monitor"]["qualification_eligible"] is False
     assert manifest_api.validate_campaign_manifest(manifest,
-        source_root=tmp_path)["valid"]
+        source_root=tmp_path, allow_legacy_v2=True)["valid"]
 
     bad = copy.deepcopy(manifest)
     bad["diagnostic_monitor"]["seeds"] = [1, 100]
     bad["diagnostic_monitor"]["episode_budget"] = 2
     bad = _seal(bad)
     with pytest.raises(ValueError, match="overlap"):
-        manifest_api.validate_campaign_manifest(bad, source_root=tmp_path)
+        manifest_api.validate_campaign_manifest(bad, source_root=tmp_path,
+            allow_legacy_v2=True)
 
 
 def test_monitor_seeds_must_also_avoid_qualification_protocol(campaign):
@@ -448,7 +450,7 @@ def test_supervisor_monitor_dispatch_uses_only_eval_device_and_defers_its_lane(
         "status"] == "queued"
 
 
-def test_monitor_only_campaign_can_resume_without_finite_schedule(campaign, monkeypatch):
+def test_monitor_only_legacy_campaign_is_rejected_for_resume(campaign, monkeypatch):
     from frc_defense import meco_supervisor as supervisor_api
 
     tmp_path, config = campaign
@@ -457,7 +459,8 @@ def test_monitor_only_campaign_can_resume_without_finite_schedule(campaign, monk
     digest = hashlib.sha256(Path(protocol_path).read_bytes()).hexdigest()
     config = copy.deepcopy(config)
     config["diagnostic_monitor"] = _monitor(protocol, digest)
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path,
+        legacy_diagnostic=True)
     campaign_root = Path(manifest["campaign"]["root"])
     evaluation_root = Path(manifest["campaign"]["evaluation_output"])
     campaign_root.mkdir(parents=True)
@@ -476,7 +479,8 @@ def test_monitor_only_campaign_can_resume_without_finite_schedule(campaign, monk
     monkeypatch.setattr("frc_defense.fuel_physics_hip.native_extension_identity",
         lambda: identity)
     cfg = manifest["tracks"][MECO_TRACKS[0]]["config"]
-    supervisor = supervisor_api.MecoSupervisor(output=str(campaign_root),
+    with pytest.raises(ValueError, match="legacy v2 manifests are read-only"):
+        supervisor_api.MecoSupervisor(output=str(campaign_root),
         evaluation_output=str(evaluation_root),
         devices=tuple(manifest["devices"]["training_pool"]),
         scenario=cfg["scenario_id"], category=cfg["category"], seed=cfg["seed"],
@@ -495,9 +499,7 @@ def test_monitor_only_campaign_can_resume_without_finite_schedule(campaign, monk
         prediction_mode=cfg["prediction_mode"],
         qualification_protocol=manifest["qualification_protocol"]["path"],
         evaluation_split="diagnostic", campaign_manifest=manifest,
-        resume_campaign=True)
-    assert supervisor.evaluation_schedule is None
-    assert supervisor.diagnostic_monitor_config["enabled"] is True
+            resume_campaign=True)
 
 
 def test_monitor_failure_and_stop_file_do_not_fail_or_launch_training(tmp_path, monkeypatch):

@@ -60,6 +60,14 @@ def campaign(tmp_path, monkeypatch):
     return tmp_path, config
 
 
+def _legacy_describe(config, **kwargs):
+    return manifest_api.describe_campaign(config, legacy_diagnostic=True, **kwargs)
+
+
+def _legacy_validate(manifest, **kwargs):
+    return manifest_api.validate_campaign_manifest(manifest, allow_legacy_v2=True, **kwargs)
+
+
 def _seal(value):
     value["canonical_sha256"] = _canonical({k: v for k, v in value.items()
         if k != "canonical_sha256"})
@@ -68,7 +76,7 @@ def _seal(value):
 
 def test_describe_is_no_write_by_default_and_records_false_phase2(campaign):
     tmp_path, config = campaign
-    result = manifest_api.describe_campaign(config, source_root=tmp_path)
+    result = _legacy_describe(config, source_root=tmp_path)
     assert set(result["tracks"]) == set(MECO_TRACKS)
     assert result["campaign"]["phase4_train_exposure"] is False
     assert result["readiness"]["implementation_ready"] is True
@@ -82,23 +90,37 @@ def test_describe_is_no_write_by_default_and_records_false_phase2(campaign):
     assert not (tmp_path / "meco-five-fixture" / "manifest.json").exists()
 
 
+def test_new_manifest_requires_phase0_and_v2_is_explicitly_legacy_read_only(campaign):
+    tmp_path, config = campaign
+    with pytest.raises(ValueError, match="require Phase 0 materialization"):
+        manifest_api.describe_campaign(config, source_root=tmp_path)
+    legacy = manifest_api.describe_campaign(config, source_root=tmp_path,
+        legacy_diagnostic=True)
+    assert legacy["schema"] == manifest_api.SCHEMA
+    assert legacy["legacy_diagnostic_only"] is True
+    with pytest.raises(ValueError, match="read-only"):
+        manifest_api.validate_campaign_manifest(legacy, source_root=tmp_path)
+    assert manifest_api.validate_campaign_manifest(legacy, source_root=tmp_path,
+        allow_legacy_v2=True)["valid"]
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_phase4_train_exposure_is_frozen_in_manifest_and_digest(campaign, enabled):
     tmp_path, config = campaign
     config = copy.deepcopy(config)
     config["phase4_train_exposure"] = enabled
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     assert manifest["campaign"]["phase4_train_exposure"] is enabled
-    assert manifest_api.validate_campaign_manifest(
+    assert _legacy_validate(
         manifest, source_root=tmp_path)["valid"]
 
 
 def test_legacy_manifest_defaults_phase4_train_exposure_to_false(campaign):
     tmp_path, config = campaign
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     del manifest["campaign"]["phase4_train_exposure"]
     _seal(manifest)
-    assert manifest_api.validate_campaign_manifest(
+    assert _legacy_validate(
         manifest, source_root=tmp_path)["valid"]
 
 
@@ -108,23 +130,23 @@ def test_phase4_train_exposure_requires_strict_boolean(campaign, value):
     bad = copy.deepcopy(config)
     bad["phase4_train_exposure"] = value
     with pytest.raises(ValueError, match="phase4_train_exposure.*boolean"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
 
 
 def test_phase4_train_exposure_tampering_fails_digest_and_strict_validation(campaign):
     tmp_path, config = campaign
     config = copy.deepcopy(config)
     config["phase4_train_exposure"] = True
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     tampered = copy.deepcopy(manifest)
     tampered["campaign"]["phase4_train_exposure"] = False
     with pytest.raises(ValueError, match="canonical digest mismatch"):
-        manifest_api.validate_campaign_manifest(tampered, source_root=tmp_path)
+        _legacy_validate(tampered, source_root=tmp_path)
     tampered = copy.deepcopy(manifest)
     tampered["campaign"]["phase4_train_exposure"] = 1
     _seal(tampered)
     with pytest.raises(ValueError, match="phase4_train_exposure.*boolean"):
-        manifest_api.validate_campaign_manifest(tampered, source_root=tmp_path)
+        _legacy_validate(tampered, source_root=tmp_path)
 
 
 def test_optional_evaluation_schedule_is_frozen_and_validated(campaign):
@@ -136,15 +158,15 @@ def test_optional_evaluation_schedule_is_frozen_and_validated(campaign):
         "scenario_id": "pickup_simple", "category": "single", "seeds": [101],
         "split": "diagnostic", "protocol_id": protocol["protocol_id"],
         "protocol_sha256": hashlib.sha256(protocol_path.read_bytes()).hexdigest()}]
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     assert manifest["evaluation_schedule"][0]["index"] == 0
-    assert manifest_api.validate_campaign_manifest(
+    assert _legacy_validate(
         manifest, source_root=tmp_path)["valid"]
     bad = copy.deepcopy(manifest)
     bad["evaluation_schedule"][0]["seeds"] = [1]
     bad = _seal(bad)
     with pytest.raises(ValueError, match="leaks"):
-        manifest_api.validate_campaign_manifest(bad, source_root=tmp_path)
+        _legacy_validate(bad, source_root=tmp_path)
 
 
 def test_manifest_supervisor_constructor_keeps_roots_absent_until_claim(campaign, monkeypatch):
@@ -156,7 +178,7 @@ def test_manifest_supervisor_constructor_keeps_roots_absent_until_claim(campaign
         "scenario_id": "pickup_simple", "category": "single", "seeds": [101],
         "split": "diagnostic", "protocol_id": protocol["protocol_id"],
         "protocol_sha256": hashlib.sha256(protocol_path.read_bytes()).hexdigest()}]
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     identity = {"status": "present", "module": "autodrive_fuel_physics_hip",
         "path": "/native/fuel.so", "sha256": "a" * 64,
         "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
@@ -172,34 +194,31 @@ def test_manifest_supervisor_constructor_keeps_roots_absent_until_claim(campaign
         lambda: identity)
 
     cfg = manifest["tracks"][MECO_TRACKS[0]]["config"]
-    supervisor = supervisor_api.MecoSupervisor(output=manifest["campaign"]["root"],
-        evaluation_output=manifest["campaign"]["evaluation_output"],
-        devices=tuple(manifest["devices"]["training_pool"]),
-        scenario=cfg["scenario_id"], category=cfg["category"], seed=cfg["seed"],
-        chunk_updates=cfg["updates"], rollout_steps=cfg["rollout_steps"],
-        epochs=cfg["epochs"], action_ticks=cfg["action_ticks"],
-        learning_rate=cfg["learning_rate"], gamma=cfg["gamma"],
-        gae_lambda=cfg["gae_lambda"], clip_coef=cfg["clip_coef"],
-        entropy_coef=cfg["entropy_coef"], value_coef=cfg["value_coef"],
-        max_grad_norm=cfg["max_grad_norm"],
-        route_cost_weight=cfg["route_cost_points_per_second"],
-        candidate_k=cfg["candidate_k"], evaluation_categories=("single",),
-        evaluation_episodes=1, evaluation_seed=101,
-        evaluation_device=manifest["devices"]["evaluation"], cycles=0,
-        stop_file=None, p_mode=cfg["p_mode"], p_cost_scale=cfg["p_cost_scale"],
-        p_points_per_grid_edge=cfg["p_points_per_grid_edge"],
-        prediction_mode=cfg["prediction_mode"],
-        qualification_protocol=manifest["qualification_protocol"]["path"],
-        evaluation_split="diagnostic", campaign_manifest=manifest)
+    with pytest.raises(ValueError, match="legacy v2 manifests are read-only"):
+        supervisor_api.MecoSupervisor(output=manifest["campaign"]["root"],
+            evaluation_output=manifest["campaign"]["evaluation_output"],
+            devices=tuple(manifest["devices"]["training_pool"]),
+            scenario=cfg["scenario_id"], category=cfg["category"], seed=cfg["seed"],
+            chunk_updates=cfg["updates"], rollout_steps=cfg["rollout_steps"],
+            epochs=cfg["epochs"], action_ticks=cfg["action_ticks"],
+            learning_rate=cfg["learning_rate"], gamma=cfg["gamma"],
+            gae_lambda=cfg["gae_lambda"], clip_coef=cfg["clip_coef"],
+            entropy_coef=cfg["entropy_coef"], value_coef=cfg["value_coef"],
+            max_grad_norm=cfg["max_grad_norm"],
+            route_cost_weight=cfg["route_cost_points_per_second"],
+            candidate_k=cfg["candidate_k"], evaluation_categories=("single",),
+            evaluation_episodes=1, evaluation_seed=101,
+            evaluation_device=manifest["devices"]["evaluation"], cycles=0,
+            stop_file=None, p_mode=cfg["p_mode"], p_cost_scale=cfg["p_cost_scale"],
+            p_points_per_grid_edge=cfg["p_points_per_grid_edge"],
+            prediction_mode=cfg["prediction_mode"],
+            qualification_protocol=manifest["qualification_protocol"]["path"],
+            evaluation_split="diagnostic", campaign_manifest=manifest)
 
     campaign_root = Path(manifest["campaign"]["root"])
     evaluation_root = Path(manifest["campaign"]["evaluation_output"])
     assert not campaign_root.exists()
     assert not evaluation_root.exists()
-    supervisor._claim_fresh_manifest_roots()
-    assert supervisor._campaign_roots_claimed is True
-    assert campaign_root.is_dir()
-    assert evaluation_root.is_dir()
 
 
 def test_rejects_cpu_unindexed_and_duplicate_devices(campaign):
@@ -207,23 +226,23 @@ def test_rejects_cpu_unindexed_and_duplicate_devices(campaign):
     bad = copy.deepcopy(config)
     bad["training_devices"] = ["cpu"]
     with pytest.raises(ValueError, match="indexed CUDA"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["training_devices"] = ["cuda:0", "cuda:0"]
     with pytest.raises(ValueError, match="duplicate"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["tracks"]["C2"]["device"] = "cuda"
     with pytest.raises(ValueError, match="indexed CUDA"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["training_devices"] = ["cuda:0"]
     with pytest.raises(ValueError, match="exactly two"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["lease_contract"] = {"policy": "trust config"}
     with pytest.raises(ValueError, match="exclusive ownership"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
 
 
 def test_rejects_duplicate_seed_partition_and_incomplete_track_map(campaign):
@@ -231,7 +250,7 @@ def test_rejects_duplicate_seed_partition_and_incomplete_track_map(campaign):
     bad = copy.deepcopy(config)
     bad["scheduler"]["seed_partitions"]["validation"] = [2, 3]
     with pytest.raises(ValueError, match="seed partitions"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
 
 
 def test_rejects_bad_numeric_ranges_and_campaign_path_collisions(campaign):
@@ -239,26 +258,26 @@ def test_rejects_bad_numeric_ranges_and_campaign_path_collisions(campaign):
     bad = copy.deepcopy(config)
     bad["tracks"]["A1"]["gamma"] = 1.5
     with pytest.raises(ValueError, match="optimizer or discount"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["campaign_root"] = str(manifest_api.PINNED_LIVE_ROOTS[0] / "fake-campaign")
     with pytest.raises(ValueError, match="namespaced|pinned live"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     bad = copy.deepcopy(config)
     bad["tracks"]["A2"]["output"] = bad["tracks"]["A1"]["output"]
     with pytest.raises(ValueError, match="unique"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
     output = Path(config["campaign_root"]) / "campaign-manifest.json"
-    written = manifest_api.describe_campaign(config, source_root=tmp_path, output=output)
+    written = _legacy_describe(config, source_root=tmp_path, output=output)
     assert json.loads(output.read_text()) == written
-    assert manifest_api.validate_campaign_manifest(written, source_root=tmp_path)["valid"]
-    assert manifest_api.validate_campaign_manifest(written, source_root=tmp_path)["launch_ready"] is False
+    assert _legacy_validate(written, source_root=tmp_path)["valid"]
+    assert _legacy_validate(written, source_root=tmp_path)["launch_ready"] is False
     with pytest.raises(ValueError, match="already exists|existing frozen manifest"):
-        manifest_api.describe_campaign(config, source_root=tmp_path, output=output)
+        _legacy_describe(config, source_root=tmp_path, output=output)
     bad = copy.deepcopy(config)
     del bad["tracks"]["A3"]
     with pytest.raises(ValueError, match="exactly"):
-        manifest_api.describe_campaign(bad, source_root=tmp_path)
+        _legacy_describe(bad, source_root=tmp_path)
 
 
 def test_rejects_preexisting_campaign_namespace(campaign):
@@ -266,61 +285,61 @@ def test_rejects_preexisting_campaign_namespace(campaign):
     root = Path(config["campaign_root"])
     root.mkdir(parents=True)
     with pytest.raises(ValueError, match="namespace already exists"):
-        manifest_api.describe_campaign(config, source_root=tmp_path)
+        _legacy_describe(config, source_root=tmp_path)
 
 
 def test_validate_rederives_config_seed_device_and_source_bindings(campaign):
     tmp_path, config = campaign
-    base = manifest_api.describe_campaign(config, source_root=tmp_path)
-    assert manifest_api.validate_campaign_manifest(base, source_root=tmp_path)["valid"]
+    base = _legacy_describe(config, source_root=tmp_path)
+    assert _legacy_validate(base, source_root=tmp_path)["valid"]
     bad = copy.deepcopy(base)
     bad["tracks"]["C1"]["config"]["learning_rate"] = .2
     bad["tracks"]["C1"]["config_sha256"] = _canonical(bad["tracks"]["C1"]["config"])
     with pytest.raises(ValueError, match="shared training"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["scheduler"]["seed_partitions"]["train"] = [2]
     with pytest.raises(ValueError, match="seed partitions"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["devices"]["training_pool"] = ["cuda:0", "cuda:0"]
     with pytest.raises(ValueError, match="duplicate"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["source"]["identity_sha256"] = "c" * 64
     with pytest.raises(ValueError, match="source binding"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["source"]["identity"] = {"forged": "identity"}
     with pytest.raises(ValueError, match="source binding"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
 
 
 def test_validate_rejects_protocol_and_false_coverage_mutations(campaign):
     tmp_path, config = campaign
-    base = manifest_api.describe_campaign(config, source_root=tmp_path)
+    base = _legacy_describe(config, source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["evaluation_protocol"]["episode_seeds"] = [3]
     bad["evaluation_protocol"]["split"] = "validation"
     bad["evaluation_protocol"]["qualification_eligible"] = True
     with pytest.raises(ValueError, match="qualification"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     bad = copy.deepcopy(base)
     bad["warm_starts"]["A1"]["phase2_covered"] = True
     bad["readiness"]["phase2_ready"] = False
     with pytest.raises(ValueError, match="warm-start bytes|coverage"):
-        manifest_api.validate_campaign_manifest(_seal(bad), source_root=tmp_path)
+        _legacy_validate(_seal(bad), source_root=tmp_path)
     protocol_path = tmp_path / "protocol.json"
     protocol_path.write_text(protocol_path.read_text() + " ")
     with pytest.raises(ValueError, match="protocol binding is stale"):
-        manifest_api.validate_campaign_manifest(base, source_root=tmp_path)
+        _legacy_validate(base, source_root=tmp_path)
 
 
 def test_calibrated_gate_fields_and_validation_readiness_are_separate(campaign):
     tmp_path, config = campaign
     config["evaluation"]["split"] = "validation"
     config["evaluation"]["episode_seeds"] = [3]
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     assert manifest["readiness"]["validation_ready"] is True
     assert manifest["readiness"]["qualification_ready"] is False
     assert manifest["evaluation_protocol"]["qualification_eligible"] is False
@@ -343,7 +362,7 @@ def test_forged_v1_calibration_sidecar_never_enables_qualification(campaign):
     protocol_path.write_text(json.dumps(protocol))
     config["evaluation"]["split"] = "test"
     config["evaluation"]["episode_seeds"] = [4]
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     assert manifest["evaluation_protocol"]["qualification_eligible"] is False
     assert manifest["evaluation_protocol"]["gate_calibration"]["trusted_calibration_report_binding"] is False
     assert manifest["readiness"]["qualification_ready"] is False
@@ -395,7 +414,7 @@ def test_hardware_inventory_requires_matching_wx9100_evidence(campaign, monkeypa
     monkeypatch.setattr(manifest_api, "HOST_GPU_INVENTORY", path)
     monkeypatch.setattr(manifest_api, "HOST_GPU_INVENTORY_SHA256", manifest_api._file_sha(path))
     with pytest.raises(ValueError, match="index/BDF/model"):
-        manifest_api.describe_campaign(config, source_root=tmp_path)
+        _legacy_describe(config, source_root=tmp_path)
 
 
 def test_fabricated_target_coverage_never_qualifies(campaign, monkeypatch):
@@ -424,7 +443,7 @@ def test_fabricated_target_coverage_never_qualifies(campaign, monkeypatch):
                 for name in ("U", "P", "behavior")}}
     monkeypatch.setattr(torch, "load", lambda path, **kwargs: payloads[str(Path(path).resolve())])
     config["warm_start_artifacts"] = paths
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     for track in MECO_TRACKS:
         assert manifest["warm_starts"][track]["phase2_covered"] is False
         assert not any(row["valid"] for row in manifest["warm_starts"][track]["targets"].values())
@@ -446,10 +465,10 @@ def test_validate_rehashes_warm_start_bytes(campaign, monkeypatch):
             "binding_valid": True, "targets": {"U": {"valid": False},
                 "P": {"valid": False}, "behavior": {"valid": False}},
             "phase2_covered": False, "reason": None})
-    base = manifest_api.describe_campaign(config, source_root=tmp_path)
+    base = _legacy_describe(config, source_root=tmp_path)
     artifacts["A1"].write_bytes(b"mutated-artifact")
     with pytest.raises(ValueError, match="warm-start bytes"):
-        manifest_api.validate_campaign_manifest(base, source_root=tmp_path)
+        _legacy_validate(base, source_root=tmp_path)
 
 
 def test_partial_five_track_warm_start_set_is_rejected(campaign):
@@ -458,7 +477,7 @@ def test_partial_five_track_warm_start_set_is_rejected(campaign):
     artifact.write_bytes(b"warm-start")
     config["warm_start_artifacts"] = {"A1": str(artifact)}
     with pytest.raises(ValueError, match="all five tracks or none"):
-        manifest_api.describe_campaign(config, source_root=tmp_path)
+        _legacy_describe(config, source_root=tmp_path)
 
 
 def test_source_projection_excludes_only_native_state_and_accepts_prepare_transition(
@@ -468,12 +487,12 @@ def test_source_projection_excludes_only_native_state_and_accepts_prepare_transi
         "_drivetrain_config_sha256": "d" * 64,
         "_native_fuel_extension": {"status": "unprepared"}}
     monkeypatch.setattr(manifest_api, "source_identity", lambda: unprepared)
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     projection = {key: value for key, value in unprepared.items()
                   if key != "_native_fuel_extension"}
     assert manifest["source"]["identity"] == projection
     assert manifest["source"]["identity_sha256"] == manifest_api._sha(projection)
-    assert manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)["valid"]
+    assert _legacy_validate(manifest, source_root=tmp_path)["valid"]
 
     loaded = {**unprepared, "_native_fuel_extension": {
         "status": "present", "module": "autodrive_fuel_physics_hip",
@@ -481,7 +500,7 @@ def test_source_projection_excludes_only_native_state_and_accepts_prepare_transi
         "build_fingerprint": "b" * 64, "device": 1, "inode": 2,
         "size": 3, "mtime_ns": 4}}
     monkeypatch.setattr(manifest_api, "source_identity", lambda: loaded)
-    assert manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)["valid"]
+    assert _legacy_validate(manifest, source_root=tmp_path)["valid"]
 
 
 @pytest.mark.parametrize("change", ["code", "environment", "drivetrain"])
@@ -492,7 +511,7 @@ def test_source_projection_still_rejects_code_environment_and_drivetrain_drift(
         "_drivetrain_config_sha256": "d" * 64,
         "_native_fuel_extension": {"status": "unprepared"}}
     monkeypatch.setattr(manifest_api, "source_identity", lambda: source)
-    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    manifest = _legacy_describe(config, source_root=tmp_path)
     drifted = copy.deepcopy(source)
     if change == "code":
         drifted["module.py"] = "c" * 64
@@ -502,7 +521,7 @@ def test_source_projection_still_rejects_code_environment_and_drivetrain_drift(
         drifted["_drivetrain_config_sha256"] = "e" * 64
     monkeypatch.setattr(manifest_api, "source_identity", lambda: drifted)
     with pytest.raises(ValueError, match="source binding"):
-        manifest_api.validate_campaign_manifest(manifest, source_root=tmp_path)
+        _legacy_validate(manifest, source_root=tmp_path)
 
 
 def test_warm_start_metadata_binds_source_projection_and_defers_loaded_binary_parity(
