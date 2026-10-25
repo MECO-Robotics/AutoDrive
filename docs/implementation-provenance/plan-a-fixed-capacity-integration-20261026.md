@@ -4,7 +4,7 @@ This is a scoped transcript summary for the Plan A source integration and its le
 
 ## Planner and code candidates
 
-- Pass 1 plan: `docs/plans/plan-a-fixed-capacity-integration-20261026.md`, planner commit `c9c0ffe327593474d9122d028a950a0592c7c38e`.
+- Original authored plan commit: `c9c0ffe327593474d9122d028a950a0592c7c38e`. The amended Pass 1-approved plan is `docs/plans/plan-a-fixed-capacity-integration-20261026.md`, commit `802932fdae8bd52611490ff6030585a7700597d6`.
 - Reviewed source candidate: `e116941c439020b8a4bf7447972d9229190f1fbe`, based on `b9489cfa615a236db2cbf1a65402ee06ed515804`. Its independent exact-head Pass 3 verdict was approved.
 - Integrated code candidate: `305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95`, with parents `c9c0ffe327593474d9122d028a950a0592c7c38e` and `e116941c439020b8a4bf7447972d9229190f1fbe`. An independent exact-head Pass 3 review approved this integrated candidate. That verdict was communicated as a review message; no standalone reviewer artifact was persisted.
 

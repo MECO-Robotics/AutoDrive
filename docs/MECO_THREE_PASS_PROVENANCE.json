@@ -3666,7 +3666,7 @@
           "kind": "scoped-transcript-summary",
           "status": "transcript-summary"
         },
-        "pass1_plan_commit": "c9c0ffe327593474d9122d028a950a0592c7c38e"
+        "pass1_plan_commit": "802932fdae8bd52611490ff6030585a7700597d6"
       },
       "implementer": {
         "source_candidate_commit": "e116941c439020b8a4bf7447972d9229190f1fbe",
@@ -3713,7 +3713,7 @@
       "reviewer": {
         "artifact": {
           "path": "docs/implementation-provenance/plan-a-fixed-capacity-integration-20261026.md",
-          "sha256": "4ad733466c3f54f1618502e9ef436ac2353a3cc24b42fbbdaafd8293f9034270",
+          "sha256": "97a42179fbe07938c34b7da33671c25bf3f55cabb4970c54daeb51aadd67dcc1",
           "kind": "scoped-transcript-summary",
           "status": "review-summary"
         },
