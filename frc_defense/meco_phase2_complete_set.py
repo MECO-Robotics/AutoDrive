@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import uuid
 from datetime import datetime, timezone
 
 from .meco_phase2_campaign import (_protocol, _source_snapshot, _sha,
@@ -48,6 +49,35 @@ def _regular_nonsymlink(path: Path) -> Path:
     return path
 
 
+def _reject_symlink_path(path: Path, *, allow_missing_leaf=True) -> None:
+    path = Path(path).absolute()
+    cursor = Path(path.anchor)
+    for part in path.parts[1:]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError(f"output path contains symlink: {cursor}")
+        if not cursor.exists() and (not allow_missing_leaf or cursor != path):
+            raise ValueError(f"output path ancestor is missing: {cursor}")
+
+
+def _open_pinned_directory(path: Path) -> int:
+    """Open every absolute path component with O_NOFOLLOW and return pinned fd."""
+    path = Path(path).absolute()
+    if not path.is_absolute():
+        raise ValueError("output directory must be absolute")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _nonoverlap(path: Path, protected: Path) -> bool:
     path, protected = Path(path).absolute(), Path(protected).resolve()
     return not (path == protected or path in protected.parents or protected in path.parents)
@@ -63,7 +93,8 @@ def _expected_outputs(root: Path) -> dict:
         "C2": c_root / "C2.pt",
     }
     return {"root": str(root), "manifest": str(root / MANIFEST_NAME),
-        "state": str(root / STATE_NAME), "source_dataset": str(c_root / "matched-prefix.jsonl"),
+        "state": str(root / STATE_NAME), "stage_journal": str(root / "stage-receipts.jsonl"),
+        "source_dataset": str(c_root / "matched-prefix.jsonl"),
         "source_manifest": str(c_root / "matched-prefix.jsonl.manifest.json"),
         "c_campaign_report": str(c_root / "campaign-report.json"),
         "a_bundle": str(a_root / "bundle.json"),
@@ -300,6 +331,58 @@ def validate_complete_set_manifest(manifest: dict, descriptor: dict) -> dict:
             a_stage.get("bundle_sha256") != _sha_file(_regular_nonsymlink(
                 Path(descriptor["outputs"]["a_bundle"])) )):
         raise ValueError("complete-set stage report/bundle binding is stale")
+    journal_path = Path(descriptor["outputs"]["stage_journal"])
+    journal_records = _read_stage_journal(journal_path)
+    journal_sha = _sha_file(journal_path)
+    latest = {}
+    for record in journal_records:
+        latest[record["stage"]] = record
+    if (manifest.get("stage_journal_sha256") != journal_sha or
+            set(latest) != {"C", "A"} or
+            any(latest[stage].get("attempt_id") != stages[stage].get("attempt_id") or
+                _digest(latest[stage]) != stages[stage].get("receipt_sha256")
+                for stage in ("C", "A"))):
+        raise ValueError("complete-set manifest does not bind the immutable stage journal")
+    c_record, a_record = latest["C"], latest["A"]
+    if (c_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
+            c_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
+            c_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
+            c_record.get("inputs", {}).get("category") != descriptor["category"] or
+            c_record.get("inputs", {}).get("device") != descriptor["device"] or
+            c_record.get("outputs", {}).get("source_dataset") != {
+                "path": descriptor["outputs"]["source_dataset"],
+                "sha256": source_binding["dataset_sha256"]} or
+            c_record.get("outputs", {}).get("source_manifest") != {
+                "path": descriptor["outputs"]["source_manifest"],
+                "sha256": source_binding["dataset_manifest_sha256"]} or
+            c_record.get("outputs", {}).get("report") != {
+                "path": descriptor["outputs"]["c_campaign_report"],
+                "sha256": c_stage["report_sha256"]} or
+            c_record.get("outputs", {}).get("artifacts") != {
+                track: {"path": descriptor["outputs"]["artifacts"][track],
+                    "sha256": c_validators[track]["artifact_sha256"]}
+                for track in ("C1", "C2")} or
+            c_record.get("validator_summary") != c_validators or
+            a_record.get("inputs", {}).get("source_dataset") != {
+                "path": descriptor["outputs"]["source_dataset"],
+                "sha256": source_binding["dataset_sha256"]} or
+            a_record.get("inputs", {}).get("source_manifest") != {
+                "path": descriptor["outputs"]["source_manifest"],
+                "sha256": source_binding["dataset_manifest_sha256"]} or
+            a_record.get("inputs", {}).get("protocol") != descriptor["qualification_protocol"] or
+            a_record.get("inputs", {}).get("scenario_id") != descriptor["scenario_id"] or
+            a_record.get("inputs", {}).get("category") != descriptor["category"] or
+            a_record.get("inputs", {}).get("seeds") != descriptor["seeds"] or
+            a_record.get("inputs", {}).get("device") != descriptor["device"] or
+            a_record.get("outputs", {}).get("bundle") != {
+                "path": descriptor["outputs"]["a_bundle"],
+                "sha256": a_stage["bundle_sha256"]} or
+            a_record.get("outputs", {}).get("artifacts") != {
+                track: {"path": descriptor["outputs"]["artifacts"][track],
+                    "sha256": a_validators[track]["sha256"]}
+                for track in ("A1", "A2", "A3")} or
+            a_record.get("validator_summary") != a_validators):
+        raise ValueError("immutable stage journal receipts differ from revalidated stage bindings")
     if c_stage.get("validators") != c_validators or a_stage.get("validators") != a_validators:
         raise ValueError("complete-set stage validator receipts differ from live validation")
     expected_receipts = {}
@@ -402,6 +485,42 @@ def _replace_json(path: Path, value: dict):
         os.replace(temp, path)
     finally:
         Path(temp).unlink(missing_ok=True)
+
+
+def _append_stage_receipt(path: Path, receipt: dict) -> str:
+    """Append and fsync one immutable stage receipt; return its canonical hash."""
+    path = Path(path)
+    encoded = (_canonical(receipt) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT |
+        getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "ab", closefd=False) as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(fd)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return _sha(encoded.rstrip(b"\n"))
+
+
+def _read_stage_journal(path: Path) -> list[dict]:
+    path = _regular_nonsymlink(path)
+    records = []
+    attempt_ids = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        value = json.loads(line)
+        if (not isinstance(value, dict) or value.get("schema") != SCHEMA + ".stage-receipt" or
+                not isinstance(value.get("attempt_id"), str) or
+                value["attempt_id"] in attempt_ids or value.get("status") != "validated"):
+            raise ValueError("stage journal contains a malformed, duplicate, or unvalidated receipt")
+        attempt_ids.add(value["attempt_id"])
+        records.append(value)
+    return records
 
 
 def _load_c_stage(descriptor: dict, *, expected_sources: dict) -> tuple[dict, dict]:
@@ -548,7 +667,7 @@ def _load_a_stage(descriptor: dict, *, expected_sources: dict,
 
 
 def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
-        c_execute=None, a_execute=None) -> dict:
+        c_execute=None, a_execute=None, lease_factory=None) -> dict:
     """Run/resume complete C and Plan A stages, publish manifest after five validators."""
     validate_descriptor(descriptor, repo_root=repo_root)
     outputs = descriptor["outputs"]
@@ -571,28 +690,59 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
     from .meco_phase2_campaign import execute_campaign
     from .meco_supervised import _read_counterfactual_dataset
     from .curriculum_training import source_identity
-    from .meco_device_lease import lease_devices
+    if lease_factory is None:
+        from .meco_device_lease import lease_devices
+        lease_factory = lease_devices
     expected_sources = source_identity()
     c_root = Path(descriptor["c_campaign_descriptor"]["outputs"]["root"])
     c_report_path = Path(outputs["c_campaign_report"])
 
     # Acquire the exclusive device lease before reserving the numbered attempt
     # directory or its mutable state journal. Nested APIs borrow this lease.
-    with lease_devices([descriptor["device"]],
+    with lease_factory([descriptor["device"]],
             owner=f"phase2-five-track-{descriptor['attempt_number']:04d}"):
+        validate_descriptor(descriptor, repo_root=repo_root)
+        _reject_symlink_path(root.parent, allow_missing_leaf=False)
+        _reject_symlink_path(root)
+        if not root.parent.is_dir():
+            raise ValueError("complete-set output parent disappeared before lease acquisition")
+        parent_fd = _open_pinned_directory(root.parent)
+        try:
+            if root.exists():
+                if root.is_symlink() or not root.is_dir():
+                    raise ValueError("existing complete-set root is not a safe directory")
+                root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                    getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+            else:
+                os.mkdir(root.name, mode=0o700, dir_fd=parent_fd)
+                root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                    getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        try:
+            root_identity = os.fstat(root_fd)
+        finally:
+            os.close(root_fd)
+        def check_pinned_root():
+            _reject_symlink_path(root, allow_missing_leaf=False)
+            current = root.stat(follow_symlinks=False)
+            if (not root.is_dir() or current.st_dev != root_identity.st_dev or
+                    current.st_ino != root_identity.st_ino):
+                raise ValueError("complete-set output root changed after it was pinned")
         if root.exists():
             state = json.loads(_regular_nonsymlink(state_path).read_text(encoding="utf-8"))
             if (state.get("schema") != SCHEMA or
                     state.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
                 raise ValueError("attempt state changed while acquiring device lease")
         else:
-            root.mkdir(mode=0o700)
             state = {"schema": SCHEMA,
                 "descriptor_sha256": descriptor["descriptor_sha256"],
                 "attempt_number": descriptor["attempt_number"],
                 "status": "running", "completed_stages": []}
+            check_pinned_root()
             _atomic_json(state_path, state)
 
+        _reject_symlink_path(c_root)
         c_complete = c_report_path.is_file() and c_root.is_dir()
         if c_complete:
             source_binding, c_validators = _load_c_stage(descriptor,
@@ -608,12 +758,59 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 c_execute(descriptor["c_campaign_descriptor"])
             source_binding, c_validators = _load_c_stage(descriptor,
                 expected_sources=expected_sources)
+            c_attempt_id = uuid.uuid4().hex
+            c_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "C",
+                "attempt_id": c_attempt_id, "status": "validated",
+                "inputs": {"protocol": {"path": descriptor["qualification_protocol"]["path"],
+                    "id": descriptor["qualification_protocol"]["id"],
+                    "sha256": descriptor["qualification_protocol"]["sha256"]},
+                    "seeds": descriptor["seeds"], "scenario_id": descriptor["scenario_id"],
+                    "category": descriptor["category"], "device": descriptor["device"]},
+                "outputs": {"source_dataset": {"path": outputs["source_dataset"],
+                    "sha256": source_binding["dataset_sha256"]},
+                    "source_manifest": {"path": outputs["source_manifest"],
+                    "sha256": source_binding["dataset_manifest_sha256"]},
+                    "report": {"path": outputs["c_campaign_report"],
+                    "sha256": _sha_file(c_report_path)},
+                    "artifacts": {track: {"path": outputs["artifacts"][track],
+                        "sha256": c_validators[track]["artifact_sha256"]}
+                        for track in ("C1", "C2")}},
+                "validator_summary": c_validators}
+            check_pinned_root()
+            c_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), c_receipt)
+            state.setdefault("stage_receipts", {})["C"] = {
+                "attempt_id": c_attempt_id, "receipt_sha256": c_receipt_sha}
+            check_pinned_root()
             state["completed_stages"] = ["C1", "C2"]
             state["c_campaign_id"] = descriptor["c_campaign_descriptor"]["campaign_id"]
+            _replace_json(state_path, state)
+        if c_complete:
+            c_attempt_id = uuid.uuid4().hex
+            c_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "C",
+                "attempt_id": c_attempt_id, "status": "validated",
+                "inputs": {"protocol": {"path": descriptor["qualification_protocol"]["path"],
+                    "id": descriptor["qualification_protocol"]["id"],
+                    "sha256": descriptor["qualification_protocol"]["sha256"]},
+                    "seeds": descriptor["seeds"], "scenario_id": descriptor["scenario_id"],
+                    "category": descriptor["category"], "device": descriptor["device"]},
+                "outputs": {"source_dataset": {"path": outputs["source_dataset"],
+                    "sha256": source_binding["dataset_sha256"]},
+                    "source_manifest": {"path": outputs["source_manifest"],
+                    "sha256": source_binding["dataset_manifest_sha256"]},
+                    "report": {"path": outputs["c_campaign_report"],
+                    "sha256": _sha_file(c_report_path)},
+                    "artifacts": {track: {"path": outputs["artifacts"][track],
+                        "sha256": c_validators[track]["artifact_sha256"]}
+                        for track in ("C1", "C2")}},
+                "validator_summary": c_validators}
+            c_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), c_receipt)
+            state.setdefault("stage_receipts", {})["C"] = {
+                "attempt_id": c_attempt_id, "receipt_sha256": c_receipt_sha}
             _replace_json(state_path, state)
 
         a_root = Path(descriptor["plan_a_ubp"]["output_dir"])
         a_bundle_path = Path(outputs["a_bundle"])
+        _reject_symlink_path(a_root)
         a_complete = a_bundle_path.is_file() and a_root.is_dir()
         if a_complete:
             a_artifacts = _load_a_stage(descriptor, expected_sources=expected_sources,
@@ -635,7 +832,55 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                     device=descriptor["device"])
             a_artifacts = _load_a_stage(descriptor, expected_sources=expected_sources,
                                         source_binding=source_binding)
+            a_attempt_id = uuid.uuid4().hex
+            a_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "A",
+                "attempt_id": a_attempt_id, "status": "validated",
+                "inputs": {"source_dataset": {"path": outputs["source_dataset"],
+                    "sha256": source_binding["dataset_sha256"]},
+                    "source_manifest": {"path": outputs["source_manifest"],
+                    "sha256": source_binding["dataset_manifest_sha256"]},
+                    "protocol": {"path": descriptor["qualification_protocol"]["path"],
+                    "id": descriptor["qualification_protocol"]["id"],
+                    "sha256": descriptor["qualification_protocol"]["sha256"]},
+                    "scenario_id": descriptor["scenario_id"],
+                    "category": descriptor["category"], "seeds": descriptor["seeds"],
+                    "device": descriptor["device"]},
+                "outputs": {"bundle": {"path": outputs["a_bundle"],
+                    "sha256": _sha_file(a_bundle_path)},
+                    "artifacts": {track: {"path": outputs["artifacts"][track],
+                        "sha256": a_artifacts[track]["sha256"]}
+                        for track in ("A1", "A2", "A3")}},
+                "validator_summary": a_artifacts}
+            check_pinned_root()
+            a_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), a_receipt)
+            state.setdefault("stage_receipts", {})["A"] = {
+                "attempt_id": a_attempt_id, "receipt_sha256": a_receipt_sha}
+            check_pinned_root()
             state["completed_stages"] = ["C1", "C2", "A1", "A2", "A3"]
+            _replace_json(state_path, state)
+        if a_complete:
+            a_attempt_id = uuid.uuid4().hex
+            a_receipt = {"schema": SCHEMA + ".stage-receipt", "stage": "A",
+                "attempt_id": a_attempt_id, "status": "validated",
+                "inputs": {"source_dataset": {"path": outputs["source_dataset"],
+                    "sha256": source_binding["dataset_sha256"]},
+                    "source_manifest": {"path": outputs["source_manifest"],
+                    "sha256": source_binding["dataset_manifest_sha256"]},
+                    "protocol": {"path": descriptor["qualification_protocol"]["path"],
+                    "id": descriptor["qualification_protocol"]["id"],
+                    "sha256": descriptor["qualification_protocol"]["sha256"]},
+                    "scenario_id": descriptor["scenario_id"],
+                    "category": descriptor["category"], "seeds": descriptor["seeds"],
+                    "device": descriptor["device"]},
+                "outputs": {"bundle": {"path": outputs["a_bundle"],
+                    "sha256": _sha_file(a_bundle_path)},
+                    "artifacts": {track: {"path": outputs["artifacts"][track],
+                        "sha256": a_artifacts[track]["sha256"]}
+                        for track in ("A1", "A2", "A3")}},
+                "validator_summary": a_artifacts}
+            a_receipt_sha = _append_stage_receipt(Path(outputs["stage_journal"]), a_receipt)
+            state.setdefault("stage_receipts", {})["A"] = {
+                "attempt_id": a_attempt_id, "receipt_sha256": a_receipt_sha}
             _replace_json(state_path, state)
 
         artifact_records = {}
@@ -678,10 +923,15 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 "dataset_sha256": source_binding["dataset_sha256"],
                 "manifest_sha256": source_binding["dataset_manifest_sha256"],
                 "record_count": source_binding["record_count"]},
-            "stages": {"C": {"report": outputs["c_campaign_report"],
+            "stage_journal_sha256": _sha_file(Path(outputs["stage_journal"])),
+            "stages": {"C": {"attempt_id": c_attempt_id,
+                    "receipt_sha256": c_receipt_sha,
+                    "report": outputs["c_campaign_report"],
                     "report_sha256": _sha_file(Path(outputs["c_campaign_report"])),
                     "validators": c_validators},
-                "A": {"bundle": outputs["a_bundle"],
+                "A": {"attempt_id": a_attempt_id,
+                    "receipt_sha256": a_receipt_sha,
+                    "bundle": outputs["a_bundle"],
                     "bundle_sha256": _sha_file(Path(outputs["a_bundle"])),
                     "validators": a_artifacts}},
             "artifacts": artifact_records,
