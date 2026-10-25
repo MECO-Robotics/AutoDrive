@@ -40,7 +40,7 @@ def test_current_manifest_is_validated_as_summary_only():
     result = dashboard_api._three_pass_provenance()
     assert result["validation_status"] == "validated_summary_only"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 57
+    assert len(result["tranches"]) == 58
     lease = next(t for t in result["tranches"]
                  if t["requirement_id"] == "meco-evaluation-device-lease")
     assert lease["implementer"]["commit"] == "9e41078fd438767217d051b89a58b2110449b3fb"
@@ -74,6 +74,13 @@ def test_current_manifest_is_validated_as_summary_only():
     assert plan_c_repeats["reviewer"]["approved_commit"] == (
         "6c397fe17570363cc3d14f7232bc8c660b076eb3")
     assert "No Plan C labels were collected" in plan_c_repeats["limits"]
+    plan_a_heap = next(t for t in result["tranches"]
+                       if t["requirement_id"] == "plan-a-exact-heap-device-prototype")
+    assert plan_a_heap["implementer"]["commit"] == (
+        "eae7c8ebfea8dce971845b95597ee95ca90a157d")
+    assert plan_a_heap["reviewer"]["approved_commit"] == (
+        plan_a_heap["implementer"]["commit"])
+    assert "No HIP compilation/execution" in plan_a_heap["limits"]
     contact_geometry = next(t for t in result["tranches"]
         if t["requirement_id"] == "phase4-contact-geometry-path")
     assert contact_geometry["implementer"]["commit"] == (

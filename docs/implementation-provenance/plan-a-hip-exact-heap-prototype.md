@@ -30,3 +30,21 @@ representative graphs (including production-sized graphs), exercise edge
 corner cases, and profile throughput and memory. Until those checks pass, this
 prototype is an implementation experiment and provides no GPU speedup or
 simulation-parity claim.
+
+
+## Scoped three-pass record
+
+**Planner pass.** The support builder copied the static legal graph to CPU and
+ran Python `heapq` Dijkstra on every decision. The implementation preserves its
+Python geometry operation order for graph-lifetime precomputed weights, then
+prototypes a gated device heap.
+
+**Implementer pass.** Commit `eae7c8ebfea8dce971845b95597ee95ca90a157d` adds the
+CPU oracle, weak-reference graph cache, HIP binding/kernel/loader, and focused
+contract tests.
+
+**Reviewer pass.** Independent review approved that exact commit as a gated
+prototype. The focused CPU suite passed 8 tests; Python compilation and
+`git diff --check` passed. The HIP extension was not compiled or run. WX9100
+parity, support-digest equality, and performance remain mandatory before
+runtime dispatch; no simulator evaluation or replay was performed.

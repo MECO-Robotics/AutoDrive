@@ -1,5 +1,38 @@
 # MECO learning tracks plan: execution status
 
+> **R4 live training snapshot — 2026-10-25 01:50 UTC.** The service remains
+> active (PID `2750253`). A1 is at 83/100 and A2 at 75/100 optimizer updates
+> on `cuda:0` and `cuda:1`; A3, C1, and C2 are queued. No 100-update chunk,
+> five-track cycle, or evaluation has completed. This campaign is pinned to
+> source `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`, uses only the diagnostic
+> `pickup_simple/cluster` assignment, has no evaluation-protocol binding, and
+> consumes no warm-start artifacts. Its online task counters at the same
+> snapshot were A1 0/30 and A2 19/40 successes; these are training episode
+> counters, not held-out evaluation or qualification results. The scheduler is
+> progressing through all five lanes two at a time, but this campaign does not
+> establish the plan's curriculum or evaluation gates.
+
+> **Three-pass dashboard re-verification — 2026-10-25 01:55 UTC.** After adding
+> the reviewed Plan A exact-heap tranche, `frc-defense-dashboard.service` was
+> restarted on current `main` (PID `2810214`). `/`, `/api/meco-status`,
+> `/api/curriculum-status`, `/assets/meco.js`, and `/assets/dashboard.js` all
+> returned HTTP 200. The curriculum API validated 58 scoped summaries. Served
+> frontend assets match the checkout (`meco.js` SHA-256
+> `6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`;
+> `dashboard.js` SHA-256
+> `487dff5cfb48d4d7e6d419be343d5e1149c291b4ba9866d227fa312972867219`). No
+> simulator replay was generated or reviewed.
+
+> **Plan A exact-heap prototype — 2026-10-25.** The scoped three-pass tranche
+> was integrated at `eae7c8ebfea8dce971845b95597ee95ca90a157d`. It extracts the
+> legacy Python Dijkstra as an oracle, caches exact edge weights for each
+> static graph, and adds an explicitly gated HIP binary-heap implementation.
+> The reviewer approved the exact commit as a prototype. Eight focused CPU
+> contract tests, Python compilation, and diff checks passed. The kernel has
+> not been compiled or run on WX9100; dispatch remains off pending exact output
+> and support-digest parity plus profiling. This is not CPU-free execution and
+> no simulator evaluation/replay was performed.
+
 > **r4 cycle/evaluation configuration audit — 2026-10-25 01:00 UTC.** The
 > service is active in cycle 1 with A1 at 15/100, A2 at 13/100, and A3/C1/C2
 > queued; no evaluation file exists yet. The manifest-mode supervisor uses
@@ -759,7 +792,7 @@ The old campaign's checkpoints do not satisfy strict source identity for the cur
 | **3. Deterministic and predictive controls** | D0/D1/D2 evaluation paths and prediction-mode controls exist. The schema-5 paired matrix analyzer binds exact seed manifests, reports, source, checkpoints, condition/policy replay selection, and can calculate paired outcome and runtime/fallback diagnostic intervals. Schema-4 report reading remains supported. | No current matrix report or interval exists for the requested architecture, control, prediction, penalty, candidate-recall, and fallback comparisons. D3 is not established. |
 | **4. Shared observation and planner contract** | Shared raster/scalar inputs, candidate masks/order, stale-output fallback, legal action support, Plan A penalty provenance, evaluation-to-replay record binding, and generation-based replay publication are implemented. The async broker has deterministic fake-adapter contract coverage, including replacement, freshness, faults, and close; raised inference exceptions no longer kill its worker. No-route replay validation checks complete contiguous action coverage. The matrix can select replay seeds by condition and policy; latency and fallback diagnostics are tagged as non-qualification metrics. | No fresh five-track learned-policy replay has been generated and inspected. Broker contract tests do not establish GPU-load freshness or simulator fallback. Replay selection and timing instrumentation do not prove P-shaped routes, robot behavior, collection/scoring, fallback behavior, or representative end-to-end safety. Global planning remains XY AD* with swept SE(2) checks, not full global SE(2). |
 | **5. Training strategy** | Phase 0 protocol/configuration, Phase 1 interfaces, stochastic PPO support, Phase 4 train-split exposure scheduling, and the resumable two-device supervisor exist. Phase 2 collectors/loaders/fitters exist. A human-authored Plan A goal annotation materializer packages explicit sidecar labels with source/legal/protocol/authority hashes. The legal-node rollout U contract now defines a bounded, replay-bound matched gross-return estimand, strict repeat evidence digest, explicit censoring/completeness, and fitted-artifact semantics; P stays at P0 absent independent P labels. | No Plan A rollout dataset, human-authored annotations, or warm-start artifact is available; the new U contract has not generated labels or weights. The current campaign does not consume warm starts. Baseline variance calibration, a matched evaluation frontier, Phase 4 factor outcome runs, and candidate-source training remain outstanding. |
-| **6. Metrics and decision gates** | Metrics, qualification protocol versions, confidence intervals, calibration, promotion interfaces, paired compute/fallback diagnostics, and a protocol-scoped single-use final-test ledger exist. New qualification claims are restricted to validated v4 gate status; legacy v1–v3 are diagnostic/read-only. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | The supervisor is stopped and its prior run was diagnostic with no evaluation-protocol binding. D0 calibration exists only for `pickup_simple`; the checked-in protocol remains provisional v1. There is no v4 protocol artifact, reviewed operational margin set, learned-policy held-out report, match-outcome confidence interval, or primary success-gate result. No model is qualified. |
+| **6. Metrics and decision gates** | Metrics, qualification protocol versions, confidence intervals, calibration, promotion interfaces, paired compute/fallback diagnostics, and a protocol-scoped single-use final-test ledger exist. New qualification claims are restricted to validated v4 gate status; legacy v1–v3 are diagnostic/read-only. Plan A PPO penalty semantics use one versioned contract shared by training protocol hashing, reports, and dashboard validation. | The active r4 supervisor remains diagnostic with no evaluation-protocol binding and only `pickup_simple` exposure. D0 calibration exists only for `pickup_simple`; the checked-in protocol remains provisional v1. There is no v4 protocol artifact, reviewed operational margin set, learned-policy held-out report, match-outcome confidence interval, or primary success-gate result. No model is qualified. |
 | **7. A/B experiments** | Matrix runs record paired policy rows and bind inputs to schema-5 reports; the analyzer enforces exact seed/category/stratum and policy completeness and calculates paired bootstrap intervals. Schema-4 reports remain readable. Phase 4 factor completeness is checked. | The analyzer has no experiment results to summarize. The listed A/B experiments, K=8/16/32 candidate recall, P=0 ablation, matched prediction and inference-disable comparisons have not been completed as a current results bundle. |
 | **8. Implementation boundaries and order** | Candidate generation, model adapters, controls, evaluation, replay capture, provenance, deployment interfaces, and the three-pass dashboard are present in the current checkout. | A frozen baseline/fixture evidence package, complete matched five-track bundle, representative replay, qualification, and promotion evidence remain absent. |
 | **9. Unresolved design decisions** | The code exposes candidate K, prediction mode, graph support, penalty mode, profiling, and replay/provenance fields needed to measure several open questions. | Legal graph/bin adequacy, candidate recall, route evaluation cost, prediction calibration/occlusion, held-out generalization, Hailo support, latency, and simulator shortcut resistance remain measurement questions. No result should be inferred from current code or synthetic tests. |
