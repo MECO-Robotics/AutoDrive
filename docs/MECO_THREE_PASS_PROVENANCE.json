@@ -3201,10 +3201,11 @@
       "title": "Phase 0 baseline-freeze and held-out partition contracts",
       "planner": {
         "status": "summary-only",
-        "commit": "f39ab80986e0bbb1db1adc880fa99bc7d7df169c",
+        "commit": "a5aebfb034e0329ed66f097ea38d8cf4e93723ee",
+        "mainline_commit": "81dcf7ab668c6cb40d1e2e9c83648f2894d7c361",
         "artifact": {
           "path": "docs/plans/phase0-baseline-heldout-calibration-20261025.md",
-          "sha256": "504484dd9c38446b92faac2837dd56fb0f583643f8bc3dc70ecf21d09afb6fa4",
+          "sha256": "95e1b9185509259af952fab7fc956c12974d50aacf43525302275f859f917d49",
           "kind": "scoped-transcript-summary",
           "status": "transcript-summary"
         }
