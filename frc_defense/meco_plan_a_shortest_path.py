@@ -1,0 +1,173 @@
+"""Exact-weight Plan A shortest-path primitives and gated HIP heap prototype.
+
+Runtime support construction continues to use the existing CPU heap until
+the separately exposed HIP prototype passes WX9100 parity and profiling.
+"""
+from __future__ import annotations
+
+import heapq
+import math
+import threading
+import weakref
+
+_EDGE_WEIGHT_CACHE = {}
+_EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
+
+
+def precompute_plan_a_edge_weights(xy, headings, edges, edge_mask):
+    """Precompute directed edge cost/translation using the canonical Python math."""
+    xy_values = xy.detach().cpu().tolist() if hasattr(xy, "detach") else xy
+    heading_values = headings.detach().cpu().tolist() if hasattr(headings, "detach") else headings
+    edge_values = edges.detach().cpu().tolist() if hasattr(edges, "detach") else edges
+    mask_values = edge_mask.detach().cpu().tolist() if hasattr(edge_mask, "detach") else edge_mask
+    n = len(xy_values)
+    slots = len(edge_values[0]) if n else 0
+    costs = [[math.inf] * slots for _ in range(n)]
+    lengths = [[0.] * slots for _ in range(n)]
+    allowed_values = [[False] * slots for _ in range(n)]
+    destinations = [[0] * slots for _ in range(n)]
+    for src in range(n):
+        for slot, (dst, allowed) in enumerate(zip(edge_values[src], mask_values[src])):
+            destinations[src][slot] = int(dst)
+            if not allowed:
+                continue
+            dx = xy_values[src][0] - xy_values[dst][0]
+            dy = xy_values[src][1] - xy_values[dst][1]
+            translation = math.hypot(dx, dy)
+            delta_heading = heading_values[dst] - heading_values[src]
+            turn = abs(math.atan2(math.sin(delta_heading), math.cos(delta_heading)))
+            costs[src][slot] = translation + .25 * turn
+            lengths[src][slot] = translation
+            allowed_values[src][slot] = True
+    return destinations, costs, lengths, allowed_values
+
+
+def cached_plan_a_edge_weights(graph):
+    """Reuse precomputed weights for the lifetime of one static pose graph."""
+    graph_id = id(graph)
+    with _EDGE_WEIGHT_CACHE_LOCK:
+        cached = _EDGE_WEIGHT_CACHE.get(graph_id)
+        if cached is not None and cached[0]() is graph:
+            return cached[1]["host"]
+        edge_values = graph.edges[0].detach().cpu().tolist()
+        mask_values = graph.edge_mask[0].detach().cpu().tolist()
+        weights = precompute_plan_a_edge_weights(graph.xy, graph.heading,
+            edge_values, mask_values)
+        try:
+            reference = weakref.ref(graph,
+                lambda reference, key=graph_id: _discard_graph_weights(key, reference))
+        except TypeError as exc:
+            raise TypeError("static legal pose graph must support weak references") from exc
+        _EDGE_WEIGHT_CACHE[graph_id] = (reference,
+            {"host": weights, "device_tensors": {}})
+        return weights
+
+
+def _discard_graph_weights(graph_id, reference):
+    with _EDGE_WEIGHT_CACHE_LOCK:
+        current = _EDGE_WEIGHT_CACHE.get(graph_id)
+        if current is not None and current[0] is reference:
+            _EDGE_WEIGHT_CACHE.pop(graph_id, None)
+
+
+def plan_a_dijkstra_cpu(edge_dst, edge_costs, edge_lengths, edge_allowed, *, root,
+                        root_start_cost, root_connector_m):
+    """CPU reference matching the original heap order and epsilon contract."""
+    n = len(edge_costs)
+    if (n < 1 or len(edge_dst) != n or len(edge_lengths) != n or len(edge_allowed) != n or
+            type(root) is not int or not 0 <= root < n):
+        raise ValueError("invalid Plan A graph or root")
+    distances = [math.inf] * n
+    physical = [math.inf] * n
+    parents = [-1] * n
+    parent_edge_m = [0.] * n
+    distances[root] = float(root_start_cost)
+    physical[root] = float(root_connector_m)
+    pending = [(distances[root], root)]
+    settled_order = []
+    while pending:
+        distance, src = heapq.heappop(pending)
+        if distance != distances[src]:
+            continue
+        settled_order.append(src)
+        for dst, cost, length, allowed in zip(edge_dst[src], edge_costs[src],
+                                               edge_lengths[src], edge_allowed[src]):
+            if not allowed:
+                continue
+            proposal = distance + cost
+            if proposal < distances[dst] - 1e-9:
+                distances[dst] = proposal
+                physical[dst] = physical[src] + length
+                parents[dst] = src
+                parent_edge_m[dst] = length
+                heapq.heappush(pending, (proposal, dst))
+    traversal = sorted((i for i, value in enumerate(distances) if math.isfinite(value)),
+                       key=lambda i: (distances[i], i))
+    return {"route_cost": distances, "physical_distance": physical,
+        "parent_ids": parents, "parent_edge_m": parent_edge_m,
+        "traversal_order": traversal}
+
+
+def plan_a_fallback_pair(valid_matrix, physical_distance):
+    """Choose closest node by physical path distance, then first valid slot."""
+    if len(valid_matrix) != len(physical_distance):
+        raise ValueError("fallback support and distances differ in size")
+    candidates = [node for node, row in enumerate(valid_matrix) if any(row)]
+    if not candidates:
+        raise ValueError("Plan A safe fallback is absent from the support mask")
+    node = min(candidates, key=lambda index: (physical_distance[index], index))
+    return node * len(valid_matrix[node]) + next(
+        slot for slot, valid in enumerate(valid_matrix[node]) if valid)
+
+
+def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, root,
+                        root_start_cost, root_connector_m):
+    """Explicitly gated prototype entry point; never called by training dispatch."""
+    import torch
+    from .meco_plan_a_shortest_path_hip import extension
+
+    if not (torch.is_tensor(edge_costs) and edge_costs.is_cuda and
+            edge_costs.dtype == torch.float64 and edge_costs.ndim == 2 and
+            edge_lengths.shape == edge_costs.shape and edge_lengths.dtype == torch.float64 and
+            edge_allowed.shape == edge_costs.shape and edge_allowed.dtype == torch.bool and
+            edge_costs.device == edge_lengths.device == edge_allowed.device == edge_dst.device and
+            edge_dst.dtype == torch.int64 and edge_dst.shape == edge_costs.shape):
+        raise ValueError("HIP heap requires same-device float64 costs/lengths and bool mask")
+    route, physical, parent, parent_length, _settled = extension().dijkstra(
+        edge_dst.contiguous(), edge_costs.contiguous(), edge_lengths.contiguous(),
+        edge_allowed.contiguous(), int(root), float(root_start_cost),
+        float(root_connector_m))
+    reachable = torch.isfinite(route)
+    reachable_nodes = torch.arange(route.numel(), device=route.device,
+                                   dtype=torch.long)[reachable]
+    # reachable_nodes is ascending, so stable route sorting implements the
+    # historical (final distance, node_id) order exactly.
+    order = reachable_nodes[torch.argsort(route[reachable], stable=True)]
+    return {"route_cost": route, "physical_distance": physical,
+        "parent_ids": parent, "parent_edge_m": parent_length,
+        "traversal_order": order}
+
+
+def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
+                                  root_connector_m):
+    """Run the explicit prototype while retaining device edge tables per graph."""
+    import torch
+
+    graph_id = id(graph)
+    weights = cached_plan_a_edge_weights(graph)
+    device = torch.device(device)
+    cache_key = str(device)
+    with _EDGE_WEIGHT_CACHE_LOCK:
+        reference, entry = _EDGE_WEIGHT_CACHE[graph_id]
+        if reference() is not graph:
+            raise RuntimeError("static legal pose graph cache identity changed")
+        tensors = entry["device_tensors"].get(cache_key)
+        if tensors is None:
+            dst, costs, lengths, allowed = weights
+            tensors = (torch.tensor(dst, dtype=torch.long, device=device),
+                torch.tensor(costs, dtype=torch.float64, device=device),
+                torch.tensor(lengths, dtype=torch.float64, device=device),
+                torch.tensor(allowed, dtype=torch.bool, device=device))
+            entry["device_tensors"][cache_key] = tensors
+    return plan_a_dijkstra_hip(*tensors, root=root,
+        root_start_cost=root_start_cost, root_connector_m=root_connector_m)

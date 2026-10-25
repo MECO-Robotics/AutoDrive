@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import heapq
 import math
 
 import torch
@@ -133,42 +132,19 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
                         torch.cos(graph.heading - pose[2])).abs()
     start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
     root = int(start_cost.argmin().item())
-    edges = graph.edges[0].detach().cpu().tolist()
-    edge_masks = graph.edge_mask[0].detach().cpu().tolist()
-    xy = graph.xy.detach().cpu()
-    headings = graph.heading.detach().cpu()
-    xy_values = xy.tolist()
-    heading_values = headings.tolist()
-    distances = [math.inf] * n
-    physical_distances = [math.inf] * n
-    parents = [-1] * n
-    edge_lengths = [0.] * n
     root_connector_m = float((pose[:2] - graph.xy[root]).norm())
-    distances[root] = float(start_cost[root])
-    physical_distances[root] = root_connector_m
-    queue = [(distances[root], root)]
-    while queue:
-        distance, src = heapq.heappop(queue)
-        if distance != distances[src]:
-            continue
-        for dst, allowed in zip(edges[src], edge_masks[src]):
-            if not allowed:
-                continue
-            dx = xy_values[src][0] - xy_values[dst][0]
-            dy = xy_values[src][1] - xy_values[dst][1]
-            translation = math.hypot(dx, dy)
-            delta_heading = heading_values[dst] - heading_values[src]
-            turn = abs(math.atan2(math.sin(delta_heading), math.cos(delta_heading)))
-            cost = translation + .25 * turn
-            proposal = distance + cost
-            if proposal < distances[dst] - 1e-9:
-                distances[dst] = proposal
-                physical_distances[dst] = physical_distances[src] + translation
-                parents[dst] = src
-                edge_lengths[dst] = translation
-                heapq.heappush(queue, (proposal, dst))
-    order = sorted((i for i, d in enumerate(distances) if math.isfinite(d)),
-                   key=lambda i: (distances[i], i))
+    from .meco_plan_a_shortest_path import (cached_plan_a_edge_weights,
+        plan_a_dijkstra_cpu)
+    edge_dst, edge_costs, edge_translations, edge_allowed = \
+        cached_plan_a_edge_weights(graph)
+    paths = plan_a_dijkstra_cpu(edge_dst, edge_costs, edge_translations,
+        edge_allowed, root=root, root_start_cost=float(start_cost[root]),
+        root_connector_m=root_connector_m)
+    distances = paths["route_cost"]
+    physical_distances = paths["physical_distance"]
+    parents = paths["parent_ids"]
+    edge_lengths = paths["parent_edge_m"]
+    order = paths["traversal_order"]
     reachable = torch.tensor([math.isfinite(d) for d in distances],
                              device=device, dtype=torch.bool)
     action_mask = observation[0, 3, -8:].bool()
@@ -312,16 +288,10 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         raise PlanAEmptySupportError(diagnostic)
     # Use the closest graph pose with any deterministic executable behavior,
     # then its first valid descriptor in canonical order.
-    node_has_action = valid.reshape(n, 8).any(-1)
-    fallback_nodes = torch.nonzero(node_has_action, as_tuple=False).flatten()
-    if fallback_nodes.numel() == 0:
-        raise RuntimeError("Plan A safe fallback is absent from the support mask")
-    fallback_node = int(fallback_nodes[torch.argmin(
-        torch.tensor([physical_distances[i] for i in fallback_nodes.tolist()],
-                     device=device, dtype=graph.xy.dtype))].item())
-    fallback_behaviors = torch.nonzero(valid[fallback_node * 8:(fallback_node + 1) * 8],
-                                       as_tuple=False).flatten()
-    fallback_pair = fallback_node * 8 + int(fallback_behaviors[0].item())
+    valid_matrix_values = valid_matrix.detach().cpu().tolist()
+    from .meco_plan_a_shortest_path import plan_a_fallback_pair
+    fallback_distances = torch.tensor(physical_distances, dtype=graph.xy.dtype).tolist()
+    fallback_pair = plan_a_fallback_pair(valid_matrix_values, fallback_distances)
     parent_tensor = torch.tensor([p if p >= 0 else root for p in parents],
                                  device=device, dtype=torch.long)
     jumps = [parent_tensor]
