@@ -1,5 +1,23 @@
 # MECO learning tracks plan: execution status
 
+> **Live campaign snapshot — 2026-10-25 00:16 UTC.** User service
+> `meco-five-continuous-20261024.service` is active (supervisor PID `2660362`,
+> started 2026-10-24 23:25:55 UTC). It runs from the main checkout at
+> `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDrive`, source commit
+> `f7ee92d90`; the generated HIP file is dirty at runtime, and source identity
+> hashes exclude that generated output. Campaign data is under
+> `/mnt/zfs-storage/All Drives/Brian Data/Projects/AutoDriveCampaigns/meco-five-continuous-20261024-r3`.
+>
+> Cycle 1 targets 100 optimizer updates per track. At this snapshot A1 is
+> 73/100 on `cuda:0` and A2 is 68/100 on `cuda:1`, with both worker processes
+> live. A3, C1, and C2 are queued at 0. The five tracks are planned across two
+> WX9100 devices, so they are not all running concurrently. No tracks, chunks,
+> or cycles are complete yet. Evaluation is idle with no bound protocol; it is
+> queued automatically only after all five checkpoints reach the matched
+> frontier. This is diagnostic training progress, not qualification or
+> held-out evaluation evidence. First-cycle output is pending, and evaluation
+> idleness is expected while the cycle remains incomplete.
+
 > **Runtime identity correction — 2026-10-24 23:25 UTC.** The first relaunch
 > passed manifest validation and created its isolated campaign root, but both
 > workers exited before checkpoint writes: ROCm hipify reformatted the tracked
