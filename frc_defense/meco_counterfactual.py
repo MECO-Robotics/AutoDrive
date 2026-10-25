@@ -703,7 +703,7 @@ def _plan_a_p_route_record(env, *, intervention_map, intervention_seed,
 
 def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
                      prediction_mode, max_c_candidates, max_a_pairs,
-                     materialize=False):
+                     materialize=False, require_hip_plan_a=False):
     from .meco_track_training import (_candidate_replay_digest, _route_cost_tensor)
     candidates = build_route_feasible_candidates(env, env._last_obs, graph,
         episode_id=episode_id, action_ticks=action_ticks,
@@ -714,7 +714,8 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     risk = candidates.risk_cost_points.unsqueeze(0)
     candidate_hash = _candidate_replay_digest(candidates.table, route, risk)
     support = build_plan_a_support(env, graph, env._last_obs,
-                                   observation.snapshot_id)
+        observation.snapshot_id,
+        require_hip_shortest_path=require_hip_plan_a)
     support_hash = plan_a_support_digest(support, graph)
     if support_hash != support.support_digest:
         raise RuntimeError("Plan A support digest failed self-validation")
@@ -734,9 +735,22 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
                 "goal_xy_m": record["goal_xy_m"],
                 "route_record": record})})
 
-    valid_a = torch.nonzero(support.valid_mask, as_tuple=False).reshape(-1).tolist()
-    valid_a = _deterministic_sample(valid_a, max_a_pairs,
-        f"A:{episode_id}:{int(env.steps[0].item())}")
+    a_sample_key = f"A:{episode_id}:{int(env.steps[0].item())}"
+    if require_hip_plan_a:
+        # Keep the historical SHA-256 ordering exactly, but apply the full
+        # support mask on device and copy back only the selected descriptor IDs.
+        # The CPU creates an index permutation only; it never reads graph
+        # reachability, costs, or valid support rows.
+        pair_indices = sorted(range(support.valid_mask.numel()), key=lambda index:
+            hashlib.sha256(f"{a_sample_key}:{index}".encode()).digest())
+        ranked = torch.tensor(pair_indices, device=support.valid_mask.device,
+                              dtype=torch.long)
+        valid_a = ranked[support.valid_mask.index_select(0, ranked)][:max_a_pairs]
+        valid_a = valid_a.detach().cpu().tolist()
+    else:
+        valid_a = torch.nonzero(support.valid_mask,
+            as_tuple=False).reshape(-1).tolist()
+        valid_a = _deterministic_sample(valid_a, max_a_pairs, a_sample_key)
     skip_reasons = []
     if len(valid_c) < 2:
         skip_reasons.append("fewer_than_two_plan_c_descriptors")
@@ -778,7 +792,7 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     return result
 
 
-def replay_counterfactual_branch(record, manifest):
+def replay_counterfactual_branch(record, manifest, *, require_hip_plan_a=False):
     """Replay under the record seed while restoring the caller's RNG streams."""
     device = manifest.get("device", {}).get("device") if isinstance(
         manifest.get("device"), dict) else None
@@ -792,10 +806,11 @@ def replay_counterfactual_branch(record, manifest):
         _verify_native_fuel_extension(identity)
     seed = record.get("seed") if isinstance(record, dict) else None
     with _counterfactual_rng_scope(seed):
-        return _replay_counterfactual_branch_seeded(record, manifest)
+        return _replay_counterfactual_branch_seeded(record, manifest,
+            require_hip_plan_a=require_hip_plan_a)
 
 
-def _replay_episode_eligibility(record, manifest):
+def _replay_episode_eligibility(record, manifest, *, require_hip_plan_a=False):
     """Replay the complete teacher episode to verify post-branch eligibility metadata."""
     from .meco_track_training import _reset_episode
     scenario_id, category, seed = record["scenario_id"], record["category"], record["seed"]
@@ -825,6 +840,8 @@ def _replay_episode_eligibility(record, manifest):
         "source_identity_sha256": manifest.get("source_identity_sha256"),
         "native_extension_identity": manifest.get("native_extension_identity"),
         "artifact_identity_sha256": manifest.get("artifact_identity_sha256")})
+    cache_key = _hash({"cache_key": cache_key,
+        "require_hip_plan_a": bool(require_hip_plan_a)})
     cached = _VALIDATED_EPISODE_ELIGIBILITY_CACHE.get(cache_key)
     if cached is not None:
         return list(cached)
@@ -847,7 +864,8 @@ def _replay_episode_eligibility(record, manifest):
                 candidate_k=manifest["candidate_k"],
                 prediction_mode=manifest["prediction_mode"],
                 max_c_candidates=manifest["max_plan_c_descriptors_per_prefix"],
-                max_a_pairs=manifest["max_plan_a_pairs_per_prefix"])
+                max_a_pairs=manifest["max_plan_a_pairs_per_prefix"],
+                require_hip_plan_a=require_hip_plan_a)
             for key in ("snapshot_id", "simulator_state_sha256", "observation_sha256",
                     "safe_observation_sha256", "candidate_digest", "candidate_replay_digest",
                     "support_digest", "macro_ticks", "teacher_action", "branch_eligibility"):
@@ -876,7 +894,8 @@ def _replay_episode_eligibility(record, manifest):
             close()
 
 
-def _replay_counterfactual_branch_seeded(record, manifest):
+def _replay_counterfactual_branch_seeded(record, manifest, *,
+                                        require_hip_plan_a=False):
     """Replay a v2 prefix with strict digest/trace parity and return branch inputs."""
     from .meco_track_training import _reset_episode
 
@@ -915,7 +934,8 @@ def _replay_counterfactual_branch_seeded(record, manifest):
             current = _prefix_snapshot(env, graph, episode_id,
                 action_ticks=ticks, candidate_k=candidate_k,
                 prediction_mode=prediction_mode, max_c_candidates=max_c,
-                max_a_pairs=max_a)
+                max_a_pairs=max_a,
+                require_hip_plan_a=require_hip_plan_a)
             if expected.get("branch_eligibility") != current["branch_eligibility"]:
                 raise RuntimeError(f"strict v2 eligibility parity mismatch at transcript[{index}]")
             mapping = {"snapshot_id": "snapshot_id",
@@ -951,7 +971,8 @@ def _replay_counterfactual_branch_seeded(record, manifest):
             raise ValueError("counterfactual branch has invalid macro ticks")
         current = _prefix_snapshot(env, graph, episode_id, action_ticks=ticks,
             candidate_k=candidate_k, prediction_mode=prediction_mode,
-            max_c_candidates=max_c, max_a_pairs=max_a, materialize=True)
+            max_c_candidates=max_c, max_a_pairs=max_a, materialize=True,
+            require_hip_plan_a=require_hip_plan_a)
         if record.get("branch_eligibility") != current["branch_eligibility"] or not current["branch_eligibility"]["eligible"]:
             raise RuntimeError("strict v2 branch eligibility mismatch or ineligible branch point")
         summary = record.get("seed_branch_summary")
@@ -960,7 +981,8 @@ def _replay_counterfactual_branch_seeded(record, manifest):
         if manifest.get("seed_branch_summaries", {}).get(str(seed)) != summary:
             raise RuntimeError("row and manifest seed eligibility summaries differ")
         if decision_index == summary.get("coverage_through_decision_index"):
-            statuses = _replay_episode_eligibility(record, manifest)
+            statuses = _replay_episode_eligibility(record, manifest,
+                require_hip_plan_a=require_hip_plan_a)
             eligible = [i for i, item in enumerate(statuses) if item["eligible"]]
             reasons = {}
             for item in statuses:
@@ -1985,7 +2007,8 @@ def _execute_plan_a_p_route_branch(record, manifest, descriptor, intervention_se
     """Strictly replay one branch with a deterministic P intervention map."""
     if not math.isfinite(float(p_cost_scale)) or p_cost_scale <= 0.:
         raise ValueError("P route intervention scale must be positive and finite")
-    replay = replay_counterfactual_branch(record, manifest)
+    replay = replay_counterfactual_branch(record, manifest,
+        require_hip_plan_a=True)
     env = replay["env"]
     try:
         expected = next((item for item in replay["snapshot"]["plan_a_descriptors"]
@@ -2210,7 +2233,8 @@ def collect_plan_a_p_routes_v3(output: Path, *, dataset: Path,
                 route = outcome["native_route"]
                 # The original branch data contains the exact intervention seed
                 # and scale; regenerate the map only after replaying that branch.
-                replay = replay_counterfactual_branch(row, manifest)
+                replay = replay_counterfactual_branch(row, manifest,
+                    require_hip_plan_a=True)
                 try:
                     env = replay["env"]
                     seed = outcome["intervention_seed"]

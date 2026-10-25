@@ -113,7 +113,8 @@ def plan_a_support_digest(support: PlanAActionSupport, graph) -> str:
 
 
 @torch.no_grad()
-def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActionSupport:
+def build_plan_a_support(env, graph, observation, snapshot_id: str, *,
+                         require_hip_shortest_path: bool = False) -> PlanAActionSupport:
     """Build all reachable legal node × currently legal behavior pairs.
 
     One Dijkstra pass over the legal SE(2) graph supplies deterministic route
@@ -133,20 +134,32 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
     start_cost = (graph.xy - pose[:2]).norm(dim=-1) + angle * .25
     root = int(start_cost.argmin().item())
     root_connector_m = float((pose[:2] - graph.xy[root]).norm())
-    from .meco_plan_a_shortest_path import (cached_plan_a_edge_weights,
-        plan_a_dijkstra_cpu)
-    edge_dst, edge_costs, edge_translations, edge_allowed = \
-        cached_plan_a_edge_weights(graph)
-    paths = plan_a_dijkstra_cpu(edge_dst, edge_costs, edge_translations,
-        edge_allowed, root=root, root_start_cost=float(start_cost[root]),
-        root_connector_m=root_connector_m)
+    if require_hip_shortest_path:
+        # This mode is used by the Plan A P-route collector. It must not copy
+        # graph edges to Python or fall back to the CPU reference when the
+        # exact-heap HIP parity/profile gate is closed.
+        from .meco_plan_a_shortest_path import plan_a_dijkstra_hip_for_graph
+        paths = plan_a_dijkstra_hip_for_graph(graph, device=device, root=root,
+            root_start_cost=float(start_cost[root]),
+            root_connector_m=root_connector_m)
+    else:
+        from .meco_plan_a_shortest_path import (cached_plan_a_edge_weights,
+            plan_a_dijkstra_cpu)
+        edge_dst, edge_costs, edge_translations, edge_allowed = \
+            cached_plan_a_edge_weights(graph)
+        paths = plan_a_dijkstra_cpu(edge_dst, edge_costs, edge_translations,
+            edge_allowed, root=root, root_start_cost=float(start_cost[root]),
+            root_connector_m=root_connector_m)
     distances = paths["route_cost"]
     physical_distances = paths["physical_distance"]
     parents = paths["parent_ids"]
     edge_lengths = paths["parent_edge_m"]
     order = paths["traversal_order"]
-    reachable = torch.tensor([math.isfinite(d) for d in distances],
-                             device=device, dtype=torch.bool)
+    if torch.is_tensor(distances):
+        reachable = torch.isfinite(distances)
+    else:
+        reachable = torch.tensor([math.isfinite(d) for d in distances],
+                                 device=device, dtype=torch.bool)
     action_mask = observation[0, 3, -8:].bool()
     # Pair constraints reflect the native executor's actual goal semantics.
     # Intake rows bind a sensed target slot and require a bearing-aligned
@@ -288,12 +301,26 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         raise PlanAEmptySupportError(diagnostic)
     # Use the closest graph pose with any deterministic executable behavior,
     # then its first valid descriptor in canonical order.
-    valid_matrix_values = valid_matrix.detach().cpu().tolist()
-    from .meco_plan_a_shortest_path import plan_a_fallback_pair
-    fallback_distances = torch.tensor(physical_distances, dtype=graph.xy.dtype).tolist()
-    fallback_pair = plan_a_fallback_pair(valid_matrix_values, fallback_distances)
-    parent_tensor = torch.tensor([p if p >= 0 else root for p in parents],
-                                 device=device, dtype=torch.long)
+    if torch.is_tensor(physical_distances):
+        # torch.argmin returns the first minimum, preserving the canonical
+        # node-index tie break. The first nonzero slot preserves behavior order.
+        fallback_node = physical_distances.masked_fill(
+            ~valid_matrix.any(dim=-1), torch.inf).argmin()
+        fallback_slot = torch.nonzero(valid_matrix[fallback_node],
+                                      as_tuple=False)[0, 0]
+        fallback_pair = int((fallback_node * valid_matrix.shape[1] +
+                             fallback_slot).item())
+        parent_tensor = torch.where(parents >= 0, parents,
+                                    torch.full_like(parents, root))
+    else:
+        valid_matrix_values = valid_matrix.detach().cpu().tolist()
+        from .meco_plan_a_shortest_path import plan_a_fallback_pair
+        fallback_distances = torch.tensor(physical_distances,
+            dtype=graph.xy.dtype).tolist()
+        fallback_pair = plan_a_fallback_pair(valid_matrix_values,
+                                             fallback_distances)
+        parent_tensor = torch.tensor([p if p >= 0 else root for p in parents],
+                                     device=device, dtype=torch.long)
     jumps = [parent_tensor]
     while (1 << len(jumps)) < n:
         previous = jumps[-1]
@@ -303,11 +330,21 @@ def build_plan_a_support(env, graph, observation, snapshot_id: str) -> PlanAActi
         behavior_ids=behavior_ids, action_ids=action_ids,
         pair_node_ids=pair_node_ids, descriptor_ids=descriptor_ids,
         valid_mask=valid,
-        distances_m=torch.tensor(physical_distances, device=device, dtype=graph.xy.dtype),
-        route_cost=torch.tensor(distances, device=device, dtype=graph.xy.dtype),
-        parent_ids=torch.tensor(parents, device=device, dtype=torch.long),
-        parent_edge_m=torch.tensor(edge_lengths, device=device, dtype=graph.xy.dtype),
-        traversal_order=torch.tensor(order, device=device, dtype=torch.long),
+        distances_m=(physical_distances.to(device=device, dtype=graph.xy.dtype)
+            if torch.is_tensor(physical_distances) else
+            torch.tensor(physical_distances, device=device, dtype=graph.xy.dtype)),
+        route_cost=(distances.to(device=device, dtype=graph.xy.dtype)
+            if torch.is_tensor(distances) else
+            torch.tensor(distances, device=device, dtype=graph.xy.dtype)),
+        parent_ids=(parents.to(device=device, dtype=torch.long)
+            if torch.is_tensor(parents) else
+            torch.tensor(parents, device=device, dtype=torch.long)),
+        parent_edge_m=(edge_lengths.to(device=device, dtype=graph.xy.dtype)
+            if torch.is_tensor(edge_lengths) else
+            torch.tensor(edge_lengths, device=device, dtype=graph.xy.dtype)),
+        traversal_order=(order.to(device=device, dtype=torch.long)
+            if torch.is_tensor(order) else
+            torch.tensor(order, device=device, dtype=torch.long)),
         ancestor_jumps=torch.stack(jumps),
         root_node=root, root_connector_m=root_connector_m,
         fallback_pair=fallback_pair,
