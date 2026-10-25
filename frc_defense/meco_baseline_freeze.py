@@ -27,6 +27,7 @@ import json
 import re
 import subprocess
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -555,13 +556,24 @@ def _validate_factory_module_origins(factory: Any, repo_root: str | Path) -> Non
     module_path = Path(importlib.import_module(factory.__module__).__file__).resolve()
     if filename != expected_factory or module_path != expected_factory:
         raise ValueError("loaded curriculum factory does not originate from the captured source root")
-    for module_name, relative_path in (
-            ("frc_defense.tensor_3v3", "frc_defense/tensor_3v3.py"),
-            ("frc_defense.tensor_sim", "frc_defense/tensor_sim.py"),
-            ("frc_defense.tensor_physics", "frc_defense/tensor_physics.py")):
-        module = importlib.import_module(module_name)
-        if Path(module.__file__).resolve() != (root / relative_path).resolve():
-            raise ValueError(f"loaded simulator module {module_name} differs from captured source root")
+    authoritative = {path for paths in AUTHORITATIVE_FIELD_SOURCES.values() for path in paths}
+    for relative_path in authoritative:
+        path = (root / relative_path).resolve()
+        if not path.is_file():
+            raise ValueError(f"authoritative source is absent from capture root: {relative_path}")
+    package_root = (root / "frc_defense").resolve()
+    for module_name, module in tuple(sys.modules.items()):
+        if module is None or not (module_name == "frc_defense"
+                or module_name.startswith("frc_defense.")):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            continue
+        origin = Path(module_file).resolve()
+        try:
+            origin.relative_to(package_root)
+        except ValueError as exc:
+            raise ValueError(f"loaded behavior module {module_name} comes from another checkout") from exc
 
 
 def _strict_utc_timestamp(value: Any, name: str) -> str:
@@ -1036,15 +1048,10 @@ def validate_tuple_partition_materialization(contract: Mapping[str, Any], *,
     return dict(contract)
 
 
-def consume_final_test_authorization(partition_contract: Mapping[str, Any], *,
+def _build_final_test_authorization_transition(partition_contract: Mapping[str, Any], *,
         prior_ledger_state: Mapping[str, Any], authorization: Mapping[str, Any],
         consumer_id: str, consumed_at_utc: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Consume one signed-off authorization slot without reading final-test outcomes.
-
-    Persist the returned ledger state atomically before any later final-test access.
-    A caller must serialize transitions for a partition; a stale/forked state is not
-    a valid second transition.
-    """
+    """Validate authorization claims and build a receipt without reading outcomes."""
     if not isinstance(partition_contract, Mapping) or not isinstance(prior_ledger_state, Mapping):
         raise ValueError("partition contract and prior ledger state must be objects")
     if not isinstance(authorization, Mapping):
@@ -1126,6 +1133,80 @@ def consume_final_test_authorization(partition_contract: Mapping[str, Any], *,
         "outcomes_included": False, "outcomes_read": False,
         "consumption_receipts": [receipt["receipt_sha256"]]}
     return next_state, receipt
+
+
+def consume_final_test_authorization(partition_contract: Mapping[str, Any], *,
+        prior_ledger_state: Mapping[str, Any], authorization: Mapping[str, Any],
+        consumer_id: str, consumed_at_utc: str,
+        ledger_path: str | Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Atomically consume one trusted approval through a persisted compare-and-swap ledger."""
+    if ledger_path is None:
+        raise ValueError("single-use final-test authorization requires a persisted ledger path")
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise ValueError("this platform cannot enforce the final-test ledger lock") from exc
+    path = Path(ledger_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a+b") as lock_stream:
+        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+        try:
+            if path.exists():
+                try:
+                    persisted_state = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError("persisted final-test ledger state is unreadable") from exc
+                if persisted_state != dict(prior_ledger_state):
+                    raise ValueError("final-test ledger compare-and-swap failed; authorization already consumed or stale")
+            else:
+                persisted_state = None
+            next_state, receipt = _build_final_test_authorization_transition(
+                partition_contract, prior_ledger_state=prior_ledger_state,
+                authorization=authorization, consumer_id=consumer_id,
+                consumed_at_utc=consumed_at_utc)
+            initial_ledger = partition_contract.get("final_test_access_ledger")
+            if persisted_state is None and dict(prior_ledger_state) != initial_ledger:
+                raise ValueError("first ledger transition must start from the immutable locked partition ledger")
+            receipt_dir = path.with_name(path.name + ".receipts")
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt_path = receipt_dir / f"{authorization['authorization_sha256']}.json"
+            receipt_data = json.dumps(receipt, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
+            try:
+                receipt_fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError as exc:
+                raise ValueError("final-test authorization already has an immutable consume receipt") from exc
+            with os.fdopen(receipt_fd, "wb") as stream:
+                stream.write(receipt_data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            receipt_directory_fd = os.open(receipt_dir, os.O_RDONLY)
+            try:
+                os.fsync(receipt_directory_fd)
+            finally:
+                os.close(receipt_directory_fd)
+            data = json.dumps(next_state, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.",
+                suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            return next_state, receipt
+        finally:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
 
 
 def write_immutable_artifact(directory: str | Path, artifact: Mapping[str, Any], *,
