@@ -125,12 +125,16 @@ def _append_evaluation_history(evaluation_root: Path, *, cycle: int, output: Pat
         path = Path(path)
         snapshot_rows.append({"track": track, "path": str(path.resolve()),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    if [row["track"] for row in snapshot_rows] != sorted(MECO_TRACKS):
+        raise ValueError("evaluation history must pin exactly one checkpoint for all five tracks")
     status_path = Path(str(output) + ".status.json")
     row = {"sequence": len(entries) + 1, "previous_entry_sha256": prior,
         "cycle": cycle, "output_file": output.name,
         "status": completion.get("status"),
         "evaluation_id": completion.get("evaluation_id"),
         "protocol_id": completion.get("protocol_id"),
+        "schedule_case": completion.get("schedule_case"),
+        "evaluation_schedule_sha256": completion.get("evaluation_schedule_sha256"),
         "return_code": completion.get("return_code"),
         "report_sha256": (hashlib.sha256(output.read_bytes()).hexdigest()
             if output.is_file() else None),
@@ -149,6 +153,15 @@ def _checkpoint_info(path: Path):
         return None
     payload = torch.load(path, map_location="cpu", weights_only=False)
     return payload
+
+
+def _scheduled_evaluation_case(schedule, cycle):
+    """Select one frozen case per complete five-track cycle deterministically."""
+    if not isinstance(schedule, list) or not schedule:
+        raise ValueError("frozen evaluation schedule must be a nonempty list")
+    if type(cycle) is not int or cycle < 1:
+        raise ValueError("scheduled evaluation cycle must be a positive integer")
+    return schedule[(cycle - 1) % len(schedule)]
 
 
 def _reap_worker_groups(processes, *, graceful_seconds=1800., term_seconds=10.,
@@ -250,8 +263,9 @@ def _evaluation_command(*, checkpoints, scenario, categories, episodes, seed,
     if evaluation_protocol is not None:
         command.extend(("--evaluation-protocol", str(evaluation_protocol),
                         "--evaluation-case-json", json.dumps(evaluation_case,
-                            sort_keys=True, allow_nan=False),
-                        "--episode-seeds", ",".join(str(value) for value in episode_seeds)))
+                            sort_keys=True, allow_nan=False)))
+    if episode_seeds is not None:
+        command.extend(("--episode-seeds", ",".join(str(value) for value in episode_seeds)))
     if prediction_mode is not None:
         command.extend(("--prediction-mode", prediction_mode))
     for track in MECO_TRACKS:
@@ -303,6 +317,9 @@ class MecoSupervisor:
         self.manifest_validation = None
         self.manifest_digest = None
         self.manifest_configs = None
+        self.evaluation_schedule = None
+        self.evaluation_schedule_sha256 = None
+        self.schedule_evaluation_protocol_path = None
         if campaign_manifest is not None:
             from .meco_training_manifest import validate_campaign_manifest
             self.manifest_validation = validate_campaign_manifest(campaign_manifest)
@@ -317,6 +334,11 @@ class MecoSupervisor:
                 raise ValueError("manifest diagnostic launch requires fresh, absent campaign output roots")
             self.manifest_configs = {track: MecoTrainConfig(**campaign_manifest["tracks"][track]["config"])
                                      for track in MECO_TRACKS}
+            self.evaluation_schedule = campaign_manifest.get("evaluation_schedule")
+            if self.evaluation_schedule is not None:
+                self.evaluation_schedule_sha256 = _hash(self.evaluation_schedule)
+                self.schedule_evaluation_protocol_path = Path(
+                    campaign_manifest["evaluation_protocol"]["path"]).expanduser().resolve()
             expected_devices = tuple(campaign_manifest["devices"]["training_pool"])
             expected_eval_device = campaign_manifest["devices"]["evaluation"]
             if tuple(devices) != expected_devices or evaluation_device != expected_eval_device:
@@ -482,6 +504,7 @@ class MecoSupervisor:
             "evaluation_split": self.evaluation_split,
             "evaluation_protocol_id": self.evaluation_protocol_id,
             "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "evaluation_binding": self.evaluation_binding,
             "evaluation_prediction_mode": evaluation_prediction_mode,
             "qualification_protocol_id": self.qualification_protocol_id,
@@ -564,6 +587,9 @@ class MecoSupervisor:
             "task_scheduler": self._task_scheduler_status(),
             "evaluation_case": self.evaluation_binding,
             "exact_episode_seeds": self.evaluation_episode_seeds,
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
+            "scheduled_case_for_cycle": (_scheduled_evaluation_case(
+                self.evaluation_schedule, cycle) if self.evaluation_schedule and cycle > 0 else None),
             "evaluation_history": {"count": len(history_entries),
                 "head_sha256": (history_entries[-1].get("entry_sha256")
                     if history_entries else None)},
@@ -593,6 +619,7 @@ class MecoSupervisor:
             "task_assignment": self.current_assignment,
             "task_scheduler": self._task_scheduler_status(),
             "evaluation_case": self.evaluation_binding,
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "exact_episode_seeds": self.evaluation_episode_seeds,
             "evaluation": evaluation, "error": error,
             "stop_requested": self.request_stop,
@@ -613,12 +640,14 @@ class MecoSupervisor:
                 for t in MECO_TRACKS},
             "qualification_protocol": manifest["qualification_protocol"],
             "evaluation_protocol": manifest["evaluation_protocol"],
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "device_lease": manifest["devices"]["indexed_device_leases"],
             "launch_profile": "diagnostic_fresh_start",
             "phase2_ready": self.manifest_validation["phase2_ready"],
             "phase2_complete": False, "qualification_eligible": False}
 
     def _evaluation_status(self):
+        job = self.evaluator_job or {}
         status_path = (Path(str(self.evaluator_job["output"]) + ".status.json")
                        if self.evaluator_job else None)
         try:
@@ -638,11 +667,14 @@ class MecoSupervisor:
                 self.last_evaluation.get("progress") if self.last_evaluation else None),
             "pid": self.evaluator.pid if self.evaluator is not None else None,
             "seed": self.evaluator_job.get("seed") if self.evaluator_job else None,
-            "evaluation_protocol_id": self.evaluation_protocol_id,
-            "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
-            "split": self.evaluation_split,
-            "evaluation_case": self.evaluation_binding,
-            "exact_episode_seeds": self.evaluation_episode_seeds,
+            "evaluation_protocol_id": (job["schedule_case"]["protocol_id"]
+                if job.get("schedule_case") else self.evaluation_protocol_id),
+            "evaluation_protocol_sha256": (job["schedule_case"]["protocol_sha256"]
+                if job.get("schedule_case") else self.evaluation_protocol_sha256),
+            "split": (job["schedule_case"]["split"] if job.get("schedule_case")
+                else self.evaluation_split),
+            "evaluation_case": job.get("evaluation_binding"),
+            "exact_episode_seeds": job.get("episode_seeds", self.evaluation_episode_seeds),
             "output_file": (self.evaluator_job["output"].name if self.evaluator_job
                 else self.last_evaluation.get("output_file") if self.last_evaluation else None)}
 
@@ -694,6 +726,7 @@ class MecoSupervisor:
             "evaluation_prediction_mode": self.evaluation_prediction_mode,
             "qualification_protocol_id": self.qualification_protocol_id,
             "qualification_protocol_sha256": self.qualification_protocol_sha256,
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
             "warm_start_artifact_sha256": dict(sorted(self.warm_start_hashes.items())),
             "chunk_reset_policy": CHUNK_RESET_POLICY,
             "task_scheduler": {"version": 1,
@@ -1139,6 +1172,16 @@ class MecoSupervisor:
             raise RuntimeError(f"training workers failed: {failed}")
 
     def _queue_evaluation(self, cycle):
+        if self.evaluation_schedule is not None:
+            if _hash(self.evaluation_schedule) != self.evaluation_schedule_sha256:
+                raise RuntimeError("frozen evaluation schedule drifted after campaign validation")
+            schedule_case = _scheduled_evaluation_case(self.evaluation_schedule, cycle)
+            frozen_protocol = self.manifest["evaluation_protocol"]
+            if (schedule_case.get("protocol_id") != frozen_protocol["protocol_id"] or
+                    schedule_case.get("protocol_sha256") != frozen_protocol["sha256"]):
+                raise RuntimeError("scheduled evaluation case no longer matches bound protocol")
+        else:
+            schedule_case = None
         if source_identity() != self.sources:
             raise RuntimeError("source identity changed before paired evaluation")
         suffix = f"cycle-{cycle:06d}-{uuid.uuid4().hex[:8]}"
@@ -1158,12 +1201,17 @@ class MecoSupervisor:
                 shutil.copyfile(source, temporary)
             os.replace(temporary, destination)
             checkpoints[track] = destination
+        episode_seeds = (schedule_case["seeds"] if schedule_case is not None
+                         else self.evaluation_episode_seeds)
         job = {"cycle": cycle, "output": output, "checkpoints": checkpoints,
-               "seed": (self.evaluation_episode_seeds[0]
+               "seed": (episode_seeds[0]
                    if self.evaluation_episode_seeds is not None else
                    self.evaluation_seed + (cycle - 1) * self.evaluation_episodes),
-               "episode_seeds": self.evaluation_episode_seeds,
-               "evaluation_binding": self.evaluation_binding}
+               "episode_seeds": episode_seeds,
+               "evaluation_binding": (schedule_case or self.evaluation_binding),
+               "schedule_case": schedule_case}
+        if schedule_case is not None:
+            job["seed"] = episode_seeds[0]
         # Bound queued snapshot storage: preserve the active evaluation and
         # replace any older pending snapshot with the newest matched cycle.
         for stale in self.pending_evaluations:
@@ -1177,12 +1225,22 @@ class MecoSupervisor:
         if self.evaluation_device in occupied_devices:
             return
         job = self.pending_evaluations.pop(0)
-        command = _evaluation_command(checkpoints=job["checkpoints"], scenario=self.scenario,
-            categories=self.evaluation_categories, episodes=self.evaluation_episodes,
+        command = _evaluation_command(checkpoints=job["checkpoints"],
+            scenario=(job["schedule_case"]["scenario_id"]
+                if job.get("schedule_case") else self.scenario),
+            categories=((job["schedule_case"]["category"],)
+                if job.get("schedule_case") else self.evaluation_categories),
+            episodes=(len(job["episode_seeds"]) if job.get("schedule_case")
+                else self.evaluation_episodes),
             seed=job["seed"], device=self.evaluation_device, output=job["output"],
-            prediction_mode=self.evaluation_prediction_mode, split=self.evaluation_split,
-            evaluation_protocol=self.evaluation_protocol_path,
-            evaluation_case=self.evaluation_case,
+            prediction_mode=self.evaluation_prediction_mode,
+            split=(job["schedule_case"]["split"] if job.get("schedule_case")
+                else self.evaluation_split),
+            evaluation_protocol=(self.schedule_evaluation_protocol_path
+                if (job.get("schedule_case") or {}).get("split") == "validation"
+                else self.evaluation_protocol_path if not job.get("schedule_case") else None),
+            evaluation_case=(job["schedule_case"].get("qualification_case")
+                if job.get("schedule_case") else self.evaluation_case),
             episode_seeds=job["episode_seeds"])
         try:
             self.evaluator_job = job
@@ -1223,11 +1281,16 @@ class MecoSupervisor:
             "protocol_id": evaluator_status.get("protocol_id"),
             "progress": evaluator_status.get("progress"),
             "seed": job.get("seed"),
-            "evaluation_protocol_id": self.evaluation_protocol_id,
-            "evaluation_protocol_sha256": self.evaluation_protocol_sha256,
-            "split": self.evaluation_split,
-            "evaluation_case": self.evaluation_binding,
-            "exact_episode_seeds": self.evaluation_episode_seeds}
+            "evaluation_protocol_id": (job["schedule_case"]["protocol_id"]
+                if job.get("schedule_case") else self.evaluation_protocol_id),
+            "evaluation_protocol_sha256": (job["schedule_case"]["protocol_sha256"]
+                if job.get("schedule_case") else self.evaluation_protocol_sha256),
+            "split": (job["schedule_case"]["split"] if job.get("schedule_case")
+                else self.evaluation_split),
+            "evaluation_case": job.get("evaluation_binding"),
+            "schedule_case": job.get("schedule_case"),
+            "evaluation_schedule_sha256": self.evaluation_schedule_sha256,
+            "exact_episode_seeds": job.get("episode_seeds")}
         self.evaluator = None
         self.evaluator_log = None
         self.evaluator_job = None

@@ -80,6 +80,26 @@ def test_describe_is_no_write_by_default_and_records_false_phase2(campaign):
     assert not (tmp_path / "meco-five-fixture" / "manifest.json").exists()
 
 
+def test_optional_evaluation_schedule_is_frozen_and_validated(campaign):
+    tmp_path, config = campaign
+    protocol_path = Path(config["evaluation_protocol"])
+    protocol = json.loads(protocol_path.read_text())
+    config = copy.deepcopy(config)
+    config["evaluation_schedule"] = [{
+        "scenario_id": "pickup_simple", "category": "single", "seeds": [101],
+        "split": "diagnostic", "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": hashlib.sha256(protocol_path.read_bytes()).hexdigest()}]
+    manifest = manifest_api.describe_campaign(config, source_root=tmp_path)
+    assert manifest["evaluation_schedule"][0]["index"] == 0
+    assert manifest_api.validate_campaign_manifest(
+        manifest, source_root=tmp_path)["valid"]
+    bad = copy.deepcopy(manifest)
+    bad["evaluation_schedule"][0]["seeds"] = [1]
+    bad = _seal(bad)
+    with pytest.raises(ValueError, match="leaks"):
+        manifest_api.validate_campaign_manifest(bad, source_root=tmp_path)
+
+
 def test_rejects_cpu_unindexed_and_duplicate_devices(campaign):
     tmp_path, config = campaign
     bad = copy.deepcopy(config)

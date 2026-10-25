@@ -35,6 +35,8 @@ HOST_GPU_INVENTORY_SHA256 = "5f7518b9c0a25687947a5375eb01a10e67a7a9089f7264eb446
 NATIVE_SOURCE_FIELD = "_native_fuel_extension"
 SOURCE_IDENTITY_POLICY = {"projection": "all source_identity fields except _native_fuel_extension",
     "native_runtime_attestation": "required after HIP preparation and before worker launch"}
+EVALUATION_CASE_FIELDS = frozenset(("layout_id", "defender_family",
+    "start_condition", "sensor_profile"))
 
 
 def _canonical_bytes(value):
@@ -186,6 +188,72 @@ def _path_is_within(path, root):
 def _paths_overlap(first, second):
     first, second = Path(first).resolve(), Path(second).resolve()
     return first == second or _path_is_within(first, second) or _path_is_within(second, first)
+
+
+def _validate_evaluation_schedule(schedule, protocol, protocol_sha256):
+    """Validate an optional immutable diagnostic/validation case round-robin."""
+    if schedule is None:
+        return None
+    if not isinstance(schedule, list) or not schedule:
+        raise ValueError("evaluation_schedule must be a nonempty ordered list")
+    partitions = {split: set(seed for case in protocol.get("cases", [])
+        if case.get("split") == split for seed in case.get("seeds", []))
+        for split in ("train", "validation", "test")}
+    normalized, seen = [], set()
+    for index, row in enumerate(schedule):
+        if not isinstance(row, dict):
+            raise ValueError("evaluation_schedule entries must be objects")
+        required = {"scenario_id", "category", "seeds", "split", "protocol_id",
+            "protocol_sha256"}
+        allowed = required | {"qualification_case", "index"}
+        if not required <= set(row) or set(row) - allowed:
+            raise ValueError("evaluation_schedule entry fields are incomplete or unknown")
+        if "index" in row and row["index"] != index:
+            raise ValueError("evaluation_schedule indices must match frozen order")
+        scenario, category, split = row["scenario_id"], row["category"], row["split"]
+        seeds = row["seeds"]
+        from .training_curriculum import get_scenario
+        definition = get_scenario(scenario) if isinstance(scenario, str) else None
+        if (not isinstance(scenario, str) or not scenario or
+                not isinstance(category, str) or not category or
+                definition is None or category not in definition.required_categories or
+                split not in ("diagnostic", "validation") or
+                not isinstance(seeds, list) or not seeds or
+                any(type(seed) is not int or seed < 0 for seed in seeds) or
+                len(set(seeds)) != len(seeds)):
+            raise ValueError("evaluation_schedule case/split/seeds are malformed")
+        if (row["protocol_id"] != protocol.get("protocol_id") or
+                row["protocol_sha256"] != protocol_sha256):
+            raise ValueError("evaluation_schedule protocol binding differs from frozen protocol")
+        matches = [case for case in protocol.get("cases", [])
+            if case.get("scenario_id") == scenario and case.get("category") == category
+            and case.get("split") == split]
+        qualification_case = row.get("qualification_case")
+        if split == "validation":
+            if (not isinstance(qualification_case, dict) or
+                    set(qualification_case) != EVALUATION_CASE_FIELDS):
+                raise ValueError("validation schedule cases require an exact qualification_case")
+            matches = [case for case in matches if all(
+                case.get(key) == qualification_case[key] for key in EVALUATION_CASE_FIELDS)]
+            if len(matches) != 1 or matches[0].get("seeds") != seeds:
+                raise ValueError("validation schedule case/seeds do not exactly match protocol")
+            if set(seeds) & (partitions["train"] | partitions["test"]):
+                raise ValueError("validation schedule leaks across protocol splits")
+        else:
+            if qualification_case is not None:
+                raise ValueError("diagnostic schedule cannot carry a qualification case")
+            if matches or set(seeds) & set().union(*partitions.values()):
+                raise ValueError("diagnostic schedule leaks into a frozen protocol split")
+        key = (scenario, category, split, tuple(seeds),
+            tuple(sorted(qualification_case.items())) if qualification_case else ())
+        if key in seen:
+            raise ValueError("evaluation_schedule contains duplicate cases")
+        seen.add(key)
+        normalized.append({"index": index, "scenario_id": scenario,
+            "category": category, "seeds": list(seeds), "split": split,
+            "protocol_id": row["protocol_id"], "protocol_sha256": row["protocol_sha256"],
+            "qualification_case": qualification_case})
+    return normalized
 
 
 def _validate_campaign_paths(campaign_id, campaign_root, tracks, evaluation_output, output=None,
@@ -443,6 +511,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("evaluation episode seeds are outside the bound protocol split/case")
     if evaluation.get("protocol_id") not in (None, evaluation_protocol["protocol_id"]):
         raise ValueError("evaluation protocol ID does not match protocol file")
+    evaluation_schedule = _validate_evaluation_schedule(
+        config.get("evaluation_schedule"), evaluation_protocol, evaluation_sha)
     manifest = {"schema": SCHEMA, "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
             "clean": git["clean"], "status_sha256": git["status_sha256"],
@@ -469,6 +539,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
             "indexed_device_leases": leases},
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "warm_starts": warm}
+    if evaluation_schedule is not None:
+        manifest["evaluation_schedule"] = evaluation_schedule
     implementation_ready = bool(git["clean"] and hardware_verified and len(entries) == 5 and
         len(indices) == 2 and
         all(entry["config_sha256"] for entry in entries.values()))
@@ -601,6 +673,11 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
     if ((eval_split == "diagnostic" and set(episode_seeds) & set(sum(eval_partitions.values(), []))) or
             (eval_split != "diagnostic" and not set(episode_seeds) <= eval_case_seeds)):
         raise ValueError("evaluation seed case no longer matches the bound protocol split")
+    if "evaluation_schedule" in manifest:
+        schedule = _validate_evaluation_schedule(manifest["evaluation_schedule"],
+            eval_protocol, eval_sha)
+        if schedule != manifest["evaluation_schedule"]:
+            raise ValueError("evaluation schedule is not in canonical frozen form")
     warm = manifest.get("warm_starts", {})
     if set(warm) != set(MECO_TRACKS):
         raise ValueError("warm-start map must contain all five tracks, including absent entries")
