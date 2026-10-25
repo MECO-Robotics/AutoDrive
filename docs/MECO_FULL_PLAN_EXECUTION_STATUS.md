@@ -1,19 +1,30 @@
 # MECO learning tracks plan: execution status
 
-> **Campaign recovery status — 2026-10-25 00:44 UTC.** The
-> `meco-five-continuous-20261024-r3` service terminated with exit status 1 at
-> 00:36:32 UTC. Its supervisor failed the strict worker provenance check:
-> the A1 run record omitted top-level `track`, although its embedded
-> `config.track` was A1. A1 reached 100 optimizer updates and A2 reached 93;
-> A3, C1, and C2 remained at 0. No five-track chunk or cycle completed, and no
-> evaluation ran. These are training updates, not evaluation cases or passes.
-> The failed root and stop marker remain untouched. The manifest launcher only
-> supports fresh roots and binds exact source identity, so this checkpoint set
-> is not being resumed under a different source. The scoped fix was implemented
-> and independently approved at `a4cc6a45ef2b3053bcc70af08ae265801bb74ed4`;
-> new training must use a separately generated source-bound manifest and root.
-> No training is running at this snapshot. The dashboard process remains up,
-> but its campaign status is stale until pointed at a new run.
+> **Live recovery campaign — 2026-10-25 00:51 UTC.** The failed
+> `meco-five-continuous-20261024-r3` root remains archived and untouched. Its
+> supervisor failed at 00:36:32 UTC because the worker run record omitted
+> top-level `track`; A1 had 100 optimizer updates, A2 had 93, and the other
+> tracks had 0. The scoped worker-manifest fix was independently approved at
+> `a4cc6a45ef2b3053bcc70af08ae265801bb74ed4`.
+>
+> A fresh, source-bound campaign `meco-five-continuous-20261025-r4` is now
+> running under user service `meco-five-continuous-20261025.service` (PID
+> `2750253`, started 00:46:34 UTC) from reviewed source commit `9bf7d8d55`.
+> Its manifest validates against that commit and assigns the two verified
+> WX9100 devices. Cycle 1 targets 100 optimizer updates per track: A1 is 1/100
+> on `cuda:0`, A2 is 1/100 on `cuda:1`, and A3/C1/C2 are queued at 0. No
+> training chunk, cycle, or automatic diagnostic evaluation is complete yet.
+> The run has no warm-start artifacts, uses the diagnostic split, and is not
+> qualification evidence.
+>
+> The dashboard service was restarted on the current checkout at 00:47:51 UTC;
+> `/api/meco-status`, `/api/curriculum-status`, and `/assets/meco.js` return
+> HTTP 200, the served JavaScript hash matches the checkout, and the
+> three-pass ledger validates 55 scoped summaries. The status projection still
+> assumes the legacy `checkpoints/meco-five` layout and therefore does not yet
+> display r4's direct `checkpoints/{A1,A2,A3,C1,C2}` layout. A scoped dashboard
+> correction is underway; until reviewed and deployed, its training status is
+> not authoritative. GPU utilization was 94% and 98% at 00:51:11 UTC.
 
 > **Runtime identity correction — 2026-10-24 23:25 UTC.** The first relaunch
 > passed manifest validation and created its isolated campaign root, but both
