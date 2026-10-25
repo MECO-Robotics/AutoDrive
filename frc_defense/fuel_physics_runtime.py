@@ -51,11 +51,14 @@ def reset_fuel_physics(env, mask=None):
         bind_fuel_state(env).reset(mask)
 
 
-def advance_with_fuel(env, commands, active_mask):
+def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     """Advance robot and fuel together; controller cadence stays unchanged."""
+    from .gamepiece_actions import _flush_fuel_score_awards
     physics = env.fuel_physics
     if physics is None:
-        return env.sim.step(commands, active_mask)
+        state = env.sim.step(commands, active_mask, _active_nonempty=active_nonempty)
+        _flush_fuel_score_awards(env)
+        return state
     physics = bind_fuel_state(env)
     active = (torch.ones(env.n, device=env.device, dtype=torch.bool)
               if active_mask is None else active_mask)
@@ -77,7 +80,8 @@ def advance_with_fuel(env, commands, active_mask):
                 env.sim.dt = substep_dt
                 try:
                     with torch.cuda.graph(graph):
-                        env.sim.step(graph_command, graph_active)
+                        env.sim.step(graph_command, graph_active,
+                                     _active_nonempty=active_nonempty)
                         physics.step(graph_active, env.piece_active,
                                      env.piece_owner, dt=substep_dt,
                                      substeps=1, adaptive=False)
@@ -96,17 +100,19 @@ def advance_with_fuel(env, commands, active_mask):
                     graph.replay()
             finally:
                 env.sim.dt = outer_dt
+            _flush_fuel_score_awards(env)
             return env.sim.state
     # The motor and tire model consumes collision-modified velocity on the
     # next substep. Restoring dt also preserves reset/playback timing.
     try:
         env.sim.dt = substep_dt
         for _ in range(substeps):
-            env.sim.step(commands, active)
+            env.sim.step(commands, active, _active_nonempty=active_nonempty)
             physics.step(active, env.piece_active, env.piece_owner,
                          dt=substep_dt, substeps=1,adaptive=False)
     finally:
         env.sim.dt = outer_dt
+    _flush_fuel_score_awards(env)
     return env.sim.state
 
 
