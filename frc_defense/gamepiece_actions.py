@@ -10,6 +10,40 @@ from . import tensor_3v3_pickup_grid_hip as _pickup_grid_hip
 from ._tensor_3v3_observation import NUM_ROBOTS
 
 
+def _capture_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
+    """Capture only accepted score mutations, and only under explicit opt-in."""
+    recorder = getattr(env, "_meco_score_event_recorder", None)
+    if recorder is None:
+        return
+    if chosen.ndim == 3:
+        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+        for world, robot, piece in accepted:
+            slot = int(robot)
+            recorder.record_award(
+                tick=max(0, int(env.steps[world].item()) - 1),
+                match_elapsed_s=float(env.match_elapsed[world].item()),
+                world_slot=world,
+                alliance=int(env.team_ids[slot].item()),
+                robot_slot=slot,
+                piece_slot=piece,
+                piece_generation=int(env._meco_piece_generation[world, piece].item()),
+                source_site=source_site)
+    elif chosen.ndim == 2 and robot_slot is not None:
+        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+        for world, piece in accepted:
+            recorder.record_award(
+                tick=max(0, int(env.steps[world].item()) - 1),
+                match_elapsed_s=float(env.match_elapsed[world].item()),
+                world_slot=world,
+                alliance=int(env.team_ids[robot_slot].item()),
+                robot_slot=robot_slot,
+                piece_slot=piece,
+                piece_generation=int(env._meco_piece_generation[world, piece].item()),
+                source_site=source_site)
+    else:
+        raise ValueError("accepted score mask has an unsupported shape")
+
+
 def _invalidate_perceived_contact_tracks(env, active):
     """Retire tracks using known chassis contact, without hidden enemy poses.
 
@@ -370,6 +404,8 @@ def update_fuel_actions(self, active, score_intent):
         team_scores=torch.zeros_like(self.fuel_score_count)
         team_scores.scatter_add_(1,self.team_ids[None].expand(self.n,-1),count)
         self.fuel_score_count+=team_scores
+        _capture_fuel_score_awards(self, chosen,
+            source_site="gamepiece_actions.update_fuel_actions.vectorized_score_mutation")
         auto_scores=torch.zeros_like(self.auto_fuel_scores)
         auto_scores.scatter_add_(1,self.team_ids[None].expand(self.n,-1),
             count*(self.match_elapsed[:,None]<=20.+self.dt).long())
@@ -415,6 +451,9 @@ def update_fuel_actions(self, active, score_intent):
             self.fuel_scored_event[:,robot]=torch.where(active,count,
                                                          self.fuel_scored_event[:,robot])
             self.fuel_score_count[:,team]+=count
+            _capture_fuel_score_awards(self, chosen,
+                source_site="gamepiece_actions.update_fuel_actions.robot_loop_score_mutation",
+                robot_slot=robot)
             self.auto_fuel_scores[:,team]+=count*(self.match_elapsed<=20.+self.dt).long()
             self.next_score[:,robot]=torch.where(
                 count>0,self.match_elapsed+self.robot_score_interval_values[robot],
@@ -423,6 +462,8 @@ def update_fuel_actions(self, active, score_intent):
 
     if curriculum_metrics is not None:
         curriculum_metrics.scored(newly_scored, self.piece_owner.clone())
+    if hasattr(self, "_meco_piece_generation"):
+        self._meco_piece_generation.add_(newly_scored.long())
     _invalidate_perceived_contact_tracks(self, active)
     if (self.fuel_physics is not None and not capturing and
             not bool(newly_scored.any().item())):

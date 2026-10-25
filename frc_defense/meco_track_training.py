@@ -434,6 +434,72 @@ def _evaluation_record_digest(record: dict) -> str:
                               if key != "dashboard_replay"})
 
 
+def _meco_score_ledger_context(env, *, episode_id, seed, scenario_id,
+                               source_identity_sha256):
+    from .meco_simulated_score_ledger import RULES_ID, RULES_SHA256, sha256
+
+    team_slots = [int(value) for value in env.team_ids.detach().cpu().tolist()]
+    reset_generation = int(env._meco_world_reset_generation[0].item())
+    score_episode_id = f"{episode_id}:world-0-reset-{reset_generation}"
+    schedule = getattr(env, "curriculum_schedule", None)
+    effective_config = {
+        "rules_id": RULES_ID,
+        "rules_sha256": RULES_SHA256,
+        "dt": float(env.dt),
+        "horizon_ticks": int(env.horizon),
+        "alliance_zone_depth_m": float(env.alliance_zone_depth),
+        "robot_team_slots": team_slots,
+        "fuel_count": int(env.fuel_count),
+        "robot_control_modes": list(env.control_modes),
+        "robot_types": list(env.robot_types),
+        "robot_roles": list(env.robot_roles),
+        "robot_fuel_capacities": list(env.robot_fuel_capacity_values),
+        "robot_score_interval_s": list(env.robot_score_interval_values),
+        "robot_dimensions_m": {
+            "length": env.sim.length[0].detach().cpu().tolist(),
+            "width": env.sim.width[0].detach().cpu().tolist(),
+        },
+        "score_intent_source": "effective policy action trace passed to update_fuel_actions",
+        "robot_readiness": {
+            "dumper_stationary_linear_mps": 0.20,
+            "dumper_stationary_angular_radps": 0.20,
+            "dumper_aim_tolerance_rad": math.pi / 9,
+            "bump_clearance_source": "TensorThreeVsThreeEnv._robots_clear_of_bumps",
+        },
+        "field_geometry": {
+            "field_length_m": float(env.sim.field_length),
+            "field_width_m": float(env.sim.field_width),
+            "hub_centers_m": env.hub_centers.detach().cpu().tolist(),
+            "bump_regions": env.sim.bump_regions.detach().cpu().tolist(),
+        },
+        "hub_schedule": (None if schedule is None else [list(item) for item in schedule]),
+        "behavior_probe": getattr(env, "behavior_probe", None),
+        "behavior_probe_hub_active": getattr(env, "behavior_probe_hub_active", None),
+    }
+    return {
+        "episode_id": score_episode_id,
+        "evaluation_episode_id": episode_id,
+        "seed": int(seed),
+        "scenario_id": scenario_id,
+        "robot_team_slots": team_slots,
+        "world_count": int(env.n),
+        "fuel_count": int(env.fuel_count),
+        "source_identity_sha256": source_identity_sha256,
+        "effective_scoring_configuration": effective_config,
+        "effective_scoring_configuration_sha256": sha256(effective_config),
+        "terminal_state": "complete",
+        "terminal_tick": int(env.horizon),
+    }
+
+
+def _assert_score_estimand_unchanged(path, expected_sha256):
+    if path is None:
+        return
+    current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if current != expected_sha256:
+        raise ValueError("score estimand approval changed during outcome collection")
+
+
 def _evaluation_action_was_remasked(selected_action: int,
         executed_action_trace) -> bool:
     """Return whether any recorded tick action differs from the selection."""
@@ -2396,7 +2462,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   replay_output_dir: str | Path | None = None,
                   replay_seeds: tuple[int, ...] | None = None,
                   replay_selection: dict[str, list[int]] | None = None,
-                  condition_id: str | None = None):
+                  condition_id: str | None = None,
+                  simulated_score_estimand: str | Path | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -2426,6 +2493,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         replay_policy_seeds = {policy: set(selected)
                                for policy, selected in replay_selection.items()}
         replay_seed_set = set().union(*replay_policy_seeds.values())
+    if simulated_score_estimand is not None:
+        if (replay_output_dir is None or replay_selection is not None
+                or replay_seed_set != set(scored_seeds)):
+            raise ValueError("simulated score collection requires replay export for every policy and scored seed")
     if split not in ("validation", "test", "train", "calibration", "diagnostic"):
         raise ValueError("split must be train, validation, test, calibration, or diagnostic")
     if schedule_case_binding is not None:
@@ -2700,6 +2771,18 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     sources = source_identity()
     source_hash = hashlib.sha256(json.dumps(
         sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    score_estimand_approval = None
+    score_estimand_approval_sha256 = None
+    score_estimand_rules_sha256 = None
+    if simulated_score_estimand is not None:
+        from .meco_simulated_score_ledger import (RULES_SHA256,
+            load_estimand_approval)
+        score_estimand_approval, score_estimand_approval_sha256 = load_estimand_approval(
+            simulated_score_estimand, source_identity_sha256=source_hash)
+        score_estimand_rules_sha256 = RULES_SHA256
+        score_estimand_path = Path(simulated_score_estimand)
+    else:
+        score_estimand_path = None
     source_tree = source_tree_identity()
     source_tree_hash = hashlib.sha256(json.dumps(source_tree, sort_keys=True,
         allow_nan=False).encode()).hexdigest()
@@ -2992,6 +3075,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         phase4_focal_pose_assignment=phase4_focal_pose_assignment,
                         phase4_teammate_behavior_assignment=phase4_teammate_behavior_assignment,
                         **(qualification_case or {}))
+                    score_event_recorder = None
+                    if score_estimand_approval is not None:
+                        from .meco_simulated_score_ledger import MecoScoreEventRecorder
+                        score_context = _meco_score_ledger_context(env,
+                            episode_id=episode_id, seed=seed, scenario_id=scenario_id,
+                            source_identity_sha256=source_hash)
+                        score_event_recorder = MecoScoreEventRecorder(
+                            score_context, score_estimand_approval,
+                            score_estimand_approval_sha256)
+                        env._meco_score_event_recorder = score_event_recorder
                     direct_pursuit_capture = None
                     if phase4_direct_pursuit_binding is not None:
                         from .meco_phase4_direct_pursuit import DirectPursuitEpisodeCapture
@@ -3926,6 +4019,27 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             "executed_policy_decision_trace": (
                                 executed_policy_decision_trace if policy in MECO_TRACKS else None),
                             "episode_id": episode_id}
+                        score_capture = None
+                        if score_event_recorder is not None:
+                            final_score_tick = int(env.steps[0].item())
+                            score_terminal_state = ("complete" if final_score_tick >= env.horizon
+                                                    else "censored")
+                            terminal_score_counts = [int(value) for value in
+                                env.fuel_score_count[0].detach().cpu().tolist()]
+                            score_capture = score_event_recorder.finish(
+                                terminal_tick=final_score_tick,
+                                terminal_state=score_terminal_state,
+                                terminal_score_counts=terminal_score_counts)
+                            record.update({
+                                "simulated_score_ledger": score_capture["ledger"],
+                                "simulated_match_score": score_capture["ledger"][
+                                    "simulated_match_score"],
+                                "official_match_points": None,
+                                "qualification_eligible": False,
+                                "score_terminal_counters": terminal_score_counts,
+                                "score_estimand_approval_sha256":
+                                    score_estimand_approval_sha256,
+                            })
                         if capture_replay:
                             final_tick = int(env.steps[0].item())
                             if not replay_frames or replay_frames[-1]["tick"] != final_tick:
@@ -4072,6 +4186,34 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         f"{split} seed {seed}"),
                                     "frames": replay_frames}],
                                 "frames": replay_frames}
+                            if score_capture is not None:
+                                _assert_score_estimand_unchanged(
+                                    score_estimand_path,
+                                    score_estimand_approval_sha256)
+                                score_summary = score_capture["ledger"][
+                                    "simulated_match_score"]
+                                replay_record.update({
+                                    "score_event_stream": score_capture["event_stream"],
+                                    "simulated_score_ledger": score_capture["ledger"],
+                                    "simulated_match_score": score_summary,
+                                    "score_terminal_counters": score_capture[
+                                        "terminal_score_counts"],
+                                    "score_estimand_approval_sha256":
+                                        score_estimand_approval_sha256,
+                                })
+                                replay_record["evaluation_record"].update({
+                                    "simulated_score_ledger_sha256": score_capture[
+                                        "ledger"]["ledger_sha256"],
+                                    "simulated_match_score": score_summary,
+                                    "official_match_points": None,
+                                    "qualification_eligible": False,
+                                    "source_identity_sha256": source_hash,
+                                })
+                                from .meco_simulated_score_ledger import (
+                                    validate_replay_score_binding)
+                                validate_replay_score_binding(replay_record, record,
+                                    score_capture["terminal_score_counts"],
+                                    score_estimand_approval)
                             result_path = Path(replay_output_dir) / f"{simulation_id}.result.json"
                             write_replay_bundle(result_path, replay_record)
                             record["dashboard_replay"] = {
@@ -4251,6 +4393,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             },
             "qualification": qualification_case is not None,
             "qualification_case": qualification_case,
+            "simulated_score_ledger": ({
+                "schema": "meco-simulated-score-ledger-v1",
+                "rules_id": "meco_simulated_fuel_score_v1",
+                "rules_sha256": score_estimand_rules_sha256,
+                "estimand_approval_sha256": score_estimand_approval_sha256,
+                "official_match_points": None,
+                "qualification_eligible": False,
+                "collection_requires_full_episode_replay": True,
+            } if score_estimand_approval is not None else None),
             "candidate_boundary": CANDIDATE_BOUNDARY,
             "diagnostic_boundary": "matched validation sample only; promotion requires separate held-out gates",
             "source_identity_sha256": source_hash,
@@ -4259,6 +4410,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "replay_selection": (None if replay_policy_seeds is None else {
                 policy: sorted(seeds) for policy, seeds in replay_policy_seeds.items()}),
             "generated_utc": datetime.now(timezone.utc).isoformat()}
+        _assert_score_estimand_unchanged(score_estimand_path,
+                                         score_estimand_approval_sha256)
         if output:
             _atomic_json(Path(output), report)
             dashboard_summary_sha256 = None
@@ -4360,6 +4513,8 @@ def _parser():
         help="opt-in dashboard replay directory, typically <run>/.scenario-progress")
     ev.add_argument("--replay-seeds", type=int, nargs="+",
         help="exact subset of evaluated seeds to export as dashboard replay bundles")
+    ev.add_argument("--simulated-score-estimand", type=Path,
+        help="human-approved immutable FUEL-only estimand JSON; requires replay export for every evaluated policy and seed")
     ev.add_argument("--output", required=True)
     for track in MECO_TRACKS:
         ev.add_argument(f"--{track.lower()}-checkpoint", required=True)
@@ -4414,6 +4569,7 @@ def main(argv=None):
             if args.diagnostic_frontier_binding_json else None),
         episode_seeds=(tuple(int(item) for item in args.episode_seeds.split(",") if item)
             if args.episode_seeds else None),
+        simulated_score_estimand=args.simulated_score_estimand,
         output=args.output, prediction_mode=args.prediction_mode,
         control_prediction_mode=args.control_prediction_mode,
         candidate_k_override=args.candidate_k_override,
