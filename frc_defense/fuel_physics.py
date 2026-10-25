@@ -215,6 +215,13 @@ class FuelPhysics:
 
     def commit_external(self, mask=None):
         """Accept synchronized state only for the deliberately updated slots."""
+        self._validate_qualifying_backend()
+        if (self._gpu_qualifying and mask is not None and
+                (not isinstance(mask, torch.Tensor) or mask.device != self.device or
+                 mask.shape != (self.n, self.p))):
+            raise ValueError(
+                "GPU-qualifying external commit mask must be a device-resident "
+                "[world,piece] tensor")
         if mask is None:
             self._last_xy.copy_(self.piece_pos)
             self._last_vxy.copy_(self.piece_vel)
@@ -232,6 +239,15 @@ class FuelPhysics:
 
     def separate_spawned(self, selected, free):
         """Nudge crowded spawn contacts apart without adding kinetic energy."""
+        self._validate_qualifying_backend()
+        if self._gpu_qualifying:
+            for name, tensor in (("selected", selected), ("free", free)):
+                if (not isinstance(tensor, torch.Tensor) or
+                        tensor.device != self.device or
+                        tensor.shape != (self.n, self.p)):
+                    raise ValueError(
+                        f"GPU-qualifying {name} spawn mask must be a "
+                        "device-resident [world,piece] tensor")
         selected = torch.as_tensor(selected, device=self.device, dtype=torch.bool)
         free = torch.as_tensor(free, device=self.device, dtype=torch.bool)
         if selected.shape != (self.n, self.p) or free.shape != selected.shape:
