@@ -241,6 +241,13 @@ class MecoDiagnosticMonitor:
                 active["result"] = payload["result"]
                 completed.append(active)
                 active = None
+            elif event["kind"] == "frontier_missed":
+                payload = event["payload"]
+                if (type(payload.get("cycle")) is not int or payload["cycle"] < 1 or
+                        type(payload.get("update")) is not int or payload["update"] < 0 or
+                        not isinstance(payload.get("reason"), str) or
+                        not payload["reason"]):
+                    raise ValueError("diagnostic monitor missed-frontier record is malformed")
             else:
                 raise ValueError("diagnostic monitor journal contains an unknown event")
         return active, queued, completed
@@ -289,6 +296,21 @@ class MecoDiagnosticMonitor:
                 "update": queued["update"]})
         self._append("frontier_queued", frontier)
         return self.pending
+
+    def record_missed_frontier(self, *, cycle, update, reason):
+        """Durably record a frontier that cannot be reconstructed safely."""
+        if (type(cycle) is not int or cycle < 1 or type(update) is not int or
+                update < 0 or not isinstance(reason, str) or not reason):
+            raise ValueError("diagnostic monitor missed-frontier identity is malformed")
+        _, queued, completed = self._frontiers()
+        active, _, _ = self._frontiers()
+        if (queued and queued["cycle"] == cycle) or (active and active["cycle"] == cycle) or any(
+                item["cycle"] == cycle for item in completed) or any(
+                event["kind"] == "frontier_missed" and
+                event["payload"].get("cycle") == cycle for event in self.events):
+            return
+        self._append("frontier_missed", {"cycle": cycle, "update": update,
+            "reason": reason})
 
     @staticmethod
     def _validate_frontier_snapshots(frontier):
@@ -378,11 +400,14 @@ class MecoDiagnosticMonitor:
         skipped = [event["payload"] for event in self.events
             if event["kind"] == "frontier_skipped"]
         frontier_cycles = [event["payload"]["cycle"] for event in self.events
-            if event["kind"] == "frontier_queued"]
+            if event["kind"] in ("frontier_queued", "frontier_missed")]
+        missed = [event["payload"] for event in self.events
+            if event["kind"] == "frontier_missed"]
         return {"enabled": True, "diagnostic_only": True,
             "qualification_eligible": False,
             "journal_sha256": self.events[-1]["event_sha256"] if self.events else _ZERO,
             "journal_events": len(self.events), "completed_count": len(completed),
             "skipped_frontiers": skipped, "frontier_cycles": frontier_cycles,
+            "missed_frontiers": missed,
             "active_frontier": active, "queued_frontier": queued,
             "pending_frontier": active or queued}

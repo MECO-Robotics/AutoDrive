@@ -152,6 +152,30 @@ def test_manifest_freezes_monitor_case_and_rejects_split_overlap(campaign):
         manifest_api.validate_campaign_manifest(bad, source_root=tmp_path)
 
 
+def test_monitor_seeds_must_also_avoid_qualification_protocol(campaign):
+    tmp_path, config = campaign
+    evaluation_protocol_path = Path(config["evaluation_protocol"])
+    evaluation_protocol = json.loads(evaluation_protocol_path.read_text())
+    evaluation_digest = hashlib.sha256(evaluation_protocol_path.read_bytes()).hexdigest()
+    qualification = copy.deepcopy(evaluation_protocol)
+    qualification["cases"] = [
+        {"scenario_id": "pickup_simple", "category": "single", "split": "train", "seeds": [100, 102]},
+        {"scenario_id": "pickup_simple", "category": "single", "split": "validation", "seeds": [103]},
+        {"scenario_id": "pickup_simple", "category": "single", "split": "test", "seeds": [104]}]
+    qualification["protocol_id"] = hashlib.sha256(json.dumps({key: value
+        for key, value in qualification.items() if key != "protocol_id"},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    qualification_path = tmp_path / "qualification-with-different-partitions.json"
+    qualification_path.write_text(json.dumps(qualification))
+    config = copy.deepcopy(config)
+    config["qualification_protocol"] = str(qualification_path)
+    config["scheduler"]["seed_partitions"] = {
+        "train": [100, 102], "validation": [103], "test": [104]}
+    config["diagnostic_monitor"] = _monitor(evaluation_protocol, evaluation_digest)
+    with pytest.raises(ValueError, match="qualification protocol partitions"):
+        manifest_api.describe_campaign(config, source_root=tmp_path)
+
+
 def _seal(value):
     value["canonical_sha256"] = hashlib.sha256(json.dumps(
         {k: v for k, v in value.items() if k != "canonical_sha256"},
@@ -189,6 +213,72 @@ def test_latest_only_coalesces_waiting_frontiers_but_preserves_active(tmp_path):
     journal.verify_attempt(_valid_result(tmp_path, first))
     journal.complete()
     assert journal.pending["frontier_id"] == third["frontier_id"]
+
+
+def test_cycle_three_enqueue_failure_then_cycle_four_resume_records_miss(tmp_path,
+        monkeypatch):
+    from frc_defense import meco_supervisor as supervisor_api
+
+    root = tmp_path / "monitor"
+    monitor = _journal(root)
+    supervisor = object.__new__(supervisor_api.MecoSupervisor)
+    supervisor.diagnostic_monitor = monitor
+    supervisor.diagnostic_monitor_config = {"cadence_cycles": 3}
+    supervisor.evaluation_schedule = None
+    supervisor.pending_evaluations = []
+    supervisor.chunk_updates = 10
+    supervisor.last_monitor_error = None
+    supervisor._enqueue_diagnostic_frontier = lambda _cycle: (_ for _ in ()).throw(
+        RuntimeError("injected cycle-3 snapshot failure"))
+    supervisor._queue_evaluation(3)
+    assert monitor.summary()["missed_frontiers"][0]["cycle"] == 3
+
+    resumed = _journal(root, resume=True)
+    supervisor.diagnostic_monitor = resumed
+    supervisor.completed_cycles = 4
+    supervisor.track_dirs = {track: tmp_path / track for track in MECO_TRACKS}
+    for track_dir in supervisor.track_dirs.values():
+        track_dir.mkdir()
+        (track_dir / "latest.pt").write_bytes(b"cycle-four")
+    supervisor.evaluation_output = tmp_path
+    supervisor.source_hash = "s" * 64
+    supervisor.configuration_hash = "c" * 64
+    supervisor.sources = {"source": "fixture"}
+    monkeypatch.setattr(supervisor_api, "source_identity", lambda: supervisor.sources)
+    monkeypatch.setattr(supervisor_api, "_checkpoint_info", lambda _path: {"update": 40})
+    supervisor._enqueue_diagnostic_frontier = (
+        supervisor_api.MecoSupervisor._enqueue_diagnostic_frontier.__get__(
+            supervisor, supervisor_api.MecoSupervisor))
+    supervisor._reconcile_completed_diagnostic_frontier()
+    assert resumed.summary()["frontier_cycles"] == [3]
+    assert resumed.summary()["missed_frontiers"][0]["cycle"] == 3
+    assert resumed.pending is None
+
+
+def test_recovery_refuses_latest_checkpoint_for_older_cycle(tmp_path, monkeypatch):
+    from frc_defense import meco_supervisor as supervisor_api
+
+    supervisor = object.__new__(supervisor_api.MecoSupervisor)
+    supervisor.diagnostic_monitor = _journal(tmp_path / "monitor")
+    supervisor.diagnostic_monitor_config = {"cadence_cycles": 3}
+    supervisor.completed_cycles = 4
+    supervisor.chunk_updates = 10
+    supervisor.track_dirs = {track: tmp_path / track for track in MECO_TRACKS}
+    for track_dir in supervisor.track_dirs.values():
+        track_dir.mkdir()
+        (track_dir / "latest.pt").write_bytes(b"cycle-four")
+    supervisor.evaluation_output = tmp_path
+    supervisor.source_hash = "s" * 64
+    supervisor.configuration_hash = "c" * 64
+    supervisor.sources = {"source": "fixture"}
+    supervisor.last_monitor_error = None
+    monkeypatch.setattr(supervisor_api, "source_identity", lambda: supervisor.sources)
+    monkeypatch.setattr(supervisor_api, "_checkpoint_info", lambda _path: {"update": 40})
+    supervisor._reconcile_completed_diagnostic_frontier()
+    summary = supervisor.diagnostic_monitor.summary()
+    assert summary["missed_frontiers"][0]["cycle"] == 3
+    assert summary["pending_frontier"] is None
+    assert summary["frontier_cycles"] == [3]
 
 
 def test_monitor_restart_turns_running_attempt_into_retryable_failure(tmp_path):
@@ -417,8 +507,10 @@ def test_monitor_failure_and_stop_file_do_not_fail_or_launch_training(tmp_path, 
     supervisor.diagnostic_monitor_config = {"cadence_cycles": 1}
     supervisor.evaluation_schedule = None
     supervisor.pending_evaluations = []
+    supervisor.chunk_updates = 10
     supervisor._enqueue_diagnostic_frontier = lambda _cycle: (_ for _ in ()).throw(
         RuntimeError("mock journal failure"))
+    supervisor.diagnostic_monitor.record_missed_frontier = lambda **_kwargs: None
     supervisor._queue_evaluation(1)
     assert supervisor.last_monitor_error == "RuntimeError: mock journal failure"
     assert supervisor.pending_evaluations == []
@@ -429,3 +521,58 @@ def test_monitor_failure_and_stop_file_do_not_fail_or_launch_training(tmp_path, 
     monkeypatch.setattr(supervisor_api.subprocess, "Popen",
         lambda *_args, **_kwargs: pytest.fail("stop intent must prevent monitor launch"))
     supervisor._start_next_evaluation()
+
+
+@pytest.mark.parametrize("failure_stage", ["command", "cursor"])
+def test_launch_stage_failure_fails_attempt_and_releases_eval_lane(
+        tmp_path, monkeypatch, failure_stage):
+    from frc_defense import meco_supervisor as supervisor_api
+
+    monitor = _journal(tmp_path / "monitor")
+    monitor.enqueue(_frontier(tmp_path, 1))
+    supervisor = object.__new__(supervisor_api.MecoSupervisor)
+    supervisor.evaluator = None
+    supervisor.request_stop = False
+    supervisor.evaluation_device = "cuda:1"
+    supervisor.evaluation_schedule_journal = None
+    supervisor.diagnostic_monitor = monitor
+    supervisor.diagnostic_monitor_config = {"scenario_id": "pickup_simple",
+        "category": "single", "seeds": [100, 101], "protocol_id": "protocol",
+        "protocol_sha256": "p" * 64}
+    supervisor.pending_evaluations = []
+    supervisor.evaluation_output = tmp_path
+    supervisor.evaluation_prediction_mode = "current_pose"
+    supervisor.scenario = "pickup_simple"
+    supervisor.evaluation_categories = ("single",)
+    supervisor.evaluation_episodes = 1
+    supervisor.evaluation_protocol_path = None
+    supervisor.schedule_evaluation_protocol_path = None
+    supervisor.evaluation_case = None
+    supervisor.evaluation_split = "diagnostic"
+    supervisor.evaluator_job = None
+    supervisor.evaluator_log = None
+    supervisor.last_evaluation = None
+    supervisor.last_monitor_error = None
+    if failure_stage == "command":
+        monkeypatch.setattr(supervisor_api, "_evaluation_command",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("injected argument error")))
+        expected_error = "RuntimeError: injected argument error"
+    else:
+        write_cursor = monitor._write_cursor
+        fail_once = {"pending": True}
+
+        def injected_cursor_failure():
+            if fail_once["pending"]:
+                fail_once["pending"] = False
+                raise OSError("injected cursor persistence error")
+            write_cursor()
+
+        monkeypatch.setattr(monitor, "_write_cursor", injected_cursor_failure)
+        expected_error = "OSError: injected cursor persistence error"
+
+    supervisor._start_next_evaluation()
+
+    assert supervisor.diagnostic_monitor is None
+    assert supervisor.last_monitor_error == expected_error
+    assert monitor.pending["status"] == "failed"
+    assert supervisor._training_device_deferred_for_evaluation("cuda:1") is False

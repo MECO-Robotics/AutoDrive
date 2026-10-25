@@ -257,7 +257,7 @@ def _validate_evaluation_schedule(schedule, protocol, protocol_sha256):
 
 
 def _validate_diagnostic_monitor(monitor, protocol, protocol_sha256, device_pool,
-                                 evaluation_device):
+                                 evaluation_device, qualification_protocol):
     """Freeze an opt-in, diagnostic-only repeated-frontier monitor."""
     if monitor is None:
         return None
@@ -297,8 +297,10 @@ def _validate_diagnostic_monitor(monitor, protocol, protocol_sha256, device_pool
         raise ValueError("diagnostic_monitor backlog_policy must be latest_only")
     protocol_seeds = {seed for case in protocol.get("cases", [])
         for seed in case.get("seeds", [])}
-    if set(seeds) & protocol_seeds:
-        raise ValueError("diagnostic_monitor seeds overlap train/validation/test partitions")
+    qualification_seeds = {seed for case in qualification_protocol.get("cases", [])
+        for seed in case.get("seeds", [])}
+    if set(seeds) & (protocol_seeds | qualification_seeds):
+        raise ValueError("diagnostic_monitor seeds overlap evaluation or qualification protocol partitions")
     return {"enabled": True, "cadence_cycles": cadence,
         "episode_budget": budget, "device": monitor["device"],
         "protocol_id": protocol["protocol_id"],
@@ -580,7 +582,7 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("diagnostic_monitor and finite evaluation_schedule are separate modes")
     diagnostic_monitor = _validate_diagnostic_monitor(
         config.get("diagnostic_monitor"), evaluation_protocol, evaluation_sha,
-        device_pool, eval_device)
+        device_pool, eval_device, protocol)
     manifest = {"schema": SCHEMA, "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
             "clean": git["clean"], "status_sha256": git["status_sha256"],
@@ -758,7 +760,7 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
             raise ValueError("evaluation schedule is not in canonical frozen form")
     if "diagnostic_monitor" in manifest:
         monitor = _validate_diagnostic_monitor(manifest["diagnostic_monitor"],
-            eval_protocol, eval_sha, pool, devices.get("evaluation"))
+            eval_protocol, eval_sha, pool, devices.get("evaluation"), parsed)
         if monitor != manifest["diagnostic_monitor"]:
             raise ValueError("diagnostic monitor is not in canonical frozen form")
     warm = manifest.get("warm_starts", {})

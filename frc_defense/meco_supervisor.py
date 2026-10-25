@@ -1405,6 +1405,14 @@ class MecoSupervisor:
                 self._enqueue_diagnostic_frontier(cycle)
             except Exception as exc:
                 self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    monitor.record_missed_frontier(cycle=cycle,
+                        update=cycle * self.chunk_updates,
+                        reason=self.last_monitor_error)
+                except Exception as journal_exc:
+                    self.last_monitor_error += (
+                        f"; missed-frontier journal failed: {type(journal_exc).__name__}: "
+                        f"{journal_exc}")
         if self.evaluation_schedule is not None:
             if _hash(self.evaluation_schedule) != self.evaluation_schedule_sha256:
                 raise RuntimeError("frozen evaluation schedule drifted after campaign validation")
@@ -1492,15 +1500,25 @@ class MecoSupervisor:
     def _enqueue_diagnostic_frontier(self, cycle):
         if source_identity() != self.sources:
             raise RuntimeError("source identity changed before diagnostic frontier capture")
+        requested_update = cycle * self.chunk_updates
+        latest = {track: self.track_dirs[track] / "latest.pt" for track in MECO_TRACKS}
+        if any(not path.is_file() for path in latest.values()):
+            raise RuntimeError("all five checkpoints are required to reconstruct a diagnostic frontier")
+        observed_updates = {}
+        for track, source in latest.items():
+            payload = _checkpoint_info(source)
+            observed_updates[track] = payload.get("update") if isinstance(payload, dict) else None
+        if any(update != requested_update for update in observed_updates.values()):
+            raise RuntimeError(
+                f"cannot reconstruct diagnostic cycle {cycle}: checkpoint updates are "
+                f"{observed_updates}, expected {requested_update}")
         suffix = f"frontier-cycle-{cycle:08d}-update-{cycle * self.chunk_updates:012d}"
         snapshot_dir = (self.evaluation_output / "diagnostic-monitor" /
             "checkpoint-snapshots" / suffix)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         snapshots = []
         for track in sorted(MECO_TRACKS):
-            source = self.track_dirs[track] / "latest.pt"
-            if not source.is_file():
-                raise RuntimeError(f"{track} checkpoint is missing at diagnostic frontier")
+            source = latest[track]
             destination = snapshot_dir / f"{track}.pt"
             if not destination.exists():
                 temporary = snapshot_dir / f".{track}.pt.tmp"
@@ -1533,6 +1551,14 @@ class MecoSupervisor:
                 self._enqueue_diagnostic_frontier(latest_due)
             except Exception as exc:
                 self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    monitor.record_missed_frontier(cycle=latest_due,
+                        update=latest_due * self.chunk_updates,
+                        reason=self.last_monitor_error)
+                except Exception as journal_exc:
+                    self.last_monitor_error += (
+                        f"; missed-frontier journal failed: {type(journal_exc).__name__}: "
+                        f"{journal_exc}")
 
     def _reconcile_completed_schedule_cycles(self):
         """Recover the one cycle-complete / journal-enqueue crash window."""
@@ -1559,6 +1585,19 @@ class MecoSupervisor:
             if getattr(self, "diagnostic_monitor_config", None) is None:
                 raise
             self.last_monitor_error = f"{type(exc).__name__}: {exc}"
+            monitor = getattr(self, "diagnostic_monitor", None)
+            if monitor is not None:
+                try:
+                    pending = monitor.pending
+                    if pending is not None and pending["status"] == "running":
+                        monitor.fail_attempt(self.last_monitor_error)
+                except Exception as recovery_exc:
+                    self.last_monitor_error += (
+                        f"; attempt recovery failed: {type(recovery_exc).__name__}: "
+                        f"{recovery_exc}")
+                # A launch-stage monitor failure must release scheduler ownership
+                # even if the durable journal/cursor cannot be updated.
+                self.diagnostic_monitor = None
 
     def _start_next_evaluation_impl(self, *, occupied_devices=()):
         if self.evaluator is not None or self.request_stop:
@@ -1680,8 +1719,16 @@ class MecoSupervisor:
                 start_new_session=True)
         except OSError as exc:
             if job.get("diagnostic_monitor"):
-                self.diagnostic_monitor.fail_attempt(
-                    f"evaluator spawn failed: {type(exc).__name__}: {exc}")
+                try:
+                    self.diagnostic_monitor.fail_attempt(
+                        f"evaluator spawn failed: {type(exc).__name__}: {exc}")
+                except Exception as recovery_exc:
+                    self.last_monitor_error = (
+                        f"evaluator spawn failed: {type(exc).__name__}: {exc}; "
+                        f"attempt recovery failed: {type(recovery_exc).__name__}: {recovery_exc}")
+                else:
+                    self.last_monitor_error = f"evaluator spawn failed: {type(exc).__name__}: {exc}"
+                self.diagnostic_monitor = None
             elif self.evaluation_schedule_journal is not None:
                 self.evaluation_schedule_journal.fail_attempt(
                     f"evaluator spawn failed: {type(exc).__name__}: {exc}")
