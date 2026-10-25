@@ -29,7 +29,8 @@ from .curriculum_training import source_identity, source_tree_identity
 from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
-    RouteFeasibleCandidates, build_route_feasible_candidates)
+    RouteFeasibleCandidates, build_route_feasible_candidates,
+    materialize_device_candidate_evidence)
 from .meco_pose_graph import LegalPoseGraph, build_legal_pose_graph
 from .meco_path_penalty import (PENALTY_MAP_PROJECTION, PENALTY_MAP_UNITS,
     PENALTY_PATH_UNITS, plan_a_ppo_contract_metadata,
@@ -1418,7 +1419,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
     candidate_set = build_route_feasible_candidates(env, observation, graph,
         episode_id=episode_id, action_ticks=action_ticks, candidate_k=candidate_k,
         prediction_mode=prediction_mode,
-        commitment=commitment)
+        commitment=commitment, device_resident=track in ("C1", "C2"))
     raster, globals_ = _snapshot_tensors(candidate_set.observation, device=env.device)
     hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
         hidden, tracking_was_available, raster)
@@ -1478,6 +1479,7 @@ def _prepare_decision(track, model, env, graph, episode_id, hidden,
                        "deterministic_fallback" else deterministic))
     selected_action_payload = (None if candidate_set.device_batch is None else
         candidate_set.device_batch.gather_action_payload(action))
+    candidate_set = materialize_device_candidate_evidence(candidate_set)
     value = (_value(value_head, globals_, decision["hidden"])
              if value_head is not None else None)
     return {"snapshot": candidate_set.observation, "candidate_set": candidate_set,
@@ -3659,6 +3661,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 continue
                             obs = env._last_obs
                             prepared = None
+                            device_dispatch_payload = None
                             use_d1_fallback = inference_fault_run and inference_fault_reached
                             if (policy in MECO_TRACKS or policy in ("A1_P0", "A2_P0", "A3_P0")) and not use_d1_fallback:
                                 model_track = policy[:2] if policy.endswith("_P0") else policy
@@ -3694,7 +3697,13 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 candidate_set = prepared["candidate_set"]
                                 last_candidate_recall = (None if "support" in prepared
                                                          else candidate_set.candidate_recall)
-                                choice = int(prepared["action"].item())
+                                selected_payload = prepared.get("selected_action_payload")
+                                if selected_payload is not None:
+                                    device_dispatch_payload = selected_payload.detach().to(
+                                        device="cpu").reshape(-1).tolist()
+                                    choice = int(device_dispatch_payload[0])
+                                else:
+                                    choice = int(prepared["action"].item())
                                 hidden = prepared["hidden_next"]
                                 tracking_was_available = prepared["tracking_available"]
                                 tracking_loss_reset_count += int(prepared["tracking_reset"])
@@ -3707,14 +3716,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     candidate_k=candidate_k,
                                     prediction_mode=(effective_prediction_mode if use_d1_fallback
                                         else effective_control_modes.get(policy, "current")),
-                                    commitment=commitment)
-                                last_candidate_recall = candidate_set.candidate_recall
+                                    commitment=commitment,
+                                    device_resident=policy in ("C1", "C2", "D1", "D2"))
                                 logits = _d1_d2_scores(candidate_set, env,
                                     "D1" if use_d1_fallback else policy,
                                     prediction_mode=(effective_prediction_mode if use_d1_fallback
                                         else effective_control_modes.get(policy, "current")),
                                     route_cost_points_per_second=route_weight)
-                                choice = int(logits.argmax(-1).item())
+                                if candidate_set.device_batch is not None:
+                                    choice_tensor = logits.argmax(-1)
+                                    device_dispatch_payload = candidate_set.device_batch.gather_action_payload(
+                                        choice_tensor).detach().to(device="cpu").reshape(-1).tolist()
+                                    choice = int(device_dispatch_payload[0])
+                                    candidate_set = materialize_device_candidate_evidence(candidate_set)
+                                else:
+                                    choice = int(logits.argmax(-1).item())
+                                last_candidate_recall = candidate_set.candidate_recall
                                 _timing_sync(env)
                                 decision_latency = (time.perf_counter() - fallback_started) * 1000.
                                 component_timing_ms["d1_fallback_pipeline" if use_d1_fallback
@@ -3778,6 +3795,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "p_map_scale": p_cost_scale if override_mode == "learned" else 0.,
                                     "p_points_per_grid_edge": p_points_per_grid_edge,
                                     "route_feasibility": "model_independent_legal_graph_reachability"})
+                            elif device_dispatch_payload is not None:
+                                action = int(device_dispatch_payload[1])
+                                selected_target_track = (None if device_dispatch_payload[2] < 0
+                                    else int(device_dispatch_payload[2]))
+                                selected_target_xy = (None if selected_target_track is None else
+                                    (device_dispatch_payload[3], device_dispatch_payload[4]))
+                                goal_xy = (device_dispatch_payload[5], device_dispatch_payload[6])
+                                goal_heading = device_dispatch_payload[7]
+                                selected_goal_node = candidate_set.route_records[choice].get(
+                                    "legal_node_index")
                             else:
                                 action = candidate_set.action_indices[choice]
                                 cols = {name: i for i, name in enumerate(candidate_set.table.feature_names)}
@@ -3793,9 +3820,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     choice].get("legal_node_index")
                                 selected_target_xy = candidate_set.route_records[
                                     choice].get("source_fuel_xy_m")
-                            goal_heading = (float(support.goal_heading[node].item())
-                                            if prepared is not None and "support" in prepared
-                                            else None)
+                            if prepared is not None and "support" in prepared:
+                                goal_heading = float(support.goal_heading[node].item())
+                            elif device_dispatch_payload is None:
+                                goal_heading = None
                             forced_eval_goal = pending_eval_goal is not None
                             if forced_eval_goal:
                                 action = pending_eval_goal["action"]
