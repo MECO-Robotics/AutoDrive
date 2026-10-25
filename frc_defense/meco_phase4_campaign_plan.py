@@ -824,10 +824,22 @@ def _replay_matches_condition_report(outcomes: dict, outcome_dir: Path,
         return False
     expected_path = condition.get("report_path")
     expected_condition_id = condition.get("condition_id")
+    evaluation_id = report.get("evaluation_id")
+    expected_simulation_id = ("scenario-meco-" + _sha256(_canonical_bytes({
+        "evaluation_id": evaluation_id,
+        "condition_id": expected_condition_id,
+        "record_digest": record_digest,
+        "seed": seed,
+        "policy": policy}))[:24] if isinstance(evaluation_id, str) and
+            evaluation_id else None)
     return (isinstance(record, dict) and indexed_record is record and
         isinstance(expected_path, str) and
+        isinstance(evaluation_id, str) and bool(evaluation_id) and
         replay.get("evaluation_report_path") == expected_path and
         isinstance(nested, dict) and
+        nested.get("evaluation_id") == evaluation_id and
+        replay.get("simulation_id") == expected_simulation_id and
+        replay.get("evaluation_id") == evaluation_id and
         nested.get("evaluation_report_path") == expected_path and
         nested.get("evaluation_record_index") == index and
         nested.get("policy") == policy and
