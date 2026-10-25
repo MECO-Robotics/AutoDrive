@@ -833,12 +833,29 @@ def test_device_route_evaluator_matches_legacy_for_obstacle_and_invalid_rows():
     with _NoHostTensorProjection(), _NoHostScalarSync():
         bump_center_batch = evaluate_device_routes(env, (bump_goal_query,),
             bump_center[None])
+    bump_center_device, = bump_center_batch.project_results()
+    bump_center_legacy_query = RouteQuery("bump-center", "route-parity:bump",
+        0, 3, tuple(bump_center.tolist()))
+    bump_center_legacy, = evaluate_routes(env, (bump_center_legacy_query,))
     bump_path = bump_center_batch.path_xy[0, :bump_center_batch.path_length[0]]
     bump_cells = torch.floor(bump_path / env.planner.resolution).to(torch.long)
     bump_cost = env.planner._bump_cost[bump_cells[:, 0], bump_cells[:, 1]]
     assert (bump_cost > 1.).any(), "route must include a positive bump contribution"
     assert bump_center_batch.weighted_cost_grid_edges[0] > (
         bump_center_batch.distance_m[0] / env.planner.resolution)
+    assert bump_center_device.status == bump_center_legacy.status
+    assert bump_center_device.feasible == bump_center_legacy.feasible
+    assert bump_center_device.path_points_m == bump_center_legacy.path_points_m
+    assert bump_center_device.weighted_cost == pytest.approx(
+        bump_center_legacy.weighted_cost, abs=1e-6)
+    legacy_bump_path = torch.tensor(bump_center_legacy.path_points_m,
+                                    dtype=env.policy_pose.dtype)
+    legacy_bump_cells = torch.floor(
+        legacy_bump_path / env.planner.resolution).to(torch.long)
+    legacy_bump_cost = env.planner._bump_cost[
+        legacy_bump_cells[:, 0], legacy_bump_cells[:, 1]]
+    assert (legacy_bump_cost > 1.).any(), (
+        "legacy parity route must include a positive bump contribution")
 
     # A synthetic observed circle over the robot start exercises the planner's
     # blocked-start/escape contract and explicit endpoint collision checks.
