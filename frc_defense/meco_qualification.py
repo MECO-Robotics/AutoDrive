@@ -4471,6 +4471,471 @@ def _load_json(path):
     return value
 
 
+_STAGE1_PREFLIGHT_ARTIFACTS = (
+    "effective_freeze", "seed_partition", "score_estimand_review",
+    "d0_calibration_bundle", "matched_reference_calibration_bundle",
+    "margin_review",
+)
+_STAGE1_PREFLIGHT_SCHEMA = "meco-stage1-readiness-preflight-v1"
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _stage1_resolved_path(value, *, label, strict=True):
+    path = Path(value).expanduser()
+    try:
+        return path.resolve(strict=strict)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} cannot be resolved") from exc
+
+
+def _stage1_inside(path, roots):
+    return any(path == root or root in path.parents for root in roots)
+
+
+def _stage1_json(path, *, label, canonical=False):
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read()
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not readable JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    if canonical:
+        from .meco_simulated_score_ledger import canonical_bytes
+        if raw != canonical_bytes(value):
+            raise ValueError(f"{label} must use canonical immutable JSON bytes")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def _stage1_digest(value, label):
+    if not isinstance(value, str) or _HEX_SHA256.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _stage1_reject_protected_references(value, *, base, roots):
+    """Inspect path declarations without opening the referenced files."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and (key == "path" or key.endswith("_path")):
+                if isinstance(item, str) and item:
+                    candidate = Path(item).expanduser()
+                    if not candidate.is_absolute():
+                        candidate = base / candidate
+                    resolved = _stage1_resolved_path(candidate, label="referenced evidence path", strict=False)
+                    if _stage1_inside(resolved, roots):
+                        raise ValueError("referenced_evidence_path_protected")
+            _stage1_reject_protected_references(item, base=base, roots=roots)
+    elif isinstance(value, list):
+        for item in value:
+            _stage1_reject_protected_references(item, base=base, roots=roots)
+
+
+def _stage1_check_phase0_artifact(name, value, protocol):
+    if not isinstance(value, dict):
+        raise ValueError(f"Phase 0 {name} artifact is malformed")
+    if name == "effective_freeze":
+        if value.get("schema") != "meco-baseline-freeze-v3":
+            raise ValueError("effective freeze schema is not the current effective-freeze schema")
+        digest = _stage1_digest(value.get("freeze_sha256"), "effective freeze digest")
+        body = {key: item for key, item in value.items() if key != "freeze_sha256"}
+        if _canonical_sha256(body) != digest or value.get("qualification_eligible") is not False:
+            raise ValueError("effective freeze digest or eligibility marker is invalid")
+        if not isinstance(value.get("source"), dict) or not isinstance(value.get("runtime"), dict):
+            raise ValueError("effective freeze lacks source/runtime identity")
+        return {"freeze_sha256": digest}
+    if name == "seed_partition":
+        if value.get("schema") != "meco-heldout-partitions-v2":
+            raise ValueError("seed partition schema is not the current materialized partition schema")
+        digest = _stage1_digest(value.get("partition_sha256"), "seed partition digest")
+        from .meco_baseline_freeze import (TUPLE_FIELDS,
+            validate_tuple_partition_materialization)
+        freeze_digest = _stage1_digest(value.get("baseline_freeze_sha256"),
+            "partition baseline freeze digest")
+        if (value.get("allocation_authorized") is not True
+                or value.get("qualification_eligible") is not False):
+            raise ValueError("partition lacks trusted allocation authorization")
+        registry = value.get("tuple_registry")
+        assignments = value.get("assignment_table")
+        if not isinstance(registry, dict) or not isinstance(assignments, dict):
+            raise ValueError("partition tuple registry or assignment table is missing")
+        raw_registry = {"schema": registry.get("schema"), "tuples": [
+            {key: row[key] for key in (*TUPLE_FIELDS, "eligible")}
+            | ({"exclusion_reason": row["exclusion_reason"]}
+                if row.get("eligible") is False else {})
+            for row in registry.get("tuples", [])]}
+        validate_tuple_partition_materialization(value,
+            freeze_sha256=freeze_digest, registry=raw_registry,
+            assignment_table=assignments)
+        rows = {row.get("tuple_id"): row for row in registry.get("tuples", [])}
+        derived = {}
+        partitions = value.get("partitions", {})
+        for split, phase in (("validation", "validation"), ("final_test", "final_test")):
+            entry = partitions.get(phase, {}) if isinstance(partitions, dict) else {}
+            tuple_ids = entry.get("tuple_ids") if isinstance(entry, dict) else None
+            if not isinstance(tuple_ids, list) or not tuple_ids:
+                raise ValueError(f"partition {phase} tuple IDs are missing")
+            seeds = {row.get("seed") for tuple_id in tuple_ids
+                if isinstance((row := rows.get(tuple_id)), dict)
+                and row.get("scenario_id") == "pickup_simple"
+                and row.get("evaluation_phase") == phase and row.get("eligible") is True}
+            if not seeds or any(type(seed) is not int for seed in seeds):
+                raise ValueError(f"partition has no valid pickup_simple {phase} seeds")
+            derived[f"{split}_seeds"] = sorted(seeds)
+        return {"partition_sha256": digest, **derived,
+            "baseline_freeze_sha256": freeze_digest}
+    if name == "score_estimand_review":
+        from .meco_simulated_score_ledger import validate_estimand_approval
+        validate_estimand_approval(value,
+            source_identity_sha256=protocol.get("calibration_source_identity_sha256"))
+        return {"approval_id": value["approval_id"],
+            "source_identity_sha256": value["simulator_source_sha256"],
+            "rules_sha256": value["rules_sha256"]}
+    if name == "d0_calibration_bundle":
+        reports = value.get("calibration_reports")
+        if value.get("schema_version") != 1 or not isinstance(reports, dict) or not reports:
+            raise ValueError("D0 calibration bundle is incomplete")
+        ids, _, source_hash, _ = _calibration_report_index(reports,
+            _scenario_closure("pickup_simple"))
+        if ids != protocol.get("calibration_ids"):
+            raise ValueError("D0 calibration bundle does not match protocol calibration IDs")
+        if source_hash != protocol.get("calibration_source_identity_sha256"):
+            raise ValueError("D0 calibration source does not match protocol source identity")
+        return {"calibration_ids": ids, "source_identity_sha256": source_hash}
+    if name == "matched_reference_calibration_bundle":
+        reports = value.get("calibration_reports")
+        if value.get("schema_version") != 1 or not isinstance(reports, dict) or not reports:
+            raise ValueError("matched-reference calibration bundle is incomplete")
+        hashes = {}
+        ids = {}
+        for scenario, report in reports.items():
+            if not isinstance(report, dict):
+                raise ValueError(f"matched-reference report is malformed for {scenario}")
+            _validate_matched_reference_variance_report(report)
+            ids[scenario] = report["calibration_id"]
+            hashes[scenario] = _canonical_sha256(report)
+        embedded = protocol.get("matched_reference_variance_calibration", {})
+        if (ids != embedded.get("calibration_ids")
+                or hashes != embedded.get("report_sha256")):
+            raise ValueError("matched-reference bundle does not match protocol calibration binding")
+        return {"calibration_ids": ids, "report_sha256": hashes}
+    if name == "margin_review":
+        ref = protocol.get("matched_reference_variance_calibration", {})
+        _validate_reference_margin_review(value, target="pickup_simple",
+            reference_variant=protocol.get("paired_reference_variant"),
+            reference_ids=ref.get("calibration_ids"),
+            reference_hashes=ref.get("report_sha256"),
+            safety_margins=protocol.get("safety_noninferiority_margins"))
+        return {"review_sha256": _canonical_sha256(value)}
+    raise ValueError("unknown Phase 0 artifact")
+
+
+def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path,
+                     checkpoint_manifest_paths, protected_campaign_roots,
+                     protected_checkpoint_roots, output_path):
+    """Read allowlisted metadata only and emit a fail-closed Stage 1 readiness report."""
+    if len(checkpoint_manifest_paths) != len(POLICIES):
+        raise ValueError("supply exactly five checkpoint manifest paths")
+    protected = []
+    for label, values in (("campaign", protected_campaign_roots),
+                          ("checkpoint", protected_checkpoint_roots)):
+        if not values:
+            raise ValueError(f"at least one protected {label} root is required")
+        for value in values:
+            root = _stage1_resolved_path(value, label=f"protected {label} root")
+            if not root.is_dir():
+                raise ValueError(f"protected {label} root is not a directory")
+            protected.append(root)
+    protected = list(dict.fromkeys(protected))
+
+    input_values = [protocol_path, phase0_index_path, campaign_manifest_path,
+        *checkpoint_manifest_paths]
+    inputs = []
+    for value in input_values:
+        path = _stage1_resolved_path(value, label="input")
+        if _stage1_inside(path, protected) or not path.is_file():
+            raise ValueError("input must be a regular file outside every protected root")
+        inputs.append(path)
+    output_candidate = Path(output_path).expanduser()
+    parent = _stage1_resolved_path(output_candidate.parent, label="output parent")
+    destination = (parent / output_candidate.name).resolve(strict=False)
+    if _stage1_inside(destination, protected):
+        raise ValueError("output resolves inside a protected campaign/checkpoint root")
+    if destination in inputs:
+        raise ValueError("input/output alias is forbidden")
+
+    # Read the campaign declaration first, then expand the denylist before
+    # opening any other supplied or referenced artifact.
+    campaign, _ = _stage1_json(inputs[2], label="campaign manifest")
+    for field in ("campaign_roots", "checkpoint_roots"):
+        roots = campaign.get(field)
+        if not isinstance(roots, list) or not roots:
+            raise ValueError(f"campaign manifest must declare nonempty {field}")
+        for raw_root in roots:
+            if not isinstance(raw_root, str) or not Path(raw_root).is_absolute():
+                raise ValueError(f"declared {field} entries must be absolute paths")
+            root = _stage1_resolved_path(raw_root, label=f"declared {field} root")
+            if not root.is_dir():
+                raise ValueError(f"declared {field} root is not a directory")
+            protected.append(root)
+    protected = list(dict.fromkeys(protected))
+    if any(_stage1_inside(path, protected) for path in inputs):
+        raise ValueError("an input resolves inside a campaign-declared protected root")
+    if _stage1_inside(destination, protected):
+        raise ValueError("output resolves inside a campaign-declared protected root")
+    _stage1_reject_protected_references(campaign, base=inputs[2].parent, roots=protected)
+
+    protocol_load_error = phase0_load_error = None
+    try:
+        protocol, protocol_raw_sha = _stage1_json(inputs[0], label="protocol")
+    except ValueError:
+        protocol, protocol_raw_sha, protocol_load_error = {}, hashlib.sha256(inputs[0].read_bytes()).hexdigest(), True
+    try:
+        phase0, phase0_sha = _stage1_json(inputs[1], label="Phase 0 evidence index")
+    except ValueError:
+        phase0, phase0_sha, phase0_load_error = {}, hashlib.sha256(inputs[1].read_bytes()).hexdigest(), True
+    if not protocol_load_error:
+        _stage1_reject_protected_references(protocol, base=inputs[0].parent, roots=protected)
+    if not phase0_load_error:
+        _stage1_reject_protected_references(phase0, base=inputs[1].parent, roots=protected)
+    checkpoint_paths = inputs[3:]
+    checkpoint_rows = []
+    checkpoint_load_errors = []
+    for path in checkpoint_paths:
+        try:
+            checkpoint_rows.append(_stage1_json(path, label="checkpoint manifest"))
+            checkpoint_load_errors.append(False)
+        except ValueError:
+            checkpoint_rows.append(({}, hashlib.sha256(path.read_bytes()).hexdigest()))
+            checkpoint_load_errors.append(True)
+    checkpoints = [row[0] for row in checkpoint_rows]
+    checks = []
+    blockers = []
+    track_statuses = {policy: {"policy_id": policy, "status": "blocked",
+        "blocker_code": "five_track_binding_not_validated"} for policy in POLICIES}
+
+    def record(check_id, evidence_path, evidence_sha, error=None, related=None):
+        row = {"check_id": check_id, "status": "blocked" if error else "passed",
+            "evidence_path": str(evidence_path), "evidence_sha256": evidence_sha}
+        if related:
+            row["related_evidence"] = related
+        if error:
+            row["blocker_code"] = error
+            blockers.append(error)
+        checks.append(row)
+
+    try:
+        if protocol_load_error:
+            raise ValueError("protocol_json_invalid")
+        if protocol.get("protocol_version") != GPU_BOOTSTRAP_PROTOCOL_VERSION:
+            raise ValueError("protocol_not_v5_gpu_bootstrap")
+        _validate_v2_protocol(protocol, "pickup_simple")
+        if protocol.get("promotion_target_scenario") != "pickup_simple":
+            raise ValueError("protocol_wrong_target_scenario")
+        if protocol.get("gpu_statistics_implementation", {}).get("implementation_id") != GPU_BOOTSTRAP_IMPLEMENTATION_ID:
+            raise ValueError("protocol_wrong_implementation")
+        record("protocol_v5", inputs[0], protocol_raw_sha)
+    except Exception as exc:
+        record("protocol_v5", inputs[0], protocol_raw_sha, str(exc) if str(exc) in {
+            "protocol_not_v5_gpu_bootstrap", "protocol_wrong_target_scenario",
+            "protocol_wrong_implementation"} else "protocol_invalid")
+
+    try:
+        if phase0_load_error:
+            raise ValueError("phase0_index_json_invalid")
+        if set(phase0) != {"schema", "source_identity_sha256", "config_sha256", "artifacts", "index_sha256"} or phase0.get("schema") != "meco-stage1-phase0-evidence-index-v1":
+            raise ValueError("phase0_index_schema_invalid")
+        index_digest = _stage1_digest(phase0.get("index_sha256"), "Phase 0 index digest")
+        if _canonical_sha256({key: value for key, value in phase0.items() if key != "index_sha256"}) != index_digest:
+            raise ValueError("phase0_index_digest_invalid")
+        if (phase0.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256")
+                or _stage1_digest(phase0.get("config_sha256"), "Phase 0 config digest") != campaign.get("config_sha256")):
+            raise ValueError("phase0_source_or_config_binding_invalid")
+        artifacts = phase0.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != set(_STAGE1_PREFLIGHT_ARTIFACTS):
+            raise ValueError("phase0_artifact_set_incomplete")
+        refs = {}
+        for name in _STAGE1_PREFLIGHT_ARTIFACTS:
+            ref = artifacts[name]
+            if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
+                raise ValueError("phase0_artifact_reference_invalid")
+            raw_path = ref["path"]
+            if not isinstance(raw_path, str) or Path(raw_path).is_absolute() or ".." in Path(raw_path).parts:
+                raise ValueError("phase0_artifact_path_invalid")
+            path = _stage1_resolved_path(inputs[1].parent / raw_path, label="Phase 0 evidence path")
+            if _stage1_inside(path, protected) or not path.is_file():
+                raise ValueError("phase0_artifact_path_protected_or_missing")
+            if path in inputs or path == destination:
+                raise ValueError("phase0_input_output_alias")
+            refs[name] = path
+        if len(set(refs.values())) != len(_STAGE1_PREFLIGHT_ARTIFACTS):
+            raise ValueError("phase0_artifact_reference_duplicate")
+        loaded_artifacts = {}
+        phase0_evidence = []
+        for name, path in refs.items():
+            artifact, raw_sha = _stage1_json(path, label=f"Phase 0 {name}",
+                canonical=(name == "score_estimand_review"))
+            _stage1_reject_protected_references(artifact, base=path.parent, roots=protected)
+            if _stage1_digest(artifacts[name]["sha256"], f"{name} file digest") != raw_sha:
+                raise ValueError("phase0_artifact_digest_mismatch")
+            loaded_artifacts[name] = artifact
+            phase0_evidence.append({"artifact": name, "evidence_path": str(path),
+                "evidence_sha256": raw_sha})
+            _stage1_check_phase0_artifact(name, artifact, protocol)
+        partition_binding = _stage1_check_phase0_artifact("seed_partition",
+            loaded_artifacts["seed_partition"], protocol)
+        if partition_binding["baseline_freeze_sha256"] != loaded_artifacts["effective_freeze"].get("freeze_sha256"):
+            raise ValueError("phase0_freeze_partition_binding_invalid")
+        phase0["_verified_stage1_seeds"] = partition_binding
+        review = loaded_artifacts["score_estimand_review"]
+        if review.get("simulator_source_sha256") != phase0["source_identity_sha256"]:
+            raise ValueError("phase0_estimand_source_binding_invalid")
+        if campaign.get("source_identity_sha256") != phase0["source_identity_sha256"]:
+            raise ValueError("phase0_campaign_source_binding_invalid")
+        record("phase0_prerequisites", inputs[1], phase0_sha,
+            related=phase0_evidence)
+    except Exception as exc:
+        record("phase0_prerequisites", inputs[1], phase0_sha,
+            str(exc) if str(exc).startswith("phase0_") else "phase0_evidence_invalid")
+
+    try:
+        if any(checkpoint_load_errors):
+            raise ValueError("checkpoint_manifest_json_invalid")
+        declared = _stage1_validate_campaign_and_checkpoints(campaign, checkpoints, protocol, phase0)
+        track_statuses = {policy: {"policy_id": policy, "status": "passed",
+            "declared_checkpoint_sha256": declared[policy]} for policy in POLICIES}
+        related = [{"policy_id": item.get("policy_id"),
+            "evidence_path": str(path), "evidence_sha256": checkpoint_rows[index][1]}
+            for index, (path, item) in enumerate(zip(checkpoint_paths, checkpoints))]
+        record("five_track_binding", inputs[2], hashlib.sha256(inputs[2].read_bytes()).hexdigest(),
+            related=related)
+    except Exception as exc:
+        known = str(exc)
+        track_error = known if re.fullmatch(r"[a-z0-9_]+", known) else "campaign_or_checkpoint_binding_invalid"
+        counts = {policy: sum(item.get("policy_id") == policy for item in checkpoints)
+            for policy in POLICIES}
+        track_statuses = {policy: {"policy_id": policy, "status": "blocked",
+            "blocker_code": ("track_manifest_missing" if counts[policy] == 0 else
+                "track_manifest_duplicate" if counts[policy] > 1 else track_error)}
+            for policy in POLICIES}
+        related = [{"policy_id": item.get("policy_id"),
+            "evidence_path": str(path), "evidence_sha256": checkpoint_rows[index][1]}
+            for index, (path, item) in enumerate(zip(checkpoint_paths, checkpoints))]
+        record("five_track_binding", inputs[2], hashlib.sha256(inputs[2].read_bytes()).hexdigest(),
+            known if re.fullmatch(r"[a-z0-9_]+", known) else "campaign_or_checkpoint_binding_invalid",
+            related=related)
+
+    report = {"schema": _STAGE1_PREFLIGHT_SCHEMA,
+        "status": "ready" if not blockers else "blocked",
+        "scope": "metadata_consistent_only",
+        "ready": not blockers,
+        "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
+        "checkpoint_bytes_opened": False, "outcomes_read": False,
+        "curriculum_state_changed": False, "qualification_decision": False,
+        "tracks": [track_statuses[policy] for policy in POLICIES],
+        "checks": checks, "blocker_codes": sorted(set(blockers))}
+    report["report_sha256"] = _canonical_sha256(report)
+    if destination.exists():
+        existing, _ = _stage1_json(destination, label="existing output")
+        if existing != report:
+            raise ValueError("refusing to replace a non-identical existing output")
+        return report
+    tmp = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, sort_keys=True, indent=2, allow_nan=False)
+            stream.write("\n")
+        os.replace(tmp, destination)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return report
+
+
+def _stage1_validate_campaign_and_checkpoints(campaign, checkpoints, protocol, phase0):
+    campaign_fields = {"schema", "qualification_eligible", "evaluation_split",
+        "scenario_id", "scenario_version", "protocol_id", "source_identity_sha256",
+        "config_sha256", "promotion_comparator", "safety_floor_policy",
+        "validation_seeds", "final_test_seeds", "matched_campaign_ancestry",
+        "campaign_roots", "checkpoint_roots"}
+    if (set(campaign) != campaign_fields
+            or campaign.get("schema") != "meco-five-track-stage1-campaign-manifest-v1"):
+        raise ValueError("campaign_manifest_schema_invalid")
+    if campaign.get("qualification_eligible") is not True or campaign.get("evaluation_split") != "validation":
+        raise ValueError("diagnostic_campaign_not_qualification_eligible")
+    if (campaign.get("scenario_id") != "pickup_simple"
+            or campaign.get("scenario_version") != SCENARIOS["pickup_simple"].version):
+        raise ValueError("campaign_scenario_binding_invalid")
+    if campaign.get("protocol_id") != protocol.get("protocol_id"):
+        raise ValueError("campaign_protocol_mismatch")
+    source = protocol.get("calibration_source_identity_sha256")
+    if campaign.get("source_identity_sha256") != source:
+        raise ValueError("campaign_source_mismatch")
+    if campaign.get("promotion_comparator") != protocol.get("paired_reference_variant"):
+        raise ValueError("campaign_comparator_mismatch")
+    if campaign.get("safety_floor_policy") != REFERENCE_POLICY:
+        raise ValueError("campaign_safety_floor_invalid")
+    partition = phase0.get("_verified_stage1_seeds")
+    if not isinstance(partition, dict):
+        raise ValueError("phase0_partition_missing")
+    validation = campaign.get("validation_seeds")
+    final_test = campaign.get("final_test_seeds")
+    expected_validation = sorted({seed for row in protocol.get("cases", [])
+        if row.get("scenario_id") == "pickup_simple" and row.get("split") == "validation"
+        for seed in row.get("seeds", [])})
+    expected_test = sorted({seed for row in protocol.get("cases", [])
+        if row.get("scenario_id") == "pickup_simple" and row.get("split") == "test"
+        for seed in row.get("seeds", [])})
+    if (not isinstance(validation, list) or not validation
+            or not isinstance(final_test, list) or not final_test
+            or any(type(seed) is not int for seed in validation + final_test)
+            or len(set(validation)) != len(validation) or len(set(final_test)) != len(final_test)
+            or set(validation) & set(final_test)):
+        raise ValueError("campaign_seed_partition_invalid")
+    if (validation != partition.get("validation_seeds")
+            or final_test != partition.get("final_test_seeds")):
+        raise ValueError("campaign_seed_partition_mismatch")
+    if validation != expected_validation or final_test != expected_test:
+        raise ValueError("campaign_protocol_seed_mismatch")
+    ancestry = campaign.get("matched_campaign_ancestry")
+    config_digest = _stage1_digest(campaign.get("config_sha256"), "campaign config digest")
+    if not isinstance(ancestry, str) or not ancestry.strip():
+        raise ValueError("campaign_ancestry_missing")
+    found = {}
+    declared_digests = set()
+    for item in checkpoints:
+        checkpoint_fields = {"schema", "policy_id", "checkpoint_sha256",
+            "source_identity_sha256", "config_sha256", "protocol_id",
+            "scenario_id", "scenario_version", "validation_seed_partition_sha256",
+            "final_test_seed_partition_sha256", "matched_campaign_ancestry"}
+        if (set(item) != checkpoint_fields
+                or item.get("schema") != "meco-stage1-checkpoint-manifest-v1"):
+            raise ValueError("checkpoint_manifest_schema_invalid")
+        policy = item.get("policy_id")
+        if policy not in POLICIES or policy in found:
+            raise ValueError("checkpoint_policy_missing_duplicate_or_invalid")
+        digest = _stage1_digest(item.get("checkpoint_sha256"), "declared checkpoint digest")
+        if digest in declared_digests:
+            raise ValueError("checkpoint_digest_duplicate")
+        declared_digests.add(digest)
+        if (item.get("source_identity_sha256") != source
+                or item.get("config_sha256") != config_digest
+                or item.get("protocol_id") != protocol.get("protocol_id")
+                or item.get("scenario_id") != "pickup_simple"
+                or item.get("scenario_version") != SCENARIOS["pickup_simple"].version
+                or item.get("validation_seed_partition_sha256") != _canonical_sha256(validation)
+                or item.get("final_test_seed_partition_sha256") != _canonical_sha256(final_test)
+                or item.get("matched_campaign_ancestry") != ancestry):
+            raise ValueError("checkpoint_binding_mismatch")
+        found[policy] = digest
+    if set(found) != set(POLICIES):
+        raise ValueError("five_track_checkpoint_set_incomplete")
+    return found
+
+
 def _write_immutable_or_verify(path, payload):
     destination = Path(path)
     if destination.exists():
@@ -4484,6 +4949,19 @@ def _write_immutable_or_verify(path, payload):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MECO frozen qualification and promotion")
     commands = parser.add_subparsers(dest="command", required=True)
+    preflight = commands.add_parser("preflight-stage1",
+        help="metadata-only readiness check for the five-track pickup_simple Stage 1 gate")
+    preflight.add_argument("--protocol", required=True)
+    preflight.add_argument("--phase0-index", required=True)
+    preflight.add_argument("--campaign-manifest", required=True)
+    preflight.add_argument("--checkpoint-manifest", action="append", required=True,
+        help="per-track manifest; supply exactly once for each A1, A2, A3, C1, and C2")
+    preflight.add_argument("--protected-campaign-root", action="append", required=True,
+        help="active campaign root; repeat for every protected campaign root")
+    preflight.add_argument("--protected-checkpoint-root", action="append", required=True,
+        help="active checkpoint root; repeat for every protected checkpoint root")
+    preflight.add_argument("--output", required=True,
+        help="new JSON report destination outside all campaign/checkpoint roots")
     create = commands.add_parser("create-protocol")
     create.add_argument("--output", required=True)
     create.add_argument("--episodes", type=int, default=MIN_EPISODES)
@@ -4566,6 +5044,16 @@ def main(argv=None):
     test.add_argument("--device", required=True,
         help="available CUDA or ROCm/HIP device, for example cuda:0")
     args = parser.parse_args(argv)
+    if args.command == "preflight-stage1":
+        report = preflight_stage1(protocol_path=args.protocol,
+            phase0_index_path=args.phase0_index,
+            campaign_manifest_path=args.campaign_manifest,
+            checkpoint_manifest_paths=args.checkpoint_manifest,
+            protected_campaign_roots=args.protected_campaign_root,
+            protected_checkpoint_roots=args.protected_checkpoint_root,
+            output_path=args.output)
+        print(json.dumps(report, sort_keys=True, indent=2))
+        return
     if args.command == "create-protocol":
         if args.calibration_report and args.calibration_bundle_json:
             raise ValueError("use either one calibration report or a calibration bundle")
