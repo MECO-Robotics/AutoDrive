@@ -10,6 +10,16 @@ This is a code-and-evidence-contract tranche; it does not claim that any start
 profile has been validated in a representative simulator run. Keep
 qualification disabled.
 
+The unit of work and evidence is **one registered profile as one candidate
+cell**. Each candidate cell's `outcome_by_start_state` compares only the
+scenario-defined no-factor start against that exact cell's assigned profile
+(currently `team_start_set_a`, `team_start_set_b`, or `team_start_set_c`). It
+must not aggregate the three profile cells or imply that one profile's evidence
+covers another. All three registered profile cells need their own complete
+evidence before the `multiple_legal_team_start_states` requirement can be
+called complete. This tranche can open a candidate cell; it cannot complete
+the whole requirement by itself.
+
 This slice is deliberately separate from `opponent.trench_interception`
 (slot-0 policy schedule, 100 seeds, 11 policies) and
 `opponent.direct_pursuit`. It must not edit either opponent assignment,
@@ -52,56 +62,72 @@ simulator, or training work.
 
 ## Bounded implementation slice
 
-1. **Define the authoritative source contract.** Update the start-state
-   requirement binding only after auditing the existing producer and reducer.
-   Name the captured event fields as the signal sources. Keep the legal-start
-   rate as a ratio over all evaluated treatment policy/category/seed rows and
-   their complete simulator-world sets; require every world legal and reconcile
-   the aggregate numerator/denominator to the individual Boolean rows. Do not
-   accept a caller-supplied rate that disagrees with those rows.
-2. **Seal outcome-by-start-state evidence.** Preserve the existing registered
-   pose-set IDs as the strata. Reconcile each stratum's policy/category/seed
-   coverage and per-policy metrics against source evaluation rows; reconcile
-   paired deltas against exact same-policy/category/seed no-factor records.
-   Reject missing, duplicate, censored, non-finite, or mismatched rows. Keep
-   the output explicitly descriptive; do not infer a winning start state or
-   qualification from it.
-3. **Add an exact replay-review gate for this requirement.** Consume a
-   requirement-specific evidence bundle that binds registry/protocol digests,
-   exact validation case and seed-assignment digest, profile assignment/config
-   digests, both condition reports and their exact policy/checkpoint/source/
-   device bindings, outcome-artifact digest, and one paired replay seed present
-   in the frozen validation manifest. The two replay records must bind the
-   scenario/category/case, registered profile, condition, current source,
-   checkpoint bundle, device, replay IDs and hashes. Require reviewer
-   acceptance plus current dashboard backend, endpoints, frontend asset
-   manifest, and fresh current-checkout replay provenance. A stale or
-   mismatched item keeps the gate closed.
-4. **Open only a candidate executable cell.** Let the compiler mark the exact
-   `multiple_legal_team_start_states` case executable only when both required
-   signals are authoritative and the reviewed evidence gate accepts. Keep
-   `executed` false until a genuine paired campaign is run, and keep
-   `qualification_eligible` false regardless. No other requirement status
-   changes in this tranche.
+1. **Define the authoritative source contract per profile cell.** Update the
+   start-state requirement binding only after auditing the existing producer
+   and reducer. Name the captured event fields as the signal sources. Retain
+   each row's exact profile ID, policy/category/seed key, `validated_pose_world_count`,
+   and ordered per-world legality booleans (with stable world IDs or indices).
+   Define the descriptive legal-start rate exactly as
+   `sum(legal_world_booleans) / sum(validated_pose_world_count)` over the
+   complete treatment rows for this one profile cell. Recompute it from rows;
+   reject a caller-supplied value that disagrees. This ratio is a diagnostic
+   aggregate, not the cell gate: candidate executability requires every
+   expected world in every expected treatment row to be legal, so an average
+   of 1.0 cannot conceal missing or illegal worlds.
+2. **Seal outcome-by-start-state evidence for the single candidate cell.**
+   Preserve the exact registered profile ID as the treatment stratum. In that
+   cell's result, `outcome_by_start_state.states` must contain exactly
+   `scenario_defined` (no-factor) and that assigned profile ID (treatment),
+   with complete policy/category/seed coverage and per-policy metrics
+   reconciled to the two source reports. Reconcile paired deltas against the
+   exact same-policy/category/seed rows. Reject missing, duplicate, censored,
+   non-finite, or mismatched rows. Do not combine profile strata in this
+   artifact or infer a winning start state or qualification from it.
+3. **Add an exact replay-review gate per profile assignment.** Consume one
+   requirement-specific evidence row for one exact candidate cell, binding
+   registry/protocol digests, exact validation case and seed-assignment digest,
+   that profile's assignment/config digests, both condition reports and their
+   exact policy/checkpoint/source/device bindings, per-cell outcome-artifact
+   digest, and one paired replay seed present in the frozen validation
+   manifest. The two replay records must bind the scenario/category/case,
+   assigned profile, condition, current source, checkpoint bundle, device,
+   replay IDs and hashes. Require reviewer acceptance plus current dashboard
+   backend, endpoints, frontend asset manifest, and fresh current-checkout
+   replay provenance. A stale or mismatched item keeps that profile cell
+   closed.
+4. **Open only the evidenced candidate cell.** Let the compiler mark one
+   exact `multiple_legal_team_start_states` profile cell executable only when
+   both required signals are authoritative for that profile and its reviewed
+   evidence row accepts. Keep `executed` false until a genuine paired campaign
+   is run and `qualification_eligible` false regardless. The requirement is
+   complete only after all three registered profile cells independently meet
+   their full evidence gate. No other requirement status changes in this
+   tranche.
 
 The implementation remains offline and must not dispatch simulator work,
 acquire devices, or alter any campaign manifest/checkpoint/output. After the
-live r4 lease is released, the required runtime acceptance is one representative
-registered start profile with a reproducible validation seed in both arms,
-followed by source-bound pair reduction and replay inspection. A later full
-cell campaign must still cover every exact protocol case, policy, category,
-and seed before it is described as complete evidence.
+live r4 lease is released, the required initial runtime acceptance is one
+candidate profile cell with a reproducible validation seed in both arms,
+followed by per-profile source-bound pair reduction and replay inspection. That
+acceptance validates only that candidate cell; a full requirement claim still
+needs independent complete evidence for all three profile cells across their
+exact protocol cases, policies, categories, and seeds.
 
 ## Review criteria
 
 - The assigned pose set is applied after reset and before the first policy
   observation, and the checked tensor is the simulator's actual pose state.
-- Legal-start numerator and denominator reconcile exactly to per-world rows;
-  any illegal/missing world or incorrect denominator fails closed.
-- Outcome strata and paired deltas reconcile exactly to individual records and
-  exact frozen policy/category/seed coverage.
-- Evidence binds the exact immutable protocol, registry, profile assignment,
-  checkpoint/source/device, replay seed, replay artifact, backend, and frontend.
+- Per-profile legal-start numerator and denominator reconcile exactly to
+  retained world IDs/indices and booleans; the reported ratio is recomputed as
+  sum of legal worlds divided by sum of world counts. Any missing/illegal world
+  fails the candidate gate even if the diagnostic ratio rounds to 1.0.
+- One profile cell's `outcome_by_start_state` has exactly two strata:
+  `scenario_defined` and its assigned profile. Metrics and paired deltas
+  reconcile to individual records and exact frozen policy/category/seed
+  coverage. No cross-profile aggregation is accepted.
+- Each evidence row binds one immutable protocol, registry, profile
+  assignment, checkpoint/source/device, replay seed, replay artifact, backend,
+  and frontend. Evidence for one registered profile cannot satisfy another.
 - Old-code replay, stale dashboard, mismatched condition, incomplete pair,
   proxy metric, or missing reviewer acceptance leaves the cell non-executable.
 - Qualification remains false. No direct-pursuit or trench-interception code,
@@ -114,17 +140,21 @@ and seed before it is described as complete evidence.
    fail-closed replay evidence. These checks alone do not establish simulator
    behavior.
 2. When r4 releases devices, run a paired, representative end-to-end simulator
-   evaluation for the chosen registered profile on a reproducible validation
-   seed. Inspect the record for actual pose application before observation,
-   all-world legality, policy rows, and outcome metrics; retain scenario, seed,
-   source/checkpoint/device, and pair identifiers.
+   evaluation for one chosen candidate profile cell on a reproducible
+   validation seed. Inspect the record for actual pose application before
+   observation, each retained world ID/index and legality value, policy rows,
+   and outcome metrics; retain profile ID, scenario, seed, source/checkpoint/
+   device, and pair identifiers. Do not extrapolate this evidence to either
+   of the other two registered profiles.
 3. Restart the dashboard services on the implementation checkout; verify
    service health, relevant endpoints, and frontend asset hashes. Generate a
    fresh paired replay from that checkout, inspect both arms, and bind both
    replay hashes and the current dashboard evidence to the review bundle.
    Mark any older replay outdated.
-4. Only then provide evidence to the compiler's reviewed-evidence gate. This
-   opens a candidate executable cell, not a qualification or promotion result.
+4. Only then provide that profile's evidence to the compiler's reviewed-
+   evidence gate. This opens one candidate executable cell, not a qualification
+   or promotion result. Repeat the full process independently for the other
+   two registered profiles before describing the requirement as complete.
 
 ## Explicit nonclaims and remaining gates
 
