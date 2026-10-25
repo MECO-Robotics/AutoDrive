@@ -68,23 +68,29 @@
 > correction is underway; until reviewed and deployed, its training status is
 > not authoritative. GPU utilization was 94% and 98% at 00:51:11 UTC.
 
-> **Plan C repeated-label integration candidate — 2026-10-25.** The isolated
+> **Plan C repeated-label implementation — 2026-10-25.** The isolated
 > implementation based on source `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`
-> is ported to current `main` in branch
-> `codex/meco-plan-c-repeated-labels-integration` at `5815e48ee91ce3aab932666b60781190a928940a`.
+> was fast-forwarded into `main` at `8cb3177026461669a8f095502430f8616d4582cb`.
 > Its reviewed code and test commits are `875b4df9b3ec7e0ceecac27a6c30100aa921bd8e`
 > and `5815e48ee91ce3aab932666b60781190a928940a`.
 > It adds two common-random-number repeats for each archived Plan C candidate
 > branch, with repeat seed derivation and protocol identity recorded in the
 > dataset. C1/C2 pair labels require the same strict preference sign in both
 > matched repeats; mixed-sign or tied evidence is retained and excluded from
-> fitting. The implementation has synthetic contract coverage only. The
-> integration branch is isolated pending final dashboard-provenance review and
-> merge; the active r4 workers remain pinned to their original source. No label
+> fitting. The implementation has synthetic contract coverage only. The active
+> r4 workers remain pinned to their original source and do not load this change.
+> No label
 > collection, GPU/training, simulator behavior evaluation, replay, or dashboard
 > currentness check was run; this tranche establishes no variance calibration,
 > winner, or qualification result. See
 > [`plan-c-repeated-rollout-labels.md`](implementation-provenance/plan-c-repeated-rollout-labels.md).
+
+> The dashboard provenance manifest now contains 57 validated scoped
+> summaries and its pinned digest matches the checkout. The service restarted
+> from current `main` at 01:35 UTC, but its new process is blocked in uninterruptible
+> ZFS buffer I/O and port 8765 is not listening. Live three-pass API and frontend
+> asset verification are therefore pending; the prior service process was not
+> treated as current after the manifest change.
 
 > **Runtime identity correction — 2026-10-24 23:25 UTC.** The first relaunch
 > passed manifest validation and created its isolated campaign root, but both
