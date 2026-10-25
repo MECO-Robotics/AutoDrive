@@ -7,22 +7,27 @@ def test_audit_counts_sampled_repeated_label_coverage_deterministically(monkeypa
         {"plan_c_counterfactuals": [
             {"descriptor": {"action": 1}}, {"descriptor": {"action": 4}},
             {"descriptor": {"action": 1}}],
+         "seed": 7,
          "plan_c_pairwise_labels": [
              {"stable_preference": True, "repeat_differences": [2.0, 1.0]},
              {"stable_preference": False, "repeat_differences": [1.0, -1.0]},
              {"stable_preference": False, "repeat_differences": [0.0, 2.0]}]},
         {"plan_c_counterfactuals": [
             {"descriptor": {"action": 6}}, {"descriptor": {"action": 1}}],
+         "seed": 9,
          "plan_c_pairwise_labels": [
              {"stable_preference": True, "repeat_differences": [-1.0, -2.0]}]},
     ]
     manifest = {
         "split": "train", "plan_c_target_schema": PLAN_C_REPEAT_TARGET_SCHEMA,
+        "seeds": [7, 9],
         "scenario_id": "scenario", "category": "single",
         "source_identity_sha256": "a" * 64, "source_runtime_device_bound": True,
         "plan_c_repeat_protocol": {"repeat_protocol_id": "repeat-id"},
-        "seed_branch_summaries": {"7": {"skipped_count": 3,
-            "skipped_reason_counts": {"fewer_than_two_plan_c_descriptors": 3}}},
+        "seed_branch_summaries": {
+            "7": {"skipped_count": 3,
+                "skipped_reason_counts": {"fewer_than_two_plan_c_descriptors": 3}},
+            "9": {"skipped_count": 0, "skipped_reason_counts": {}}},
     }
     monkeypatch.setattr(audit, "source_identity", lambda: {"source": "test"})
     monkeypatch.setattr(audit, "_read_counterfactual_dataset",
@@ -44,6 +49,21 @@ def test_audit_counts_sampled_repeated_label_coverage_deterministically(monkeypa
     }
     assert first["audit_identity"]
     assert "does not establish data sufficiency" in " ".join(first["limits"])
+
+
+def test_audit_rejects_missing_declared_train_seed(monkeypatch, tmp_path):
+    rows = [{"seed": 7, "plan_c_counterfactuals": [], "plan_c_pairwise_labels": []}]
+    manifest = {"split": "train", "plan_c_target_schema": PLAN_C_REPEAT_TARGET_SCHEMA,
+        "seeds": [7, 9], "scenario_id": "scenario", "category": "single",
+        "source_identity_sha256": "a" * 64, "source_runtime_device_bound": True,
+        "plan_c_repeat_protocol": {"repeat_protocol_id": "repeat"},
+        "seed_branch_summaries": {}}
+    monkeypatch.setattr(audit, "source_identity", lambda: {})
+    monkeypatch.setattr(audit, "_read_counterfactual_dataset",
+        lambda *args, **kwargs: (rows, "d", "m", {}, "p", "q", manifest))
+    import pytest
+    with pytest.raises(ValueError, match="every declared train seed"):
+        audit.audit_dataset(tmp_path / "data", qualification_protocol=tmp_path / "qual")
 
 
 def test_audit_rejects_heldout_or_nonrepeated_manifest(monkeypatch, tmp_path):

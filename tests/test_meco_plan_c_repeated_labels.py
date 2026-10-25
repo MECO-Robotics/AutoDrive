@@ -99,7 +99,8 @@ def test_repeated_label_validator_accepts_complete_matched_contract():
 
 
 @pytest.mark.parametrize("corruption", [
-    "missing_repeat", "wrong_seed", "variance", "label", "generator_provenance"])
+    "missing_repeat", "wrong_seed", "variance", "label", "bool_integer",
+    "generator_provenance"])
 def test_repeated_label_validator_fails_closed_on_incomplete_or_forged_evidence(corruption):
     row, repeat_protocol, protocol_id = _synthetic_row()
     row = copy.deepcopy(row)
@@ -112,6 +113,8 @@ def test_repeated_label_validator_fails_closed_on_incomplete_or_forged_evidence(
     elif corruption == "generator_provenance":
         row["plan_c_counterfactuals"][0]["repeat_returns"][1][
             "repeat_rng_provenance"]["seed_manifest_sha256"] = "b" * 64
+    elif corruption == "bool_integer":
+        row["plan_c_pairwise_labels"][0]["stable_preference"] = 1
     else:
         row["plan_c_pairwise_labels"][0]["preferred_id"] = "right"
     with pytest.raises(ValueError):

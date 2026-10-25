@@ -36,6 +36,13 @@ def audit_dataset(dataset: Path, *, qualification_protocol: Path) -> dict:
     if (manifest.get("split") != "train" or
             manifest.get("plan_c_target_schema") != PLAN_C_REPEAT_TARGET_SCHEMA):
         raise ValueError("Plan C corpus audit requires repeated-label train-split data")
+    declared_seeds = manifest.get("seeds")
+    row_seeds = {row.get("seed") for row in rows}
+    if (not isinstance(declared_seeds, list) or not declared_seeds or
+            any(type(seed) is not int for seed in declared_seeds) or
+            len(set(declared_seeds)) != len(declared_seeds) or
+            row_seeds != set(declared_seeds)):
+        raise ValueError("Plan C corpus rows do not cover every declared train seed")
 
     candidate_count = pair_count = stable_count = tied_count = mixed_count = 0
     action_counts: dict[str, int] = {}

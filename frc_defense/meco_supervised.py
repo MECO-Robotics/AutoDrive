@@ -557,6 +557,9 @@ def _validate_plan_c_repeated_labels(row, *, repeat_protocol, protocol_id,
         expected_labels = _plan_c_pairwise_labels(outcomes)
     except (TypeError, ValueError, KeyError) as exc:
         raise ValueError("Plan C paired labels cannot be derived from repeats") from exc
+    if any(not isinstance(label, dict) or type(label.get("stable_preference")) is not bool
+           for label in labels):
+        raise ValueError("Plan C repeated label stability must use exact boolean values")
     if labels != expected_labels:
         raise ValueError("Plan C paired stability labels/variance are not derived from repeat returns")
     return True
