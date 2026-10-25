@@ -70,6 +70,9 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
         _flush_fuel_score_awards(env)
         return state
     physics._validate_qualifying_backend()
+    if physics._gpu_qualifying and not env._physics_graph_enabled:
+        raise RuntimeError(
+            "GPU-qualifying fuel physics requires HIP graph capture to be enabled")
     if physics._gpu_qualifying:
         for name, tensor, shape in (
                 ("commands",commands,
