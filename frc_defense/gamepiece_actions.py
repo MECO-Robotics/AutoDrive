@@ -11,37 +11,57 @@ from ._tensor_3v3_observation import NUM_ROBOTS
 
 
 def _capture_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
-    """Capture only accepted score mutations, and only under explicit opt-in."""
+    """Queue accepted score masks for serialization after gameplay mutation."""
     recorder = getattr(env, "_meco_score_event_recorder", None)
     if recorder is None:
         return
-    if chosen.ndim == 3:
-        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
-        for world, robot, piece in accepted:
-            slot = int(robot)
-            recorder.record_award(
-                tick=max(0, int(env.steps[world].item()) - 1),
-                match_elapsed_s=float(env.match_elapsed[world].item()),
-                world_slot=world,
-                alliance=int(env.team_ids[slot].item()),
-                robot_slot=slot,
-                piece_slot=piece,
-                piece_generation=int(env._meco_piece_generation[world, piece].item()),
-                source_site=source_site)
-    elif chosen.ndim == 2 and robot_slot is not None:
-        accepted = torch.nonzero(chosen, as_tuple=False).tolist()
-        for world, piece in accepted:
-            recorder.record_award(
-                tick=max(0, int(env.steps[world].item()) - 1),
-                match_elapsed_s=float(env.match_elapsed[world].item()),
-                world_slot=world,
-                alliance=int(env.team_ids[robot_slot].item()),
-                robot_slot=robot_slot,
-                piece_slot=piece,
-                piece_generation=int(env._meco_piece_generation[world, piece].item()),
-                source_site=source_site)
-    else:
-        raise ValueError("accepted score mask has an unsupported shape")
+    pending = getattr(env, "_pending_fuel_score_awards", None)
+    if pending is None:
+        pending = []
+        env._pending_fuel_score_awards = pending
+    generation = getattr(env, "_meco_piece_generation", None)
+    pending.append((chosen.detach().clone(), source_site, robot_slot,
+                    None if generation is None else generation.detach().clone()))
+
+
+def _flush_fuel_score_awards(env):
+    """Serialize queued awards after score, respawn, and ownership updates."""
+    pending = getattr(env, "_pending_fuel_score_awards", None)
+    if not pending:
+        return
+    env._pending_fuel_score_awards = []
+    recorder = getattr(env, "_meco_score_event_recorder", None)
+    if recorder is None:
+        return
+    for chosen, source_site, robot_slot, generation in pending:
+        if chosen.ndim == 3:
+            accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+            for world, slot, piece in accepted:
+                recorder.record_award(
+                    tick=max(0, int(env.steps[world].item()) - 1),
+                    match_elapsed_s=float(env.match_elapsed[world].item()),
+                    world_slot=world,
+                    alliance=int(env.team_ids[slot].item()),
+                    robot_slot=slot,
+                    piece_slot=piece,
+                    piece_generation=(int(generation[world, piece].item())
+                                     if generation is not None else 0),
+                    source_site=source_site)
+        elif chosen.ndim == 2 and robot_slot is not None:
+            accepted = torch.nonzero(chosen, as_tuple=False).tolist()
+            for world, piece in accepted:
+                recorder.record_award(
+                    tick=max(0, int(env.steps[world].item()) - 1),
+                    match_elapsed_s=float(env.match_elapsed[world].item()),
+                    world_slot=world,
+                    alliance=int(env.team_ids[robot_slot].item()),
+                    robot_slot=robot_slot,
+                    piece_slot=piece,
+                    piece_generation=(int(generation[world, piece].item())
+                                     if generation is not None else 0),
+                    source_site=source_site)
+        else:
+            raise ValueError("accepted score mask has an unsupported shape")
 
 
 def _invalidate_perceived_contact_tracks(env, active):
@@ -475,5 +495,6 @@ def update_fuel_actions(self, active, score_intent):
     torch.where(newly_scored[...,None],self._midfield_respawn_cells,
                 self._pickup_possible_cells,out=self._pickup_possible_cells)
     self.fuel_acquisition_count += self.fuel_acquired_event*active[:,None]
+    _flush_fuel_score_awards(self)
     return (self.fuel_acquired_event,self.fuel_scored_event,
             self.fuel_denied_event)
