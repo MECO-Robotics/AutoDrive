@@ -17,7 +17,7 @@ import math
 import torch
 
 from .experimental_route_evaluation import (MAX_ROUTE_QUERY_BATCH, RouteQuery,
-    evaluate_routes)
+    DeviceRouteBatch, DeviceRouteQuery, evaluate_device_routes, evaluate_routes)
 from .learning_contract import CandidateTable
 from .meco_pose_graph import LegalPoseGraph
 from .meco_tracks import (SafeActionCandidates, build_safe_action_candidates,
@@ -115,6 +115,100 @@ class RouteFeasibleCandidates:
     route_records: tuple[dict, ...]
     candidate_recall: dict
     commitment: CandidateCommitment | None = None
+
+
+@dataclass(frozen=True)
+class DeviceCandidateBatch:
+    """Device-resident numeric Plan C candidates with host-only stable IDs."""
+
+    candidate_ids: tuple[str, ...]
+    feature_names: tuple[str, ...]
+    candidate_index: torch.Tensor
+    action_index: torch.Tensor
+    target_track_index: torch.Tensor
+    target_xy: torch.Tensor
+    goal_xy: torch.Tensor
+    goal_heading: torch.Tensor
+    route_override_flags: torch.Tensor
+    raw_features: torch.Tensor
+    missing_mask: torch.Tensor
+    valid_mask: torch.Tensor
+    eta_s: torch.Tensor
+    route_cost_points: torch.Tensor
+    risk_cost_points: torch.Tensor
+    route_batch: DeviceRouteBatch
+    fallback_index: torch.Tensor
+
+    def __post_init__(self):
+        count = len(self.candidate_ids)
+        if (not count or len(set(self.candidate_ids)) != count or
+                any(not isinstance(item, str) or not item for item in self.candidate_ids)):
+            raise ValueError("candidate IDs must be unique nonempty host metadata")
+        if not self.feature_names or len(set(self.feature_names)) != len(self.feature_names):
+            raise ValueError("candidate feature names must be unique and ordered")
+        device = self.valid_mask.device
+        if self.candidate_index.shape != (count,) or self.candidate_index.dtype != torch.long:
+            raise ValueError("candidate_index must be int64 [K]")
+        if self.action_index.shape != (count,) or self.action_index.dtype != torch.long:
+            raise ValueError("action_index must be int64 [K]")
+        if self.target_track_index.shape != (count,) or self.target_track_index.dtype != torch.long:
+            raise ValueError("target_track_index must be int64 [K]")
+        for name, tensor in (("target_xy", self.target_xy), ("goal_xy", self.goal_xy)):
+            if tensor.shape != (count, 2) or not tensor.is_floating_point():
+                raise ValueError(f"{name} must be floating [K,2]")
+        if self.goal_heading.shape != (count,) or not self.goal_heading.is_floating_point():
+            raise ValueError("goal_heading must be floating [K]")
+        if self.route_override_flags.shape != (count, 2) or self.route_override_flags.dtype != torch.bool:
+            raise ValueError("route_override_flags must be bool [K,2]")
+        feature_shape = (1, count, len(self.feature_names))
+        if (self.raw_features.shape != feature_shape or
+                self.missing_mask.shape != feature_shape or
+                not self.raw_features.is_floating_point() or
+                not self.missing_mask.is_floating_point()):
+            raise ValueError("raw_features and missing_mask must be floating [1,K,F]")
+        if self.valid_mask.shape != (1, count) or self.valid_mask.dtype != torch.bool:
+            raise ValueError("valid_mask must be bool [1,K]")
+        for name, tensor in (("eta_s", self.eta_s),
+                             ("route_cost_points", self.route_cost_points),
+                             ("risk_cost_points", self.risk_cost_points)):
+            if tensor.shape != (1, count) or not tensor.is_floating_point():
+                raise ValueError(f"{name} must be floating [1,K]")
+        if self.fallback_index.shape != () or self.fallback_index.dtype != torch.long:
+            raise ValueError("fallback_index must be a scalar int64 tensor")
+        tensors = (self.candidate_index, self.action_index,
+            self.target_track_index, self.target_xy, self.goal_xy,
+            self.goal_heading, self.route_override_flags, self.raw_features,
+            self.missing_mask, self.valid_mask, self.eta_s,
+            self.route_cost_points, self.risk_cost_points, self.fallback_index)
+        if any(tensor.device != device for tensor in tensors):
+            raise ValueError("all device candidate tensors must share one device")
+        if (self.route_batch.device != device or len(self.route_batch.queries) != count or
+                tuple(query.candidate_id for query in self.route_batch.queries) !=
+                tuple(self.candidate_ids)):
+            raise ValueError("route batch must align with device candidate order")
+
+    @property
+    def device(self):
+        return self.valid_mask.device
+
+    @property
+    def candidate_features(self):
+        return torch.cat((self.raw_features, self.missing_mask), dim=-1)
+
+    def gather_action_payload(self, selected_index: torch.Tensor) -> torch.Tensor:
+        """Gather the sole numeric selection payload for host simulator dispatch."""
+        if selected_index.numel() != 1 or selected_index.device != self.device:
+            raise ValueError("selected_index must be one device scalar")
+        index = selected_index.reshape(1).to(dtype=torch.long)
+        action = self.action_index[index].to(torch.float64)
+        target_track = self.target_track_index[index].to(torch.float64)
+        target_xy = self.target_xy[index].to(torch.float64)
+        goal_xy = self.goal_xy[index].to(torch.float64)
+        goal_heading = self.goal_heading[index].to(torch.float64)[:, None]
+        flags = self.route_override_flags[index].to(torch.float64)
+        candidate_index = self.candidate_index[index].to(torch.float64)
+        return torch.cat((candidate_index[:, None], action[:, None],
+            target_track[:, None], target_xy, goal_xy, goal_heading, flags), dim=-1)
 
 
 def _candidate_target(env, action: int, base: SafeActionCandidates, *,
