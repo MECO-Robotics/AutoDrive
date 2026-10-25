@@ -10,9 +10,15 @@ from frc_defense import meco_phase2_multicase as multi
 @pytest.fixture
 def frozen_protocol(tmp_path, monkeypatch):
     rows = [
-        {"scenario_id": "case-a", "category": "single", "split": "train", "seeds": [11, 12]},
-        {"scenario_id": "case-b", "category": "pair", "split": "train", "seeds": [21, 22]},
-        {"scenario_id": "heldout", "category": "single", "split": "validation", "seeds": [31]},
+        {"scenario_id": "case-a", "category": "single", "split": "train", "seeds": [11, 12],
+            "defender_family": "family-a", "layout_id": "layout-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"},
+        {"scenario_id": "case-b", "category": "pair", "split": "train", "seeds": [21, 22],
+            "defender_family": "family-a", "layout_id": "layout-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"},
+        {"scenario_id": "heldout", "category": "single", "split": "validation", "seeds": [31],
+            "defender_family": "family-a", "layout_id": "layout-a",
+            "start_condition": "start-a", "sensor_profile": "sensor-a"},
     ]
     body = {"protocol_version": "meco-qualification-v1", "cases": rows}
     body["protocol_id"] = multi._digest(body)
@@ -284,7 +290,94 @@ def test_production_descriptor_binds_phase0_train_tuples_and_approval_bytes(
         bundle["partition_materialization"]["partitions"]["train"]["tuple_ids"])
     assert all(row["scenario_id"] != "heldout" for case in value["tuple_crosswalk"]["cases"]
         for row in case["tuples"])
+    for case in value["ordered_cases"]:
+        mapping = next(item for item in value["tuple_crosswalk"]["cases"]
+            if item["case_key"] == [case["scenario_id"], case["category"]])
+        assert case["phase0_case_id"] == mapping["case_id"]
+        assert case["phase0_protocol_axes"] == mapping["protocol_axes"]
     assert multi.validate_multicase_descriptor(value, repo_root=repo) == value
+
+
+@pytest.mark.parametrize("field", ["scenario_id", "category", "case_id", "defender_family",
+    "layout_id", "start_condition", "sensor_profile", "seed", "evaluation_phase"])
+def test_phase0_crosswalk_rejects_tuple_identity_axis_drift(
+        tmp_path, frozen_protocol, monkeypatch, field):
+    from frc_defense import meco_baseline_freeze as freeze
+    protocol_path, _repo, bundle, _approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    protocol = json.loads(protocol_path.read_text())
+    changed = copy.deepcopy(bundle)
+    row = changed["partition_materialization"]["tuple_registry"]["tuples"][0]
+    row[field] = (row[field] + "-changed" if isinstance(row[field], str) else row[field] + 1)
+    old_id = row["tuple_id"]
+    new_id = freeze.canonical_sha256({name: row[name] for name in multi.TUPLE_FIELDS})
+    row["tuple_id"] = new_id
+    assignments = changed["partition_materialization"]["assignment_table"]["assignments"]
+    assignments[new_id] = assignments.pop(old_id)
+    train_ids = changed["partition_materialization"]["partitions"]["train"]["tuple_ids"]
+    train_ids[train_ids.index(old_id)] = new_id
+    with pytest.raises(ValueError):
+        multi._phase0_train_tuple_crosswalk(changed, [
+            {"scenario_id": "case-a", "category": "single", "seeds": [11, 12]},
+            {"scenario_id": "case-b", "category": "pair", "seeds": [21, 22]}], protocol)
+
+
+def test_phase0_crosswalk_rejects_tuple_digest_mismatch(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol_path, _repo, bundle, _approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    protocol = json.loads(protocol_path.read_text())
+    changed = copy.deepcopy(bundle)
+    changed["partition_materialization"]["tuple_registry"]["tuples"][0]["layout_id"] = "forged"
+    with pytest.raises(ValueError, match="tuple ID"):
+        multi._phase0_train_tuple_crosswalk(changed, [
+            {"scenario_id": "case-a", "category": "single", "seeds": [11, 12]},
+            {"scenario_id": "case-b", "category": "pair", "seeds": [21, 22]}], protocol)
+
+
+def test_phase0_provenance_is_mandatory_and_exact_on_downstream_records(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    descriptor = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    record = multi._phase0_provenance(descriptor)
+    assert multi._validate_phase0_provenance(record, descriptor, label="fixture")
+    for key in record:
+        changed = copy.deepcopy(record)
+        changed.pop(key)
+        with pytest.raises(ValueError, match="Phase 0/approval/train tuple provenance"):
+            multi._validate_phase0_provenance(changed, descriptor, label="fixture")
+        changed = copy.deepcopy(record)
+        changed[key] = {"changed": True}
+        with pytest.raises(ValueError, match="Phase 0/approval/train tuple provenance"):
+            multi._validate_phase0_provenance(changed, descriptor, label="fixture")
+
+
+def test_phase0_target_envelope_preserves_collector_sidecar_and_binds_its_bytes(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    descriptor = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    dataset = tmp_path / "sample.jsonl"
+    target_manifest = tmp_path / "sample.jsonl.manifest.json"
+    dataset.write_text('{"seed":11}\n')
+    target_manifest.write_text('{"collector":"unchanged"}\n')
+    original_manifest_bytes = target_manifest.read_bytes()
+    binding = multi._write_phase0_target_envelope(dataset, target_manifest, descriptor)
+    assert target_manifest.read_bytes() == original_manifest_bytes
+    assert multi._validate_phase0_target_envelope(dataset, target_manifest, binding, descriptor)
+    envelope_path = Path(binding["phase0_envelope_path"])
+    envelope_path.write_text('{}\n')
+    with pytest.raises(ValueError, match="provenance envelope"):
+        multi._validate_phase0_target_envelope(dataset, target_manifest, binding, descriptor)
 
 
 @pytest.mark.parametrize("mutation", ["approval_bytes", "tuple_identity", "train_membership",

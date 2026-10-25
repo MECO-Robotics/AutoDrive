@@ -31,6 +31,8 @@ A_SETTINGS = {"p_cost_scale": 1.0, "intervention_maps": 3,
 TUPLE_FIELDS = ("scenario_id", "case_id", "category", "defender_family",
     "layout_id", "start_condition", "sensor_profile", "seed", "repetition",
     "evaluation_phase")
+PROTOCOL_AXIS_FIELDS = ("scenario_id", "category", "defender_family", "layout_id",
+    "start_condition", "sensor_profile")
 
 
 def _phase0_inputs(phase0_materialization, estimand_approval_path, *, repo_root):
@@ -91,7 +93,50 @@ def _validate_phase0_provenance(record, descriptor, *, label):
     return True
 
 
-def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases):
+def _phase0_target_envelope(dataset_path, target_manifest_path, descriptor):
+    if descriptor.get("schema") != PRODUCTION_SCHEMA:
+        return None
+    dataset_path = Path(dataset_path)
+    target_manifest_path = Path(target_manifest_path)
+    return {"schema": "meco-phase2-target-phase0-provenance-v1",
+        "dataset_path": str(dataset_path), "dataset_sha256": _sha(dataset_path.read_bytes()),
+        "target_manifest_path": str(target_manifest_path),
+        "target_manifest_sha256": _sha(target_manifest_path.read_bytes()),
+        **_phase0_provenance(descriptor)}
+
+
+def _write_phase0_target_envelope(dataset_path, target_manifest_path, descriptor):
+    envelope = _phase0_target_envelope(dataset_path, target_manifest_path, descriptor)
+    if envelope is None:
+        return None
+    path = Path(dataset_path).with_suffix(Path(dataset_path).suffix + ".phase0-provenance.json")
+    encoded = json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+            raise ValueError("existing Phase 0 target provenance envelope differs")
+    else:
+        _write_private_json(path, envelope)
+    return {"phase0_envelope_path": str(path),
+        "phase0_envelope_sha256": _sha(path.read_bytes())}
+
+
+def _validate_phase0_target_envelope(dataset_path, target_manifest_path, binding, descriptor):
+    expected = _phase0_target_envelope(dataset_path, target_manifest_path, descriptor)
+    if expected is None:
+        if isinstance(binding, dict) and any(key.startswith("phase0_envelope_") for key in binding):
+            raise ValueError("legacy target cannot claim a Phase 0 provenance envelope")
+        return True
+    if not isinstance(binding, dict):
+        raise ValueError("production target omits its Phase 0 provenance envelope binding")
+    path = Path(binding.get("phase0_envelope_path", "")).absolute()
+    if (path.is_symlink() or not path.is_file() or
+            _sha(path.read_bytes()) != binding.get("phase0_envelope_sha256") or
+            json.loads(path.read_text(encoding="utf-8")) != expected):
+        raise ValueError("target Phase 0 provenance envelope is missing, stale, or mismatched")
+    return True
+
+
+def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases, protocol):
     """Close requested case/seed keys over every eligible Phase 0 train tuple."""
     from .meco_baseline_freeze import canonical_sha256
 
@@ -113,6 +158,8 @@ def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases):
         raise ValueError("Phase 0 train tuple closure differs from the assignment table")
     requested = {(case["scenario_id"], case["category"], seed)
         for case in ordered_cases for seed in case["seeds"]}
+    protocol_cases = {(row.get("scenario_id"), row.get("category")): row
+        for row in protocol.get("cases", []) if isinstance(row, dict) and row.get("split") == "train"}
     by_key = {}
     by_id = {}
     for row in registry["tuples"]:
@@ -131,6 +178,10 @@ def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases):
             key = (row["scenario_id"], row["category"], row["seed"])
             if key not in requested:
                 raise ValueError("Phase 0 train tuple is absent from the requested protocol cases/seeds")
+            protocol_case = protocol_cases.get(key[:2])
+            if protocol_case is None or any(row.get(field) != protocol_case.get(field)
+                    for field in PROTOCOL_AXIS_FIELDS):
+                raise ValueError("Phase 0 tuple axes differ from the frozen protocol case")
             by_key.setdefault(key, []).append({**fields, "tuple_id": tuple_id})
         elif assignments.get(tuple_id) in ("calibration", "validation", "final_test"):
             if row.get("evaluation_phase") != assignments[tuple_id]:
@@ -138,13 +189,20 @@ def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases):
     crosswalk_rows = []
     for case in ordered_cases:
         tuple_rows = []
+        case_ids = set()
         for seed in case["seeds"]:
             selected = sorted(by_key.get((case["scenario_id"], case["category"], seed), []),
                 key=lambda row: (row["case_id"], row["repetition"], row["tuple_id"]))
             if not selected:
                 raise ValueError("requested case/seed has no exact Phase 0 train tuple")
+            case_ids.update(row["case_id"] for row in selected)
             tuple_rows.extend(selected)
+        if len(case_ids) != 1:
+            raise ValueError("Phase 0 tuple crosswalk maps a protocol case to multiple case IDs")
+        protocol_case = protocol_cases.get((case["scenario_id"], case["category"]))
+        axes = {field: protocol_case[field] for field in PROTOCOL_AXIS_FIELDS}
         crosswalk_rows.append({"case_key": [case["scenario_id"], case["category"]],
+            "case_id": next(iter(case_ids)), "protocol_axes": axes,
             "seeds": list(case["seeds"]), "tuples": tuple_rows,
             "tuple_ids": [row["tuple_id"] for row in tuple_rows]})
     seen = [tuple_id for row in crosswalk_rows for tuple_id in row["tuple_ids"]]
@@ -255,7 +313,12 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
     if phase0_materialization is not None:
         phase0_binding, approval_binding = _phase0_inputs(
             phase0_materialization, estimand_approval_path, repo_root=repo)
-        tuple_crosswalk = _phase0_train_tuple_crosswalk(phase0_materialization, normalized)
+        tuple_crosswalk = _phase0_train_tuple_crosswalk(phase0_materialization, normalized, protocol)
+        crosswalk_by_case = {tuple(row["case_key"]): row for row in tuple_crosswalk["cases"]}
+        for case in normalized:
+            mapping = crosswalk_by_case[(case["scenario_id"], case["category"])]
+            case["phase0_case_id"] = mapping["case_id"]
+            case["phase0_protocol_axes"] = mapping["protocol_axes"]
         production_binding = {"phase0_binding": phase0_binding,
             "score_estimand_approval": approval_binding,
             "tuple_crosswalk": tuple_crosswalk}
@@ -359,7 +422,7 @@ def validate_multicase_descriptor(descriptor: dict, *, repo_root: Path | None = 
             repo / descriptor.get("score_estimand_approval", {}).get("path", ""),
             repo_root=repo)
         crosswalk = _phase0_train_tuple_crosswalk(
-            descriptor["phase0_materialization"], descriptor.get("ordered_cases", []))
+            descriptor["phase0_materialization"], descriptor.get("ordered_cases", []), protocol)
         if (descriptor.get("phase0_binding") != phase0_binding
                 or descriptor.get("score_estimand_approval") != approval_binding
                 or descriptor.get("tuple_crosswalk") != crosswalk):
@@ -503,6 +566,13 @@ def combine_target_shards(family: str, shards: list[Path], output: Path, *,
         if path.is_symlink() or manifest_path.is_symlink():
             raise ValueError("target shard or sidecar is a symlink")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        envelope_path = path.with_suffix(path.suffix + ".phase0-provenance.json")
+        if descriptor.get("schema") == PRODUCTION_SCHEMA:
+            _validate_phase0_target_envelope(path, manifest_path, {
+                "phase0_envelope_path": str(envelope_path),
+                "phase0_envelope_sha256": _sha(envelope_path.read_bytes())
+                    if envelope_path.is_file() and not envelope_path.is_symlink() else ""},
+                descriptor)
         key = (case["scenario_id"], case["category"])
         if (manifest.get("split") != "train" or
                 (family != "ub" and (manifest.get("scenario_id"), manifest.get("category")) != key) or
@@ -560,6 +630,7 @@ def combine_target_shards(family: str, shards: list[Path], output: Path, *,
         "case_coverage": combined["case_coverage"],
         "record_count": combined["record_count"], "dataset_sha256": combined["sha256"],
         "shard_manifests": shard_manifests}
+    manifest.update(_phase0_provenance(descriptor))
     if family in ("ub", "p"):
         if not isinstance(source_binding, dict) or not source_binding.get("path"):
             raise ValueError("Plan A pooled target requires the exact combined trajectory binding")
@@ -625,6 +696,7 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
             receipt.get("qualification_protocol") != descriptor["qualification_protocol"] or
             receipt.get("device") != descriptor["device"]):
         raise ValueError("case receipt does not bind the frozen descriptor")
+    _validate_phase0_provenance(receipt, descriptor, label="case receipt")
     expected_key = tuple(shard["case_key"])
     if require_complete_set:
         from .meco_phase2_complete_set import validate_complete_set_manifest
@@ -676,6 +748,7 @@ def validate_case_receipt(receipt: dict, shard: dict, descriptor: dict,
         if (_sha(raw) != entry.get("sha256") or
                 _sha(manifest_raw) != entry.get("manifest_sha256")):
             raise ValueError(f"case {family} bytes differ from their receipt")
+        _validate_phase0_target_envelope(path, manifest_path, entry, descriptor)
         manifest = json.loads(manifest_raw)
         if not isinstance(manifest, dict):
             raise ValueError(f"case {family} manifest must be an object")
@@ -749,11 +822,15 @@ def collect_case_complete_set(case: dict, output_root: Path, *, lease_attestatio
         "complete_set_manifest_sha256": _sha(manifest_path.read_bytes()),
         "complete_set_manifest": complete_manifest,
         "datasets": {}}
+    record.update(_phase0_provenance(case))
     for family, path in datasets.items():
         sidecar = path.with_suffix(path.suffix + ".manifest.json")
+        envelope_binding = _write_phase0_target_envelope(path, sidecar, case)
         record["datasets"][family] = {"path": str(path),
             "sha256": _sha(path.read_bytes()), "manifest_path": str(sidecar),
             "manifest_sha256": _sha(sidecar.read_bytes())}
+        if envelope_binding:
+            record["datasets"][family].update(envelope_binding)
     return record
 
 
@@ -948,6 +1025,8 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
                 "horizon_ticks": descriptor["horizon_ticks"],
                 "descriptor_sha256": descriptor["descriptor_sha256"],
                 "device_identity_attestation": attestation, "output_root": str(case_root)})
+            one_case["schema"] = descriptor["schema"]
+            one_case.update(_phase0_provenance(descriptor))
             receipt = collect_case(one_case, case_root)
             validate_case_receipt(receipt, shard, descriptor,
                 target_validators=target_validators, require_complete_set=True)
@@ -987,6 +1066,8 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
                     pooled_manifest.get("record_count") != combined[family].get("record_count") or
                     pooled_manifest.get("qualification_protocol") != descriptor["qualification_protocol"]):
                 raise ValueError(f"combined {family} corpus manifest is not descriptor-bound")
+            _validate_phase0_provenance(pooled_manifest, descriptor,
+                label=f"combined {family} target")
             _validate_case_coverage_summary(pooled_manifest.get("case_coverage"), expected_cases)
             combined[family]["case_coverage"] = pooled_manifest["case_coverage"]
             if family == "trajectory":
@@ -1068,6 +1149,8 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
                 pooled.get("qualification_protocol") != descriptor["qualification_protocol"] or
                 pooled.get("case_coverage") != target_coverage[family]):
             raise ValueError(f"combined {family} manifest binding or coverage changed")
+        _validate_phase0_provenance(pooled, descriptor,
+            label=f"published combined {family} target")
         _validate_case_coverage_summary(target_coverage[family], descriptor["ordered_cases"])
         pooled_manifests[family] = pooled
     trajectory_shards = pooled_manifests["trajectory"].get("shard_manifests")
