@@ -42,31 +42,31 @@
 > No five-track chunk, cycle, or evaluation has yet completed. The dashboard
 > direct-campaign status projection remains under repair.
 
-> **Live recovery campaign — 2026-10-25 00:51 UTC.** The failed
+> **R4 launch snapshot — 2026-10-25 00:51 UTC.** The failed
 > `meco-five-continuous-20261024-r3` root remains archived and untouched. Its
 > supervisor failed at 00:36:32 UTC because the worker run record omitted
 > top-level `track`; A1 had 100 optimizer updates, A2 had 93, and the other
 > tracks had 0. The scoped worker-manifest fix was independently approved at
 > `a4cc6a45ef2b3053bcc70af08ae265801bb74ed4`.
 >
-> A fresh, source-bound campaign `meco-five-continuous-20261025-r4` is now
-> running under user service `meco-five-continuous-20261025.service` (PID
+> A fresh, source-bound campaign `meco-five-continuous-20261025-r4` was
+> launched under user service `meco-five-continuous-20261025.service` (PID
 > `2750253`, started 00:46:34 UTC) from reviewed source commit `9bf7d8d55`.
 > Its manifest validates against that commit and assigns the two verified
-> WX9100 devices. Cycle 1 targets 100 optimizer updates per track: A1 is 1/100
-> on `cuda:0`, A2 is 1/100 on `cuda:1`, and A3/C1/C2 are queued at 0. No
-> training chunk, cycle, or automatic diagnostic evaluation is complete yet.
+> WX9100 devices. At this snapshot, cycle 1 targeted 100 optimizer updates per
+> track: A1 was 1/100 on `cuda:0`, A2 was 1/100 on `cuda:1`, and A3/C1/C2 were
+> queued at 0. No training chunk, cycle, or automatic diagnostic evaluation
+> was complete yet.
 > The run has no warm-start artifacts, uses the diagnostic split, and is not
 > qualification evidence.
 >
-> The dashboard service was restarted on the current checkout at 00:47:51 UTC;
+> At this snapshot, the dashboard service had been restarted on the current checkout at 00:47:51 UTC;
 > `/api/meco-status`, `/api/curriculum-status`, and `/assets/meco.js` return
 > HTTP 200, the served JavaScript hash matches the checkout, and the
-> three-pass ledger validates 55 scoped summaries. The status projection still
-> assumes the legacy `checkpoints/meco-five` layout and therefore does not yet
-> display r4's direct `checkpoints/{A1,A2,A3,C1,C2}` layout. A scoped dashboard
-> correction is underway; until reviewed and deployed, its training status is
-> not authoritative. GPU utilization was 94% and 98% at 00:51:11 UTC.
+> three-pass ledger validated 55 scoped summaries. The status projection then
+> assumed the legacy `checkpoints/meco-five` layout; its direct-root correction
+> was completed and verified later. GPU utilization was 94% and 98% at
+> 00:51:11 UTC.
 
 > **Plan C repeated-label implementation — 2026-10-25.** The isolated
 > implementation based on source `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`
@@ -84,6 +84,22 @@
 > currentness check was run; this tranche establishes no variance calibration,
 > winner, or qualification result. See
 > [`plan-c-repeated-rollout-labels.md`](implementation-provenance/plan-c-repeated-rollout-labels.md).
+
+> The dashboard provenance manifest now contains 57 validated scoped
+> summaries and its pinned digest matches the checkout. The dashboard restarted
+> from current `main` at 01:35 UTC (PID `2796113`); at 01:40 UTC, `/`,
+> `/api/meco-status`, `/api/curriculum-status`, `/assets/meco.js`, and
+> `/assets/dashboard.js` returned HTTP 200. The curriculum API reported
+> `validated_summary_only` with 57 tranches. Both served JavaScript SHA-256
+> values match `main`. No simulator replay was generated or reviewed in this
+> dashboard verification.
+>
+> **R4 training snapshot — 2026-10-25 01:40 UTC.** The supervisor heartbeat
+> was fresh and reported cycle 1, zero completed 100-update chunks, zero
+> completed cycles, and no evaluation. A1 was 68/100 on `cuda:0`, A2 was
+> 61/100 on `cuda:1`, and A3/C1/C2 were queued. The run remains diagnostic,
+> without warm-start artifacts; these are optimizer updates, not evaluation
+> passes or qualification evidence.
 
 > The dashboard provenance manifest now contains 57 validated scoped
 > summaries and its pinned digest matches the checkout. The service restarted
