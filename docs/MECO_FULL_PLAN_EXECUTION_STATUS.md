@@ -1,3 +1,14 @@
+> **Phase 4 direct-pursuit runtime wiring integrated — 2026-10-25 06:24 UTC.**
+> Reviewed code is on `main` at `42a57af12`. The runtime now captures exact
+> simulator pair-contact events and fixed-objective progress, checks matched
+> outcomes, requires all 11 policy rows for both 100-seed arms, and changes
+> only one preregistered pursuit slot while preserving the other category
+> opponent. The compiler still refuses to mark the cell executable until a
+> current-source paired simulator record, inspected fresh replay, and current
+> dashboard evidence are accepted. Static AST and diff checks passed. No tests,
+> simulator, GPU, replay, or qualification run was made; no behavior result is
+> claimed. The r4 campaign remains active and was not interrupted.
+>
 > **Phase 5 provenance dashboard reverified — 2026-10-25 06:09 UTC.** After
 > integrating the 72-entry three-pass ledger and digest pin at
 > `577584417`, `frc-defense-dashboard.service` restarted on current `main`
