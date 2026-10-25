@@ -1739,6 +1739,11 @@ class SafeActionCandidates:
     table: CandidateTable
     fallback_candidate_id: str
     action_indices: tuple[int, ...]
+    device_features: torch.Tensor | None = None
+    device_missing_mask: torch.Tensor | None = None
+    device_valid_mask: torch.Tensor | None = None
+    device_track_indices: torch.Tensor | None = None
+    device_fallback_index: torch.Tensor | None = None
 
 
 @torch.no_grad()
@@ -1815,13 +1820,59 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
                            tuple(bool(x) for x in mask.cpu().tolist()), SAFE_ACTION_FEATURES,
                            route_costs=(None,) * 8)
     from .curriculum_scenarios import teacher_actions
-    fallback_action = int(teacher_actions(env, observation)[world, slot].item())
-    if fallback_action < 0 or fallback_action >= 8 or not table.valid_mask[fallback_action]:
-        valid = [i for i, allowed in enumerate(table.valid_mask) if allowed]
-        if not valid:
-            raise RuntimeError("simulator exposed no legal fallback action")
-        fallback_action = valid[0]
-    return SafeActionCandidates(snap, table, table.candidate_ids[fallback_action], tuple(range(8)))
+    torch._assert_async(mask.any(), "simulator exposed no legal fallback action")
+    teacher_action = teacher_actions(env, observation)[world, slot].to(
+        device=mask.device, dtype=torch.long)
+    safe_teacher_action = teacher_action.clamp(0, 7)
+    fallback_index = torch.where(
+        (teacher_action >= 0) & (teacher_action < 8) & mask[safe_teacher_action],
+        teacher_action, mask.to(torch.long).argmax())
+    fallback_action = int(fallback_index.detach().to(device="cpu").item())
+    device = observation.device
+    dtype = points.dtype
+    device_values = torch.zeros((8, len(SAFE_ACTION_FEATURES)),
+                                device=device, dtype=dtype)
+    device_missing = torch.ones_like(device_values)
+    action_ids = torch.arange(8, device=device, dtype=torch.long)
+    device_values[:, 0] = action_ids.to(dtype)
+    device_values[:, 5] = torch.tensor((1., 1., 1., 1., 2., 4., 3., 0.),
+                                      device=device, dtype=dtype)
+    device_values[:, 6] = float(env.sim.field_length)
+    device_values[:, 7] = float(env.sim.field_width)
+    device_missing[:, (0, 5, 6, 7)] = 0.
+    collect_valid = candidate_available.to(device=device, dtype=torch.bool)
+    collect_heading_bin = torch.round(torch.remainder(
+        torch.atan2(delta[:, 1], delta[:, 0]), 2. * math.pi) *
+        (8. / (2. * math.pi))).remainder(8).to(dtype)
+    device_values[:4, 1] = track_indices.to(dtype)
+    device_values[:4, 2:4] = points
+    device_values[:4, 4] = collect_heading_bin
+    device_values[:4, 8] = distances
+    device_values[:4, 9] = nearby.to(dtype)
+    device_values[:4, 10] = confidence
+    device_values[:4, 11] = ages
+    device_missing[:4, (1, 2, 3, 4, 8, 9, 10, 11)] = (~collect_valid[:, None]).to(dtype)
+    opponent_valid = env.opponent_valid[world, slot].to(device=device, dtype=torch.bool)
+    opponent_xy = env.opponent_pose[world, slot, :2]
+    collect_opponent_distance = torch.linalg.vector_norm(points - opponent_xy, dim=-1)
+    device_values[:4, 12] = collect_opponent_distance
+    device_missing[:4, 12] = (~collect_valid | ~opponent_valid).to(dtype)
+    fixed_targets = torch.stack((
+        env.hub_centers[env.team_ids[slot]],
+        torch.where(opponent_valid, opponent_xy, pose[:2]),
+        env.hub_centers[env.team_ids[slot]], pose[:2]), dim=0)
+    fixed_delta = fixed_targets - pose[:2]
+    device_values[4:, 2:4] = fixed_targets
+    device_values[4:, 4] = torch.round(torch.remainder(
+        torch.atan2(fixed_delta[:, 1], fixed_delta[:, 0]), 2. * math.pi) *
+        (8. / (2. * math.pi))).remainder(8).to(dtype)
+    device_values[4:, 8] = torch.linalg.vector_norm(fixed_delta, dim=-1)
+    device_missing[4:, (2, 3, 4, 8)] = 0.
+    device_missing[:, 13] = 1.
+    return SafeActionCandidates(snap, table, table.candidate_ids[fallback_action],
+        tuple(range(8)), device_values, device_missing, mask,
+        track_indices.to(device=observation.device, dtype=torch.long),
+        fallback_index.to(device=observation.device, dtype=torch.long))
 
 
 def deterministic_candidate_scores(table: CandidateTable, *, policy="D1",
