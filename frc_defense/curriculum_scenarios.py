@@ -167,15 +167,25 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
         opponent_runtime = getattr(self, 'phase4_opponent_runtime', None)
         opponent_slots = (set(opponent_runtime['configured_slots'])
                           if opponent_runtime is not None else set())
-        if opponent_runtime is not None and set(pressure['slots']) != opponent_slots:
-            raise RuntimeError('runtime pressure slots differ from validation-bound opponent assignment')
+        direct_pursuit = (opponent_runtime is not None and
+                          opponent_runtime.get('policy_id') == 'direct_pursuit')
+        if opponent_runtime is not None:
+            pressure_slots = set(pressure['slots'])
+            if direct_pursuit:
+                registered = set(opponent_runtime.get('registered_pressure_slots', ()))
+                preserved = set(opponent_runtime.get('preserved_scripted_slots', ()))
+                if (len(opponent_slots) != 1 or not opponent_slots.issubset(pressure_slots)
+                        or registered != pressure_slots or preserved != pressure_slots - opponent_slots):
+                    raise RuntimeError('direct-pursuit assignment must replace one registered pressure slot')
+            elif pressure_slots != opponent_slots:
+                raise RuntimeError('runtime pressure slots differ from validation-bound opponent assignment')
         for slot in pressure['slots']:
             if slot == stationary_slot:
                 commands[:, slot] = 0.
                 continue
             commands[:, slot] = 0.
             policy_id = getattr(self, 'phase4_opponent_policy_id', None)
-            if policy_id is not None:
+            if policy_id is not None and (not direct_pursuit or slot in opponent_slots):
                 # The policy sees its own controller pose and only its noisy,
                 # validity-masked opponent track. Static anchor/objective data
                 # are scenario configuration, not simulator truth state.
@@ -198,6 +208,9 @@ class CurriculumEnv(TensorThreeVsThreeEnv):
                     opponent_runtime['applied_slots'] = sorted(set(
                         opponent_runtime['applied_slots']) | {int(slot)})
                     opponent_runtime['applied_command_calls'] += 1
+                    calls_by_slot = opponent_runtime['applied_command_calls_by_slot']
+                    calls_by_slot[str(slot)] = calls_by_slot.get(str(slot), 0) + int(
+                        active_requested.sum().item())
                 continue
             level = pressure['level']
             if factor and slot == 0 and factor['kind'] in (
@@ -299,8 +312,9 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         if (scenario_id not in ('offense_vs_scripted_pressure', 'full_match_offense')
                 or _pressure_level(category) not in supported_levels):
             raise ValueError('Phase 4 opponent policy requires a registered pressure category')
-        if phase4_opponent_policy_id == 'trench_interceptor' and phase4_opponent_schedule is None:
-            raise ValueError('trench interceptor requires its protocol-bound validation schedule')
+        if (phase4_opponent_policy_id in ('trench_interceptor', 'direct_pursuit')
+                and phase4_opponent_schedule is None):
+            raise ValueError('scheduled Phase 4 opponent requires its protocol-bound validation schedule')
     elif phase4_opponent_schedule is not None:
         raise ValueError('opponent validation schedule requires its assigned policy ID')
     trench_schedule = None
@@ -395,7 +409,14 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
         'factor_id': trench_schedule['factor_id'],
         'category': category, 'seed': int(phase4_opponent_seed),
         'configured_slots': trench_schedule['configured_pressure_slots'][category],
+        'registered_pressure_slots': trench_schedule.get(
+            'registered_pressure_slots', {}).get(category,
+            trench_schedule['configured_pressure_slots'][category]),
+        'preserved_scripted_slots': trench_schedule.get(
+            'preserved_scripted_slots', {}).get(category, []),
         'applied_slots': [], 'applied_command_calls': 0,
+        'applied_command_calls_by_slot': {
+            str(slot): 0 for slot in trench_schedule['configured_pressure_slots'][category]},
         'interception_rate': None, 'alternate_crossing_success_rate': None,
         'trench_crossing_time_s': None, 'qualification_eligible': False})
     env.contact_geometry_id = contact_geometry_id

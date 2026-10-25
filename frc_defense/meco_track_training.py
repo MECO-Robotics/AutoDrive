@@ -1213,6 +1213,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     safety_counts: dict | None = None,
                     metric_ledger: MecoEpisodeMetricLedger | None = None,
                     contact_progress_observer=None,
+                    direct_pursuit_capture=None,
                     contact_progress_goal_id=None,
                     return_execution_flags: bool = False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
@@ -1246,6 +1247,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             planner_goal_heading_override=goal_heading,
             planner_force_goal_replan=(planner_force_goal_replan and tick_index == 0),
             **planner_kwargs)
+        if direct_pursuit_capture is not None:
+            direct_pursuit_capture.observe_physics_step()
         if contact_progress_observer is not None:
             _observe_phase4_contact_route_progress(env, contact_progress_observer,
                 selected_goal_id=contact_progress_goal_id,
@@ -2376,6 +2379,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   inference_disable_tick: int | None = None,
                   phase4_factor: dict | None = None,
                   phase4_opponent_schedule: dict | None = None,
+                  phase4_direct_pursuit_binding: dict | None = None,
                   phase4_contact_factor_id: str | None = None,
                   phase4_route_outcome_factor_ids: tuple[str, ...] | None = None,
                   contact_geometry_id: str | None = None,
@@ -2460,6 +2464,22 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             protocol_id=(evaluation_binding["protocol_id"]
                          if evaluation_binding is not None else None))
         phase4_opponent_policy_id = validated_schedule["policy_id"]
+    if phase4_direct_pursuit_binding is not None:
+        if (split != "validation" or evaluation_binding is None or
+                scenario_id != "offense_vs_scripted_pressure" or
+                not isinstance(phase4_direct_pursuit_binding, dict) or
+                phase4_direct_pursuit_binding.get("policy_id") != "direct_pursuit" or
+                phase4_direct_pursuit_binding.get("factor_id") != "opponent.direct_pursuit" or
+                phase4_direct_pursuit_binding.get("protocol_id") != evaluation_binding["protocol_id"] or
+                phase4_direct_pursuit_binding.get("protocol_sha256") != evaluation_binding["protocol_sha256"] or
+                phase4_direct_pursuit_binding.get("seed_list") != list(scored_seeds) or
+                phase4_direct_pursuit_binding.get("scenario_id") != scenario_id or
+                phase4_direct_pursuit_binding.get("qualification_case") != qualification_case):
+            raise ValueError("direct-pursuit binding differs from exact held-out evaluator case/seed")
+        if phase4_opponent_schedule is not None and (
+                phase4_opponent_schedule.get("schedule_sha256") !=
+                phase4_direct_pursuit_binding.get("schedule_sha256")):
+            raise ValueError("direct-pursuit treatment schedule differs from outcome binding")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
@@ -2932,6 +2952,21 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         phase4_focal_pose_assignment=phase4_focal_pose_assignment,
                         phase4_teammate_behavior_assignment=phase4_teammate_behavior_assignment,
                         **(qualification_case or {}))
+                    direct_pursuit_capture = None
+                    if phase4_direct_pursuit_binding is not None:
+                        from .meco_phase4_direct_pursuit import DirectPursuitEpisodeCapture
+                        manifest = policy_manifest[policy]
+                        checkpoint_hash = manifest.get("checkpoint_sha256")
+                        direct_pursuit_capture = DirectPursuitEpisodeCapture(
+                            env, phase4_direct_pursuit_binding,
+                            condition=("factor_treatment" if phase4_opponent_schedule
+                                       is not None else "no_factor"),
+                            episode_id=episode_id, source_identity_sha256=source_hash,
+                            checkpoint_sha256=checkpoint_hash,
+                            scenario_id=scenario_id, category=category,
+                            qualification_case=qualification_case or {}, seed=seed,
+                            split=split, policy_id=policy, execution_device=execution_device,
+                            condition_id=condition_id)
                     phase4_focal_pose_record = None
                     if phase4_focal_pose_assignment is not None:
                         from .meco_phase4_context import phase4_focal_pose_evaluator_diagnostics
@@ -3024,6 +3059,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                                              dtype=torch.long)
                                 _, _, done, truncated, _ = env.step(
                                     native_actions, capture_info=False)
+                                if direct_pursuit_capture is not None:
+                                    direct_pursuit_capture.observe_physics_step()
                                 if contact_progress_observer is not None:
                                     planner_goal = env.planner.last_goal.reshape(
                                         env.n, 6, 2)[0, 3].tolist()
@@ -3233,6 +3270,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                         not prepared.get("fallback_used", False)) else 1.),
                                 metric_ledger=episode_metric_ledger,
                                 contact_progress_observer=contact_progress_observer,
+                                direct_pursuit_capture=direct_pursuit_capture,
                                 contact_progress_goal_id=(selected_candidate_id or
                                     ("selected_goal:" + json.dumps(
                                         [round(float(v), 6) for v in goal_xy],
@@ -3705,6 +3743,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "paired_outcome_by_family": None,
                                 "qualification_eligible": False,
                             } if phase4_opponent_schedule is not None else None),
+                            "phase4_direct_pursuit": (
+                                direct_pursuit_capture.finish(
+                                    episode_censored=(int(env.sim.physics_substep_index[0].item())
+                                        < int(env.horizon)))
+                                if direct_pursuit_capture is not None else None),
                             "phase4_pair_contact_event": (
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
@@ -4032,6 +4075,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 if inference_disable_tick is not None else None),
             "phase4_factor": phase4_factor,
             "phase4_opponent_schedule": phase4_opponent_schedule,
+            "phase4_direct_pursuit_binding": phase4_direct_pursuit_binding,
             "phase4_opponent_outcomes": ({
                 "interception_rate": None,
                 "policy_family_coverage": None,

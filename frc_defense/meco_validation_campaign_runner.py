@@ -45,15 +45,19 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
                                     if key != "plan_id"}):
         raise ValueError("Phase 4 campaign plan digest mismatch")
     requirement = next((row for row in plan.get("requirements", [])
-        if row.get("requirement_id") == "reactive_defenders_and_opponent_pools"), None)
+        if row.get("requirement_id") in ("reactive_defenders_and_opponent_pools",
+                                          "direct_pursuit") and any(
+            cell.get("case_cell_key") == cell_key for cell in row.get("cells", []))), None)
     if requirement is None:
-        raise ValueError("Phase 4 plan lacks the reactive opponent requirement")
+        raise ValueError("Phase 4 plan lacks the requested opponent requirement")
     matches = [cell for cell in requirement.get("cells", [])
                if cell.get("case_cell_key") == cell_key]
     if len(matches) != 1:
         raise ValueError("Phase 4 reactive cell key is missing or duplicated")
     cell = matches[0]
-    assignment = cell.get("opponent_schedule_assignment")
+    direct_pursuit = requirement.get("requirement_id") == "direct_pursuit"
+    assignment = (cell.get("direct_pursuit_assignment") if direct_pursuit else
+                 cell.get("opponent_schedule_assignment"))
     if (not isinstance(assignment, dict) or
             cell.get("scheduler_assignment_supported") is not True or
             assignment.get("qualification_eligible") is not False):
@@ -92,17 +96,29 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     qualification_case = {axis: case_axes[axis] for axis in (
         "layout_id", "defender_family", "start_condition", "sensor_profile")}
     schedule = compile_opponent_policy_schedule(
-        policy_id=assignment["policy_id"], scenario_id=case_axes["scenario_id"],
+        policy_id=("direct_pursuit" if direct_pursuit else assignment["policy_id"]),
+        scenario_id=case_axes["scenario_id"],
         categories=(case_axes["category"],), qualification_case=qualification_case,
         seeds=seeds, split="validation", factor_id=cell["factor_id"],
         protocol_id=protocol["protocol_id"])
     if (schedule["policy_config_sha256"] != assignment.get("policy_config_sha256")
             or schedule["factor_id"] != cell.get("factor_id")
-            or schedule["policy_family"] != assignment.get("policy_family")
+            or (not direct_pursuit and schedule["policy_family"] != assignment.get("policy_family"))
             or schedule["per_episode_assignment_sha256"] !=
                 assignment.get("factor_treatment_seeded_assignment_sha256")
             or schedule["configured_pressure_slots"].get(case_axes["category"])
-                != assignment.get("configured_pressure_slots")):
+                != assignment.get("configured_pressure_slots")
+            or (direct_pursuit and (
+                schedule.get("registered_pressure_slots", {}).get(case_axes["category"])
+                    != assignment.get("registered_pressure_slots")
+                or schedule.get("preserved_scripted_slots", {}).get(case_axes["category"])
+                    != assignment.get("preserved_scripted_slots")
+                or assignment.get("assigned_pursuit_slot") not in
+                    assignment.get("configured_pressure_slots", ())
+                or assignment.get("configured_pressure_slots") !=
+                    [assignment.get("assigned_pursuit_slot")]
+                or assignment.get("control_policy_ids") != sorted(
+                    (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))))):
         raise ValueError("runtime schedule differs from the planner's exact policy/config/seed assignment")
     case_dir = Path(output_dir).resolve()
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -114,9 +130,14 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         "qualification_case": qualification_case, "seed_list": seeds}
     seed_path = case_dir / "seed-manifest.json"
     schedule_path = case_dir / "opponent-schedule.json"
+    direct_binding = {**schedule, "schedule": schedule,
+        "protocol_sha256": hashlib.sha256(raw).hexdigest()}
+    direct_binding_path = case_dir / "direct-pursuit-binding.json"
     case_path = case_dir / "qualification-case.json"
     _write_immutable(seed_path, seed_manifest)
     _write_immutable(schedule_path, schedule)
+    if direct_pursuit:
+        _write_immutable(direct_binding_path, direct_binding)
     _write_immutable(case_path, qualification_case)
     base_argv = [sys.executable, str(Path(matrix_script).resolve()),
         "--scenario", case_axes["scenario_id"], "--categories", case_axes["category"],
@@ -130,6 +151,8 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     pair_results = {}
     for condition in ("no_factor", "factor_treatment"):
         argv = [*base_argv, "--output-dir", str(case_dir / condition)]
+        if direct_pursuit:
+            argv += ["--phase4-direct-pursuit-binding-json", str(direct_binding_path)]
         if condition == "factor_treatment":
             argv += ["--phase4-opponent-schedule-json", str(schedule_path)]
         pair_results[condition] = execute(argv)
@@ -137,17 +160,27 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     if all(result == 0 for result in pair_results.values()):
         pairing = _validate_phase4_opponent_pair(case_dir, schedule,
             categories=[case_axes["category"]], seeds=seeds,
-            qualification_case=qualification_case)
+            qualification_case=qualification_case,
+            direct_pursuit=direct_pursuit)
     return {"case_cell_key": cell_key,
         "policy_id": assignment["policy_id"],
         "schedule_sha256": schedule["schedule_sha256"],
-        "runtime_status": "scheduled_not_simulator_validated",
+        "runtime_status": ("outcomes_captured_pending_replay_review" if
+            direct_pursuit and pairing else "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
-        "outcome_signals_complete": False,
+        "outcome_signals_complete": bool(direct_pursuit and pairing and
+            pairing.get("outcome_signals_complete")),
         "qualification_eligible": False,
-        "required_family_outcomes": {"interception_rate": None,
-            "policy_family_coverage": None, "paired_outcome_by_family": None},
+        "required_family_outcomes": ({"interception_rate": None,
+            "policy_family_coverage": None, "paired_outcome_by_family": None}
+            if not direct_pursuit else None),
         "paired_coverage": pairing,
+        "promotion_gate": ({"simulator_outcomes_captured": bool(pairing and
+            pairing.get("outcome_signals_complete")),
+            "held_out_replay_review_accepted": False,
+            "dashboard_backend_current": False,
+            "dashboard_frontend_current": False,
+            "executable_promotion_allowed": False} if direct_pursuit else None),
         "dispatch_return_codes": pair_results,
         "executed": all(result == 0 for result in pair_results.values())}
 
@@ -777,7 +810,8 @@ def _file_sha(path: Path) -> str:
 
 
 def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
-        *, categories: list[str], seeds: list[int], qualification_case: dict) -> dict:
+        *, categories: list[str], seeds: list[int], qualification_case: dict,
+        direct_pursuit: bool = False) -> dict:
     """Require exact paired controls/category/seeds across both matrix arms."""
     from .meco_tracks import MECO_TRACKS
     policy_names = set((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
@@ -793,13 +827,28 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         matrix = _read_json(paths[0])
         protocol = matrix.get("protocol", {})
         expected_schedule = schedule if arm == "factor_treatment" else None
+        direct_binding = protocol.get("phase4_direct_pursuit_binding")
         if (protocol.get("qualification_case") != qualification_case
                 or protocol.get("categories") != categories
                 or protocol.get("seed_list") != seeds
                 or protocol.get("condition_selection") != ["architecture_matched_cv_k16"]
                 or [condition.get("condition_name") for condition in protocol.get("conditions", [])]
                     != ["architecture_matched_cv_k16"]
-                or protocol.get("phase4_opponent_schedule") != expected_schedule):
+                or protocol.get("phase4_opponent_schedule") != expected_schedule
+                or (direct_pursuit and (not isinstance(direct_binding, dict)
+                    or direct_binding.get("schedule") != schedule
+                    or direct_binding.get("schedule_sha256") != schedule["schedule_sha256"]
+                    or direct_binding.get("checkpoint_bundle_sha256") != protocol.get(
+                        "checkpoint_sha256")
+                    or direct_binding.get("source_identity_sha256") != protocol.get(
+                        "source_identity_sha256")
+                    or direct_binding.get("execution_device") != protocol.get(
+                        "execution_device")
+                    or not isinstance(direct_binding.get("pair_binding_id"), str)
+                    or not direct_binding.get("pair_binding_id")
+                    or direct_binding.get("pair_binding") !=
+                        protocol.get("phase4_direct_pursuit_binding", {}).get(
+                            "pair_binding")))):
             raise ValueError(f"Phase 4 {arm} matrix differs from its frozen paired assignment")
         binding = {key: protocol.get(key) for key in (
             "scenario_id", "qualification_protocol_id", "qualification_protocol",
@@ -817,6 +866,21 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         arm_reports = {}
         for condition_name, entry in condition_map.items():
             report = _read_json(Path(entry["report_path"]).resolve())
+            if direct_pursuit and (
+                    report.get("scenario_id") != protocol.get("scenario_id")
+                    or report.get("categories") != categories
+                    or report.get("split") != "validation"
+                    or report.get("evaluation_protocol_id") !=
+                        protocol.get("qualification_protocol_id")
+                    or report.get("evaluation_protocol_sha256") !=
+                        protocol.get("qualification_protocol", {}).get("protocol_sha256")
+                    or report.get("exact_episode_seeds") != seeds
+                    or report.get("execution_device") != protocol.get("execution_device")
+                    or report.get("source_identity_sha256") !=
+                        protocol.get("source_identity_sha256")
+                    or report.get("checkpoint_sha256") != protocol.get(
+                        "checkpoint_sha256")):
+                raise ValueError(f"Phase 4 {arm} evaluator report differs from frozen matrix provenance")
             rows = _records_by_key(report)
             if set(rows) != expected_keys:
                 raise ValueError(f"Phase 4 {arm}/{condition_name} has incomplete policy/category/seed coverage")
@@ -824,6 +888,38 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                 raise ValueError("Phase 4 opponent outputs cannot be qualification eligible")
             for key, row in rows.items():
                 captured = row.get("phase4_opponent_policy")
+                if direct_pursuit:
+                    outcome = row.get("phase4_direct_pursuit")
+                    if (not isinstance(outcome, dict)
+                            or outcome.get("scenario_id") != protocol.get("scenario_id")
+                            or outcome.get("category") != key[1]
+                            or outcome.get("qualification_case") != qualification_case
+                            or outcome.get("split") != "validation"
+                            or outcome.get("seed") != key[2]
+                            or outcome.get("factor_id") != schedule["factor_id"]
+                            or outcome.get("policy_id") != schedule["policy_id"]
+                            or outcome.get("schedule_sha256") != schedule["schedule_sha256"]
+                            or outcome.get("pair_binding_id") != direct_binding.get(
+                                "pair_binding_id")
+                            or outcome.get("policy_config_sha256") != schedule["policy_config_sha256"]
+                            or outcome.get("configured_slots") != schedule[
+                                "configured_pressure_slots"][key[1]]
+                            or outcome.get("checkpoint_bundle_sha256") != protocol.get(
+                                "checkpoint_sha256")
+                            or outcome.get("policy_checkpoint_sha256") != row.get(
+                                "checkpoint_sha256")
+                            or outcome.get("source_identity_sha256") !=
+                                protocol.get("source_identity_sha256")
+                            or outcome.get("execution_device") != protocol.get("execution_device")
+                            or outcome.get("condition") != arm):
+                        raise ValueError(f"Phase 4 direct-pursuit row lacks exact simulator binding: {key}")
+                    if arm == "factor_treatment" and (
+                            outcome.get("applied_slots") != outcome.get("configured_slots")
+                            or outcome.get("contact_events") is None):
+                        raise ValueError(f"direct-pursuit treatment lacks applied slot/event capture: {key}")
+                    if arm == "no_factor" and outcome.get("applied_slots") != []:
+                        raise ValueError(f"direct-pursuit control unexpectedly applied policy: {key}")
+                    continue
                 if arm == "no_factor" and captured is not None:
                     raise ValueError("no-factor control unexpectedly applied a reactive policy")
                 if arm == "factor_treatment":
@@ -844,13 +940,21 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         reports_by_arm[arm] = arm_reports_by_name
         matrix_files[arm] = paths[0]
     pair_counts = {}
+    direct_paired = []
     for condition_name in sorted(condition_names):
         control = reports_by_arm["no_factor"][condition_name]
         treatment = reports_by_arm["factor_treatment"][condition_name]
         if set(control) != set(treatment):
             raise ValueError(f"Phase 4 pair key coverage differs for {condition_name}")
         pair_counts[condition_name] = len(control)
-    pairing = {"schema": "meco-phase4-reactive-opponent-pair-coverage-v1",
+        if direct_pursuit:
+            from .meco_phase4_direct_pursuit import paired_direct_pursuit_outcomes
+            for key in sorted(control):
+                direct_paired.append(paired_direct_pursuit_outcomes(
+                    control[key]["phase4_direct_pursuit"],
+                    treatment[key]["phase4_direct_pursuit"]))
+    pairing = {"schema": ("meco-phase4-direct-pursuit-pair-outcomes-v1" if direct_pursuit
+                           else "meco-phase4-reactive-opponent-pair-coverage-v1"),
         "policy_id": schedule["policy_id"],
         "schedule_sha256": schedule["schedule_sha256"],
         "condition_names": sorted(condition_names),
@@ -859,11 +963,58 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
         "validation_seed_assignment_sha256": _sha(seeds),
         "paired_rows_per_condition": pair_counts,
         "exact_policy_category_seed_pair_coverage": True,
-        "runtime_status": "scheduled_not_simulator_validated",
+        "runtime_status": ("outcomes_captured_pending_replay_review" if direct_pursuit
+                            else "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
-        "outcome_signals_complete": False,
+        "outcome_signals_complete": bool(direct_pursuit and direct_paired),
         "paired_outcome_by_family": None,
-        "interception_rate": None,
+        "interception_rate": ({
+            "numerator_intercepted_episodes": sum(
+                row["interception_episode_numerator"] for row in direct_paired),
+            "denominator_eligible_episodes": sum(
+                row["interception_eligible_episode_denominator"]
+                for row in direct_paired),
+            "rate": (sum(row["interception_episode_numerator"]
+                for row in direct_paired) / sum(
+                    row["interception_eligible_episode_denominator"]
+                    for row in direct_paired)) if direct_paired else None}
+            if direct_pursuit else None),
+        "contact_frequency": ({
+            "numerator_distinct_pair_contact_substeps": sum(
+                sum(pair["distinct_contact_substep_count"] for pair in
+                    reports_by_arm["factor_treatment"][condition_name][key][
+                        "phase4_direct_pursuit"]["contact_pairs"])
+                for condition_name in sorted(condition_names)
+                for key in sorted(reports_by_arm["factor_treatment"][condition_name])),
+            "denominator_pair_seconds": sum(
+                reports_by_arm["factor_treatment"][condition_name][key][
+                    "phase4_direct_pursuit"]["robot_contact_rate_denominator_pair_seconds"]
+                for condition_name in sorted(condition_names)
+                for key in sorted(reports_by_arm["factor_treatment"][condition_name])),
+            "rate_distinct_pair_contact_substeps_per_pair_second": (
+                sum(reports_by_arm["factor_treatment"][condition_name][key][
+                    "phase4_direct_pursuit"]["robot_contact_rate_numerator_distinct_substeps"]
+                    for condition_name in sorted(condition_names)
+                    for key in sorted(reports_by_arm["factor_treatment"][condition_name])) /
+                sum(reports_by_arm["factor_treatment"][condition_name][key][
+                    "phase4_direct_pursuit"]["robot_contact_rate_denominator_pair_seconds"]
+                    for condition_name in sorted(condition_names)
+                    for key in sorted(reports_by_arm["factor_treatment"][condition_name])))
+                if direct_pursuit and treatment else None}
+            if direct_pursuit else None),
+        "robot_contact_rate": ({"mean_pair_contact_events_per_pair_second":
+            sum(treatment[key]["phase4_direct_pursuit"]["robot_contact_rate"]
+                for key in treatment) / len(treatment)} if direct_pursuit and treatment else None),
+        "paired_time_loss_to_opponents_s": ([row["time_lost_to_opponents_s"]
+            for row in direct_paired] if direct_pursuit else None),
+        "paired_time_loss_by_policy": ({policy: {
+            "eligible_pairs": sum(row["policy_id"] == policy for row in direct_paired),
+            "mean_time_lost_to_opponents_s": sum(row["time_lost_to_opponents_s"]
+                for row in direct_paired if row["policy_id"] == policy) /
+                sum(row["policy_id"] == policy for row in direct_paired)}
+            for policy in sorted({row["policy_id"] for row in direct_paired})}
+            if direct_pursuit and direct_paired else None),
+        "paired_direct_pursuit_outcomes": direct_paired if direct_pursuit else None,
         "qualification_eligible": False,
         "matrix_sha256": {arm: _file_sha(path) for arm, path in matrix_files.items()}}
     pairing["pairing_sha256"] = _sha(pairing)

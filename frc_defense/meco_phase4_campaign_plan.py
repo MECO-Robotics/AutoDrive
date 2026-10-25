@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from .meco_phase4_context import phase4_start_profile_assignment
 
 PLAN_SCHEMA = "meco-phase4-validation-campaign-plan-v1"
 POLICIES = ("D0", "D1", "D2", "A1", "A2", "A3", "C1", "C2")
+DIRECT_PURSUIT_POLICY_IDS = tuple(sorted((*POLICIES, "A1_P0", "A2_P0", "A3_P0")))
 CONDITIONS = ("no_factor", "factor_treatment")
 EXPECTED_FACTOR_CASE_AXIS_CELLS = 6488
 VALIDATION_SEEDS_PER_CASE = 100
@@ -39,6 +41,142 @@ VALIDATION_SEEDS_PER_CASE = 100
 def _seed_digest(seeds: list[int]) -> str:
     """Bind exact validation seed assignment without returning its values."""
     return _sha256(_canonical_bytes(seeds))
+
+
+def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
+        protocol_sha256: str, registry_sha256: str, case: dict, seed_sha256: str,
+        assignment_sha256: str, seed_count: int,
+        configured_pressure_slots: list[int]) -> dict | None:
+    matches = [row for row in rows if isinstance(row, dict) and
+        row.get("scenario_id") == case["scenario_id"] and
+        row.get("category") == case["category"] and
+        row.get("qualification_case") == {axis: case[axis] for axis in (
+            "layout_id", "defender_family", "start_condition", "sensor_profile")}]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("direct-pursuit review evidence duplicates a protocol case")
+    row = matches[0]
+    replay = row.get("replay_review")
+    outcomes = row.get("paired_outcomes")
+    paired_replays = replay.get("paired_replays") if isinstance(replay, dict) else None
+    pair_count = seed_count * len(DIRECT_PURSUIT_POLICY_IDS)
+    schedule_sha256 = row.get("schedule_sha256")
+    seed_manifest_sha256 = row.get("seed_manifest_sha256")
+    interception = outcomes.get("interception_rate") if isinstance(outcomes, dict) else None
+    contact_rate = outcomes.get("robot_contact_rate") if isinstance(outcomes, dict) else None
+    time_loss = outcomes.get("paired_time_loss_to_opponents_s") if isinstance(outcomes, dict) else None
+    exact_binding = (row.get("schema") == "meco-phase4-direct-pursuit-review-evidence-v1"
+        and row.get("protocol_id") == protocol.get("protocol_id")
+        and row.get("protocol_sha256") == protocol_sha256
+        and row.get("registry_sha256") == registry_sha256
+        and row.get("factor_id") == "opponent.direct_pursuit"
+        and row.get("policy_id") == "direct_pursuit"
+        and row.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and row.get("split") == "validation"
+        and row.get("validation_seed_assignment_sha256") == seed_sha256
+        and row.get("assignment_identity_sha256") == assignment_sha256
+        and isinstance(schedule_sha256, str) and bool(schedule_sha256)
+        and isinstance(seed_manifest_sha256, str) and bool(seed_manifest_sha256)
+        and row.get("configured_pressure_slots") == configured_pressure_slots
+        and row.get("control_policy_ids") == list(DIRECT_PURSUIT_POLICY_IDS)
+        and isinstance(row.get("paired_rows_per_condition"), dict)
+        and set(row["paired_rows_per_condition"]) == {
+            "no_factor", "factor_treatment"}
+        and row["paired_rows_per_condition"] == {
+            "no_factor": pair_count, "factor_treatment": pair_count}
+        and isinstance(row.get("source_identity_sha256"), str)
+        and bool(row.get("source_identity_sha256"))
+        and isinstance(row.get("checkpoint_bundle_sha256"), dict)
+        and bool(row.get("checkpoint_bundle_sha256"))
+        and all(isinstance(value, str) and value
+                for value in row["checkpoint_bundle_sha256"].values())
+        and isinstance(row.get("execution_device"), dict)
+        and bool(row.get("execution_device"))
+        and row.get("exact_pair_coverage") is True
+        and row.get("all_pairs_uncensored") is True
+        and row.get("qualification_eligible") is False
+        and row.get("eligible_pair_count") == pair_count
+        and isinstance(row.get("paired_outcomes_artifact_sha256"), str)
+        and bool(row.get("paired_outcomes_artifact_sha256"))
+        and isinstance(outcomes, dict)
+        and isinstance(interception, dict)
+        and interception.get("denominator_eligible_episodes") == pair_count
+        and type(interception.get("numerator_intercepted_episodes")) is int
+        and 0 <= interception["numerator_intercepted_episodes"] <= pair_count
+        and isinstance(interception.get("rate"), (int, float))
+        and math.isfinite(interception["rate"])
+        and abs(interception["rate"] - interception[
+            "numerator_intercepted_episodes"] / pair_count) <= 1e-12
+        and isinstance(contact_rate, dict)
+        and type(contact_rate.get("numerator_distinct_pair_contact_substeps")) is int
+        and contact_rate["numerator_distinct_pair_contact_substeps"] >= 0
+        and isinstance(contact_rate.get("denominator_pair_seconds"), (int, float))
+        and math.isfinite(contact_rate["denominator_pair_seconds"])
+        and contact_rate["denominator_pair_seconds"] > 0
+        and isinstance(contact_rate.get(
+            "rate_distinct_pair_contact_substeps_per_pair_second"), (int, float))
+        and math.isfinite(contact_rate[
+            "rate_distinct_pair_contact_substeps_per_pair_second"])
+        and isinstance(time_loss, list) and len(time_loss) == pair_count
+        and all(isinstance(value, (int, float)) and math.isfinite(value)
+                for value in time_loss)
+        and isinstance(replay, dict)
+        and replay.get("review_accepted") is True
+        and replay.get("validation_seed_assignment_sha256") == seed_sha256
+        and replay.get("dashboard_backend_current") is True
+        and replay.get("dashboard_frontend_current") is True
+        and replay.get("endpoint_healthy") is True
+        and replay.get("replay_seed_is_in_exact_validation_manifest") is True
+        and replay.get("replay_current_checkout") is True
+        and type(replay.get("replay_seed")) is int
+        and 0 <= replay["replay_seed"] < 2**63
+        and replay.get("seed_manifest_sha256") == seed_manifest_sha256
+        and replay.get("backend_source_identity_sha256") == row.get(
+            "source_identity_sha256")
+        and isinstance(replay.get("frontend_asset_manifest_sha256"), str)
+        and bool(replay.get("frontend_asset_manifest_sha256"))
+        and isinstance(paired_replays, list) and len(paired_replays) == 2
+        and {item.get("condition") for item in paired_replays if isinstance(item, dict)} ==
+            {"no_factor", "factor_treatment"}
+        and len({item.get("seed") for item in paired_replays if isinstance(item, dict)}) == 1
+        and all(isinstance(item, dict)
+            and item.get("scenario_id") == case["scenario_id"]
+            and item.get("category") == case["category"]
+            and item.get("qualification_case") == {axis: case[axis] for axis in (
+                "layout_id", "defender_family", "start_condition", "sensor_profile")}
+            and item.get("split") == "validation"
+            and type(item.get("seed")) is int and 0 <= item["seed"] < 2**63
+            and item.get("seed") == replay.get("replay_seed")
+            and item.get("seed_manifest_sha256") == seed_manifest_sha256
+            and item.get("schedule_sha256") == schedule_sha256
+            and item.get("assignment_identity_sha256") == assignment_sha256
+            and item.get("source_identity_sha256") == row.get("source_identity_sha256")
+            and item.get("frontend_asset_manifest_sha256") == replay.get(
+                "frontend_asset_manifest_sha256")
+            and item.get("checkpoint_bundle_sha256") == row.get("checkpoint_bundle_sha256")
+            and item.get("execution_device") == row.get("execution_device")
+            and item.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+            and item.get("policy_id") == "direct_pursuit"
+            and item.get("configured_slots") == configured_pressure_slots
+            and item.get("policy_ids") == list(DIRECT_PURSUIT_POLICY_IDS)
+            and ((item.get("condition") == "no_factor" and item.get("applied_slots") == [])
+                or (item.get("condition") == "factor_treatment" and
+                    item.get("applied_slots") == configured_pressure_slots))
+            and isinstance(item.get("replay_id"), str) and bool(item["replay_id"])
+            and isinstance(item.get("replay_sha256"), str) and bool(item["replay_sha256"])
+            for item in paired_replays)
+        and isinstance(replay.get("reviewer"), str) and bool(replay["reviewer"]))
+    if not exact_binding:
+        return {"accepted": False, "reason": "direct-pursuit review evidence is incomplete or mismatched"}
+    return {"accepted": True, "evidence_sha256": _sha256(_canonical_bytes(row)),
+        "source_identity_sha256": row["source_identity_sha256"],
+        "checkpoint_bundle_sha256": row["checkpoint_bundle_sha256"],
+        "execution_device": row["execution_device"],
+        "schedule_sha256": schedule_sha256,
+        "registry_sha256": registry_sha256,
+        "seed_manifest_sha256": seed_manifest_sha256,
+        "paired_replay_sha256": _sha256(_canonical_bytes(paired_replays))}
 
 
 def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, Any]]:
@@ -70,11 +208,25 @@ def _validate_seed_partition(protocol: dict[str, Any]) -> dict[tuple, dict[str, 
 
 def compile_phase4_campaign_plan(protocol_path: str | Path,
                                 registry_path: str | Path,
-                                overlay_path: str | Path) -> dict[str, Any]:
+                                overlay_path: str | Path,
+                                direct_pursuit_review_evidence_path: str | Path | None = None
+                                ) -> dict[str, Any]:
     """Return a compact, deterministic schedule plan, never episode rows."""
     protocol, protocol_raw = _read_protocol_validation(protocol_path)
     registry, registry_raw = _read_json(registry_path)
     overlay, overlay_raw = _read_json(overlay_path)
+    direct_review_rows = []
+    direct_review_raw_sha256 = None
+    if direct_pursuit_review_evidence_path is not None:
+        review_path = Path(direct_pursuit_review_evidence_path)
+        review_raw = review_path.read_bytes()
+        review_payload = json.loads(review_raw)
+        if (not isinstance(review_payload, dict) or review_payload.get("schema") !=
+                "meco-phase4-direct-pursuit-review-evidence-bundle-v1" or
+                not isinstance(review_payload.get("cases"), list)):
+            raise ValueError("invalid direct-pursuit replay-review evidence bundle")
+        direct_review_rows = review_payload["cases"]
+        direct_review_raw_sha256 = _sha256(review_raw)
     expected_overlay = compile_phase4_design_overlay(protocol_path, registry_path)
     if overlay != expected_overlay:
         raise ValueError("Phase 4 overlay does not exactly match the bound protocol and registry")
@@ -146,6 +298,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                 for product in design_products:
                     design_axes = dict(zip(names, product))
                     reactive_assignment = None
+                    direct_pursuit_assignment = None
+                    direct_review_gate = None
                     start_profile_assignment = None
                     if req_id == "reactive_defenders_and_opponent_pools":
                         policy_id = design_axes.get("policy_pool")
@@ -203,6 +357,67 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             "executed": False,
                             "qualification_eligible": False,
                         }
+                    if req_id == "direct_pursuit":
+                        if factor != "opponent.direct_pursuit":
+                            raise ValueError("direct-pursuit requirement has an unexpected factor")
+                        supported = opponent_policy_runtime_domain_supported(
+                            case["scenario_id"], case["category"])
+                        if supported:
+                            case_payload = {"scenario_id": case["scenario_id"],
+                                "category": case["category"],
+                                "qualification_case": {axis: case[axis] for axis in (
+                                    "layout_id", "defender_family", "start_condition",
+                                    "sensor_profile")}, "split": "validation",
+                                "validation_seed_assignment_sha256": seed_info["seed_sha256"]}
+                            registered_pressure_slots = list(opponent_policy_runtime_slots(
+                                case["category"]))
+                            if not registered_pressure_slots:
+                                raise ValueError("direct pursuit requires registered pressure slots")
+                            assigned_pursuit_slot = registered_pressure_slots[0]
+                            direct_pursuit_assignment = {
+                                "schema": "meco-phase4-direct-pursuit-assignment-v1",
+                                "policy_id": "direct_pursuit", "factor_id": factor,
+                                "policy_config_sha256": policy_pool_identity()["config_sha256"],
+                                "registered_pressure_slots": registered_pressure_slots,
+                                "assigned_pursuit_slot": assigned_pursuit_slot,
+                                "configured_pressure_slots": [assigned_pursuit_slot],
+                                "preserved_scripted_slots": registered_pressure_slots[1:],
+                                "control_policy_ids": list(DIRECT_PURSUIT_POLICY_IDS),
+                                "paired_control_category_seed_coverage_sha256": _sha256(
+                                    _canonical_bytes([[control, case["category"], seed, condition]
+                                        for control in DIRECT_PURSUIT_POLICY_IDS
+                                        for seed in seed_info["_seed_values_internal"]
+                                        for condition in CONDITIONS])),
+                                "protocol_bound_evaluation_case": case_payload,
+                                "factor_treatment_seeded_assignment_sha256": _sha256(
+                                    _canonical_bytes([{**policy_assignment_identity(
+                                        policy_id="direct_pursuit",
+                                        scenario_id=case["scenario_id"],
+                                        category=case["category"],
+                                        qualification_case=case_payload[
+                                            "qualification_case"], seed=seed,
+                                        condition="factor_treatment", factor_id=factor),
+                                        "category": case["category"],
+                                        "registered_pressure_slots": registered_pressure_slots,
+                                        "configured_pressure_slots": [assigned_pursuit_slot],
+                                        "preserved_scripted_slots": registered_pressure_slots[1:]}
+                                        for seed in seed_info["_seed_values_internal"]])),
+                                "runtime_domain_supported": True,
+                                "paired_control_category_seed_row_count": (
+                                    len(DIRECT_PURSUIT_POLICY_IDS) * seed_info["seed_count"] * len(CONDITIONS)),
+                                "exact_pair_coverage": True,
+                                "executed": False, "qualification_eligible": False,
+                            }
+                            direct_review_gate = _direct_pursuit_review_gate(
+                                direct_review_rows, protocol=protocol,
+                                protocol_sha256=_sha256(protocol_raw),
+                                registry_sha256=_sha256(registry_raw), case=case,
+                                seed_sha256=seed_info["seed_sha256"],
+                                assignment_sha256=direct_pursuit_assignment[
+                                    "factor_treatment_seeded_assignment_sha256"],
+                                seed_count=seed_info["seed_count"],
+                                configured_pressure_slots=direct_pursuit_assignment[
+                                    "configured_pressure_slots"])
                     if req_id == "multiple_legal_team_start_states":
                         registry_profile_id = design_axes.get("legal_team_pose_sets")
                         start_profile_assignment = phase4_start_profile_assignment(
@@ -216,7 +431,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             categories=(case["category"],),
                             seeds=seed_info["_seed_values_internal"])
                     status = ("protocol_bound_policy_assignment_planned_not_executed"
-                              if reactive_assignment is not None else
+                              if reactive_assignment is not None or direct_pursuit_assignment is not None else
                               "protocol_bound_start_profile_assignment_planned_not_executed"
                               if start_profile_assignment is not None else
                               "design_only_unassigned_to_protocol_case" if design_axes else
@@ -240,18 +455,25 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             and runtime_binding["stimulus_supported"]),
                         "scheduler_assignment_supported": (
                             reactive_assignment is not None or
+                            direct_pursuit_assignment is not None or
                             start_profile_assignment is not None),
                         "opponent_schedule_assignment": reactive_assignment,
+                        "direct_pursuit_assignment": direct_pursuit_assignment,
                         "start_profile_assignment": start_profile_assignment,
                         "required_outcome_signals_complete": set(
                             runtime_binding["required_signals"]).issubset(
                                 runtime_binding["authoritative_signals"]),
                         "executable": (not bool(design_axes)
+                            and (req_id != "direct_pursuit" or
+                                bool(direct_review_gate and direct_review_gate.get("accepted")))
                             and factor in runtime_binding["runtime_factor_by_factor_id"]
                             and runtime_binding["stimulus_supported"]
                             and set(runtime_binding["required_signals"]).issubset(
                                 runtime_binding["authoritative_signals"])),
                         "executed": False,
+                        "simulator_behavior_validated": bool(
+                            direct_review_gate and direct_review_gate.get("accepted")),
+                        "direct_pursuit_review_gate": direct_review_gate,
                     }
                     schedule_identity = {"factor_id": factor, "case_axes": case,
                                         "design_axes": design_axes}
@@ -310,6 +532,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
         "runtime_capture_schema": "meco-phase4-realized-stimulus-capture-v1",
         "requirements": plan_requirements,
         "runtime_and_evaluator_wiring_required": True,
+        "direct_pursuit_review_evidence_sha256": direct_review_raw_sha256,
     }
     plan["plan_id"] = _sha256(_canonical_bytes(plan))
     return plan
@@ -317,8 +540,11 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
 
 def write_phase4_campaign_plan(protocol_path: str | Path, registry_path: str | Path,
                                overlay_path: str | Path,
-                               output_path: str | Path) -> dict[str, Any]:
-    plan = compile_phase4_campaign_plan(protocol_path, registry_path, overlay_path)
+                               output_path: str | Path,
+                               direct_pursuit_review_evidence_path: str | Path | None = None
+                               ) -> dict[str, Any]:
+    plan = compile_phase4_campaign_plan(protocol_path, registry_path, overlay_path,
+        direct_pursuit_review_evidence_path=direct_pursuit_review_evidence_path)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(plan, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -332,8 +558,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry", required=True)
     parser.add_argument("--overlay", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--direct-pursuit-review-evidence", type=Path,
+        help="reviewed held-out simulator/replay evidence required to open direct-pursuit executability")
     args = parser.parse_args(argv)
-    plan = write_phase4_campaign_plan(args.protocol, args.registry, args.overlay, args.output)
+    plan = write_phase4_campaign_plan(args.protocol, args.registry, args.overlay, args.output,
+        direct_pursuit_review_evidence_path=args.direct_pursuit_review_evidence)
     print(json.dumps({"plan_id": plan["plan_id"],
                       "factor_case_axis_cell_count": plan["factor_case_axis_cell_count"],
                       "scheduled_row_count_theoretical": plan["scheduled_row_count_theoretical"],
