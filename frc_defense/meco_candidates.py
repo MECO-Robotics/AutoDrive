@@ -275,6 +275,194 @@ def _candidate_target(env, action: int, base: SafeActionCandidates, *,
     return xy, heading, valid, False
 
 
+def _endpoint_clear_batch(env, xy, intake_mask):
+    """Tensor-only endpoint envelope check for an aligned candidate batch."""
+    if xy.ndim != 2 or xy.shape[-1] != 2 or intake_mask.shape != xy.shape[:1]:
+        raise ValueError("endpoint batch requires XY [K,2] and intake mask [K]")
+    slot = 3
+    length = env.sim.length[0, slot] + intake_mask.to(env.sim.length.dtype) * .6096
+    width = env.sim.width[0, slot].expand_as(length)
+    side = torch.sqrt(length.square() + width.square())
+    path = xy[:, None, :].expand(-1, 2, -1)
+    static_clear = env.planner._footprint_path_clear(path,
+        torch.zeros(xy.shape[0], device=xy.device, dtype=xy.dtype), side, side)
+    circles = env._perceived_robot_obstacles()[slot]
+    circle_mask = circles[:, 2] > 0.
+    separation = torch.linalg.vector_norm(xy[:, None, :] - circles[None, :, :2], dim=-1)
+    circles_clear = ((separation > side[:, None] * .5 + circles[None, :, 2]) |
+                     ~circle_mask[None, :]).all(dim=-1)
+    return static_clear & circles_clear
+
+
+def _goal_nodes_batch(env, graph: LegalPoseGraph, xy, heading, intake_mask):
+    """Resolve legal pose nodes and endpoint clearance without scalar reads."""
+    device = xy.device
+    hbin = torch.round(torch.remainder(heading, 2. * math.pi) *
+                       (8. / (2. * math.pi))).to(torch.long).remainder(8)
+    if graph.node_count == 0:
+        return (torch.full_like(hbin, -1), xy, hbin,
+                torch.zeros_like(hbin, dtype=torch.bool))
+    finite = torch.isfinite(xy).all(dim=-1) & torch.isfinite(heading)
+    in_field = ((xy[:, 0] >= 0.) & (xy[:, 0] < float(env.sim.field_length)) &
+                (xy[:, 1] >= 0.) & (xy[:, 1] < float(env.sim.field_width)))
+    ix = torch.floor(xy[:, 0] / graph.resolution_m).to(torch.long)
+    iy = torch.floor(xy[:, 1] / graph.resolution_m).to(torch.long)
+    cell_valid = (ix >= 0) & (ix < graph.nx) & (iy >= 0) & (iy < graph.ny)
+    safe_ix, safe_iy = ix.clamp(0, graph.nx - 1), iy.clamp(0, graph.ny - 1)
+    lookup = graph.lookup.to(device=device)
+    requested = lookup[hbin, safe_ix, safe_iy]
+    all_headings = lookup[:, safe_ix, safe_iy].transpose(0, 1)
+    heading_ids = torch.arange(8, device=device).expand_as(all_headings)
+    fallback_heading = torch.where(all_headings >= 0, heading_ids, 8).amin(dim=-1)
+    fallback = lookup[fallback_heading.clamp_max(7), safe_ix, safe_iy]
+    node = torch.where(requested >= 0, requested, fallback)
+    valid = finite & in_field & cell_valid & (node >= 0)
+    safe_node = node.clamp_min(0)
+    center = graph.xy.to(device=device)[safe_node]
+    close = torch.linalg.vector_norm(center - xy, dim=-1) <= graph.resolution_m * .72
+    clear = _endpoint_clear_batch(env, center, intake_mask)
+    valid &= close & clear
+    selected_hbin = graph.heading_bin.to(device=device)[safe_node].to(torch.long)
+    selected_hbin = torch.where(valid, selected_hbin, hbin)
+    node = torch.where(valid, node, torch.full_like(node, -1))
+    center = torch.where(valid[:, None], center, xy)
+    return node, center, selected_hbin, valid
+
+
+def _candidate_geometry_device(env, graph, specs, fuel_xy, fuel_available,
+                               base_valid):
+    """Build route goals/capture masks as tensors after the host spec list."""
+    device = torch.device(env.device)
+    dtype = env.sim.pose.dtype
+    count = len(specs)
+    if fuel_xy.shape != (count, 2) or fuel_available.shape != (count,):
+        raise ValueError("candidate fuel tensors must align with the ordered spec list")
+    actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
+    variants = torch.tensor([row[1] for row in specs], device=device, dtype=torch.long)
+    forward_offsets = torch.tensor([row[2] for row in specs], device=device, dtype=dtype)
+    lateral_offsets = torch.tensor([row[3] for row in specs], device=device, dtype=dtype)
+    pose = env.sim.pose[0, 3]
+    pose_xy = pose[:2].expand(count, -1)
+    pose_heading = pose[2].to(torch.float64).expand(count)
+    collect = actions < 4
+    allowed = base_valid[actions]
+    fuel_delta = fuel_xy - pose_xy
+    fuel_distance = torch.linalg.vector_norm(fuel_delta, dim=-1)
+    fuel_ok = (fuel_available & torch.isfinite(fuel_xy).all(dim=-1) &
+               torch.isfinite(fuel_distance) & (fuel_distance > 1e-6))
+    direction = fuel_delta / fuel_distance.clamp_min(1e-12)[:, None]
+    radius = .5 * torch.sqrt(env.sim.length[0, 3].square() +
+                             env.sim.width[0, 3].square())
+    fuel_target = fuel_xy - direction * .45
+    fuel_target = torch.stack((
+        fuel_target[:, 0].clamp(radius, float(env.sim.field_length) - radius),
+        fuel_target[:, 1].clamp(radius, float(env.sim.field_width) - radius)), dim=-1)
+    targets = torch.where(collect[:, None] & fuel_ok[:, None], fuel_target, pose_xy)
+    fuel_heading = torch.atan2(direction[:, 1].to(torch.float64),
+                               direction[:, 0].to(torch.float64))
+    headings = torch.where(collect & fuel_ok, fuel_heading, pose_heading)
+    allowed &= ~collect | fuel_ok
+
+    score_mask = actions == 4
+    score_points = env._score_grid_points[0, 3]
+    score_clear = env._score_grid_clear[0, 3]
+    if score_points.shape[0]:
+        score_dist = torch.linalg.vector_norm(score_points - pose[:2], dim=-1)
+        score_dist = score_dist.masked_fill(~score_clear, float("inf"))
+        score_target = score_points[score_dist.argmin()]
+        score_ok = torch.isfinite(score_dist).any()
+    else:
+        team_zero = env.team_ids[3] == 0
+        low = torch.where(team_zero, radius,
+            env.sim.field_length - env.alliance_zone_depth + radius)
+        high = torch.where(team_zero, env.alliance_zone_depth - radius,
+            env.sim.field_length - radius)
+        score_target = pose[:2].clone()
+        score_target[0].clamp_(low, high)
+        score_ok = torch.ones((), device=device, dtype=torch.bool)
+    hub = env.hub_centers[env.team_ids[3]]
+    score_delta = hub - score_target
+    score_heading = torch.atan2(score_delta[1].to(torch.float64),
+                                score_delta[0].to(torch.float64))
+    targets = torch.where(score_mask[:, None], score_target.expand(count, -1), targets)
+    headings = torch.where(score_mask, score_heading.expand(count), headings)
+    allowed &= ~score_mask | score_ok
+
+    intercept_mask = actions == 5
+    opponent_xy = env.opponent_pose[0, 3, :2]
+    opponent_ok = env.opponent_valid[0, 3] & torch.isfinite(opponent_xy).all()
+    intercept_delta = opponent_xy - pose[:2]
+    intercept_heading = torch.atan2(intercept_delta[1].to(torch.float64),
+                                    intercept_delta[0].to(torch.float64))
+    targets = torch.where(intercept_mask[:, None], opponent_xy.expand(count, -1), targets)
+    headings = torch.where(intercept_mask &
+        (torch.linalg.vector_norm(intercept_delta) > 1e-6),
+        intercept_heading.expand(count), headings)
+    allowed &= ~intercept_mask | opponent_ok
+
+    ferry_mask = actions == 6
+    ferry_target = env._ferry_targets_for_current_motion()[0, 3]
+    ferry_delta = ferry_target - pose[:2]
+    ferry_heading = torch.atan2(ferry_delta[1].to(torch.float64),
+                                ferry_delta[0].to(torch.float64))
+    targets = torch.where(ferry_mask[:, None], ferry_target.expand(count, -1), targets)
+    headings = torch.where(ferry_mask &
+        (torch.linalg.vector_norm(ferry_delta) > 1e-6),
+        ferry_heading.expand(count), headings)
+
+    offsets = variants != 0
+    forward = torch.stack((headings.cos(), headings.sin()), dim=-1).to(dtype)
+    left = torch.stack((-headings.sin(), headings.cos()), dim=-1).to(dtype)
+    offset_xy = forward * forward_offsets[:, None] + left * lateral_offsets[:, None]
+    targets = targets + torch.where(offsets[:, None], offset_xy,
+                                    torch.zeros_like(offset_xy))
+    # Collection bearing is recomputed against the offset target, matching the
+    # existing candidate semantics before legal-node snapping.
+    target_delta = fuel_xy - targets
+    target_distance = torch.linalg.vector_norm(target_delta, dim=-1)
+    target_heading = torch.atan2(target_delta[:, 1].to(torch.float64),
+                                 target_delta[:, 0].to(torch.float64))
+    headings = torch.where(collect & (target_distance > 1e-8), target_heading, headings)
+    nodes, centers, hbins, node_ok = _goal_nodes_batch(
+        env, graph, targets, headings, collect)
+    allowed &= node_ok
+
+    snapped_delta = fuel_xy - centers
+    snapped_distance = torch.linalg.vector_norm(snapped_delta, dim=-1)
+    snapped_heading = torch.atan2(snapped_delta[:, 1].to(torch.float64),
+                                  snapped_delta[:, 0].to(torch.float64))
+    recheck = collect & node_ok
+    headings = torch.where(recheck & (snapped_distance > 1e-8), snapped_heading, headings)
+    nodes2, centers2, hbins2, valid2 = _goal_nodes_batch(
+        env, graph, centers, headings, collect)
+    nodes = torch.where(recheck, nodes2, nodes)
+    centers = torch.where(recheck[:, None], centers2, centers)
+    hbins = torch.where(recheck, hbins2, hbins)
+    allowed &= ~recheck | valid2
+
+    capture_delta = fuel_xy - centers
+    safe_heading = torch.where(torch.isfinite(headings), headings,
+                               torch.zeros_like(headings))
+    forward = torch.stack((safe_heading.cos(), safe_heading.sin()), dim=-1).to(dtype)
+    left = torch.stack((-safe_heading.sin(), safe_heading.cos()), dim=-1).to(dtype)
+    longitudinal = (capture_delta * forward).sum(-1)
+    lateral = (capture_delta * left).sum(-1).abs()
+    fuel_radius = torch.as_tensor(env._fuel_radius, device=device, dtype=dtype)
+    half_length = env.sim.length[0, 3] * .5
+    half_width = env.sim.width[0, 3] * .5
+    capture = (torch.isfinite(capture_delta).all(-1) &
+        (longitudinal >= half_length - .075 - fuel_radius) &
+        (longitudinal <= half_length + .35 + .3048 + fuel_radius) &
+        (lateral <= half_width + .075 + fuel_radius))
+    allowed &= ~collect | capture
+    return {"actions": actions, "collect": collect, "fuel_xy": fuel_xy,
+        "fuel_available": fuel_available, "targets": centers, "headings": headings,
+        "nodes": nodes, "heading_bins": hbins, "allowed": allowed,
+        "capture_distance": torch.linalg.vector_norm(capture_delta, dim=-1),
+        "capture_longitudinal": longitudinal, "capture_lateral": lateral,
+        "capture_inside": capture}
+
+
 def _endpoint_clear(env, xy, heading: float, *, intake_extended: bool):
     slot = 3
     length = env.sim.length[0, slot].clone()
