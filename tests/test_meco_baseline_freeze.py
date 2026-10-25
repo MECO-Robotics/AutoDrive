@@ -11,6 +11,7 @@ from frc_defense.meco_baseline_freeze import (
     AUTHORITATIVE_FIELD_SOURCES,
     PARTITION_NAMES,
     PARTITION_WORKFLOWS,
+    REQUIRED_CONFIGURATION_ARTIFACT_IDS,
     canonical_sha256,
     compile_baseline_freeze,
     compile_partition_contract,
@@ -22,19 +23,63 @@ from frc_defense.meco_baseline_freeze import (
 SOURCE_PLAN = "docs/source-plan.md"
 
 
-def test_authoritative_sources_follow_meco_tensor_defense_evaluation_path():
-    all_sources = {path for paths in AUTHORITATIVE_FIELD_SOURCES.values() for path in paths}
-    assert "frc_defense/tensor_3v3.py" not in all_sources
-    assert "frc_defense/_tensor_3v3_observation.py" not in all_sources
-    assert {
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_observation.py",
-        "frc_defense/tensor_defense_opponent.py",
-        "frc_defense/tensor_defense_gamepieces.py",
-        "frc_defense/tensor_defense_step.py",
-        "frc_defense/tensor_training_runtime.py",
-        "frc_defense/meco_track_training.py",
-    } <= all_sources
+def test_authoritative_sources_follow_meco_curriculum_evaluation_path():
+    assert AUTHORITATIVE_FIELD_SOURCES == {
+        "robot_dynamics": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/tensor_sim.py",
+            "frc_defense/tensor_physics.py",
+            "frc_defense/fuel_physics_runtime.py",
+        ),
+        "field_geometry": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/field.py",
+        ),
+        "legal_connectivity": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/field.py",
+            "frc_defense/tensor_adstar.py",
+            "frc_defense/_tensor_3v3_navigation.py",
+        ),
+        "opponent_controllers": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/training_curriculum.py",
+            "frc_defense/meco_track_training.py",
+            "frc_defense/meco_phase4_opponents.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/_tensor_3v3_actions.py",
+        ),
+        "action_update_cadence": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/_tensor_3v3_actions.py",
+            "frc_defense/tensor_physics.py",
+        ),
+        "sensor_noise_profiles": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/_tensor_3v3_observation.py",
+            "frc_defense/tensor_perception.py",
+        ),
+        "scoring_observation_semantics": (
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/_tensor_3v3_gamepieces.py",
+            "frc_defense/meco_track_training.py",
+            "frc_defense/meco_metric_ledger.py",
+        ),
+        "safety_event_semantics": (
+            "frc_defense/tensor_physics.py",
+            "frc_defense/tensor_3v3.py",
+            "frc_defense/_tensor_3v3_actions.py",
+            "frc_defense/curriculum_scenarios.py",
+            "frc_defense/meco_track_training.py",
+            "frc_defense/meco_metric_ledger.py",
+        ),
+    }
 
 
 def _init_repo(root: Path) -> None:
@@ -64,6 +109,13 @@ def _runtime_identity() -> dict[str, str]:
         "backend_version": "synthetic-fixture-backend-version",
         "device_id": "synthetic-fixture-device",
         "dependency_lock_sha256": digest,
+    }
+
+
+def _configuration_artifacts() -> dict[str, bytes]:
+    return {
+        artifact_id: f'{{"artifact":"{artifact_id}","fixture":true}}'.encode()
+        for artifact_id in sorted(REQUIRED_CONFIGURATION_ARTIFACT_IDS)
     }
 
 
@@ -124,6 +176,7 @@ def test_baseline_freeze_is_bound_to_clean_source_runtime_and_field_sources(tmp_
         source_plan_path=SOURCE_PLAN,
         runtime_identity=_runtime_identity(),
         field_records=_field_records(tmp_path),
+        configuration_artifacts=_configuration_artifacts(),
     )
 
     assert freeze["qualification_eligible"] is False
@@ -132,13 +185,21 @@ def test_baseline_freeze_is_bound_to_clean_source_runtime_and_field_sources(tmp_
         source_plan_path=SOURCE_PLAN,
         runtime_identity=_runtime_identity(),
         field_records=_field_records(tmp_path),
+        configuration_artifacts=_configuration_artifacts(),
     )
-    assert validate_baseline_freeze(freeze, tmp_path) == freeze
+    assert validate_baseline_freeze(
+        freeze, tmp_path, configuration_artifacts=_configuration_artifacts()) == freeze
+    assert freeze["configuration_artifacts"] == [
+        {"artifact_id": artifact_id,
+         "content_sha256": hashlib.sha256(config_bytes).hexdigest()}
+        for artifact_id, config_bytes in sorted(_configuration_artifacts().items())]
+    assert "path" not in freeze["configuration_artifacts"][0]
 
     changed = dict(freeze)
     changed["runtime"] = dict(freeze["runtime"], device_id="different-device")
     with pytest.raises(ValueError, match="runtime identity digest"):
-        validate_baseline_freeze(changed, tmp_path)
+        validate_baseline_freeze(
+            changed, tmp_path, configuration_artifacts=_configuration_artifacts())
 
 
 def test_baseline_freeze_rejects_missing_runtime_field_and_dirty_source(tmp_path):
@@ -151,15 +212,17 @@ def test_baseline_freeze_rejects_missing_runtime_field_and_dirty_source(tmp_path
             source_plan_path=SOURCE_PLAN,
             runtime_identity=runtime,
             field_records=_field_records(tmp_path),
+            configuration_artifacts=_configuration_artifacts(),
         )
 
-    (tmp_path / "frc_defense/tensor_sim.py").write_text("dirty\n")
+    (tmp_path / "frc_defense/curriculum_scenarios.py").write_text("dirty\n")
     with pytest.raises(ValueError, match="clean source checkout"):
         compile_baseline_freeze(
             tmp_path,
             source_plan_path=SOURCE_PLAN,
             runtime_identity=_runtime_identity(),
             field_records=_field_records(tmp_path),
+            configuration_artifacts=_configuration_artifacts(),
         )
 
 
@@ -173,6 +236,7 @@ def test_baseline_freeze_rejects_missing_source_field_or_changed_source_hash(tmp
             source_plan_path=SOURCE_PLAN,
             runtime_identity=_runtime_identity(),
             field_records=records,
+            configuration_artifacts=_configuration_artifacts(),
         )
 
     records = _field_records(tmp_path)
@@ -183,6 +247,7 @@ def test_baseline_freeze_rejects_missing_source_field_or_changed_source_hash(tmp
             source_plan_path=SOURCE_PLAN,
             runtime_identity=_runtime_identity(),
             field_records=records,
+            configuration_artifacts=_configuration_artifacts(),
         )
 
 
@@ -200,6 +265,7 @@ def test_scoring_field_cannot_claim_official_match_points_or_convert_fuel_counts
             source_plan_path=SOURCE_PLAN,
             runtime_identity=_runtime_identity(),
             field_records=records,
+            configuration_artifacts=_configuration_artifacts(),
         )
 
     records = _field_records(tmp_path)
@@ -210,7 +276,38 @@ def test_scoring_field_cannot_claim_official_match_points_or_convert_fuel_counts
             source_plan_path=SOURCE_PLAN,
             runtime_identity=_runtime_identity(),
             field_records=records,
+            configuration_artifacts=_configuration_artifacts(),
         )
+
+
+def test_baseline_freeze_rejects_missing_or_drifted_configuration_artifacts(tmp_path):
+    _init_repo(tmp_path)
+    arguments = {
+        "source_plan_path": SOURCE_PLAN,
+        "runtime_identity": _runtime_identity(),
+        "field_records": _field_records(tmp_path),
+    }
+    for missing_id in REQUIRED_CONFIGURATION_ARTIFACT_IDS:
+        incomplete = _configuration_artifacts()
+        del incomplete[missing_id]
+        with pytest.raises(ValueError, match="configuration artifact IDs"):
+            compile_baseline_freeze(
+                tmp_path, **arguments, configuration_artifacts=incomplete)
+
+    config = _configuration_artifacts()
+    freeze = compile_baseline_freeze(
+        tmp_path, **arguments, configuration_artifacts=config)
+    with pytest.raises(ValueError, match="configuration artifact identity drifted"):
+        validate_baseline_freeze(
+            freeze, tmp_path,
+            configuration_artifacts={**config, "field_layout": b'{"layout":"shifted"}'})
+
+    invalid_ids = dict(config)
+    invalid_ids["/tmp/config.json"] = invalid_ids.pop("field_layout")
+    with pytest.raises(ValueError, match="configuration artifact IDs"):
+        compile_baseline_freeze(
+            tmp_path, **arguments,
+            configuration_artifacts=invalid_ids)
 
 
 def test_partition_contract_is_deterministic_disjoint_and_final_test_isolated():

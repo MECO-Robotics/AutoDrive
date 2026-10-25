@@ -1,14 +1,18 @@
 """Offline contracts for immutable Phase 0 baseline and split freezes.
 
-The MECO evaluator constructs ``TensorDefenseEnv`` through
-``tensor_training_runtime`` and ``meco_track_training.evaluate_meco``. Its
-authoritative implementation is ``tensor_sim.py`` plus the
-``TensorDefense*Mixin`` modules listed per field below; the separate
-``TensorThreeVsThreeEnv`` path is not used as a source for this freeze.
-Constructor defaults and per-run overrides are not an effective campaign
-configuration, so callers must supply observed values and runtime identity.
-This module only binds those values to the clean source tree. It does not
-instantiate a simulator or create a production freeze.
+The MECO track evaluator calls ``make_curriculum_env`` from
+``meco_track_training.evaluate_meco``. That factory builds ``CurriculumEnv``
+from ``TensorThreeVsThreeEnv`` and applies scenario, category, layout, sensor,
+and opponent assignments. ``tensor_3v3.py`` imports the shared low-level
+``TensorVectorizedSimulator`` from ``tensor_sim.py``; only that shared physics
+dependency is included in the source map. The map also follows scenario and
+opponent selection through the evaluator and their registries. Constructor
+defaults and per-run overrides are not an effective campaign configuration,
+so callers must supply observed values, runtime identity, and the content
+bytes of every required outcome-affecting configuration artifact. Config
+artifacts are stored by stable logical ID and content digest; filesystem
+locations are not identity. This module does not instantiate a simulator or
+create a production freeze.
 
 The simulator reports scored FUEL piece counts; it does not assign official
 match points. Do not use those counts as a ``match_points`` field or as a
@@ -24,7 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-BASELINE_FREEZE_SCHEMA = "meco-baseline-freeze-v1"
+BASELINE_FREEZE_SCHEMA = "meco-baseline-freeze-v2"
 PARTITION_CONTRACT_SCHEMA = "meco-heldout-partitions-v1"
 
 # Every field is an effective value to be extracted from a real campaign
@@ -32,47 +36,58 @@ PARTITION_CONTRACT_SCHEMA = "meco-heldout-partitions-v1"
 # are not treated as proof of the value by themselves.
 AUTHORITATIVE_FIELD_SOURCES: dict[str, tuple[str, ...]] = {
     "robot_dynamics": (
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
         "frc_defense/tensor_sim.py",
         "frc_defense/tensor_physics.py",
+        "frc_defense/fuel_physics_runtime.py",
     ),
     "field_geometry": (
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
         "frc_defense/field.py",
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_reset.py",
     ),
     "legal_connectivity": (
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
         "frc_defense/field.py",
         "frc_defense/tensor_adstar.py",
+        "frc_defense/_tensor_3v3_navigation.py",
     ),
     "opponent_controllers": (
-        "frc_defense/tensor_training_runtime.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/training_curriculum.py",
         "frc_defense/meco_track_training.py",
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_opponent.py",
         "frc_defense/meco_phase4_opponents.py",
+        "frc_defense/tensor_3v3.py",
+        "frc_defense/_tensor_3v3_actions.py",
     ),
     "action_update_cadence": (
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_step.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
+        "frc_defense/_tensor_3v3_actions.py",
         "frc_defense/tensor_physics.py",
     ),
     "sensor_noise_profiles": (
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_observation.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
+        "frc_defense/_tensor_3v3_observation.py",
         "frc_defense/tensor_perception.py",
     ),
     "scoring_observation_semantics": (
-        "frc_defense/gamepiece_actions.py",
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_gamepieces.py",
-        "frc_defense/tensor_defense_step.py",
-        "frc_defense/tensor_training_evaluation.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_3v3.py",
+        "frc_defense/_tensor_3v3_gamepieces.py",
+        "frc_defense/meco_track_training.py",
+        "frc_defense/meco_metric_ledger.py",
     ),
     "safety_event_semantics": (
         "frc_defense/tensor_physics.py",
-        "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_defense_step.py",
-        "frc_defense/tensor_training_evaluation.py",
+        "frc_defense/tensor_3v3.py",
+        "frc_defense/_tensor_3v3_actions.py",
+        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/meco_track_training.py",
+        "frc_defense/meco_metric_ledger.py",
     ),
 }
 
@@ -104,10 +119,21 @@ PARTITION_WORKFLOWS = {
     "validation": frozenset({"validation", "model_selection"}),
     "final_test": frozenset({"final_evaluation"}),
 }
+REQUIRED_CONFIGURATION_ARTIFACT_IDS = frozenset({
+    "campaign_assignment",
+    "evaluation_protocol",
+    "drivetrain_physics",
+    "gamepiece_rules",
+    "field_layout",
+    "scenario_registry",
+    "opponent_schedule",
+    "sensor_profile",
+})
 
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_RELATIVE_PATH = re.compile(r"^[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*$")
+_CONFIG_ARTIFACT_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _NONIDENTITY_VALUES = {"", "unknown", "unavailable", "unspecified", "none", "null"}
 
 
@@ -187,6 +213,33 @@ def _validate_runtime_identity(runtime: Mapping[str, Any]) -> dict[str, str]:
     return clean
 
 
+def _normalize_configuration_artifacts(
+    artifacts: Mapping[str, bytes],
+) -> list[dict[str, str]]:
+    """Bind supplied config contents without persisting their filesystem paths."""
+    if (not isinstance(artifacts, Mapping)
+            or any(not isinstance(key, str) for key in artifacts)):
+        raise ValueError("configuration artifacts must provide every required config content")
+    missing = REQUIRED_CONFIGURATION_ARTIFACT_IDS - set(artifacts)
+    extra = set(artifacts) - REQUIRED_CONFIGURATION_ARTIFACT_IDS
+    if missing or extra:
+        raise ValueError(
+            "configuration artifact IDs must match the required set exactly; "
+            f"missing={sorted(missing)}, extra={sorted(extra)}")
+    normalized = []
+    for artifact_id in sorted(artifacts):
+        content = artifacts[artifact_id]
+        if (not isinstance(artifact_id, str)
+                or not _CONFIG_ARTIFACT_ID.fullmatch(artifact_id)
+                or not isinstance(content, bytes)):
+            raise ValueError("configuration artifact needs a stable logical ID and content bytes")
+        normalized.append({
+            "artifact_id": artifact_id,
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+        })
+    return normalized
+
+
 def _validate_field_records(
     repo_root: Path,
     records: Mapping[str, Any],
@@ -264,6 +317,7 @@ def compile_baseline_freeze(
     source_plan_path: str,
     runtime_identity: Mapping[str, Any],
     field_records: Mapping[str, Any],
+    configuration_artifacts: Mapping[str, bytes],
 ) -> dict[str, Any]:
     """Compile only a complete, clean-source, explicitly runtime-bound freeze.
 
@@ -275,12 +329,15 @@ def compile_baseline_freeze(
     source = capture_source_identity(root, source_plan_path)
     runtime = _validate_runtime_identity(runtime_identity)
     fields = _validate_field_records(root, field_records)
+    configs = _normalize_configuration_artifacts(configuration_artifacts)
     body = {
         "schema": BASELINE_FREEZE_SCHEMA,
         "status": "complete_source_runtime_bound_baseline",
         "source": source,
         "runtime": runtime,
         "runtime_sha256": canonical_sha256(runtime),
+        "configuration_artifacts": configs,
+        "configuration_artifacts_sha256": canonical_sha256(configs),
         "fields": fields,
         "qualification_eligible": False,
     }
@@ -288,13 +345,17 @@ def compile_baseline_freeze(
 
 
 def validate_baseline_freeze(
-    freeze: Mapping[str, Any], repo_root: str | Path,
+    freeze: Mapping[str, Any],
+    repo_root: str | Path,
+    *,
+    configuration_artifacts: Mapping[str, bytes],
 ) -> dict[str, Any]:
     """Validate a compiled freeze against current source files and checkout."""
     if not isinstance(freeze, Mapping):
         raise ValueError("baseline freeze must be an object")
     expected_keys = {
-        "schema", "status", "source", "runtime", "runtime_sha256", "fields",
+        "schema", "status", "source", "runtime", "runtime_sha256",
+        "configuration_artifacts", "configuration_artifacts_sha256", "fields",
         "qualification_eligible", "freeze_sha256",
     }
     if set(freeze) != expected_keys:
@@ -315,6 +376,10 @@ def validate_baseline_freeze(
     runtime = _validate_runtime_identity(freeze["runtime"])
     if freeze["runtime_sha256"] != canonical_sha256(runtime):
         raise ValueError("runtime identity digest mismatch")
+    configs = _normalize_configuration_artifacts(configuration_artifacts)
+    if (freeze["configuration_artifacts"] != configs
+            or freeze["configuration_artifacts_sha256"] != canonical_sha256(configs)):
+        raise ValueError("configuration artifact identity drifted")
     normalized_fields = _validate_field_records(
         Path(repo_root).resolve(), freeze["fields"], is_normalized=True)
     if normalized_fields != freeze["fields"]:
