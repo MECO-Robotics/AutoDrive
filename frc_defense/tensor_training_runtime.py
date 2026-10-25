@@ -208,17 +208,21 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
         known_remaining_ticks > ticks +
         int(getattr(env, "max_observation_latency_steps", 0)) and
         getattr(env, "_full_observation_hip_available", False))
-    active_world_physics_ticks = 0
+    # Retain the scheduler-derived Python counter on the optimized path. Direct
+    # callers that do not know the horizon still get an exact passive report,
+    # accumulated on-device without steering any per-tick control flow.
+    active_world_physics_ticks = (
+        0 if active_counts is not None else
+        torch.zeros((), dtype=torch.long, device=env.device))
     for tick_index in range(ticks):
-        if active_counts is None:
-            raise ValueError("held-action intervals require scheduler-known remaining ticks")
-        active_worlds_this_tick = active_counts[tick_index]
+        active_worlds_this_tick = (
+            active_counts[tick_index] if active_counts is not None else None)
         step_kwargs = {"active_mask": active_this_decision}
         if return_info is not None:
             # PPO consumes observations, rewards, and episode flags only. The
             # environment's detailed diagnostics are for evaluation/UI callers.
             step_kwargs["_return_info"] = return_info
-        if active_counts is not None:
+        if active_worlds_this_tick is not None:
             step_kwargs["_active_count"] = active_counts[tick_index]
         if sparse_observation_capture:
             # The policy's observation at interval end reads the raw snapshot
@@ -281,11 +285,17 @@ def _held_action_interval(env, action: torch.Tensor, ticks: int,
                 active_before_tick[:, None], next_obs, transition_next_obs)
         newly_ended = active_before_tick & (tick_done | tick_truncated)
         complete_matches += (tick_truncated & active_before_tick).sum()
+        if active_worlds_this_tick is not None:
+            active_world_physics_ticks += active_worlds_this_tick
+        else:
+            active_world_physics_ticks += active_before_tick.sum()
         active_this_decision &= ~newly_ended
-        active_world_physics_ticks += active_worlds_this_tick
     # Ended worlds remain frozen until reset, so one batched read now returns
     # their terminal observation and the final state for every still-active
     # world without constructing full strategic observations per physics tick.
+    if active_counts is None:
+        # Reporting only: materialize once after the interval has completed.
+        active_world_physics_ticks = int(active_world_physics_ticks.item())
     return (reward, done, truncated, transition_next_obs, active_this_decision,
             ticks, active_world_physics_ticks, complete_matches)
 
