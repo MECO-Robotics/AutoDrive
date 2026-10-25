@@ -1214,6 +1214,7 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
                     metric_ledger: MecoEpisodeMetricLedger | None = None,
                     contact_progress_observer=None,
                     direct_pursuit_capture=None,
+                    trench_interception_capture=None,
                     contact_progress_goal_id=None,
                     return_execution_flags: bool = False):
     actions = torch.zeros((env.n, 6), device=env.device, dtype=torch.long)
@@ -1249,6 +1250,8 @@ def _run_macro_step(env, action_index: int, action_ticks: int, goal_xy=None, *,
             **planner_kwargs)
         if direct_pursuit_capture is not None:
             direct_pursuit_capture.observe_physics_step()
+        if trench_interception_capture is not None:
+            trench_interception_capture.observe_physics_step()
         if contact_progress_observer is not None:
             _observe_phase4_contact_route_progress(env, contact_progress_observer,
                 selected_goal_id=contact_progress_goal_id,
@@ -2380,6 +2383,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   phase4_factor: dict | None = None,
                   phase4_opponent_schedule: dict | None = None,
                   phase4_direct_pursuit_binding: dict | None = None,
+                  phase4_trench_interception_binding: dict | None = None,
                   phase4_contact_factor_id: str | None = None,
                   phase4_route_outcome_factor_ids: tuple[str, ...] | None = None,
                   contact_geometry_id: str | None = None,
@@ -2480,6 +2484,34 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                 phase4_opponent_schedule.get("schedule_sha256") !=
                 phase4_direct_pursuit_binding.get("schedule_sha256")):
             raise ValueError("direct-pursuit treatment schedule differs from outcome binding")
+    if phase4_trench_interception_binding is not None:
+        trench_binding = phase4_trench_interception_binding
+        if (split != "validation" or evaluation_binding is None or
+                scenario_id != "offense_vs_scripted_pressure" or
+                not isinstance(trench_binding, dict) or
+                trench_binding.get("schema") !=
+                    "meco-phase4-trench-interception-binding-v1" or
+                trench_binding.get("factor_id") != "opponent.trench_interception" or
+                trench_binding.get("policy_id") != "trench_interceptor" or
+                trench_binding.get("protocol_id") != evaluation_binding["protocol_id"] or
+                trench_binding.get("protocol_sha256") != evaluation_binding["protocol_sha256"] or
+                trench_binding.get("seed_list") != list(scored_seeds) or
+                trench_binding.get("scenario_id") != scenario_id or
+                trench_binding.get("category") not in categories or
+                trench_binding.get("qualification_case") != qualification_case or
+                trench_binding.get("split") != "validation" or
+                not isinstance(trench_binding.get("pair_binding_id"), str) or
+                not trench_binding.get("pair_binding_id")):
+            raise ValueError("trench-interception binding differs from exact held-out case/seed")
+        expected_trench_schedule = trench_binding.get("schedule")
+        if (not isinstance(expected_trench_schedule, dict) or
+                trench_binding.get("schedule_sha256") !=
+                    expected_trench_schedule.get("schedule_sha256") or
+                (phase4_opponent_schedule is not None and
+                 phase4_opponent_schedule != expected_trench_schedule) or
+                (phase4_opponent_schedule is None and
+                 trench_binding.get("condition") not in (None, "no_factor"))):
+            raise ValueError("trench treatment schedule differs from exact outcome binding")
     if prediction_mode is not None and prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if control_prediction_mode is not None and control_prediction_mode not in PREDICTION_MODES:
@@ -2967,6 +2999,17 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                             qualification_case=qualification_case or {}, seed=seed,
                             split=split, policy_id=policy, execution_device=execution_device,
                             condition_id=condition_id)
+                    trench_interception_capture = None
+                    if phase4_trench_interception_binding is not None:
+                        from .meco_phase4_trench_interception import TrenchInterceptionEpisodeCapture
+                        trench_interception_capture = TrenchInterceptionEpisodeCapture(
+                            env, phase4_trench_interception_binding,
+                            condition=("factor_treatment" if phase4_opponent_schedule
+                                       is not None else "no_factor"),
+                            episode_id=episode_id, source_identity_sha256=source_hash,
+                            checkpoint_sha256=policy_manifest[policy].get("checkpoint_sha256"),
+                            policy_id=policy, seed=seed,
+                            execution_device=execution_device, condition_id=condition_id)
                     phase4_focal_pose_record = None
                     if phase4_focal_pose_assignment is not None:
                         from .meco_phase4_context import phase4_focal_pose_evaluator_diagnostics
@@ -3061,6 +3104,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     native_actions, capture_info=False)
                                 if direct_pursuit_capture is not None:
                                     direct_pursuit_capture.observe_physics_step()
+                                if trench_interception_capture is not None:
+                                    trench_interception_capture.observe_physics_step()
                                 if contact_progress_observer is not None:
                                     planner_goal = env.planner.last_goal.reshape(
                                         env.n, 6, 2)[0, 3].tolist()
@@ -3271,6 +3316,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 metric_ledger=episode_metric_ledger,
                                 contact_progress_observer=contact_progress_observer,
                                 direct_pursuit_capture=direct_pursuit_capture,
+                                trench_interception_capture=trench_interception_capture,
                                 contact_progress_goal_id=(selected_candidate_id or
                                     ("selected_goal:" + json.dumps(
                                         [round(float(v), 6) for v in goal_xy],
@@ -3748,6 +3794,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     episode_censored=(int(env.sim.physics_substep_index[0].item())
                                         < int(env.horizon)))
                                 if direct_pursuit_capture is not None else None),
+                            "phase4_trench_interception": (
+                                trench_interception_capture.finish(
+                                    episode_censored=(int(env.sim.physics_substep_index[0].item())
+                                        < int(env.horizon)))
+                                if trench_interception_capture is not None else None),
                             "phase4_pair_contact_event": (
                                 phase4_pair_contact_event_record(env.sim,
                                     factor_id=phase4_contact_factor_id)
@@ -4076,6 +4127,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "phase4_factor": phase4_factor,
             "phase4_opponent_schedule": phase4_opponent_schedule,
             "phase4_direct_pursuit_binding": phase4_direct_pursuit_binding,
+            "phase4_trench_interception_binding": phase4_trench_interception_binding,
             "phase4_opponent_outcomes": ({
                 "interception_rate": None,
                 "policy_family_coverage": None,

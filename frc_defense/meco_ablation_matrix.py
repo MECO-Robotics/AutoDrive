@@ -762,6 +762,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                contact_geometries: tuple[str, ...] = (),
                phase4_opponent_schedule: dict | None = None,
                phase4_direct_pursuit_binding: dict | None = None,
+               phase4_trench_interception_binding: dict | None = None,
                start_profile_registry_id: str | None = None,
                focal_pose_offsets: tuple[str, ...] = (),
                teammate_behavior_pool_seed: int | None = None,
@@ -868,6 +869,35 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
                 (phase4_opponent_schedule is not None and
                  phase4_opponent_schedule != validated_direct)):
             raise ValueError("direct-pursuit condition schedule differs from its outcome binding")
+    if phase4_trench_interception_binding is not None:
+        trench_binding = phase4_trench_interception_binding
+        if (qualification_provenance is None or evaluation_split != "validation" or
+                not isinstance(trench_binding, dict) or
+                trench_binding.get("schema") !=
+                    "meco-phase4-trench-interception-binding-v1" or
+                trench_binding.get("factor_id") != "opponent.trench_interception" or
+                trench_binding.get("policy_id") != "trench_interceptor" or
+                trench_binding.get("protocol_id") != qualification_provenance["protocol_id"] or
+                trench_binding.get("protocol_sha256") != qualification_provenance["protocol_sha256"] or
+                trench_binding.get("scenario_id") != scenario_id or
+                trench_binding.get("category") not in categories or
+                trench_binding.get("qualification_case") != qualification_case or
+                trench_binding.get("seed_list") != list(seeds) or
+                trench_binding.get("seed_manifest_sha256") != (
+                    None if seed_manifest is None else
+                    hashlib.sha256(Path(seed_manifest).read_bytes()).hexdigest())):
+            raise ValueError("trench outcome binding differs from exact frozen validation assignment")
+        from .meco_phase4_opponents import validate_opponent_policy_schedule
+        validated_trench = validate_opponent_policy_schedule(
+            trench_binding.get("schedule"), scenario_id=scenario_id,
+            categories=categories, qualification_case=qualification_case,
+            seeds=seeds, split=evaluation_split,
+            factor_id="opponent.trench_interception",
+            protocol_id=qualification_provenance["protocol_id"])
+        if (trench_binding.get("schedule_sha256") != validated_trench["schedule_sha256"] or
+                (phase4_opponent_schedule is not None and
+                 phase4_opponent_schedule != validated_trench)):
+            raise ValueError("trench treatment schedule differs from outcome binding")
     start_profile_assignment = None
     if start_profile_registry_id is not None:
         if qualification_provenance is None:
@@ -913,6 +943,26 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             "source_identity_sha256": source_hash,
             "execution_device": execution_device,
             "pair_binding_id": pair_binding_id,
+            "pair_binding": pair_binding}
+    if phase4_trench_interception_binding is not None:
+        pair_binding = {"schema": "meco-phase4-trench-interception-pair-binding-v1",
+            "protocol_id": qualification_provenance["protocol_id"],
+            "protocol_sha256": qualification_provenance["protocol_sha256"],
+            "scenario_id": scenario_id, "categories": list(categories),
+            "qualification_case": qualification_case, "seed_list": list(seeds),
+            "seed_manifest_sha256": phase4_trench_interception_binding[
+                "seed_manifest_sha256"],
+            "schedule_sha256": phase4_trench_interception_binding["schedule_sha256"],
+            "checkpoint_bundle_sha256": bundle_hashes,
+            "source_identity_sha256": source_hash,
+            "execution_device": execution_device,
+            "conditions": ["no_factor", "factor_treatment"]}
+        phase4_trench_interception_binding = {
+            **phase4_trench_interception_binding,
+            "checkpoint_bundle_sha256": bundle_hashes,
+            "source_identity_sha256": source_hash,
+            "execution_device": execution_device,
+            "pair_binding_id": _canonical_hash(pair_binding),
             "pair_binding": pair_binding}
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
@@ -972,6 +1022,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "qualification_case": qualification_case,
         "phase4_opponent_schedule": phase4_opponent_schedule,
         "phase4_direct_pursuit_binding": phase4_direct_pursuit_binding,
+        "phase4_trench_interception_binding": phase4_trench_interception_binding,
         "phase4_start_profile_assignment": start_profile_assignment,
         "training_configuration_sha256": config_hashes,
         "training_protocol_ids": protocol_ids,
@@ -1080,6 +1131,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
             phase4_factor=condition.phase4_factor,
             phase4_opponent_schedule=phase4_opponent_schedule,
             phase4_direct_pursuit_binding=phase4_direct_pursuit_binding,
+            phase4_trench_interception_binding=phase4_trench_interception_binding,
             phase4_contact_factor_id=("contact.robot_bump"
                 if condition.contact_geometry_id is not None else None),
             phase4_route_outcome_factor_ids=route_outcome_factor_ids,
@@ -1522,6 +1574,7 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
         "contact_geometry_ids": [condition.contact_geometry_id
             for condition in conditions if condition.contact_geometry_id is not None],
         "phase4_start_profile_assignment": start_profile_assignment,
+        "phase4_trench_interception_binding": phase4_trench_interception_binding,
         "seed_split_assignments": seed_split_assignments,
         "checkpoint_sha256": bundle_hashes,
         "training_configuration_sha256": {
