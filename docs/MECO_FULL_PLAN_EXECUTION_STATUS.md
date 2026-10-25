@@ -1,3 +1,14 @@
+> **Phase 2 provenance and dashboard currentness — 2026-10-25 05:58 UTC.**
+> The approved Phase 2 runtime tranche is registered as summary 71 in the
+> dashboard three-pass ledger, whose digest pin now matches. After integration
+> at `b52883d5b`, `frc-defense-dashboard.service` restarted on this checkout
+> (PID `3061667`). `/`, `/api/meco-status`, `/api/curriculum-status`, and both
+> served JavaScript assets returned HTTP 200. The API validated 71 scoped
+> summaries; served `meco.js` and `dashboard.js` hashes match this checkout.
+> No replay was generated. The independently reviewed direct-pursuit Phase 4
+> planner plan is integrated in `main`; implementation is in progress in an
+> isolated worktree. No qualification or simulator outcome is claimed.
+>
 > **Phase 2 runtime tranche integrated — 2026-10-25 05:55 UTC.** The
 > Phase 2 five-track runtime plan is implemented and integrated at
 > `054a21ea0fce42100a8c5eb5993d2e5c9e0bf53b`, after three exact-head review
