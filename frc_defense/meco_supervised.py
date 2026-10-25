@@ -1024,12 +1024,14 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     goal_pair_count = sum(len(row["goal_preferences"]) for row, _ in labelled)
     behavior_pair_count = sum(len(row["behavior_preferences"]) for row, _ in labelled)
-    if goal_pair_count < 1:
-        raise ValueError("preference dataset has no pairwise U ranking targets")
-    goal_losses, behavior_losses = [], []
+    action_pair_count = sum(len(row.get("action_pair_preferences", []))
+        for row, _ in labelled)
+    if goal_pair_count + action_pair_count < 1:
+        raise ValueError("preference dataset has no pairwise action or U ranking targets")
+    goal_losses, behavior_losses, action_losses = [], [], []
     model.train()
     for _ in range(updates):
-        epoch_goal, epoch_behavior = [], []
+        epoch_goal, epoch_behavior, epoch_action = [], [], []
         for row, sample in labelled:
             graph = sample["graph"]
             raw = model(raster=sample["raster"], globals_=sample["globals"],
@@ -1048,7 +1050,8 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
             goal_terms = [F.softplus(-(node_values[p["preferred_node_id"]] -
                 node_values[p["right_node_id"] if p["preferred_node_id"] == p["left_node_id"]
                     else p["left_node_id"]])) for p in row["goal_preferences"]]
-            goal_loss = torch.stack(goal_terms).mean()
+            goal_loss = (torch.stack(goal_terms).mean() if goal_terms
+                else logits.new_zeros(()))
             behavior_terms = []
             available = {}
             for pair in sample["row"]["pairs"]:
@@ -1072,7 +1075,19 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
                 behavior_terms.append(F.softplus(-(preferred - other)))
             behavior_loss = (torch.stack(behavior_terms).mean() if behavior_terms
                 else goal_loss.new_zeros(()))
-            loss = goal_loss + behavior_loss
+            pair_index = {(pair["node_id"], pair["behavior_id"]): pair["pair_index"]
+                for pair in sample["row"]["pairs"] if pair.get("status") == "available"}
+            action_terms = []
+            for pref in row.get("action_pair_preferences", []):
+                left = logits[pair_index[(pref["left_node_id"], pref["left_behavior_id"])]]
+                right = logits[pair_index[(pref["right_node_id"], pref["right_behavior_id"])]]
+                preferred, other = ((left, right) if (pref["preferred_node_id"],
+                    pref["preferred_behavior_id"]) == (pref["left_node_id"],
+                    pref["left_behavior_id"]) else (right, left))
+                action_terms.append(F.softplus(-(preferred - other)))
+            action_loss = (torch.stack(action_terms).mean() if action_terms
+                else goal_loss.new_zeros(()))
+            loss = goal_loss + behavior_loss + action_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
@@ -1080,8 +1095,11 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
             epoch_goal.append(float(goal_loss.detach().cpu()))
             if behavior_terms:
                 epoch_behavior.append(float(behavior_loss.detach().cpu()))
+            if action_terms:
+                epoch_action.append(float(action_loss.detach().cpu()))
         goal_losses.append(sum(epoch_goal) / len(epoch_goal))
         behavior_losses.append(sum(epoch_behavior) / len(epoch_behavior) if epoch_behavior else 0.)
+        action_losses.append(sum(epoch_action) / len(epoch_action) if epoch_action else 0.)
     if source_identity() != sources:
         raise RuntimeError("source/runtime changed during Plan A preference fitting")
     _initialize_unlabelled_plan_a_penalty_head(model, track)
@@ -1106,9 +1124,10 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
         "authority_sha256": hashlib.sha256(authority_path.read_bytes()).hexdigest(),
         "dataset_schema": "meco-plan-a-human-preferences-v2",
         "target_schema": "meco-plan-a-pairwise-goal-and-behavior-preferences-v2",
-        "target_semantics": "pairwise_human_goal_ranking_for_U_and_behavior_preferences_for_B",
+        "target_semantics": "pairwise_human_goal_and_complete_action_preferences_for_U_plus_B",
         "goal_loss": "pairwise_softplus_U(preferred_goal, less_preferred_goal)",
         "behavior_loss": "within_goal_centered_pairwise_softplus_B(preferred_behavior, alternative)",
+        "action_pair_loss": "pairwise_softplus_(U_plus_B)(preferred_complete_action, alternative)",
         "u_numeric_target": None,
         "u_numeric_unavailable_reason": "no independent complete uncensored oracle values supplied",
         "p_target": None, "p_mode": "p0", "p_prior": 0.0,
@@ -1129,14 +1148,16 @@ def warm_start_plan_a_preferences_v2(track: str, dataset: Path,
         "annotated_record_count": len(labelled), "goal_pair_count": goal_pair_count,
         "behavior_pair_count": behavior_pair_count,
         "mean_goal_preference_loss_by_epoch": goal_losses,
-        "mean_behavior_preference_loss_by_epoch": behavior_losses}
+        "mean_behavior_preference_loss_by_epoch": behavior_losses,
+        "mean_action_pair_preference_loss_by_epoch": action_losses,
+        "action_pair_count": action_pair_count}
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output)
     validate_plan_a_preferences_v2_artifact(track, output,
         qualification_protocol=qualification_protocol, expected_sources=sources)
     return {"track": track, "checkpoint": str(output), "schema": payload["schema"],
         "annotated_records": len(labelled), "goal_pairs": goal_pair_count,
-        "behavior_pairs": behavior_pair_count}
+        "behavior_pairs": behavior_pair_count, "action_pairs": action_pair_count}
 
 
 def validate_plan_a_preferences_v2_artifact(track: str, checkpoint: Path, *,
@@ -1174,6 +1195,10 @@ def validate_plan_a_preferences_v2_artifact(track: str, checkpoint: Path, *,
             payload.get("qualification_protocol_file") != protocol_path.name or
             payload.get("split") != "train" or payload.get("dataset_schema") != "meco-plan-a-human-preferences-v2" or
             payload.get("target_schema") != "meco-plan-a-pairwise-goal-and-behavior-preferences-v2" or
+            payload.get("target_semantics") !=
+                "pairwise_human_goal_and_complete_action_preferences_for_U_plus_B" or
+            payload.get("action_pair_loss") !=
+                "pairwise_softplus_(U_plus_B)(preferred_complete_action, alternative)" or
             payload.get("optimizer_state_included") is not False or payload.get("resume_compatible") is not False or
             payload.get("u_numeric_target") is not None or payload.get("p_target") is not None or
             payload.get("p_mode") != "p0" or
@@ -1200,8 +1225,10 @@ def validate_plan_a_preferences_v2_artifact(track: str, checkpoint: Path, *,
             data_manifest.get("qualification_protocol_sha256") != protocol_sha or
             data_manifest.get("sources") != sources or data_manifest.get("split") != "train" or
             data_manifest.get("u_numeric_target") is not None or
-            data_manifest.get("authority_declared_only") is not True or
-            data_manifest.get("authority_is_authenticated_identity") is not False or
+            data_manifest.get("authority_declared_only") is not
+                (data_manifest.get("signed_human_choice_authority") is None) or
+            data_manifest.get("authority_is_authenticated_identity") is not
+                (data_manifest.get("signed_human_choice_authority") is not None) or
             data_manifest.get("authority_proves_expertise_or_optimality") is not False or
             not isinstance(annotation_source, dict) or
             legal_manifest.get("dataset_sha256") != digests["legal_node_dataset_sha256"] or
@@ -1215,16 +1242,44 @@ def validate_plan_a_preferences_v2_artifact(track: str, checkpoint: Path, *,
             source_manifest.get("split") != "train" or source_manifest.get("sources") != sources or
             annotation_source.get("sha256") != digests["authority_sha256"]):
         raise ValueError("Plan A preference artifact manifests are not identically bound")
-    for key in ("updates", "annotated_record_count", "goal_pair_count"):
+    for key in ("updates", "annotated_record_count"):
         if type(payload.get(key)) is not int or payload[key] < 1:
             raise ValueError("Plan A preference artifact has invalid update or label counts")
-    if type(payload.get("behavior_pair_count")) is not int or payload["behavior_pair_count"] < 0:
-        raise ValueError("Plan A preference artifact has invalid behavior pair count")
-    for key in ("mean_goal_preference_loss_by_epoch", "mean_behavior_preference_loss_by_epoch"):
+    for key in ("goal_pair_count", "behavior_pair_count", "action_pair_count"):
+        if type(payload.get(key)) is not int or payload[key] < 0:
+            raise ValueError("Plan A preference artifact has invalid preference pair counts")
+    if payload["goal_pair_count"] + payload["action_pair_count"] < 1:
+        raise ValueError("Plan A preference artifact has no fitted goal/action labels")
+    for key in ("mean_goal_preference_loss_by_epoch", "mean_behavior_preference_loss_by_epoch",
+                "mean_action_pair_preference_loss_by_epoch"):
         values = payload.get(key)
         if (not isinstance(values, list) or len(values) != payload["updates"] or
                 any(not _finite_number(value) or value < 0 for value in values)):
             raise ValueError("Plan A preference artifact has invalid loss history")
+    signed_authority = data_manifest.get("signed_human_choice_authority")
+    if signed_authority is not None:
+        from . import meco_plan_a_expert_choice as choice_authority
+        from .meco_plan_a_preferences_v2 import _protocol_trusted_keys
+        trusted_keys = _protocol_trusted_keys(protocol)
+        authority_payload = choice_authority.verify_authority(signed_authority,
+            trusted_keys=trusted_keys)
+        rows = [json.loads(line) for line in dataset_bytes.decode().splitlines() if line.strip()]
+        choice_rows = [row.get("signed_human_choice") for row in rows]
+        sidecar = b"".join((json.dumps(row, sort_keys=True, separators=(",", ":"),
+            allow_nan=False) + "\n").encode() for row in choice_rows)
+        expected_signed_hashes = {
+            "sidecar_sha256": hashlib.sha256(sidecar).hexdigest(),
+            "source_sha256": digests["source_dataset_sha256"],
+            "source_manifest_sha256": digests["source_manifest_sha256"],
+            "replay_sha256": digests["legal_node_dataset_sha256"],
+            "replay_manifest_sha256": digests["legal_node_manifest_sha256"]}
+        if (any(not isinstance(row, dict) for row in choice_rows) or
+                data_manifest.get("signed_human_choice_sidecar_sha256") !=
+                    expected_signed_hashes["sidecar_sha256"] or
+                any(authority_payload.get(key) != value
+                    for key, value in expected_signed_hashes.items()) or
+                authority_payload.get("author_id") != annotation_source.get("source_id")):
+            raise ValueError("signed human preference authority signature/provenance mismatch")
     model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
     try:
         model.load_state_dict(payload["model"], strict=True)
@@ -3362,7 +3417,6 @@ def _read_and_replay_plan_a_legal_node_dataset(dataset, source_dataset, qualific
             manifest.get("source_identity_sha256") != _canonical_hash(sources) or
             manifest.get("dataset_sha256") != digest):
         raise ValueError("legal-node dataset schema, source identity, or bytes mismatch")
-    from .meco_counterfactual import _read_counterfactual_dataset
     source_rows, source_sha, source_manifest_sha, _, protocol_id, protocol_sha, source_manifest = \
         _read_counterfactual_dataset(source_dataset,
             qualification_protocol=Path(qualification_protocol), expected_sources=sources)
