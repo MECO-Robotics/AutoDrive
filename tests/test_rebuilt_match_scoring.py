@@ -1,5 +1,6 @@
 """Deterministic contract tests; these do not construct or run the simulator."""
 from copy import deepcopy
+import math
 
 import pytest
 
@@ -13,6 +14,7 @@ from frc_defense.rebuilt_match_scoring import (
     derive_simulation_tie_selection,
     hub_is_active,
     match_period,
+    runtime_hub_schedule_table,
     shift_1_inactive_alliance,
     validate_fuel_proxy_ledger,
     validate_score_ledger,
@@ -91,6 +93,33 @@ def test_pinned_rules_and_half_open_period_boundaries():
         "shift_2", "shift_2", "shift_3", "shift_3", "shift_4", "shift_4", "end_game", "end_game"]
     with pytest.raises(ValueError):
         match_period(160)
+
+
+def test_runtime_hub_table_matches_pinned_contract_at_every_clock_boundary():
+    dt = .02
+    table = runtime_hub_schedule_table(dt, 8000)
+    for boundary in (0., 20., 30., 55., 80., 105., 130., 160.):
+        tick = round(boundary / dt)
+        for offset in (-1, 0, 1):
+            source_tick = min(max(tick + offset, 0), 8000)
+            time_s = min(source_tick * dt, 160.)
+            contract_time = min(time_s, math.nextafter(160., 0.))
+            expected_period = match_period(contract_time)
+            period_index = table["phase_by_tick"][source_tick]
+            assert table["period_ids"][period_index] == expected_period
+            for first_inactive in ("red", "blue"):
+                counts = {"red": int(first_inactive == "red"),
+                          "blue": int(first_inactive == "blue")}
+                expected = {alliance: hub_is_active(
+                    alliance, contract_time, counts) for alliance in ALLIANCES}
+                assert table["hub_active_by_first_inactive"][first_inactive][
+                    expected_period] == expected
+                tied = {"red": 1, "blue": 1}
+                tied_expected = {alliance: hub_is_active(
+                    alliance, contract_time, tied,
+                    fms_tie_selection=first_inactive) for alliance in ALLIANCES}
+                assert table["hub_active_by_first_inactive"][first_inactive][
+                    expected_period] == tied_expected
 
 
 def test_fms_tie_and_alternating_shift_activity():

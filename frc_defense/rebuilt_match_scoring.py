@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -64,6 +65,10 @@ def _rules_snapshot() -> dict[str, Any]:
 
 
 RULES_SNAPSHOT = _rules_snapshot()
+MATCH_PERIODS = tuple(RULES_SNAPSHOT["match_clock_seconds"]["periods"])
+MATCH_END_TIME_S = float(RULES_SNAPSHOT["match_clock_seconds"]["duration"])
+AUTO_PERIOD_END_TIME_S = float(next(
+    period["end_exclusive"] for period in MATCH_PERIODS if period["id"] == "auto"))
 
 
 def rules_snapshot_sha256() -> str:
@@ -116,7 +121,7 @@ def _require_text(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _require_time(value: Any, field: str, maximum: float = 160.0) -> float:
+def _require_time(value: Any, field: str, maximum: float = MATCH_END_TIME_S) -> float:
     if not _number(value) or not 0 <= value <= maximum:
         raise ValueError(f"{field} must be a finite time in [0, {maximum:g}]")
     return float(value)
@@ -171,6 +176,41 @@ def hub_is_active(
     inactive = first_inactive if shift_number % 2 == 1 else (
         "blue" if first_inactive == "red" else "red")
     return alliance != inactive
+
+
+@lru_cache(maxsize=32)
+def runtime_hub_schedule_table(time_step_s: float, final_tick: int) -> dict[str, Any]:
+    """Return a tick lookup derived only from the pinned phase/HUB contract.
+
+    The runtime uses this small integer/bool lookup on the device instead of
+    reimplementing match-period boundaries in its per-tick schedule logic.
+    """
+    if not _number(time_step_s) or time_step_s <= 0:
+        raise ValueError("time_step_s must be finite and positive")
+    if type(final_tick) is not int or final_tick < 0:
+        raise ValueError("final_tick must be a nonnegative integer")
+    period_ids = tuple(period["id"] for period in MATCH_PERIODS)
+    period_index = {period_id: index for index, period_id in enumerate(period_ids)}
+    phase_by_tick = []
+    for tick in range(final_tick + 1):
+        time_s = min(tick * float(time_step_s), MATCH_END_TIME_S)
+        if time_s >= MATCH_END_TIME_S:
+            time_s = math.nextafter(MATCH_END_TIME_S, 0.)
+        phase_by_tick.append(period_index[match_period(time_s)])
+    states = {}
+    for first_inactive in ALLIANCES:
+        counts = {alliance: int(alliance == first_inactive) for alliance in ALLIANCES}
+        states[first_inactive] = {}
+        for period in MATCH_PERIODS:
+            start, end = (float(period["start_inclusive"]),
+                          float(period["end_exclusive"]))
+            sample_time = (start + end) * .5
+            states[first_inactive][period["id"]] = {
+                alliance: hub_is_active(alliance, sample_time, counts)
+                for alliance in ALLIANCES
+            }
+    return {"period_ids": period_ids, "phase_by_tick": tuple(phase_by_tick),
+            "hub_active_by_first_inactive": states}
 
 
 def _validate_context(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -404,14 +444,16 @@ def _auto_counts(events: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     counts = {alliance: 0 for alliance in ALLIANCES}
     for event in events:
         if (event.get("event_type") == "fuel_sensor_crossing"
-                and event.get("crossing_time_s", 160) < 20
+                and event.get("crossing_time_s", MATCH_END_TIME_S) < AUTO_PERIOD_END_TIME_S
                 and event.get("sensor_confirmed") is True):
             counts[event["alliance"]] += 1
     return counts
 
 
 def _shift_boundaries() -> tuple[float, ...]:
-    return (30., 55., 80., 105., 130., 160.)
+    shift_starts = tuple(float(period["start_inclusive"]) for period in MATCH_PERIODS
+                         if str(period["id"]).startswith("shift_"))
+    return shift_starts + (MATCH_END_TIME_S,)
 
 
 def _fuel_assessment_deadline(
@@ -420,13 +462,13 @@ def _fuel_assessment_deadline(
     auto_counts: Mapping[str, int],
     fms: str | None,
 ) -> float:
-    if crossing < 20.:
-        return 23.
+    if crossing < AUTO_PERIOD_END_TIME_S:
+        return AUTO_PERIOD_END_TIME_S + 3.
     # Find the first boundary at which this active HUB deactivates. The rule
     # grants three seconds for processing after that boundary; absent a later
     # deactivation, TELEOP's end assessment is the final bound.
     for boundary in _shift_boundaries():
-        if boundary <= crossing or boundary >= 160.:
+        if boundary <= crossing or boundary >= MATCH_END_TIME_S:
             continue
         before = hub_is_active(alliance, boundary - 1e-6, auto_counts,
                                fms_tie_selection=fms)
@@ -434,7 +476,7 @@ def _fuel_assessment_deadline(
                               fms_tie_selection=fms)
         if before and not after:
             return boundary + 3.
-    return 163.
+    return MATCH_END_TIME_S + 3.
 
 
 def _normalize_proxy_events(proxy_events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -513,7 +555,7 @@ def _normalize_fuel_proxy_events(
         expected_time = (raw["source_tick"] + 1) * time_step_s
         if time_s != expected_time:
             raise ValueError("event_time_s must match its exact source physics tick")
-        if time_s >= 160.:
+        if time_s >= MATCH_END_TIME_S:
             raise ValueError("proxy score-action event must be inside the half-open match clock")
         slot = raw["robot_slot"]
         if type(slot) is not int or not 0 <= slot < len(slot_alliances):
@@ -599,7 +641,7 @@ def build_fuel_proxy_ledger(
         # The row is validated below; only count candidates with a valid time
         # and alliance here so malformed events still fail closed in order.
         time_s = _require_time(raw.get("event_time_s"), "event_time_s")
-        if time_s < 20. and raw.get("alliance") in ALLIANCES:
+        if time_s < AUTO_PERIOD_END_TIME_S and raw.get("alliance") in ALLIANCES:
             preliminary[raw["alliance"]] += 1
     clean_events = _normalize_fuel_proxy_events(
         events, slot_alliances=slot_alliances, auto_counts=preliminary,
@@ -707,7 +749,8 @@ def build_score_ledger(
     context = _validate_context(match_context)
     clean_proxy = _normalize_proxy_events(proxy_events)
     proxy_auto = {alliance: sum(
-        1 for row in clean_proxy if row["alliance"] == alliance and row["event_time_s"] < 20.)
+        1 for row in clean_proxy if row["alliance"] == alliance
+        and row["event_time_s"] < AUTO_PERIOD_END_TIME_S)
         for alliance in ALLIANCES}
     proxy_fms = context["fms_tie_selection"] if proxy_auto["red"] == proxy_auto["blue"] else None
     if proxy_auto["red"] == proxy_auto["blue"]:

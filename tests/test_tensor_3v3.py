@@ -1,4 +1,5 @@
 import pytest
+import math
 
 torch = pytest.importorskip("torch")
 
@@ -60,6 +61,109 @@ def test_proxy_auto_counts_freeze_at_transition_and_use_seeded_tie():
     env._update_match(torch.tensor([True]))
     expected = [expected_tie != "red", expected_tie != "blue"]
     assert env.hub_active[0].tolist() == expected
+
+
+def test_runtime_hub_state_matches_pinned_contract_at_all_phase_boundaries():
+    from frc_defense.rebuilt_match_scoring import hub_is_active
+
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=72, horizon=8000,
+        randomize=False, fuel_count=96, fuel_proxy_enabled=True,
+        simulation_episode_id="boundary-episode", simulation_match_id="boundary-match",
+        simulation_seed=72,
+    )
+    env._auto_fuel_frozen.fill_(True)
+    env._frozen_auto_fuel_scores[0] = torch.tensor([4, 2])
+    counts = {"red": 4, "blue": 2}
+    for boundary in (0., 20., 30., 55., 80., 105., 130., 160.):
+        center_tick = round(boundary / env.dt)
+        for tick in (max(0, center_tick-1), center_tick, min(8000, center_tick+1)):
+            time_s = min(tick * env.dt, 160.)
+            env.steps.fill_(tick)
+            env._update_match(torch.tensor([True]),
+                clock_time=torch.tensor([time_s], dtype=env.match_elapsed.dtype))
+            contract_time = min(time_s, math.nextafter(160., 0.))
+            assert env.hub_active[0].tolist() == [
+                hub_is_active(alliance, contract_time, counts)
+                for alliance in ("red", "blue")]
+
+
+def test_manual_match_update_uses_device_phase_boundaries():
+    from frc_defense.rebuilt_match_scoring import hub_is_active
+
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=75, horizon=8000,
+        randomize=False, fuel_count=96, fuel_proxy_enabled=True,
+        simulation_episode_id="manual-phase-episode",
+        simulation_match_id="manual-phase-match", simulation_seed=75,
+    )
+    env._auto_fuel_frozen.fill_(True)
+    env._frozen_auto_fuel_scores[0] = torch.tensor([2, 2])
+    tie_counts = {"red": 2, "blue": 2}
+    tie = env._fuel_proxy_tie_alliance[0].item()
+    selected = ("red", "blue")[tie]
+    for boundary in (0., 20., 30., 55., 80., 105., 130., 160.):
+        center_tick = round(boundary / env.dt)
+        for tick in (max(0, center_tick-1), center_tick, min(8000, center_tick+1)):
+            time_s = min(tick * env.dt, 160.)
+            env.match_elapsed.fill_(time_s - env.dt)
+            env._update_match(torch.tensor([True]))
+            contract_time = min(time_s, math.nextafter(160., 0.))
+            assert env.hub_active[0].tolist() == [
+                hub_is_active(alliance, contract_time, tie_counts,
+                              fms_tie_selection=selected)
+                for alliance in ("red", "blue")]
+
+
+def test_inactive_world_match_mask_preserves_phase_and_auto_freeze():
+    env = TensorThreeVsThreeEnv(
+        num_envs=2, device="cpu", seed=73, horizon=8000,
+        randomize=False, fuel_count=96, fuel_proxy_enabled=True,
+        simulation_episode_id="mask-episode", simulation_match_id="mask-match",
+        simulation_seed=73,
+    )
+    env.auto_fuel_scores[:] = torch.tensor([[3, 1], [1, 4]])
+    env.steps[:] = torch.tensor([1500, 2750])
+    env.match_elapsed[:] = torch.tensor([29.98, 54.98])
+    env.hub_active[1] = torch.tensor([False, True])
+
+    env._update_match(torch.tensor([True, False]),
+        clock_time=torch.tensor([30., 55.]))
+
+    assert env.match_elapsed.tolist() == pytest.approx([30., 54.98])
+    assert env.hub_active.tolist() == [[False, True], [False, True]]
+    assert env._auto_fuel_frozen.tolist() == [True, False]
+    assert env._frozen_auto_fuel_scores.tolist() == [[3, 1], [0, 0]]
+
+
+def test_partial_reset_clears_only_selected_proxy_world():
+    from frc_defense.rebuilt_match_scoring import derive_simulation_tie_selection
+
+    env = TensorThreeVsThreeEnv(
+        num_envs=2, device="cpu", seed=74, horizon=32,
+        randomize=False, fuel_count=96, fuel_proxy_enabled=True,
+        simulation_episode_id="reset-episode", simulation_match_id="reset-match",
+        simulation_seed=74,
+    )
+    before_tie = int(env._fuel_proxy_tie_alliance[0].item())
+    env._fuel_proxy_piece_events[0, 0, 0] = 3
+    env._fuel_proxy_piece_events[1, 0, 3] = 7
+    env._auto_fuel_frozen[:] = True
+    env._frozen_auto_fuel_scores[:] = torch.tensor([[2, 1], [1, 2]])
+    env.hub_active[1] = torch.tensor([False, True])
+
+    env.reset_done(torch.tensor([True, False]))
+
+    assert env._fuel_proxy_reset_generation.tolist() == [1, 0]
+    assert (env._fuel_proxy_piece_events[0] == -1).all()
+    assert env._fuel_proxy_piece_events[1, 0, 3].item() == 7
+    assert env._auto_fuel_frozen.tolist() == [False, True]
+    assert env._frozen_auto_fuel_scores.tolist() == [[0, 0], [1, 2]]
+    assert env.hub_active[1].tolist() == [False, True]
+    assert env._fuel_proxy_tie_alliance[0].item() != before_tie
+    assert env._fuel_proxy_tie_alliance[0].item() == (
+        0 if derive_simulation_tie_selection("reset-match", 74,
+            world_index=0, reset_generation=1)["alliance"] == "red" else 1)
 
 
 def test_deterministic_defender_guards_standard_hub_scoring_approach():

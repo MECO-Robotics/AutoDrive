@@ -95,6 +95,23 @@ class TensorThreeVsThreeEnv(
                 not isinstance(simulation_match_id, str) or not simulation_match_id or
                 type(simulation_seed) is not int or simulation_seed < 0):
             raise ValueError("fuel proxy requires explicit simulation episode, match, and seed identity")
+        from .rebuilt_match_scoring import (AUTO_PERIOD_END_TIME_S,
+            MATCH_END_TIME_S, MATCH_PERIODS, runtime_hub_schedule_table)
+        self.auto_period_end_time_s = AUTO_PERIOD_END_TIME_S
+        self.match_end_time_s = MATCH_END_TIME_S
+        self._match_period_ids = tuple(period["id"] for period in MATCH_PERIODS)
+        final_match_tick = min(self.horizon, math.ceil(self.match_end_time_s / self.dt))
+        schedule_table = runtime_hub_schedule_table(self.dt, final_match_tick)
+        self._match_period_by_tick = torch.tensor(
+            schedule_table["phase_by_tick"], device=self.device, dtype=torch.long)
+        self._match_period_boundaries = torch.tensor(
+            [float(period["start_inclusive"]) for period in MATCH_PERIODS[1:]],
+            device=self.device, dtype=torch.float32)
+        self._hub_state_by_first_inactive = torch.tensor([
+            [[schedule_table["hub_active_by_first_inactive"][first][period][alliance]
+              for alliance in ("red", "blue")]
+             for period in self._match_period_ids]
+            for first in ("red", "blue")], device=self.device, dtype=torch.bool)
         self._fuel_proxy_reset_generation = torch.full(
             (self.n,), -1, device=self.device, dtype=torch.long)
         self._fuel_proxy_tie_alliance = torch.zeros(
@@ -419,7 +436,7 @@ class TensorThreeVsThreeEnv(
         self._last_score_intent = torch.zeros(
             (self.n, NUM_ROBOTS),device=self.device,dtype=torch.bool)
         self.match_elapsed = torch.zeros(self.n, device=self.device)
-        self.match_remaining = torch.full((self.n,), 160., device=self.device)
+        self.match_remaining = torch.full((self.n,), self.match_end_time_s, device=self.device)
         self.steps = torch.zeros((self.n,), device=self.device, dtype=torch.long)
         self.planner_ticks = torch.zeros_like(self.steps)
 
@@ -588,7 +605,7 @@ class TensorThreeVsThreeEnv(
         self._target_cluster_empty_ticks.zero_()
         self._raster_cursor.copy_(self._closest_raster_indices(self.policy_pose[:,:,:2]))
         self._raster_reanchor.fill_(True)
-        self.match_elapsed.zero_(); self.match_remaining.fill_(160.)
+        self.match_elapsed.zero_(); self.match_remaining.fill_(self.match_end_time_s)
         self.steps.zero_(); self.planner_ticks.fill_(self.replan_interval-1)
         self._planner_tick_scalar=self.replan_interval-1; self._planner_tick_aligned=True
         self._full_batch_step_scalar=0
@@ -680,7 +697,8 @@ class TensorThreeVsThreeEnv(
         else:
             self._planner_tick_aligned=False
             self._full_batch_step_scalar=None
-        self.match_remaining.copy_(torch.where(mask, torch.full_like(self.match_remaining, 160.),
+        self.match_remaining.copy_(torch.where(mask, torch.full_like(
+                                               self.match_remaining, self.match_end_time_s),
                                                self.match_remaining))
         for tensor in (self.auto_fuel_scores, self.fuel_score_count, self.fuel_acquisition_count,
                        self.fuel_denied_count, self.fuel_acquired_event, self.fuel_scored_event,
@@ -1542,11 +1560,8 @@ class TensorThreeVsThreeEnv(
         self._update_match(active, clock_time=self.steps.to(self.match_elapsed.dtype)*self.dt)
         self._update_fuel(active,score_intent=self._last_score_intent)
         if self.fuel_proxy_enabled:
-            source_ticks = (self.steps - 1).clamp(0, self.horizon - 1)
-            worlds = self._world_indices
-            prior = self._fuel_proxy_piece_events[worlds, source_ticks]
-            self._fuel_proxy_piece_events[worlds, source_ticks] = torch.where(
-                active[:, None], self._fuel_proxy_step_piece_ids, prior)
+            from .gamepiece_actions import _capture_fuel_proxy_step_events
+            _capture_fuel_proxy_step_events(self, active)
         if self.perception_interval == 1:
             self._update_perception(active,active_count=active_count)
         elif full_batch and self._full_batch_step_scalar is not None:

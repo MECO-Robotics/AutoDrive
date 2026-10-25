@@ -132,9 +132,13 @@ class TensorThreeVsThreeGamepieceMixin:
 
     def _update_match(self, active, *, clock_time=None):
         elapsed = ((self.match_elapsed + self.dt) if clock_time is None else clock_time)
-        self.match_elapsed.copy_(torch.where(active,elapsed.clamp(max=160.),self.match_elapsed))
-        self.match_remaining.copy_(torch.where(active,(160.-self.match_elapsed).clamp_min(0.),self.match_remaining))
-        freeze = active & (self.match_elapsed >= 20.) & ~self._auto_fuel_frozen
+        self.match_elapsed.copy_(torch.where(
+            active, elapsed.clamp(max=self.match_end_time_s), self.match_elapsed))
+        self.match_remaining.copy_(torch.where(
+            active, (self.match_end_time_s-self.match_elapsed).clamp_min(0.),
+            self.match_remaining))
+        freeze = (active & (self.match_elapsed >= self.auto_period_end_time_s) &
+                  ~self._auto_fuel_frozen)
         self._frozen_auto_fuel_scores.copy_(torch.where(
             freeze[:, None], self.auto_fuel_scores, self._frozen_auto_fuel_scores))
         self._auto_fuel_frozen |= freeze
@@ -161,14 +165,12 @@ class TensorThreeVsThreeGamepieceMixin:
                torch.zeros_like(self.steps))
         first = torch.where(auto_counts[:,0] > auto_counts[:,1], 0,
                 torch.where(auto_counts[:,1] > auto_counts[:,0], 1, tie))
-        # REBUILT: AUTO + transition are 30 s; four 25 s alliance shifts
-        # run from 30–130 s, followed by a 30 s end game. The AUTO winner's
-        # HUB is inactive in shift 1, then HUB status alternates each shift.
-        cycle=((self.match_elapsed-30.).clamp_min(0.)/25.).floor().long()
-        inactive=torch.where(cycle%2==0,first,1-first)
-        values=torch.ones_like(self.hub_active)
-        in_alliance_shifts=((self.match_elapsed>=30.) & (self.match_elapsed<130.))
-        values.scatter_(1,inactive[:,None],(~in_alliance_shifts)[:,None])
-        values=torch.where((self.match_elapsed >= 130.)[:,None],
-                           torch.ones_like(values),values)
+        if clock_time is None:
+            phase_index = torch.bucketize(
+                self.match_elapsed.contiguous(), self._match_period_boundaries,
+                right=True).clamp(max=len(self._match_period_ids)-1)
+        else:
+            tick = self.steps.clamp(max=self._match_period_by_tick.numel()-1)
+            phase_index = self._match_period_by_tick[tick]
+        values = self._hub_state_by_first_inactive[first, phase_index]
         self.hub_active.copy_(torch.where(active[:,None],values,self.hub_active))
