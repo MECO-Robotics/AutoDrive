@@ -1,9 +1,9 @@
 # MECO learning tracks plan: execution status
 
-> **Live r4 and durable-evaluation update — 2026-10-25 03:19 UTC.** The
+> **Live r4 and durable-evaluation update — 2026-10-25 03:23 UTC.** The
 > `meco-five-continuous-20261025.service` remains active (PID `2750253`) on the
-> two WX9100s. Its latest queue heartbeat is `2026-10-25T03:19:02Z`: A1, A2,
-> and C1 are complete at 100/100; A3 is 90/100 on `cuda:0`; C2 is queued at
+> two WX9100s. Its latest queue heartbeat is `2026-10-25T03:23:26Z`: A1, A2,
+> and C1 are complete at 100/100; A3 is 96/100 on `cuda:0`; C2 is queued at
 > 0/100. Cycle 1 has zero completed matched cycles and no evaluation. This is
 > still the older one-scenario `pickup_simple/cluster` diagnostic, without an
 > evaluation binding, warm starts, or Phase 4 exposure.
