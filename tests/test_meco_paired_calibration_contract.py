@@ -387,6 +387,16 @@ def test_paired_control_summary_uses_same_tuple_and_separate_alliance_deltas(mon
     assert stratum["safety_rate_difference"][next(iter(q.SAFETY_METRIC_NAMES))]["mean"] == -0.1
 
 
+def test_paired_seed_bootstrap_resamples_clusters_and_retains_repetitions():
+    interval = q._paired_seed_cluster_bootstrap_ci(
+        {"seed-a": [0.0, 100.0], "seed-b": [10.0, 10.0]},
+        seed=17, replicates=1000)
+    assert interval == [10.0, 50.0]
+
+    with pytest.raises(ValueError, match="populated seed clusters"):
+        q._paired_seed_cluster_bootstrap_ci({}, seed=17, replicates=10)
+
+
 def test_paired_control_bundle_is_individually_digest_bound_and_nonqualifying(monkeypatch):
     campaign = _campaign(monkeypatch)
     summary = {"control_id": "D1/current", "pair_count": 3,

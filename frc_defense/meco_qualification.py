@@ -2507,6 +2507,33 @@ def _paired_variance(values):
     return sum((value - mean) ** 2 for value in values) / (len(values) - 1)
 
 
+def _paired_seed_cluster_bootstrap_ci(seed_clusters, *, seed,
+        replicates=BOOTSTRAP_REPLICATES):
+    """Resample matched seed clusters while retaining every repetition in each draw."""
+    keys = sorted(seed_clusters, key=repr)
+    if not keys or any(not seed_clusters[key] for key in keys):
+        raise ValueError("paired seed bootstrap requires populated seed clusters")
+    state = seed & ((1 << 64) - 1)
+
+    def randbelow(limit):
+        nonlocal state
+        state ^= (state << 13) & ((1 << 64) - 1)
+        state ^= state >> 7
+        state ^= (state << 17) & ((1 << 64) - 1)
+        return state % limit
+
+    means = []
+    for _ in range(replicates):
+        sampled = []
+        for _ in keys:
+            cluster = seed_clusters[keys[randbelow(len(keys))]]
+            sampled.extend(cluster)
+        means.append(sum(sampled) / len(sampled))
+    means.sort()
+    return [means[int(.025 * (replicates - 1))],
+            means[int(.975 * (replicates - 1))]]
+
+
 def _paired_control_summary(campaign, control_id, pairs):
     strata = {}
     outcome_deltas = {"red": [], "blue": []}
@@ -2550,7 +2577,8 @@ def _paired_control_summary(campaign, control_id, pairs):
     summary = {"control_id": control_id, "pair_count": len(pairs),
         "simulated_match_score_difference": {}}
     for side in ("red", "blue"):
-        groups = {repr(key): values[side] for key, values in strata.items()}
+        seed_clusters = {repr(seed_key): values[side]
+            for seed_key, values in seed_groups.items()}
         bootstrap_seed = int(_canonical_sha256({"campaign_id": campaign["campaign_id"],
             "control_id": control_id, "alliance": side})[:16], 16)
         differences = outcome_deltas[side]
@@ -2559,7 +2587,7 @@ def _paired_control_summary(campaign, control_id, pairs):
             for group in seed_groups.values()]
         summary["simulated_match_score_difference"][side] = {
             "mean": sum(differences) / len(differences),
-            "cluster_bootstrap_ci": _cluster_bootstrap_ci(groups,
+            "cluster_bootstrap_ci": _paired_seed_cluster_bootstrap_ci(seed_clusters,
                 seed=bootstrap_seed, replicates=BOOTSTRAP_REPLICATES),
             "within_seed_variance_mean": sum(within) / len(within),
             "between_seed_variance": _paired_variance(seed_means)}
@@ -2575,10 +2603,12 @@ def _paired_control_summary(campaign, control_id, pairs):
             seed = int(_canonical_sha256({"campaign_id": campaign["campaign_id"],
                 "control_id": control_id, "stratum": stratum_key,
                 "alliance": side})[:16], 16)
+            seed_clusters = {seed: seed_values[side]
+                for (seed_stratum, seed), seed_values in seed_groups.items()
+                if seed_stratum == stratum}
             score_differences[side] = {"mean": sum(values[side]) / len(values[side]),
-                "cluster_bootstrap_ci": _cluster_bootstrap_ci(
-                    {repr(stratum): values[side]}, seed=seed,
-                    replicates=BOOTSTRAP_REPLICATES)}
+                "cluster_bootstrap_ci": _paired_seed_cluster_bootstrap_ci(
+                    seed_clusters, seed=seed, replicates=BOOTSTRAP_REPLICATES)}
         stratum_summaries.append({**stratum_key, "pair_count": len(values["red"]),
             "simulated_match_score_difference": score_differences,
             "safety_rate_difference": {name: {"mean": sum(deltas) / len(deltas)}
