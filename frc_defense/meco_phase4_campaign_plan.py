@@ -1107,6 +1107,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                     review_item.get("condition")) and
                 item.get("seed") == review_item.get("seed") ==
                     replay.get("replay_seed") and
+                _replay_matches_condition_report(outcomes,
+                    outcome_artifact_path.parent, item,
+                    arm=review_item.get("condition"), case=case) and
                 item.get("phase4_start_profile_assignment") ==
                     (assignment if review_item.get("condition") ==
                         "factor_treatment" else None) and
@@ -1126,6 +1129,13 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                 item.get("simulation_device") ==
                     outcomes["execution_device"]["device"]
                 for review_item, item in zip(replays, replay_payloads)))
+    replay_policy = (replay_payloads[0].get("policy")
+        if replay_artifacts_exact else None)
+    replay_policy_exact = (replay_artifacts_exact and
+        isinstance(replay_policy, str) and
+        replay_policy in START_PROFILE_POLICY_IDS and
+        all(item.get("policy") == replay_policy
+            for item in replay_payloads))
     exact_review = (row.get("schema") ==
         "meco-phase4-start-profile-review-evidence-v1" and
         row.get("protocol_id") == protocol.get("protocol_id") and
@@ -1178,6 +1188,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         replay.get("frontend_asset_manifest_sha256") ==
             manifest_sha and
         replay.get("replay_checkout_source_identity_sha256") == dashboard_tree and
+        replay_policy_exact and
+        replay.get("reviewed_policy_id") == replay_policy and
+        row.get("replay_policy_id") == replay_policy and
         type(replay.get("replay_seed")) is int and
         replay.get("replay_seed") in seed_values and
         isinstance(replays, list) and len(replays) == 2 and
@@ -1188,6 +1201,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         {item.get("condition") for item in replays if isinstance(item, dict)} ==
             set(CONDITIONS) and
         len({item.get("seed") for item in replays if isinstance(item, dict)}) == 1 and
+        all(item.get("policy") == replay_policy for item in replays
+            if isinstance(item, dict)) and
         replay_artifacts_exact and all(isinstance(item, dict) and
             item.get("scenario_id") == case["scenario_id"] and
             item.get("category") == case["category"] and
