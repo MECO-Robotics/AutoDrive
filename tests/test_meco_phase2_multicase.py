@@ -220,6 +220,101 @@ def test_descriptor_marks_selected_subset_partial_and_binds_raw_protocol(tmp_pat
         multi.validate_multicase_descriptor(value, repo_root=repo)
 
 
+def _production_descriptor_inputs(tmp_path, frozen_protocol, monkeypatch):
+    import hashlib
+    from frc_defense import meco_baseline_freeze as freeze
+    from frc_defense import meco_simulated_score_ledger as ledger
+
+    protocol, repo = frozen_protocol
+    monkeypatch.setattr(freeze, "validate_effective_phase0_bundle", lambda _bundle, _root: {
+        "capture_receipt_sha256": "1" * 64, "baseline_freeze_sha256": "2" * 64,
+        "partition_sha256": "3" * 64, "tuple_registry_sha256": "4" * 64,
+        "assignment_table_sha256": "5" * 64})
+    tuples = []
+    assignments = {}
+    for scenario, category, case_id, seeds, split in (
+            ("case-a", "single", "a", [11, 12], "train"),
+            ("case-b", "pair", "b", [21, 22], "train"),
+            ("heldout", "single", "h", [31], "validation")):
+        for seed in seeds:
+            fields = {"scenario_id": scenario, "case_id": case_id, "category": category,
+                "defender_family": "family-a", "layout_id": "layout-a",
+                "start_condition": "start-a", "sensor_profile": "sensor-a",
+                "seed": seed, "repetition": 0, "evaluation_phase": split}
+            tuple_id = freeze.canonical_sha256(fields)
+            tuples.append({**fields, "tuple_id": tuple_id, "eligible": True})
+            assignments[tuple_id] = split
+    train_ids = [row["tuple_id"] for row in tuples if row["evaluation_phase"] == "train"]
+    bundle = {"capture_receipt": {}, "baseline_freeze": {},
+        "partition_materialization": {"partitions": {
+            "train": {"tuple_ids": train_ids}, "validation": {"tuple_ids": [
+                row["tuple_id"] for row in tuples if row["evaluation_phase"] == "validation"]}},
+            "tuple_registry": {"tuples": tuples}, "assignment_table": {"assignments": assignments},
+            "partition_sha256": "3" * 64, "tuple_registry_sha256": "4" * 64,
+            "assignment_table_sha256": "5" * 64}}
+    source_sha = multi._digest({"runtime": "frozen-test"})
+    approval = {"schema": ledger.ESTIMAND_SCHEMA, "approval_id": "test-only-approval",
+        "approved": True, "approver": "fixture", "approved_at": "2026-10-25T00:00:00Z",
+        "source_plan_sha256": ledger.SOURCE_PLAN_SHA256,
+        "phase0_plan_sha256": ledger.PHASE0_PLAN_SHA256,
+        "simulator_source_sha256": source_sha, "rules_id": ledger.RULES_ID,
+        "rules_sha256": ledger.RULES_SHA256, "primary_estimand": ledger.OUTCOME_NAME,
+        "formula": "sum score_units by alliance over accepted FUEL score-award events",
+        "unit": ledger.RULES["unit"], "included_outcomes": ledger.RULES["included_outcomes"],
+        "excluded_outcomes": ledger.RULES["excluded_outcomes"],
+        "interpretation_limits": "Test fixture only.", "intended_use": "Contract test only."}
+    approval_path = repo / "approval.json"
+    approval_path.write_bytes(ledger.canonical_bytes(approval))
+    return protocol, repo, bundle, approval_path
+
+
+def test_production_descriptor_binds_phase0_train_tuples_and_approval_bytes(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    cases = [{"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}]
+    value = multi.describe_multicase(protocol_path=protocol, cases=cases,
+        device="cuda:0", output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    assert value["schema"] == multi.PRODUCTION_SCHEMA
+    assert value["phase0_binding"]["partition_sha256"] == "3" * 64
+    assert value["score_estimand_approval"]["artifact_sha256"] == multi._sha(approval.read_bytes())
+    assert set(value["tuple_crosswalk"]["tuple_ids"]) == set(
+        bundle["partition_materialization"]["partitions"]["train"]["tuple_ids"])
+    assert all(row["scenario_id"] != "heldout" for case in value["tuple_crosswalk"]["cases"]
+        for row in case["tuples"])
+    assert multi.validate_multicase_descriptor(value, repo_root=repo) == value
+
+
+@pytest.mark.parametrize("mutation", ["approval_bytes", "tuple_identity", "train_membership",
+    "crosswalk_claim", "missing_approval"])
+def test_production_descriptor_rejects_phase0_or_approval_drift(
+        tmp_path, frozen_protocol, monkeypatch, mutation):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    value = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    changed = copy.deepcopy(value)
+    if mutation == "approval_bytes":
+        approval.write_bytes(approval.read_bytes() + b" ")
+    elif mutation == "tuple_identity":
+        changed["phase0_materialization"]["partition_materialization"]["tuple_registry"]["tuples"][0]["layout_id"] = "changed"
+    elif mutation == "train_membership":
+        changed["phase0_materialization"]["partition_materialization"]["partitions"]["train"]["tuple_ids"].pop()
+    elif mutation == "crosswalk_claim":
+        changed["tuple_crosswalk"]["tuple_ids"].pop()
+    else:
+        changed["score_estimand_approval"]["path"] = "missing.json"
+    body = {key: item for key, item in changed.items() if key != "descriptor_sha256"}
+    changed["descriptor_sha256"] = multi._digest(body)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        multi.validate_multicase_descriptor(changed, repo_root=repo)
+
+
 def test_case_coverage_rejects_missing_seed_and_duplicate_decision():
     expected = [{"scenario_id": "s", "category": "c", "seeds": [1, 2]}]
     rows = [{"scenario_id": "s", "category": "c", "seed": 1, "decision_index": 0},

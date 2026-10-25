@@ -20,6 +20,7 @@ from .curriculum_training import source_identity
 from .meco_tracks import MECO_TRACKS, prediction_contract
 
 SCHEMA = "meco-phase2-multi-case-five-track-v1"
+PRODUCTION_SCHEMA = "meco-phase2-multi-case-five-track-phase0-v2"
 PREDICTION_MODE = C_FIXED["prediction_mode"]
 ACTION_TICKS = C_FIXED["action_ticks"]
 HORIZON_TICKS = C_FIXED["horizon_ticks"]
@@ -27,6 +28,134 @@ CANDIDATE_K = C_FIXED["candidate_k"]
 A_SETTINGS = {"p_cost_scale": 1.0, "intervention_maps": 3,
     "updates": 10, "learning_rate": 1e-4, "route_margin": 0.02,
     "map_regularization": 0.001, "minimum_coverage_fraction": 0.01}
+TUPLE_FIELDS = ("scenario_id", "case_id", "category", "defender_family",
+    "layout_id", "start_condition", "sensor_profile", "seed", "repetition",
+    "evaluation_phase")
+
+
+def _phase0_inputs(phase0_materialization, estimand_approval_path, *, repo_root):
+    from .meco_baseline_freeze import validate_effective_phase0_bundle, canonical_sha256
+    from .meco_simulated_score_ledger import load_estimand_approval, estimand_approval_digest
+
+    if not isinstance(phase0_materialization, dict):
+        raise ValueError("production Phase 2 requires an effective Phase 0 materialization")
+    phase0_digests = validate_effective_phase0_bundle(phase0_materialization, repo_root)
+    source_identity_sha256 = _digest(source_identity())
+    approval_path = Path(estimand_approval_path).expanduser()
+    if not approval_path.is_absolute():
+        approval_path = Path(repo_root).resolve(strict=True) / approval_path
+    candidate = approval_path
+    root = Path(repo_root).resolve(strict=True)
+    while candidate != candidate.parent:
+        if candidate.is_symlink():
+            raise ValueError("score-estimand approval path contains a symlink")
+        candidate = candidate.parent
+    if approval_path.is_symlink() or not approval_path.is_file():
+        raise ValueError("production Phase 2 requires a regular human score-estimand approval file")
+    approval_path = approval_path.resolve(strict=True)
+    try:
+        approval_relative = approval_path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError("score-estimand approval must be inside the clean source checkout") from exc
+    approval, approval_raw_sha256 = load_estimand_approval(approval_path,
+        source_identity_sha256=source_identity_sha256)
+    raw = approval_path.read_bytes()
+    if _sha(raw) != approval_raw_sha256:
+        raise ValueError("score-estimand approval bytes changed during validation")
+    approval_binding = {"schema": approval["schema"], "path": approval_relative,
+        "artifact_sha256": approval_raw_sha256,
+        "approval_id": approval["approval_id"],
+        "source_identity_sha256": source_identity_sha256,
+        "rules_id": approval["rules_id"], "rules_sha256": approval["rules_sha256"],
+        "approval_digest": estimand_approval_digest(approval)}
+    phase0_binding = {**phase0_digests,
+        "bundle_sha256": canonical_sha256(phase0_materialization)}
+    return phase0_binding, approval_binding
+
+
+def _phase0_provenance(descriptor):
+    if descriptor.get("schema") != PRODUCTION_SCHEMA:
+        return {}
+    return {"phase0_binding": descriptor["phase0_binding"],
+        "score_estimand_approval": descriptor["score_estimand_approval"],
+        "tuple_crosswalk": descriptor["tuple_crosswalk"]}
+
+
+def _validate_phase0_provenance(record, descriptor, *, label):
+    expected = _phase0_provenance(descriptor)
+    if expected and any(record.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"{label} Phase 0/approval/train tuple provenance changed")
+    if not expected and any(key in record for key in (
+            "phase0_binding", "score_estimand_approval", "tuple_crosswalk")):
+        raise ValueError(f"legacy {label} cannot claim production Phase 0 provenance")
+    return True
+
+
+def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases):
+    """Close requested case/seed keys over every eligible Phase 0 train tuple."""
+    from .meco_baseline_freeze import canonical_sha256
+
+    materialization = phase0_materialization.get("partition_materialization")
+    if not isinstance(materialization, dict):
+        raise ValueError("Phase 0 tuple partition materialization is missing")
+    partitions = materialization.get("partitions")
+    registry = materialization.get("tuple_registry")
+    table = materialization.get("assignment_table")
+    if (not isinstance(partitions, dict) or not isinstance(partitions.get("train"), dict)
+            or not isinstance(registry, dict) or not isinstance(registry.get("tuples"), list)
+            or not isinstance(table, dict) or not isinstance(table.get("assignments"), dict)):
+        raise ValueError("Phase 0 train tuple registry or assignment table is malformed")
+    expected_train_ids = partitions["train"].get("tuple_ids")
+    assignments = table["assignments"]
+    if (not isinstance(expected_train_ids, list) or len(set(expected_train_ids)) != len(expected_train_ids)
+            or set(expected_train_ids) != {tuple_id for tuple_id, split in assignments.items()
+                if split == "train"}):
+        raise ValueError("Phase 0 train tuple closure differs from the assignment table")
+    requested = {(case["scenario_id"], case["category"], seed)
+        for case in ordered_cases for seed in case["seeds"]}
+    by_key = {}
+    by_id = {}
+    for row in registry["tuples"]:
+        if not isinstance(row, dict):
+            raise ValueError("Phase 0 tuple registry row is malformed")
+        fields = {name: row.get(name) for name in TUPLE_FIELDS}
+        tuple_id = row.get("tuple_id")
+        if (tuple_id != canonical_sha256(fields) or tuple_id in by_id
+                or type(row.get("eligible")) is not bool):
+            raise ValueError("Phase 0 tuple ID does not bind its full identity")
+        by_id[tuple_id] = row
+        if tuple_id in set(expected_train_ids):
+            if (row.get("eligible") is not True or assignments.get(tuple_id) != "train"
+                    or row.get("evaluation_phase") != "train"):
+                raise ValueError("Phase 0 train closure contains an ineligible or non-train tuple")
+            key = (row["scenario_id"], row["category"], row["seed"])
+            if key not in requested:
+                raise ValueError("Phase 0 train tuple is absent from the requested protocol cases/seeds")
+            by_key.setdefault(key, []).append({**fields, "tuple_id": tuple_id})
+        elif assignments.get(tuple_id) in ("calibration", "validation", "final_test"):
+            if row.get("evaluation_phase") != assignments[tuple_id]:
+                raise ValueError("Phase 0 held-out tuple phase differs from assignment")
+    crosswalk_rows = []
+    for case in ordered_cases:
+        tuple_rows = []
+        for seed in case["seeds"]:
+            selected = sorted(by_key.get((case["scenario_id"], case["category"], seed), []),
+                key=lambda row: (row["case_id"], row["repetition"], row["tuple_id"]))
+            if not selected:
+                raise ValueError("requested case/seed has no exact Phase 0 train tuple")
+            tuple_rows.extend(selected)
+        crosswalk_rows.append({"case_key": [case["scenario_id"], case["category"]],
+            "seeds": list(case["seeds"]), "tuples": tuple_rows,
+            "tuple_ids": [row["tuple_id"] for row in tuple_rows]})
+    seen = [tuple_id for row in crosswalk_rows for tuple_id in row["tuple_ids"]]
+    if len(seen) != len(set(seen)) or set(seen) != set(expected_train_ids):
+        raise ValueError("Phase 0 train tuple crosswalk is partial, duplicated, or not closed")
+    body = {"schema": "meco-phase0-train-tuple-crosswalk-v1",
+        "partition_sha256": materialization["partition_sha256"],
+        "tuple_registry_sha256": materialization["tuple_registry_sha256"],
+        "assignment_table_sha256": materialization["assignment_table_sha256"],
+        "tuple_ids": sorted(seen), "cases": crosswalk_rows}
+    return {**body, "crosswalk_sha256": canonical_sha256(body)}
 
 
 def _digest(value) -> str:
@@ -71,6 +200,8 @@ def _check_output_namespace(root: Path, protected: tuple[Path, ...], *, allow_ex
 
 def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
         output_root: Path, repo_root: Path | None = None,
+        phase0_materialization: dict | None = None,
+        estimand_approval_path: Path | None = None,
         _allow_existing_output=False) -> dict:
     """Describe ordered train cases without creating outputs or acquiring devices.
 
@@ -118,6 +249,16 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
         normalized.append({"scenario_id": key[0], "category": key[1],
             "seeds": list(seeds), "protocol_seeds": list(allowed),
             "full_case_coverage": seeds == allowed})
+    if (phase0_materialization is None) != (estimand_approval_path is None):
+        raise ValueError("production Phase 2 requires both Phase 0 materialization and score approval")
+    production_binding = None
+    if phase0_materialization is not None:
+        phase0_binding, approval_binding = _phase0_inputs(
+            phase0_materialization, estimand_approval_path, repo_root=repo)
+        tuple_crosswalk = _phase0_train_tuple_crosswalk(phase0_materialization, normalized)
+        production_binding = {"phase0_binding": phase0_binding,
+            "score_estimand_approval": approval_binding,
+            "tuple_crosswalk": tuple_crosswalk}
     device = _safe_device(device)
     from .meco_gpu_attestation import EXPECTED_IDENTITIES
     from .meco_training_manifest import HOST_GPU_INVENTORY, HOST_GPU_INVENTORY_SHA256
@@ -147,7 +288,8 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
             "trajectory": "trajectory.jsonl", "ub": "plan-a-ub.jsonl",
             "p": "plan-a-p.jsonl"}.items()},
         "bundle": {track: str(root / "bundle" / f"{track}.pt") for track in MECO_TRACKS}}
-    body = {"schema": SCHEMA, "source": {"commit": commit, "source_tree_sha256": source_sha},
+    body = {"schema": PRODUCTION_SCHEMA if production_binding else SCHEMA,
+        "source": {"commit": commit, "source_tree_sha256": source_sha},
         "runtime_source_identity": source_identity(),
         "qualification_protocol": {"path": str(protocol_file), "id": protocol_id,
             "sha256": protocol_sha}, "ordered_cases": normalized,
@@ -167,13 +309,18 @@ def describe_multicase(*, protocol_path: Path, cases: list[dict], device: str,
         "tracks": list(MECO_TRACKS), "shards": shards,
         "outputs": outputs, "phase2_ready": False, "phase2_complete": False,
         "qualification_eligible": False}
+    if production_binding:
+        body.update(production_binding)
+        body["phase0_materialization"] = phase0_materialization
     body["descriptor_sha256"] = _digest(body)
     return body
 
 
 def validate_multicase_descriptor(descriptor: dict, *, repo_root: Path | None = None) -> dict:
-    if not isinstance(descriptor, dict) or descriptor.get("schema") != SCHEMA:
+    if (not isinstance(descriptor, dict)
+            or descriptor.get("schema") not in (SCHEMA, PRODUCTION_SCHEMA)):
         raise ValueError("unsupported multi-case Phase 2 descriptor")
+    production = descriptor["schema"] == PRODUCTION_SCHEMA
     body = {key: value for key, value in descriptor.items() if key != "descriptor_sha256"}
     if descriptor.get("descriptor_sha256") != _digest(body):
         raise ValueError("multi-case descriptor digest mismatch")
@@ -206,11 +353,30 @@ def validate_multicase_descriptor(descriptor: dict, *, repo_root: Path | None = 
             inventory_sha != HOST_GPU_INVENTORY_SHA256 or
             _safe_device(descriptor.get("device")) != descriptor.get("device")):
         raise ValueError("multi-case common training contract changed")
+    if production:
+        phase0_binding, approval_binding = _phase0_inputs(
+            descriptor.get("phase0_materialization"),
+            repo / descriptor.get("score_estimand_approval", {}).get("path", ""),
+            repo_root=repo)
+        crosswalk = _phase0_train_tuple_crosswalk(
+            descriptor["phase0_materialization"], descriptor.get("ordered_cases", []))
+        if (descriptor.get("phase0_binding") != phase0_binding
+                or descriptor.get("score_estimand_approval") != approval_binding
+                or descriptor.get("tuple_crosswalk") != crosswalk):
+            raise ValueError("multi-case Phase 0/approval/train tuple binding changed")
+    elif any(key in descriptor for key in (
+            "phase0_materialization", "phase0_binding", "score_estimand_approval",
+            "tuple_crosswalk")):
+        raise ValueError("legacy multi-case descriptors cannot carry partial production bindings")
     expected = describe_multicase(protocol_path=protocol_file,
         cases=[{"scenario_id": row["scenario_id"], "category": row["category"],
             "seeds": row["seeds"]} for row in descriptor["ordered_cases"]],
         device=descriptor["device"], output_root=Path(descriptor["outputs"]["root"]),
-        repo_root=repo, _allow_existing_output=True)
+        repo_root=repo,
+        phase0_materialization=(descriptor["phase0_materialization"] if production else None),
+        estimand_approval_path=(repo / descriptor["score_estimand_approval"]["path"]
+            if production else None),
+        _allow_existing_output=True)
     if expected != descriptor:
         raise ValueError("multi-case descriptor differs from rederived frozen protocol claims")
     return descriptor
