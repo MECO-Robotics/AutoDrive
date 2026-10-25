@@ -1723,6 +1723,7 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
     comparisons = []
     evaluation_runs = []
     comparison_cache = {}
+    diagnostic_status_outputs = set()
     summary_budget = {"files": 0, "summary_bytes": 0, "raw_bytes": 0, "records": 0}
 
     def comparison_for(report_path):
@@ -1737,42 +1738,106 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             status, error = _read_json_within(status_path, data_root)
             if status is None:
                 errors.append({"source": status_path.name, "error": error or "invalid evaluator status"})
+                evaluation_runs.append({"evaluation_id": None,
+                    "status": "unconfirmed/invalid",
+                    "execution_status": "unconfirmed/invalid",
+                    "report_validation": "unconfirmed",
+                    "evidence_error": error or "invalid evaluator status",
+                    "heartbeat_state": "stale/missing",
+                    "heartbeat_age_seconds": None, "process_alive": False,
+                    "protocol_id": None, "split": None, "diagnostic": False,
+                    "progress": None, "output_file": None,
+                    "error": error or "invalid evaluator status"})
                 continue
             stamp = _utc_timestamp(status.get("heartbeat_utc"))
             age = None if stamp is None else max(0., now - stamp)
             fresh = age is not None and age <= EVALUATION_HEARTBEAT_STALE_SECONDS and stamp <= now + 5.
             output_name = status.get("output_file")
-            safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
+            safe_name = (isinstance(output_name, str) and bool(output_name)
+                and "\x00" not in output_name and len(output_name) <= 255
+                and output_name not in (".", "..")
+                and Path(output_name).name == output_name)
             report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
+            safe_output_path = (safe_name and _inside(report_path, data_root)
+                and not report_path.is_symlink()
+                and (not report_path.exists() or report_path.is_file()))
+            if safe_output_path and status.get("split") == "diagnostic":
+                diagnostic_status_outputs.add(output_name)
             valid_report, binding, report_error, report_visible = (
                 _read_evaluation_comparison(report_path, data_root, summary_budget,
-                    status=status) if safe_name else (None, None, None, False))
-            if safe_name:
+                    status=status) if safe_output_path else (None, None,
+                    "evaluator output file is not a safe in-root basename", False))
+            if safe_output_path:
                 comparison_cache[str(report_path)] = (
                     valid_report, binding, report_error, report_visible)
-            consistent = (status.get("schema_version") == 1
+            identity_valid = (status.get("schema_version") == 1
                 and isinstance(status.get("evaluation_id"), str)
+                and bool(status.get("evaluation_id"))
+                and len(status["evaluation_id"]) <= 160
                 and isinstance(status.get("protocol_id"), str)
-                and status.get("split") == "validation"
-                and (status.get("status") == "running"
-                    or (valid_report is not None
-                        and binding.get("evaluation_id") == status.get("evaluation_id")
-                        and binding.get("protocol_id") == status.get("protocol_id")
-                        and binding.get("split") == status.get("split"))))
+                and bool(status.get("protocol_id"))
+                and len(status["protocol_id"]) <= 160
+                and status.get("split") in ("validation", "test", "diagnostic")
+                and safe_output_path)
+            report_matches_status = (valid_report is not None
+                and isinstance(binding, dict)
+                and binding.get("evaluation_id") == status.get("evaluation_id")
+                and binding.get("protocol_id") == status.get("protocol_id")
+                and binding.get("split") == status.get("split"))
+            diagnostic_complete = (identity_valid
+                and status.get("status") == "complete"
+                and status.get("split") == "diagnostic")
+            consistent = (identity_valid and
+                (status.get("status") == "running" or report_matches_status))
             alive = bool(process_probe(status.get("pid")))
             state = status.get("status", "unknown")
             if state == "running":
                 state = "running" if fresh and alive and consistent else "stale/unconfirmed"
+            elif diagnostic_complete:
+                state = "status-reported complete"
             elif state == "complete" and not consistent:
                 state = "invalid"
             elif state not in ("complete", "failed", "stopped"):
                 state = "unknown"
+            if not safe_output_path:
+                report_error = "evaluator output file is not a safe in-root basename"
+            if report_error is not None:
+                if state == "running" and report_error == "evaluation report is unavailable":
+                    report_validation = "pending"
+                    evidence_error = None
+                elif report_error == "oversized report lacks evaluator summary binding":
+                    report_validation = "unvalidated"
+                    evidence_error = report_error
+                elif report_error in ("evaluation report is unavailable",
+                        "evaluation report is not a regular in-root file"):
+                    report_validation = "unavailable"
+                    evidence_error = report_error
+                else:
+                    report_validation = "invalid"
+                    evidence_error = report_error
+            elif valid_report is not None and report_matches_status:
+                report_validation = "validated"
+                evidence_error = None
+            elif state == "running":
+                report_validation = "pending"
+                evidence_error = None
+            else:
+                report_validation = "invalid" if valid_report is not None else "unconfirmed"
+                evidence_error = ("evaluator status/report provenance mismatch"
+                    if valid_report is not None else None)
+            projected_status = state
+            projected_error = (evidence_error if diagnostic_complete else
+                None if consistent else "evaluator status/report provenance mismatch")
             evaluation_runs.append({"evaluation_id": status.get("evaluation_id"),
-                "status": state, "heartbeat_state": "fresh" if fresh else "stale/missing",
+                "status": projected_status, "execution_status": projected_status,
+                "diagnostic": diagnostic_complete,
+                "report_validation": report_validation,
+                "evidence_error": evidence_error,
+                "heartbeat_state": "fresh" if fresh else "stale/missing",
                 "heartbeat_age_seconds": age, "process_alive": alive,
                 "protocol_id": status.get("protocol_id"), "split": status.get("split"),
                 "progress": status.get("progress"), "output_file": output_name,
-                "error": None if consistent else "evaluator status/report provenance mismatch"})
+                "error": projected_error})
         for path in sorted(eval_root.glob("*.json")):
             if (path.name.endswith(".status.json")
                     or path.name.endswith(DASHBOARD_SUMMARY_SUFFIX)):
@@ -1780,6 +1845,9 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             if not path.is_file() or not _inside(path, data_root):
                 continue
             comparison, _, error, _ = comparison_for(path)
+            if path.name in diagnostic_status_outputs and comparison is not None:
+                comparison = None
+                error = "diagnostic evaluator status is not comparison evidence"
             if error:
                 errors.append({"source": path.name, "error": error or "invalid evaluation"})
                 continue

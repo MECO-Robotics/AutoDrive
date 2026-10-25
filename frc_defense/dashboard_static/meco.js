@@ -86,11 +86,20 @@
     }).join("");
     const groups = data.comparison_groups || [];
     const evaluatorRuns = data.evaluation_runs || [];
-    document.querySelector("#evaluators").innerHTML = evaluatorRuns.length ? evaluatorRuns.map(run =>
-      `<article class="group"><h3>${esc(run.status)} · ${esc(run.evaluation_id)}</h3>`+
+    document.querySelector("#evaluators").innerHTML = evaluatorRuns.length ? evaluatorRuns.map(run => {
+      const lifecycle = run.execution_status || run.status || "unconfirmed/invalid";
+      const evaluatorLabel = run.diagnostic === true && lifecycle === "status-reported complete"
+        ? "status-reported complete · diagnostic · report unvalidated"
+        : lifecycle;
+      const evidenceError = run.evidence_error || run.error;
+      return `<article class="group"><h3>${esc(evaluatorLabel)}</h3>`+
+      `<small>Status-file evaluation ${esc(run.evaluation_id)}</small>`+
       `<p>${esc(run.progress?.completed_records ?? 0)} / ${esc(run.progress?.total_records ?? "?")} records</p>`+
       `<small>Heartbeat ${esc(run.heartbeat_state)} · ${esc(run.heartbeat_age_seconds ?? "?")}s · process ${run.process_alive ? "alive" : "not confirmed"}</small>`+
-      `<p>Protocol ${esc(run.protocol_id)} · split ${esc(run.split)} · output ${esc(run.output_file)}</p></article>`).join("") : "<p class='muted'>No evaluator status manifest is available.</p>";
+      `<p>Protocol ${esc(run.protocol_id)} · split ${esc(run.split)} · output ${esc(run.output_file)}</p>`+
+      `<small>Report validation ${esc(run.report_validation || "unconfirmed")}</small>`+
+      `${evidenceError ? `<p>Evidence error: ${esc(evidenceError)}</p>` : ""}</article>`;
+    }).join("") : "<p class='muted'>No evaluator status manifest is available.</p>";
     const workflow = data.implementation_passes;
     const passStatus = workflow?.passes?.length ? workflow.passes.map(pass =>
       `<article class="group"><h3>${esc(pass.pass)} · ${esc(pass.status)}</h3>`+

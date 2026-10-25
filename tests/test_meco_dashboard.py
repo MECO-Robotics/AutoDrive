@@ -567,6 +567,243 @@ def test_evaluator_complete_requires_valid_report(tmp_path):
     assert result["evaluation_runs"][0]["error"]
 
 
+def test_diagnostic_status_completion_stays_separate_from_unbound_reports(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 32)
+    stable_hash = dashboard._stable_file_sha256
+    def forbid_unbound_report_read(path, *args, **kwargs):
+        if Path(path).name.startswith("diagnostic-"):
+            raise AssertionError("unbound report bytes must not be read for identity")
+        return stable_hash(path, *args, **kwargs)
+    monkeypatch.setattr(dashboard, "_stable_file_sha256", forbid_unbound_report_read)
+    for index in range(5):
+        output_name = f"diagnostic-{index}.json"
+        # The oversized report contains a misleading header, but without a
+        # summary binding its bytes are never read for report identity.
+        (evaluation_root / output_name).write_bytes(
+            b'{"evaluation_id":"header-id","protocol_id":"header-protocol"}' + b" " * 4096)
+        (evaluation_root / f"{output_name}.status.json").write_text(json.dumps({
+            "schema_version": 1, "evaluation_id": f"status-eval-{index}",
+            "protocol_id": f"status-protocol-{index}", "split": "diagnostic",
+            "status": "complete", "pid": 999999,
+            "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+            "output_file": output_name,
+            "progress": {"completed_records": 2200, "total_records": 2200}}))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    assert len(result["evaluation_runs"]) == 5
+    for row in result["evaluation_runs"]:
+        assert row["execution_status"] == "status-reported complete"
+        assert row["status"] == "status-reported complete"
+        assert row["diagnostic"] is True
+        assert row["report_validation"] == "unvalidated"
+        assert row["evidence_error"] == "oversized report lacks evaluator summary binding"
+        assert row["evaluation_id"].startswith("status-eval-")
+        assert "report_identity" not in row
+    assert result["comparison_groups"] == []
+    assert result["qualification"] is None
+    assert sum(error["error"] == "oversized report lacks evaluator summary binding"
+               for error in result["errors"]) == 5
+
+
+def test_diagnostic_status_cannot_promote_report_into_comparison(tmp_path):
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    report = _report(100)
+    report["evaluation_id"] = "diag-status-eval"
+    report_path = evaluation_root / "diagnostic.json"
+    report_path.write_text(json.dumps(report))
+    (evaluation_root / "diagnostic.json.status.json").write_text(json.dumps({
+        "schema_version": 1, "evaluation_id": "diag-status-eval",
+        "protocol_id": "proto-a", "split": "diagnostic", "status": "complete",
+        "pid": 999999, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": report_path.name,
+        "progress": {"completed_records": 2200, "total_records": 2200}}))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    row = result["evaluation_runs"][0]
+    assert row["execution_status"] == "status-reported complete"
+    assert row["diagnostic"] is True
+    assert row["report_validation"] == "invalid"
+    assert row["evidence_error"] == "evaluator status/report provenance mismatch"
+    assert result["comparison_groups"] == []
+    assert result["qualification"] is None
+
+
+def test_diagnostic_completion_survives_missing_report_but_not_bad_status_identity(tmp_path):
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    base = {"schema_version": 1, "evaluation_id": "missing-report-eval",
+        "protocol_id": "missing-report-protocol", "split": "diagnostic",
+        "status": "complete", "pid": 999999,
+        "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": "missing.json"}
+    (evaluation_root / "missing.json.status.json").write_text(json.dumps(base))
+    bad_id = dict(base, evaluation_id="")
+    bad_id["output_file"] = "bad-id.json"
+    (evaluation_root / "bad-id.json.status.json").write_text(json.dumps(bad_id))
+    bad_split = dict(base, evaluation_id="bad-split-eval", split="unknown")
+    bad_split["output_file"] = "bad-split.json"
+    (evaluation_root / "bad-split.json.status.json").write_text(json.dumps(bad_split))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    by_id = {row["evaluation_id"]: row for row in result["evaluation_runs"]}
+    missing = by_id["missing-report-eval"]
+    assert missing["execution_status"] == "status-reported complete"
+    assert missing["diagnostic"] is True
+    assert missing["report_validation"] == "unavailable"
+    assert missing["evidence_error"] == "evaluation report is unavailable"
+    assert by_id[""]["execution_status"] == "invalid"
+    assert by_id[""]["diagnostic"] is False
+    assert by_id["bad-split-eval"]["execution_status"] == "invalid"
+    assert by_id["bad-split-eval"]["diagnostic"] is False
+
+
+def test_bound_report_validation_remains_independent_from_execution_lifecycle(tmp_path, monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 1)
+    report = _report(100)
+    report_path = evaluation_root / "bound.json"
+    report_path.write_text(json.dumps(report, separators=(",", ":")))
+    assert _write_dashboard_comparison_summary(report_path, report)
+    summary = Path(str(report_path) + ".dashboard-summary.json").read_bytes()
+    (evaluation_root / "bound.json.status.json").write_text(json.dumps({
+        "schema_version": 1, "evaluation_id": report["evaluation_id"],
+        "protocol_id": report["protocol_id"], "split": "validation",
+        "status": "complete", "pid": 999999,
+        "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": report_path.name,
+        "dashboard_summary_sha256": hashlib.sha256(summary).hexdigest()}))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    row = result["evaluation_runs"][0]
+    assert row["execution_status"] == "complete"
+    assert row["report_validation"] == "validated"
+    assert row["evidence_error"] is None
+    assert len(result["comparison_groups"]) == 1
+
+
+@pytest.mark.parametrize("mismatch", ["digest", "evaluation_id", "protocol_id", "split"])
+def test_bounded_report_binding_mismatches_remain_evidence_invalid(
+        tmp_path, monkeypatch, mismatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 1)
+    report = _report(100)
+    report_path = evaluation_root / f"{mismatch}.json"
+    report_path.write_text(json.dumps(report, separators=(",", ":")))
+    assert _write_dashboard_comparison_summary(report_path, report)
+    summary = Path(str(report_path) + ".dashboard-summary.json").read_bytes()
+    status = {"schema_version": 1, "evaluation_id": report["evaluation_id"],
+        "protocol_id": report["protocol_id"], "split": "validation", "status": "complete",
+        "pid": 999999, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": report_path.name,
+        "dashboard_summary_sha256": hashlib.sha256(summary).hexdigest()}
+    if mismatch == "digest":
+        status["dashboard_summary_sha256"] = "f" * 64
+    elif mismatch == "evaluation_id":
+        status["evaluation_id"] = "different-evaluation"
+    elif mismatch == "protocol_id":
+        status["protocol_id"] = "different-protocol"
+    else:
+        status["split"] = "test"
+    (evaluation_root / f"{report_path.name}.status.json").write_text(json.dumps(status))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    row = result["evaluation_runs"][0]
+    assert row["execution_status"] == "invalid"
+    assert row["report_validation"] == "invalid"
+    assert row["evidence_error"]
+    assert result["comparison_groups"] == []
+
+
+def test_invalid_or_absent_status_never_projects_completion_or_report_identity(tmp_path,
+                                                                               monkeypatch):
+    import frc_defense.meco_dashboard as dashboard
+
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    monkeypatch.setattr(dashboard, "MAX_DASHBOARD_INLINE_REPORT_BYTES", 32)
+    invalid = {"schema_version": 1, "evaluation_id": "bad-eval",
+        "protocol_id": "bad-protocol", "split": "diagnostic", "status": "complete",
+        "pid": 999999, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": "../outside.json"}
+    (evaluation_root / "unsafe.json.status.json").write_text(json.dumps(invalid))
+    (evaluation_root / "malformed.json.status.json").write_text("{")
+    (evaluation_root / "absent-status.json").write_bytes(
+        b'{"evaluation_id":"report-header-id"}' + b" " * 4096)
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: False)
+
+    by_id = {row["evaluation_id"]: row for row in result["evaluation_runs"]}
+    unsafe = by_id["bad-eval"]
+    malformed = next(row for row in result["evaluation_runs"]
+                     if row["evaluation_id"] is None)
+    assert unsafe["execution_status"] == "invalid"
+    assert unsafe["diagnostic"] is False
+    assert unsafe["evidence_error"] == "evaluator output file is not a safe in-root basename"
+    assert malformed["execution_status"] == "unconfirmed/invalid"
+    assert malformed["evaluation_id"] is None
+    assert malformed["evidence_error"]
+    assert result["comparison_groups"] == []
+    assert all("report-header-id" not in str(row) for row in result["evaluation_runs"])
+
+
+def test_running_diagnostic_status_remains_running_while_report_is_pending(tmp_path):
+    checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
+    checkpoint_root.mkdir()
+    evaluation_root.mkdir()
+    (evaluation_root / "running.json.status.json").write_text(json.dumps({
+        "schema_version": 1, "evaluation_id": "running-eval",
+        "protocol_id": "running-protocol", "split": "diagnostic", "status": "running",
+        "pid": 42, "heartbeat_utc": "2027-01-15T08:00:00+00:00",
+        "output_file": "running.json",
+        "progress": {"completed_records": 3, "total_records": 2200}}))
+
+    result = _collect_status(checkpoint_root, evaluation_root,
+        project_root=tmp_path, now=1_800_000_000., process_probe=lambda _pid: True)
+
+    row = result["evaluation_runs"][0]
+    assert row["execution_status"] == "running"
+    assert row["diagnostic"] is False
+    assert row["report_validation"] == "pending"
+    assert row["evidence_error"] is None
+
+
+def test_evaluator_card_labels_status_claim_and_report_validation_separately():
+    source = Path("frc_defense/dashboard_static/meco.js").read_text()
+    assert 'run.execution_status || run.status' in source
+    assert '"status-reported complete · diagnostic · report unvalidated"' in source
+    assert 'Status-file evaluation ${esc(run.evaluation_id)}' in source
+    assert 'Report validation ${esc(run.report_validation || "unconfirmed")}' in source
+    assert '${esc(evidenceError)}' in source
+
+
 def test_running_evaluator_can_report_progress_before_evidence_file_exists(tmp_path):
     checkpoint_root, evaluation_root = tmp_path / "ckpt", tmp_path / "eval"
     checkpoint_root.mkdir()
