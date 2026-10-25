@@ -52,3 +52,17 @@ RNG consumption for inactive rows and partial resets; seeded parity is not
 claimed. Empty active masks proceed through fixed-shape masked physics rather
 than a host early return. These changes have static checks only and require
 runtime review after campaign access is released.
+
+Planner cadence, focal traversal overrides, depot retries, and optional heading
+alignment now use device masks and fixed-shape planner calls. Macro execution
+propagates target-valid/action-match masks to later ticks; tensor-to-host
+projection happens after execution for trace/report fields. This removes the
+early host break on those status masks and may run masked no-op ticks through
+the requested macro horizon. Runtime parity and throughput are unverified.
+
+All 3v3 planner calls set `static_active_mask=True`, avoiding `TensorADStar`
+caller-mask `nonzero` compaction. `frc_defense/tensor_adstar.py` remains outside
+this tranche: its route extraction still checks an internal progress mask with
+`.any().item()` every 16 iterations, and learned-cost validation also has
+`.item()` predicates. These are explicit residuals for the separately reviewed
+planner addendum; the native route algorithm was not changed here.

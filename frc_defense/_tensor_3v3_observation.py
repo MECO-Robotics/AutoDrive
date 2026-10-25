@@ -15,6 +15,17 @@ OBS_DIM = 137
 ACTION_DIM = 8
 
 
+def _assert_device_condition(device, condition, message):
+    """Fail closed with a device assertion instead of synchronizing a predicate."""
+    if (not isinstance(condition, torch.Tensor) or condition.device != device or
+            condition.numel() != 1):
+        raise ValueError("validation predicate must be a scalar tensor on the environment device")
+    assert_async=getattr(torch,"_assert_async",None)
+    if assert_async is None:
+        raise RuntimeError("device-side validation is unavailable")
+    assert_async(condition,message)
+
+
 def _gated_angular_track_association(track_pos,track_mask,track_age,
                                      detections,detected,observer_pose,
                                      timeout,gate_m):

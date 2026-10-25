@@ -23,6 +23,7 @@ from ._tensor_3v3_gamepieces import TensorThreeVsThreeGamepieceMixin
 from ._tensor_3v3_navigation import TensorThreeVsThreeNavigationMixin
 from ._tensor_3v3_observation import (
     ACTION_DIM, NUM_ROBOTS, OBS_DIM, TensorThreeVsThreeObservationMixin,
+    _assert_device_condition,
 )
 
 
@@ -409,6 +410,8 @@ class TensorThreeVsThreeEnv(
         self._planner_controller_modes_dirty=False
         self._planner_traversal_request_signature=None
         self._last_applied_planner_traversal_signature=None
+        self._planner_traversal_pending=torch.zeros((self.n,),device=self.device,
+                                                     dtype=torch.bool)
         self._route_segment_indices=torch.arange(
             self.planner.max_points-1,device=self.device)
         self._last_obs = torch.zeros((self.n, NUM_ROBOTS, OBS_DIM), device=self.device)
@@ -551,6 +554,7 @@ class TensorThreeVsThreeEnv(
         self._full_batch_step_scalar=0
         self._planner_traversal_request_signature=None
         self._last_applied_planner_traversal_signature=None
+        self._planner_traversal_pending.zero_()
         self.hub_active.fill_(True); self.auto_fuel_scores.zero_(); self.fuel_score_count.zero_()
         for tensor in (self.fuel_acquisition_count, self.fuel_denied_count,
                        self.fuel_acquired_event, self.fuel_scored_event,
@@ -590,6 +594,7 @@ class TensorThreeVsThreeEnv(
         if self.n == 1:
             self._planner_traversal_request_signature=None
             self._last_applied_planner_traversal_signature=None
+        self._planner_traversal_pending &= ~mask
         pose=self._hub_line_spawn_poses()
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
@@ -767,8 +772,9 @@ class TensorThreeVsThreeEnv(
             planner_target_source_xy = torch.as_tensor(
                 planner_goal_override_target_xy, device=self.device,
                 dtype=self.policy_pose.dtype).reshape(2)
-            if not bool(torch.isfinite(planner_target_source_xy).all()):
-                raise ValueError("planner collection target snapshot XY must be finite")
+            _assert_device_condition(self.device,
+                torch.isfinite(planner_target_source_xy).all(),
+                "planner collection target snapshot XY must be finite")
         elif planner_goal_override_target_xy is not None:
             raise ValueError("planner collection target XY requires its sensor-track index")
         self._prepare_raster_cursor(active)
@@ -790,11 +796,8 @@ class TensorThreeVsThreeEnv(
                 torch.isfinite(collection_target_xy).all(-1) & (source_gap <= 1.0))
             action_match = action[:, 3] == planner_goal_override_action
             collection_target_valid = active & target_valid & action_match
-            if bool(active.any()):
-                self._last_planner_collection_target_valid = bool(
-                    target_valid[0].item())
-                self._last_planner_collection_action_match = bool(
-                    action_match[0].item())
+            self._last_planner_collection_target_valid = target_valid[0]
+            self._last_planner_collection_action_match = action_match[0]
             selected_target_delta = collection_target_xy - self.policy_pose[:, 3, :2]
             selected_target_distance = selected_target_delta.norm(dim=-1, keepdim=True)
             current_forward = torch.stack((self.policy_pose[:, 3, 2].cos(),
@@ -826,10 +829,11 @@ class TensorThreeVsThreeEnv(
                 raise ValueError("planner goal override action must be in [0, 7]")
             if planner_goal_override_traversal and expected_action != 7:
                 raise ValueError("planner goal traversal is only valid for action 7")
-            if not bool(torch.isfinite(goal).all()) or not (
-                    0. <= float(goal[0]) < float(self.sim.field_length) and
-                    0. <= float(goal[1]) < float(self.sim.field_width)):
-                raise ValueError("planner_goal_override must be a finite in-field XY endpoint")
+            _assert_device_condition(self.device,
+                torch.isfinite(goal).all() & (goal[0] >= 0.) &
+                (goal[0] < self.sim.field_length) & (goal[1] >= 0.) &
+                (goal[1] < self.sim.field_width),
+                "planner goal override must be a finite in-field XY endpoint")
             targets = targets.clone()
             override_permitted = expected_action != 7 or bool(planner_goal_override_traversal)
             planner_goal_override_mask[:, 3] = (
@@ -846,23 +850,25 @@ class TensorThreeVsThreeEnv(
                     selected_heading, self.policy_pose[:, 3, 2])
                 planner_goal_heading = selected_heading[0]
                 planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
-                if bool(planner_goal_heading_mask[0, 3]):
-                    self._last_planner_collection_goal_heading = float(
-                        selected_heading[0].item())
+                self._last_planner_collection_goal_heading = selected_heading[0]
             elif planner_goal_heading_override is not None:
                 planner_goal_heading = torch.as_tensor(
                     planner_goal_heading_override, device=self.device,
                     dtype=targets.dtype).reshape(())
-                if not bool(torch.isfinite(planner_goal_heading)):
-                    raise ValueError("planner goal heading must be finite")
+                _assert_device_condition(self.device,
+                    torch.isfinite(planner_goal_heading),
+                    "planner goal heading must be finite")
                 planner_goal_heading_mask[:, 3] = planner_goal_override_mask[:, 3]
         elif planner_goal_heading_override is not None:
             raise ValueError("planner goal heading requires its paired XY goal")
         if (type(planner_force_goal_replan) is not bool or
                 (planner_force_goal_replan and
                  (self.n != 1 or planner_goal_override is None or
-                  not bool(planner_goal_override_mask[0, 3])))):
+                  planner_goal_override_action is None))):
             raise ValueError("forced focal planner refresh requires a selected focal goal")
+        if planner_force_goal_replan:
+            _assert_device_condition(self.device,planner_goal_override_mask[0,3],
+                                     "forced focal planner refresh requires a selected focal goal")
         if planner_traversal_cost_override is None:
             if planner_traversal_cost_override_action is not None:
                 raise ValueError("planner traversal cost action requires a cost map")
@@ -872,6 +878,10 @@ class TensorThreeVsThreeEnv(
             traversal_request_changed=False
             self._planner_traversal_request_signature=None
         else:
+            if (self.device.type != "cpu" and
+                    (not isinstance(planner_traversal_cost_override,torch.Tensor) or
+                     planner_traversal_cost_override.device != self.device)):
+                raise ValueError("GPU traversal cost map must already reside on the environment device")
             if (self.device.type == "cuda" and
                     torch.cuda.is_current_stream_capturing()):
                 raise ValueError(
@@ -910,13 +920,13 @@ class TensorThreeVsThreeEnv(
             if not (version is not None and cached is not None and
                     cached[0] is planner_traversal_cost and
                     cached[1] == version and cached[2] == planner_traversal_cost_scale):
-                if (not bool(torch.isfinite(planner_traversal_cost).all().item()) or
-                        bool((planner_traversal_cost < 0.).any().item())):
-                    raise ValueError(
-                        "planner traversal cost map must be finite and nonnegative")
-                if not bool(torch.isfinite(
-                        planner_traversal_cost * planner_traversal_cost_scale).all().item()):
-                    raise ValueError("scaled planner traversal cost map must remain finite")
+                _assert_device_condition(self.device,
+                    torch.isfinite(planner_traversal_cost).all() &
+                    (planner_traversal_cost >= 0.).all(),
+                    "planner traversal cost map must be finite and nonnegative")
+                _assert_device_condition(self.device,torch.isfinite(
+                    planner_traversal_cost * planner_traversal_cost_scale).all(),
+                    "scaled planner traversal cost map must remain finite")
                 if version is not None:
                     self._validated_planner_traversal_cost = (
                         planner_traversal_cost, version, planner_traversal_cost_scale)
@@ -928,11 +938,16 @@ class TensorThreeVsThreeEnv(
                 traversal_version = planner_traversal_cost._version
             except RuntimeError:
                 traversal_version = None
-            if isinstance(planner_goal_override, (tuple, list)):
+            if planner_goal_override is None:
+                traversal_goal=None
+            elif isinstance(planner_goal_override, (tuple, list)):
                 traversal_goal = tuple(float(value) for value in planner_goal_override)
             else:
-                traversal_goal = tuple(float(value) for value in
-                    goal.detach().cpu().tolist())
+                try:
+                    goal_version=planner_goal_override._version
+                except RuntimeError:
+                    goal_version=None
+                traversal_goal=("tensor",id(planner_goal_override),goal_version)
             traversal_signature = {
                 "map": planner_traversal_cost,
                 "version": traversal_version,
@@ -941,13 +956,16 @@ class TensorThreeVsThreeEnv(
                 "action": planner_traversal_cost_override_action,
             }
             previous_request = self._planner_traversal_request_signature
-            traversal_request_changed = (previous_request is None or
+            traversal_request_changed = (traversal_version is None or
+                previous_request is None or
                 previous_request["map"] is not planner_traversal_cost or
                 previous_request["version"] != traversal_version or
                 previous_request["scale"] != planner_traversal_cost_scale or
                 previous_request["goal"] != traversal_goal or
                 previous_request["action"] != planner_traversal_cost_override_action)
             self._planner_traversal_request_signature=traversal_signature
+            if traversal_request_changed:
+                self._planner_traversal_pending.fill_(True)
         raster_mask=((self._deterministic_mode_mask &
                       ~self._defense_role_mask)[None] &
                      ((self.sweeping_enabled &
@@ -959,53 +977,22 @@ class TensorThreeVsThreeEnv(
         planner_robot_mask=self._nn_mode_mask|self._deterministic_mode_mask
         planner_modes_dirty=self._planner_controller_modes_dirty
         self._planner_controller_modes_dirty=False
-        # The strategic trainer supplies its horizon-derived active count as
-        # a host integer. While it reports the full batch and planner cadence
-        # remains aligned, every planner row has the same replan tick; avoid
-        # reducing the GPU mask and synchronizing a device boolean each tick.
-        full_active_batch=full_batch
-        if full_active_batch and self._planner_tick_aligned:
-            self._planner_tick_scalar+=1
-            self.planner_ticks.add_(1)
-            replan_due=((self._planner_tick_scalar%self.replan_interval)==0 or
-                        planner_modes_dirty)
-            if replan_due and len(self._planner_controller_mode_key)==NUM_ROBOTS:
-                # Preserve the planner's no-compaction fast path when all six
-                # robots are controlled.
-                flat_active=None
-            elif replan_due:
-                flat_active=planner_robot_mask[None].expand(self.n,-1).reshape(-1)
-            else:
-                flat_active=None
-        else:
-            self._planner_tick_aligned=False
-            self.planner_ticks.copy_(torch.where(active,self.planner_ticks+1,self.planner_ticks))
-            replan=active&((self.planner_ticks%self.replan_interval)==0)
-            if planner_modes_dirty:
-                replan=active
-            flat_active=(replan[:,None]&planner_robot_mask[None]).reshape(-1)
-            replan_due=bool(flat_active.any())
-        applied_signature=self._last_applied_planner_traversal_signature
-        traversal_differs_from_applied=(traversal_signature is not None and
-            (applied_signature is None or
-             applied_signature["map"] is not traversal_signature["map"] or
-             applied_signature["version"] != traversal_signature["version"] or
-             applied_signature["scale"] != traversal_signature["scale"] or
-             applied_signature["goal"] != traversal_signature["goal"] or
-             applied_signature["action"] != traversal_signature["action"]))
-        traversal_override_eligible=(traversal_request_changed and
-            traversal_differs_from_applied and self.n == 1 and bool(active[0]) and
-            bool(planner_goal_override_mask[0, 3]))
-        if traversal_override_eligible and not replan_due:
-            replan_due=True
-            flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
-                                    dtype=torch.bool)
-            flat_active[3]=True
-        if planner_force_goal_replan and not replan_due:
-            replan_due=True
-            flat_active=torch.zeros((self.n * NUM_ROBOTS,), device=self.device,
-                                    dtype=torch.bool)
-            flat_active[3]=True
+        # Replanning cadence is maintained per world. Host scheduler counts
+        # remain metadata only; planner eligibility comes from device masks.
+        self._planner_tick_aligned=False
+        self.planner_ticks.copy_(torch.where(active,self.planner_ticks+1,self.planner_ticks))
+        replan=active&((self.planner_ticks%self.replan_interval)==0)
+        if planner_modes_dirty:
+            replan=active
+        flat_active=(replan[:,None]&planner_robot_mask[None]).reshape(-1)
+        focal_override=(planner_goal_override_mask[:,3] & replan &
+                        planner_robot_mask[3])
+        forced_focal=(torch.full_like(active,planner_force_goal_replan) & active)
+        traversal_pending=(self._planner_traversal_pending & active &
+                           planner_goal_override_mask[:,3])
+        flat_focal=(focal_override | forced_focal | traversal_pending)
+        flat_active=flat_active.clone()
+        flat_active[3::NUM_ROBOTS] |= flat_focal
         start=self.policy_pose[:,:,:2].reshape(-1,2); goal=targets.reshape(-1,2)
         heading=self.policy_pose[:,:,2].reshape(-1)
         # Plan with the intake extended whenever collection is requested,
@@ -1018,122 +1005,113 @@ class TensorThreeVsThreeEnv(
         lengths=planner_lengths.reshape(-1); widths=self.sim.width.reshape(-1)
         speeds=self.sim.speed.reshape(-1); accel=self.sim.accel.reshape(-1)
         lateral=self.sim.lateral_mu.reshape(-1)
-        if replan_due:
-            robot_obstacles=self._perceived_robot_obstacles()
-            waypoint_chains=self.raster_sweep_points[None].expand(
-                self.n,-1,-1,-1).reshape(-1,self.raster_sweep_points.shape[1],2)
+        robot_obstacles=self._perceived_robot_obstacles()
+        waypoint_chains=self.raster_sweep_points[None].expand(
+            self.n,-1,-1,-1).reshape(-1,self.raster_sweep_points.shape[1],2)
 
-            def plan_focal_traversal_override(active_mask, obstacles, *,
-                                               static_active_mask=False):
-                if planner_traversal_cost is None:
-                    return False
-                rows = self.n * NUM_ROBOTS
-                if active_mask is None:
-                    selected = torch.ones((rows,), device=self.device,
-                                          dtype=torch.bool)
-                else:
-                    selected = torch.as_tensor(active_mask, device=self.device,
-                                               dtype=torch.bool).reshape(rows)
-                focal = torch.zeros((rows,), device=self.device, dtype=torch.bool)
-                focal[3::NUM_ROBOTS] = True
-                permitted = (planner_goal_override_mask.reshape(rows) &
-                             planner_robot_mask.reshape(rows) &
-                             active[:, None].expand(-1, NUM_ROBOTS).reshape(rows))
-                selected &= focal & permitted
-                if not bool(selected[3]):
-                    return False
-                if self.sweeping_enabled:
-                    self.planner.plan_waypoints(
-                        start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
-                        lookahead=self._raster_waypoint_lookahead,
-                        fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
-                        speed=speeds,lateral_friction=lateral,acceleration=accel,
-                        active_mask=selected,robot_obstacles=obstacles,
-                        static_active_mask=static_active_mask,
-                        learned_traversal_cost=planner_traversal_cost,
-                        learned_cost_scale=planner_traversal_cost_scale)
-                else:
-                    self.planner.plan(
-                        start,goal,heading,lengths,widths,speed=speeds,
-                        lateral_friction=lateral,acceleration=accel,
-                        active_mask=selected,robot_obstacles=obstacles,
-                        static_active_mask=static_active_mask,
-                        learned_traversal_cost=planner_traversal_cost,
-                        learned_cost_scale=planner_traversal_cost_scale)
-                self._last_applied_planner_traversal_signature=traversal_signature
-                return True
+        if self.sweeping_enabled:
+            self.planner.plan_waypoints(
+                start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
+                lookahead=self._raster_waypoint_lookahead,
+                fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
+                speed=speeds,lateral_friction=lateral,acceleration=accel,
+                active_mask=flat_active,robot_obstacles=robot_obstacles,
+                static_active_mask=True)
+        else:
+            self.planner.plan(
+                start,goal,heading,lengths,widths,speed=speeds,
+                lateral_friction=lateral,acceleration=accel,
+                active_mask=flat_active,robot_obstacles=robot_obstacles,
+                static_active_mask=True)
 
+        if planner_traversal_cost is not None:
+            rows=self.n*NUM_ROBOTS
+            selected=flat_active.clone()
+            focal=torch.zeros((rows,),device=self.device,dtype=torch.bool)
+            focal[3::NUM_ROBOTS]=True
+            permitted=(planner_goal_override_mask.reshape(rows) &
+                       planner_robot_mask.reshape(rows) &
+                       active[:,None].expand(-1,NUM_ROBOTS).reshape(rows))
+            selected &= focal & permitted
             if self.sweeping_enabled:
                 self.planner.plan_waypoints(
                     start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
                     lookahead=self._raster_waypoint_lookahead,
                     fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
                     speed=speeds,lateral_friction=lateral,acceleration=accel,
-                    active_mask=flat_active,robot_obstacles=robot_obstacles)
+                    active_mask=selected,robot_obstacles=robot_obstacles,
+                    static_active_mask=True,
+                    learned_traversal_cost=planner_traversal_cost,
+                    learned_cost_scale=planner_traversal_cost_scale)
             else:
                 self.planner.plan(
                     start,goal,heading,lengths,widths,speed=speeds,
                     lateral_friction=lateral,acceleration=accel,
-                    active_mask=flat_active,robot_obstacles=robot_obstacles)
-            focal_was_planned=(flat_active is None or
-                (self.n == 1 and bool(flat_active[3])))
-            traversal_override_applied=plan_focal_traversal_override(flat_active, robot_obstacles,
-                static_active_mask=bool(getattr(self, "_capture_planner_retries", False)))
-            if focal_was_planned and not traversal_override_applied:
-                self._last_applied_planner_traversal_signature=None
-            # A depot approach can be a narrow field-edge route. If the other
-            # chassis collectively seal its only entrance, retry that failed
-            # route against static field geometry; near-term robot contention
-            # is handled by the motion controller and physics contacts.
-            depot_fuel=self._last_audit_fuel_targets
-            depot_target=torch.zeros((self.n,NUM_ROBOTS),device=self.device,
-                                     dtype=torch.bool)
-            for box in self.field_boxes:
-                if box.name.endswith("_depot"):
-                    depot_target |= (
-                        (depot_fuel[...,0]-box.x).abs()<=box.length/2) & (
-                        (depot_fuel[...,1]-box.y).abs()<=box.width/2)
-            depot_target &= (self.last_actions.reshape(self.n,NUM_ROBOTS)<4)
-            failed=(self.planner.last_lengths.reshape(self.n,NUM_ROBOTS)<=2)
-            far_goal=(goal.reshape(self.n,NUM_ROBOTS,2)-
-                      self.policy_pose[:,:,:2]).norm(dim=-1)>1.25
-            retry=(depot_target&failed&far_goal&planner_robot_mask[None])
-            retry_flat=retry.reshape(-1)
-            if getattr(self, "_capture_planner_retries", False):
-                # Keep retry execution in the captured planner graph. The
-                # planner uses a fixed six-row batch and masks persistent
-                # writes, avoiding both .any() synchronization and nonzero
-                # compaction while preserving the retry predicate on device.
-                if self.sweeping_enabled:
-                    self.planner.plan_waypoints(
-                        start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
-                        lookahead=self._raster_waypoint_lookahead,
-                        fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
-                        speed=speeds,lateral_friction=lateral,acceleration=accel,
-                        active_mask=retry_flat,robot_obstacles=None,
-                        static_active_mask=True)
-                else:
-                    self.planner.plan(
-                        start,goal,heading,lengths,widths,speed=speeds,
-                        lateral_friction=lateral,acceleration=accel,
-                        active_mask=retry_flat,robot_obstacles=None,
-                        static_active_mask=True)
-                plan_focal_traversal_override(retry_flat, None,
-                    static_active_mask=True)
-            elif retry_flat.any():
-                if self.sweeping_enabled:
-                    self.planner.plan_waypoints(
-                        start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
-                        lookahead=self._raster_waypoint_lookahead,
-                        fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
-                        speed=speeds,lateral_friction=lateral,acceleration=accel,
-                        active_mask=retry_flat,robot_obstacles=None)
-                else:
-                    self.planner.plan(
-                        start,goal,heading,lengths,widths,speed=speeds,
-                        lateral_friction=lateral,acceleration=accel,
-                        active_mask=retry_flat,robot_obstacles=None)
-                plan_focal_traversal_override(retry_flat, None)
+                    active_mask=selected,robot_obstacles=robot_obstacles,
+                    static_active_mask=True,
+                    learned_traversal_cost=planner_traversal_cost,
+                    learned_cost_scale=planner_traversal_cost_scale)
+            self._last_applied_planner_traversal_signature=traversal_signature
+            selected_world=selected.reshape(self.n,NUM_ROBOTS)[:,3]
+            self._planner_traversal_pending &= ~selected_world
+        else:
+            self._planner_traversal_pending.zero_()
+            self._last_applied_planner_traversal_signature=None
+
+        # Retry failed depot routes with static geometry, preserving the retry
+        # predicate on device and keeping the planner batch shape fixed.
+        depot_fuel=self._last_audit_fuel_targets
+        depot_target=torch.zeros((self.n,NUM_ROBOTS),device=self.device,dtype=torch.bool)
+        for box in self.field_boxes:
+            if box.name.endswith("_depot"):
+                depot_target |= ((depot_fuel[...,0]-box.x).abs()<=box.length/2) & (
+                    (depot_fuel[...,1]-box.y).abs()<=box.width/2)
+        depot_target &= self.last_actions.reshape(self.n,NUM_ROBOTS)<4
+        failed=self.planner.last_lengths.reshape(self.n,NUM_ROBOTS)<=2
+        far_goal=(goal.reshape(self.n,NUM_ROBOTS,2)-self.policy_pose[:,:,:2]).norm(dim=-1)>1.25
+        retry_flat=(depot_target & failed & far_goal &
+                    planner_robot_mask[None] & active[:,None]).reshape(-1)
+        if self.sweeping_enabled:
+            self.planner.plan_waypoints(
+                start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
+                lookahead=self._raster_waypoint_lookahead,
+                fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
+                speed=speeds,lateral_friction=lateral,acceleration=accel,
+                active_mask=retry_flat,robot_obstacles=None,
+                static_active_mask=True)
+        else:
+            self.planner.plan(
+                start,goal,heading,lengths,widths,speed=speeds,
+                lateral_friction=lateral,acceleration=accel,
+                active_mask=retry_flat,robot_obstacles=None,
+                static_active_mask=True)
+        if planner_traversal_cost is not None:
+            retry_selected=retry_flat.clone()
+            focal=torch.zeros_like(retry_selected)
+            focal[3::NUM_ROBOTS]=True
+            permitted=(planner_goal_override_mask.reshape(-1) &
+                       planner_robot_mask.reshape(-1) &
+                       active[:,None].expand(-1,NUM_ROBOTS).reshape(-1))
+            retry_selected &= focal & permitted
+            if self.sweeping_enabled:
+                self.planner.plan_waypoints(
+                    start,waypoint_chains,self._raster_cursor.reshape(-1),heading,lengths,widths,
+                    lookahead=self._raster_waypoint_lookahead,
+                    fallback_goal=goal,waypoint_mask=raster_mask.reshape(-1),
+                    speed=speeds,lateral_friction=lateral,acceleration=accel,
+                    active_mask=retry_selected,robot_obstacles=None,
+                    static_active_mask=True,
+                    learned_traversal_cost=planner_traversal_cost,
+                    learned_cost_scale=planner_traversal_cost_scale)
+            else:
+                self.planner.plan(
+                    start,goal,heading,lengths,widths,speed=speeds,
+                    lateral_friction=lateral,acceleration=accel,
+                    active_mask=retry_selected,robot_obstacles=None,
+                    static_active_mask=True,
+                    learned_traversal_cost=planner_traversal_cost,
+                    learned_cost_scale=planner_traversal_cost_scale)
+            self._planner_traversal_pending &= ~retry_selected.reshape(self.n,NUM_ROBOTS)[:,3]
         adstar_command=None
         adstar_tangent=None
         if not self.sweeping_enabled and self._has_deterministic_offense:
@@ -1339,7 +1317,7 @@ class TensorThreeVsThreeEnv(
         # chassis is aligned so the sidestep cannot push it into a trench arm.
         command=torch.where((trench_alignment & (trench_error.abs()>.25))[...,None],
                             torch.zeros_like(command),command)
-        if planner_goal_heading is not None and bool(planner_goal_heading_mask[:, 3].any()):
+        if planner_goal_heading is not None:
             at_heading_goal = (planner_goal_heading_mask[:, 3] &
                                (distance[:, 3, 0] <= .04))
             # Before rotating, check the whole turn against static field
@@ -1422,8 +1400,7 @@ class TensorThreeVsThreeEnv(
         stationary_pose=(self.sim.pose.clone() if "none" in self.control_modes else None)
         if hasattr(self, "_curriculum_commands"):
             commands = self._curriculum_commands(commands, active)
-        advance_with_fuel(self,commands,None if full_batch else active,
-                          active_nonempty=True)
+        advance_with_fuel(self,commands,None if full_batch else active)
         self._advance_policy_pose_odometry(prior_velocity, active)
         if stationary_pose is not None:
             stationary=active[:,None]&~enabled[None,:]

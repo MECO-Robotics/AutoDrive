@@ -1476,8 +1476,12 @@ def _legal_node_pair_return(record, manifest, pair_index, repeat_index):
             goal_xy=goal_xy, goal_heading=goal_heading,
             goal_track_index=goal_track_index, goal_track_source_xy=goal_track_source_xy,
             allow_action7_traversal=(action == 7))
-        target_lost = getattr(env, "_last_planner_collection_target_valid", None) is False
-        action_remasked = getattr(env, "_last_planner_collection_action_match", None) is False
+        target_valid = getattr(env, "_last_planner_collection_target_valid", None)
+        action_match = getattr(env, "_last_planner_collection_action_match", None)
+        target_lost = (isinstance(target_valid, torch.Tensor) and
+                       not bool(target_valid.item()))
+        action_remasked = (isinstance(action_match, torch.Tensor) and
+                           not bool(action_match.item()))
         if (len(trace) != ticks or any(executed != action for executed in trace) or
                 preempted or target_lost or action_remasked):
             return {"status": "unavailable", "unavailable_reason":
