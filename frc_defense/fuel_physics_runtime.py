@@ -59,6 +59,7 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
         state = env.sim.step(commands, active_mask, _active_nonempty=active_nonempty)
         _flush_fuel_score_awards(env)
         return state
+    physics._validate_qualifying_backend()
     physics = bind_fuel_state(env)
     active = (torch.ones(env.n, device=env.device, dtype=torch.bool)
               if active_mask is None else active_mask)
