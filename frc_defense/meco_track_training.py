@@ -25,7 +25,7 @@ import torch
 from torch import nn
 
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
-from .curriculum_training import source_identity
+from .curriculum_training import source_identity, source_tree_identity
 from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
@@ -2700,6 +2700,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     sources = source_identity()
     source_hash = hashlib.sha256(json.dumps(
         sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    source_tree = source_tree_identity()
+    source_tree_hash = hashlib.sha256(json.dumps(source_tree, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
     loaded = {}
     policy_manifest = {}
     route_weight = None
@@ -3948,6 +3951,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "checkpoint_source_outdated": source_checkpoint_outdated,
                                 "replay_source_sha256": source_hash,
                                 "source_identity_sha256": source_hash,
+                                "source_tree_identity_sha256": source_tree_hash,
                                 "protocol_id": record["protocol_id"],
                                 "qualification_protocol_id": qualification_protocol_id,
                                 "training_protocol_id": manifest.get("training_protocol_id"),

@@ -27,6 +27,16 @@ def _dashboard_source_identity_sha256() -> str:
     from .curriculum_training import source_identity
     identity = json.dumps(source_identity(), sort_keys=True, allow_nan=False).encode()
     return hashlib.sha256(identity).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _dashboard_source_tree_identity_sha256() -> str:
+    """Return stable source/config identity, independent of runtime state."""
+    import hashlib
+    from .curriculum_training import source_tree_identity
+    identity = json.dumps(source_tree_identity(), sort_keys=True,
+        allow_nan=False).encode()
+    return hashlib.sha256(identity).hexdigest()
 from .dashboard_simulation import (
     PPO_CAMPAIGN_UNIT,
     BEHAVIOR_PROBE_TICKS,
@@ -782,6 +792,8 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None, *,
                 self.send_header("X-Playback-Decoded-Length",str(playback_decoded_size))
             self.send_header("X-AutoDrive-Source-Identity-SHA256",
                 _dashboard_source_identity_sha256())
+            self.send_header("X-AutoDrive-Source-Tree-Identity-SHA256",
+                _dashboard_source_tree_identity_sha256())
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)

@@ -317,6 +317,9 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
         current_source_hash = _source_identity_sha256()
         if current_source_hash != dispatch_binding["source_identity_sha256"]:
             raise ValueError("Phase 4 start-profile source identity drifted during paired dispatch")
+        if (_source_tree_identity_sha256() !=
+                dispatch_binding["source_tree_identity_sha256"]):
+            raise ValueError("Phase 4 start-profile source tree changed during paired dispatch")
         if _dispatch_checkpoint_hashes(checkpoint_paths) != dispatch_binding[
                 "checkpoint_sha256"]:
             raise ValueError("Phase 4 start-profile checkpoint files drifted during paired dispatch")
@@ -337,6 +340,9 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
             "assignment_sha256": assignment["assignment_sha256"],
             "source_identity_sha256": dispatch_binding[
                 "source_identity_sha256"],
+            "source_tree_identity": dispatch_binding["source_tree_identity"],
+            "source_tree_identity_sha256": dispatch_binding[
+                "source_tree_identity_sha256"],
             "checkpoint_sha256": dispatch_binding["checkpoint_sha256"],
             "execution_device": dispatch_binding["execution_device"],
             "condition_report_sha256": pairing["condition_report_sha256"],

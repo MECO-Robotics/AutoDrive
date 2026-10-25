@@ -329,6 +329,26 @@ def source_identity():
     return identity
 
 
+def source_tree_identity():
+    """Return stable checkout source/config identity without runtime state."""
+    generated_sources = {
+        'frc_defense/csrc/fuel_physics_hip_kernel.hip',
+        'frc_defense/csrc/fuel_sleep_hip_kernel.hip',
+        'frc_defense/csrc/tensor_collision_multi_hip_kernel.hip',
+    }
+    files = sorted(path for path in (ROOT/'frc_defense').rglob('*')
+        if path.suffix in ('.py', '.cpp', '.cu', '.h', '.cuh', '.json',
+                           '.hip', '.hpp', '.cc') and
+        path.relative_to(ROOT).as_posix() not in generated_sources)
+    source_files = {str(path.relative_to(ROOT)): hashlib.sha256(
+        path.read_bytes()).hexdigest() for path in files}
+    config_path = os.environ.get('FRC_DRIVETRAIN_CONFIG')
+    config_digest = (hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+        if config_path else None)
+    return {"source_files": source_files,
+        "drivetrain_config_sha256": config_digest}
+
+
 def _native_fuel_extension_source_identity():
     """Identify the active/default HIP binary without importing or building it."""
     from . import fuel_physics_hip
