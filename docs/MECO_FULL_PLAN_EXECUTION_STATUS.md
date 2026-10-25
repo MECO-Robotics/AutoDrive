@@ -23,6 +23,16 @@
 > output roots are absent. Launch, Phase 2, validation, qualification, and
 > warm-start readiness remain false. It is not launched while r4 holds both
 > WX9100 leases. r4 was not changed or interrupted.
+>
+> The user dashboard was restarted on the integrated checkout at 03:21:38 UTC
+> (PID `2894274`). `/`, `/api/meco-status`, `/api/curriculum-status`,
+> `/assets/meco.js`, and `/assets/dashboard.js` returned HTTP 200. The
+> curriculum API reports `validated_summary_only` with 64 scoped tranches.
+> Served asset hashes match the checkout: `meco.js`
+> `203e4c2d680d0c30465e2e868dc82a3b5cbf63511e4cb6273ae3650fbd91f7ba` and
+> `dashboard.js`
+> `487dff5cfb48d4d7e6d419be343d5e1149c291b4ba9866d227fa312972867219`.
+> No fresh replay was generated or reviewed.
 
 > **Live five-track campaign recheck — 2026-10-25 03:00 UTC.** The user
 > systemd service `meco-five-continuous-20261025.service` is active (PID
