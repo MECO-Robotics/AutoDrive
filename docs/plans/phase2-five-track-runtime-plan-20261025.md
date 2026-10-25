@@ -225,8 +225,10 @@ for track in tracks:
     cfg["tracks"][track]["output"] = str(root / "checkpoints" / track)
 destination.write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
 PY
+# Keep manifest_output null in the manifest; capture describe's JSON stdout at
+# the external path so campaign-path validation does not bind it under R6_ROOT.
 python3 -m frc_defense.meco_training_manifest describe \
-  --config "$CONFIG" --source-root "$REPO" --output "$MANIFEST"
+  --config "$CONFIG" --source-root "$REPO" > "$MANIFEST"
 python3 -m frc_defense.meco_training_manifest validate \
   "$MANIFEST" --source-root "$REPO"
 python3 - <<'PY' "$MANIFEST" "$ATTEMPT/complete-set-manifest.json"
