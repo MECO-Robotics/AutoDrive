@@ -21,14 +21,25 @@ def evidence_case(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard_api, "_EXPECTED_PLAN_SHA256", hashlib.sha256(plan.read_bytes()).hexdigest())
     for tranche in data["tranches"]:
         for role_name in ("planner", "reviewer"):
-            artifact = tranche[role_name]["artifact"]
+            artifact = tranche[role_name].get("artifact")
+            if not isinstance(artifact, dict):
+                continue
             destination = tmp_path / artifact["path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((REPO / artifact["path"]).read_bytes())
+        for artifact_key in ("code_review_artifact", "ledger_candidate_summary_artifact"):
+            artifact = tranche["implementer"].get(artifact_key)
+            if isinstance(artifact, dict):
+                destination = tmp_path / artifact["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((REPO / artifact["path"]).read_bytes())
         for relative in tranche["implementer"]["paths"]:
             destination = tmp_path / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((REPO / relative).read_bytes())
+    # Exercise the previously approved prefix as a validated summary while D
+    # remains intentionally pending in the actual repository manifest.
+    data["tranches"] = data["tranches"][:-1]
     return tmp_path, data
 
 
@@ -36,23 +47,25 @@ def validate(project, data):
     return dashboard_api._validate_three_pass_manifest(project, data)
 
 
-def test_current_manifest_is_validated_as_summary_only():
-    result = dashboard_api._three_pass_provenance()
+def test_prior_manifest_prefix_remains_validated_as_summary_only(evidence_case):
+    current = dashboard_api._three_pass_provenance()
+    assert current["status"] == "untrusted"
+    assert "reviewer evidence" in current["untrusted_reason"]
+    project, data = evidence_case
+    result = validate(project, data)
     assert result["validation_status"] == "validated_summary_only"
     assert result["status"] == "scoped-transcript-summaries"
     assert result["evidence_class"] == "scoped_transcript_summary"
-    assert len(result["tranches"]) == 89
+    assert len(result["tranches"]) == 88
     assert result["tranches"][-1]["requirement_id"] == (
-        "plan-c-device-resident-route-decision")
-    assert result["tranches"][-2]["requirement_id"] == (
         "phase4-runtime-status-ledger-dashboard")
     assert hashlib.sha256(MANIFEST.read_bytes()).hexdigest() == (
         dashboard_api._EXPECTED_THREE_PASS_PROVENANCE_SHA256)
     assert hashlib.sha256(json.dumps(
-        result["tranches"][:-1], sort_keys=True, separators=(",", ":")
+        result["tranches"], sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest() == (
         "af5303953982a989276a62bcc47abb78700e5d5b4273f93796fcc3a356423829")
-    phase4_status = result["tranches"][-2]
+    phase4_status = result["tranches"][-1]
     assert phase4_status["planner"]["artifact"] == {
         "path": "docs/plans/phase4-runtime-status-ledger-dashboard-20261025.md",
         "sha256": "3fd84e8adaab8b8ab92d08123dd10d7486890255476259a17de7c31d6a95549c",
@@ -109,38 +122,6 @@ def test_current_manifest_is_validated_as_summary_only():
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
     assert plan_a_hip["reviewer"]["approved_commit"] == (
         "5f199c68efdc4e17ae77fa4e286c15adaf9093d6")
-    plan_c = result["tranches"][-1]
-    assert plan_c["requirement_id"] == "plan-c-device-resident-route-decision"
-    assert plan_c["planner"]["artifact"] == {
-        "path": "docs/plans/gpu-resident-route-decision-slice-20261025.md",
-        "sha256": "8c6c67ffb2934fa3a4ce40b54c5cc2f2e2cb4877b5eedac9c31a2936a6879b5a",
-        "kind": "scoped-transcript-summary",
-        "status": "transcript-summary",
-    }
-    assert plan_c["implementer"]["candidate_commit"] == (
-        "cdeb9391bf23e5c2460527959132008aee6f8eb1")
-    assert plan_c["reviewer"]["approved_commit"] == (
-        "cdeb9391bf23e5c2460527959132008aee6f8eb1")
-    assert plan_c["implementer"]["integration_commit"] == (
-        "e87d757cb70262b523a4342315695bf600cf24c7")
-    assert plan_c["implementer"]["implementation_commits"][-1] == (
-        plan_c["implementer"]["candidate_commit"])
-    assert len(plan_c["implementer"]["implementation_commits"]) == 22
-    assert len(plan_c["implementer"]["paths"]) == 6
-    assert plan_c["reviewer"]["status"] == "approved-summary"
-    assert plan_c["reviewer"]["verdict"] == "approved"
-    assert "simulator" in plan_c["limits"]
-    assert "GPU/HIP" in plan_c["limits"]
-    assert "qualification" in plan_c["limits"]
-    plan_c_summary = (REPO / plan_c["reviewer"]["artifact"]["path"]).read_text()
-    for required_reference in (
-        "gpu-resident-route-decision-slice-20261025.md",
-        "cdeb9391bf23e5c2460527959132008aee6f8eb1",
-        "e87d757cb70262b523a4342315695bf600cf24c7",
-        "seeded simulator evaluation",
-        "current-dashboard verification",
-    ):
-        assert required_reference in plan_c_summary
     durable_schedule = next(t for t in result["tranches"]
         if t["requirement_id"] == "meco-durable-evaluation-schedule")
     assert durable_schedule["implementer"]["commit"] == (
@@ -432,6 +413,50 @@ def test_current_manifest_is_validated_as_summary_only():
     assert "generic `phase4_factor_exposure`" in focal_summary
     assert "initial-only" in focal_summary
 
+
+
+def test_plan_c_checkpoint_d_is_pending_and_fail_closed():
+    data = json.loads(MANIFEST.read_text())
+    assert len(data["tranches"]) == 89
+    row = data["tranches"][-1]
+    assert row["requirement_id"] == "meco-plan-c-route-device-residency"
+    assert row["planner"]["artifact"] == {
+        "path": "docs/plans/gpu-resident-route-decision-slice-20261025.md",
+        "sha256": "8c6c67ffb2934fa3a4ce40b54c5cc2f2e2cb4877b5eedac9c31a2936a6879b5a",
+        "kind": "scoped-transcript-summary",
+        "status": "transcript-summary",
+    }
+    implementer = row["implementer"]
+    assert implementer["code_candidate_commit"] == (
+        "cdeb9391bf23e5c2460527959132008aee6f8eb1")
+    assert implementer["code_review_approved_commit"] == (
+        implementer["code_candidate_commit"])
+    assert implementer["code_review_verdict"] == "approved"
+    assert implementer["code_review_artifact"]["status"] == "review-summary"
+    code_review = REPO / implementer["code_review_artifact"]["path"]
+    assert hashlib.sha256(code_review.read_bytes()).hexdigest() == (
+        implementer["code_review_artifact"]["sha256"])
+    d_summary = REPO / implementer["ledger_candidate_summary_artifact"]["path"]
+    assert hashlib.sha256(d_summary.read_bytes()).hexdigest() == (
+        implementer["ledger_candidate_summary_artifact"]["sha256"])
+    assert (REPO / "docs/implementation-provenance/plan-c-device-resident-selection-currentness-20261025.md").is_file()
+    status_text = (REPO / "docs/MECO_FULL_PLAN_EXECUTION_STATUS.md").read_text()
+    assert "Ledger checkpoint D records that C approval but remains pending" in status_text
+    assert implementer["code_candidate_paths"] == implementer["paths"]
+    assert len(implementer["code_candidate_paths"]) == 6
+    assert "candidate_commit" not in implementer
+    assert "approved_commit" not in row["reviewer"]
+    assert "artifact" not in row["reviewer"]
+    assert row["reviewer"]["status"] == "pending"
+    assert hashlib.sha256(MANIFEST.read_bytes()).hexdigest() == (
+        dashboard_api._EXPECTED_THREE_PASS_PROVENANCE_SHA256)
+    result = validate(REPO, data)
+    assert result["status"] == "untrusted"
+    assert "reviewer evidence" in result["untrusted_reason"]
+    api_result = dashboard_api._three_pass_provenance()
+    assert api_result["status"] == "untrusted"
+    assert api_result["tranches"] == []
+    assert "reviewer evidence" in api_result["untrusted_reason"]
 
 def test_valid_fixture_passes_structural_and_hash_checks(evidence_case):
     project, data = evidence_case
