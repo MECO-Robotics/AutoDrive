@@ -12,6 +12,11 @@ import math
 import torch
 
 
+# Fixed-shape masked gamepiece work and cell-permutation placement have a
+# distinct seeded draw schedule from the prior host-conditional implementation.
+FUEL_GAMEPIECE_RNG_CONTRACT_VERSION = "fuel-gamepiece-rng-fixed-mask-v2"
+
+
 @dataclass
 class FuelPhysicsConfig:
     radius: float = .075
@@ -155,10 +160,17 @@ class FuelPhysics:
         if mask is None:
             self._last_xy.copy_(self.piece_pos)
             self._last_vxy.copy_(self.piece_vel)
+            selected=torch.ones((self.n,self.p),device=self.device,dtype=torch.bool)
         else:
-            selected=torch.as_tensor(mask,device=self.device,dtype=torch.bool)[...,None]
-            self._last_xy.copy_(torch.where(selected,self.piece_pos,self._last_xy))
-            self._last_vxy.copy_(torch.where(selected,self.piece_vel,self._last_vxy))
+            selected=torch.as_tensor(mask,device=self.device,dtype=torch.bool)
+            expanded=selected[...,None]
+            self._last_xy.copy_(torch.where(expanded,self.piece_pos,self._last_xy))
+            self._last_vxy.copy_(torch.where(expanded,self.piece_vel,self._last_vxy))
+        if self._hip is None:
+            self._valid_cache=False
+        else:
+            torch.maximum(self._hip.rebuild,selected.any(-1).to(torch.int32),
+                          out=self._hip.rebuild)
 
     def separate_spawned(self, selected, free):
         """Nudge crowded spawn contacts apart without adding kinetic energy."""
@@ -166,60 +178,7 @@ class FuelPhysics:
         free = torch.as_tensor(free, device=self.device, dtype=torch.bool)
         if selected.shape != (self.n, self.p) or free.shape != selected.shape:
             raise ValueError("selected and free masks must have shape [world,piece]")
-        # Stream capture cannot record data-dependent compaction. Use the
-        # fixed-shape masked formulation only while capturing a simulator step.
-        if (self.device.type == "cuda" and
-                torch.cuda.is_current_stream_capturing()):
-            self._separate_spawned_dense(selected, free)
-            return
-        i, j = torch.triu_indices(self.p, self.p, offset=1, device=self.device)
-        pair_selected = selected[:, i] | selected[:, j]
-        valid = free[:, i] & free[:, j] & pair_selected
-        delta = self.pos[:, i, :2] - self.pos[:, j, :2]
-        distance = delta.norm(dim=-1)
-        contact = valid & (distance < 2*self.config.radius)
-        world, row = contact.nonzero(as_tuple=True)
-        if not world.numel():
-            return
-        a, b = i[row], j[row]
-        delta = delta[world, row]
-        distance = distance[world, row]
-        normal = delta / distance.clamp_min(1e-8)[:, None]
-        fallback = torch.zeros_like(normal); fallback[:, 0] = 1.
-        normal = torch.where((distance < 1e-8)[:, None], fallback, normal)
-        penetration = 2*self.config.radius-distance
-        # Apply only a small fraction of each overlap, then cap the combined
-        # displacement per ball. Dense contact counts cannot stack into a kick.
-        correction = (penetration*.10).clamp_max(.005)
-        displacement = correction[:, None]*normal
-        flat_delta = torch.zeros((self.n*self.p, 2), device=self.device,
-                                 dtype=self.pos.dtype)
-        flat_delta.index_add_(0, world*self.p+a, displacement)
-        flat_delta.index_add_(0, world*self.p+b, -displacement)
-        flat_delta = flat_delta.reshape(self.n, self.p, 2)
-        magnitude = flat_delta.norm(dim=-1, keepdim=True)
-        flat_delta *= (.015/magnitude.clamp_min(.015))
-        self.pos[..., :2].add_(flat_delta)
-        self.piece_pos.add_(flat_delta)
-        self._last_xy.copy_(self.piece_pos)
-        affected = flat_delta.norm(dim=-1) > 0
-        self.sleeping &= ~affected
-        self.sleep_clock.masked_fill_(affected, 0.)
-        # Ferry placement can start with a small geometric overlap. Treat
-        # that as a soft landing: absorb most of the carried ball's launch
-        # speed before the ordinary contact solver takes over.
-        spawned_world, spawned_piece = selected.nonzero(as_tuple=True)
-        touching = (free[spawned_world] &
-                    (torch.arange(self.p, device=self.device)[None] !=
-                     spawned_piece[:, None]) &
-                    ((self.pos[spawned_world, spawned_piece, None, :2] -
-                      self.pos[spawned_world, :, :2]).norm(dim=-1) <
-                     2*self.config.radius)).any(-1)
-        self.vel[spawned_world[touching], spawned_piece[touching], :2] *= .2
-        self.piece_vel[spawned_world[touching], spawned_piece[touching]] = \
-            self.vel[spawned_world[touching], spawned_piece[touching], :2]
-        self._last_vxy[spawned_world[touching], spawned_piece[touching]] = \
-            self.piece_vel[spawned_world[touching], spawned_piece[touching]]
+        self._separate_spawned_dense(selected, free)
 
     def _separate_spawned_dense(self, selected, free):
         """Fixed-shape equivalent of ``separate_spawned`` for graph capture."""
@@ -253,6 +212,11 @@ class FuelPhysics:
         affected = flat_delta.norm(dim=-1) > 0
         self.sleeping &= ~affected
         self.sleep_clock.masked_fill_(affected, 0.)
+        if self._hip is None:
+            self._valid_cache=False
+        else:
+            torch.maximum(self._hip.rebuild,affected.any(-1).to(torch.int32),
+                          out=self._hip.rebuild)
 
         delta_to_all = self.pos[:, :, None, :2] - self.pos[:, None, :, :2]
         distance_to_all = delta_to_all.norm(dim=-1)
