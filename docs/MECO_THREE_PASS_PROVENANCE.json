@@ -3673,6 +3673,7 @@
         "source_candidate_parent": "b9489cfa615a236db2cbf1a65402ee06ed515804",
         "source_candidate_verdict": "approved",
         "code_integration_commit": "305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95",
+        "ledger_implementation_commit": "270790a6f41c1c7a485e5a3c7b05b97796380c8e",
         "code_integration_parents": [
           "c9c0ffe327593474d9122d028a950a0592c7c38e",
           "e116941c439020b8a4bf7447972d9229190f1fbe"
@@ -3703,6 +3704,10 @@
           "tests/test_meco_pose_graph_fixed_capacity.py",
           "tests/test_meco_tracks.py",
           "tests/test_plan_a_pose_pair_contracts.py"
+        ],
+        "ledger_paths": [
+          "docs/implementation-provenance/plan-a-fixed-capacity-integration-20261026.md",
+          "docs/MECO_THREE_PASS_PROVENANCE.json"
         ]
       },
       "reviewer": {
@@ -3715,7 +3720,10 @@
         "status": "approved-summary",
         "verdict": "approved",
         "approved_commit": "305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95",
-        "verdict_detail": "Independent exact-head Pass 3 approved the integrated code candidate against its actual parents. The verdict is recorded from the reviewer message; no standalone reviewer artifact was persisted. The source candidate e116941c439020b8a4bf7447972d9229190f1fbe had a separate approved exact-head review against b9489cf."
+        "verdict_detail": "Independent exact-head Pass 3 approved only the integrated code candidate 305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95 against its actual parents. The verdict is recorded from the reviewer message; no standalone reviewer artifact was persisted. The source candidate e116941c439020b8a4bf7447972d9229190f1fbe had a separate approved exact-head review against b9489cf."
+      },
+      "ledger_candidate_review": {
+        "status": "pending-exact-head-pass3"
       },
       "limits": "Scoped source integration and review evidence only. Source-candidate checks were py_compile and git diff --check; no pytest, HIP compilation/import/profile, GPU/device work, simulator, replay, dashboard currentness, or training validation was performed. The ledger candidate still requires its own exact-head review. API digest pin finalization and dashboard restart/currentness verification remain pending. No runtime memory admission, WX9100 parity/profile, simulator behavior, campaign passage, training, deployment, qualification, or whole-plan completion is established."
     }
