@@ -26,6 +26,7 @@ def reduce_policy_family_outcomes(rows: list[dict], *,
         if key not in expected or key in by_key:
             raise ValueError("reactive family outcomes contain an unexpected or duplicate key")
         if (row.get("policy_family") != family_by_policy[key[0]] or
+                not isinstance(row.get("opponent_policy_id"), str) or
                 not isinstance(row.get("control_episode_outcome"), dict) or
                 not isinstance(row.get("treatment_episode_outcome"), dict) or
                 row.get("outcome_semantics") != (
@@ -39,7 +40,10 @@ def reduce_policy_family_outcomes(rows: list[dict], *,
     for key in sorted(expected):
         grouped.setdefault(family_by_policy[key[0]], []).append(by_key[key])
     return {"policy_family_coverage": {family: {
-                "policy_ids": sorted({row["policy_id"] for row in family_rows}),
+                "opponent_policy_ids": sorted({row["opponent_policy_id"]
+                    for row in family_rows}),
+                "evaluated_policy_ids": sorted({row["policy_id"]
+                    for row in family_rows}),
                 "paired_episode_rows": len(family_rows)}
                 for family, family_rows in sorted(grouped.items())},
             "paired_outcome_by_family": grouped,

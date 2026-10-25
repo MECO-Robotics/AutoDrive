@@ -1212,6 +1212,7 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
                     raise ValueError(f"reactive treatment lacks applied policy capture: {key}")
                 family = captured["policy_family"]
                 reactive_paired.append({"policy_id": key[0],
+                    "opponent_policy_id": schedule["policy_id"],
                     "policy_family": family, "category": key[1], "seed": key[2],
                     "control_episode_outcome": {name: control[key].get(
                         "metrics", {}).get(name) for name in ("success", "scores",
