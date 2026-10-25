@@ -15,7 +15,7 @@
 
 ## Common rollout fields and mask truth table
 
-Common numeric fields are action index, old log probability, old value, reward, episode-boundary bit, execution-failure bit, actor-valid bit, critic-valid bit, slot-valid bit, and per-row frozen input digest bytes. `episode_boundary = ended OR truncated`, preserving current update behavior (it prevents GAE from bootstrapping through either reset); the last rollout bootstrap remains the existing `bootstrap_value`. `actor_valid = slot_valid AND NOT execution_failure`; `critic_valid = slot_valid`; `slot_valid = true` only for a committed rollout slot. Padding has all masks false and inert zero payloads.
+Common numeric fields are action index, old log probability, old value, next value, reward, episode-boundary bit, execution-failure bit, actor-valid bit, critic-valid bit, slot-valid bit, and per-row frozen input digest bytes. `episode_boundary = ended OR truncated`, preserving current update behavior (it prevents GAE from bootstrapping through either reset); each active row stores the exact next-state value, using the existing final `bootstrap_value` for the last nonterminal row. `actor_valid = slot_valid AND NOT execution_failure`; `critic_valid = slot_valid`; `slot_valid = true` only for a committed rollout slot. Padding has all masks false and inert zero payloads.
 
 | Slot | Actor | Critic | GAE contribution | Adam transition |
 |---|---:|---:|---:|---:|
