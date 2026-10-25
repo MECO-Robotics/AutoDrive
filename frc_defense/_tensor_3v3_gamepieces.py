@@ -130,9 +130,14 @@ class TensorThreeVsThreeGamepieceMixin:
         self._pickup_possible_cells.copy_(torch.where(
             mask[:, None, None], possible, self._pickup_possible_cells))
 
-    def _update_match(self, active):
-        self.match_elapsed.copy_(torch.where(active,(self.match_elapsed+self.dt).clamp(max=160.),self.match_elapsed))
+    def _update_match(self, active, *, clock_time=None):
+        elapsed = ((self.match_elapsed + self.dt) if clock_time is None else clock_time)
+        self.match_elapsed.copy_(torch.where(active,elapsed.clamp(max=160.),self.match_elapsed))
         self.match_remaining.copy_(torch.where(active,(160.-self.match_elapsed).clamp_min(0.),self.match_remaining))
+        freeze = active & (self.match_elapsed >= 20.) & ~self._auto_fuel_frozen
+        self._frozen_auto_fuel_scores.copy_(torch.where(
+            freeze[:, None], self.auto_fuel_scores, self._frozen_auto_fuel_scores))
+        self._auto_fuel_frozen |= freeze
         schedule = getattr(self, "curriculum_schedule", None)
         if schedule is not None:
             # Overrides are consumed every ordinary match update, including
@@ -149,9 +154,13 @@ class TensorThreeVsThreeGamepieceMixin:
             values[:,1]=not self.behavior_probe_hub_active
             self.hub_active.copy_(torch.where(active[:,None],values,self.hub_active))
             return
-        first = torch.where(self.auto_fuel_scores[:,0] > self.auto_fuel_scores[:,1], 0,
-                torch.where(self.auto_fuel_scores[:,1] > self.auto_fuel_scores[:,0], 1,
-                            torch.zeros_like(self.steps)))
+        auto_counts = torch.where(self._auto_fuel_frozen[:, None],
+                                  self._frozen_auto_fuel_scores,
+                                  self.auto_fuel_scores)
+        tie = (self._fuel_proxy_tie_alliance if self.fuel_proxy_enabled else
+               torch.zeros_like(self.steps))
+        first = torch.where(auto_counts[:,0] > auto_counts[:,1], 0,
+                torch.where(auto_counts[:,1] > auto_counts[:,0], 1, tie))
         # REBUILT: AUTO + transition are 30 s; four 25 s alliance shifts
         # run from 30–130 s, followed by a 30 s end game. The AUTO winner's
         # HUB is inactive in shift 1, then HUB status alternates each shift.

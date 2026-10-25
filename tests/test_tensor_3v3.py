@@ -29,6 +29,39 @@ def test_rebuilt_hub_activation_follows_auto_transition_shifts_and_endgame():
         assert env.hub_active[0].tolist() == expected
 
 
+def test_proxy_auto_counts_freeze_at_transition_and_use_seeded_tie():
+    from frc_defense.rebuilt_match_scoring import derive_simulation_tie_selection
+
+    env = TensorThreeVsThreeEnv(
+        num_envs=1, device="cpu", seed=71, horizon=8000,
+        randomize=False, fuel_count=96, fuel_proxy_enabled=True,
+        simulation_episode_id="test-episode", simulation_match_id="test-match",
+        simulation_seed=71,
+    )
+    expected_tie = derive_simulation_tie_selection(
+        "test-match", 71, world_index=0, reset_generation=int(
+            env._fuel_proxy_reset_generation[0].item()))["alliance"]
+
+    # The score tick at exactly 20 seconds is excluded from AUTO; the frozen
+    # pair is captured before any transition score can affect shift 1.
+    env.auto_fuel_scores[0] = torch.tensor([3, 3])
+    env.match_elapsed.fill_(19.98)
+    env._update_match(torch.tensor([True]))
+    assert env.match_elapsed[0].item() == pytest.approx(20.)
+    assert env._frozen_auto_fuel_scores[0].tolist() == [3, 3]
+    assert env._auto_fuel_frozen.tolist() == [True]
+
+    env.auto_fuel_scores[0] = torch.tensor([3, 9])
+    env.match_elapsed.fill_(29.96)
+    env._update_match(torch.tensor([True]))
+    assert env.hub_active[0].tolist() == [True, True]
+    assert env._frozen_auto_fuel_scores[0].tolist() == [3, 3]
+    env.match_elapsed.fill_(29.98)
+    env._update_match(torch.tensor([True]))
+    expected = [expected_tie != "red", expected_tie != "blue"]
+    assert env.hub_active[0].tolist() == expected
+
+
 def test_deterministic_defender_guards_standard_hub_scoring_approach():
     env = TensorThreeVsThreeEnv(
         num_envs=1, device="cpu", seed=18, horizon=1, randomize=False,

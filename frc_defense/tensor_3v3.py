@@ -62,7 +62,9 @@ class TensorThreeVsThreeEnv(
                  random_gamepiece_placement=False,
                  field_length=16.54,
                  field_width=8.07, obstacles=(), fuel_physics=True,
-                 field_layout="2026_rebuilt", defer_initial_perception=False):
+                 field_layout="2026_rebuilt", defer_initial_perception=False,
+                 fuel_proxy_enabled=False, simulation_episode_id=None,
+                 simulation_match_id=None, simulation_seed=None):
         self.n = int(num_envs)
         if self.n < 1:
             raise ValueError("num_envs must be positive")
@@ -84,6 +86,28 @@ class TensorThreeVsThreeEnv(
         self.field_length = float(field_length)
         self.alliance_zone_depth = float(ALLIANCE_ZONE_DEPTH)
         self.dt, self.horizon = float(dt), int(horizon)
+        self.fuel_proxy_enabled = bool(fuel_proxy_enabled)
+        self.simulation_episode_id = simulation_episode_id
+        self.simulation_match_id = simulation_match_id
+        self.simulation_seed = simulation_seed
+        if self.fuel_proxy_enabled and (
+                not isinstance(simulation_episode_id, str) or not simulation_episode_id or
+                not isinstance(simulation_match_id, str) or not simulation_match_id or
+                type(simulation_seed) is not int or simulation_seed < 0):
+            raise ValueError("fuel proxy requires explicit simulation episode, match, and seed identity")
+        self._fuel_proxy_reset_generation = torch.full(
+            (self.n,), -1, device=self.device, dtype=torch.long)
+        self._fuel_proxy_tie_alliance = torch.zeros(
+            (self.n,), device=self.device, dtype=torch.long)
+        self._fuel_proxy_piece_events = torch.full(
+            (self.n, self.horizon, NUM_ROBOTS), -1,
+            device=self.device, dtype=torch.long)
+        self._fuel_proxy_step_piece_ids = torch.full(
+            (self.n, NUM_ROBOTS), -1, device=self.device, dtype=torch.long)
+        self._auto_fuel_frozen = torch.zeros(
+            (self.n,), device=self.device, dtype=torch.bool)
+        self._frozen_auto_fuel_scores = torch.zeros(
+            (self.n, 2), device=self.device, dtype=torch.long)
         self._target_action_graph_enabled = bool(
             torch.version.hip and self.n <= 8 and
             os.environ.get("AUTODRIVE_3V3_TARGET_GRAPH", "1") != "0")
@@ -520,6 +544,23 @@ class TensorThreeVsThreeEnv(
         if seed is not None:
             self.generator.manual_seed(int(seed))
             self._perception_rng_seed = int(seed) & 0xffffffff
+            if self.fuel_proxy_enabled:
+                self.simulation_seed = int(seed)
+        self._fuel_proxy_reset_generation.add_(1)
+        self._fuel_proxy_piece_events.fill_(-1)
+        self._fuel_proxy_step_piece_ids.fill_(-1)
+        self._auto_fuel_frozen.zero_()
+        self._frozen_auto_fuel_scores.zero_()
+        if self.fuel_proxy_enabled:
+            from .rebuilt_match_scoring import derive_simulation_tie_selection
+            generations = self._fuel_proxy_reset_generation.detach().cpu().tolist()
+            tie = [derive_simulation_tie_selection(
+                self.simulation_match_id, self.simulation_seed,
+                world_index=world, reset_generation=int(generation))["alliance"]
+                for world, generation in enumerate(generations)]
+            self._fuel_proxy_tie_alliance.copy_(torch.tensor(
+                [0 if alliance == "red" else 1 for alliance in tie],
+                device=self.device, dtype=torch.long))
         self._perception_rng_ticks.zero_()
         self.sim.reset(seed)
         self.sim.field_contact.zero_()
@@ -582,6 +623,22 @@ class TensorThreeVsThreeEnv(
 
     def reset_done(self, mask):
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
+        self._fuel_proxy_reset_generation.add_(mask.long())
+        self._fuel_proxy_piece_events[mask] = -1
+        self._fuel_proxy_step_piece_ids[mask] = -1
+        self._auto_fuel_frozen[mask] = False
+        self._frozen_auto_fuel_scores[mask] = 0
+        if self.fuel_proxy_enabled and bool(mask.any()):
+            from .rebuilt_match_scoring import derive_simulation_tie_selection
+            worlds = mask.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
+            generations = self._fuel_proxy_reset_generation[mask].detach().cpu().tolist()
+            tie = [derive_simulation_tie_selection(
+                self.simulation_match_id, self.simulation_seed,
+                world_index=int(world), reset_generation=int(generation))["alliance"]
+                for world, generation in zip(worlds, generations)]
+            self._fuel_proxy_tie_alliance[mask] = torch.tensor(
+                [0 if alliance == "red" else 1 for alliance in tie],
+                device=self.device, dtype=torch.long)
         self._invalidate_last_action_audit(mask)
         self.sim.reset_done(mask)
         if self.n == 1 and bool(mask[0]):
@@ -704,6 +761,49 @@ class TensorThreeVsThreeEnv(
 
 
 
+
+    def build_fuel_proxy_ledgers(self):
+        """Materialize captured abstract score actions as per-world ledgers."""
+        if not self.fuel_proxy_enabled:
+            raise RuntimeError("fuel proxy event capture is not enabled")
+        from .rebuilt_match_scoring import build_fuel_proxy_ledger
+        pieces = self._fuel_proxy_piece_events.detach().cpu()
+        generations = self._fuel_proxy_reset_generation.detach().cpu().tolist()
+        slot_alliances = ["red" if int(team) == 0 else "blue" for team in TEAM_IDS]
+        override = ("curriculum_schedule" if getattr(self, "curriculum_schedule", None)
+                    is not None else
+                    "behavior_probe" if getattr(self, "behavior_probe", None) is not None
+                    else None)
+        ledgers = []
+        for world in range(self.n):
+            rows = []
+            for tick in range(self.horizon):
+                for slot in range(NUM_ROBOTS):
+                    piece_id = int(pieces[world, tick, slot])
+                    if piece_id < 0:
+                        continue
+                    source_id = (f"{self.simulation_episode_id}:w{world}:"
+                                 f"g{int(generations[world])}:t{tick}:r{slot}:p{piece_id}")
+                    rows.append({
+                        "event_id": f"fuel-score:{source_id}",
+                        "event_type": "fuel_action_score",
+                        "event_time_s": (tick + 1) * self.dt,
+                        "source_tick": tick,
+                        "source_event_id": source_id,
+                        "alliance": slot_alliances[slot],
+                        "robot_slot": slot,
+                        "piece_id": piece_id,
+                        "hub_active": True,
+                        "event_semantics": "abstract_score_action_not_sensor_crossing",
+                    })
+            ledgers.append(build_fuel_proxy_ledger(
+                simulation_episode_id=self.simulation_episode_id,
+                simulation_match_id=self.simulation_match_id,
+                seed=int(self.simulation_seed), world_index=world,
+                reset_generation=int(generations[world]), time_step_s=self.dt,
+                slot_alliances=slot_alliances, events=rows,
+                schedule_override=override))
+        return ledgers
 
     def _perceived_robot_obstacles(self):
         """Known same-team localization plus one anonymous observed opponent."""
@@ -1436,8 +1536,14 @@ class TensorThreeVsThreeEnv(
                 self.sim.velocity))
         self._finish_raster_cursor(active,raster_mask)
         self.steps+=active.long()
-        self._update_match(active)
+        self._update_match(active, clock_time=self.steps.to(self.match_elapsed.dtype)*self.dt)
         self._update_fuel(active,score_intent=self._last_score_intent)
+        if self.fuel_proxy_enabled:
+            source_ticks = (self.steps - 1).clamp(0, self.horizon - 1)
+            worlds = self._world_indices
+            prior = self._fuel_proxy_piece_events[worlds, source_ticks]
+            self._fuel_proxy_piece_events[worlds, source_ticks] = torch.where(
+                active[:, None], self._fuel_proxy_step_piece_ids, prior)
         if self.perception_interval == 1:
             self._update_perception(active,active_count=active_count)
         elif full_batch and self._full_batch_step_scalar is not None:

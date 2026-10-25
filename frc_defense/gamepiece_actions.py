@@ -62,6 +62,8 @@ def _invalidate_perceived_contact_tracks(env, active):
 def update_fuel_actions(self, active, score_intent):
     self.fuel_acquired_event[active]=0; self.fuel_scored_event[active]=0
     self.fuel_passed_event[active]=0; self.fuel_denied_event[active]=0
+    if self.fuel_proxy_enabled:
+        self._fuel_proxy_step_piece_ids[active] = -1
     if hasattr(self,"fuel_abandoned_event"):
         self.fuel_abandoned_event[active]=0
     curriculum_metrics = getattr(self, "curriculum_metrics", None)
@@ -359,12 +361,17 @@ def update_fuel_actions(self, active, score_intent):
         self.fuel_denied_count+=entering.long()
         can_score=(ready&score_intent&robot_hub_active&in_alliance_zone&
             active[:,None]&
+            (self.match_elapsed[:,None] < 160.)&
             (self.match_elapsed[:,None]+1e-6>=self.next_score))
         eligible=held&can_score[...,None]
         first=eligible.to(torch.int64).argmax(-1,keepdim=True)
         chosen=eligible&(self._fuel_indices[:,None,:]==first)
         count=chosen.sum(-1)
         newly_scored=chosen.any(1)
+        if self.fuel_proxy_enabled:
+            selected = first.squeeze(-1)
+            self._fuel_proxy_step_piece_ids.copy_(torch.where(
+                count > 0, selected, self._fuel_proxy_step_piece_ids))
         self.fuel_scored_event.copy_(torch.where(
             active[:,None],count,self.fuel_scored_event))
         team_scores=torch.zeros_like(self.fuel_score_count)
@@ -372,7 +379,7 @@ def update_fuel_actions(self, active, score_intent):
         self.fuel_score_count+=team_scores
         auto_scores=torch.zeros_like(self.auto_fuel_scores)
         auto_scores.scatter_add_(1,self.team_ids[None].expand(self.n,-1),
-            count*(self.match_elapsed[:,None]<=20.+self.dt).long())
+            count*(self.match_elapsed[:,None] < 20.).long())
         self.auto_fuel_scores+=auto_scores
         self.next_score.copy_(torch.where(count>0,
             self.match_elapsed[:,None]+self.robot_score_intervals[None],
@@ -408,14 +415,19 @@ def update_fuel_actions(self, active, score_intent):
             self.fuel_denied_count[:,robot]+=entering.long()
             can_score=(ready&score_intent[:,robot]&
                 (self.match_elapsed+1e-6>=self.next_score[:,robot])&
+                (self.match_elapsed < 160.)&
                 self.hub_active[:,team]&in_alliance_zone&active)
             eligible=held&can_score[:,None]
             chosen=eligible&(self._fuel_indices==eligible.to(torch.int64).argmax(-1,keepdim=True))
             count=chosen.sum(-1); newly_scored|=chosen
+            if self.fuel_proxy_enabled:
+                selected = eligible.to(torch.int64).argmax(-1)
+                self._fuel_proxy_step_piece_ids[:,robot] = torch.where(
+                    count > 0, selected, self._fuel_proxy_step_piece_ids[:,robot])
             self.fuel_scored_event[:,robot]=torch.where(active,count,
                                                          self.fuel_scored_event[:,robot])
             self.fuel_score_count[:,team]+=count
-            self.auto_fuel_scores[:,team]+=count*(self.match_elapsed<=20.+self.dt).long()
+            self.auto_fuel_scores[:,team]+=count*(self.match_elapsed<20.).long()
             self.next_score[:,robot]=torch.where(
                 count>0,self.match_elapsed+self.robot_score_interval_values[robot],
                 self.next_score[:,robot])
