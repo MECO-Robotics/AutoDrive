@@ -456,6 +456,11 @@ def test_plan_c_checkpoint_e_records_d_approval_and_pending_mutation_fails():
     assert "currentness remain unverified" in status_text
     assert row["reviewer"]["status"] == "approved-summary"
     assert row["reviewer"]["verdict"] == "approved"
+    assert "candidate C code review and D ledger review are approved" in row["limits"]
+    assert "E remains subject to its second exact-head review and integration" in row["limits"]
+    for pending_gate in ("GPU/HIP", "simulator behavior", "fresh replay",
+                         "dashboard currentness", "qualification"):
+        assert pending_gate in row["limits"]
     d_review_artifact = row["reviewer"]["artifact"]
     assert d_review_artifact["path"] == (
         "docs/implementation-provenance/plan-c-device-resident-selection-ledger-review-20261025.md")

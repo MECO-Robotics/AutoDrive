@@ -3653,7 +3653,7 @@
         "approved_commit": "8d64233d4573600321956c74391842e7623f18f7",
         "verdict_detail": "Independent exact-head Pass 3 approved checkpoint D for ledger correctness. This approval is distinct from the code-candidate C review and is recorded by the separate E finalizer."
       },
-      "limits": "Source/code review only for candidate C. D is a pending ledger candidate and must be rejected by the dashboard validator until separately approved and finalized. No seeded simulator evaluation, fresh replay, GPU/HIP parity or profiling, current-dashboard verification, training, runtime evidence, or qualification is established."
+      "limits": "Source/code review only: candidate C code review and D ledger review are approved. E remains subject to its second exact-head review and integration. GPU/HIP parity and profiling, simulator behavior, fresh replay, runtime evidence, dashboard currentness, training, qualification, and whole-system GPU-only execution remain pending."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
