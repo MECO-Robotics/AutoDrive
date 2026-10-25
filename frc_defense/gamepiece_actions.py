@@ -32,9 +32,12 @@ def initialize_fuel_score_event_buffer(env, recorder):
     # Scoring is checked once per robot per outer transition. A successful
     # award advances that robot's next_score by its configured interval. The
     # 1ms margin bounds the readiness epsilon and float32 clock rounding.
+    # At intervals <=1ms, use the unconditional one-award-per-transition
+    # bound because the readiness tolerance can erase the cadence entirely.
     max_elapsed = min(horizon * dt, 160.0)
-    per_robot_capacity = tuple(min(horizon,
-        int(math.floor(max_elapsed / max(interval - 0.001, interval * 0.5))) + 1)
+    per_robot_capacity = tuple(
+        horizon if interval <= 0.001 else min(horizon,
+            int(math.floor(max_elapsed / (interval - 0.001))) + 1)
         for interval in intervals)
     capacity_per_world = sum(per_robot_capacity)
     capacity = world_count * capacity_per_world

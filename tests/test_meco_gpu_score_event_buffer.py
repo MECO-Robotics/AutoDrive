@@ -163,6 +163,18 @@ def test_capacity_bound_and_overflow_fail_closed_without_partial_stream():
         initialize_fuel_score_event_buffer(
             oversized, _recorder(world_count=10))
 
+    near_tolerance = _env(world_count=1, horizon=5000)
+    near_tolerance.robot_score_interval_values = (0.001,) * 6
+    initialize_fuel_score_event_buffer(
+        near_tolerance, _recorder(world_count=1))
+    assert near_tolerance._meco_gpu_score_event_buffer["capacity"] == 30000
+
+    sub_two_millisecond = _env(world_count=1, horizon=6000)
+    sub_two_millisecond.robot_score_interval_values = (0.0015,) * 6
+    with pytest.raises(ValueError, match="aggregate episode cap"):
+        initialize_fuel_score_event_buffer(
+            sub_two_millisecond, _recorder(world_count=1))
+
     env, recorder = _env(), _recorder()
     initialize_fuel_score_event_buffer(env, recorder)
     env._meco_gpu_score_event_buffer["overflow_flags"].fill_(2)
