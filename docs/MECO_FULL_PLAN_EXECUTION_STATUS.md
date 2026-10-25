@@ -1,3 +1,25 @@
+> **Phase 2 runtime tranche integrated — 2026-10-25 05:55 UTC.** The
+> Phase 2 five-track runtime plan is implemented and integrated at
+> `054a21ea0fce42100a8c5eb5993d2e5c9e0bf53b`, after three exact-head review
+> rounds. Physical WX9100 identity is checked after lease; production Plan A
+> support routes for live A-track decisions, C collection/replay, and A/C
+> fitting now fail closed through the gated HIP path. The fresh manifest
+> handoff captures describe output outside the not-yet-created campaign root.
+> The dashboard's summary-only three-pass ledger now contains 71 tranches,
+> including this one. No tests, HIP compile, live device attestation, parity or
+> profile probe, simulator/replay, or training launch was run for this tranche.
+> The HIP gate remains closed until WX9100 parity/profile evidence exists, and
+> the Phase 2 coordinator has not generated datasets, warm starts, or a seal.
+>
+> At the 05:55:27 UTC live poll, uninterrupted r4 supervisor PID `2750253` was
+> still training with `stop_requested=false`: A1 queued at 100, A2 and A3
+> complete at 200, C1 running at 185, and C2 running at 153, across `cuda:0`
+> and `cuda:1`. It remains a diagnostic campaign on the older source, without
+> the reviewed runtime gates, a protocol-bound matched evaluation schedule,
+> Phase 2 warm starts, or qualification evidence. This tranche was pushed to
+> `main`; the generated HIP source modification in the main worktree remains
+> unrelated and untouched.
+>
 # MECO learning tracks plan: execution status
 
 > **Diagnostic dashboard projection pushed — 2026-10-25.** Planner commit
