@@ -34,6 +34,30 @@ def _tree_has_symlink(root):
     return False
 
 
+def _queue_lane_directory(root, value):
+    """Resolve a queue directory only when it is an existing in-root directory."""
+    if not isinstance(value, str) or not value:
+        raise ValueError('queue lane has no valid directory')
+    relative = Path(value)
+    if relative.is_absolute() or not relative.parts or '..' in relative.parts:
+        raise ValueError('queue lane directory must be a safe relative path')
+    lexical = root / relative
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError('queue lane directory traverses a symlink')
+    try:
+        directory = lexical.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError('queue lane directory does not exist') from exc
+    if directory == root or root not in directory.parents:
+        raise ValueError('queue lane directory is outside the report root')
+    if not directory.is_dir():
+        raise ValueError('queue lane directory is not a directory')
+    return directory
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -244,15 +268,25 @@ def summarize(root, cache_dir=None):
             lanes = []
         for index, lane in enumerate(lanes):
             try:
-                if not isinstance(lane, dict) or not isinstance(lane.get('directory'), str):
+                if not isinstance(lane, dict):
+                    raise ValueError('queue lane is malformed')
+                directory = None
+                if 'run_directory' in lane:
+                    run_directory = lane['run_directory']
+                    track = lane.get('track')
+                    path = Path(run_directory) if isinstance(run_directory, str) else Path()
+                    if (not isinstance(run_directory, str) or path.is_absolute()
+                            or len(path.parts) != 1 or path.parts[0] in ('.', '..')
+                            or not isinstance(track, str) or run_directory != track):
+                        raise ValueError('queue run_directory must name its track directory')
+                    directory = _queue_lane_directory(root, run_directory)
+                if 'directory' in lane:
+                    legacy_directory = _queue_lane_directory(root, lane['directory'])
+                    if directory is not None and legacy_directory != directory:
+                        raise ValueError('queue directory conflicts with run_directory')
+                    directory = legacy_directory
+                if directory is None:
                     raise ValueError('queue lane has no valid directory')
-                lane_path = Path(lane['directory'])
-                directory = lane_path.resolve() if lane_path.is_absolute() else (root / lane_path).resolve()
-                lexical_directory = lane_path if lane_path.is_absolute() else root / lane_path
-                if any(part.is_symlink() for part in (lexical_directory.absolute(), *lexical_directory.absolute().parents)):
-                    raise ValueError('queue lane directory traverses a symlink')
-                if directory != root and root not in directory.parents:
-                    raise ValueError('queue lane directory is outside the report root')
                 run = by_path.get(directory)
                 if run is None:
                     run = {'run': str(directory.relative_to(root)), 'path': str(directory),
