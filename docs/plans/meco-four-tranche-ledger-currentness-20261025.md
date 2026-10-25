@@ -20,7 +20,7 @@ worktree had one unrelated generated modification at
 `frc_defense/csrc/tensor_collision_multi_hip_kernel.hip`; leave it untouched.
 - `docs/MECO_THREE_PASS_PROVENANCE.json` has 80 rows and its SHA-256 matches
 `frc_defense/dashboard_api.py::_EXPECTED_THREE_PASS_PROVENANCE_SHA256` at
-`76f2badfb5e7daa8f5a811dd2b788dcdc76f1db75b81dfef2d2e32d2067a01ad`.
+`93c953f451ded90664d54ec93d6d4c5d398cdbab71812d57cb3eb1ec216b8c2a`.
 The plan digest pin is
 `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`; preserve
 it.
