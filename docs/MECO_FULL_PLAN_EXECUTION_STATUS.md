@@ -1,5 +1,16 @@
 # MECO learning tracks plan: execution status
 
+> **Diagnostic monitor tranche reviewed — 2026-10-25 05:06 UTC.** The
+> manifest-bound diagnostic evaluation monitor is approved at exact head
+> `f79650107a5c92053d651a7d48d9bcd306257f1d`. The initial implementation and
+> two corrections remain separate commits so the rejected review rounds are
+> traceable. Its focused suite passed 71 tests; the final independent reviewer
+> ran 51 monitor/manifest tests, and compilation/diff checks passed. The
+> three-pass ledger now records 69 scoped summaries and the dashboard digest
+> pin is updated. This is opt-in future-campaign plumbing only: no simulator
+> replay, GPU execution, training, or qualification was run, and active r4 was
+> left untouched. Dashboard currentness and push are pending integration.
+
 > **Phase 2 coordinator code integrated — 2026-10-25 04:24 UTC.** The
 > reviewed resumable Plan A/C complete-set coordinator is integrated on `main`
 > through `59524d21a` and pushed. It provides a shared C1/C2 source campaign,
