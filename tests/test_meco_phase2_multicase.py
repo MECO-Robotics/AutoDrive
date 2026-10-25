@@ -251,3 +251,48 @@ def test_combined_plan_a_manifest_retains_each_source_triplet(tmp_path):
     assert [row["source_manifest_sha256"] for row in pooled["case_source_bindings"]] == [
         multi._sha(Path(row["manifest_path"]).read_bytes()) for row in source_shards]
     assert pooled["source_dataset_sha256"] == multi._sha(trajectory.read_bytes())
+
+
+def test_composite_counterfactual_reader_namespaces_repeated_seed_by_case(tmp_path, monkeypatch):
+    from frc_defense import meco_supervised
+    cases = [{"scenario_id": "s1", "category": "single", "seeds": [7]},
+        {"scenario_id": "s2", "category": "pair", "seeds": [7]}]
+    paths = []
+    for i in range(2):
+        path = tmp_path / f"shard-{i}.jsonl"
+        path.write_text("fixture\n")
+        paths.append(path)
+    common = {"schema": "meco-counterfactual-trajectory-v3",
+        "target_schema": "meco-matched-prefix-gross-return-v3",
+        "records_have_prefix_replay_parity": True, "source_runtime_device_bound": True,
+        "state_digest_schema": "meco-full-environment-state-v2", "sources": {"s": 1},
+        "source_identity_sha256": "x", "device": {"device": "cuda:0"},
+        "native_extension_identity_schema": 1, "native_extension_identity": {"status": "present"},
+        "artifact_identity_sha256": "a", "prediction_mode": "cv",
+        "prediction_contract": {"mode": "cv"}, "candidate_boundary": {}, "candidate_k": 8,
+        "plan_a_support_order": "order", "route_cost_points_per_second": 1,
+        "discount_semantics": "discount", "continuation_policy": "teacher",
+        "plan_c_target_schema": "meco-plan-c-matched-repeated-gross-return-v1",
+        "plan_c_repeat_protocol": {"repeat_protocol_id": "repeat"},
+        "plan_a_p_target": None, "plan_a_p_prior": 0., "plan_c_repeat_variance_note": "R=2",
+        "max_macro_ticks": 5, "horizon_physics_ticks": 10, "gamma_per_macro": .9,
+        "max_plan_c_descriptors_per_prefix": 2, "max_plan_a_pairs_per_prefix": 2}
+    def read(path, **kwargs):
+        index = paths.index(Path(path))
+        case = cases[index]
+        manifest = {**common, "scenario_id": case["scenario_id"],
+            "category": case["category"], "seeds": case["seeds"],
+            "seed_branch_summaries": {"7": {"case": case["scenario_id"]}}}
+        row = {"scenario_id": case["scenario_id"], "category": case["category"],
+            "seed": 7, "decision_index": 0}
+        return [row], str(index) * 64, chr(97 + index) * 64, {}, "p" * 64, "q" * 64, manifest
+    monkeypatch.setattr(meco_supervised, "_read_counterfactual_dataset", read)
+    rows, aggregate, reference, manifests = meco_supervised._read_counterfactual_composite_dataset(
+        [{"path": paths[0]}, {"path": paths[1]}], expected_cases=cases,
+        qualification_protocol=tmp_path / "protocol.json", expected_sources={"s": 1})
+    assert [(row["scenario_id"], row["seed"]) for row in rows] == [("s1", 7), ("s2", 7)]
+    assert set(aggregate["case_coverage"]) == {"s1::single", "s2::pair"}
+    assert len(aggregate["cases"]) == 2
+    assert aggregate["cases"][0]["case_key"] == ["s1", "single"]
+    assert reference["scenario_id"] == "s1"
+    assert len(manifests) == 2

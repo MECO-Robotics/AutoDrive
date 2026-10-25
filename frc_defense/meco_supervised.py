@@ -1945,6 +1945,90 @@ def _read_plan_a_p_route_dataset(path: Path, *, qualification_protocol: Path,
     return rows, data_sha, manifest_sha, protocol, protocol_id, protocol_sha, manifest
 
 
+MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA = "meco-counterfactual-multicase-composite-v1"
+MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-multicase-composite-weights-v1"
+
+
+def _read_counterfactual_composite_dataset(shards, *, expected_cases,
+        qualification_protocol: Path, expected_sources: dict):
+    """Validate each legacy one-case shard, then pool rows without scalar case metadata."""
+    if not isinstance(shards, (list, tuple)) or not shards or len(shards) != len(expected_cases):
+        raise ValueError("composite counterfactual input requires one shard per declared case")
+    rows, bindings, coverage, reference, manifests = [], [], {}, None, []
+    seen_cases, identities = set(), set()
+    common_fields = ("schema", "target_schema", "records_have_prefix_replay_parity",
+        "source_runtime_device_bound", "state_digest_schema", "sources",
+        "source_identity_sha256", "device", "native_extension_identity_schema",
+        "native_extension_identity", "artifact_identity_sha256", "prediction_mode",
+        "prediction_contract", "candidate_boundary", "candidate_k",
+        "plan_a_support_order", "route_cost_points_per_second",
+        "discount_semantics", "continuation_policy", "plan_c_target_schema",
+        "plan_c_repeat_protocol", "plan_a_p_target", "plan_a_p_prior",
+        "plan_c_repeat_variance_note", "max_macro_ticks", "horizon_physics_ticks",
+        "gamma_per_macro", "max_plan_c_descriptors_per_prefix",
+        "max_plan_a_pairs_per_prefix")
+    protocol_id = protocol_sha = None
+    for case, entry in zip(expected_cases, shards):
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), (str, Path)):
+            raise ValueError("composite counterfactual shard entry is malformed")
+        key = (case.get("scenario_id"), case.get("category"))
+        if key in seen_cases:
+            raise ValueError("composite counterfactual case list contains a duplicate")
+        seen_cases.add(key)
+        path = Path(entry["path"]).resolve(strict=True)
+        local_rows, data_sha, manifest_sha, protocol, local_protocol_id, local_protocol_sha, manifest = (
+            _read_counterfactual_dataset(path, qualification_protocol=qualification_protocol,
+                expected_sources=expected_sources))
+        if ((manifest.get("scenario_id"), manifest.get("category")) != key or
+                manifest.get("seeds") != case.get("seeds")):
+            raise ValueError("counterfactual shard case/seeds differ from the frozen composite case")
+        if protocol_id is not None and (local_protocol_id != protocol_id or local_protocol_sha != protocol_sha):
+            raise ValueError("counterfactual shards use different frozen protocols")
+        protocol_id, protocol_sha = local_protocol_id, local_protocol_sha
+        if reference is None:
+            reference = manifest
+        elif any(manifest.get(field) != reference.get(field) for field in common_fields):
+            raise ValueError("counterfactual shards have incompatible target or model contracts")
+        ids = set()
+        for row in local_rows:
+            identity = (key[0], key[1], row["seed"], row["decision_index"])
+            if identity in identities or identity in ids:
+                raise ValueError("composite counterfactual shards duplicate a case-seed-decision identity")
+            ids.add(identity)
+        identities.update(ids)
+        observed_seeds = sorted({row["seed"] for row in local_rows})
+        if observed_seeds != sorted(case["seeds"]):
+            raise ValueError("counterfactual shard is missing one or more declared seeds")
+        coverage[f"{key[0]}::{key[1]}"] = {"expected_seeds": sorted(case["seeds"]),
+            "observed_seeds": observed_seeds, "row_count": len(local_rows),
+            "seed_branch_summaries": {str(seed): manifest["seed_branch_summaries"][str(seed)]
+                for seed in sorted(case["seeds"])}}
+        rows.extend(local_rows)
+        manifests.append(manifest)
+        manifest_path = path.with_suffix(path.suffix + ".manifest.json")
+        bindings.append({"case_key": [key[0], key[1]], "seeds": list(case["seeds"]),
+            "dataset_path": str(path), "dataset_sha256": data_sha,
+            "manifest_path": str(manifest_path), "manifest_sha256": manifest_sha,
+            "record_count": len(local_rows)})
+    case_order = {(case["scenario_id"], case["category"]): index
+        for index, case in enumerate(expected_cases)}
+    rows.sort(key=lambda row: (case_order[(row["scenario_id"], row["category"])],
+        row["seed"], row["decision_index"]))
+    case_set_sha256 = _canonical_hash([[case["scenario_id"], case["category"], case["seeds"]]
+        for case in expected_cases])
+    aggregate = {"schema": MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA,
+        "case_set_sha256": case_set_sha256, "cases": bindings,
+        "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
+        "sources": expected_sources, "source_identity_sha256": _canonical_hash(expected_sources),
+        "prediction_mode": reference["prediction_mode"],
+        "prediction_contract": reference["prediction_contract"],
+        "target_schema": reference["target_schema"],
+        "case_coverage": coverage,
+        "dataset_sha256": _canonical_hash([item["dataset_sha256"] for item in bindings]),
+        "manifest_sha256": _canonical_hash([item["manifest_sha256"] for item in bindings])}
+    return rows, aggregate, reference, manifests
+
+
 def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
     from .meco_counterfactual import replay_counterfactual_branch, _hash
     from .meco_track_training import _graph_inputs
@@ -2200,6 +2284,202 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
             "stable_pair_count": pair_count if repeated_plan_c else None,
             "abstained_pair_count": tie_count if repeated_plan_c else None,
             "mean_loss_by_epoch": losses}
+
+
+
+
+def warm_start_counterfactual_composite_v1(track: str, shards, output: Path, *,
+        expected_cases, qualification_protocol: Path, updates=10,
+        learning_rate=1e-4, device=None):
+    """Fit Plan C repeated labels over independently validated case shards."""
+    if track not in ("C1", "C2") or type(updates) is not int or updates < 1 or not _finite_number(learning_rate) or learning_rate <= 0:
+        raise ValueError("composite repeated-label fitter requires C1/C2 and valid optimizer settings")
+    from .curriculum_training import source_identity
+    from .meco_counterfactual import _device_identity, plan_c_repeat_protocol
+    from .meco_track_training import score_candidates
+    from .meco_tracks import prediction_contract
+    _prepare_native_gpu_runtime(device)
+    sources = source_identity()
+    rows, composite, reference, manifests = _read_counterfactual_composite_dataset(
+        shards, expected_cases=expected_cases, qualification_protocol=qualification_protocol,
+        expected_sources=sources)
+    if reference.get("plan_c_target_schema") != "meco-plan-c-matched-repeated-gross-return-v1":
+        raise ValueError("composite C fitter requires repeated matched-rollout labels in every shard")
+    if any(manifest["device"] != reference["device"] for manifest in manifests):
+        raise ValueError("composite C shards were collected on different devices")
+    if _device_identity(device) != reference["device"]:
+        raise ValueError("composite C training device differs from frozen collection device")
+    replayed = []
+    for case, manifest in zip(expected_cases, manifests):
+        local = [row for row in rows if
+            (row["scenario_id"], row["category"]) == (case["scenario_id"], case["category"])]
+        replayed.extend(_materialize_counterfactual_rows(local, manifest,
+            track=track, train_device=device))
+    if not replayed or any(sample["kind"] != "C" for sample in replayed):
+        raise ValueError("composite C fit requires replayed candidate branches for every case")
+    pair_count = tie_count = 0
+    for sample in replayed:
+        total = len(sample["pairs"]) * (len(sample["pairs"]) - 1) // 2
+        pair_count += len(sample["stable_pairs"])
+        tie_count += total - len(sample["stable_pairs"])
+    if pair_count < 1:
+        raise ValueError("composite C dataset has no stable non-tied paired labels")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    losses = []
+    model.train()
+    for _ in range(updates):
+        epoch_losses = []
+        for sample in replayed:
+            result = score_candidates(track, model, raster=sample["raster"],
+                globals_=sample["globals"], table=sample["table"],
+                route_cost=sample["route"], risk_cost=sample["risk"])
+            pair_losses = []
+            for left_index, right_index, left_preferred in sample["stable_pairs"]:
+                sign = 1. if left_preferred else -1.
+                pair_losses.append(F.softplus(-sign *
+                    (result["utility"][left_index] - result["utility"][right_index])))
+            if not pair_losses:
+                continue
+            loss = torch.stack(pair_losses).mean()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            optimizer.step()
+            epoch_losses.append(float(loss.detach().cpu()))
+        if not epoch_losses:
+            raise ValueError("composite C epoch has no stable within-prefix pair")
+        losses.append(sum(epoch_losses) / len(epoch_losses))
+    if source_identity() != sources:
+        raise RuntimeError("source/runtime changed during composite C fitting")
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    payload = {"schema": MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA, "schema_version": 1,
+        "artifact_kind": "weights_only_multicase_plan_c_repeated_pairwise_v1",
+        "track": track, "model_schema_version": 1, "model": model.state_dict(),
+        "dataset_schema": MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA,
+        "dataset_sha256": composite["dataset_sha256"],
+        "dataset_manifest_sha256": composite["manifest_sha256"],
+        "case_set_sha256": composite["case_set_sha256"], "cases": composite["cases"],
+        "case_coverage": composite["case_coverage"],
+        "records_have_prefix_replay_parity": True, "source_runtime_device_bound": True,
+        "state_digest_schema": "meco-full-environment-state-v2",
+        "target_schema": "meco-matched-prefix-gross-return-v3",
+        "label_provenance": "within-prefix matched repeated simulator gross-horizon returns; stable paired sign only",
+        "target_semantics": "within_prefix_repeated_matched_stable_pairwise_preference_from_gross_horizon_return",
+        "scoring_semantics": "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target",
+        "plan_a_p_target": None, "plan_a_p_prior": 0.0, "plan_a_p_mode": None,
+        "candidate_raw_feature_count": MECO_CANDIDATE_RAW_FEATURE_COUNT,
+        "candidate_model_input_width": MECO_CANDIDATE_MODEL_INPUT_WIDTH,
+        "candidate_feature_names": list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)),
+        "prediction_mode": reference["prediction_mode"],
+        "prediction_contract": prediction_contract(reference["prediction_mode"]),
+        "candidate_boundary": reference["candidate_boundary"], "candidate_k": reference["candidate_k"],
+        "max_plan_c_descriptors_per_prefix": reference["max_plan_c_descriptors_per_prefix"],
+        "max_plan_a_pairs_per_prefix": reference["max_plan_a_pairs_per_prefix"],
+        "route_cost_points_per_second": reference["route_cost_points_per_second"],
+        "plan_a_support_order": reference["plan_a_support_order"],
+        "plan_a_p_unlabelled_reason": reference["plan_a_p_unlabelled_reason"],
+        "horizon_physics_ticks": reference["horizon_physics_ticks"],
+        "max_macro_ticks": reference["max_macro_ticks"], "gamma_per_macro": reference["gamma_per_macro"],
+        "discount_semantics": reference["discount_semantics"],
+        "continuation_policy": reference["continuation_policy"],
+        "plan_c_target_schema": reference["plan_c_target_schema"],
+        "plan_c_repeat_protocol": reference["plan_c_repeat_protocol"],
+        "plan_c_label_policy": "stable_same_strict_sign_all_paired_repeats_else_abstain",
+        "plan_c_repeat_variance_note": reference["plan_c_repeat_variance_note"],
+        "plan_c_stable_pair_count": pair_count, "plan_c_abstained_pair_count": tie_count,
+        "pair_count_semantics": "non_tied_pair_count counts stable Plan C labels; tied_pair_count counts all abstentions",
+        "source_identity_sha256": _canonical_hash(sources), "sources": sources,
+        "collection_device": reference["device"], "training_device": _device_identity(device),
+        "protocol_id": protocol_id, "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": protocol_path.name, "split": "train",
+        "optimizer_state_included": False, "resume_compatible": False,
+        "updates": updates, "learning_rate": learning_rate,
+        "non_tied_pair_count": pair_count, "tied_pair_count": tie_count,
+        "mean_loss_by_epoch": losses}
+    output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output)
+    validate_counterfactual_composite_artifact(track, output,
+        qualification_protocol=qualification_protocol, expected_sources=sources,
+        expected_prediction_mode=reference["prediction_mode"])
+    return {"track": track, "checkpoint": str(output), "case_set_sha256": composite["case_set_sha256"],
+        "non_tied_pair_count": pair_count, "tied_pair_count": tie_count,
+        "mean_loss_by_epoch": losses}
+
+
+def validate_counterfactual_composite_artifact(track: str, checkpoint: Path, *,
+        qualification_protocol: Path, expected_sources: dict,
+        expected_prediction_mode: str | None = None):
+    """Validate a composite C artifact by reopening every original strict shard."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if (track not in ("C1", "C2") or payload.get("schema") != MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA or
+            payload.get("schema_version") != 1 or payload.get("artifact_kind") !=
+            "weights_only_multicase_plan_c_repeated_pairwise_v1" or payload.get("track") != track):
+        raise ValueError("unsupported composite counterfactual artifact")
+    cases = [{"scenario_id": item["case_key"][0], "category": item["case_key"][1],
+        "seeds": item["seeds"]} for item in payload.get("cases", [])]
+    rows, composite, reference, _ = _read_counterfactual_composite_dataset(
+        payload["cases"], expected_cases=cases, qualification_protocol=qualification_protocol,
+        expected_sources=expected_sources)
+    protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
+    stable_count = sum(len(row["plan_c_pairwise_labels"]) for row in rows)
+    all_pair_count = sum(len(row["plan_c_counterfactuals"]) *
+        (len(row["plan_c_counterfactuals"]) - 1) // 2 for row in rows)
+    expected_fields = {"dataset_schema": MULTICASE_COUNTERFACTUAL_DATASET_SCHEMA,
+        "dataset_sha256": composite["dataset_sha256"],
+        "dataset_manifest_sha256": composite["manifest_sha256"],
+        "case_set_sha256": composite["case_set_sha256"], "cases": composite["cases"],
+        "case_coverage": composite["case_coverage"], "protocol_id": protocol_id,
+        "qualification_protocol_sha256": protocol_sha,
+        "qualification_protocol_file": protocol_path.name, "sources": expected_sources,
+        "source_identity_sha256": _canonical_hash(expected_sources),
+        "prediction_mode": reference["prediction_mode"],
+        "prediction_contract": prediction_contract(reference["prediction_mode"]),
+        "collection_device": reference["device"], "split": "train"}
+    if (any(payload.get(key) != value for key, value in expected_fields.items()) or
+            (expected_prediction_mode is not None and payload.get("prediction_mode") != expected_prediction_mode) or
+            payload.get("target_schema") != "meco-matched-prefix-gross-return-v3" or
+            payload.get("label_provenance") != "within-prefix matched repeated simulator gross-horizon returns; stable paired sign only" or
+            payload.get("target_semantics") != "within_prefix_repeated_matched_stable_pairwise_preference_from_gross_horizon_return" or
+            payload.get("scoring_semantics") != "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target" or
+            payload.get("plan_c_target_schema") != "meco-plan-c-matched-repeated-gross-return-v1" or
+            payload.get("plan_c_repeat_protocol") != reference.get("plan_c_repeat_protocol") or
+            payload.get("plan_c_label_policy") != "stable_same_strict_sign_all_paired_repeats_else_abstain" or
+            payload.get("plan_c_repeat_variance_note") != reference.get("plan_c_repeat_variance_note") or
+            payload.get("plan_c_repeat_protocol") != plan_c_repeat_protocol(protocol_id) or
+            payload.get("records_have_prefix_replay_parity") is not True or
+            payload.get("source_runtime_device_bound") is not True or
+            payload.get("state_digest_schema") != "meco-full-environment-state-v2" or
+            payload.get("candidate_boundary") != reference.get("candidate_boundary") or
+            payload.get("candidate_k") != reference.get("candidate_k") or
+            payload.get("candidate_raw_feature_count") != MECO_CANDIDATE_RAW_FEATURE_COUNT or
+            payload.get("candidate_model_input_width") != MECO_CANDIDATE_MODEL_INPUT_WIDTH or
+            payload.get("candidate_feature_names") != list(tuple(SAFE_ACTION_FEATURES) + tuple(EXTRA_FEATURES)) or
+            payload.get("max_plan_c_descriptors_per_prefix") != reference.get("max_plan_c_descriptors_per_prefix") or
+            payload.get("max_plan_a_pairs_per_prefix") != reference.get("max_plan_a_pairs_per_prefix") or
+            payload.get("horizon_physics_ticks") != reference.get("horizon_physics_ticks") or
+            payload.get("max_macro_ticks") != reference.get("max_macro_ticks") or
+            payload.get("gamma_per_macro") != reference.get("gamma_per_macro") or
+            payload.get("discount_semantics") != reference.get("discount_semantics") or
+            payload.get("continuation_policy") != reference.get("continuation_policy") or
+            payload.get("plan_c_stable_pair_count") != stable_count or
+            payload.get("non_tied_pair_count") != stable_count or
+            payload.get("tied_pair_count") != all_pair_count - stable_count or
+            payload.get("pair_count_semantics") != "non_tied_pair_count counts stable Plan C labels; tied_pair_count counts all abstentions" or
+            type(payload.get("updates")) is not int or payload["updates"] < 1 or
+            not _finite_number(payload.get("learning_rate")) or payload["learning_rate"] <= 0 or
+            payload.get("training_device") != _device_identity(reference["device"]["device"]) or
+            payload.get("optimizer_state_included") is not False or payload.get("resume_compatible") is not False or
+            not isinstance(payload.get("model"), dict) or not isinstance(payload.get("mean_loss_by_epoch"), list) or
+            len(payload["mean_loss_by_epoch"]) != payload.get("updates") or
+            any(not _finite_number(loss) or loss < 0 for loss in payload["mean_loss_by_epoch"])):
+        raise ValueError("composite C artifact provenance, target or case-set metadata mismatch")
+    model = make_meco_track(track, candidate_features=MECO_CANDIDATE_RAW_FEATURE_COUNT)
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError("composite C weights do not match the requested track") from exc
+    return payload
 
 
 def _initialize_unlabelled_plan_a_penalty_head(model, track):
@@ -2719,6 +2999,11 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
             expected_prediction_mode=expected_prediction_mode)
+    if payload.get("schema") == MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA:
+        return validate_counterfactual_composite_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     if payload.get("schema") in (COUNTERFACTUAL_WEIGHTS_SCHEMA,
                                   COUNTERFACTUAL_PLAN_C_REPEATED_WEIGHTS_SCHEMA):
         return validate_counterfactual_warm_start_artifact(track, checkpoint,
@@ -3051,8 +3336,13 @@ def load_warm_start(track: str, model, checkpoint: Path, *, qualification_protoc
 def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
-    """Validate a v2 pairwise artifact without accepting v1 imitation weights."""
+    """Validate legacy one-case or versioned composite pairwise weights."""
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if payload.get("schema") == MULTICASE_COUNTERFACTUAL_WEIGHTS_SCHEMA:
+        return validate_counterfactual_composite_artifact(track, checkpoint,
+            qualification_protocol=qualification_protocol,
+            expected_sources=expected_sources,
+            expected_prediction_mode=expected_prediction_mode)
     mode = payload.get("prediction_mode")
     protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
     from .meco_counterfactual import (CONTINUATION_POLICY,
