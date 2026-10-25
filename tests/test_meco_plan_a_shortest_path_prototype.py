@@ -162,6 +162,46 @@ def test_hip_prototype_is_fail_closed_and_not_in_support_dispatch():
     assert "plan_a_dijkstra_hip" not in source
 
 
+def test_graph_hip_entry_is_gated_before_any_graph_materialization(monkeypatch):
+    assert shortest_path.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is False
+    def forbidden(_graph):
+        raise AssertionError("gated graph path must not materialize graph on CPU")
+    monkeypatch.setattr(shortest_path, "cached_plan_a_edge_weights", forbidden)
+    try:
+        shortest_path.plan_a_dijkstra_hip_for_graph(object(), device="cuda:0",
+            root=0, root_start_cost=0., root_connector_m=0.)
+    except RuntimeError as exc:
+        assert "disabled pending WX9100 parity and profiling" in str(exc)
+    else:
+        raise AssertionError("device-resident graph path must remain gated")
+
+
+def test_device_resident_graph_path_has_no_host_graph_copy_or_python_heap():
+    import inspect
+    source = inspect.getsource(shortest_path.plan_a_dijkstra_hip_for_graph)
+    assert "cached_plan_a_edge_weights" not in source
+    assert ".cpu(" not in source
+    assert ".tolist(" not in source
+    assert "dijkstra_graph" in source
+    policy_source = (Path(__file__).parents[1] / "frc_defense" /
+                     "meco_plan_a_policy.py").read_text()
+    assert "plan_a_dijkstra_cpu" in policy_source
+    assert "plan_a_dijkstra_hip_for_graph" not in policy_source
+
+
+def test_device_graph_kernel_preserves_exact_heap_route_contract():
+    source_root = Path(__file__).parents[1] / "frc_defense" / "csrc"
+    binding = (source_root / "meco_plan_a_shortest_path_hip.cpp").read_text()
+    kernel = (source_root / "meco_plan_a_shortest_path_hip_kernel.cu").read_text()
+    assert 'module.def("dijkstra_graph"' in binding
+    assert "xy.to(at::kDouble).contiguous()" in binding
+    graph_kernel = kernel.split("__global__ void plan_a_dijkstra_graph_kernel", 1)[1]
+    assert "hypot(sx - dx, sy - dy)" in graph_kernel
+    assert "atan2(sin(delta), cos(delta))" in graph_kernel
+    assert "proposal < route[dst] - 1.0e-9" in graph_kernel
+    assert "traversal[settled_count++] = src" in graph_kernel
+
+
 def test_hip_kernel_has_device_side_edge_and_heap_guards():
     source_root = Path(__file__).parents[1] / "frc_defense" / "csrc"
     binding = (source_root / "meco_plan_a_shortest_path_hip.cpp").read_text()

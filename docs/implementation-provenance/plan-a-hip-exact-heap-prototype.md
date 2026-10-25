@@ -40,6 +40,26 @@ corner cases, and profile throughput and memory. Until those checks pass, this
 prototype is an implementation experiment and provides no GPU speedup or
 simulation-parity claim.
 
+## Device-resident graph route follow-up (implementer candidate)
+
+The explicit `plan_a_dijkstra_hip_for_graph` entry point now passes the static
+graph's device tensors directly to `dijkstra_graph`. The native binding converts
+coordinates and headings to float64 on the selected device, and the HIP kernel
+computes directed translation and wrapped heading costs during heap relaxation.
+The path no longer calls `cached_plan_a_edge_weights`, creates Python graph
+lists, or runs a Python heap. Its result tensors and settled traversal ordering
+remain on device. The binding reads a scalar device status to fail closed on
+invalid active edges or heap overflow.
+
+This is still an explicit, gated prototype. `build_plan_a_support` continues to
+call `plan_a_dijkstra_cpu`; its normal runtime path has not been changed. The
+WX9100 parity/profile gate remains false. CPU-only contracts verify gate order,
+absence of host graph materialization in the opt-in helper, device-kernel
+geometry/epsilon/order expressions, and continued CPU support dispatch. They do
+not establish HIP compilation, exact device parity, or runtime speedup. The
+focused suite passed 13 tests; Python compilation and `git diff --check` passed.
+No GPU compilation/execution, simulator evaluation, or replay was performed.
+
 
 ## Scoped three-pass record
 

@@ -182,24 +182,45 @@ def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, roo
 
 def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
                                   root_connector_m):
-    """Run the explicit prototype while retaining device edge tables per graph."""
+    """Run exact graph geometry and Dijkstra on device without host graph copies.
+
+    This is an explicit prototype entry point. Runtime support construction
+    remains on the CPU oracle until WX9100 parity and profile evidence opens
+    the dispatch gate.
+    """
     import torch
 
-    graph_id = id(graph)
-    weights = cached_plan_a_edge_weights(graph)
+    if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
+        raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
     device = torch.device(device)
-    cache_key = str(device)
-    with _EDGE_WEIGHT_CACHE_LOCK:
-        reference, entry = _EDGE_WEIGHT_CACHE[graph_id]
-        if reference() is not graph:
-            raise RuntimeError("static legal pose graph cache identity changed")
-        tensors = entry["device_tensors"].get(cache_key)
-        if tensors is None:
-            dst, costs, lengths, allowed = weights
-            tensors = (torch.tensor(dst, dtype=torch.long, device=device),
-                torch.tensor(costs, dtype=torch.float64, device=device),
-                torch.tensor(lengths, dtype=torch.float64, device=device),
-                torch.tensor(allowed, dtype=torch.bool, device=device))
-            entry["device_tensors"][cache_key] = tensors
-    return plan_a_dijkstra_hip(*tensors, root=root,
-        root_start_cost=root_start_cost, root_connector_m=root_connector_m)
+    selected = _require_wx9100_device(device)
+    xy = graph.xy
+    heading = graph.heading
+    edge_dst = graph.edges[0]
+    edge_allowed = graph.edge_mask[0]
+    n = int(graph.node_count)
+    if (not all(torch.is_tensor(value) and value.device == selected for value in
+                (xy, heading, edge_dst, edge_allowed)) or
+            xy.shape != (n, 2) or heading.shape != (n,) or
+            edge_dst.ndim != 2 or edge_dst.shape[0] != n or
+            edge_allowed.shape != edge_dst.shape or
+            edge_dst.dtype != torch.int64 or edge_allowed.dtype != torch.bool or
+            xy.dtype not in (torch.float32, torch.float64) or
+            heading.dtype not in (torch.float32, torch.float64) or
+            type(root) is not int or not 0 <= root < n or
+            type(root_start_cost) not in (int, float) or
+            type(root_connector_m) not in (int, float) or
+            not math.isfinite(float(root_start_cost)) or float(root_start_cost) < 0 or
+            not math.isfinite(float(root_connector_m)) or float(root_connector_m) < 0):
+        raise ValueError("HIP graph route requires valid same-device graph tensors and root costs")
+    from .meco_plan_a_shortest_path_hip import extension
+    route, physical, parent, parent_length, settled = extension().dijkstra_graph(
+        xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
+        edge_allowed.contiguous(), root, float(root_start_cost),
+        float(root_connector_m))
+    # The device heap settles nodes by (distance, node_id); remove only the
+    # unreachable -1 tail without materializing any route data on the host.
+    order = settled[settled >= 0]
+    return {"route_cost": route, "physical_distance": physical,
+        "parent_ids": parent, "parent_edge_m": parent_length,
+        "traversal_order": order}
