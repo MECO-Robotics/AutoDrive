@@ -179,6 +179,16 @@ def test_large_report_uses_digest_bound_strict_comparison_summary(tmp_path, monk
     source.write_text(json.dumps(report, separators=(",", ":")))
     assert _write_dashboard_comparison_summary(source, report)
 
+    def bind_status(report_path):
+        summary_bytes = Path(str(report_path) + ".dashboard-summary.json").read_bytes()
+        Path(str(report_path) + ".status.json").write_text(json.dumps({
+            "schema_version": 1, "evaluation_id": report["evaluation_id"],
+            "protocol_id": report["protocol_id"], "split": "validation",
+            "status": "complete", "output_file": report_path.name,
+            "dashboard_summary_sha256": hashlib.sha256(summary_bytes).hexdigest()}))
+
+    bind_status(source)
+
     comparison, binding, error, visible = _read_evaluation_comparison(
         source, tmp_path, {"files": 0, "summary_bytes": 0,
                            "raw_bytes": 0, "records": 0})
@@ -189,9 +199,29 @@ def test_large_report_uses_digest_bound_strict_comparison_summary(tmp_path, monk
         "protocol_id": "proto-a", "split": "validation",
         "source_identity_sha256": report["source_identity_sha256"], "record_count": 44}
 
+    summary_path = Path(str(source) + ".dashboard-summary.json")
+    forged = json.loads(summary_path.read_text())
+    forged["comparison"]["policy_metrics"]["A1"]["open"]["success"] = "forged"
+    forged["comparison_sha256"] = hashlib.sha256(
+        dashboard._dashboard_summary_json_bytes(forged["comparison"])).hexdigest()
+    summary_path.write_text(json.dumps(forged, separators=(",", ":")))
+    unbound, _, unbound_error, _ = _read_evaluation_comparison(
+        source, tmp_path, {"files": 0, "summary_bytes": 0,
+                           "raw_bytes": 0, "records": 0})
+    assert unbound is None and unbound_error == "dashboard summary is unavailable or invalid"
+    bind_status(source)
+    rejected, _, forged_error, _ = _read_evaluation_comparison(
+        source, tmp_path, {"files": 0, "summary_bytes": 0,
+                           "raw_bytes": 0, "records": 0})
+    assert rejected is None and forged_error == "dashboard summary is unavailable or invalid"
+
     published = tmp_path / "scheduled-evaluation.json"
     published.write_bytes(source.read_bytes())
+    assert not _copy_dashboard_comparison_summary(source, published)
+    assert _write_dashboard_comparison_summary(source, report)
+    bind_status(source)
     assert _copy_dashboard_comparison_summary(source, published)
+    bind_status(published)
     copied, _, copy_error, _ = _read_evaluation_comparison(
         published, tmp_path, {"files": 0, "summary_bytes": 0,
                             "raw_bytes": 0, "records": 0})

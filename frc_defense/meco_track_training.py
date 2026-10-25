@@ -2902,7 +2902,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                    if output_path is not None else None)
     status_last_written = 0.
     status_last_completed = -1
-    def update_evaluation_status(status, completed=0):
+    def update_evaluation_status(status, completed=0, *, dashboard_summary_sha256=None):
         nonlocal status_last_written, status_last_completed
         if status_path is None:
             return
@@ -2931,6 +2931,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "execution_device": execution_device,
             "pid": os.getpid(), "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "output_file": output_path.name,
+            "dashboard_summary_sha256": dashboard_summary_sha256,
             "progress": {"completed_records": completed,
                          "total_records": len(categories) * episodes *
                              (len(selected) * (2 if inference_disable_tick is not None else 1) +
@@ -4260,13 +4261,19 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             "generated_utc": datetime.now(timezone.utc).isoformat()}
         if output:
             _atomic_json(Path(output), report)
-            update_evaluation_status("complete", len(records))
+            dashboard_summary_sha256 = None
             try:
-                from .meco_dashboard import _write_dashboard_comparison_summary
-                _write_dashboard_comparison_summary(Path(output), report)
+                from .meco_dashboard import (_stable_file_sha256,
+                    _write_dashboard_comparison_summary)
+                if _write_dashboard_comparison_summary(Path(output), report):
+                    dashboard_summary_sha256, _, _ = _stable_file_sha256(
+                        Path(str(output) + ".dashboard-summary.json"),
+                        max_bytes=1024 * 1024)
             except (OSError, TypeError, ValueError):
                 print("Dashboard comparison summary unavailable; raw report remains authoritative.",
                       file=sys.stderr)
+            update_evaluation_status("complete", len(records),
+                dashboard_summary_sha256=dashboard_summary_sha256)
         return report
     except BaseException:
         try:

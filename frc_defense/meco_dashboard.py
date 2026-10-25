@@ -1243,6 +1243,11 @@ def _dashboard_summary_valid(payload, raw_sha256):
             or comparison.get("matched_status") != (
                 "diagnostic matched" if comparison["diagnostic"] else "non-diagnostic matched")):
         return None
+    generated = comparison.get("generated_utc")
+    scenario = comparison.get("scenario_id")
+    if (generated is not None and (not isinstance(generated, str) or len(generated) > 128)
+            or not isinstance(scenario, str) or not scenario or len(scenario) > 128):
+        return None
     categories, seeds = comparison.get("categories"), comparison.get("seeds")
     if (not isinstance(categories, list) or not categories or len(categories) > 64
             or any(not isinstance(value, str) or not value or len(value) > 128 for value in categories)
@@ -1253,20 +1258,125 @@ def _dashboard_summary_valid(payload, raw_sha256):
             or len(set(seeds)) != len(seeds)
             or len(categories) * len(seeds) * len(POLICIES) != payload["record_count"]):
         return None
-    if (not isinstance(comparison.get("policy_manifest"), dict)
-            or set(comparison["policy_manifest"]) != set(POLICIES)
+    signature = {"scenario_id": scenario, "categories": categories, "seeds": seeds,
+                 "protocol_id": payload["protocol_id"],
+                 "source_hash": payload["source_identity_sha256"]}
+    expected_group = hashlib.sha256(json.dumps(signature, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if comparison["comparison_group"] != expected_group:
+        return None
+    manifests = comparison.get("policy_manifest")
+    if (not isinstance(manifests, dict) or set(manifests) != set(POLICIES)
             or not isinstance(comparison.get("control_definitions"), dict)
+            or set(comparison["control_definitions"]) != set(CONTROLS)
             or comparison["control_definitions"].get("D0") !=
                 "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table"
+            or any(not isinstance(value, str) or len(value) > 1024
+                   for value in comparison["control_definitions"].values())
+            or (comparison.get("candidate_boundary") is not None
+                and not _bounded_json_nodes(comparison["candidate_boundary"]))
             or not isinstance(comparison.get("route_cost_provenance"), dict)
             or not set(comparison["route_cost_provenance"]) <= set(POLICIES)
             or not isinstance(comparison.get("policy_metrics"), dict)
             or set(comparison["policy_metrics"]) != set(POLICIES)):
         return None
+    for policy, manifest in manifests.items():
+        if (not isinstance(manifest, dict)
+                or not isinstance(manifest.get("policy_id"), str)
+                or not manifest["policy_id"] or len(manifest["policy_id"]) > 512
+                or manifest.get("source_identity_sha256") != payload["source_identity_sha256"]
+                or (manifest.get("checkpoint_sha256") is not None
+                    and (not isinstance(manifest["checkpoint_sha256"], str)
+                         or not re.fullmatch(r"[0-9a-f]{64}", manifest["checkpoint_sha256"])) )
+                or (policy in TRACKS + ABLATIONS
+                    and not isinstance(manifest.get("checkpoint_sha256"), str))
+                or (policy in CONTROLS and manifest.get("checkpoint_sha256") is not None)
+                or (policy in ABLATIONS and manifest.get("p_mode") != "p0")
+                or (policy in TRACKS[:3]
+                    and manifest.get("p_mode") not in ("learned", "p0"))
+                or not _bounded_json_nodes(manifest)):
+            return None
+    for policy, route in comparison["route_cost_provenance"].items():
+        if (not isinstance(route, dict)
+                or set(route) != {"mode", "route_cost_source", "projection", "map_scale",
+                                  "route_records", "sample_map_digests"}
+                or route.get("mode") not in ("p0", "learned")
+                or not isinstance(route.get("route_cost_source"), str)
+                or route.get("projection") not in (None, PENALTY_PROJECTION)
+                or not _finite_number(route.get("map_scale"))
+                or type(route.get("route_records")) is not int
+                or not 0 <= route["route_records"] <= payload["record_count"]
+                or not isinstance(route.get("sample_map_digests"), list)
+                or len(route["sample_map_digests"]) > 3
+                or any(not isinstance(digest, str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                       for digest in route["sample_map_digests"])):
+            return None
+    metric_names = {"success", "useful_throughput", "scores", "acquisitions",
+        "deliveries", "collisions", "safety_events", "fallback_count", "fallback_rate",
+        "feasible_rate", "heading_violations", "swept_violations", "p50_latency_ms",
+        "p95_latency_ms", "p99_latency_ms", "candidate_recall"}
     for policy in POLICIES:
         metrics = comparison["policy_metrics"].get(policy)
         if not isinstance(metrics, dict) or set(metrics) != set(categories):
             return None
+        for category_metrics in metrics.values():
+            if not isinstance(category_metrics, dict) or "collection_action_bouts" not in category_metrics:
+                return None
+            if not set(category_metrics) - {"collection_action_bouts"} <= metric_names:
+                return None
+            for name, summary in category_metrics.items():
+                if name == "collection_action_bouts":
+                    bouts_keys = {"available_records", "count", "acquired_count",
+                        "unsuccessful_collection_action_bouts",
+                        "unsuccessful_collection_action_bouts_available_records",
+                        "unsuccessful_collection_action_bouts_total_records",
+                        "acquired_proportion", "semantics"}
+                    if (not isinstance(summary, dict) or set(summary) != bouts_keys
+                            or any(type(summary[key]) is not int or summary[key] < 0
+                                   for key in ("available_records",
+                                       "unsuccessful_collection_action_bouts_available_records",
+                                       "unsuccessful_collection_action_bouts_total_records"))
+                            or summary["available_records"] > len(seeds)
+                            or summary["unsuccessful_collection_action_bouts_available_records"]
+                               > summary["available_records"]
+                            or summary["unsuccessful_collection_action_bouts_total_records"] != len(seeds)
+                            or summary.get("semantics") != "unsuccessful_collection_action_bouts counts finalized focal collection-action bouts with authoritative acquired quantity known to be zero; it is a descriptive bout outcome, not causal intake failure"):
+                        return None
+                    count, acquired = summary.get("count"), summary.get("acquired_count")
+                    unsuccessful = summary.get("unsuccessful_collection_action_bouts")
+                    proportion = summary.get("acquired_proportion")
+                    if (count is None and acquired is None):
+                        if (summary["available_records"] != 0 or unsuccessful is not None
+                                or proportion is not None):
+                            return None
+                    elif (type(count) is not int or type(acquired) is not int
+                            or acquired > count or type(unsuccessful) not in (int, type(None))
+                            or (unsuccessful is not None and acquired + unsuccessful != count)
+                            or (count == 0 and proportion is not None)
+                            or (count > 0 and (not _finite_number(proportion)
+                                or not 0 <= proportion <= 1
+                                or abs(float(proportion) - acquired / count) > 1e-12))):
+                        return None
+                    continue
+                if (not isinstance(summary, dict)
+                        or set(summary) != {"n", "mean", "normal_95_interval"}
+                        or type(summary.get("n")) is not int
+                        or not 1 <= summary["n"] <= len(seeds)
+                        or not _finite_number(summary.get("mean"))):
+                    return None
+                if (name in ("success", "useful_throughput")
+                        and summary["n"] != len(seeds)):
+                    return None
+                if (name == "success" and not 0 <= summary["mean"] <= 1
+                        or name == "useful_throughput" and summary["mean"] < 0):
+                    return None
+                interval = summary.get("normal_95_interval")
+                if (interval is not None and (not isinstance(interval, list)
+                        or len(interval) != 2
+                        or any(not _finite_number(value) for value in interval)
+                        or interval[0] > summary["mean"] or interval[1] < summary["mean"])):
+                    return None
     try:
         digest = hashlib.sha256(_dashboard_summary_json_bytes(comparison)).hexdigest()
     except (TypeError, ValueError):
@@ -1284,7 +1394,7 @@ def _report_binding(report):
             "record_count": len(records) if isinstance(records, list) else None}
 
 
-def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict):
+def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict, *, status=None):
     """Read a small raw report or validate its bounded digest-bound sidecar."""
     if path.is_symlink() or not _inside(path, data_root):
         return None, None, "evaluation report is not a regular in-root file", False
@@ -1302,6 +1412,17 @@ def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict):
         return comparison, _report_binding(report), None, True
     if size > MAX_DASHBOARD_SUMMARY_RAW_BYTES:
         return None, None, "evaluation report exceeds the bounded summary limit", False
+    if status is None:
+        status, _ = _read_json_within(Path(str(path) + ".status.json"), data_root)
+    if (not isinstance(status, dict) or status.get("output_file") != path.name):
+        return None, None, "oversized report lacks evaluator summary binding", True
+    if status.get("status") == "running":
+        return None, None, None, True
+    expected_summary_sha256 = status.get("dashboard_summary_sha256")
+    if (status.get("status") != "complete"
+            or not isinstance(expected_summary_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_summary_sha256)):
+        return None, None, "oversized report lacks evaluator summary binding", True
     sidecar_path = Path(str(path) + DASHBOARD_SUMMARY_SUFFIX)
     if sidecar_path.is_symlink() or not _inside(sidecar_path, data_root):
         return None, None, "evaluation summary is not a regular in-root file", False
@@ -1328,6 +1449,8 @@ def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict):
                 path, max_bytes=MAX_DASHBOARD_SUMMARY_RAW_BYTES)
             summary_bytes, read_identity = _read_bounded_regular_file(
                 sidecar_path, max_bytes=MAX_DASHBOARD_SUMMARY_FILE_BYTES)
+            if hashlib.sha256(summary_bytes).hexdigest() != expected_summary_sha256:
+                raise ValueError("dashboard summary differs from evaluator terminal binding")
             if (len(summary_bytes) != sidecar_size
                     or read_identity != (sidecar_identity.st_dev, sidecar_identity.st_ino,
                         sidecar_identity.st_size, sidecar_identity.st_mtime_ns)):
@@ -1346,6 +1469,9 @@ def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict):
     binding = {key: payload[key] for key in (
         "report_schema_version", "evaluation_id", "protocol_id", "split",
         "source_identity_sha256", "record_count")}
+    if any(status.get(key) != binding[key]
+           for key in ("evaluation_id", "protocol_id", "split")):
+        return None, None, "dashboard summary status binding is invalid", False
     if budget["records"] + binding["record_count"] > MAX_DASHBOARD_SUMMARY_RECORDS_PER_SCAN:
         return None, None, "dashboard summary record budget exceeded", False
     budget["records"] += binding["record_count"]
@@ -1602,13 +1728,17 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             output_name = status.get("output_file")
             safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
             report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
-            valid_report, binding, _, report_visible = (
-                comparison_for(report_path) if safe_name else (None, None, None, False))
+            valid_report, binding, report_error, report_visible = (
+                _read_evaluation_comparison(report_path, data_root, summary_budget,
+                    status=status) if safe_name else (None, None, None, False))
+            if safe_name:
+                comparison_cache[str(report_path)] = (
+                    valid_report, binding, report_error, report_visible)
             consistent = (status.get("schema_version") == 1
                 and isinstance(status.get("evaluation_id"), str)
                 and isinstance(status.get("protocol_id"), str)
                 and status.get("split") == "validation"
-                and ((status.get("status") == "running" and not report_visible)
+                and (status.get("status") == "running"
                     or (valid_report is not None
                         and binding.get("evaluation_id") == status.get("evaluation_id")
                         and binding.get("protocol_id") == status.get("protocol_id")
