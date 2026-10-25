@@ -17,8 +17,8 @@
 > passed 115 tests and 5 subtests, with 3 lease-acquiring tests deselected.
 > No simulator evaluation or replay was run. A replacement r5 manifest was
 > generated and validated offline at source
-> `53157b4f81807126a38b6e2832e0eced745bcbd4`, digest
-> `9d35652c97ea10f488fe4938fb5951a8dbabb7506f7a65dec0b5c4d94cd3a7c2`.
+> `9830c2647bce05bea01d59eed0c569d6b9e15550`, digest
+> `8b044475e4e96d5bedac081c1eea584d48f2915d4cf6076aef1d07da805ad45a`.
 > It binds all 466 validation cases and 46,600 exact seeds; both campaign
 > output roots are absent. Launch, Phase 2, validation, qualification, and
 > warm-start readiness remain false. It is not launched while r4 holds both

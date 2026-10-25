@@ -6,7 +6,7 @@ The earlier r5 manifest bound to `b02db09f3` is stale. A replacement config
 and manifest are now saved as
 `meco-five-continuous-20261025-r5-durable-eval.config.json` and
 `meco-five-continuous-20261025-r5-durable-eval.json` in that directory,
-generated from clean source commit `53157b4f81807126a38b6e2832e0eced745bcbd4`.
+generated from clean source commit `9830c2647bce05bea01d59eed0c569d6b9e15550`.
 The clean source worktree is
 `/mnt/zfs-storage/All Drives/Brian Data/Projects/.worktrees/autodrive-meco-r5-durable-eval`.
 Do not launch a new campaign while r4 owns the two WX9100 leases. The integrated source includes the
@@ -31,7 +31,7 @@ provenance tranches #44 and #46.
 The replacement manifest enables Phase 4 training exposure and freezes all 466
 protocol validation cases, each with its exact 100-seed list. Its canonical
 manifest digest is
-`9d35652c97ea10f488fe4938fb5951a8dbabb7506f7a65dec0b5c4d94cd3a7c2`.
+`8b044475e4e96d5bedac081c1eea584d48f2915d4cf6076aef1d07da805ad45a`.
 Offline manifest validation passed. Both campaign output roots are absent.
 Launch readiness, Phase 2 coverage, validation readiness, qualification
 readiness, and warm starts remain false.
