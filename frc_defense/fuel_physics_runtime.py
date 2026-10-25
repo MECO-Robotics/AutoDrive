@@ -87,11 +87,15 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                                      substeps=1, adaptive=False)
                 finally:
                     env.sim.dt = outer_sim_dt
-            except Exception:
+            except Exception as exc:
                 # Graph capture is an optimization only; retain the established
-                # eager path when any participating HIP operation cannot capture.
+                # eager path for diagnostic execution when capture is unsupported.
                 env._physics_graph_enabled = False
                 env._physics_graphs.clear()
+                if physics._gpu_qualifying:
+                    raise RuntimeError(
+                        "GPU-qualifying fuel physics requires a supported "
+                        "HIP graph-capture path; refusing eager fallback") from exc
             else:
                 env._physics_graphs[substeps] = graph
         if env._physics_graph_enabled:
