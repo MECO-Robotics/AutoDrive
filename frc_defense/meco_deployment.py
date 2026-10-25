@@ -11,6 +11,7 @@ import io
 import json
 import platform
 import resource
+import subprocess
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -508,3 +509,226 @@ def profile_report(tracks, checkpoint_root: Path, iterations=200, warmup=30):
             "Inference-age field repeats host scorer-plus-argmax timing; it is not an independent age measurement or sensor-to-actuator latency.",
             "Host-to-device transfer is excluded and no physical actuation is measured.",
             "ONNX export/operator inventory do not establish Hailo compiler support or robot deployability."]}
+
+
+def _profiler_source_identity() -> dict:
+    """Require and identify an immutable source checkout for capture profiles."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+            check=True, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("unable to establish profiler Git source identity") from exc
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        raise RuntimeError("profiler Git commit identity is malformed")
+    if status.strip():
+        raise RuntimeError("production-capture profiling requires a clean profiler checkout")
+    return {"git_commit_sha": commit, "working_tree_clean": True}
+
+
+def _capture_set(directory: Path) -> dict[str, Path]:
+    from .meco_tracks import MECO_TRACKS
+    directory = Path(directory).expanduser().resolve()
+    if not directory.is_dir():
+        raise FileNotFoundError(f"production capture directory is missing: {directory}")
+    files = sorted(directory.glob("*.npz"))
+    grouped = {track: [] for track in MECO_TRACKS}
+    unexpected = []
+    for path in files:
+        prefix = path.name.split("-", 1)[0]
+        if prefix not in grouped or not path.name.startswith(prefix + "-"):
+            unexpected.append(path.name)
+        else:
+            grouped[prefix].append(path)
+    if unexpected:
+        raise ValueError(f"unexpected production capture files: {unexpected}")
+    incomplete = {track: [str(path) for path in paths]
+                  for track, paths in grouped.items() if len(paths) != 1}
+    if incomplete:
+        raise ValueError(f"expected exactly one canonical capture for each of {MECO_TRACKS}: {incomplete}")
+    return {track: paths[0] for track, paths in grouped.items()}
+
+
+def _profile_captured_track(track: str, checkpoint: Path, capture_path: Path,
+        capture_file_sha256: str, model: nn.Module, provenance: dict,
+        metadata: dict, host_inputs: tuple[torch.Tensor, ...], device_name: str,
+        iterations: int, warmup: int) -> dict:
+    from .meco_request_capture import load_capture
+    from .meco_tracks import MECO_TRACKS
+
+    if track not in MECO_TRACKS:
+        raise ValueError(f"unsupported capture profile track: {track}")
+    # Re-read all bound artifacts immediately before each device measurement.
+    if hashlib.sha256(checkpoint.read_bytes()).hexdigest() != provenance["sha256"]:
+        raise ValueError(f"checkpoint changed after validation for {track}")
+    if hashlib.sha256(capture_path.read_bytes()).hexdigest() != capture_file_sha256:
+        raise ValueError(f"production capture changed after validation for {track}")
+    current_metadata, current_inputs = load_capture(capture_path, expected_track=track)
+    if current_metadata != metadata:
+        raise ValueError(f"production capture metadata changed after validation for {track}")
+    from .meco_request_capture import validate_capture_inputs
+    validate_capture_inputs(current_metadata, current_inputs, expected_track=track)
+    if len(current_inputs) != len(host_inputs) or any(
+            not torch.equal(current, original) for current, original in
+            zip(current_inputs, host_inputs)):
+        raise ValueError(f"captured profiler tensors changed after validation for {track}")
+    if any(not tensor.is_contiguous() or not bool(torch.isfinite(tensor).all())
+           for tensor in host_inputs):
+        raise ValueError(f"captured profiler inputs must be finite and contiguous for {track}")
+
+    device = torch.device(device_name)
+    selected_model = model.to(device).eval()
+    inputs = tuple(tensor.to(device) for tensor in host_inputs)
+    if any(tensor.device != device for tensor in inputs) or any(
+            parameter.device != device for parameter in selected_model.parameters()):
+        raise RuntimeError(f"capture profile failed to place {track} on {device_name}")
+    with torch.inference_mode():
+        for _ in range(warmup):
+            _pipeline(selected_model(*inputs), track)
+        _sync(device)
+        torch.cuda.reset_peak_memory_stats(device)
+        scorer_ms, forward_ms = [], []
+        for _ in range(iterations):
+            start = time.perf_counter_ns()
+            outputs = selected_model(*inputs)
+            _sync(device)
+            middle = time.perf_counter_ns()
+            _pipeline(outputs, track)
+            _sync(device)
+            end = time.perf_counter_ns()
+            forward_ms.append((middle - start) / 1e6)
+            scorer_ms.append((end - start) / 1e6)
+
+    if hashlib.sha256(checkpoint.read_bytes()).hexdigest() != provenance["sha256"]:
+        raise ValueError(f"checkpoint changed during profiling for {track}")
+    if hashlib.sha256(capture_path.read_bytes()).hexdigest() != capture_file_sha256:
+        raise ValueError(f"production capture changed during profiling for {track}")
+
+    def pct(values, p):
+        values = sorted(values)
+        return values[min(len(values) - 1, int((len(values) - 1) * p))]
+
+    names = input_names(track)
+    return {"track": track, "device": device_name,
+        "checkpoint": str(checkpoint.resolve()),
+        "checkpoint_identity": {"sha256": provenance["sha256"],
+            "run_id": provenance["run_id"], "update": provenance["update"],
+            "protocol_id": provenance["protocol_id"],
+            "source_snapshot": provenance["sources"],
+            "source_snapshot_sha256": metadata["source_snapshot_sha256"]},
+        "capture": {"path": str(capture_path.resolve()),
+            "file_sha256": capture_file_sha256,
+            "content_sha256": metadata["content_sha256"],
+            "metadata_sha256": metadata["metadata_sha256"],
+            "input_contract_sha256": metadata["input_contract_sha256"],
+            "request_sequence": metadata["request_sequence"],
+            "generation_id": metadata["generation_id"],
+            "snapshot_id": metadata["snapshot_id"],
+            "candidate_mask_digest": metadata.get("candidate_mask_digest"),
+            "legal_pose_order_digest": metadata.get("legal_pose_order_digest")},
+        "inputs": [{"name": name, "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype)} for name, tensor in zip(names, host_inputs)],
+        "input_content_sha256": metadata["content_sha256"],
+        "iterations": iterations, "warmup": warmup,
+        "timed_stages": ["model_forward", "raw_scorer_argmax"],
+        "host_to_device_transfer": "excluded; captured tensors transferred before warmup",
+        "model_forward_ms": {f"p{p}": pct(forward_ms, p / 100)
+                              for p in (50, 95, 99)},
+        "captured_scorer_argmax_ms": {f"p{p}": pct(scorer_ms, p / 100)
+                                      for p in (50, 95, 99)},
+        "peak_device_memory_bytes": torch.cuda.max_memory_allocated(device),
+        "inference_age_measured": False,
+        "end_to_end_latency_measured": False,
+        "deployment_qualification": False}
+
+
+def production_capture_profile_report(checkpoint_root: Path, capture_dir: Path,
+        devices, iterations=200, warmup=30) -> dict:
+    """Profile exact five-track production captures on the attested WX9100 pair."""
+    from .meco_device_lease import lease_devices
+    from .meco_gpu_attestation import verify_post_lease_wx9100
+    from .meco_request_capture import load_capture, validate_capture_inputs
+    from .meco_tracks import MECO_TRACKS
+    from .meco_input_provenance import input_contract_digest
+
+    devices = tuple(devices)
+    expected_devices = ("cuda:0", "cuda:1")
+    if devices != expected_devices:
+        raise ValueError("production-capture mode requires exactly --device cuda:0 --device cuda:1")
+    if iterations < 1 or warmup < 0:
+        raise ValueError("iterations must be positive and warmup nonnegative")
+    profiler_source = _profiler_source_identity()
+    captures = _capture_set(capture_dir)
+    root = Path(checkpoint_root).expanduser().resolve()
+    hailo = {"compiler_available": importlib.util.find_spec("hailo_sdk_client") is not None,
+             "device_visible": any(Path(p).exists() for p in ("/dev/hailo0", "/dev/hailo1")),
+             "validated": False}
+    staged = {}
+
+    # A lease and physical attestation are required before loading/profiling any
+    # model. Capture metadata is checked only after both physical devices pass.
+    with lease_devices(expected_devices, owner="meco-production-capture-profile") as lease:
+        attestation = verify_post_lease_wx9100(lease, expected_devices)
+        for track in MECO_TRACKS:
+            checkpoint = root / track / "latest.pt"
+            model, provenance = load_track_model(track, checkpoint)
+            capture_path = captures[track]
+            capture_file_sha256 = hashlib.sha256(capture_path.read_bytes()).hexdigest()
+            metadata, tensors = load_capture(capture_path, expected_track=track)
+            validate_capture_inputs(metadata, tensors, expected_track=track)
+            source_digest = hashlib.sha256(json.dumps(provenance["sources"],
+                sort_keys=True, allow_nan=False, separators=(",", ":")).encode()).hexdigest()
+            if (metadata.get("track") != track
+                    or metadata.get("checkpoint_sha256") != provenance["sha256"]
+                    or metadata.get("protocol_id") != provenance["protocol_id"]
+                    or metadata.get("source_snapshot_sha256") != source_digest
+                    or metadata.get("input_contract_sha256") != input_contract_digest()):
+                raise ValueError(f"production capture checkpoint/source/protocol binding mismatch for {track}")
+            staged[track] = {"checkpoint": checkpoint, "capture_path": capture_path,
+                "capture_file_sha256": capture_file_sha256, "metadata": metadata,
+                "host_inputs": tensors, "model": model, "provenance": provenance}
+
+        # Check again immediately before any timing. No partial profile is
+        # allowed when an artifact mutates during staging.
+        profiler_source = _profiler_source_identity()
+        results = []
+        device_attestations = {row["device"]: row for row in attestation["devices"]}
+        for track in MECO_TRACKS:
+            item = staged[track]
+            for device in expected_devices:
+                result = _profile_captured_track(track,
+                    item["checkpoint"], item["capture_path"],
+                    item["capture_file_sha256"], item["model"],
+                    item["provenance"], item["metadata"],
+                    item["host_inputs"], device, iterations, warmup)
+                result["physical_device_identity"] = device_attestations[device]
+                result["gpu_inventory_sha256"] = attestation["inventory_sha256"]
+                results.append(result)
+        for track, item in staged.items():
+            if hashlib.sha256(item["checkpoint"].read_bytes()).hexdigest() != item["provenance"]["sha256"]:
+                raise ValueError(f"checkpoint changed during profile run for {track}")
+            if hashlib.sha256(item["capture_path"].read_bytes()).hexdigest() != item["capture_file_sha256"]:
+                raise ValueError(f"production capture changed during profile run for {track}")
+        if _profiler_source_identity() != profiler_source:
+            raise RuntimeError("profiler source identity changed during capture profiling")
+    return {"schema": "meco-production-capture-scorer-profile-v1",
+        "status": "pass", "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "evidence_class": "production-capture-backed scorer microbenchmark; not deployment qualification",
+        "input_mode": "production_capture", "tracks_required": list(MECO_TRACKS),
+        "tracks_profiled": list(MECO_TRACKS), "devices_required": list(expected_devices),
+        "devices_tested": list(expected_devices),
+        "artifact_validation": {"status": "pass", "complete_five_track_set": True},
+        "profiler_source_identity": profiler_source,
+        "checkpoint_training_source_identity_is_separate": True,
+        "physical_device_attestation": attestation,
+        "runtime_identity": {"torch_version": str(torch.__version__),
+            "hip_version": torch.version.hip, "python": platform.python_version(),
+            "platform": platform.platform()},
+        "deployment_qualification": False,
+        "hailo": hailo, "iterations": iterations, "warmup": warmup,
+        "results": results,
+        "limitations": ["Only recorded production scorer inputs and model-forward/raw-argmax timing are measured.",
+            "Host-to-device transfer is excluded; inference age and end-to-end decision/actuation latency are not measured.",
+            "No route search, candidate construction, feasibility, arbitration, simulator, Hailo, target-device, or qualification evidence is provided."]}
