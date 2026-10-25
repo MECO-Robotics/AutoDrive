@@ -804,6 +804,9 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
         validate_phase0_identity_binding(protocol["phase0_identity_binding"])
         if protocol["phase0_identity_binding"]["source_identity_sha256"] != protocol["calibration_source_identity_sha256"]:
             raise ValueError("calibrated protocol Phase 0 evaluator source identity is invalid")
+    elif (protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION
+            and target == "pickup_simple"):
+        raise ValueError("pickup_simple v5 protocol requires a Phase 0 identity binding")
     if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
         reference_runtime = protocol.get("matched_reference_variance_calibration", {}).get(
             "normalized_runtime_identity")
@@ -4540,7 +4543,10 @@ def _stage1_blocked_report(destination, checks, blocker_codes):
         "scope": "metadata_consistent_only", "ready": False,
         "current_source_factory_reproduction": "not_performed",
         "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
-        "checkpoint_bytes_opened": False, "outcomes_read": False,
+        "checkpoint_bytes_opened": False,
+        "calibration_outcomes_may_be_read": False,
+        "calibration_outcomes_read": False,
+        "validation_outcomes_read": False, "final_test_outcomes_read": False,
         "curriculum_state_changed": False, "qualification_decision": False,
         "tracks": [{"policy_id": policy, "status": "blocked",
             "blocker_code": "preflight_input_safety_blocked"} for policy in POLICIES],
@@ -4729,6 +4735,8 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
     checkpoints = [row[0] for row in checkpoint_rows]
     checks = []
     blockers = []
+    calibration_outcomes_may_be_read = False
+    calibration_outcomes_read = False
     track_statuses = {policy: {"policy_id": policy, "status": "blocked",
         "blocker_code": "five_track_binding_not_validated"} for policy in POLICIES}
 
@@ -4819,7 +4827,11 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
             "baseline_freeze_sha256": chain_binding["effective_freeze_sha256"]}
         for name in ("score_estimand_review", "d0_calibration_bundle",
                 "matched_reference_calibration_bundle", "margin_review"):
+            if name in {"d0_calibration_bundle", "matched_reference_calibration_bundle"}:
+                calibration_outcomes_may_be_read = True
             _stage1_check_phase0_artifact(name, loaded_artifacts[name], protocol)
+            if name in {"d0_calibration_bundle", "matched_reference_calibration_bundle"}:
+                calibration_outcomes_read = True
         for bundle_name in ("d0_calibration_bundle", "matched_reference_calibration_bundle"):
             reports = loaded_artifacts[bundle_name]["calibration_reports"]
             for report in reports.values():
@@ -4869,7 +4881,10 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
         "current_source_factory_reproduction": "not_performed",
         "ready": not blockers,
         "checkpoint_digest_semantics": "declared_metadata_only_not_verified_against_checkpoint_bytes",
-        "checkpoint_bytes_opened": False, "outcomes_read": False,
+        "checkpoint_bytes_opened": False,
+        "calibration_outcomes_may_be_read": calibration_outcomes_may_be_read,
+        "calibration_outcomes_read": calibration_outcomes_read,
+        "validation_outcomes_read": False, "final_test_outcomes_read": False,
         "curriculum_state_changed": False, "qualification_decision": False,
         "tracks": [track_statuses[policy] for policy in POLICIES],
         "checks": checks, "blocker_codes": sorted(set(blockers))}

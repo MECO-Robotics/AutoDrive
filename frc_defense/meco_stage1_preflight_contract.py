@@ -197,21 +197,42 @@ def _runtime(value):
 
 
 def _normalized_calibration_runtime(runtime):
-    """Mirror qualification's pure normalized calibration-runtime contract."""
-    backend = runtime["backend"].strip().lower()
-    if backend in {"rocm", "hip"}:
-        backend, hip_version = "hip", runtime["backend_version"]
-    elif backend == "cuda":
-        hip_version = None
-    else:
+    """Mirror qualification's normalized, already-typed calibration runtime."""
+    backend = runtime.get("backend") if isinstance(runtime, dict) else None
+    if backend not in {"hip", "cuda"}:
         raise ValueError("phase0_runtime_backend_invalid")
-    if backend == "hip" and (not isinstance(hip_version, str) or not hip_version.strip()):
-        raise ValueError("phase0_runtime_hip_version_invalid")
+    if (not isinstance(runtime.get("device"), str)
+            or re.fullmatch(r"cuda:(?:0|[1-9][0-9]*)", runtime["device"]) is None
+            or not isinstance(runtime.get("torch_version"), str)
+            or not runtime["torch_version"].strip()
+            or runtime["torch_version"] != runtime["torch_version"].strip()
+            or not isinstance(runtime.get("device_name"), str)
+            or not runtime["device_name"].strip()
+            or runtime["device_name"] != runtime["device_name"].strip()):
+        raise ValueError("phase0_runtime_calibration_identity_invalid")
+    hip_version = runtime.get("hip_version")
+    if backend == "hip":
+        if (not isinstance(hip_version, str) or not hip_version.strip()
+                or hip_version != hip_version.strip()):
+            raise ValueError("phase0_runtime_hip_version_invalid")
+    elif hip_version is not None:
+        raise ValueError("phase0_runtime_cuda_hip_version_invalid")
     # Mirror _normalized_calibration_runtime: omit device selector and expose
     # the runtime device name under both `device_name` and `device_model`.
-    return {"backend": backend, "torch_version": runtime["torch_version"],
-        "hip_version": hip_version, "device_name": runtime["device_model"],
-        "device_model": runtime["device_model"]}
+    normalized = {key: value for key, value in runtime.items() if key != "device"}
+    normalized["device_model"] = runtime["device_name"]
+    return normalized
+
+
+def _phase0_runtime_as_calibration_runtime(runtime):
+    backend = {"ROCm": "hip", "CUDA": "cuda"}.get(runtime["backend"])
+    if backend is None:
+        raise ValueError("phase0_runtime_backend_invalid")
+    return _normalized_calibration_runtime({
+        "device": f"cuda:{runtime['device_index']}",
+        "device_name": runtime["device_model"], "backend": backend,
+        "torch_version": runtime["torch_version"],
+        "hip_version": runtime["backend_version"] if backend == "hip" else None})
 
 
 def _config_artifacts(value, *, snapshot=False):
@@ -559,9 +580,9 @@ def validate_phase0_chain(chain):
         "source": freeze["source"], "runtime": freeze["runtime"],
         "runtime_sha256": canonical_sha256(freeze["runtime"]),
         "dependency_lock_sha256": freeze["runtime"]["dependency_lock_sha256"],
-        "normalized_runtime": _normalized_calibration_runtime(freeze["runtime"]),
+        "normalized_runtime": _phase0_runtime_as_calibration_runtime(freeze["runtime"]),
         "normalized_runtime_sha256": canonical_sha256(
-            _normalized_calibration_runtime(freeze["runtime"])),
+            _phase0_runtime_as_calibration_runtime(freeze["runtime"])),
         "config_sha256": receipt_result["config_sha256"],
         "configuration_artifacts": receipt_result["configuration_artifacts"],
         "tuple_registry_sha256": partition["tuple_registry_sha256"],
