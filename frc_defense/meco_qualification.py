@@ -4792,6 +4792,8 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
         artifact_raw_sha256 = {}
         phase0_evidence = []
         for name, path in refs.items():
+            if name in {"d0_calibration_bundle", "matched_reference_calibration_bundle"}:
+                calibration_outcomes_may_be_read = True
             artifact, raw_sha = _stage1_json(path, label=f"Phase 0 {name}",
                 canonical=(name == "score_estimand_review"))
             _stage1_reject_protected_references(artifact, base=path.parent, roots=protected)
@@ -4827,8 +4829,6 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
             "baseline_freeze_sha256": chain_binding["effective_freeze_sha256"]}
         for name in ("score_estimand_review", "d0_calibration_bundle",
                 "matched_reference_calibration_bundle", "margin_review"):
-            if name in {"d0_calibration_bundle", "matched_reference_calibration_bundle"}:
-                calibration_outcomes_may_be_read = True
             _stage1_check_phase0_artifact(name, loaded_artifacts[name], protocol)
             if name in {"d0_calibration_bundle", "matched_reference_calibration_bundle"}:
                 calibration_outcomes_read = True
