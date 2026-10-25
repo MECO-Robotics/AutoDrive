@@ -1,12 +1,15 @@
 # MECO learning tracks plan: execution status
 
-> **Live r4 and durable-evaluation update — 2026-10-25 03:23 UTC.** The
-> `meco-five-continuous-20261025.service` remains active (PID `2750253`) on the
-> two WX9100s. Its latest queue heartbeat is `2026-10-25T03:23:26Z`: A1, A2,
-> and C1 are complete at 100/100; A3 is 96/100 on `cuda:0`; C2 is queued at
-> 0/100. Cycle 1 has zero completed matched cycles and no evaluation. This is
-> still the older one-scenario `pickup_simple/cluster` diagnostic, without an
-> evaluation binding, warm starts, or Phase 4 exposure.
+> **Live r4 and durable-evaluation update — 2026-10-25 03:29 UTC.** The
+> supervisor PID `2750253` is active with both WX9100 lanes. Its queue
+> heartbeat at `2026-10-25T03:29:14Z` shows A1, A2, A3, and C1 complete at
+> 100/100; C2 is running at 2/100 on `cuda:0`. It is cycle 1, with no matched
+> cycle completion or evaluation. This is still the older single-scenario
+> `pickup_simple/cluster` diagnostic, without an evaluation binding, warm
+> starts, or Phase 4 exposure. The five model tracks are being exercised, but
+> this run does not establish that any track passed a curriculum or evaluation
+> gate. C2 remains active; do not restart it while the user-requested
+> uninterrupted run continues.
 >
 > The durable manifest evaluation schedule is integrated on `main` as
 > `30367daa9`, `e28da846c`, `708c31033`, and `53157b4f8`. Independent exact-head
