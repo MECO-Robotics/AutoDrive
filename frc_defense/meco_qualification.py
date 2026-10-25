@@ -63,7 +63,7 @@ def _matched_reference_identity(policy: str, mode: str | None = None) -> dict:
                 or (policy == "D2" and mode in ("cv", "multi_model_v1"))):
             raise ValueError("matched reference policy/mode is unsupported")
         variant = f"{policy}/{mode}"
-    from .meco_tracks import prediction_contract
+    from .meco_prediction_contract import prediction_contract
     return {"selection_id": variant, "policy": policy, "policy_id": policy_id,
         "prediction_mode": mode, "prediction_contract": prediction_contract(mode),
         "checkpoint_sha256": None}
@@ -1942,7 +1942,7 @@ def _paired_worker_assignments(assignments):
 
 def _paired_control_specs():
     from .meco_track_training import ROUTE_COST_POINTS_PER_SECOND
-    from .meco_tracks import prediction_contract
+    from .meco_prediction_contract import prediction_contract
 
     candidate = {"candidate_k": MATCHED_REFERENCE_CANDIDATE_K,
         "route_cost_points_per_second": ROUTE_COST_POINTS_PER_SECOND,
