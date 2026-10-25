@@ -22,6 +22,21 @@ from frc_defense.meco_baseline_freeze import (
 SOURCE_PLAN = "docs/source-plan.md"
 
 
+def test_authoritative_sources_follow_meco_tensor_defense_evaluation_path():
+    all_sources = {path for paths in AUTHORITATIVE_FIELD_SOURCES.values() for path in paths}
+    assert "frc_defense/tensor_3v3.py" not in all_sources
+    assert "frc_defense/_tensor_3v3_observation.py" not in all_sources
+    assert {
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_observation.py",
+        "frc_defense/tensor_defense_opponent.py",
+        "frc_defense/tensor_defense_gamepieces.py",
+        "frc_defense/tensor_defense_step.py",
+        "frc_defense/tensor_training_runtime.py",
+        "frc_defense/meco_track_training.py",
+    } <= all_sources
+
+
 def _init_repo(root: Path) -> None:
     paths = {SOURCE_PLAN}
     for required in AUTHORITATIVE_FIELD_SOURCES.values():
@@ -138,7 +153,7 @@ def test_baseline_freeze_rejects_missing_runtime_field_and_dirty_source(tmp_path
             field_records=_field_records(tmp_path),
         )
 
-    (tmp_path / "frc_defense/tensor_3v3.py").write_text("dirty\n")
+    (tmp_path / "frc_defense/tensor_sim.py").write_text("dirty\n")
     with pytest.raises(ValueError, match="clean source checkout"):
         compile_baseline_freeze(
             tmp_path,

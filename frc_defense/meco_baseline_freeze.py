@@ -1,26 +1,18 @@
 """Offline contracts for immutable Phase 0 baseline and split freezes.
 
-The environment's constructor defaults are not an effective campaign
-configuration: ``TensorThreeVsThreeEnv`` and ``TensorVectorizedSimulator``
-accept per-run overrides. Callers must therefore supply explicit observed
-values and runtime identity; this module only binds those values to the clean
-source tree and authoritative source files. It does not instantiate a
-simulator or create a production freeze.
+The MECO evaluator constructs ``TensorDefenseEnv`` through
+``tensor_training_runtime`` and ``meco_track_training.evaluate_meco``. Its
+authoritative implementation is ``tensor_sim.py`` plus the
+``TensorDefense*Mixin`` modules listed per field below; the separate
+``TensorThreeVsThreeEnv`` path is not used as a source for this freeze.
+Constructor defaults and per-run overrides are not an effective campaign
+configuration, so callers must supply observed values and runtime identity.
+This module only binds those values to the clean source tree. It does not
+instantiate a simulator or create a production freeze.
 
-Source audit:
-* robot dynamics are configured in ``tensor_3v3.py`` and consumed by
-  ``tensor_physics.py``;
-* the REBUILT layout is materialized by ``field.py`` and ``tensor_sim.py``;
-  legal routes are derived from that geometry in ``tensor_adstar.py``;
-* scenario/opponent identity is split between ``training_curriculum.py``,
-  ``curriculum_scenarios.py``, and the Phase 4 policy registry;
-* action/physics/perception cadence is configured in ``tensor_3v3.py`` and
-  ``tensor_physics.py``; noise is applied in ``_tensor_3v3_observation.py``
-  and ``tensor_perception.py``;
-* scoring and safety sources are the game-piece event writer, physics event
-  counters, and evaluation reporter. The simulator reports scored FUEL piece
-  counts; it does not assign official match points. Do not use those counts as
-  a ``match_points`` field or as a qualification gate.
+The simulator reports scored FUEL piece counts; it does not assign official
+match points. Do not use those counts as a ``match_points`` field or as a
+qualification gate.
 """
 from __future__ import annotations
 
@@ -40,40 +32,46 @@ PARTITION_CONTRACT_SCHEMA = "meco-heldout-partitions-v1"
 # are not treated as proof of the value by themselves.
 AUTHORITATIVE_FIELD_SOURCES: dict[str, tuple[str, ...]] = {
     "robot_dynamics": (
-        "frc_defense/tensor_3v3.py",
+        "frc_defense/tensor_sim.py",
         "frc_defense/tensor_physics.py",
     ),
     "field_geometry": (
         "frc_defense/field.py",
         "frc_defense/tensor_sim.py",
-        "frc_defense/tensor_3v3.py",
+        "frc_defense/tensor_defense_reset.py",
     ),
     "legal_connectivity": (
         "frc_defense/field.py",
         "frc_defense/tensor_adstar.py",
     ),
     "opponent_controllers": (
-        "frc_defense/training_curriculum.py",
-        "frc_defense/curriculum_scenarios.py",
+        "frc_defense/tensor_training_runtime.py",
+        "frc_defense/meco_track_training.py",
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_opponent.py",
         "frc_defense/meco_phase4_opponents.py",
     ),
     "action_update_cadence": (
-        "frc_defense/tensor_3v3.py",
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_step.py",
         "frc_defense/tensor_physics.py",
     ),
     "sensor_noise_profiles": (
-        "frc_defense/tensor_3v3.py",
-        "frc_defense/_tensor_3v3_observation.py",
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_observation.py",
         "frc_defense/tensor_perception.py",
     ),
     "scoring_observation_semantics": (
         "frc_defense/gamepiece_actions.py",
-        "frc_defense/tensor_3v3.py",
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_gamepieces.py",
+        "frc_defense/tensor_defense_step.py",
         "frc_defense/tensor_training_evaluation.py",
     ),
     "safety_event_semantics": (
         "frc_defense/tensor_physics.py",
-        "frc_defense/tensor_3v3.py",
+        "frc_defense/tensor_sim.py",
+        "frc_defense/tensor_defense_step.py",
         "frc_defense/tensor_training_evaluation.py",
     ),
 }
