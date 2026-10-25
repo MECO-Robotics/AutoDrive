@@ -533,12 +533,19 @@ def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
             runtime_identity=runtime_identity)
     values = [bindings[seed] for seed in seeds]
     if any(binding.get("campaign_id") != values[0].get("campaign_id")
-            or binding.get("pair_id") != values[0].get("pair_id")
             or binding.get("control_id") != values[0].get("control_id")
             or binding.get("shard_index") != values[0].get("shard_index")
             or binding.get("shard_manifest_id") != values[0].get("shard_manifest_id")
+            or binding["work_unit"].get("paired_control_id") !=
+                values[0]["work_unit"].get("paired_control_id")
+            or binding["work_unit"].get("scenario_id") !=
+                values[0]["work_unit"].get("scenario_id")
+            or binding["work_unit"].get("category") !=
+                values[0]["work_unit"].get("category")
             or binding["work_unit"].get("repetition") !=
                 values[0]["work_unit"].get("repetition")
+            or any(binding["work_unit"].get(key) != values[0]["work_unit"].get(key)
+                for key in ("layout_id", "defender_family", "start_condition", "sensor_profile"))
             for binding in values[1:]):
         raise ValueError("paired calibration per-seed bindings mix campaign pair/control units")
 
@@ -562,9 +569,13 @@ def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings
         if assignment["worker_id"] == shard["worker_id"]), None)
     if expected_worker is None or worker != expected_worker:
         raise ValueError("paired calibration worker identity differs from exact shard assignment")
+    first_unit = first_binding.get("work_unit", {})
+    group_fields = ("scenario_id", "category", "split", "repetition",
+        "paired_control_id", "layout_id", "defender_family", "start_condition",
+        "sensor_profile")
     units = {unit["seed"]: unit for unit in shard["work_units"]
-        if unit.get("pair_id") == first_binding.get("pair_id")
-        and unit.get("control_id") == first_binding.get("control_id")}
+        if unit.get("control_id") == first_binding.get("control_id")
+        and all(unit.get(key) == first_unit.get(key) for key in group_fields)}
     if set(units) != set(seeds) or set(bindings) != set(seeds):
         raise ValueError("paired calibration shard bindings do not cover the exact scored seed tuple")
     for seed in seeds:
@@ -2719,7 +2730,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         if not isinstance(replay_selection, dict) or len(replay_selection) != 1:
             raise ValueError("paired calibration replay requires one exact selected policy")
         trusted_policy = next(iter(replay_selection))
-        trusted_mode = ("current" if trusted_policy in ("D0", "D1") else
+        trusted_mode = (None if trusted_policy == "D0" else "current" if trusted_policy == "D1" else
             (control_prediction_modes or {}).get(trusted_policy, "cv"))
         _validate_paired_calibration_campaign_inputs(
             paired_calibration_campaign, paired_calibration_shard_index,
@@ -2897,7 +2908,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
             scored_seeds, paired_calibration_worker_identity, device=device,
             execution_device=execution_device, scenario_id=scenario_id,
             split=split, policy=paired_policy,
-            prediction_mode=("current" if paired_policy in ("D0", "D1") else
+            prediction_mode=(None if paired_policy == "D0" else "current" if paired_policy == "D1" else
                 (control_prediction_modes or {}).get("D2", "cv")),
             qualification_case={"category": categories[0], **(qualification_case or {})},
             runtime_identity=runtime_identity)

@@ -11,14 +11,15 @@ from frc_defense.meco_track_training import (
 def _binding_and_worker():
     work_unit = {
         "scenario_id": "pickup_simple", "category": "single", "split": "calibration",
-        "seed": 41, "pair_id": "pair-1", "control_id": "D1", "repetition": 2,
+        "seed": 41, "pair_id": "pair-41", "paired_control_id": "D1",
+        "control_id": "D1", "repetition": 2,
         "layout_id": "layout-a", "defender_family": "family-a",
         "start_condition": "start-a", "sensor_profile": "sensor-a",
     }
     binding = {
         "campaign_id": "campaign-1", "shard_index": 0,
         "shard_manifest_id": "manifest-1", "work_unit_id": _canonical_digest(work_unit),
-        "work_unit": work_unit, "pair_id": "pair-1", "control_id": "D1",
+        "work_unit": work_unit, "pair_id": "pair-41", "control_id": "D1",
         "source_binding": {"source": "frozen"}, "baseline_freeze_sha256": "a" * 64,
         "partition_sha256": "b" * 64, "estimand_approval_sha256": "c" * 64,
         "scoring": {"replay_contract_schema": "dashboard-replay-generation-v1"},
@@ -44,7 +45,7 @@ def test_paired_replay_binding_accepts_exact_campaign_and_runtime_identity():
         prediction_mode="current", seed=41,
         qualification_case={"category": "single", "layout_id": "layout-a", "defender_family": "family-a",
             "start_condition": "start-a", "sensor_profile": "sensor-a"},
-        condition_id="paired-cal-campaign-1-pair-1-D1-r0002",
+        condition_id="paired-cal-campaign-1-pair-41-D1-r0002",
         runtime_identity=runtime)
 
 
@@ -72,15 +73,17 @@ def test_paired_replay_binding_rejects_changed_provenance(mutation):
             prediction_mode="current", seed=41,
             qualification_case={"category": "single", "layout_id": "layout-a", "defender_family": "family-a",
                 "start_condition": "start-a", "sensor_profile": "sensor-a"},
-        condition_id="paired-cal-campaign-1-pair-1-D1-r0002",
+        condition_id="paired-cal-campaign-1-pair-41-D1-r0002",
             runtime_identity=runtime)
 
 
 def test_per_seed_bindings_cover_each_score_seed_and_derive_exact_conditions():
     binding_a, worker, runtime = _binding_and_worker()
     binding_b, _, _ = _binding_and_worker()
-    binding_b["work_unit"] = {**binding_b["work_unit"], "seed": 42}
+    binding_b["work_unit"] = {**binding_b["work_unit"], "seed": 42,
+        "pair_id": "pair-42", "paired_control_id": "D1"}
     binding_b["work_unit_id"] = _canonical_digest(binding_b["work_unit"])
+    binding_b["pair_id"] = "pair-42"
     bindings = {41: binding_a, 42: binding_b}
     _validate_paired_calibration_replay_bindings(bindings, (41, 42), worker,
         device="cuda:0", execution_device={"device": "cuda:0", "accelerator_backend": "ROCm"},
@@ -119,8 +122,9 @@ def _trusted_campaign_fixture(monkeypatch):
     control["control_binding_sha256"] = _canonical_digest(control)
     control_binding = dict(control)
     units = [{"scenario_id": "pickup_simple", "category": "single",
-        "split": "calibration", "seed": seed, "pair_id": "pair-1",
-        "control_id": "D1", "repetition": 2, "layout_id": "layout-a",
+        "split": "calibration", "seed": seed, "pair_id": f"pair-{seed}",
+        "paired_control_id": "D1", "control_id": "D1", "repetition": 2,
+        "layout_id": "layout-a",
         "defender_family": "family-a", "start_condition": "start-a",
         "sensor_profile": "sensor-a"} for seed in (41, 42)]
     campaign = {"source": {"source_identity_sha256": "source-ok"},
