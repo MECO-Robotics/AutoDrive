@@ -12,6 +12,23 @@ import weakref
 
 _EDGE_WEIGHT_CACHE = {}
 _EDGE_WEIGHT_CACHE_LOCK = threading.RLock()
+PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED = False
+
+
+def _require_wx9100_device(device):
+    """Reject non-WX9100 devices before loading the experimental extension."""
+    import torch
+
+    selected = torch.device(device)
+    if selected.type != "cuda" or selected.index is None:
+        raise ValueError("Plan A HIP heap requires an explicitly indexed HIP device")
+    if (torch.version.hip is None or not torch.cuda.is_available() or
+            selected.index >= torch.cuda.device_count()):
+        raise RuntimeError("Plan A HIP heap requires an available HIP device")
+    name = torch.cuda.get_device_name(selected).casefold().replace("-", " ").replace("_", " ")
+    if "wx 9100" not in name and "wx9100" not in name:
+        raise RuntimeError("Plan A HIP heap is restricted to WX9100 devices")
+    return selected
 
 
 def precompute_plan_a_edge_weights(xy, headings, edges, edge_mask):
@@ -122,16 +139,31 @@ def plan_a_fallback_pair(valid_matrix, physical_distance):
 
 def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, root,
                         root_start_cost, root_connector_m):
-    """Explicitly gated prototype entry point; never called by training dispatch."""
+    """Fail-closed prototype entry point; never called by training dispatch."""
     import torch
+
+    if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
+        raise RuntimeError("Plan A HIP dispatch is disabled pending WX9100 parity and profiling")
+    selected = _require_wx9100_device(edge_costs.device)
+    if (type(root) is not int or type(root_start_cost) not in (int, float) or
+            type(root_connector_m) not in (int, float) or
+            not math.isfinite(float(root_start_cost)) or float(root_start_cost) < 0 or
+            not math.isfinite(float(root_connector_m)) or float(root_connector_m) < 0):
+        raise ValueError("HIP heap root and connector costs must be finite and nonnegative")
+
     from .meco_plan_a_shortest_path_hip import extension
 
-    if not (torch.is_tensor(edge_costs) and edge_costs.is_cuda and
+    if not (torch.is_tensor(edge_dst) and edge_dst.ndim == 2 and
+            torch.is_tensor(edge_costs) and edge_costs.is_cuda and
+            torch.is_tensor(edge_lengths) and torch.is_tensor(edge_allowed) and
             edge_costs.dtype == torch.float64 and edge_costs.ndim == 2 and
+            edge_costs.shape[0] > 0 and edge_costs.shape[1] > 0 and
+            edge_costs.shape[0] <= (torch.iinfo(torch.int64).max - 1) // edge_costs.shape[1] and
             edge_lengths.shape == edge_costs.shape and edge_lengths.dtype == torch.float64 and
             edge_allowed.shape == edge_costs.shape and edge_allowed.dtype == torch.bool and
-            edge_costs.device == edge_lengths.device == edge_allowed.device == edge_dst.device and
-            edge_dst.dtype == torch.int64 and edge_dst.shape == edge_costs.shape):
+            edge_costs.device == edge_lengths.device == edge_allowed.device == edge_dst.device == selected and
+            edge_dst.dtype == torch.int64 and edge_dst.shape == edge_costs.shape and
+            edge_dst.is_cuda):
         raise ValueError("HIP heap requires same-device float64 costs/lengths and bool mask")
     route, physical, parent, parent_length, _settled = extension().dijkstra(
         edge_dst.contiguous(), edge_costs.contiguous(), edge_lengths.contiguous(),

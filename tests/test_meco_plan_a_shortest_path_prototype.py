@@ -1,6 +1,7 @@
 import math
 import heapq
 import random
+from pathlib import Path
 
 import torch
 
@@ -143,3 +144,29 @@ def test_static_edge_weights_are_cached_for_graph_lifetime(monkeypatch):
     second = cached_plan_a_edge_weights(graph)
     assert first is second
     assert len(calls) == 1
+
+
+def test_hip_prototype_is_fail_closed_and_not_in_support_dispatch():
+    assert shortest_path.PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED is False
+    try:
+        shortest_path.plan_a_dijkstra_hip(None, None, None, None, root=0,
+            root_start_cost=0., root_connector_m=0.)
+    except RuntimeError as exc:
+        assert "disabled pending WX9100 parity and profiling" in str(exc)
+    else:
+        raise AssertionError("HIP prototype must remain fail-closed before hardware gates")
+
+    policy_source = Path(__file__).parents[1] / "frc_defense" / "meco_plan_a_policy.py"
+    source = policy_source.read_text()
+    assert "plan_a_dijkstra_cpu" in source
+    assert "plan_a_dijkstra_hip" not in source
+
+
+def test_hip_kernel_has_device_side_edge_and_heap_guards():
+    source_root = Path(__file__).parents[1] / "frc_defense" / "csrc"
+    binding = (source_root / "meco_plan_a_shortest_path_hip.cpp").read_text()
+    kernel = (source_root / "meco_plan_a_shortest_path_hip_kernel.cu").read_text()
+    assert "overflows the HIP heap capacity" in binding
+    assert "status.item<int64_t>()" in binding
+    assert "dst < 0 || dst >= n" in kernel
+    assert "heap_size >= heap_capacity" in kernel
