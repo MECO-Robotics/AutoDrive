@@ -527,6 +527,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         replay.get("validation_seed_assignment_sha256") == seed_sha256 and
         replay.get("paired_outcomes_artifact_sha256") == outcome_sha and
         replay.get("registry_profile_id") == assignment.get("registry_profile_id") and
+        replay.get("profile_config_sha256") == assignment.get("profile_config_sha256") and
         replay.get("assignment_sha256") == assignment.get("assignment_sha256") and
         replay.get("source_identity_sha256") == outcomes.get("source_identity_sha256") and
         replay.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256") and
@@ -552,6 +553,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             item.get("split") == "validation" and
             item.get("validation_seed_assignment_sha256") == seed_sha256 and
             item.get("registry_profile_id") == assignment.get("registry_profile_id") and
+            item.get("profile_config_sha256") == assignment.get("profile_config_sha256") and
             item.get("assignment_sha256") == assignment.get("assignment_sha256") and
             item.get("source_identity_sha256") == outcomes.get("source_identity_sha256") and
             item.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256") and

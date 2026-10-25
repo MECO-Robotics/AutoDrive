@@ -836,6 +836,7 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
+        "condition_report_sha256": condition_report_sha256,
         "per_world_legality_records": legality_records,
         "outcome_by_start_state": outcome_by_start_state})
     return {"policies": sorted(policies), "categories": categories,
