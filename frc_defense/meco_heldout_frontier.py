@@ -106,6 +106,26 @@ def _validate_campaign_roster(campaign: dict) -> None:
                                      allow_nan=False) + "\n").encode()
         if hashlib.sha256(manifest_bytes).hexdigest() != job.get("seed_manifest_sha256"):
             raise ValueError("frontier seed manifest hash mismatch")
+        job_conditions = {condition.get("condition_name"): condition
+                          for condition in job.get("conditions", [])}
+        if len(job_conditions) != len(job.get("conditions", [])):
+            raise ValueError("frontier contains duplicate matrix conditions")
+        expected_job_conditions = {
+            "architecture_matched_cv_k16", "controls_default_d1_current_d2_cv_k16",
+            "matched_prediction_current_k16", "candidate_recall_k8_cv",
+            "candidate_recall_k32_cv", "inference_disabled_fallback_current_k16",
+        }
+        if not expected_job_conditions.issubset(job_conditions):
+            raise ValueError("frontier job is missing a required registered contrast condition")
+        for condition_name in expected_job_conditions:
+            expected_policies = set(MECO_TRACKS) | set(_BASELINE_POLICIES) | set(_NEURAL_CONTROLS)
+            if condition_name == "inference_disabled_fallback_current_k16":
+                expected_policies |= set(_DISABLED)
+            current = job_conditions[condition_name].get("expected_coverage", {})
+            if (set(current.get("policies", ())) != expected_policies or
+                    set(current.get("categories", ())) != set(job["seed_manifest"]["categories"]) or
+                    current.get("seed_list") != job["seed_manifest"]["seed_list"]):
+                raise ValueError(f"frontier job lacks exact track/control/category/seed coverage for {condition_name}")
         for condition in job.get("conditions", []):
             name = condition.get("condition_name")
             expected = condition.get("expected_coverage")
