@@ -380,6 +380,97 @@ def test_phase0_target_envelope_preserves_collector_sidecar_and_binds_its_bytes(
         multi._validate_phase0_target_envelope(dataset, target_manifest, binding, descriptor)
 
 
+def test_phase0_artifact_envelope_binds_weight_bytes_and_provenance(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    descriptor = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    artifact = tmp_path / "A1.pt"
+    artifact.write_bytes(b"opaque weights-only artifact bytes")
+    binding = multi._write_phase0_artifact_envelope(artifact, "A1", descriptor)
+    assert multi._validate_phase0_artifact_envelope(artifact, "A1", binding, descriptor) == binding
+    artifact.write_bytes(b"changed artifact bytes")
+    with pytest.raises(ValueError, match="artifact Phase 0 provenance envelope"):
+        multi._validate_phase0_artifact_envelope(artifact, "A1", binding, descriptor)
+
+
+def test_standalone_track_validation_cannot_mint_phase0_artifact_envelope(
+        tmp_path, frozen_protocol, monkeypatch):
+    from frc_defense import meco_supervised
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    descriptor = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    artifact = Path(descriptor["outputs"]["bundle"]["A1"])
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"unbound old artifact")
+    sidecar_values = {}
+    combined = {}
+    for family in ("trajectory", "ub", "p"):
+        data = tmp_path / f"{family}.jsonl"
+        sidecar = tmp_path / f"{family}.manifest.json"
+        data.write_bytes(b"data")
+        sidecar.write_bytes(b"manifest")
+        combined[family] = {"path": str(data), "sha256": multi._sha(data.read_bytes()),
+            "manifest_path": str(sidecar), "manifest_sha256": multi._sha(sidecar.read_bytes())}
+    monkeypatch.setattr(meco_supervised, "validate_warm_start_artifact", lambda *_args, **_kwargs: {
+        "track": "A1", "case_set_sha256": descriptor["case_set_sha256"],
+        "descriptor_sha256": descriptor["descriptor_sha256"], "schema": "test"})
+    envelope = artifact.with_suffix(artifact.suffix + ".phase0-provenance.json")
+    assert not envelope.exists()
+    with pytest.raises(ValueError, match="Phase 0 provenance envelope"):
+        multi.validate_multicase_warm_start_track("A1", artifact, combined,
+            descriptor=descriptor)
+    assert not envelope.exists()
+
+
+def test_training_manifest_export_preserves_phase0_and_five_artifact_envelopes(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo, bundle, approval = _production_descriptor_inputs(
+        tmp_path, frozen_protocol, monkeypatch)
+    descriptor = multi.describe_multicase(protocol_path=protocol, cases=[
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}], device="cuda:0",
+        output_root=tmp_path / "campaign", repo_root=repo,
+        phase0_materialization=bundle, estimand_approval_path=approval)
+    Path(descriptor["outputs"]["descriptor"]).parent.mkdir(parents=True)
+    Path(descriptor["outputs"]["descriptor"]).write_text(
+        json.dumps(descriptor, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    artifact_records = {}
+    for track, artifact_name in descriptor["outputs"]["bundle"].items():
+        artifact = Path(artifact_name)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(track.encode())
+        envelope = multi._write_phase0_artifact_envelope(artifact, track, descriptor)
+        artifact_records[track] = {"track": track, "path": str(artifact),
+            "sha256": multi._sha(artifact.read_bytes()), **envelope}
+    manifest = {"schema": multi.SCHEMA + ".bundle",
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "case_set_sha256": descriptor["case_set_sha256"], "artifacts": artifact_records,
+        "phase2_ready": False, "phase2_complete": False,
+        "qualification_eligible": False, **multi._phase0_provenance(descriptor)}
+    bundle_path = Path(descriptor["outputs"]["manifest"])
+    bundle_path.write_text(json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    binding = multi.export_training_manifest_binding(manifest, descriptor)
+    assert multi.export_training_manifest_warm_starts(manifest, descriptor) == {
+        track: artifact_records[track]["path"] for track in multi.MECO_TRACKS}
+    assert binding["schema"].endswith("training-binding-phase0-v2")
+    assert binding["phase0_binding_sha256"] == multi._digest(descriptor["phase0_binding"])
+    assert binding["score_estimand_approval_sha256"] == descriptor["score_estimand_approval"]["artifact_sha256"]
+    assert binding["tuple_crosswalk_sha256"] == descriptor["tuple_crosswalk"]["crosswalk_sha256"]
+    assert set(binding["artifact_phase0_envelope_sha256_by_track"]) == set(multi.MECO_TRACKS)
+    manifest["tuple_crosswalk"] = {"crosswalk_sha256": "forged"}
+    with pytest.raises(ValueError, match="Phase 0/approval/train tuple provenance"):
+        multi.export_training_manifest_binding(manifest, descriptor)
+
+
 @pytest.mark.parametrize("mutation", ["approval_bytes", "tuple_identity", "train_membership",
     "crosswalk_claim", "missing_approval"])
 def test_production_descriptor_rejects_phase0_or_approval_drift(

@@ -588,3 +588,54 @@ def test_multicase_warm_start_binding_requires_exact_five_artifact_hashes(tmp_pa
     with pytest.raises(ValueError, match="exactly five"):
         manifest_api._validate_multicase_warm_start_binding(bad,
             {track: str(path) for track, path in artifacts.items()}, starts)
+
+
+def test_phase0_multicase_binding_preserves_freeze_approval_crosswalk_and_envelopes(
+        tmp_path, monkeypatch):
+    from frc_defense import meco_phase2_multicase as multicase
+    descriptor_path = tmp_path / "descriptor.json"
+    bundle_path = tmp_path / "bundle.json"
+    phase0 = {"partition_sha256": "1" * 64, "baseline_freeze_sha256": "2" * 64}
+    approval = {"artifact_sha256": "3" * 64, "approval_id": "human-approved"}
+    crosswalk = {"crosswalk_sha256": "4" * 64, "tuple_ids": ["tuple-a"]}
+    descriptor = {"schema": multicase.PRODUCTION_SCHEMA, "descriptor_sha256": "d" * 64,
+        "case_set_sha256": "c" * 64, "phase0_binding": phase0,
+        "score_estimand_approval": approval, "tuple_crosswalk": crosswalk}
+    artifacts = {track: tmp_path / f"{track}.pt" for track in MECO_TRACKS}
+    for path in artifacts.values():
+        path.write_bytes(b"artifact")
+    envelope_digests = {track: chr(ord("a") + i) * 64 for i, track in enumerate(MECO_TRACKS)}
+    bundle = {"descriptor_sha256": "d" * 64, "case_set_sha256": "c" * 64,
+        "phase0_binding": phase0, "score_estimand_approval": approval,
+        "tuple_crosswalk": crosswalk, "phase2_ready": False, "phase2_complete": False,
+        "qualification_eligible": False,
+        "artifacts": {track: {"sha256": manifest_api._file_sha(path),
+            "phase0_artifact_envelope_sha256": envelope_digests[track]}
+            for track, path in artifacts.items()}}
+    descriptor_path.write_text(json.dumps(descriptor))
+    bundle_path.write_text(json.dumps(bundle))
+    binding = {"schema": "meco-phase2-multi-case-five-track-v1.training-binding-phase0-v2",
+        "descriptor_path": str(descriptor_path), "descriptor_sha256": "d" * 64,
+        "descriptor_file_sha256": manifest_api._file_sha(descriptor_path),
+        "bundle_manifest_path": str(bundle_path),
+        "bundle_manifest_sha256": manifest_api._file_sha(bundle_path),
+        "case_set_sha256": "c" * 64,
+        "artifact_sha256_by_track": {track: manifest_api._file_sha(path)
+            for track, path in artifacts.items()},
+        "phase0_binding": phase0, "score_estimand_approval": approval,
+        "tuple_crosswalk": crosswalk,
+        "phase0_binding_sha256": multicase._digest(phase0),
+        "score_estimand_approval_sha256": approval["artifact_sha256"],
+        "tuple_crosswalk_sha256": crosswalk["crosswalk_sha256"],
+        "artifact_phase0_envelope_sha256_by_track": envelope_digests}
+    starts = {track: {"present": True, "sha256": manifest_api._file_sha(path),
+        "binding_valid": True} for track, path in artifacts.items()}
+    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_multicase_warm_start_bundle",
+        lambda *_args, **_kwargs: {"training_readiness_proven": False})
+    assert manifest_api._validate_multicase_warm_start_binding(binding,
+        {track: str(path) for track, path in artifacts.items()}, starts) == binding
+    bad = copy.deepcopy(binding)
+    bad["tuple_crosswalk_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="Phase 0 digests"):
+        manifest_api._validate_multicase_warm_start_binding(bad,
+            {track: str(path) for track, path in artifacts.items()}, starts)

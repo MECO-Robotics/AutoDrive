@@ -136,6 +136,49 @@ def _validate_phase0_target_envelope(dataset_path, target_manifest_path, binding
     return True
 
 
+def _phase0_artifact_envelope(artifact_path, track, descriptor):
+    if descriptor.get("schema") != PRODUCTION_SCHEMA:
+        return None
+    path = Path(artifact_path)
+    return {"schema": "meco-phase2-artifact-phase0-provenance-v1",
+        "track": track, "artifact_path": str(path),
+        "artifact_sha256": _sha(path.read_bytes()),
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        **_phase0_provenance(descriptor)}
+
+
+def _write_phase0_artifact_envelope(artifact_path, track, descriptor):
+    envelope = _phase0_artifact_envelope(artifact_path, track, descriptor)
+    if envelope is None:
+        return None
+    path = Path(artifact_path).with_suffix(Path(artifact_path).suffix + ".phase0-provenance.json")
+    encoded = json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+            raise ValueError("existing Phase 0 artifact provenance envelope differs")
+    else:
+        _write_private_json(path, envelope)
+    return {"phase0_artifact_envelope_path": str(path),
+        "phase0_artifact_envelope_sha256": _sha(path.read_bytes())}
+
+
+def _validate_phase0_artifact_envelope(artifact_path, track, binding, descriptor):
+    expected = _phase0_artifact_envelope(artifact_path, track, descriptor)
+    if expected is None:
+        if isinstance(binding, dict) and any(key.startswith("phase0_artifact_envelope_") for key in binding):
+            raise ValueError("legacy artifact cannot claim a Phase 0 provenance envelope")
+        return None
+    if not isinstance(binding, dict):
+        raise ValueError(f"{track} artifact omits its Phase 0 provenance envelope")
+    path = Path(binding.get("phase0_artifact_envelope_path", "")).absolute()
+    if (path.is_symlink() or not path.is_file() or
+            _sha(path.read_bytes()) != binding.get("phase0_artifact_envelope_sha256") or
+            json.loads(path.read_text(encoding="utf-8")) != expected):
+        raise ValueError(f"{track} artifact Phase 0 provenance envelope is stale or mismatched")
+    return {"phase0_artifact_envelope_path": str(path),
+        "phase0_artifact_envelope_sha256": _sha(path.read_bytes())}
+
+
 def _phase0_train_tuple_crosswalk(phase0_materialization, ordered_cases, protocol):
     """Close requested case/seed keys over every eligible Phase 0 train tuple."""
     from .meco_baseline_freeze import canonical_sha256
@@ -843,7 +886,13 @@ def fit_multicase_warm_starts(combined, artifact_paths, *, descriptor, shard_rec
     if not isinstance(shard_receipts, list) or len(shard_receipts) != len(descriptor["ordered_cases"]):
         raise ValueError("composite fitter requires every ordered case receipt")
     c_shards, a_shards = [], []
-    for case, receipt in zip(descriptor["ordered_cases"], shard_receipts):
+    for case_index, (case, receipt) in enumerate(zip(descriptor["ordered_cases"], shard_receipts)):
+        if descriptor.get("schema") == PRODUCTION_SCHEMA:
+            validate_case_receipt(receipt, descriptor["shards"][case_index], descriptor,
+                require_complete_set=True)
+        elif (receipt.get("case_key") != [case["scenario_id"], case["category"]] or
+                receipt.get("seeds") != case["seeds"]):
+            raise ValueError("legacy diagnostic fitter receipt differs from its ordered case")
         datasets = receipt.get("datasets", {})
         if receipt.get("case_key") != [case["scenario_id"], case["category"]] or receipt.get("seeds") != case["seeds"]:
             raise ValueError("fitter shard receipt differs from frozen case ordering")
@@ -882,13 +931,18 @@ def fit_multicase_warm_starts(combined, artifact_paths, *, descriptor, shard_rec
                 payload.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
                 payload.get("track") != track):
             raise ValueError(f"{track} composite fitter did not preserve the frozen case set")
-    return {"descriptor_sha256": descriptor["descriptor_sha256"],
+    envelope_bindings = {track: _write_phase0_artifact_envelope(path, track, descriptor)
+        for track, path in artifact_paths.items()}
+    result = {"descriptor_sha256": descriptor["descriptor_sha256"],
         "case_set_sha256": descriptor["case_set_sha256"],
         "combined_inputs": combined,
         "fit_schema": SCHEMA + ".native-composite-fit-v1",
         "case_shard_bindings": [{"case_key": receipt["case_key"],
             "seeds": receipt["seeds"], "receipt_sha256": _digest(receipt)}
-            for receipt in shard_receipts]}
+            for receipt in shard_receipts],
+        "phase0_artifact_envelopes": envelope_bindings}
+    result.update(_phase0_provenance(descriptor))
+    return result
 
 
 def validate_multicase_warm_start_track(track, artifact_path, combined, *, descriptor):
@@ -906,13 +960,26 @@ def validate_multicase_warm_start_track(track, artifact_path, combined, *, descr
             payload.get("case_set_sha256") != descriptor["case_set_sha256"] or
             payload.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
         raise ValueError(f"{track} composite artifact does not bind the declared cases")
-    return {"track": track, "artifact_sha256": digest,
+    if descriptor.get("schema") == PRODUCTION_SCHEMA:
+        envelope_path = Path(artifact_path).with_suffix(
+            Path(artifact_path).suffix + ".phase0-provenance.json")
+        envelope_binding = {"phase0_artifact_envelope_path": str(envelope_path),
+            "phase0_artifact_envelope_sha256": _sha(envelope_path.read_bytes())
+                if envelope_path.is_file() and not envelope_path.is_symlink() else ""}
+        _validate_phase0_artifact_envelope(artifact_path, track, envelope_binding, descriptor)
+    else:
+        envelope_binding = None
+    result = {"track": track, "artifact_sha256": digest,
         "descriptor_sha256": descriptor["descriptor_sha256"],
         "case_set_sha256": descriptor["case_set_sha256"],
         "combined_inputs": combined,
         "artifact_schema": payload.get("schema"),
         "phase2_ready": False, "phase2_complete": False,
         "qualification_eligible": False}
+    if envelope_binding:
+        result.update(envelope_binding)
+    result.update(_phase0_provenance(descriptor))
+    return result
 
 
 def _canonical_combined_inputs(combined):
@@ -1084,6 +1151,14 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
             fit_combined(expected_combined, artifact_paths, descriptor=descriptor))
         if not isinstance(fit_receipt, dict) or fit_receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"] or fit_receipt.get("combined_inputs") != expected_combined:
             raise ValueError("combined fitter receipt is not bound to current pooled target bytes")
+        _validate_phase0_provenance(fit_receipt, descriptor, label="five-track fit receipt")
+        if descriptor["schema"] == PRODUCTION_SCHEMA:
+            bindings = fit_receipt.get("phase0_artifact_envelopes")
+            if not isinstance(bindings, dict) or set(bindings) != set(MECO_TRACKS):
+                raise ValueError("production fitter receipt omits Phase 0 bindings for all five artifacts")
+            for track in MECO_TRACKS:
+                _validate_phase0_artifact_envelope(artifact_paths[track], track,
+                    bindings[track], descriptor)
         validator_receipts = {}
         for track in MECO_TRACKS:
             validation = validate_track(track, artifact_paths[track], expected_combined, descriptor=descriptor)
@@ -1092,6 +1167,13 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
                     validation.get("case_set_sha256") != descriptor["case_set_sha256"] or
                     validation.get("combined_inputs") != expected_combined):
                 raise ValueError(f"{track} validator did not bind pooled data and case set")
+            _validate_phase0_provenance(validation, descriptor,
+                label=f"{track} artifact validator receipt")
+            envelope_binding = _validate_phase0_artifact_envelope(
+                artifact_paths[track], track, validation, descriptor)
+            if (descriptor["schema"] == PRODUCTION_SCHEMA and
+                    envelope_binding != {key: validation.get(key) for key in envelope_binding}):
+                raise ValueError(f"{track} validator receipt differs from its Phase 0 artifact envelope")
             validator_receipts[track] = validation
         manifest = {"schema": SCHEMA + ".bundle",
             "descriptor_sha256": descriptor["descriptor_sha256"],
@@ -1103,10 +1185,15 @@ def execute_multicase(descriptor: dict, *, collect_case=None, combine_target=Non
             "shard_receipts": [{"case_key": receipt["case_key"], "seeds": receipt["seeds"],
                 "receipt_sha256": _digest(receipt)} for receipt in shard_receipts],
             "artifacts": {track: {"track": track, "path": str(artifact_paths[track]),
-                "sha256": _sha(artifact_paths[track].read_bytes())} for track in MECO_TRACKS},
+                "sha256": _sha(artifact_paths[track].read_bytes()),
+                **{key: validator_receipts[track][key] for key in (
+                    "phase0_artifact_envelope_path", "phase0_artifact_envelope_sha256")
+                    if key in validator_receipts[track]}}
+                for track in MECO_TRACKS},
             "validator_receipts": validator_receipts,
             "phase2_ready": False, "phase2_complete": False,
             "qualification_eligible": False}
+        manifest.update(_phase0_provenance(descriptor))
         validate_five_track_manifest(manifest, descriptor,
             validator_receipts=validator_receipts, artifact_paths=artifact_paths)
         manifest_path = Path(descriptor["outputs"]["manifest"])
@@ -1122,6 +1209,7 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
         *, validator_receipts: dict[str, dict], artifact_paths: dict[str, Path]) -> dict:
     """Validate a combined-data five-track receipt table without fabricating receipts."""
     validate_multicase_descriptor(descriptor)
+    _validate_phase0_provenance(manifest, descriptor, label="five-track bundle")
     if manifest.get("schema") != SCHEMA + ".bundle" or manifest.get("descriptor_sha256") != descriptor["descriptor_sha256"] or manifest.get("case_set_sha256") != descriptor["case_set_sha256"]:
         raise ValueError("multi-case bundle descriptor/case-set binding mismatch")
     if manifest.get("coverage") != descriptor["coverage"] or manifest.get("qualification_protocol") != descriptor["qualification_protocol"]:
@@ -1175,6 +1263,12 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"missing or unsafe {track} artifact")
         record, receipt = artifacts[track], validator_receipts[track]
+        _validate_phase0_provenance(receipt, descriptor,
+            label=f"{track} validator receipt")
+        envelope_binding = _validate_phase0_artifact_envelope(path, track, record, descriptor)
+        if (descriptor["schema"] == PRODUCTION_SCHEMA and
+                envelope_binding != {key: receipt.get(key) for key in envelope_binding}):
+            raise ValueError(f"{track} artifact validator receipt differs from its Phase 0 envelope")
         if (record.get("track") != track or Path(record.get("path", "")).resolve() != path.resolve() or
                 record.get("sha256") != _sha(path.read_bytes()) or
                 record.get("sha256") != receipt.get("artifact_sha256") or
@@ -1322,23 +1416,29 @@ def validate_multicase_warm_start_bundle(descriptor_path, bundle_path, *,
         payload_inputs = payload.get("combined_input", payload.get("combined_inputs"))
         if payload_inputs != expected_inputs:
             raise ValueError(f"{track} artifact does not bind the published combined corpus")
+        envelope_binding = _validate_phase0_artifact_envelope(path, track,
+            manifest["artifacts"][track], descriptor)
         track_reports[track] = {"artifact_sha256": _sha(path.read_bytes()),
             "artifact_schema": payload.get("schema"),
-            "case_coverage": payload.get("case_coverage", payload.get("case_coverage_by_case"))}
+            "case_coverage": payload.get("case_coverage", payload.get("case_coverage_by_case")),
+            **(envelope_binding or {})}
 
-    return {"schema": SCHEMA + ".production-validation-receipt-v1",
+    result = {"schema": SCHEMA + ".production-validation-receipt-v1",
         "descriptor_sha256": descriptor["descriptor_sha256"],
         "case_set_sha256": descriptor["case_set_sha256"],
         "bundle_manifest_sha256": _sha(bundle_raw), "combined_inputs": pooled,
         "cases": case_reports, "tracks": track_reports,
         "training_readiness_proven": False, "phase2_complete": False,
         "qualification_eligible": False}
+    result.update(_phase0_provenance(descriptor))
+    return result
 
 
 def export_training_manifest_warm_starts(manifest: dict, descriptor: dict) -> dict[str, str]:
     """Forward all five track artifact paths and preserve the frozen case set."""
     if manifest.get("descriptor_sha256") != descriptor.get("descriptor_sha256"):
         raise ValueError("training manifest export requires the exact multi-case descriptor")
+    _validate_phase0_provenance(manifest, descriptor, label="training export bundle")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(MECO_TRACKS):
         raise ValueError("training manifest export requires all five tracks")
@@ -1352,6 +1452,7 @@ def export_training_manifest_binding(manifest: dict, descriptor: dict) -> dict:
     if (manifest.get("descriptor_sha256") != descriptor.get("descriptor_sha256") or
             manifest.get("case_set_sha256") != descriptor.get("case_set_sha256")):
         raise ValueError("training manifest binding requires the exact multi-case bundle")
+    _validate_phase0_provenance(manifest, descriptor, label="training export bundle")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(MECO_TRACKS):
         raise ValueError("training manifest binding requires all five tracks")
@@ -1361,7 +1462,16 @@ def export_training_manifest_binding(manifest: dict, descriptor: dict) -> dict:
         raise ValueError("training manifest binding requires published descriptor and bundle files")
     if json.loads(bundle_path.read_text(encoding="utf-8")) != manifest:
         raise ValueError("training manifest export differs from the published bundle bytes")
-    return {"schema": SCHEMA + ".training-binding",
+    if descriptor.get("schema") == PRODUCTION_SCHEMA:
+        for track in MECO_TRACKS:
+            item = artifacts[track]
+            artifact_path = Path(item.get("path", ""))
+            if (not artifact_path.is_file() or artifact_path.is_symlink() or
+                    _sha(artifact_path.read_bytes()) != item.get("sha256")):
+                raise ValueError(f"training export {track} artifact bytes are missing or stale")
+            _validate_phase0_artifact_envelope(artifact_path, track, item, descriptor)
+    result = {"schema": (SCHEMA + ".training-binding-phase0-v2"
+                if descriptor.get("schema") == PRODUCTION_SCHEMA else SCHEMA + ".training-binding"),
         "descriptor_path": str(descriptor_path),
         "descriptor_sha256": descriptor["descriptor_sha256"],
         "descriptor_file_sha256": _sha(descriptor_path.read_bytes()),
@@ -1370,3 +1480,12 @@ def export_training_manifest_binding(manifest: dict, descriptor: dict) -> dict:
         "case_set_sha256": descriptor["case_set_sha256"],
         "artifact_sha256_by_track": {track: artifacts[track]["sha256"]
             for track in MECO_TRACKS}}
+    if descriptor.get("schema") == PRODUCTION_SCHEMA:
+        result.update(_phase0_provenance(descriptor))
+        result.update({"phase0_binding_sha256": _digest(descriptor["phase0_binding"]),
+            "score_estimand_approval_sha256": descriptor["score_estimand_approval"]["artifact_sha256"],
+            "tuple_crosswalk_sha256": descriptor["tuple_crosswalk"]["crosswalk_sha256"],
+            "artifact_phase0_envelope_sha256_by_track": {
+                track: artifacts[track]["phase0_artifact_envelope_sha256"]
+                for track in MECO_TRACKS}})
+    return result
