@@ -59,8 +59,11 @@ def test_update_fuel_actions_capture_reuse_reset_and_reward_parity(vectorized):
         env.piece_owner[0, 0] = 0
         hub = env.hub_centers[0]
         env.sim.pose[0, 0] = torch.stack(
-            (hub[0] - 0.5, hub[1], hub.new_zeros(())))
+            (hub.new_tensor(env.alliance_zone_depth - 0.5),
+             hub[1], hub.new_zeros(())))
         env.sim.velocity[0, 0].zero_()
+        assert env.sim.pose[0, 0, 0] <= env.alliance_zone_depth
+        assert env._robots_clear_of_bumps(env.sim.pose[:, :, :2])[0, 0]
         env.match_elapsed.zero_()
         env.steps.zero_()
         env.next_score.zero_()
