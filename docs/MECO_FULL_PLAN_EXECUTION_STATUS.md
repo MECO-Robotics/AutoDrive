@@ -1,3 +1,23 @@
+## V4 GPU cluster-bootstrap implementation — 2026-10-26
+
+The scoped GPU-resident v4 category-level and final-test cluster-bootstrap
+implementation is integrated in source at exact head
+`9497615c9cbd355b8b065e9ccd9b7ead87ad00be` and was approved by Pass 3 against
+the exact plan SHA-256
+`48db0d260fe29da4a55d65c553746d4aa0813237a6bb10d5eabd52d285340ca9`. Its
+summary-only provenance record distinguishes source implementation and review
+from runtime evidence; see
+[`v4-gpu-cluster-bootstrap-20261026.md`](implementation-provenance/v4-gpu-cluster-bootstrap-20261026.md)
+and the corresponding scoped entry in
+[`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
+This tranche does not establish physical WX9100 execution or parity/profile,
+new source-bound calibration, a promotion, qualification, training/evaluation
+results, or whole-compute GPU-only compliance. No tests, GPU/runtime work, or
+evaluation were run for this tranche. The API digest pin has been updated in
+the implementation candidate; post-integration dashboard service, API, and
+frontend currentness checks remain pending in this status record.
+
 ## Phase 4 runtime-status documentation corrections — 2026-10-25
 
 The reviewed focal-pose status row and the later stationary-blockage, direct-
