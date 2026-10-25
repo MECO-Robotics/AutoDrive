@@ -334,10 +334,10 @@ The output schema is `meco-stage1-readiness-preflight-v1`; it contains
 `status`, `ready`, `scope`, `checkpoint_digest_semantics`, explicit checkpoint,
 validation, and final-test read flags, calibration outcome read/may-have-been-read
 flags, `current_source_factory_reproduction`, five separate `tracks` rows,
-per-check evidence paths and digests, and stable `blocker_codes`. Early blocked
-reports say calibration outcomes were not read; blocked reports that reach
-calibration validation set `calibration_outcomes_may_be_read`, and successful
-calibration validation also sets `calibration_outcomes_read`.
+per-check evidence paths and digests, and stable `blocker_codes`. Input-safety
+blocked reports say calibration outcomes were not read; other blocked reports
+that open a calibration bundle set `calibration_outcomes_may_be_read`, and
+successful semantic validation also sets `calibration_outcomes_read`.
 Illustrative output fragments (not evidence):
 
 ```json
