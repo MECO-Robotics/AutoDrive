@@ -65,6 +65,8 @@ class TensorDefenseObservationMixin:
         from . import tensor_sim as _tensor_sim
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
+        if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
+            raise ValueError("perception active mask must be a device bool vector [N]")
         dt=self.dt
         advance_mask=(active_mask if reset_mask is None else
                       torch.zeros_like(active_mask))
@@ -443,6 +445,8 @@ class TensorDefenseObservationMixin:
                        (active_count is not None and int(active_count) == self.n))
         active_mask=(torch.ones(self.n,device=self.device,dtype=torch.bool) if active_mask is None
                      else torch.as_tensor(active_mask,device=self.device,dtype=torch.bool))
+        if active_mask.device != self.device or tuple(active_mask.shape) != (self.n,):
+            raise ValueError("observation active mask must be a device bool vector [N]")
         raw_capture_mask=(active_mask if capture_raw_mask is None else
                           (active_mask & torch.as_tensor(
                               capture_raw_mask, device=self.device,
@@ -522,6 +526,8 @@ class TensorDefenseObservationMixin:
         if self.randomize and self.observation_dropout>0:
             keep=self._random_active(active_mask,(18,),active_count=active_count)>=self.observation_dropout
             obs[:,:18].mul_(keep)
+        if obs.device != self.device or tuple(obs.shape) != (self.n, self.obs_dim):
+            raise RuntimeError("policy observation has an invalid device or batch shape")
         if full_active:
             return obs
         return torch.where(active_mask[:,None],obs,self._last_observation)

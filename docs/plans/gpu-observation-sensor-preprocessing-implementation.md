@@ -22,6 +22,12 @@ The reviewed source base is `53f3d9c9a49a7e12bf65b5e1fa2797f4464e63be`.
   to synthesize per-tick active counts.
 - Defense reset calls disable the scalar planner cadence fast path without
   inspecting `mask.all()` on the host. Per-world cadence remains authoritative.
+- 3v3 resets follow the same per-world cadence rule; a device reset mask never
+  restores its scalar full-batch counter. Tensor masks and returned observation
+  batches receive static device/shape guards at perception and policy boundaries.
+- Strategic evaluation active counts are maintained by its host episode quota
+  scheduler while processing already-finished episodes; reset cardinality is no
+  longer reduced from `reset_mask` to the host.
 
 ## Static review boundary
 

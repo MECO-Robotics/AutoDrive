@@ -245,7 +245,9 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
     episode_quota = torch.full((num_envs,), base_quota, dtype=torch.long, device=device)
     if extra_quota:
         episode_quota[:extra_quota] += 1
+    episode_quota_host = [base_quota + int(i < extra_quota) for i in range(num_envs)]
     episode_counts = torch.zeros((num_envs,), dtype=torch.long, device=device)
+    episode_counts_host = [0] * num_envs
     active = episode_quota > 0
     active_episode_count = min(episodes, num_envs)
     scores, episode_lengths = [], []
@@ -462,16 +464,19 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
                 write_playback()
         finished_indices = (torch.nonzero(finished, as_tuple=False).flatten()
             if (not strategic or strategic_episode_boundary) else ())
+        finished_worlds = []
         if (strategic and strategic_episode_boundary and
                 len(finished_indices) != active_episode_count):
             raise RuntimeError("strategic evaluation worlds did not truncate together at the horizon")
         for index in finished_indices:
+            i = int(index.item())
+            finished_worlds.append(i)
+            episode_counts[i] += 1
+            episode_counts_host[i] += 1
             if len(scores) < episodes:
-                i = int(index.item())
                 scores.append(float(totals[i].item()))
                 length_i=int(lengths[i].item())
                 episode_lengths.append(length_i)
-                episode_counts[i] += 1
                 for name in metric_names:
                     value=float(metric_totals[name][i].item())
                     metric_rows[name].append(value/length_i if name=="contact" else value)
@@ -510,12 +515,10 @@ def _evaluate_once(checkpoint, task, episodes, seed, num_envs, device, opponent,
             raise RuntimeError("TensorDefenseEnv must provide reset_done(mask) for per-world episode resets")
         active &= ~finished
         reset_mask = finished & (episode_counts < episode_quota)
-        reset_count = 0
-        if strategic and strategic_episode_boundary:
-            reset_count = int(reset_mask.sum().item()) if len(scores) < episodes else 0
-            has_reset = reset_count > 0
-        else:
-            has_reset = len(scores) < episodes and bool(reset_mask.any().item())
+        reset_worlds = [i for i in finished_worlds
+                        if episode_counts_host[i] < episode_quota_host[i]]
+        reset_count = len(reset_worlds) if len(scores) < episodes else 0
+        has_reset = reset_count > 0
         if has_reset:
             active |= reset_mask
             if strategic:

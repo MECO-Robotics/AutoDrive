@@ -584,7 +584,7 @@ class TensorThreeVsThreeEnv(
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
         self._invalidate_last_action_audit(mask)
         self.sim.reset_done(mask)
-        if self.n == 1 and bool(mask[0]):
+        if self.n == 1:
             self._planner_traversal_request_signature=None
             self._last_applied_planner_traversal_signature=None
         pose=self._hub_line_spawn_poses()
@@ -613,13 +613,10 @@ class TensorThreeVsThreeEnv(
             tensor.masked_fill_(mask, 0)
         self.planner_ticks.copy_(torch.where(mask,
             torch.full_like(self.planner_ticks,self.replan_interval-1),self.planner_ticks))
-        if bool(mask.all()):
-            self._planner_tick_scalar=self.replan_interval-1
-            self._planner_tick_aligned=True
-            self._full_batch_step_scalar=0
-        else:
-            self._planner_tick_aligned=False
-            self._full_batch_step_scalar=None
+        # Keep reset scheduling per world; do not inspect a device mask to
+        # restore the host scalar fast path.
+        self._planner_tick_aligned=False
+        self._full_batch_step_scalar=None
         self.match_remaining.copy_(torch.where(mask, torch.full_like(self.match_remaining, 160.),
                                                self.match_remaining))
         for tensor in (self.auto_fuel_scores, self.fuel_score_count, self.fuel_acquisition_count,
