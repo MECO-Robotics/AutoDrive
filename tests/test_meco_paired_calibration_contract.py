@@ -24,7 +24,8 @@ def _bindings():
     return ({"path": "artifacts/baseline-freeze.json",
              "artifact_sha256": "a" * 64,
              "schema": "meco-baseline-freeze-v2",
-             "freeze_sha256": freeze_sha},
+             "freeze_sha256": freeze_sha, "source_commit": "1" * 40,
+             "source_tree": "2" * 40, "dependency_lock_sha256": "3" * 64},
             {"path": "artifacts/partitions.json",
              "artifact_sha256": "c" * 64,
              "schema": "meco-heldout-partitions-v1",
@@ -50,7 +51,10 @@ def _campaign(monkeypatch, **overrides):
     _cases(monkeypatch)
     freeze, partition, approval = _bindings()
     values = {"episodes": 100, "repetitions": 2, "master_seed": 123,
-        "shard_count": 2, "source_identity_sha256": "9" * 64,
+        "shard_count": 2, "source_binding": {"commit": "1" * 40,
+            "tree": "2" * 40, "source_identity_sha256": "9" * 64,
+            "source_tree_identity_sha256": "8" * 64,
+            "dependency_lock_sha256": "3" * 64},
         "baseline_freeze_binding": freeze, "partition_binding": partition,
         "estimand_approval_binding": approval,
         "worker_assignments": _workers()}
@@ -67,17 +71,18 @@ def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(mo
         if row["control_id"] == "D2/multi_model_v1")
     assert multi_model["execution_supported"] is False
     assert "not implemented" in multi_model["support_limit"]
-    assert {unit["control_id"] for unit in units} == set(
-        q.PAIRED_CALIBRATION_CONTROLS[1:])
-    assert len(units) == campaign["work_unit_count"] == 12 * 2 * 2 * 3
+    assert {unit["control_id"] for unit in units} == set(q.PAIRED_CALIBRATION_CONTROLS)
+    assert len(units) == campaign["work_unit_count"] == 12 * 2 * 2 * 3 * 2
     assert {unit["split"] for unit in units} == {"calibration"}
     pairs = {}
     for unit in units:
         pairs.setdefault(unit["pair_id"], set()).add(unit["control_id"])
-    assert all(controls == set(q.PAIRED_CALIBRATION_CONTROLS[1:])
-               for controls in pairs.values())
+    assert all(controls == {"D0", pair["paired_control_id"]}
+               for pair_id, controls in pairs.items()
+               for pair in [next(unit for unit in units if unit["pair_id"] == pair_id)])
     assert len(campaign["shards"]) == 2
     assert {shard["worker_id"] for shard in campaign["shards"]} == {"wx-a", "wx-b"}
+    assert q.paired_calibration_execution_blockers(campaign) == ["D2/multi_model_v1"]
     assert q.validate_paired_calibration_campaign(campaign) is campaign
 
 
