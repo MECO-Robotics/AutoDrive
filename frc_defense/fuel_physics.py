@@ -15,6 +15,7 @@ import torch
 # Fixed-shape masked gamepiece work and cell-permutation placement have a
 # distinct seeded draw schedule from the prior host-conditional implementation.
 FUEL_GAMEPIECE_RNG_CONTRACT_VERSION = "fuel-gamepiece-rng-fixed-mask-v2"
+FUEL_PHYSICS_IMPLEMENTATION_ID = "fuel-physics-fixed-adaptive-loop-v2"
 
 
 @dataclass
@@ -43,6 +44,8 @@ class FuelPhysicsConfig:
     sleep_speed: float = .025
     sleep_angular_speed: float = .5
     adaptive_substeps: bool = True
+    max_adaptive_substeps: int = 64
+    gpu_qualifying: bool = False
     max_compression_fraction: float = .5
     max_translation_per_substep: float | None = None
 
@@ -57,6 +60,10 @@ class FuelPhysicsConfig:
                 raise ValueError(f"{name} must be one of {choices}")
         if not isinstance(self.substeps, int) or isinstance(self.substeps, bool) or not isinstance(self.max_neighbors, int):
             raise ValueError("substeps and max_neighbors must be integers")
+        if (not isinstance(self.max_adaptive_substeps,int) or
+                isinstance(self.max_adaptive_substeps,bool) or
+                self.max_adaptive_substeps<1):
+            raise ValueError("max_adaptive_substeps must be a positive integer")
         numeric = (self.radius,self.mass,self.gravity,self.stiffness,self.damping,self.friction,
                    self.rolling_friction,self.robot_height,self.skin,self.sleep_time,
                    self.sleep_speed,self.sleep_angular_speed,self.max_compression_fraction)
@@ -83,6 +90,11 @@ class FuelPhysics:
             raise ValueError("piece positions and velocities must be [world,piece,2]")
         self.n, self.p = piece_pos.shape[:2]
         self.device = piece_pos.device
+        if self.config.gpu_qualifying and (
+                self.device.type!="cuda" or self.device.index is None or
+                torch.version.hip is None or self.config.backend!="hip"):
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires an explicitly indexed HIP device and backend='hip'")
         self.pos = torch.zeros((self.n, self.p, 3), device=self.device, dtype=piece_pos.dtype)
         self.vel = torch.zeros_like(self.pos)
         self.angular = torch.zeros_like(self.pos)
@@ -494,11 +506,14 @@ class FuelPhysics:
         self.angular.masked_fill_((self.sleeping & free)[...,None],0.)
 
     def required_substeps(self, dt=None, base=None, active_mask=None, piece_active=None, piece_owner=None):
-        """One host reduction per control tick; callers can reuse the result."""
+        """Use a fixed Python loop bound and assert stability capacity on device."""
         duration=float(self.sim.dt if dt is None else dt)
         count=self.config.substeps if base is None else int(base)
         if not self.config.adaptive_substeps:
             return count
+        limit=self.config.max_adaptive_substeps
+        if count>limit:
+            raise ValueError("base substeps exceed max_adaptive_substeps")
         fuel_speed=torch.maximum(self.vel.norm(dim=-1),self.piece_vel.norm(dim=-1))
         robot_speed=self.sim.velocity[...,:2].norm(dim=-1)+self.sim.velocity[...,2].abs()*.5*(self.sim.length.square()+self.sim.width.square()).sqrt()
         if piece_active is not None: fuel_speed=fuel_speed*piece_active.bool()
@@ -507,10 +522,12 @@ class FuelPhysics:
             fuel_speed=fuel_speed*active_mask[:,None]
             robot_speed=robot_speed*active_mask[:,None]
         speed=torch.maximum(fuel_speed.amax(),robot_speed.amax())
-        duration=float(self.sim.dt if dt is None else dt)
         max_motion=self.config.max_translation_per_substep or self.config.radius*.5
-        bound=2*float(speed.item())+self.config.gravity*duration
-        return max(count,math.ceil(duration*bound/max_motion))
+        bound=2*speed+self.config.gravity*duration
+        required=torch.ceil(duration*bound/max_motion).to(torch.int64).clamp_min(count)
+        torch._assert_async(required<=limit,
+            "adaptive fuel substep capacity exceeded; refusing unstable physics step")
+        return limit
 
     def step(self, active_mask, piece_active, piece_owner, *, dt=None, substeps=None, adaptive=None):
         active=torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n)

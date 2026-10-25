@@ -8,8 +8,10 @@ import torch
 
 def initialize_fuel_physics(env, config=True):
     """Keep legacy planar slots as the game/observation API."""
-    from .fuel_physics import FUEL_GAMEPIECE_RNG_CONTRACT_VERSION
+    from .fuel_physics import (FUEL_GAMEPIECE_RNG_CONTRACT_VERSION,
+                               FUEL_PHYSICS_IMPLEMENTATION_ID)
     env._fuel_gamepiece_rng_contract_version = FUEL_GAMEPIECE_RNG_CONTRACT_VERSION
+    env._fuel_physics_implementation_id = FUEL_PHYSICS_IMPLEMENTATION_ID
     if config is False:
         env.fuel_physics = None
     else:
