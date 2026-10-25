@@ -71,7 +71,21 @@ def _support(graph, valid=(True, False)):
     return PlanAActionSupport(**{**support.__dict__, "support_digest": digest})
 
 
-def _inputs(track):
+def _assert_device(value):
+    if torch.is_tensor(value):
+        assert value.device == DEVICE
+    elif isinstance(value, dict):
+        for item in value.values():
+            _assert_device(item)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            _assert_device(item)
+    elif hasattr(value, "__dict__"):
+        for item in vars(value).values():
+            _assert_device(item)
+
+
+def _inputs(track, *, valid=(True, False)):
     torch.manual_seed(42)
     graph = SimpleNamespace(
         node_count=2,
@@ -85,7 +99,7 @@ def _inputs(track):
         ny=8,
         resolution_m=1.,
     )
-    support = _support(graph)
+    support = _support(graph, valid=valid)
     raster = torch.zeros((1, 6, 16, 16), device=DEVICE)
     globals_ = torch.zeros((1, 7), device=DEVICE)
     model = make_meco_track(track).to(DEVICE).eval()
@@ -122,6 +136,8 @@ def _inputs(track):
         "done": True,
         "execution_failure": False,
     }
+    _assert_device(row)
+    assert all(parameter.device == DEVICE for parameter in model.parameters())
     return row, model, config
 
 
@@ -160,12 +176,21 @@ def test_plan_a_masked_support_sampling_and_exact_replay(track):
 @pytest.mark.parametrize("track", ["A1", "A2", "A3"])
 @pytest.mark.parametrize("mutation", ["policy_input", "support"])
 def test_plan_a_replay_mutations_fail_before_optimizer_step(track, mutation, tmp_path):
-    row, model, config = _inputs(track)
+    row, model, config = _inputs(
+        track, valid=(True, True) if mutation == "policy_input" else (True, False))
     row["track"] = track
-    _rollout_logprob(row, model, config)
+    original_logits = _rollout_logprob(row, model, config).detach().clone()
     if mutation == "policy_input":
-        row["globals"] = row["globals"] + .125
+        row["route_cost_nodes"] = row["route_cost_nodes"] + torch.tensor(
+            [.75, 0.], device=DEVICE)
         expected = "rollout log-probability does not replay"
+        changed = _policy_inputs_for_row(track, model, row, None, config)["logits"]
+        old_logprob = categorical_from_candidate_logits(original_logits).log_prob(
+            row["action"]).reshape(())
+        changed_logprob = categorical_from_candidate_logits(changed).log_prob(
+            row["action"]).reshape(())
+        assert not torch.equal(changed, original_logits)
+        assert not torch.equal(changed_logprob, old_logprob)
     else:
         row["support"].valid_mask[0] = False
         row["support"].valid_mask[1] = True
