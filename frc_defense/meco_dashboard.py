@@ -7,6 +7,9 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
+import tempfile
+import threading
 import time
 
 from .meco_path_penalty import PLAN_A_PPO_RECOMPUTATION_CONTRACT
@@ -28,6 +31,19 @@ WORKER_STALL_SECONDS = 600
 QUEUE_STALE_SECONDS = 180
 EVALUATION_HEARTBEAT_STALE_SECONDS = 90
 MAX_STATUS_FILE_BYTES = 32 * 1024 * 1024
+MAX_DASHBOARD_INLINE_REPORT_BYTES = MAX_STATUS_FILE_BYTES
+MAX_DASHBOARD_SUMMARY_RAW_BYTES = 128 * 1024 * 1024
+MAX_DASHBOARD_SUMMARY_FILE_BYTES = 1024 * 1024
+MAX_DASHBOARD_SUMMARY_RECORDS = 50_000
+MAX_DASHBOARD_SUMMARY_JSON_NODES = 2_000_000
+MAX_DASHBOARD_SUMMARY_FILES_PER_SCAN = 8
+MAX_DASHBOARD_SUMMARY_BYTES_PER_SCAN = 4 * 1024 * 1024
+MAX_DASHBOARD_SUMMARY_RAW_BYTES_PER_SCAN = 512 * 1024 * 1024
+MAX_DASHBOARD_SUMMARY_RECORDS_PER_SCAN = 50_000
+DASHBOARD_SUMMARY_SCHEMA_VERSION = 1
+DASHBOARD_SUMMARY_SUFFIX = ".dashboard-summary.json"
+_DASHBOARD_SUMMARY_READS = threading.BoundedSemaphore(2)
+_DASHBOARD_SUMMARY_WRITES = threading.BoundedSemaphore(1)
 DIAGNOSTIC_MONITOR_ERROR_LIMIT = 300
 DIAGNOSTIC_MONITOR_FRONTIER_LIMIT = 100
 
@@ -1026,6 +1042,458 @@ def _comparison(report):
             "policy_metrics": policy_metrics}
 
 
+def _dashboard_summary_json_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False).encode()
+
+
+def _bounded_json_nodes(value):
+    stack = [(value, 0)]
+    visited = 0
+    while stack:
+        current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_DASHBOARD_SUMMARY_JSON_NODES or depth > 48:
+            return False
+        if isinstance(current, dict):
+            if any(not isinstance(key, str) or len(key) > 4096 for key in current):
+                return False
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+        elif isinstance(current, str) and len(current) > 1024 * 1024:
+            return False
+        elif current is not None and type(current) not in (str, int, float, bool):
+            return False
+    return True
+
+
+def _stable_file_sha256(path: Path, *, max_bytes: int):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise ValueError("report is not a bounded regular file")
+        digest = hashlib.sha256()
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise ValueError("report changed while being hashed") from exc
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    if identity(before) != identity(after) or identity(after) != identity(current):
+        raise ValueError("report changed while being hashed")
+    return digest.hexdigest(), identity(after), after.st_size
+
+
+def _read_bounded_regular_file(path: Path, *, max_bytes: int):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise ValueError("summary is not a bounded regular file")
+        data = handle.read(max_bytes + 1)
+        after = os.fstat(handle.fileno())
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise ValueError("summary changed while being read") from exc
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    if (len(data) > max_bytes or identity(before) != identity(after)
+            or identity(after) != identity(current)):
+        raise ValueError("summary changed while being read")
+    return data, identity(after)
+
+
+def _atomic_summary_write(path: Path, data: bytes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def _write_dashboard_comparison_summary_unlocked(report_path: Path, report: dict) -> bool:
+    """Atomically publish a bounded projection derived by the dashboard validator."""
+    report_path = Path(report_path)
+    records = report.get("records") if isinstance(report, dict) else None
+    categories = report.get("categories") if isinstance(report, dict) else None
+    seeds = report.get("seeds") if isinstance(report, dict) else None
+    if (not isinstance(records, list) or len(records) > MAX_DASHBOARD_SUMMARY_RECORDS
+            or not isinstance(categories, list) or not isinstance(seeds, list)
+            or len(categories) * len(seeds) * len(POLICIES) != len(records)
+            or not _bounded_json_nodes(report)):
+        return False
+    raw_sha256, raw_identity, _ = _stable_file_sha256(
+        report_path, max_bytes=MAX_DASHBOARD_SUMMARY_RAW_BYTES)
+    comparison = _comparison(report)
+    if comparison is None:
+        return False
+    try:
+        current = report_path.lstat()
+    except OSError:
+        return False
+    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != raw_identity:
+        return False
+    comparison_bytes = _dashboard_summary_json_bytes(comparison)
+    payload = {
+        "summary_schema_version": DASHBOARD_SUMMARY_SCHEMA_VERSION,
+        "summary_type": "meco-dashboard-comparison",
+        "raw_report_sha256": raw_sha256,
+        "report_schema_version": report.get("schema_version"),
+        "evaluation_id": report.get("evaluation_id"),
+        "protocol_id": report.get("protocol_id"),
+        "split": report.get("split"),
+        "source_identity_sha256": report.get("source_identity_sha256"),
+        "record_count": len(records),
+        "comparison_sha256": hashlib.sha256(comparison_bytes).hexdigest(),
+        "comparison": comparison,
+    }
+    data = _dashboard_summary_json_bytes(payload)
+    if len(data) > MAX_DASHBOARD_SUMMARY_FILE_BYTES:
+        return False
+    _atomic_summary_write(Path(str(report_path) + DASHBOARD_SUMMARY_SUFFIX), data)
+    return True
+
+
+def _write_dashboard_comparison_summary(report_path: Path, report: dict) -> bool:
+    """Allow one bounded projection writer per process at a time."""
+    if not _DASHBOARD_SUMMARY_WRITES.acquire(blocking=False):
+        return False
+    try:
+        return _write_dashboard_comparison_summary_unlocked(report_path, report)
+    finally:
+        _DASHBOARD_SUMMARY_WRITES.release()
+
+
+def _copy_dashboard_comparison_summary(source_path: Path, destination_path: Path) -> bool:
+    """Copy a verified sidecar only when the published raw report is byte-identical."""
+    source_path, destination_path = Path(source_path), Path(destination_path)
+    source_sidecar = Path(str(source_path) + DASHBOARD_SUMMARY_SUFFIX)
+    try:
+        source_digest, _, _ = _stable_file_sha256(
+            source_path, max_bytes=MAX_DASHBOARD_SUMMARY_RAW_BYTES)
+        destination_digest, _, _ = _stable_file_sha256(
+            destination_path, max_bytes=MAX_DASHBOARD_SUMMARY_RAW_BYTES)
+        if source_digest != destination_digest:
+            return False
+        data, _ = _read_bounded_regular_file(
+            source_sidecar, max_bytes=MAX_DASHBOARD_SUMMARY_FILE_BYTES)
+        payload = json.loads(data)
+        if _dashboard_summary_valid(payload, source_digest) is None:
+            return False
+        _atomic_summary_write(Path(str(destination_path) + DASHBOARD_SUMMARY_SUFFIX), data)
+        return True
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
+def _dashboard_summary_valid(payload, raw_sha256):
+    keys = {"summary_schema_version", "summary_type", "raw_report_sha256",
+            "report_schema_version", "evaluation_id", "protocol_id", "split",
+            "source_identity_sha256", "record_count", "comparison_sha256",
+            "comparison"}
+    if (not isinstance(payload, dict) or set(payload) != keys
+            or type(payload.get("summary_schema_version")) is not int
+            or payload.get("summary_schema_version") != DASHBOARD_SUMMARY_SCHEMA_VERSION
+            or payload.get("summary_type") != "meco-dashboard-comparison"
+            or payload.get("raw_report_sha256") != raw_sha256
+            or type(payload.get("report_schema_version")) is not int
+            or payload.get("report_schema_version") != 1
+            or not isinstance(payload.get("evaluation_id"), str)
+            or not payload["evaluation_id"] or len(payload["evaluation_id"]) > 160
+            or not isinstance(payload.get("protocol_id"), str)
+            or not payload["protocol_id"] or len(payload["protocol_id"]) > 512
+            or payload.get("split") != "validation"
+            or not isinstance(payload.get("source_identity_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", payload["source_identity_sha256"])
+            or type(payload.get("record_count")) is not int
+            or not 1 <= payload["record_count"] <= MAX_DASHBOARD_SUMMARY_RECORDS
+            or not isinstance(payload.get("comparison_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", payload["comparison_sha256"])):
+        return None
+    comparison = payload.get("comparison")
+    comparison_keys = {"evaluation_id", "generated_utc", "comparison_group",
+        "protocol_id", "source_hash", "scenario_id", "categories", "seeds",
+        "diagnostic", "matched_status", "policy_manifest", "control_definitions",
+        "candidate_boundary", "route_cost_provenance", "policy_metrics"}
+    if (not isinstance(comparison, dict) or set(comparison) != comparison_keys
+            or comparison.get("evaluation_id") != payload["evaluation_id"]
+            or comparison.get("protocol_id") != payload["protocol_id"]
+            or comparison.get("source_hash") != payload["source_identity_sha256"]
+            or not isinstance(comparison.get("comparison_group"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", comparison["comparison_group"])
+            or type(comparison.get("diagnostic")) is not bool
+            or comparison.get("matched_status") != (
+                "diagnostic matched" if comparison["diagnostic"] else "non-diagnostic matched")):
+        return None
+    generated = comparison.get("generated_utc")
+    scenario = comparison.get("scenario_id")
+    if (generated is not None and (not isinstance(generated, str) or len(generated) > 128)
+            or not isinstance(scenario, str) or not scenario or len(scenario) > 128):
+        return None
+    categories, seeds = comparison.get("categories"), comparison.get("seeds")
+    if (not isinstance(categories, list) or not categories or len(categories) > 64
+            or any(not isinstance(value, str) or not value or len(value) > 128 for value in categories)
+            or len(set(categories)) != len(categories)
+            or not isinstance(seeds, list) or not seeds
+            or len(seeds) > MAX_DASHBOARD_SUMMARY_RECORDS
+            or any(type(value) is not int for value in seeds)
+            or len(set(seeds)) != len(seeds)
+            or len(categories) * len(seeds) * len(POLICIES) != payload["record_count"]):
+        return None
+    signature = {"scenario_id": scenario, "categories": categories, "seeds": seeds,
+                 "protocol_id": payload["protocol_id"],
+                 "source_hash": payload["source_identity_sha256"]}
+    expected_group = hashlib.sha256(json.dumps(signature, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if comparison["comparison_group"] != expected_group:
+        return None
+    manifests = comparison.get("policy_manifest")
+    if (not isinstance(manifests, dict) or set(manifests) != set(POLICIES)
+            or not isinstance(comparison.get("control_definitions"), dict)
+            or set(comparison["control_definitions"]) != set(CONTROLS)
+            or comparison["control_definitions"].get("D0") !=
+                "production deterministic offense controller; native 20 ms physics-step cadence; actual executed actions recorded; not constrained by the MECO candidate table"
+            or any(not isinstance(value, str) or len(value) > 1024
+                   for value in comparison["control_definitions"].values())
+            or (comparison.get("candidate_boundary") is not None
+                and not _bounded_json_nodes(comparison["candidate_boundary"]))
+            or not isinstance(comparison.get("route_cost_provenance"), dict)
+            or not set(comparison["route_cost_provenance"]) <= set(POLICIES)
+            or not isinstance(comparison.get("policy_metrics"), dict)
+            or set(comparison["policy_metrics"]) != set(POLICIES)):
+        return None
+    for policy, manifest in manifests.items():
+        if (not isinstance(manifest, dict)
+                or not isinstance(manifest.get("policy_id"), str)
+                or not manifest["policy_id"] or len(manifest["policy_id"]) > 512
+                or manifest.get("source_identity_sha256") != payload["source_identity_sha256"]
+                or (manifest.get("checkpoint_sha256") is not None
+                    and (not isinstance(manifest["checkpoint_sha256"], str)
+                         or not re.fullmatch(r"[0-9a-f]{64}", manifest["checkpoint_sha256"])) )
+                or (policy in TRACKS + ABLATIONS
+                    and not isinstance(manifest.get("checkpoint_sha256"), str))
+                or (policy in CONTROLS and manifest.get("checkpoint_sha256") is not None)
+                or (policy in ABLATIONS and manifest.get("p_mode") != "p0")
+                or (policy in TRACKS[:3]
+                    and manifest.get("p_mode") not in ("learned", "p0"))
+                or not _bounded_json_nodes(manifest)):
+            return None
+    for policy, route in comparison["route_cost_provenance"].items():
+        if (not isinstance(route, dict)
+                or set(route) != {"mode", "route_cost_source", "projection", "map_scale",
+                                  "route_records", "sample_map_digests"}
+                or route.get("mode") not in ("p0", "learned")
+                or not isinstance(route.get("route_cost_source"), str)
+                or route.get("projection") not in (None, PENALTY_PROJECTION)
+                or not _finite_number(route.get("map_scale"))
+                or type(route.get("route_records")) is not int
+                or not 0 <= route["route_records"] <= payload["record_count"]
+                or not isinstance(route.get("sample_map_digests"), list)
+                or len(route["sample_map_digests"]) > 3
+                or any(not isinstance(digest, str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                       for digest in route["sample_map_digests"])):
+            return None
+    metric_names = {"success", "useful_throughput", "scores", "acquisitions",
+        "deliveries", "collisions", "safety_events", "fallback_count", "fallback_rate",
+        "feasible_rate", "heading_violations", "swept_violations", "p50_latency_ms",
+        "p95_latency_ms", "p99_latency_ms", "candidate_recall"}
+    for policy in POLICIES:
+        metrics = comparison["policy_metrics"].get(policy)
+        if not isinstance(metrics, dict) or set(metrics) != set(categories):
+            return None
+        for category_metrics in metrics.values():
+            if not isinstance(category_metrics, dict) or "collection_action_bouts" not in category_metrics:
+                return None
+            if not {"success", "useful_throughput"} <= set(category_metrics):
+                return None
+            if not set(category_metrics) - {"collection_action_bouts"} <= metric_names:
+                return None
+            for name, summary in category_metrics.items():
+                if name == "collection_action_bouts":
+                    bouts_keys = {"available_records", "count", "acquired_count",
+                        "unsuccessful_collection_action_bouts",
+                        "unsuccessful_collection_action_bouts_available_records",
+                        "unsuccessful_collection_action_bouts_total_records",
+                        "acquired_proportion", "semantics"}
+                    if (not isinstance(summary, dict) or set(summary) != bouts_keys
+                            or any(type(summary[key]) is not int or summary[key] < 0
+                                   for key in ("available_records",
+                                       "unsuccessful_collection_action_bouts_available_records",
+                                       "unsuccessful_collection_action_bouts_total_records"))
+                            or summary["available_records"] > len(seeds)
+                            or summary["unsuccessful_collection_action_bouts_available_records"]
+                               > summary["available_records"]
+                            or summary["unsuccessful_collection_action_bouts_total_records"] != len(seeds)
+                            or summary.get("semantics") != "unsuccessful_collection_action_bouts counts finalized focal collection-action bouts with authoritative acquired quantity known to be zero; it is a descriptive bout outcome, not causal intake failure"):
+                        return None
+                    count, acquired = summary.get("count"), summary.get("acquired_count")
+                    unsuccessful = summary.get("unsuccessful_collection_action_bouts")
+                    proportion = summary.get("acquired_proportion")
+                    if (count is None and acquired is None):
+                        if (summary["available_records"] != 0 or unsuccessful is not None
+                                or proportion is not None):
+                            return None
+                    elif (type(count) is not int or count < 0
+                            or type(acquired) is not int or acquired < 0 or acquired > count
+                            or (summary["available_records"] == 0)
+                            or (summary["unsuccessful_collection_action_bouts_available_records"] == 0
+                                and unsuccessful is not None)
+                            or (summary["unsuccessful_collection_action_bouts_available_records"] > 0
+                                and (type(unsuccessful) is not int or unsuccessful < 0))
+                            or (unsuccessful is not None and (unsuccessful > count
+                                or (summary["unsuccessful_collection_action_bouts_available_records"]
+                                    == summary["available_records"]
+                                    and acquired + unsuccessful != count)
+                                or (summary["unsuccessful_collection_action_bouts_available_records"]
+                                    < summary["available_records"]
+                                    and acquired + unsuccessful > count)))
+                            or (count == 0 and proportion is not None)
+                            or (count > 0 and (not _finite_number(proportion)
+                                or not 0 <= proportion <= 1
+                                or abs(float(proportion) - acquired / count) > 1e-12))):
+                        return None
+                    continue
+                if (not isinstance(summary, dict)
+                        or set(summary) != {"n", "mean", "normal_95_interval"}
+                        or type(summary.get("n")) is not int
+                        or not 1 <= summary["n"] <= len(seeds)
+                        or not _finite_number(summary.get("mean"))):
+                    return None
+                if (name in ("success", "useful_throughput")
+                        and summary["n"] != len(seeds)):
+                    return None
+                if (name == "success" and not 0 <= summary["mean"] <= 1
+                        or name == "useful_throughput" and summary["mean"] < 0):
+                    return None
+                interval = summary.get("normal_95_interval")
+                if (summary["n"] == 1 and interval is not None
+                        or summary["n"] > 1 and interval is None):
+                    return None
+                if (interval is not None and (not isinstance(interval, list)
+                        or len(interval) != 2
+                        or any(not _finite_number(value) for value in interval)
+                        or interval[0] > summary["mean"] or interval[1] < summary["mean"])):
+                    return None
+    try:
+        digest = hashlib.sha256(_dashboard_summary_json_bytes(comparison)).hexdigest()
+    except (TypeError, ValueError):
+        return None
+    return comparison if digest == payload["comparison_sha256"] else None
+
+
+def _report_binding(report):
+    records = report.get("records") if isinstance(report, dict) else None
+    return {"report_schema_version": report.get("schema_version"),
+            "evaluation_id": report.get("evaluation_id"),
+            "protocol_id": report.get("protocol_id"),
+            "split": report.get("split"),
+            "source_identity_sha256": report.get("source_identity_sha256"),
+            "record_count": len(records) if isinstance(records, list) else None}
+
+
+def _read_evaluation_comparison(path: Path, data_root: Path, budget: dict, *, status=None):
+    """Read a small raw report or validate its bounded digest-bound sidecar."""
+    if path.is_symlink() or not _inside(path, data_root):
+        return None, None, "evaluation report is not a regular in-root file", False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None, None, "evaluation report is unavailable", False
+    if size <= MAX_DASHBOARD_INLINE_REPORT_BYTES:
+        report, error = _read_json_within(path, data_root)
+        if report is None:
+            return None, None, error or "evaluation report is unavailable", False
+        comparison = _comparison(report)
+        if comparison is None:
+            return None, None, "evaluation report is incomplete or invalid", True
+        return comparison, _report_binding(report), None, True
+    if size > MAX_DASHBOARD_SUMMARY_RAW_BYTES:
+        return None, None, "evaluation report exceeds the bounded summary limit", False
+    if status is None:
+        status, _ = _read_json_within(Path(str(path) + ".status.json"), data_root)
+    if (not isinstance(status, dict) or status.get("output_file") != path.name):
+        return None, None, "oversized report lacks evaluator summary binding", True
+    if status.get("status") == "running":
+        return None, None, None, True
+    expected_summary_sha256 = status.get("dashboard_summary_sha256")
+    if (status.get("status") != "complete"
+            or not isinstance(expected_summary_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_summary_sha256)):
+        return None, None, "oversized report lacks evaluator summary binding", True
+    sidecar_path = Path(str(path) + DASHBOARD_SUMMARY_SUFFIX)
+    if sidecar_path.is_symlink() or not _inside(sidecar_path, data_root):
+        return None, None, "evaluation summary is not a regular in-root file", False
+    try:
+        sidecar_identity = sidecar_path.lstat()
+        if not stat.S_ISREG(sidecar_identity.st_mode):
+            raise ValueError("dashboard summary is not a regular file")
+        sidecar_size = sidecar_identity.st_size
+    except OSError:
+        return None, None, "oversized evaluation report has no dashboard summary", False
+    except ValueError:
+        return None, None, "dashboard summary is not a regular in-root file", False
+    if (sidecar_size > MAX_DASHBOARD_SUMMARY_FILE_BYTES
+            or budget["files"] >= MAX_DASHBOARD_SUMMARY_FILES_PER_SCAN
+            or budget["summary_bytes"] + sidecar_size > MAX_DASHBOARD_SUMMARY_BYTES_PER_SCAN
+            or budget["raw_bytes"] + size > MAX_DASHBOARD_SUMMARY_RAW_BYTES_PER_SCAN):
+        return None, None, "dashboard summary scan budget exceeded", False
+    budget["files"] += 1
+    budget["summary_bytes"] += sidecar_size
+    budget["raw_bytes"] += size
+    try:
+        with _DASHBOARD_SUMMARY_READS:
+            raw_sha256, raw_identity, _ = _stable_file_sha256(
+                path, max_bytes=MAX_DASHBOARD_SUMMARY_RAW_BYTES)
+            summary_bytes, read_identity = _read_bounded_regular_file(
+                sidecar_path, max_bytes=MAX_DASHBOARD_SUMMARY_FILE_BYTES)
+            if hashlib.sha256(summary_bytes).hexdigest() != expected_summary_sha256:
+                raise ValueError("dashboard summary differs from evaluator terminal binding")
+            if (len(summary_bytes) != sidecar_size
+                    or read_identity != (sidecar_identity.st_dev, sidecar_identity.st_ino,
+                        sidecar_identity.st_size, sidecar_identity.st_mtime_ns)):
+                raise ValueError("dashboard summary changed while being read")
+            payload = json.loads(summary_bytes)
+            comparison = _dashboard_summary_valid(payload, raw_sha256)
+            if comparison is None:
+                raise ValueError("dashboard summary schema or binding is invalid")
+            current = path.lstat()
+            current_identity = (current.st_dev, current.st_ino,
+                                current.st_size, current.st_mtime_ns)
+            if current_identity != raw_identity:
+                raise ValueError("evaluation report changed while being verified")
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None, None, "dashboard summary is unavailable or invalid", False
+    binding = {key: payload[key] for key in (
+        "report_schema_version", "evaluation_id", "protocol_id", "split",
+        "source_identity_sha256", "record_count")}
+    if any(status.get(key) != binding[key]
+           for key in ("evaluation_id", "protocol_id", "split")):
+        return None, None, "dashboard summary status binding is invalid", False
+    if budget["records"] + binding["record_count"] > MAX_DASHBOARD_SUMMARY_RECORDS_PER_SCAN:
+        return None, None, "dashboard summary record budget exceeded", False
+    budget["records"] += binding["record_count"]
+    return comparison, binding, None, True
+
+
 def _qualification_status(project: Path, errors: list, data_root: Path):
     root = project / "qualifications" / "meco"
     path = root / "qualification-status.json"
@@ -1254,6 +1722,16 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
 
     comparisons = []
     evaluation_runs = []
+    comparison_cache = {}
+    summary_budget = {"files": 0, "summary_bytes": 0, "raw_bytes": 0, "records": 0}
+
+    def comparison_for(report_path):
+        cache_key = str(report_path)
+        if cache_key not in comparison_cache:
+            comparison_cache[cache_key] = _read_evaluation_comparison(
+                report_path, data_root, summary_budget)
+        return comparison_cache[cache_key]
+
     if eval_root.is_dir():
         for status_path in sorted(eval_root.glob("*.status.json")):
             status, error = _read_json_within(status_path, data_root)
@@ -1266,18 +1744,21 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
             output_name = status.get("output_file")
             safe_name = isinstance(output_name, str) and Path(output_name).name == output_name
             report_path = eval_root / output_name if safe_name else eval_root / "__invalid__"
-            report, _ = (_read_json_within(report_path, data_root)
-                         if safe_name else (None, None))
-            valid_report = _comparison(report) if report is not None else None
+            valid_report, binding, report_error, report_visible = (
+                _read_evaluation_comparison(report_path, data_root, summary_budget,
+                    status=status) if safe_name else (None, None, None, False))
+            if safe_name:
+                comparison_cache[str(report_path)] = (
+                    valid_report, binding, report_error, report_visible)
             consistent = (status.get("schema_version") == 1
                 and isinstance(status.get("evaluation_id"), str)
                 and isinstance(status.get("protocol_id"), str)
                 and status.get("split") == "validation"
-                and ((status.get("status") == "running" and report is None)
+                and (status.get("status") == "running"
                     or (valid_report is not None
-                        and report.get("evaluation_id") == status.get("evaluation_id")
-                        and report.get("protocol_id") == status.get("protocol_id")
-                        and report.get("split") == status.get("split"))))
+                        and binding.get("evaluation_id") == status.get("evaluation_id")
+                        and binding.get("protocol_id") == status.get("protocol_id")
+                        and binding.get("split") == status.get("split"))))
             alive = bool(process_probe(status.get("pid")))
             state = status.get("status", "unknown")
             if state == "running":
@@ -1293,15 +1774,15 @@ def _collect_status(checkpoint_root: Path, evaluation_root: Path, *, project_roo
                 "progress": status.get("progress"), "output_file": output_name,
                 "error": None if consistent else "evaluator status/report provenance mismatch"})
         for path in sorted(eval_root.glob("*.json")):
-            if path.name.endswith(".status.json"):
+            if (path.name.endswith(".status.json")
+                    or path.name.endswith(DASHBOARD_SUMMARY_SUFFIX)):
                 continue
             if not path.is_file() or not _inside(path, data_root):
                 continue
-            report, error = _read_json_within(path, data_root)
-            if report is None:
+            comparison, _, error, _ = comparison_for(path)
+            if error:
                 errors.append({"source": path.name, "error": error or "invalid evaluation"})
                 continue
-            comparison = _comparison(report)
             if comparison is not None:
                 comparison["evidence_file"] = path.name
                 try:
