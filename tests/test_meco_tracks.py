@@ -190,8 +190,7 @@ def test_inference_broker_discards_result_completed_after_expiry_and_fallback_is
         "fallback", "deterministic_fallback")
 
 
-def test_se2_heading_embedding_wraps_and_rejects_bad_bins():
-    import pytest
+def test_se2_heading_embedding_wraps_and_marks_bad_bins_invalid():
     from frc_defense.meco_tracks import _se2_node_inputs
 
     features = torch.zeros(1, 3, 9)
@@ -201,8 +200,39 @@ def test_se2_heading_embedding_wraps_and_rejects_bad_bins():
     assert torch.allclose((embedded[0] - embedded[1]).norm(),
                           (embedded[1] - embedded[2]).norm(), atol=1e-6)
     features[0, 0, 8] = 8.
-    with pytest.raises(ValueError, match="heading bins"):
-        _se2_node_inputs(features, torch.zeros(1, 7))
+    embedded, status = _se2_node_inputs(features, torch.zeros(1, 7),
+                                        return_status=True)
+    assert not status.item()
+    assert torch.isfinite(embedded).all()
+
+
+@pytest.mark.parametrize("track", ("A2", "A3"))
+def test_a23_invalid_region_and_edge_status_fail_closed_without_host_checks(track):
+    from frc_defense.meco_tracks import _pool_regions
+
+    nodes = torch.ones(1, 2, 4)
+    pooled, occupied, region_status = _pool_regions(
+        nodes, torch.tensor([[0, 64]]), 64)
+    assert not region_status.item()
+    assert occupied[0, 0]
+    assert torch.isfinite(pooled).all()
+
+    block = SE2MessageBlock(width=4)
+    output, edge_status = block(nodes, torch.tensor([[[2], [0]]]),
+                                torch.ones(1, 2, 1, dtype=torch.bool),
+                                return_status=True)
+    assert not edge_status.item()
+    assert torch.isfinite(output).all()
+
+    model = make_meco_track(track).eval()
+    output = model(node_features=torch.zeros(1, 2, 9),
+        edges=torch.tensor([[[2], [0]]]),
+        edge_mask=torch.ones(1, 2, 1, dtype=torch.bool),
+        region_ids=torch.tensor([[0, 64]]), globals_=torch.zeros(1, 7),
+        coarse_edges=torch.zeros(1, 64, 1, dtype=torch.long),
+        coarse_edge_mask=torch.zeros(1, 64, 1, dtype=torch.bool))
+    assert not output["device_input_valid"].item()
+    assert torch.isfinite(output["utility"]).all()
 
 
 def test_a1_rejects_out_of_field_and_nonintegral_pose_candidates():

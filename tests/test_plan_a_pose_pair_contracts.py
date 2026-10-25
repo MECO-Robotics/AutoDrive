@@ -126,7 +126,9 @@ def test_plan_a_support_digest_binds_device_fallback_pair():
     assert first != second
 
 
-def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypatch):
+@pytest.mark.parametrize("route_valid", (False, True))
+def test_plan_a_prepare_fails_closed_for_empty_routes_or_invalid_model_input(
+        monkeypatch, route_valid):
     from dataclasses import replace
     from types import SimpleNamespace
     import frc_defense.meco_track_training as training
@@ -144,7 +146,6 @@ def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypat
     })()
     observation = SimpleNamespace(snapshot_id="synthetic", capture_monotonic=1.,
         timestamp=1., schema_version=1)
-    safe = SimpleNamespace(observation=observation)
     env = SimpleNamespace(device=torch.device("cpu"), _last_obs=torch.zeros(1),
         sim=SimpleNamespace(speed=torch.tensor([[0., 0., 0., 1.]]),
             field_length=4.0, field_width=2.0),
@@ -152,8 +153,11 @@ def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypat
         track_pos=torch.zeros((1, 6, 4, 2)))
     env._candidates = lambda: (torch.zeros((1, 6, 4), dtype=torch.long),
                                torch.zeros((1, 6, 4), dtype=torch.bool), None)
+    monkeypatch.setattr(training, "build_observation_snapshot",
+                        lambda *args, **kwargs: observation)
     monkeypatch.setattr(training, "build_safe_action_candidates",
-                        lambda *args, **kwargs: safe)
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("Plan A must not build candidates")))
     monkeypatch.setattr(training, "build_plan_a_support",
                         lambda *args, **kwargs: support)
     monkeypatch.setattr(training, "_snapshot_tensors",
@@ -164,7 +168,8 @@ def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypat
     monkeypatch.setattr(training, "_graph_inputs", lambda *args: {})
     monkeypatch.setattr(training, "_plan_a_route_support",
         lambda _env, _graph, incoming, *_args: (
-            replace(incoming, valid_mask=torch.zeros_like(incoming.valid_mask),
+            replace(incoming, valid_mask=(torch.ones_like(incoming.valid_mask)
+                    if route_valid else torch.zeros_like(incoming.valid_mask)),
                     fallback_pair_tensor=torch.tensor(0)),
             SimpleNamespace(distance_m=torch.zeros(2),
                             learned_cost_grid_edges=torch.zeros(2))))
@@ -184,7 +189,8 @@ def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypat
             return {"utility": torch.zeros((1, 2)),
                     "penalty": torch.zeros((1, 2)),
                     "behavior_logits": torch.zeros((1, 5)),
-                    "hidden": torch.zeros((1, 64))}
+                    "hidden": torch.zeros((1, 64)),
+                    "device_input_valid": torch.tensor(not route_valid)}
 
     prepared = _prepare_plan_a_decision("A2", Model(), env, graph, "episode",
         None, route_cost_points_per_second=1., action_ticks=1, candidate_k=8,
@@ -199,6 +205,7 @@ def test_plan_a_prepare_keeps_empty_route_support_as_no_action_outcome(monkeypat
     assert prepared["selected_action_payload"][2].item() == -1
     assert prepared["selected_action_payload"][5:7].tolist() == [0.0, 0.0]
     assert prepared["selected_action_payload"][8:11].tolist() == [-1.0, -1.0, -1.0]
+    assert prepared["selected_action_payload"][11].item() == 1
     assert prepared["selected_action_payload"][12].item() == 1
 
 

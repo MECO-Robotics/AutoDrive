@@ -54,6 +54,7 @@ from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     plan_a_support_order_digest, PlanAEmptySupportError, SUPPORT_ORDER)
 from .meco_metric_ledger import MecoEpisodeMetricLedger
+from .learning_inputs import build_observation_snapshot
 from .meco_input_provenance import input_contract_digest, validate_serialized_inputs
 from .meco_phase4_runtime_adapter import (phase4_factor_exposure,
     phase4_pair_contact_event_record, route_remaining_distance_m,
@@ -1401,14 +1402,15 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                              p_mode, p_cost_scale, p_points_per_grid_edge,
                              prediction_mode="cv", tracking_was_available=None):
     """Build stable full-pose support and sample from its exact masked softmax."""
-    # Use the existing observation snapshot seam, but do not build or score a
-    # bounded candidate table for Plan A. Candidate K remains a Plan C setting.
-    safe = build_safe_action_candidates(env, env._last_obs, world=0, slot=3,
-                                        episode_id=episode_id)
+    # Plan A needs the canonical observation provenance, but has no candidate
+    # table, teacher action, or candidate feature rows. Capture only that
+    # observation so C's legacy candidate projection stays out of this path.
+    observation = build_observation_snapshot(env, world=0, slot=3,
+                                              episode_id=episode_id)
     support = build_plan_a_support(env, graph, env._last_obs,
-                                   safe.observation.snapshot_id,
+                                   observation.snapshot_id,
                                    require_hip_shortest_path=True)
-    raster, globals_ = _snapshot_tensors(safe.observation, device=env.device)
+    raster, globals_ = _snapshot_tensors(observation, device=env.device)
     hidden_before, tracking_available, tracking_reset = _tracking_reset_hidden(
         hidden, tracking_was_available, raster)
     graph_data = _graph_inputs(track, graph, env, raster)
@@ -1429,18 +1431,18 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                               for index in range(support.pair_count))
         request_dispatch = time.monotonic()
         request = None
-        if request_dispatch <= safe.observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
+        if request_dispatch <= observation.capture_monotonic + PRODUCTION_INFERENCE_MAX_AGE_S:
             try:
                 request_sequence, generation_id = model.next_request_identity()
                 input_contract_sha256 = validate_serialized_inputs(track, ordered_inputs)
                 request = MecoInferenceRequest(
-                    track=track, snapshot_id=safe.observation.snapshot_id,
+                    track=track, snapshot_id=observation.snapshot_id,
                     checkpoint_sha256=model.checkpoint_sha256, protocol_id=model.protocol_id,
-                    observation_schema=safe.observation.schema_version,
-                    observation_timestamp=safe.observation.timestamp,
-                    capture_monotonic=safe.observation.capture_monotonic,
+                    observation_schema=observation.schema_version,
+                    observation_timestamp=observation.timestamp,
+                    capture_monotonic=observation.capture_monotonic,
                     dispatch_monotonic=request_dispatch,
-                    expires_monotonic=(safe.observation.capture_monotonic
+                    expires_monotonic=(observation.capture_monotonic
                                        + PRODUCTION_INFERENCE_MAX_AGE_S),
                     input_names=MECO_INPUT_NAMES[track],
                     input_shapes=tuple(tuple(ordered_inputs[name].shape)
@@ -1484,7 +1486,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         p_points_per_grid_edge=p_points_per_grid_edge,
         prediction_mode=prediction_mode)
     support, route_batch = _plan_a_route_support(env, graph, support,
-        safe.observation.snapshot_id, penalty_map, config)
+        observation.snapshot_id, penalty_map, config)
     logits, path_cost = _plan_a_logits(track, seed_decision["raw"], support,
                                        graph, raster, env, config,
                                        penalty_map=penalty_map,
@@ -1505,12 +1507,12 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
             and response.protocol_id == model.protocol_id
             and response.request_sequence == request.request_sequence
             and response.generation_id == request.generation_id
-            and response.snapshot_id == request.snapshot_id == safe.observation.snapshot_id
+            and response.snapshot_id == request.snapshot_id == observation.snapshot_id
             and response.candidate_mask_digest == request.candidate_mask_digest
             and response.legal_pose_order_digest == support.order_digest
             and request.legal_pose_order_digest == support.order_digest
-            and response.observation_timestamp == safe.observation.timestamp
-            and response.capture_monotonic == safe.observation.capture_monotonic
+            and response.observation_timestamp == observation.timestamp
+            and response.capture_monotonic == observation.capture_monotonic
             and response.dispatch_monotonic == request.dispatch_monotonic
             and response.expires_monotonic == request.expires_monotonic
             and math.isfinite(response.completed_monotonic)
@@ -1534,7 +1536,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
                     env.planner, float(env.sim.field_length), float(env.sim.field_width),
                     mode="learned")
             support, route_batch = _plan_a_route_support(env, graph, support,
-                safe.observation.snapshot_id, penalty_map, config)
+                observation.snapshot_id, penalty_map, config)
             logits, path_cost = _plan_a_logits(track, raw, support, graph, raster,
                 env, config, penalty_map=penalty_map, route_batch=route_batch)
             speed = env.sim.speed[0, 3].to(dtype=support.route_cost.dtype).clamp_min(.1)
@@ -1547,25 +1549,30 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
         inference_provenance = {"schema": MECO_INFERENCE_SCHEMA,
             "model_id": f"meco:{track}", "checkpoint_sha256": model.checkpoint_sha256,
             "protocol_id": model.protocol_id,
-            "observation_timestamp": safe.observation.timestamp,
+            "observation_timestamp": observation.timestamp,
             "request_sequence": request.request_sequence if request else None,
             "generation_id": request.generation_id if request else None,
-            "snapshot_id": safe.observation.snapshot_id,
+            "snapshot_id": observation.snapshot_id,
             "candidate_mask_digest": request.candidate_mask_digest if request else None,
             "legal_pose_order_digest": support.order_digest,
-            "captured_monotonic": safe.observation.capture_monotonic,
+            "captured_monotonic": observation.capture_monotonic,
             "dispatch_monotonic": request.dispatch_monotonic if request else None,
             "completed_monotonic": response.completed_monotonic if response_valid else None,
             "expires_monotonic": request.expires_monotonic if request else None,
             "status": "accepted" if response_valid else "deterministic_fallback",
             "counters": model.inference_counters}
     decision_valid = torch.isfinite(torch.logsumexp(logits[None], dim=-1)).all()
+    model_input_valid = raw.get("device_input_valid")
+    if isinstance(model_input_valid, torch.Tensor):
+        decision_valid = decision_valid & model_input_valid.reshape(()).bool()
     if inference_valid_device is not None:
         decision_valid = decision_valid & inference_valid_device.reshape(()).bool()
     if production_inference_failed:
         decision_valid = decision_valid & torch.zeros((), device=env.device,
                                                        dtype=torch.bool)
     has_legal_support = support.valid_mask.any()
+    if isinstance(model_input_valid, torch.Tensor):
+        has_legal_support = has_legal_support & model_input_valid.reshape(()).bool()
     selection_logits = _plan_a_selection_logits(logits, support.valid_mask,
         support.fallback_pair_tensor, decision_valid)
     # Empty support is carried as a typed status bit to the compact action
@@ -1638,7 +1645,7 @@ def _prepare_plan_a_decision(track, model, env, graph, episode_id, hidden, *,
     fallback_reason = "policy_inference_fallback" if production_inference_failed else None
     value = (_value(value_head, globals_, seed_decision["hidden"])
              if value_head is not None else None)
-    return {"snapshot": safe.observation, "candidate_set": None,
+    return {"snapshot": observation, "candidate_set": None,
         "support": support, "raster": raster, "globals": globals_,
         "hidden_before": hidden_before,
         "tracking_available": tracking_available,

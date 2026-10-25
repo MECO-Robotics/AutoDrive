@@ -934,55 +934,66 @@ class SE2MessageBlock(nn.Module):
         self.update = nn.Sequential(nn.Linear(width * 2, width), nn.SiLU(), nn.Linear(width, width))
         self.norm = nn.LayerNorm(width)
 
-    def forward(self, nodes, edges, edge_mask):
+    def forward(self, nodes, edges, edge_mask, *, return_status=False):
         # edges [B,N,D] contains neighbor node indices; edge_mask marks legal transitions.
         if (nodes.ndim != 3 or edges.ndim != 3 or edge_mask.shape != edges.shape
                 or edges.shape[:2] != nodes.shape[:2] or edges.dtype != torch.long
                 or edge_mask.dtype != torch.bool):
             raise ValueError("invalid SE(2) graph tensor shapes or dtypes")
-        if bool((edge_mask & ((edges < 0) | (edges >= nodes.shape[1]))).any()):
-            raise ValueError("a legal SE(2) edge references an out-of-range node")
-        safe = torch.where(edge_mask, edges, torch.zeros_like(edges))
+        edge_valid = (edges >= 0) & (edges < nodes.shape[1])
+        status = ~(edge_mask & ~edge_valid).any()
+        safe_mask = edge_mask & edge_valid
+        safe = torch.where(safe_mask, edges, torch.zeros_like(edges))
         expanded = nodes[:, :, None, :].expand(-1, -1, safe.shape[-1], -1)
         neighbors = expanded.gather(1, safe[..., None].expand(-1, -1, -1, nodes.shape[-1]))
         messages = self.message(neighbors)
-        mask = edge_mask[..., None].to(messages.dtype)
+        mask = safe_mask[..., None].to(messages.dtype)
         aggregate = (messages * mask).sum(2) / mask.sum(2).clamp_min(1.)
-        return self.norm(nodes + self.update(torch.cat((nodes, aggregate), -1)))
+        result = self.norm(nodes + self.update(torch.cat((nodes, aggregate), -1)))
+        return (result, status) if return_status else result
 
 
-def _se2_node_inputs(node_features, globals_):
+def _se2_node_inputs(node_features, globals_, *, return_status=False):
     """Encode headings as sin/cos so bins 7 and 0 obey angular wraparound."""
     if (node_features.ndim != 3 or node_features.shape[-1] != 9
             or globals_.shape != (node_features.shape[0], 7)):
         raise ValueError("SE(2) nodes require six raster values, x/y, heading-bin and seven globals")
-    if not bool(torch.isfinite(node_features).all()) or not bool(torch.isfinite(globals_).all()):
-        raise ValueError("SE(2) node features and globals must be finite")
-    if bool(((node_features[..., 6:8] < 0.) | (node_features[..., 6:8] > 1.)).any()):
-        raise ValueError("SE(2) node x/y coordinates must be normalized to [0, 1]")
-    heading = node_features[..., 8]
-    if bool(((heading < 0.) | (heading > 7.) | (heading != heading.round())).any()):
-        raise ValueError("heading bins must be integers in [0, 7]")
+    finite_nodes = torch.isfinite(node_features).all()
+    finite_globals = torch.isfinite(globals_).all()
+    clean_nodes = torch.nan_to_num(node_features)
+    clean_globals = torch.nan_to_num(globals_)
+    coords = clean_nodes[..., 6:8]
+    heading = clean_nodes[..., 8]
+    status = (finite_nodes & finite_globals
+        & ((coords >= 0.) & (coords <= 1.)).all()
+        & ((heading >= 0.) & (heading <= 7.)
+           & (heading == heading.round())).all())
+    coords = coords.clamp(0., 1.)
+    heading = heading.round().clamp(0., 7.)
     angle = heading * (2. * math.pi / 8.)
     heading_vector = torch.stack((angle.sin(), angle.cos()), -1)
-    return torch.cat((node_features[..., :8], heading_vector,
-                      globals_[:, None, :].expand(-1, node_features.shape[1], -1)), -1)
+    embedded = torch.cat((clean_nodes[..., :6], coords, heading_vector,
+                      clean_globals[:, None, :].expand(-1, node_features.shape[1], -1)), -1)
+    return (embedded, status) if return_status else embedded
 
 
 def _pool_regions(nodes, region_ids, region_tokens):
     batch, count, width = nodes.shape
-    if (region_ids.shape != (batch, count) or region_ids.dtype != torch.long
-            or bool(((region_ids < 0) | (region_ids >= region_tokens)).any())):
+    if region_ids.shape != (batch, count) or region_ids.dtype != torch.long:
         raise ValueError("region IDs must be integer indices within the configured regions")
+    id_valid = (region_ids >= 0) & (region_ids < region_tokens)
+    ids_safe = torch.where(id_valid, region_ids, torch.zeros_like(region_ids))
     pooled = nodes.new_zeros((batch, region_tokens, width))
     counts = nodes.new_zeros((batch, region_tokens, 1))
-    pooled.scatter_add_(1, region_ids[..., None].expand_as(nodes), nodes)
-    counts.scatter_add_(1, region_ids[..., None], nodes.new_ones((batch, count, 1)))
+    pooled.scatter_add_(1, ids_safe[..., None].expand_as(nodes), nodes)
+    counts.scatter_add_(1, ids_safe[..., None], nodes.new_ones((batch, count, 1)))
     occupied = counts.squeeze(-1) > 0
-    if not bool(occupied.any(-1).all()):
-        raise ValueError("each SE(2) graph must contain at least one legal node")
+    has_region = occupied.any(-1)
+    status = id_valid.all() & has_region.all()
+    occupied = occupied.clone()
+    occupied[:, 0] |= ~has_region
     pooled = pooled / counts.clamp_min(1.)
-    return pooled, occupied
+    return pooled, occupied, status
 
 
 class A2StructuredSE2UNetGRU(nn.Module):
@@ -1004,22 +1015,30 @@ class A2StructuredSE2UNetGRU(nn.Module):
 
     def forward(self, node_features, edges, edge_mask, region_ids, globals_,
                 coarse_edges, coarse_edge_mask, hidden=None, **_):
-        nodes = self.lift(_se2_node_inputs(node_features, globals_))
+        node_inputs, status = _se2_node_inputs(node_features, globals_, return_status=True)
+        nodes = self.lift(node_inputs)
         for layer in self.fine_layers:
-            nodes = layer(nodes, edges, edge_mask)
+            nodes, layer_status = layer(nodes, edges, edge_mask, return_status=True)
+            status = status & layer_status
         batch, count, _ = nodes.shape
-        coarse, occupied = _pool_regions(nodes, region_ids, self.region_tokens)
-        coarse = self.coarse_layer(coarse, coarse_edges, coarse_edge_mask)
+        coarse, occupied, pool_status = _pool_regions(nodes, region_ids, self.region_tokens)
+        status = status & pool_status
+        coarse, coarse_status = self.coarse_layer(coarse, coarse_edges,
+            coarse_edge_mask, return_status=True)
+        status = status & coarse_status
         attended, _ = self.attention(coarse, coarse, coarse,
                                      key_padding_mask=~occupied, need_weights=False)
         state = self.context((attended * occupied[..., None]).sum(1) /
                              occupied.sum(1, keepdim=True).clamp_min(1.), hidden)
-        upsampled = coarse.gather(1, region_ids[..., None].expand(-1, -1, HIDDEN))
+        safe_region_ids = torch.where((region_ids >= 0) & (region_ids < self.region_tokens),
+                                      region_ids, torch.zeros_like(region_ids))
+        upsampled = coarse.gather(1, safe_region_ids[..., None].expand(-1, -1, HIDDEN))
         decoded = self.decoder(torch.cat((nodes, upsampled,
                                           state[:, None].expand(-1, count, -1)), -1))
         return {"utility": decoded[..., 0], "penalty": F.softplus(decoded[..., 1]),
                 "behavior_logits": self.behavior_head(state), "hidden": state,
-                "region_tokens": coarse, "occupied_regions": occupied}
+                "region_tokens": coarse, "occupied_regions": occupied,
+                "device_input_valid": status}
 
 
 class A3HierarchicalSE2GNNGRU(nn.Module):
@@ -1040,21 +1059,27 @@ class A3HierarchicalSE2GNNGRU(nn.Module):
         self.behavior_head = nn.Linear(HIDDEN, 5)
 
     def forward(self, node_features, edges, edge_mask, region_ids, globals_, hidden=None, **_):
-        nodes = self.lift(_se2_node_inputs(node_features, globals_))
+        node_inputs, status = _se2_node_inputs(node_features, globals_, return_status=True)
+        nodes = self.lift(node_inputs)
         for layer in self.layers:
-            nodes = layer(nodes, edges, edge_mask)
+            nodes, layer_status = layer(nodes, edges, edge_mask, return_status=True)
+            status = status & layer_status
         batch, count, _ = nodes.shape
-        pooled, occupied = _pool_regions(nodes, region_ids, self.region_tokens)
+        pooled, occupied, pool_status = _pool_regions(nodes, region_ids, self.region_tokens)
+        status = status & pool_status
         regions, _ = self.region_attention(pooled, pooled, pooled,
                                            key_padding_mask=~occupied, need_weights=False)
         state = self.context((regions * occupied[..., None]).sum(1) /
                              occupied.sum(1, keepdim=True).clamp_min(1.), hidden)
         contextual = self.region_decoder(torch.cat((regions, state[:, None].expand(-1, self.region_tokens, -1)), -1))
-        node_context = contextual.gather(1, region_ids[..., None].expand(-1, -1, HIDDEN))
+        safe_region_ids = torch.where((region_ids >= 0) & (region_ids < self.region_tokens),
+                                      region_ids, torch.zeros_like(region_ids))
+        node_context = contextual.gather(1, safe_region_ids[..., None].expand(-1, -1, HIDDEN))
         outputs = self.node_head(nodes + node_context)
         return {"utility": outputs[..., 0], "penalty": F.softplus(outputs[..., 1]),
                 "behavior_logits": self.behavior_head(state), "hidden": state,
-                "region_tokens": regions, "occupied_regions": occupied}
+                "region_tokens": regions, "occupied_regions": occupied,
+                "device_input_valid": status}
 
 
 class CandidateMLPGRU(nn.Module):
