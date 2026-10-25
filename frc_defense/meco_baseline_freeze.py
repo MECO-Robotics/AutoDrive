@@ -329,7 +329,7 @@ def compile_baseline_freeze(
     repo_root: str | Path,
     *,
     source_plan_path: str,
-    runtime_identity: Mapping[str, Any],
+    runtime_identity: Mapping[str, Any] | None = None,
     field_records: Mapping[str, Any],
     configuration_artifacts: Mapping[str, bytes],
 ) -> dict[str, Any]:
@@ -551,7 +551,7 @@ def _validate_effective_runtime(runtime: Mapping[str, Any]) -> dict[str, Any]:
 
 def _effective_snapshot_body(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, Mapping) or set(snapshot) != {
-            "schema", "producer", "resolved_fields", "configuration_artifacts",
+            "schema", "producer", "factory_arguments", "resolved_fields", "configuration_artifacts",
             "runtime_identity", "snapshot_sha256"}:
         raise ValueError("effective snapshot has missing or unexpected fields")
     body = {key: snapshot[key] for key in snapshot if key != "snapshot_sha256"}
@@ -566,6 +566,11 @@ def _effective_snapshot_body(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     _strict_digest(producer["source_identity_sha256"], "snapshot producer source identity")
     if snapshot["snapshot_sha256"] != canonical_sha256(body):
         raise ValueError("effective snapshot digest mismatch")
+    factory_arguments = snapshot["factory_arguments"]
+    if not isinstance(factory_arguments, Mapping) or not factory_arguments:
+        raise ValueError("effective snapshot must retain exact public factory arguments")
+    if any(not isinstance(key, str) or key.startswith("_") for key in factory_arguments):
+        raise ValueError("effective snapshot factory arguments cannot contain private controls")
     return body
 
 
@@ -574,7 +579,7 @@ def compile_effective_capture_receipt(
     *,
     source_plan_path: str,
     factory_arguments: Mapping[str, Any],
-    runtime_identity: Mapping[str, Any],
+    runtime_identity: Mapping[str, Any] | None = None,
     captured_at_utc: str | None = None,
 ) -> dict[str, Any]:
     """Ask the live factory resolver for its exact constructor snapshot, then bind it.
@@ -668,6 +673,7 @@ def compile_effective_capture_receipt(
             path: hashlib.sha256(_repo_path(root, path).read_bytes()).hexdigest()
             for path in sorted({p for paths in AUTHORITATIVE_FIELD_SOURCES.values() for p in paths})}},
         "effective_snapshot_sha256": effective_snapshot["snapshot_sha256"],
+        "effective_snapshot": effective_snapshot,
         "fields": clean_fields, "configuration_artifacts": clean_artifacts,
         "runtime": runtime, "qualification_eligible": False}
     return {**receipt_body, "receipt_sha256": canonical_sha256(receipt_body)}
@@ -680,7 +686,7 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
     if not isinstance(receipt, Mapping):
         raise ValueError("capture receipt must be an object")
     expected = {"schema", "capture_tool_version", "captured_at_utc", "source",
-        "effective_snapshot_sha256", "fields", "configuration_artifacts",
+        "effective_snapshot_sha256", "effective_snapshot", "fields", "configuration_artifacts",
         "runtime", "qualification_eligible", "receipt_sha256"}
     if set(receipt) != expected or receipt["schema"] != CAPTURE_RECEIPT_SCHEMA:
         raise ValueError("unsupported or noncanonical capture receipt")
@@ -696,7 +702,23 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
     if set(source.get("authoritative_source_sha256", {})) != {
             p for paths in AUTHORITATIVE_FIELD_SOURCES.values() for p in paths}:
         raise ValueError("capture receipt omits authoritative source hashes")
-    _validate_effective_runtime(receipt["runtime"])
+    snapshot = receipt["effective_snapshot"]
+    snapshot_body = _effective_snapshot_body(snapshot)
+    if (snapshot.get("snapshot_sha256") != receipt["effective_snapshot_sha256"]
+            or snapshot["producer"]["source_identity_sha256"] != canonical_sha256(current)
+            or _validate_effective_runtime(receipt["runtime"])
+                != _validate_effective_runtime(snapshot["runtime_identity"])):
+        raise ValueError("capture receipt runtime or snapshot binding mismatch")
+    # Re-run only the factory's snapshot path from the captured public arguments.
+    # It returns before environment construction; the runtime probe is read-only.
+    from .curriculum_scenarios import make_curriculum_env
+    reproduced_snapshot = make_curriculum_env(**dict(snapshot["factory_arguments"]),
+        _effective_snapshot_only=True,
+        _effective_snapshot_runtime_identity=snapshot["runtime_identity"],
+        _effective_snapshot_repo_root=Path(repo_root).resolve(),
+        _effective_snapshot_source_plan_path=source["source_plan_path"])
+    if reproduced_snapshot != snapshot:
+        raise ValueError("capture receipt snapshot does not reproduce from the current factory")
     for field, record in receipt["fields"].items():
         if field not in AUTHORITATIVE_FIELD_SOURCES or set(record) != {
                 "value", "value_sha256", "selector", "runtime_owner",
@@ -724,6 +746,12 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
                 raise ValueError(f"capture receipt field source binding mismatch: {field}")
     if set(receipt["fields"]) != set(AUTHORITATIVE_FIELD_SOURCES):
         raise ValueError("capture receipt omits effective fields")
+    if ({name: {"value": record["value"], "selector": record["selector"],
+            "runtime_owner": record["runtime_owner"],
+            "resolution_state": record["resolution_state"],
+            "derivation": record["derivation"]}
+            for name, record in receipt["fields"].items()} != snapshot["resolved_fields"]):
+        raise ValueError("capture receipt effective fields differ from reproduced factory snapshot")
     artifacts = receipt["configuration_artifacts"]
     if (not isinstance(artifacts, list) or len(artifacts) != len(REQUIRED_CONFIGURATION_ARTIFACT_IDS)
             or {item.get("artifact_id") for item in artifacts if isinstance(item, Mapping)}
@@ -738,6 +766,12 @@ def validate_effective_capture_receipt(receipt: Mapping[str, Any], repo_root: st
             raise ValueError(f"capture receipt configuration bytes changed: {item['artifact_id']}")
         if _canonical_json_bytes(json.loads(raw)) != raw:
             raise ValueError(f"capture receipt configuration is not canonical: {item['artifact_id']}")
+    snapshot_artifacts = snapshot["configuration_artifacts"]
+    receipt_artifact_map = {item["artifact_id"]: {
+        "content_base64": item["content_base64"],
+        "content_sha256": item["content_sha256"]} for item in artifacts}
+    if receipt_artifact_map != snapshot_artifacts:
+        raise ValueError("capture receipt config bytes differ from reproduced factory snapshot")
     body = {key: receipt[key] for key in expected if key != "receipt_sha256"}
     if receipt["receipt_sha256"] != canonical_sha256(body):
         raise ValueError("capture receipt digest mismatch")

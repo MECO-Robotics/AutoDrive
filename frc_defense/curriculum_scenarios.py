@@ -426,7 +426,12 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
             raise ValueError('effective capture requires explicit overrides for every material setting')
         if phase4_focal_pose_assignment is not None or phase4_teammate_behavior_assignment is not None:
             raise ValueError('effective capture for focal/teammate validation assignments is not registered')
-        selected_device_identity = _discover_effective_device_identity(device)
+        snapshot_locals = locals()
+        factory_arguments = {name: snapshot_locals[name]
+            for name, parameter in __import__('inspect').signature(make_curriculum_env).parameters.items()
+            if not name.startswith('_')}
+        selected_runtime_identity = _discover_effective_runtime_identity(device,
+            _effective_snapshot_repo_root)
         return _effective_curriculum_snapshot(scenario_id, category, seed, definition,
             defender_family, start_condition, sensor_profile, production_d0, pressure,
             phase4_factor, phase4_opponent_policy_id, trench_schedule,
@@ -435,7 +440,8 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
             evaluation_protocol_content_base64=evaluation_protocol_content_base64,
             evaluation_protocol_object=evaluation_protocol_object,
             evaluation_protocol_content_sha256=evaluation_protocol_content_sha256,
-            selected_device_identity=selected_device_identity,
+            factory_arguments=factory_arguments,
+            selected_runtime_identity=selected_runtime_identity,
             runtime_identity=_effective_snapshot_runtime_identity,
             repo_root=_effective_snapshot_repo_root,
             source_plan_path=_effective_snapshot_source_plan_path)
@@ -550,8 +556,12 @@ def make_curriculum_env(scenario_id, category, num_envs, device, seed, *, horizo
     return env
 
 
-def _discover_effective_device_identity(device):
-    """Read the selected indexed accelerator identity without constructing an environment."""
+def _discover_effective_runtime_identity(device, repo_root=None):
+    """Collect runtime identity from loaded Python/Torch and the selected accelerator."""
+    import importlib.metadata
+    import platform
+    import tomllib
+    from pathlib import Path
     selected = torch.device(device)
     if selected.type != 'cuda' or selected.index is None:
         raise ValueError('effective capture requires an explicitly indexed CUDA/ROCm device')
@@ -563,8 +573,32 @@ def _discover_effective_device_identity(device):
     name = getattr(properties, 'name', None)
     if not isinstance(uuid, str) or not uuid.strip() or not isinstance(name, str) or not name.strip():
         raise ValueError('selected accelerator must expose a stable UUID and model name')
-    return {'device_index': selected.index, 'device_model': name.strip(),
-        'device_id': uuid.strip()}
+    root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
+    simulator_paths = ('frc_defense/tensor_3v3.py', 'frc_defense/tensor_sim.py',
+        'frc_defense/tensor_physics.py')
+    simulator_hashes = {path: hashlib.sha256((root / path).read_bytes()).hexdigest()
+        for path in simulator_paths}
+    with (root / 'pyproject.toml').open('rb') as stream:
+        project = tomllib.load(stream)
+    installed = sorted((distribution.metadata.get('Name', '').lower(), distribution.version)
+        for distribution in importlib.metadata.distributions()
+        if distribution.metadata.get('Name'))
+    dependency_digest = hashlib.sha256(json.dumps(installed, separators=(',', ':'))
+        .encode('utf-8')).hexdigest()
+    if torch.version.hip:
+        backend, backend_version = 'ROCm', str(torch.version.hip)
+    elif torch.version.cuda:
+        backend, backend_version = 'CUDA', str(torch.version.cuda)
+    else:
+        raise ValueError('effective capture requires an initialized CUDA/ROCm runtime')
+    return {'simulator_id': 'autodrive.TensorThreeVsThreeEnv',
+        'simulator_version': str(project['project']['version']),
+        'simulator_build_sha256': hashlib.sha256(json.dumps(simulator_hashes,
+            sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest(),
+        'python_version': platform.python_version(), 'torch_version': str(torch.__version__),
+        'backend': backend, 'backend_version': backend_version,
+        'device_id': uuid.strip(), 'device_index': selected.index,
+        'device_model': name.strip(), 'dependency_lock_sha256': dependency_digest}
 
 
 def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
@@ -574,21 +608,20 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
         requested_values, evaluation_protocol_content_base64,
         evaluation_protocol_object,
         evaluation_protocol_content_sha256,
-        selected_device_identity,
+        factory_arguments,
+        selected_runtime_identity,
         runtime_identity, repo_root, source_plan_path):
     """Export the normalized object passed to CurriculumEnv without constructing it."""
     from pathlib import Path
     from .meco_baseline_freeze import (EFFECTIVE_SNAPSHOT_SCHEMA,
         canonical_sha256, capture_source_identity, _validate_effective_runtime)
 
-    if runtime_identity is None:
-        raise ValueError('effective capture requires an explicit complete runtime identity')
     root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[1]
     source = capture_source_identity(root, source_plan_path)
-    runtime = _validate_effective_runtime(runtime_identity)
-    if any(runtime[key] != selected_device_identity[key] for key in
-            ('device_index', 'device_model', 'device_id')):
-        raise ValueError('runtime identity does not match the selected accelerator discovered by the factory')
+    observed_runtime = _validate_effective_runtime(selected_runtime_identity)
+    runtime = observed_runtime
+    if runtime_identity is not None and _validate_effective_runtime(runtime_identity) != observed_runtime:
+        raise ValueError('caller runtime identity differs from runtime discovered by the factory')
     resolved = {"scenario_id": scenario_id, "scenario_version": definition.version,
         "scenario_time_budget_s": definition.time_budget_s, "category": category,
         "seed": int(seed), "defender_family": defender_family,
@@ -695,6 +728,7 @@ def _effective_curriculum_snapshot(scenario_id, category, seed, definition,
     producer = {"module": "frc_defense.curriculum_scenarios",
         "function": "make_curriculum_env", "source_identity_sha256": canonical_sha256(source)}
     body = {"schema": EFFECTIVE_SNAPSHOT_SCHEMA, "producer": producer,
+        "factory_arguments": factory_arguments,
         "resolved_fields": resolved_fields, "configuration_artifacts": artifacts,
         "runtime_identity": runtime}
     body["snapshot_sha256"] = canonical_sha256(body)

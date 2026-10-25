@@ -203,9 +203,9 @@ def _effective_runtime_identity():
 @pytest.fixture
 def stub_effective_device_probe(monkeypatch):
     from frc_defense import curriculum_scenarios
-    monkeypatch.setattr(curriculum_scenarios, "_discover_effective_device_identity",
-        lambda device: {"device_index": int(str(device).rsplit(":", 1)[1]),
-            "device_model": "fixture WX9100", "device_id": "GPU-0123456789abcdef"})
+    monkeypatch.setattr(curriculum_scenarios, "_discover_effective_runtime_identity",
+        lambda device, _root: {**_effective_runtime_identity(),
+            "device_index": int(str(device).rsplit(":", 1)[1])})
 
 
 def _registry_and_assignment():
@@ -440,7 +440,7 @@ def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp
 
     changed_receipt = __import__("copy").deepcopy(receipt)
     changed_receipt["fields"]["robot_dynamics"]["value"]["forged"] = True
-    with pytest.raises(ValueError, match="field value digest|receipt digest"):
+    with pytest.raises(ValueError, match="digest"):
         validate_effective_capture_receipt(changed_receipt, tmp_path)
 
 
@@ -481,7 +481,8 @@ def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path,
         validate_effective_capture_receipt(receipt, tmp_path)
 
 
-@pytest.mark.parametrize("mismatch", ["selector", "index", "model", "uuid"])
+@pytest.mark.parametrize("mismatch", ["selector", "index", "model", "uuid",
+    "torch", "backend", "simulator", "dependency"])
 def test_effective_capture_rejects_runtime_device_not_selected_by_factory(tmp_path,
         stub_effective_device_probe, mismatch):
     _init_repo(tmp_path)
@@ -493,12 +494,49 @@ def test_effective_capture_rejects_runtime_device_not_selected_by_factory(tmp_pa
         runtime["device_index"] = 1
     elif mismatch == "model":
         runtime["device_model"] = "different model"
-    else:
+    elif mismatch == "uuid":
         runtime["device_id"] = "GPU-ffffffffffffffff"
-    with pytest.raises(ValueError, match="selected accelerator"):
+    elif mismatch == "torch":
+        runtime["torch_version"] = "forged"
+    elif mismatch == "backend":
+        runtime["backend_version"] = "forged"
+    elif mismatch == "simulator":
+        runtime["simulator_version"] = "forged"
+    else:
+        runtime["dependency_lock_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="runtime identity differs"):
         compile_effective_capture_receipt(tmp_path, source_plan_path=SOURCE_PLAN,
             factory_arguments=arguments, runtime_identity=runtime,
             captured_at_utc="2026-10-25T00:00:00Z")
+
+
+def test_receipt_reproduces_snapshot_instead_of_trusting_resealed_snapshot(tmp_path,
+        stub_effective_device_probe):
+    import copy
+    _init_repo(tmp_path)
+    receipt = compile_effective_capture_receipt(tmp_path,
+        source_plan_path=SOURCE_PLAN, factory_arguments=_factory_arguments(),
+        runtime_identity=_effective_runtime_identity(),
+        captured_at_utc="2026-10-25T00:00:00Z")
+    changed = copy.deepcopy(receipt)
+    snapshot = changed["effective_snapshot"]
+    snapshot["factory_arguments"]["layout_id"] = "forged-layout"
+    snapshot["snapshot_sha256"] = canonical_sha256({key: value
+        for key, value in snapshot.items() if key != "snapshot_sha256"})
+    changed["effective_snapshot_sha256"] = snapshot["snapshot_sha256"]
+    changed["receipt_sha256"] = canonical_sha256({key: value
+        for key, value in changed.items() if key != "receipt_sha256"})
+    with pytest.raises(ValueError, match="does not reproduce"):
+        validate_effective_capture_receipt(changed, tmp_path)
+
+
+def test_effective_runtime_identity_is_discovered_without_caller_assertion(tmp_path,
+        stub_effective_device_probe):
+    _init_repo(tmp_path)
+    receipt = compile_effective_capture_receipt(tmp_path,
+        source_plan_path=SOURCE_PLAN, factory_arguments=_factory_arguments(),
+        captured_at_utc="2026-10-25T00:00:00Z")
+    assert receipt["runtime"] == _effective_runtime_identity()
 
 
 def test_tuple_partition_closes_registry_for_five_identical_tracks():
