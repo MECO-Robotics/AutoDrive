@@ -99,11 +99,12 @@ class TensorThreeVsThreeEnv(
             (self.n,), -1, device=self.device, dtype=torch.long)
         self._fuel_proxy_tie_alliance = torch.zeros(
             (self.n,), device=self.device, dtype=torch.long)
-        self._fuel_proxy_piece_events = torch.full(
+        self._fuel_proxy_piece_events = (torch.full(
             (self.n, self.horizon, NUM_ROBOTS), -1,
-            device=self.device, dtype=torch.long)
-        self._fuel_proxy_step_piece_ids = torch.full(
+            device=self.device, dtype=torch.long) if self.fuel_proxy_enabled else None)
+        self._fuel_proxy_step_piece_ids = (torch.full(
             (self.n, NUM_ROBOTS), -1, device=self.device, dtype=torch.long)
+            if self.fuel_proxy_enabled else None)
         self._auto_fuel_frozen = torch.zeros(
             (self.n,), device=self.device, dtype=torch.bool)
         self._frozen_auto_fuel_scores = torch.zeros(
@@ -547,8 +548,9 @@ class TensorThreeVsThreeEnv(
             if self.fuel_proxy_enabled:
                 self.simulation_seed = int(seed)
         self._fuel_proxy_reset_generation.add_(1)
-        self._fuel_proxy_piece_events.fill_(-1)
-        self._fuel_proxy_step_piece_ids.fill_(-1)
+        if self.fuel_proxy_enabled:
+            self._fuel_proxy_piece_events.fill_(-1)
+            self._fuel_proxy_step_piece_ids.fill_(-1)
         self._auto_fuel_frozen.zero_()
         self._frozen_auto_fuel_scores.zero_()
         if self.fuel_proxy_enabled:
@@ -624,8 +626,9 @@ class TensorThreeVsThreeEnv(
     def reset_done(self, mask):
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
         self._fuel_proxy_reset_generation.add_(mask.long())
-        self._fuel_proxy_piece_events[mask] = -1
-        self._fuel_proxy_step_piece_ids[mask] = -1
+        if self.fuel_proxy_enabled:
+            self._fuel_proxy_piece_events[mask] = -1
+            self._fuel_proxy_step_piece_ids[mask] = -1
         self._auto_fuel_frozen[mask] = False
         self._frozen_auto_fuel_scores[mask] = 0
         if self.fuel_proxy_enabled and bool(mask.any()):
