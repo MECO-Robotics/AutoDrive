@@ -11,16 +11,25 @@ review record. It does not represent a production freeze or complete Phase 0.
   `504484dd9c38446b92faac2837dd56fb0f583643f8bc3dc70ecf21d09afb6fa4`.
 - Reviewed implementation head:
   `16aecdc0c9427cdd45c6f7a6f16f1bb07462ca1d`.
+- Feature commits: `f45023f77b34a8117f0a3de195df75af2accd8b7`,
+  `f5907ed98d64f3d2ea2475425bace5286d6a2c1e`,
+  `360c5f074b259b16aee8b2d682ecdbef9e645f1d`,
+  `37f3f83351a54f171e0e15d6dba88d12af9943da`, and
+  `16aecdc0c9427cdd45c6f7a6f16f1bb07462ca1d`; integration commit:
+  `860e2dcabf571a175df30dfcf5ff5c3ed4c3c4d1`.
 - The contract follows the MECO track path through
   `meco_track_training.evaluate_meco` → `make_curriculum_env` →
   `CurriculumEnv`/`TensorThreeVsThreeEnv`, its shared low-level simulator and
   source registries. It records eight required configuration artifact IDs and
   SHA-256 digests of supplied content. IDs are stable logical names; the
   freeze does not store file locations, including locations outside the
-  checkout. Compilation and validation fail closed when an ID is missing,
-  extra, or has changed content. The source/runtime and field records remain
-  explicit inputs; the module does not extract effective values from a live
-  campaign.
+  checkout. The required IDs are `campaign_assignment`,
+  `evaluation_protocol`, `drivetrain_physics`, `gamepiece_rules`,
+  `field_layout`, `scenario_registry`, `opponent_schedule`, and
+  `sensor_profile`. Compilation and validation fail closed when an ID is
+  missing, extra, or has changed content. The source/runtime and field records
+  remain explicit inputs; the module does not extract effective values from a
+  live campaign.
 - The partition contract requires exact `train`, `calibration`, `validation`,
   and `final_test` assignments and rejects duplicates or cross-partition
   overlap for seeds, defender families, layouts, and start conditions. Final
@@ -29,6 +38,13 @@ review record. It does not represent a production freeze or complete Phase 0.
 - Offline implementer checks: 12 focused tests passed; module compilation and
   `git diff --check` passed. No simulator, GPU, device, training, runtime
   calibration, or production artifact was used or created.
+
+## Integrated source hashes
+
+| Path | SHA-256 |
+| --- | --- |
+| `frc_defense/meco_baseline_freeze.py` | `5c5bc333c01f8a89f7a0e70e5add665621d7458f9a33fea3790b7687b64bd821` |
+| `tests/test_meco_baseline_freeze.py` | `043ca040f9b6f86f2b1b1f07b5fd6240438160f03bb5b96d9ccac2162b13567d` |
 
 ## Independent review
 
