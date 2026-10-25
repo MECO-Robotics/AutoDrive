@@ -140,6 +140,7 @@ class EvaluationResult:
     scenario_version: str = '1'
     curriculum_version: str = CURRICULUM_VERSION
     protocol_id: str = ''
+    numeric_gate_verdict: dict | None = None
 
 
 @dataclass
@@ -243,18 +244,79 @@ def _failures(result):
         categories[c.category] = c
     if set(categories) != set(scenario.required_categories):
         failures.append('required categories must match exactly')
+    numeric_verdict = result.numeric_gate_verdict
+    device_category_verdicts = None
+    if numeric_verdict is not None:
+        required_verdict_categories = (
+            'success_rate_pass', 'throughput_ratio_pass',
+            'minimum_useful_throughput_pass', 'useful_gain_ci_pass',
+            'safety_pass')
+        runtime = (numeric_verdict.get('runtime_device')
+                   if isinstance(numeric_verdict, dict) else None)
+        if (not isinstance(numeric_verdict, dict)
+                or numeric_verdict.get('schema_version') != 1
+                or numeric_verdict.get('verdict_type') != 'meco-gpu-numeric-gate-verdict-v1'
+                or numeric_verdict.get('implementation_id') !=
+                    'meco-v4-cluster-episode-device-percentile-v1'
+                or numeric_verdict.get('evaluation_id') != result.evaluation_id
+                or numeric_verdict.get('protocol_id') != result.protocol_id
+                or not isinstance(runtime, dict)
+                or runtime.get('backend') != 'hip'
+                or not isinstance(runtime.get('device'), str)
+                or not runtime['device'].startswith('cuda:')
+                or not runtime['device'][5:].isdigit()
+                or not isinstance(numeric_verdict.get('category_verdicts'), dict)
+                or set(numeric_verdict['category_verdicts']) != set(scenario.required_categories)
+                or not isinstance(numeric_verdict.get('failures'), list)
+                or any(not isinstance(message, str) or not message
+                       for message in numeric_verdict['failures'])):
+            failures.append('GPU numeric gate verdict is missing or unbound')
+        else:
+            device_category_verdicts = numeric_verdict['category_verdicts']
+            failures.extend(numeric_verdict['failures'])
     for name, c in categories.items():
         if type(c.episodes) is not int or type(c.successes) is not int or not 0 <= c.successes <= c.episodes or c.episodes < scenario.gate.min_episodes:
             failures.append(f'{name}: invalid or insufficient episode counts')
-        elif c.successes / c.episodes < scenario.gate.success_rate:
+        elif device_category_verdicts is None and c.successes / c.episodes < scenario.gate.success_rate:
             failures.append(f'{name}: success gate failed')
+        elif device_category_verdicts is not None:
+            category_verdict = device_category_verdicts.get(name)
+            if (not isinstance(category_verdict, dict) or
+                    any(type(category_verdict.get(key)) is not bool
+                        for key in required_verdict_categories) or
+                    not isinstance(category_verdict.get('safety_metric_pass'), dict) or
+                    set(category_verdict.get('safety_metric_pass', {})) != {
+                        'safety_robot_contact_rate', 'safety_field_contact_rate',
+                        'safety_wall_contact_rate'} or
+                    any(type(value) is not bool for value in
+                        category_verdict['safety_metric_pass'].values()) or
+                    category_verdict.get('safety_pass') is not all(
+                        category_verdict.get('safety_metric_pass', {}).values())):
+                failures.append(f'{name}: GPU numeric category verdict is invalid')
+            else:
+                # The device computed the numeric predicates. Host orchestration
+                # only consumes their typed Boolean outcomes; it never repeats
+                # a threshold comparison.
+                for key, message in (
+                        ('success_rate_pass', 'success gate failed'),
+                        ('throughput_ratio_pass', 'qualified paired throughput gate failed'),
+                        ('minimum_useful_throughput_pass', 'absolute delivery minimum failed'),
+                        ('useful_gain_ci_pass', 'paired useful-throughput CI does not exceed frozen margin'),
+                        ('safety_pass', 'safety noninferiority CI failed')):
+                    if not category_verdict[key]:
+                        failures.append(f'{name}: {message}')
+                if category_verdict.get('retention_baseline_pass') is False:
+                    failures.append(f'{name}: retention throughput regression or missing baseline')
+                for metric, passed in category_verdict['safety_metric_pass'].items():
+                    if not passed:
+                        failures.append(f'{name}: safety noninferiority failed for {metric}')
         if not _validation_seeds(c.seeds, c.episodes):
             failures.append(f'{name}: validation seed evidence missing or invalid')
         if not _number(c.useful_throughput) or not _number(c.reference_throughput):
             failures.append(f'{name}: invalid throughput')
             continue
         gate = scenario.gate
-        if gate.throughput_ratio and (
+        if device_category_verdicts is None and gate.throughput_ratio and (
             c.paired is not True or c.reference_qualified is not True
             or c.reference_protocol_id != result.protocol_id
             or not _validation_seeds(c.reference_seeds, c.episodes)
@@ -262,7 +324,7 @@ def _failures(result):
             or c.useful_throughput < gate.throughput_ratio * c.reference_throughput
         ):
             failures.append(f'{name}: qualified paired throughput gate failed')
-        if c.useful_throughput < gate.min_useful_throughput:
+        if device_category_verdicts is None and c.useful_throughput < gate.min_useful_throughput:
             failures.append(f'{name}: absolute delivery minimum failed')
     return failures
 
@@ -299,7 +361,12 @@ def evaluate_promotion(state: CurriculumState, result: EvaluationResult, *, rete
             failures.append(f'{name}: baseline protocol mismatch')
         baseline = state.qualified_throughput.get(name, {})
         for c in retained.categories:
-            if c.category not in baseline or not _number(c.useful_throughput) or c.useful_throughput < .9 * baseline[c.category]:
+            if retained.numeric_gate_verdict is not None:
+                category_verdict = retained.numeric_gate_verdict.get(
+                    'category_verdicts', {}).get(c.category, {})
+                if type(category_verdict.get('retention_baseline_pass')) is not bool:
+                    failures.append(f'{name}/{c.category}: retention GPU verdict is invalid')
+            elif c.category not in baseline or not _number(c.useful_throughput) or c.useful_throughput < .9 * baseline[c.category]:
                 failures.append(f'{name}/{c.category}: retention throughput regression or missing baseline')
     if isinstance(result.evaluation_id, str) and result.evaluation_id:
         state.seen_evaluation_ids.add(result.evaluation_id)

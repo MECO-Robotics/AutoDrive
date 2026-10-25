@@ -25,6 +25,8 @@ PROTOCOL_VERSION = "meco-qualification-v1"
 LEGACY_CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
 D0_PAIRED_REFERENCE_PROTOCOL_VERSION = "meco-qualification-v3"
 CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v4"
+GPU_BOOTSTRAP_PROTOCOL_VERSION = "meco-qualification-v5-gpu-bootstrap"
+GPU_BOOTSTRAP_IMPLEMENTATION_ID = "meco-v4-cluster-episode-device-percentile-v1"
 D0_CALIBRATION_VERSION = "meco-d0-calibration-v2"
 D0_CALIBRATION_SHARD_MANIFEST = "meco-d0-calibration-shard-manifest-v1"
 D0_CALIBRATION_SHARD_ARTIFACT = "meco-d0-calibration-shard-v1"
@@ -81,7 +83,8 @@ def _control_prediction_modes(protocol: dict) -> dict[str, str]:
 
 
 def _reference_control_kwargs(protocol: dict) -> dict:
-    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+    if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION):
         return {"control_prediction_modes": _control_prediction_modes(protocol)}
     if protocol.get("protocol_version") == D0_PAIRED_REFERENCE_PROTOCOL_VERSION:
         return {"control_prediction_modes": _control_prediction_modes(protocol)}
@@ -680,7 +683,7 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
         calibration_ids, calibration_seed_pools, calibration_report_hashes, source_hash, baseline_id = {}, {}, {}, None, None
         reference_reports, reference_ids, reference_hashes = {}, {}, {}
         reviewed, reference_variance_calibration = None, None
-    body = {"protocol_version": CALIBRATED_PROTOCOL_VERSION if calibrated else PROTOCOL_VERSION,
+    body = {"protocol_version": GPU_BOOTSTRAP_PROTOCOL_VERSION if calibrated else PROTOCOL_VERSION,
         "promotion_target_scenario": target,
         "scenario_ids": list(scenarios),
         "retention_scenario_ids": list(_retention_scenarios(target)) if calibrated else [],
@@ -734,15 +737,29 @@ def protocol_document(scenario_id: str | None = None, *, episodes: int = MIN_EPI
     if calibrated:
         body["safety_metrics_schema"] = SAFETY_METRICS_SCHEMA
         body["safety_metrics_source_identity_sha256"] = source_hash
+        body["gpu_statistics_implementation"] = _gpu_statistics_implementation(
+            reference_variance_calibration["normalized_runtime_identity"])
     body["protocol_id"] = hashlib.sha256(json.dumps(body, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return body
 
 
+def _gpu_statistics_implementation(runtime_identity):
+    return {"implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
+        "generator": "torch.Generator(device); torch.randint and float64 torch.rand",
+        "seed_derivation": "sha256(evaluation_id/category)[:16]; safety XOR 0x5AFE and 0xD00D",
+        "cluster_order": "ascending (layout_id, defender_family)",
+        "resampling": "same number of clusters; episodes sampled within each selected cluster using that cluster's original count; pooled episode mean with variable replicate denominator",
+        "replicate_count": BOOTSTRAP_REPLICATES,
+        "quantile_indices": [int(.025 * (BOOTSTRAP_REPLICATES - 1)),
+                             int(.975 * (BOOTSTRAP_REPLICATES - 1))],
+        "runtime_identity": runtime_identity}
+
+
 def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
     """Validate a target-scoped calibrated protocol for target or retention use."""
     if not isinstance(protocol, dict) or protocol.get("protocol_version") not in (
-            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
             LEGACY_CALIBRATED_PROTOCOL_VERSION):
         raise ValueError("promotion requires a calibrated v2 protocol")
     body = {key: value for key, value in protocol.items() if key != "protocol_id"}
@@ -802,6 +819,13 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or protocol.get("safety_metrics_source_identity_sha256")
                 != protocol.get("calibration_source_identity_sha256")):
         raise ValueError("calibrated protocol safety schema/source binding is invalid")
+    if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+        reference_runtime = protocol.get("matched_reference_variance_calibration", {}).get(
+            "normalized_runtime_identity")
+        if (not isinstance(reference_runtime, dict)
+                or protocol.get("gpu_statistics_implementation") !=
+                    _gpu_statistics_implementation(reference_runtime)):
+            raise ValueError("GPU bootstrap implementation/runtime binding is invalid")
     ids = protocol.get("calibration_ids")
     pools = protocol.get("calibration_seed_pools")
     report_hashes = protocol.get("calibration_report_sha256")
@@ -851,7 +875,8 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
                    for value in gain_margins.values())):
         raise ValueError("calibrated protocol useful-gain categories or margins are invalid")
     derivation = protocol.get("useful_gain_derivation")
-    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+    if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION):
         if (not isinstance(derivation, dict)
                 or derivation.get("schema_version") != 1
                 or derivation.get("method") != "explicit_reviewed_reference_variance_margins"
@@ -903,7 +928,8 @@ def _validate_v2_protocol(protocol: dict, scenario: str) -> None:
             or derivation["uncertainty_multiplier"] < 0):
         raise ValueError("calibrated protocol useful-gain derivation provenance is invalid")
     for category in categories:
-        if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+        if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+                GPU_BOOTSTRAP_PROTOCOL_VERSION):
             break
         uncertainty = derivation["uncertainty_by_category"][category]
         threshold = derivation["operational_gain_threshold"][category]
@@ -943,18 +969,22 @@ _EVIDENCE_FIELDS = ("schema_version", "evidence_schema_version", "qualification"
     "paired_reference_policy", "paired_reference_mode", "paired_reference_variant",
     "paired_reference_identity", "reference_selection_basis",
     "safety_floor_policy", "matched_reference_variance_calibration",
-    "paired", "episodes_per_category_stratum",
+    "paired", "episodes_per_category_stratum", "gpu_statistics_implementation",
+    "statistics_runtime_device", "confidence_intervals", "gpu_numeric_verdict",
     "master_seed", "records", "case_ids", "reference_report", "generated_utc",
     "final_test_isolated", "final_test_results")
 
 
-_LEGACY_EVIDENCE_FIELDS = tuple(key for key in _EVIDENCE_FIELDS
+_HISTORICAL_EVIDENCE_FIELDS = tuple(key for key in _EVIDENCE_FIELDS
+    if key not in ("gpu_statistics_implementation", "statistics_runtime_device",
+                   "confidence_intervals", "gpu_numeric_verdict"))
+_LEGACY_EVIDENCE_FIELDS = tuple(key for key in _HISTORICAL_EVIDENCE_FIELDS
     if key not in ("evidence_schema_version", "final_test_isolated", "final_test_results",
                    "useful_gain_calibration_basis", "paired_reference_identity",
                    "paired_reference_mode", "paired_reference_variant",
                    "reference_selection_basis", "safety_floor_policy",
                    "matched_reference_variance_calibration"))
-_D0_PAIRED_EVIDENCE_FIELDS = tuple(key for key in _EVIDENCE_FIELDS
+_D0_PAIRED_EVIDENCE_FIELDS = tuple(key for key in _HISTORICAL_EVIDENCE_FIELDS
     if key != "matched_reference_variance_calibration")
 
 
@@ -962,12 +992,13 @@ def _evidence_digest(report: dict) -> str:
     version = report.get("evidence_schema_version", 1)
     if type(version) is not int or version not in (1, 2):
         raise ValueError("qualification evidence schema version is unsupported")
-    if report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
-            D0_PAIRED_REFERENCE_PROTOCOL_VERSION) and version != 2:
-        raise ValueError("calibrated v3/v4 reports require evidence schema v2")
+    if report.get("protocol_version") in (GPU_BOOTSTRAP_PROTOCOL_VERSION,
+            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION) and version != 2:
+        raise ValueError("calibrated v3/v4/v5 reports require evidence schema v2")
     fields = (_LEGACY_EVIDENCE_FIELDS if version == 1 else
         _D0_PAIRED_EVIDENCE_FIELDS if report.get("protocol_version") == D0_PAIRED_REFERENCE_PROTOCOL_VERSION
-        else _EVIDENCE_FIELDS)
+        else _EVIDENCE_FIELDS if report.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION
+        else _HISTORICAL_EVIDENCE_FIELDS)
     evidence = {key: report.get(key) for key in fields}
     return hashlib.sha256(json.dumps(evidence, sort_keys=True,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -977,8 +1008,8 @@ def _validate_evidence_digest(report: dict) -> None:
     if (not isinstance(report, dict)
             or type(report.get("evidence_schema_version", 1)) is not int
             or report.get("evidence_schema_version", 1) not in (1, 2)
-            or (report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
-                D0_PAIRED_REFERENCE_PROTOCOL_VERSION)
+            or (report.get("protocol_version") in (GPU_BOOTSTRAP_PROTOCOL_VERSION,
+                CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION)
                 and report.get("evidence_schema_version") != 2)
             or report.get("evidence_sha256") != _evidence_digest(report)):
         raise ValueError("qualification evidence digest is missing or invalid")
@@ -998,10 +1029,28 @@ def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
                      "paired_reference_variant", "paired_reference_identity",
                      "reference_selection_basis", "safety_floor_policy",
                      "useful_gain_calibration_basis")
-    if protocol.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION:
+    if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION):
         bindings += ("matched_reference_variance_calibration",)
+    if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+        bindings += ("gpu_statistics_implementation",)
     if any(report.get(field) != protocol.get(field) for field in bindings):
         raise ValueError("qualification report calibration/protocol provenance mismatch")
+    if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+        runtime = report.get("statistics_runtime_device")
+        if not isinstance(runtime, dict) or runtime != _require_calibration_gpu(
+                runtime.get("device")):
+            raise ValueError("GPU statistics report runtime/device identity is invalid")
+        if (_normalized_calibration_runtime(runtime) !=
+                protocol["gpu_statistics_implementation"]["runtime_identity"]):
+            raise ValueError("GPU statistics runtime differs from the frozen protocol")
+        verdict = report.get("gpu_numeric_verdict")
+        if verdict is not None and (not isinstance(verdict, dict)
+                or verdict.get("implementation_id") != GPU_BOOTSTRAP_IMPLEMENTATION_ID
+                or verdict.get("evaluation_id") != report.get("evaluation_id")
+                or verdict.get("protocol_id") != report.get("protocol_id")
+                or verdict.get("runtime_device") != runtime):
+            raise ValueError("GPU numeric verdict is not bound to this report/runtime")
     legacy_v2 = report.get("protocol_version") == LEGACY_CALIBRATED_PROTOCOL_VERSION
     valid_reference = (report.get("paired_reference_policy") == REFERENCE_POLICY
         if legacy_v2 else report.get("paired_reference_policy") in MATCHED_REFERENCE_POLICIES)
@@ -1015,7 +1064,8 @@ def _validate_report_protocol_binding(report: dict, protocol: dict) -> None:
             or reference_report.get("paired_reference_identity") != report.get("paired_reference_identity")
             or reference_report.get("reference_selection_basis") != report.get("reference_selection_basis")
             or reference_report.get("safety_floor_policy") != report.get("safety_floor_policy")
-            or (report.get("protocol_version") == CALIBRATED_PROTOCOL_VERSION
+            or (report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+                GPU_BOOTSTRAP_PROTOCOL_VERSION)
                 and reference_report.get("matched_reference_variance_calibration")
                     != report.get("matched_reference_variance_calibration"))))):
         raise ValueError("qualification reference report declaration differs from its frozen protocol")
@@ -3622,6 +3672,72 @@ def _cluster_bootstrap_ci(groups, *, seed: int, replicates: int = BOOTSTRAP_REPL
             means[int(.975 * (replicates - 1))]]
 
 
+def _device_cluster_bootstrap_ci(groups, *, seed: int, device,
+                                 replicates: int = BOOTSTRAP_REPLICATES,
+                                 replicate_chunk: int = 128):
+    """GPU cluster-then-episode bootstrap with the v4 variable denominator.
+
+    ``groups`` is an already paired mapping from stable cluster key to one
+    finite 1-D device tensor of episode deltas. Each replicate samples the same
+    number of complete clusters; for each selected cluster it samples that
+    cluster's original episode count with replacement, then averages all
+    sampled episode values together. No cluster macro-average is introduced.
+    """
+    import torch
+
+    selected = torch.device(device)
+    if selected.type != "cuda" or selected.index is None or torch.version.hip is None:
+        raise ValueError("GPU cluster bootstrap requires an explicitly indexed HIP device")
+    if type(seed) is not int or seed < 0 or type(replicates) is not int or replicates < 1:
+        raise ValueError("GPU cluster bootstrap seed/replicate count is invalid")
+    if type(replicate_chunk) is not int or replicate_chunk < 1:
+        raise ValueError("GPU cluster bootstrap chunk size is invalid")
+    keys = sorted(groups)
+    if not keys:
+        raise ValueError("GPU cluster bootstrap requires at least one cluster")
+    values = []
+    for key in keys:
+        tensor = groups[key]
+        if (not isinstance(tensor, torch.Tensor) or tensor.ndim != 1 or
+                tensor.numel() < 1 or tensor.device != selected or
+                not tensor.is_floating_point()):
+            raise ValueError("GPU cluster bootstrap groups must be nonempty same-device vectors")
+        values.append(tensor.to(dtype=torch.float64))
+    lengths = torch.tensor([value.numel() for value in values],
+                           device=selected, dtype=torch.long)
+    maximum = max(value.numel() for value in values)
+    padded = torch.zeros((len(values), maximum), device=selected,
+                         dtype=torch.float64)
+    for index, value in enumerate(values):
+        padded[index, :value.numel()] = value
+    generator = torch.Generator(device=selected)
+    generator.manual_seed(seed)
+    means = []
+    for start in range(0, replicates, replicate_chunk):
+        count = min(replicate_chunk, replicates - start)
+        cluster_index = torch.randint(len(keys), (count, len(keys)),
+            device=selected, generator=generator)
+        selected_lengths = lengths.index_select(0, cluster_index.reshape(-1)).reshape(
+            count, len(keys))
+        selected_values = padded.index_select(0, cluster_index.reshape(-1)).reshape(
+            count, len(keys), maximum)
+        uniforms = torch.rand((count, len(keys), maximum), device=selected,
+            dtype=torch.float64, generator=generator)
+        episode_index = torch.floor(
+            uniforms * selected_lengths[..., None].to(torch.float64)).to(torch.long)
+        sampled = selected_values.gather(2, episode_index)
+        valid_episode = torch.arange(maximum, device=selected)[None, None, :] < \
+            selected_lengths[..., None]
+        numerator = torch.where(valid_episode, sampled,
+                                torch.zeros_like(sampled)).sum(dim=(1, 2))
+        denominator = selected_lengths.sum(dim=1).to(torch.float64)
+        means.append(numerator / denominator)
+    ordered = torch.sort(torch.cat(means)).values
+    lower = int(.025 * (replicates - 1))
+    upper = int(.975 * (replicates - 1))
+    return ordered[lower], ordered[upper]
+
+
 def _validate_case_rows(report, expected_cases, policy):
     expected = {(case.category, case.layout_id, case.defender_family,
                  case.start_condition, case.sensor_profile, seed)
@@ -3653,7 +3769,8 @@ def _validate_case_rows(report, expected_cases, policy):
                        if isinstance(metrics, dict) else set())
         if safety_keys - SAFETY_METRIC_NAMES:
             raise ValueError("qualification row contains an unknown safety metric")
-        if report.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+        if report.get("protocol_version") in (GPU_BOOTSTRAP_PROTOCOL_VERSION,
+                CALIBRATED_PROTOCOL_VERSION,
                 D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
             source_hash = report.get("source_identity_sha256")
             if (not isinstance(source_hash, str) or len(source_hash) != 64
@@ -3688,6 +3805,142 @@ def _validate_case_rows(report, expected_cases, policy):
     return found
 
 
+def _device_category_statistics(category, cases, candidate_rows,
+        reference_rows, d0_rows, *, device, evaluation_id, protocol_id,
+        gate, useful_margin, safety_margins, seed, reference_policy,
+        compute_gate=True, safety_seed_map=None):
+    """Aggregate one category and its paired CIs on the selected HIP device."""
+    import torch
+
+    selected = torch.device(device)
+    if selected.type != "cuda" or selected.index is None or torch.version.hip is None:
+        raise ValueError("v4 statistics require an explicitly indexed HIP device")
+    if not (len(cases) == len(candidate_rows) == len(reference_rows) == len(d0_rows)
+            and candidate_rows):
+        raise ValueError("GPU category statistics require complete aligned policy rows")
+    candidate_metrics = [row["metrics"] for row in candidate_rows]
+    reference_metrics = [row["metrics"] for row in reference_rows]
+    d0_metrics = [row["metrics"] for row in d0_rows]
+    throughput = torch.tensor([row["useful_throughput"] for row in candidate_metrics],
+        device=selected, dtype=torch.float64)
+    reference_throughput = torch.tensor(
+        [row["useful_throughput"] for row in reference_metrics],
+        device=selected, dtype=torch.float64)
+    success = torch.tensor([bool(row["success"]) for row in candidate_metrics],
+        device=selected, dtype=torch.bool)
+    paired_delta = throughput - reference_throughput
+    cluster_indices = {}
+    for index, case in enumerate(cases):
+        cluster_indices.setdefault((case.layout_id, case.defender_family), []).append(index)
+    paired_groups = {key: paired_delta.index_select(0, torch.tensor(indices,
+        device=selected, dtype=torch.long)) for key, indices in cluster_indices.items()}
+    lower, upper = _device_cluster_bootstrap_ci(paired_groups, seed=seed,
+                                                 device=selected)
+    candidate_mean = throughput.mean()
+    reference_mean = reference_throughput.mean()
+    success_count = success.sum()
+    success_rate = success_count.to(torch.float64) / success.numel()
+    verdict_tensors = {
+        "success_rate_pass": success_rate >= gate.success_rate,
+        "throughput_ratio_pass": (candidate_mean >= gate.throughput_ratio * reference_mean
+            if gate.throughput_ratio else torch.ones((), device=selected, dtype=torch.bool)),
+        "minimum_useful_throughput_pass": candidate_mean >= gate.min_useful_throughput,
+        "useful_gain_ci_pass": lower > float(useful_margin),
+    }
+    safety_tensors = {}
+    safety_cis = {}
+    if set(safety_margins) != SAFETY_METRIC_NAMES:
+        raise ValueError("GPU v4 statistics require the complete frozen safety margin set")
+    for metric, margin in sorted(safety_margins.items()):
+        candidate_value = torch.tensor([row[metric] for row in candidate_metrics],
+            device=selected, dtype=torch.float64)
+        reference_value = torch.tensor([row[metric] for row in reference_metrics],
+            device=selected, dtype=torch.float64)
+        d0_value = torch.tensor([row[metric] for row in d0_metrics],
+            device=selected, dtype=torch.float64)
+        candidate_reference = candidate_value - reference_value
+        candidate_d0 = candidate_value - d0_value
+        reference_groups = {key: candidate_reference.index_select(0,
+            torch.tensor(indices, device=selected, dtype=torch.long))
+            for key, indices in cluster_indices.items()}
+        d0_groups = {key: candidate_d0.index_select(0,
+            torch.tensor(indices, device=selected, dtype=torch.long))
+            for key, indices in cluster_indices.items()}
+        safety_seed = (safety_seed_map or {}).get(metric, (seed ^ 0x5AFE,
+                                                           seed ^ 0xD00D))[0]
+        d0_safety_seed = (safety_seed_map or {}).get(metric, (seed ^ 0x5AFE,
+                                                              seed ^ 0xD00D))[1]
+        safety_lower, safety_upper = _device_cluster_bootstrap_ci(
+            reference_groups, seed=safety_seed, device=selected)
+        d0_lower, d0_upper = _device_cluster_bootstrap_ci(
+            d0_groups, seed=d0_safety_seed, device=selected)
+        safety_pass = (safety_upper <= float(margin)) & (d0_upper <= float(margin))
+        safety_tensors[metric] = safety_pass
+        safety_cis[metric] = (safety_lower, safety_upper, d0_lower, d0_upper,
+                              float(margin))
+    verdict_tensors["safety_pass"] = torch.stack(
+        [safety_tensors[name] for name in sorted(safety_tensors)]).all()
+    # Transfer only completed aggregates and Boolean decisions for report/state
+    # orchestration. All means, CI selection, and numeric comparisons above are
+    # device operations.
+    scalar_tensors = [success_count, success_rate, candidate_mean, reference_mean,
+        lower, upper, *[value for values in safety_cis.values() for value in values[:4]],
+        *verdict_tensors.values(), *[safety_tensors[name]
+            for name in sorted(safety_tensors)]]
+    scalars = torch.stack([value.to(torch.float64) for value in scalar_tensors]
+                          ).detach().cpu().tolist()
+    cursor = 0
+    success_count_value = int(scalars[cursor]); cursor += 1
+    success_rate_value = float(scalars[cursor]); cursor += 1
+    candidate_mean_value = float(scalars[cursor]); cursor += 1
+    reference_mean_value = float(scalars[cursor]); cursor += 1
+    lower_value, upper_value = float(scalars[cursor]), float(scalars[cursor + 1]); cursor += 2
+    copied_safety = {}
+    for metric in sorted(safety_cis):
+        copied_safety[metric] = [float(value) for value in scalars[cursor:cursor + 4]]
+        cursor += 4
+    verdict_names = tuple(verdict_tensors)
+    verdict_values = {name: bool(value) for name, value in
+        zip(verdict_names, scalars[cursor:cursor + len(verdict_names)])}
+    cursor += len(verdict_names)
+    safety_values = {name: bool(value) for name, value in
+        zip(sorted(safety_tensors), scalars[cursor:])}
+    failures = []
+    if compute_gate:
+        if not verdict_values["success_rate_pass"]:
+            failures.append(f"{category}: success gate failed")
+        if not verdict_values["throughput_ratio_pass"]:
+            failures.append(f"{category}: qualified paired throughput gate failed")
+        if not verdict_values["minimum_useful_throughput_pass"]:
+            failures.append(f"{category}: absolute delivery minimum failed")
+        if not verdict_values["useful_gain_ci_pass"]:
+            failures.append(f"{category}: paired useful-throughput CI does not exceed frozen margin")
+        for metric, passed in safety_values.items():
+            if not passed:
+                failures.append(f"{category}: safety noninferiority CI exceeds {metric} margin")
+    return {
+        "category_result": {"category": category, "episodes": len(candidate_rows),
+            "successes": success_count_value,
+            "success_rate": success_rate_value,
+            "useful_throughput": candidate_mean_value,
+            "reference_throughput": reference_mean_value},
+        "confidence_intervals": {"candidate_mean": candidate_mean_value,
+            "reference_mean": reference_mean_value,
+            "paired_difference_95_ci": [lower_value, upper_value],
+            "clusters": len(cluster_indices), "episodes": len(candidate_rows),
+            "cluster_keys": [list(key) for key in sorted(cluster_indices)],
+            "safety_noninferiority": {
+                metric: {"candidate_minus_reference_95_ci": values[:2],
+                    "reference_policy": reference_policy,
+                    "candidate_minus_D0_safety_floor_95_ci": values[2:4],
+                    "noninferiority_margin": values[4]}
+                for metric, values in copied_safety.items()}},
+        "category_verdict": {**verdict_values,
+            "safety_metric_pass": safety_values},
+        "failures": failures,
+    }
+
+
 def consume_validation_round(report: dict, *, protocol: dict,
                              state: CurriculumState,
                              retention_reports: tuple[dict, ...] = ()):
@@ -3703,6 +3956,8 @@ def consume_validation_round(report: dict, *, protocol: dict,
     if scenario != protocol.get("promotion_target_scenario"):
         raise ValueError("only the frozen target scenario may advance promotion")
     _validate_v2_protocol(protocol, scenario)
+    if protocol.get("protocol_version") != GPU_BOOTSTRAP_PROTOCOL_VERSION:
+        raise ValueError("historical host-bootstrap protocols cannot enter a promotion streak")
     _validate_evidence_digest(report)
     _validate_report_protocol_binding(report, protocol)
     from .curriculum_training import source_identity
@@ -3746,6 +4001,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
                   for policy in (candidate_policy, reference_policy, REFERENCE_POLICY)}
     categories = []
     ci = {}
+    category_verdicts = {}
     gate_failures = []
     if (report.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
             or report.get("safety_metrics_source_identity_sha256") != report.get("source_identity_sha256")):
@@ -3754,6 +4010,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
         gate_failures.append("protocol does not authorize a verified safety metric implementation")
     if report.get("source_identity_sha256") != protocol.get("calibration_source_identity_sha256"):
         raise ValueError("qualification report source identity differs from calibrated protocol")
+    selected_device = report["statistics_runtime_device"]["device"]
     for category in SCENARIOS[scenario].required_categories:
         case_rows = [case for case in expected_cases if case.category == category]
         seeds = tuple(seed for case in case_rows for seed in case.seeds)
@@ -3765,95 +4022,55 @@ def consume_validation_round(report: dict, *, protocol: dict,
             (case.category, case.layout_id, case.defender_family,
              case.start_condition, case.sensor_profile, seed)]
             for case in case_rows for seed in case.seeds]
-        successes = sum(int(bool(row["metrics"]["success"])) for row in candidate_rows)
-        candidate_rate = sum(float(row["metrics"]["useful_throughput"])
-                             for row in candidate_rows) / len(candidate_rows)
-        reference_rate = sum(float(row["metrics"]["useful_throughput"])
-                             for row in reference_rows) / len(reference_rows)
-        # Paired, stratified bootstrap: resample complete (family, layout)
-        # clusters, then episodes within each selected cluster.
-        groups = {}
-        for case, candidate, reference in zip(
-                (case for case in case_rows for _ in case.seeds),
-                candidate_rows, reference_rows):
-            key = (case.layout_id, case.defender_family)
-            groups.setdefault(key, []).append((candidate, reference))
-        paired_by_cluster = {}
-        for key, pairs in groups.items():
-            paired_by_cluster[key] = [float(a["metrics"]["useful_throughput"])
-                - float(b["metrics"]["useful_throughput"]) for a, b in pairs]
         seed = int(hashlib.sha256(f"{report['evaluation_id']}/{category}".encode()).hexdigest()[:16], 16)
-        ci[category] = {"candidate_mean": candidate_rate,
-            "reference_mean": reference_rate,
-            "paired_difference_95_ci": _cluster_bootstrap_ci(paired_by_cluster, seed=seed),
-            "paired_reference_policy": reference_policy,
-            "clusters": len(groups), "episodes": len(candidate_rows),
-            "cluster_keys": [list(key) for key in sorted(groups)]}
         margin = protocol.get("minimum_useful_gain", {}).get(category)
         if type(margin) not in (int, float) or not math.isfinite(margin) or margin < 0:
-            gate_failures.append(f"{category}: frozen useful gain margin missing")
-        elif ci[category]["paired_difference_95_ci"][0] <= margin:
-            gate_failures.append(f"{category}: paired useful-throughput CI does not exceed frozen margin")
-        safety_cis = {}
+            raise ValueError(f"{category}: frozen useful gain margin is invalid")
         d0_rows = [per_policy[REFERENCE_POLICY][
             (case.category, case.layout_id, case.defender_family,
              case.start_condition, case.sensor_profile, seed)]
             for case in case_rows for seed in case.seeds]
-        for metric, safety_margin in protocol.get("safety_noninferiority_margins", {}).items():
-            safety_groups = {key: [] for key in groups}
-            d0_safety_groups = {key: [] for key in groups}
-            valid = True
-            for case, candidate, reference, d0 in zip(
-                    (case for case in case_rows for _ in case.seeds),
-                    candidate_rows, reference_rows, d0_rows):
-                candidate_value = candidate["metrics"].get(metric)
-                reference_value = reference["metrics"].get(metric)
-                d0_value = d0["metrics"].get(metric)
-                if (type(candidate_value) not in (int, float)
-                        or type(reference_value) not in (int, float)
-                        or type(d0_value) not in (int, float)
-                        or not math.isfinite(candidate_value)
-                        or not math.isfinite(reference_value)
-                        or not math.isfinite(d0_value)):
-                    valid = False
-                    break
-                cluster = (case.layout_id, case.defender_family)
-                safety_groups[cluster].append(
-                    float(candidate_value) - float(reference_value))
-                d0_safety_groups[cluster].append(float(candidate_value) - float(d0_value))
-            if not valid:
-                gate_failures.append(f"{category}: safety metric {metric} is absent or invalid")
-                safety_cis[metric] = None
-            else:
-                interval = _cluster_bootstrap_ci(safety_groups, seed=seed ^ 0x5AFE)
-                d0_interval = _cluster_bootstrap_ci(d0_safety_groups,
-                    seed=seed ^ 0xD00D)
-                safety_cis[metric] = {
-                    "candidate_minus_reference_95_ci": interval,
-                    "reference_policy": reference_policy,
-                    "candidate_minus_D0_safety_floor_95_ci": d0_interval,
-                    "noninferiority_margin": safety_margin}
-                if interval[1] > safety_margin:
-                    gate_failures.append(f"{category}: safety noninferiority CI exceeds {metric} margin")
-                if d0_interval[1] > safety_margin:
-                    gate_failures.append(f"{category}: D0 safety floor CI exceeds {metric} margin")
-        ci[category]["safety_noninferiority"] = safety_cis
-        categories.append(CategoryResult(category, len(candidate_rows), successes,
-            candidate_rate, reference_rate, True, True, protocol_id,
+        computed = _device_category_statistics(category,
+            [case for case in case_rows for _ in case.seeds],
+            candidate_rows, reference_rows, d0_rows, device=selected_device,
+            evaluation_id=report["evaluation_id"], protocol_id=protocol_id,
+            gate=SCENARIOS[scenario].gate, useful_margin=margin,
+            safety_margins=protocol["safety_noninferiority_margins"], seed=seed,
+            reference_policy=reference_policy)
+        summary_row = computed["category_result"]
+        ci[category] = computed["confidence_intervals"]
+        category_verdicts[category] = computed["category_verdict"]
+        gate_failures.extend(computed["failures"])
+        categories.append(CategoryResult(category, summary_row["episodes"],
+            summary_row["successes"], summary_row["useful_throughput"],
+            summary_row["reference_throughput"], True, True, protocol_id,
             seeds, seeds))
+    numeric_verdict = {"schema_version": 1,
+        "verdict_type": "meco-gpu-numeric-gate-verdict-v1",
+        "implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
+        "evaluation_id": report["evaluation_id"], "protocol_id": protocol_id,
+        "runtime_device": report["statistics_runtime_device"],
+        "category_verdicts": category_verdicts, "failures": gate_failures}
+    if report.get("gpu_numeric_verdict") is not None and report["gpu_numeric_verdict"] != numeric_verdict:
+        raise ValueError("stored GPU numeric verdict differs from recomputed device result")
+    report["confidence_intervals"] = ci
+    report["gpu_numeric_verdict"] = numeric_verdict
+    report["evidence_sha256"] = _evidence_digest(report)
+    _validate_evidence_digest(report)
     result = EvaluationResult(report["evaluation_id"], scenario, "validation",
         tuple(categories), report["bundle_id"],
-        SCENARIOS[scenario].version, CURRICULUM_VERSION, protocol_id)
-    retention_results = tuple(_retention_result(item, protocol, report)
+        SCENARIOS[scenario].version, CURRICULUM_VERSION, protocol_id,
+        numeric_verdict)
+    retention_results = tuple(_retention_result(item, protocol, report,
+                                device=device, state=state)
                               for item in retention_reports)
     decision = evaluate_promotion(state, result,
-                                  retention_results=retention_results,
-                                  additional_failures=gate_failures)
+                                  retention_results=retention_results)
     return decision, {"evaluation_result": asdict(result), "confidence_intervals": ci,
         "promotion": asdict(decision), "state": state.to_dict()}
 
 
-def _retention_result(report, protocol, primary):
+def _retention_result(report, protocol, primary, *, device, state):
     """Convert a complete retention report; promotion gate enforces same bundle."""
     _validate_evidence_digest(report)
     _validate_v2_protocol(protocol, protocol.get("scenario_ids", [None])[0])
@@ -3881,16 +4098,61 @@ def _retention_result(report, protocol, primary):
         raise ValueError("retention report case coverage differs from the frozen protocol")
     records = _validate_case_rows(report, cases, candidate)
     categories = []
+    verdict_by_category = {}
+    numeric_failures = []
     for category in SCENARIOS[scenario].required_categories:
         rows = [row for key, row in records.items() if key[0] == category]
         seeds = tuple(row["seed"] for row in rows)
-        throughput = sum(row["metrics"]["useful_throughput"] for row in rows) / len(rows)
+        import torch
+        selected = torch.device(device)
+        metrics = [row["metrics"] for row in rows]
+        throughput_tensor = torch.tensor([row["useful_throughput"] for row in metrics],
+            device=selected, dtype=torch.float64)
+        success_tensor = torch.tensor([bool(row["success"]) for row in metrics],
+            device=selected, dtype=torch.bool)
+        mean_tensor = throughput_tensor.mean()
+        success_count_tensor = success_tensor.sum()
+        gate = SCENARIOS[scenario].gate
+        success_pass_tensor = (success_count_tensor.to(torch.float64) /
+                               success_tensor.numel()) >= gate.success_rate
+        throughput_ratio_pass_tensor = (mean_tensor >= gate.throughput_ratio * mean_tensor
+            if gate.throughput_ratio else torch.ones((), device=selected, dtype=torch.bool))
+        minimum_pass_tensor = mean_tensor >= gate.min_useful_throughput
+        baseline = state.qualified_throughput.get(scenario, {}).get(category)
+        baseline_pass_tensor = (mean_tensor >= .9 * float(baseline)
+            if baseline is not None else torch.zeros((), device=selected, dtype=torch.bool))
+        copied = torch.stack((mean_tensor, success_count_tensor.to(torch.float64),
+            success_pass_tensor.to(torch.float64), throughput_ratio_pass_tensor.to(torch.float64),
+            minimum_pass_tensor.to(torch.float64), baseline_pass_tensor.to(torch.float64))
+            ).detach().cpu().tolist()
+        throughput, successes, success_pass, ratio_pass, minimum_pass, baseline_pass = copied
+        status = {"success_rate_pass": bool(success_pass),
+            "throughput_ratio_pass": bool(ratio_pass),
+            "minimum_useful_throughput_pass": bool(minimum_pass),
+            "useful_gain_ci_pass": True, "safety_pass": True,
+            "safety_metric_pass": {},
+            "retention_baseline_pass": bool(baseline_pass)}
+        verdict_by_category[category] = status
+        if not status["success_rate_pass"]:
+            numeric_failures.append(f"{category}: success gate failed")
+        if not status["throughput_ratio_pass"]:
+            numeric_failures.append(f"{category}: qualified paired throughput gate failed")
+        if not status["minimum_useful_throughput_pass"]:
+            numeric_failures.append(f"{category}: absolute delivery minimum failed")
+        if not status["retention_baseline_pass"]:
+            numeric_failures.append(f"{scenario}/{category}: retention throughput regression or missing baseline")
         categories.append(CategoryResult(category, len(rows),
-            sum(bool(row["metrics"]["success"]) for row in rows),
-            throughput, throughput, True, True, protocol["protocol_id"], seeds, seeds))
+            int(successes), float(throughput), float(throughput), True, True,
+            protocol["protocol_id"], seeds, seeds))
+    numeric_verdict = {"schema_version": 1,
+        "verdict_type": "meco-gpu-numeric-gate-verdict-v1",
+        "implementation_id": GPU_BOOTSTRAP_IMPLEMENTATION_ID,
+        "evaluation_id": report["evaluation_id"], "protocol_id": report["protocol_id"],
+        "runtime_device": report["statistics_runtime_device"],
+        "category_verdicts": verdict_by_category, "failures": numeric_failures}
     return EvaluationResult(report["evaluation_id"], scenario, "validation",
         tuple(categories), report["bundle_id"], SCENARIOS[scenario].version,
-        CURRICULUM_VERSION, protocol["protocol_id"])
+        CURRICULUM_VERSION, protocol["protocol_id"], numeric_verdict)
 
 
 def write_immutable_report(path: str | Path, report: dict) -> str:
@@ -3945,6 +4207,12 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
     if split == "validation" and scenario_id != protocol.get("promotion_target_scenario") and not collect_only:
         raise ValueError("validation promotion is target-only; prerequisites are retention evidence")
     _validate_v2_protocol(protocol, scenario_id)
+    statistics_runtime_device = None
+    if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+        statistics_runtime_device = _require_calibration_gpu(device)
+        if (_normalized_calibration_runtime(statistics_runtime_device) !=
+                protocol["gpu_statistics_implementation"]["runtime_identity"]):
+            raise ValueError("selected validation device/runtime differs from frozen GPU statistics protocol")
     if protocol.get("promotion_gates", {}).get(scenario_id) != asdict(SCENARIOS[scenario_id].gate):
         raise ValueError("protocol gate definition does not match curriculum version")
     episodes = protocol.get("episodes_per_category_stratum")
@@ -3956,7 +4224,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     if protocol.get("protocol_id") != protocol_id:
         raise ValueError("qualification protocol hash mismatch")
-    if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+    if protocol.get("protocol_version") in (GPU_BOOTSTRAP_PROTOCOL_VERSION,
+            CALIBRATED_PROTOCOL_VERSION,
             D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
         from .curriculum_training import source_identity
         current_source_hash = hashlib.sha256(json.dumps(source_identity(), sort_keys=True,
@@ -4021,7 +4290,8 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
             raise ValueError("checkpoint/source identity changed during qualification round")
         report_safety_schema = report.get("safety_metrics_schema")
         report_safety_source_hash = report.get("safety_metrics_source_identity_sha256")
-        if protocol.get("protocol_version") in (CALIBRATED_PROTOCOL_VERSION,
+        if protocol.get("protocol_version") in (GPU_BOOTSTRAP_PROTOCOL_VERSION,
+                CALIBRATED_PROTOCOL_VERSION,
                 D0_PAIRED_REFERENCE_PROTOCOL_VERSION, LEGACY_CALIBRATED_PROTOCOL_VERSION):
             if (report_safety_schema != protocol.get("safety_metrics_schema")
                     or report_safety_source_hash != protocol.get("safety_metrics_source_identity_sha256")
@@ -4055,6 +4325,9 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "useful_gain_derivation": protocol.get("useful_gain_derivation"),
         "useful_gain_calibration_basis": protocol.get("useful_gain_calibration_basis"),
         "matched_reference_variance_calibration": protocol.get("matched_reference_variance_calibration"),
+        "gpu_statistics_implementation": protocol.get("gpu_statistics_implementation"),
+        "statistics_runtime_device": statistics_runtime_device,
+        "confidence_intervals": None, "gpu_numeric_verdict": None,
         "safety_noninferiority_margins": protocol.get("safety_noninferiority_margins"),
         "safety_gate_status": protocol.get("safety_gate_status"),
         "safety_metrics_schema": safety_schema,
@@ -4065,7 +4338,7 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "paired_reference_identity": protocol.get("paired_reference_identity"),
         "reference_selection_basis": protocol.get("reference_selection_basis"),
         "safety_floor_policy": REFERENCE_POLICY if protocol.get("protocol_version") in (
-            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
             LEGACY_CALIBRATED_PROTOCOL_VERSION) else None,
         "paired": True,
         "episodes_per_category_stratum": episodes,
@@ -4082,7 +4355,7 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
         "paired_reference_identity": protocol.get("paired_reference_identity"),
         "reference_selection_basis": protocol.get("reference_selection_basis"),
         "safety_floor_policy": REFERENCE_POLICY if protocol.get("protocol_version") in (
-            CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
+            GPU_BOOTSTRAP_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION, D0_PAIRED_REFERENCE_PROTOCOL_VERSION,
             LEGACY_CALIBRATED_PROTOCOL_VERSION) else None,
         "matched_reference_variance_calibration": protocol.get("matched_reference_variance_calibration")}
     round_report["evidence_sha256"] = _evidence_digest(round_report)
@@ -4099,6 +4372,7 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                     for key in ("policy_id", "prediction_mode", "prediction_contract", "checkpoint_sha256"))):
             raise ValueError("final-test reference identity differs from the preselected protocol")
         summary = {}
+        final_test_cis = {}
         for category in SCENARIOS[scenario_id].required_categories:
             cases = [case for case in expected if case.category == category]
             keys = [(case, seed) for case in cases for seed in case.seeds]
@@ -4110,40 +4384,70 @@ def run_validation_round(*, scenario_id: str, candidate_policy: str,
                 for case, seed in keys]
             d0 = [d0_map[(case.category, case.layout_id, case.defender_family,
                 case.start_condition, case.sensor_profile, seed)] for case, seed in keys]
-            success = sum(bool(row["metrics"]["success"]) for row in cand)
-            grouped = {}
-            for (case, _), a, b in zip(keys, cand, ref):
-                grouped.setdefault((case.layout_id, case.defender_family), []).append(
-                    float(a["metrics"]["useful_throughput"])
-                    - float(b["metrics"]["useful_throughput"]))
-            safety_summary = {}
-            for metric, margin in protocol.get("safety_noninferiority_margins", {}).items():
-                reference_diffs = {}
-                d0_diffs = {}
-                for (case, _), candidate_row, reference_row, d0_row in zip(keys, cand, ref, d0):
-                    key = (case.layout_id, case.defender_family)
-                    reference_diffs.setdefault(key, []).append(
-                        candidate_row["metrics"][metric] - reference_row["metrics"][metric])
-                    d0_diffs.setdefault(key, []).append(
-                        candidate_row["metrics"][metric] - d0_row["metrics"][metric])
-                safety_summary[metric] = {
-                    "candidate_minus_reference_95_ci": _cluster_bootstrap_ci(reference_diffs,
-                        seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/ref".encode()).hexdigest()[:16], 16)),
-                    "candidate_minus_D0_safety_floor_95_ci": _cluster_bootstrap_ci(d0_diffs,
-                        seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/D0".encode()).hexdigest()[:16], 16)),
-                    "noninferiority_margin": margin}
-            summary[category] = {"episodes": len(cand), "successes": success,
-                "success_rate": success / len(cand),
-                "candidate_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in cand) / len(cand),
-                "reference_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in ref) / len(ref),
-                "paired_reference_policy": reference_policy,
-                "paired_reference_mode": protocol.get("paired_reference_mode"),
-                "paired_reference_variant": protocol.get("paired_reference_variant"),
-                "safety_noninferiority": safety_summary,
-                "paired_difference_95_ci": _cluster_bootstrap_ci(grouped,
-                    seed=int(hashlib.sha256(f"{run_id}/{category}".encode()).hexdigest()[:16], 16))}
+            if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+                seed = int(hashlib.sha256(f"{run_id}/{category}".encode()).hexdigest()[:16], 16)
+                safety_seed_map = {metric: (
+                    int(hashlib.sha256(f"{run_id}/{category}/{metric}/ref".encode()).hexdigest()[:16], 16),
+                    int(hashlib.sha256(f"{run_id}/{category}/{metric}/D0".encode()).hexdigest()[:16], 16))
+                    for metric in protocol["safety_noninferiority_margins"]}
+                computed = _device_category_statistics(category,
+                    [case for case in cases for _ in case.seeds], cand, ref, d0,
+                    device=statistics_runtime_device["device"], evaluation_id=run_id,
+                    protocol_id=protocol_id, gate=SCENARIOS[scenario_id].gate,
+                    useful_margin=protocol["minimum_useful_gain"][category],
+                    safety_margins=protocol["safety_noninferiority_margins"],
+                    seed=seed, reference_policy=reference_policy, compute_gate=False,
+                    safety_seed_map=safety_seed_map)
+                values = computed["category_result"]
+                ci_row = computed["confidence_intervals"]
+                final_test_cis[category] = ci_row
+                summary[category] = {"episodes": values["episodes"],
+                    "successes": values["successes"],
+                    "success_rate": values["success_rate"],
+                    "candidate_useful_throughput": values["useful_throughput"],
+                    "reference_useful_throughput": values["reference_throughput"],
+                    "paired_reference_policy": reference_policy,
+                    "paired_reference_mode": protocol.get("paired_reference_mode"),
+                    "paired_reference_variant": protocol.get("paired_reference_variant"),
+                    "safety_noninferiority": ci_row["safety_noninferiority"],
+                    "paired_difference_95_ci": ci_row["paired_difference_95_ci"]}
+            else:
+                success = sum(bool(row["metrics"]["success"]) for row in cand)
+                grouped = {}
+                for (case, _), a, b in zip(keys, cand, ref):
+                    grouped.setdefault((case.layout_id, case.defender_family), []).append(
+                        float(a["metrics"]["useful_throughput"])
+                        - float(b["metrics"]["useful_throughput"]))
+                safety_summary = {}
+                for metric, margin in protocol.get("safety_noninferiority_margins", {}).items():
+                    reference_diffs = {}
+                    d0_diffs = {}
+                    for (case, _), candidate_row, reference_row, d0_row in zip(keys, cand, ref, d0):
+                        key = (case.layout_id, case.defender_family)
+                        reference_diffs.setdefault(key, []).append(
+                            candidate_row["metrics"][metric] - reference_row["metrics"][metric])
+                        d0_diffs.setdefault(key, []).append(
+                            candidate_row["metrics"][metric] - d0_row["metrics"][metric])
+                    safety_summary[metric] = {
+                        "candidate_minus_reference_95_ci": _cluster_bootstrap_ci(reference_diffs,
+                            seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/ref".encode()).hexdigest()[:16], 16)),
+                        "candidate_minus_D0_safety_floor_95_ci": _cluster_bootstrap_ci(d0_diffs,
+                            seed=int(hashlib.sha256(f"{run_id}/{category}/{metric}/D0".encode()).hexdigest()[:16], 16)),
+                        "noninferiority_margin": margin}
+                summary[category] = {"episodes": len(cand), "successes": success,
+                    "success_rate": success / len(cand),
+                    "candidate_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in cand) / len(cand),
+                    "reference_useful_throughput": sum(row["metrics"]["useful_throughput"] for row in ref) / len(ref),
+                    "paired_reference_policy": reference_policy,
+                    "paired_reference_mode": protocol.get("paired_reference_mode"),
+                    "paired_reference_variant": protocol.get("paired_reference_variant"),
+                    "safety_noninferiority": safety_summary,
+                    "paired_difference_95_ci": _cluster_bootstrap_ci(grouped,
+                        seed=int(hashlib.sha256(f"{run_id}/{category}".encode()).hexdigest()[:16], 16))}
         round_report["final_test_isolated"] = True
         round_report["final_test_results"] = summary
+        if protocol.get("protocol_version") == GPU_BOOTSTRAP_PROTOCOL_VERSION:
+            round_report["confidence_intervals"] = final_test_cis
         round_report["evidence_sha256"] = _evidence_digest(round_report)
         _validate_evidence_digest(round_report)
         write_immutable_report(output, round_report)
