@@ -322,7 +322,7 @@ def _goal_nodes_batch(env, graph: LegalPoseGraph, xy, heading, intake_mask):
     device = xy.device
     hbin = torch.round(torch.remainder(heading, 2. * math.pi) *
                        (8. / (2. * math.pi))).to(torch.long).remainder(8)
-    if graph.node_count == 0:
+    if graph.node_capacity == 0:
         return (torch.full_like(hbin, -1), xy, hbin,
                 torch.zeros_like(hbin, dtype=torch.bool))
     finite = torch.isfinite(xy).all(dim=-1) & torch.isfinite(heading)

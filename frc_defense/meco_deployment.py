@@ -9,6 +9,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import math
 import platform
 import resource
 import subprocess
@@ -25,8 +26,13 @@ from .meco_tracks import (HIDDEN, MECO_CANDIDATE_RAW_FEATURE_COUNT,
 from .meco_input_provenance import input_contract_digest
 
 BATCH = 1
-NODES = 256
-DEGREE = 8
+PLAN_A_GRID_RESOLUTION_M = .3
+PLAN_A_FIELD_LENGTH_M = 16.54
+PLAN_A_FIELD_WIDTH_M = 8.07
+PLAN_A_GRID_NX = math.ceil(PLAN_A_FIELD_LENGTH_M / PLAN_A_GRID_RESOLUTION_M)
+PLAN_A_GRID_NY = math.ceil(PLAN_A_FIELD_WIDTH_M / PLAN_A_GRID_RESOLUTION_M)
+NODES = 8 * PLAN_A_GRID_NX * PLAN_A_GRID_NY
+DEGREE = 10
 REGIONS = 64
 CANDIDATES = 16
 RASTER_H = RASTER_W = 64
@@ -41,10 +47,17 @@ def _parameter_dimensions(track: str) -> dict:
             "hidden_features": HIDDEN, "heading_bins": 8,
             "behavior_outputs": 5}
     if track in ("A2", "A3"):
-        return {"nodes": NODES, "node_features": 9, "edge_degree": DEGREE,
+        return {"node_capacity": NODES, "node_features": 9, "edge_degree": DEGREE,
             "regions": REGIONS, "global_features": GLOBAL_FEATURES,
             "hidden_features": HIDDEN, "heading_bins": 8,
-            "behavior_outputs": 5}
+            "grid_nx": PLAN_A_GRID_NX, "grid_ny": PLAN_A_GRID_NY,
+            "grid_resolution_m": PLAN_A_GRID_RESOLUTION_M,
+            "field_length_m": PLAN_A_FIELD_LENGTH_M,
+            "field_width_m": PLAN_A_FIELD_WIDTH_M,
+            "behavior_outputs": 5,
+            "graph_schema": "fixed-capacity-pose-v1",
+            "compact_order": "row-major-valid-prefix",
+            "coarse_adjacency_width": REGIONS}
     if track in ("C1", "C2"):
         return {"raster_channels": 6 if track == "C2" else None,
             "raster_height": RASTER_H if track == "C2" else None,
@@ -200,12 +213,13 @@ def dummy_inputs(track: str, device="cpu") -> tuple[torch.Tensor, ...]:
         nodes[:, :, 6:8] = .5
         edges = li(BATCH, NODES, DEGREE)
         edge_mask = bi(BATCH, NODES, DEGREE)
+        node_valid = torch.ones((BATCH, NODES), device=device, dtype=torch.bool)
         regions = li(BATCH, NODES).remainder(REGIONS)
         by_name.update(node_features=nodes, edges=edges, edge_mask=edge_mask,
-            region_ids=regions)
+            node_valid=node_valid, region_ids=regions)
         if track == "A2":
-            coarse_edges = li(BATCH, REGIONS, DEGREE)
-            coarse_mask = bi(BATCH, REGIONS, DEGREE)
+            coarse_edges = li(BATCH, REGIONS, REGIONS)
+            coarse_mask = bi(BATCH, REGIONS, REGIONS)
             by_name.update(coarse_edges=coarse_edges, coarse_edge_mask=coarse_mask)
     names = input_names(track)
     return tuple(by_name[name] for name in names)

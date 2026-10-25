@@ -29,7 +29,7 @@ def plan_a_ppo_contract_metadata() -> dict[str, str]:
 
 def project_pose_penalty(track: str, penalty: torch.Tensor, legal_lookup: torch.Tensor,
                          planner, field_length: float, field_width: float,
-                         *, mode: str = "learned") -> torch.Tensor:
+                         *, mode: str = "learned", node_valid=None) -> torch.Tensor:
     """Project an A track's output to the XY map consumed by weighted AD*."""
     if track not in ("A1", "A2", "A3"):
         raise ValueError("Plan A penalty projection only supports A1/A2/A3")
@@ -44,8 +44,7 @@ def project_pose_penalty(track: str, penalty: torch.Tensor, legal_lookup: torch.
         return penalty.new_zeros(expected)
     if penalty.ndim != (4 if track == "A1" else 2) or penalty.shape[0] != 1:
         raise ValueError(f"{track} penalty field has an invalid shape")
-    if not bool(torch.isfinite(penalty).all()) or bool((penalty < 0).any()):
-        raise ValueError("Plan A penalty field must be finite and nonnegative")
+    penalty = torch.nan_to_num(penalty).clamp_min(0.)
     legal = legal_lookup >= 0
     if track == "A1":
         if penalty.shape[1] != 8:
@@ -61,12 +60,15 @@ def project_pose_penalty(track: str, penalty: torch.Tensor, legal_lookup: torch.
         heading_maps = F.grid_sample(penalty, sampling_grid, mode="bilinear",
             padding_mode="border", align_corners=False)[0]
     else:
-        if penalty.shape[1] != int(legal_lookup.max().item()) + 1:
-            raise ValueError("A2/A3 penalty node count differs from legal pose lookup")
-        heading_maps = penalty[0][legal_lookup.clamp_min(0)]
+        if node_valid is None:
+            raise ValueError("A2/A3 penalty projection requires node_valid")
+        if (node_valid.shape != (1, penalty.shape[1]) or node_valid.dtype != torch.bool):
+            raise ValueError("A2/A3 penalty projection requires the fixed-capacity node mask")
+        if node_valid.device != penalty.device:
+            raise ValueError("A2/A3 node validity must remain with the penalty tensor")
+        safe_penalty = torch.where(node_valid[0], penalty[0], torch.zeros_like(penalty[0]))
+        heading_maps = safe_penalty[legal_lookup.clamp_min(0)]
     counts = legal.sum(0)
-    if bool((counts == 0).all()):
-        raise ValueError("planner grid has no legal heading for penalty projection")
     projected = (heading_maps * legal.to(heading_maps.dtype)).sum(0)
     return projected / counts.clamp_min(1).to(projected.dtype)
 

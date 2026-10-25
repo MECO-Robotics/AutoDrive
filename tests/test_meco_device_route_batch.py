@@ -12,9 +12,11 @@ from frc_defense.experimental_route_evaluation import (
     evaluate_device_route_chunks,
     evaluate_device_routes,
     evaluate_routes,
+    make_device_route_chunk_map,
     RouteQuery,
 )
 import frc_defense.meco_candidates as meco_candidates
+import frc_defense.experimental_route_evaluation as route_evaluation
 from frc_defense.meco_candidates import (CandidateCommitment, DeviceCandidateBatch,
                                          _goal_nodes_batch)
 from frc_defense.meco_pose_graph import build_legal_pose_graph
@@ -23,14 +25,254 @@ from types import SimpleNamespace
 from frc_defense.learning_contract import CandidateTable
 from frc_defense.meco_tracks import (EXTRA_FEATURES, MECO_CANDIDATE_MODEL_INPUT_WIDTH,
                                      SAFE_ACTION_FEATURES,
+                                     MECO_INPUT_NAMES, MECO_MAX_INFERENCE_AGE_S,
+                                     MecoInferenceRequest,
                                      MecoInferenceResponse,
                                      ProductionMecoAdapter, SafeActionCandidates,
                                      candidate_policy_logits,
                                      candidate_feature_tensor,
                                      build_safe_action_candidates,
                                      make_meco_track, sample_candidate_action,
-                                     make_meco_inference_request, score_candidates)
+                                     make_meco_inference_request,
+                                     ordered_candidate_mask_digest,
+                                     ordered_candidate_order_digest, score_candidates)
+from frc_defense.meco_input_provenance import input_contract_digest
 from frc_defense.curriculum_scenarios import make_curriculum_env
+
+
+def test_plan_a_route_chunk_map_preserves_all_global_rows_without_truncation():
+    mapping = make_device_route_chunk_map(130, device="cpu")
+    assert mapping.spans == ((0, 64), (64, 128), (128, 130))
+    assert mapping.global_row.tolist() == list(range(130))
+    assert mapping.chunk_index.tolist() == [0] * 64 + [1] * 64 + [2] * 2
+    assert mapping.local_row.tolist() == list(range(64)) * 2 + [0, 1]
+
+
+def test_plan_a_route_chunk_map_keeps_empty_support_explicit():
+    mapping = make_device_route_chunk_map(0, device="cpu")
+    assert mapping.spans == ()
+    assert mapping.global_row.shape == (0,)
+    with pytest.raises(ValueError, match="contiguous"):
+        type(mapping)(1, ((1, 1),), torch.tensor([0]), torch.tensor([0]),
+                      torch.tensor([0]))
+
+
+def _synthetic_route_batch(queries, *, device="cpu", nonfinite_row=None):
+    count = len(queries)
+    route_device = torch.device(device)
+    status = torch.full((count,), DeviceRouteBatch.FEASIBLE,
+                        device=route_device, dtype=torch.long)
+    feasible = torch.ones((count,), device=route_device, dtype=torch.bool)
+    path_xy = torch.zeros((count, 1, 2), device=route_device)
+    lengths = torch.ones((count,), device=route_device, dtype=torch.long)
+    distances = torch.ones((count,), device=route_device, dtype=torch.float64)
+    endpoint = torch.zeros_like(distances)
+    cost = torch.ones_like(distances)
+    if nonfinite_row is not None:
+        cost[nonfinite_row] = torch.nan
+    return DeviceRouteBatch(tuple(queries), status, feasible, path_xy, lengths,
+        distances, endpoint, cost,
+        torch.arange(count, device=route_device, dtype=torch.long),
+        bump_cost_grid_edges=torch.zeros_like(cost),
+        learned_cost_grid_edges=torch.zeros_like(cost))
+
+
+def test_device_route_chunks_reassemble_130_rows_in_canonical_order(monkeypatch):
+    calls = []
+    def fake_evaluate(env, queries, goals, **kwargs):
+        calls.append((tuple(queries), goals.detach().clone()))
+        return _synthetic_route_batch(queries)
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(130))
+    goals = torch.arange(260, dtype=torch.float32).reshape(130, 2)
+    result = evaluate_device_route_chunks(env, queries, goals)
+    assert [len(items) for items, _ in calls] == [64, 64, 2]
+    assert [items[0].candidate_id for items, _ in calls] == ["node:0", "node:64", "node:128"]
+    assert result.queries == queries
+    assert result.candidate_index.tolist() == list(range(130))
+    assert torch.equal(result.distance_m, torch.ones(130, dtype=torch.float64))
+
+
+def test_device_route_chunks_fail_closed_as_a_whole_on_nonfinite_chunk(monkeypatch):
+    call_index = 0
+    def fake_evaluate(env, queries, goals, **kwargs):
+        nonlocal call_index
+        index = call_index
+        call_index += 1
+        return _synthetic_route_batch(queries,
+            nonfinite_row=0 if index == 1 else None)
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(130))
+    result = evaluate_device_route_chunks(env, queries,
+        torch.zeros((130, 2), dtype=torch.float32))
+    assert not result.feasible.any()
+    assert (result.status_code == DeviceRouteBatch.INVALID).all()
+
+
+def test_device_route_chunks_reject_missing_or_permuted_chunk_identity(monkeypatch):
+    def fake_evaluate(env, queries, goals, **kwargs):
+        return _synthetic_route_batch(tuple(reversed(queries)))
+    monkeypatch.setattr(route_evaluation, "evaluate_device_routes", fake_evaluate)
+    env = SimpleNamespace(device=torch.device("cpu"))
+    queries = tuple(DeviceRouteQuery(f"node:{i}", "snapshot", 0, 3)
+                    for i in range(65))
+    with pytest.raises(ValueError, match="identity/order"):
+        evaluate_device_route_chunks(env, queries,
+            torch.zeros((65, 2), dtype=torch.float32))
+
+
+@pytest.mark.parametrize("track", ("A1", "A2", "A3"))
+def test_plan_a_inference_request_keeps_dynamic_support_mask_device_resident(track):
+    captured = time.monotonic()
+    candidate_ids = tuple(f"plan-a-row:{i}" for i in range(24))
+    request = MecoInferenceRequest(track=track, snapshot_id="snapshot:plan-a",
+        checkpoint_sha256="a" * 64, protocol_id="plan-a-contract",
+        observation_schema=1, observation_timestamp=1.0,
+        capture_monotonic=captured, dispatch_monotonic=captured,
+        expires_monotonic=captured + MECO_MAX_INFERENCE_AGE_S,
+        input_names=MECO_INPUT_NAMES[track],
+        input_shapes=tuple((1, 6, 32, 32) if name == "raster" else
+            (1, 7) if name == "globals_" else (1, 64) if name == "hidden" else
+            (1, 24, 9) if name == "node_features" else
+            (1, 24, 10) if name == "edges" or name == "edge_mask" else
+            (1, 24) if name in ("region_ids", "node_valid") else (1, 64, 64)
+            for name in MECO_INPUT_NAMES[track]),
+        candidate_ids=candidate_ids, valid_mask=(), fallback_index=-1,
+        request_sequence=1, generation_id="generation:plan-a",
+        candidate_mask_digest=ordered_candidate_order_digest(candidate_ids),
+        legal_pose_order_digest="b" * 64,
+        input_contract_sha256=input_contract_digest(), model_id=f"meco:{track}",
+        candidate_support_mode="device-mask")
+    assert request.valid_mask == ()
+    assert request.fallback_index == -1
+    assert request.candidate_support_mode == "device-mask"
+
+
+@pytest.mark.parametrize(("track", "support_mode"), (
+    ("A2", "device-mask"), ("A3", "device-mask"),
+    ("A2", "table-mask"), ("A3", "table-mask")))
+def test_plan_a_adapter_propagates_graph_status_for_each_mask_mode(track, support_mode):
+    candidate_ids = ("plan-a-row:0", "plan-a-row:1")
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.device = torch.device("cuda:0")
+    adapter.checkpoint_sha256 = "c" * 64
+    adapter.protocol_id = "plan-a-device-status"
+    adapter._last_inference_exception_type = None
+    fake = lambda tensor: tensor.as_subclass(_CudaContractTensor)
+    inputs = {
+        "node_features": fake(torch.zeros((1, 2, 9))),
+        "edges": fake(torch.zeros((1, 2, 10), dtype=torch.long)),
+        "edge_mask": fake(torch.zeros((1, 2, 10), dtype=torch.bool)),
+        "node_valid": fake(torch.ones((1, 2), dtype=torch.bool)),
+        "region_ids": fake(torch.tensor([[0, 1]])),
+        "globals_": fake(torch.zeros((1, 7))),
+        "hidden": fake(torch.zeros((1, 64))),
+    }
+    if track == "A2":
+        inputs["coarse_edges"] = fake(torch.zeros((1, 64, 64), dtype=torch.long))
+        inputs["coarse_edge_mask"] = fake(torch.zeros((1, 64, 64), dtype=torch.bool))
+    # Preserve canonical request key order for the adapter's schema check.
+    inputs = {name: inputs[name] for name in MECO_INPUT_NAMES[track]}
+    capture = time.monotonic() - .01
+    request = MecoInferenceRequest(track=track, snapshot_id="status:1",
+        checkpoint_sha256=adapter.checkpoint_sha256, protocol_id=adapter.protocol_id,
+        observation_schema=1, observation_timestamp=1., capture_monotonic=capture,
+        dispatch_monotonic=capture, expires_monotonic=capture + MECO_MAX_INFERENCE_AGE_S,
+        input_names=MECO_INPUT_NAMES[track],
+        input_shapes=tuple(tuple(inputs[name].shape) for name in MECO_INPUT_NAMES[track]),
+        candidate_ids=candidate_ids,
+        valid_mask=((True, True) if support_mode == "table-mask" else ()),
+        fallback_index=(0 if support_mode == "table-mask" else -1),
+        request_sequence=1, generation_id="status-generation",
+        candidate_mask_digest=(ordered_candidate_mask_digest(candidate_ids, (True, True))
+            if support_mode == "table-mask" else ordered_candidate_order_digest(candidate_ids)),
+        legal_pose_order_digest="d" * 64,
+        input_contract_sha256=input_contract_digest(), model_id=f"meco:{track}",
+        candidate_support_mode=support_mode)
+
+    def invalid_model(**_inputs):
+        return {"utility": fake(torch.ones((1, 2))),
+            "penalty": fake(torch.ones((1, 2))),
+            "behavior_logits": fake(torch.ones((1, 5))),
+            "hidden": fake(torch.ones((1, 64))),
+            "device_input_valid": fake(torch.tensor(False))}
+
+    adapter.model = invalid_model
+    broker_inputs = ({**inputs, "__candidate_valid_mask": fake(torch.tensor([[True, True]]))}
+                     if support_mode == "device-mask" else inputs)
+    with _NoHostScalarSync():
+        response = adapter._infer_sync(request, broker_inputs, now=time.monotonic())
+    assert response is not None, adapter._last_inference_exception_type
+    assert not response.outputs["__inference_valid"].item()
+    assert torch.equal(response.outputs["utility"], torch.zeros_like(response.outputs["utility"]))
+
+
+@pytest.mark.parametrize("track", ("A2", "A3"))
+def test_table_mask_graph_status_reaches_candidate_fallback(track):
+    ids = ("node:0", "node:1")
+    names = ("legal_node_index", "behavior_index")
+    table = CandidateTable("table-status:1", ids, ((0., 0.), (1., 1.)),
+                           (True, True), names)
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.checkpoint_sha256 = "e" * 64
+    adapter.protocol_id = "table-status-contract"
+    adapter.next_request_identity = lambda: (1, "table-status-generation")
+    adapter._broker = SimpleNamespace(counters=lambda: {})
+    submitted = {}
+    adapter.submit_inference = lambda request, inputs: submitted.update(
+        request=request, inputs=inputs) or (request, inputs)
+
+    def poll(request, _handle):
+        completed = max(time.monotonic(), request.dispatch_monotonic)
+        return MecoInferenceResponse(schema="meco-inference-v2", track=track,
+            checkpoint_sha256=request.checkpoint_sha256,
+            protocol_id=request.protocol_id, model_id=request.model_id,
+            observation_timestamp=request.observation_timestamp,
+            capture_monotonic=request.capture_monotonic,
+            dispatch_monotonic=request.dispatch_monotonic,
+            completed_monotonic=completed, expires_monotonic=request.expires_monotonic,
+            request_sequence=request.request_sequence, generation_id=request.generation_id,
+            snapshot_id=request.snapshot_id,
+            candidate_mask_digest=request.candidate_mask_digest,
+            legal_pose_order_digest=request.legal_pose_order_digest,
+            input_contract_sha256=request.input_contract_sha256,
+            outputs={"utility": torch.zeros((1, 2)),
+                "penalty": torch.zeros((1, 2)),
+                "behavior_logits": torch.zeros((1, 5)),
+                "hidden": torch.zeros((1, 64)),
+                "__inference_valid": torch.tensor(False)})
+    adapter.poll_inference = poll
+
+    graph = {"node_features": torch.zeros((1, 2, 9)),
+        "edges": torch.zeros((1, 2, 10), dtype=torch.long),
+        "edge_mask": torch.zeros((1, 2, 10), dtype=torch.bool),
+        "node_valid": torch.ones((1, 2), dtype=torch.bool),
+        "region_ids": torch.tensor([[0, 1]])}
+    if track == "A2":
+        graph["coarse_edges"] = torch.zeros((1, 64, 64), dtype=torch.long)
+        graph["coarse_edge_mask"] = torch.zeros((1, 64, 64), dtype=torch.bool)
+    raster = torch.zeros((1, 6, 4, 4))
+    globals_ = torch.zeros((1, 7))
+    ordered_inputs = {name: {"raster": raster, "globals_": globals_,
+        "hidden": torch.zeros((1, 64)), **graph}[name]
+        for name in MECO_INPUT_NAMES[track]}
+    capture = time.monotonic() - .01
+    request = make_meco_inference_request(adapter, table=table,
+        observation_timestamp=1., capture_monotonic=capture,
+        inputs=ordered_inputs, legal_pose_order_digest="f" * 64)
+    result = score_candidates(track, adapter, raster=torch.zeros((1, 6, 4, 4)),
+        globals_=torch.zeros((1, 7)), table=table, graph=graph,
+        inference_request=request, observation_timestamp=1., capture_monotonic=capture)
+    assert submitted, "table-mask adapter request should be dispatched"
+    assert result["inference_status"] == "device_validated"
+    assert result["inference_status_code"].item() == 1
+    assert torch.equal(result["logits"], torch.tensor([[0., -torch.inf]]))
 
 
 class _NoHostScalarSync(TorchDispatchMode):
@@ -1016,7 +1258,7 @@ def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():
     env = SimpleNamespace(device="cpu", sim=Sim(), planner=Planner(),
         _perceived_robot_obstacles=lambda: torch.zeros((6, 0, 3)))
     class Graph:
-        node_count = 1
+        node_capacity = 1
         resolution_m = 1.
         nx = 2
         ny = 2

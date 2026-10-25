@@ -10,7 +10,10 @@ from frc_defense.meco_dashboard import (
 from frc_defense.meco_path_penalty import (
     PLAN_A_PPO_RECOMPUTATION_CONTRACT,
     plan_a_ppo_contract_metadata,
+    project_pose_penalty,
 )
+import pytest
+import torch
 
 
 def _report_penalty(*, mode="learned", contract=PLAN_A_PPO_RECOMPUTATION_CONTRACT):
@@ -65,3 +68,18 @@ def test_pending_runtime_validation_and_p0_route_provenance_remain_unchanged():
     assert source.count('"runtime_route_validation": "pending_representative_simulator_replay"') == 2
     assert 'route_provenance != LEGACY_ROUTE_COST_PROVENANCE' in inspect.getsource(
         __import__("frc_defense.meco_dashboard", fromlist=["_comparison"]))
+
+
+def test_a2_penalty_projection_ignores_padded_node_values_even_if_lookup_points_there():
+    penalty = torch.tensor([[2.0, 9.0e8]])
+    lookup = torch.ones((8, 2, 2), dtype=torch.long)
+    node_valid = torch.tensor([[True, False]])
+    projected = project_pose_penalty("A2", penalty, lookup, None, 2.0, 2.0,
+                                    node_valid=node_valid)
+    torch.testing.assert_close(projected, torch.zeros((2, 2)))
+
+
+def test_a2_penalty_projection_requires_explicit_node_validity():
+    with pytest.raises(ValueError, match="requires node_valid"):
+        project_pose_penalty("A2", torch.zeros((1, 2)),
+            torch.zeros((8, 2, 2), dtype=torch.long), None, 2.0, 2.0)

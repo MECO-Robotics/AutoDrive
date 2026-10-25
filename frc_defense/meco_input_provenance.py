@@ -5,7 +5,7 @@ import hashlib
 import json
 
 
-SCHEMA = "meco-model-input-provenance-v1"
+SCHEMA = "meco-model-input-provenance-v2"
 TRACKS = ("A1", "A2", "A3", "C1", "C2")
 
 
@@ -28,13 +28,16 @@ _INPUTS = {
     "edge_mask": {"shape": "[B,N,10] bool", "tracks": ["A2", "A3"],
         "origin": "legal SE(2) graph transition validity", "observed": False,
         "boundary": "planner-derived transition feasibility"},
+    "node_valid": {"shape": "[B,N] bool", "tracks": ["A2", "A3"],
+        "origin": "fixed-capacity row-major legal-pose compaction", "observed": False,
+        "boundary": "planner-derived graph validity; padded rows are inert"},
     "region_ids": {"shape": "[B,N]", "tracks": ["A2", "A3"],
         "origin": "connected partition of legal graph", "observed": False,
         "boundary": "deterministic derived topology; no game-state observation"},
-    "coarse_edges": {"shape": "[B,R,Dc]", "tracks": ["A2"],
+    "coarse_edges": {"shape": "[B,64,64]", "tracks": ["A2"],
         "origin": "inter-region legal graph transitions", "observed": False,
         "boundary": "planner-derived transition topology"},
-    "coarse_edge_mask": {"shape": "[B,R,Dc] bool", "tracks": ["A2"],
+    "coarse_edge_mask": {"shape": "[B,64,64] bool", "tracks": ["A2"],
         "origin": "inter-region transition validity", "observed": False,
         "boundary": "planner-derived transition feasibility"},
     "candidate_features": {"shape": "[B,C,40]", "tracks": ["C1", "C2"],
@@ -71,12 +74,16 @@ _RAW_FEATURE_NAMES = tuple(item[0] for item in _FEATURE_ORIGINS)
 def registry():
     """Return the versioned, JSON-safe registry in canonical declaration order."""
     return {"schema": SCHEMA, "tracks": list(TRACKS),
+        "plan_a_graph_contract": {"schema": "fixed-capacity-pose-v1",
+            "capacity": "8*nx*ny", "compact_order": "row-major-valid-prefix",
+            "fine_edge_slots": 10, "region_count": 64,
+            "coarse_adjacency_shape": "[B,64,64]"},
         "model_inputs": {name: dict(spec) for name, spec in _INPUTS.items()},
         "serialized_inputs_by_track": {
             "A1": ["raster", "globals_", "hidden"],
-            "A2": ["node_features", "edges", "edge_mask", "region_ids", "globals_",
+            "A2": ["node_features", "edges", "edge_mask", "node_valid", "region_ids", "globals_",
                 "coarse_edges", "coarse_edge_mask", "hidden"],
-            "A3": ["node_features", "edges", "edge_mask", "region_ids", "globals_", "hidden"],
+            "A3": ["node_features", "edges", "edge_mask", "node_valid", "region_ids", "globals_", "hidden"],
             "C1": ["globals_", "candidate_features", "hidden"],
             "C2": ["raster", "globals_", "candidate_features", "hidden"]},
         "candidate_features": [{"name": name, "origin": origin,

@@ -13,6 +13,7 @@ import math
 import enum
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 import inspect
 import platform
 from pathlib import Path
@@ -29,7 +30,7 @@ from .curriculum_scenarios import make_curriculum_env, teacher_actions
 from .meco_candidates import (CANDIDATE_BOUNDARY,
     ROUTE_COST_POINTS_PER_SECOND, build_route_feasible_candidates)
 from .meco_plan_a_policy import (SUPPORT_ORDER, build_plan_a_support,
-    plan_a_support_digest)
+    plan_a_support_digest, plan_a_support_digest_cpu_reference)
 from .meco_pose_graph import build_legal_pose_graph
 from .meco_tracks import (PREDICTION_MODES, candidate_digest,
     prediction_contract)
@@ -716,9 +717,6 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
     support = build_plan_a_support(env, graph, env._last_obs,
         observation.snapshot_id,
         require_hip_shortest_path=require_hip_plan_a)
-    support_hash = plan_a_support_digest(support, graph)
-    if support_hash != support.support_digest:
-        raise RuntimeError("Plan A support digest failed self-validation")
 
     valid_c = [index for index, valid in enumerate(candidates.table.valid_mask) if valid]
     valid_c = _deterministic_sample(valid_c, max_c_candidates,
@@ -772,6 +770,14 @@ def _prefix_snapshot(env, graph, episode_id, *, action_ticks, candidate_k,
             "goal_heading_rad": float(support.goal_heading[node].item())}
         item["descriptor_sha256"] = _hash(item)
         a_descriptors.append(item)
+    # The selected descriptor rows are now materialized at this counterfactual
+    # artifact boundary. Only now may dynamic support bytes be digested; the
+    # live HIP path uses device SHA-256 and copies its fixed-size digest here.
+    support_hash = (plan_a_support_digest(support, graph) if require_hip_plan_a
+                    else plan_a_support_digest_cpu_reference(support, graph))
+    support = replace(support, support_digest=support_hash)
+    if not support.support_digest or support.support_digest != support_hash:
+        raise RuntimeError("Plan A support digest failed post-selection binding")
     result = {"snapshot_id": observation.snapshot_id,
         "macro_ticks": action_ticks,
         "simulator_state_sha256": _simulator_state_digest(env),

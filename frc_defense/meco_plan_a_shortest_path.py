@@ -139,7 +139,11 @@ def plan_a_fallback_pair(valid_matrix, physical_distance):
 
 def plan_a_dijkstra_hip(edge_dst, edge_costs, edge_lengths, edge_allowed, *, root,
                         root_start_cost, root_connector_m):
-    """Fail-closed prototype entry point; never called by training dispatch."""
+    """Legacy harness prototype with host status read; excluded from live dispatch.
+
+    Training/evaluation use ``plan_a_dijkstra_hip_for_graph`` and its
+    device-resident status tensor instead.
+    """
     import torch
 
     if not PLAN_A_HIP_PARITY_PROFILE_GATE_PASSED:
@@ -198,29 +202,30 @@ def plan_a_dijkstra_hip_for_graph(graph, *, device, root, root_start_cost,
     heading = graph.heading
     edge_dst = graph.edges[0]
     edge_allowed = graph.edge_mask[0]
-    n = int(graph.node_count)
+    n = int(graph.node_capacity)
     if (not all(torch.is_tensor(value) and value.device == selected for value in
-                (xy, heading, edge_dst, edge_allowed)) or
+                (xy, heading, edge_dst, edge_allowed, graph.node_valid[0])) or
             xy.shape != (n, 2) or heading.shape != (n,) or
             edge_dst.ndim != 2 or edge_dst.shape[0] != n or
             edge_allowed.shape != edge_dst.shape or
+            graph.node_valid.shape != (1, n) or graph.node_valid.dtype != torch.bool or
             edge_dst.dtype != torch.int64 or edge_allowed.dtype != torch.bool or
             xy.dtype not in (torch.float32, torch.float64) or
             heading.dtype not in (torch.float32, torch.float64) or
-            type(root) is not int or not 0 <= root < n or
-            type(root_start_cost) not in (int, float) or
-            type(root_connector_m) not in (int, float) or
-            not math.isfinite(float(root_start_cost)) or float(root_start_cost) < 0 or
-            not math.isfinite(float(root_connector_m)) or float(root_connector_m) < 0):
+            not torch.is_tensor(root) or root.shape != () or root.dtype != torch.int64 or
+            not torch.is_tensor(root_start_cost) or root_start_cost.shape != () or
+            root_start_cost.dtype != torch.float64 or
+            not torch.is_tensor(root_connector_m) or root_connector_m.shape != () or
+            root_connector_m.dtype != torch.float64 or
+            root.device != selected or root_start_cost.device != selected or
+            root_connector_m.device != selected):
         raise ValueError("HIP graph route requires valid same-device graph tensors and root costs")
     from .meco_plan_a_shortest_path_hip import extension
-    route, physical, parent, parent_length, settled = extension().dijkstra_graph(
+    route, physical, parent, parent_length, settled, status = extension().dijkstra_graph(
         xy.contiguous(), heading.contiguous(), edge_dst.contiguous(),
-        edge_allowed.contiguous(), root, float(root_start_cost),
-        float(root_connector_m))
-    # The device heap settles nodes by (distance, node_id); remove only the
-    # unreachable -1 tail without materializing any route data on the host.
-    order = settled[settled >= 0]
+        edge_allowed.contiguous(), graph.node_valid[0].contiguous(),
+        root.contiguous(), root_start_cost.contiguous(),
+        root_connector_m.contiguous())
     return {"route_cost": route, "physical_distance": physical,
         "parent_ids": parent, "parent_edge_m": parent_length,
-        "traversal_order": order}
+        "traversal_order": settled, "status": status}

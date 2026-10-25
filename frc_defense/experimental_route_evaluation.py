@@ -23,6 +23,85 @@ MAX_ROUTE_QUERY_BATCH = 64
 
 
 @dataclass(frozen=True, slots=True)
+class DeviceRouteChunkMap:
+    """Deterministic global-to-chunk mapping for an ordered route support."""
+
+    row_count: int
+    spans: tuple[tuple[int, int], ...]
+    global_row: torch.Tensor
+    chunk_index: torch.Tensor
+    local_row: torch.Tensor
+
+    def __post_init__(self):
+        if type(self.row_count) is not int or self.row_count < 0:
+            raise ValueError("row_count must be a nonnegative exact integer")
+        if (self.global_row.shape != (self.row_count,) or
+                self.chunk_index.shape != (self.row_count,) or
+                self.local_row.shape != (self.row_count,)):
+            raise ValueError("chunk mapping tensors must be [row_count]")
+        if any(t.dtype != torch.long for t in
+               (self.global_row, self.chunk_index, self.local_row)):
+            raise ValueError("chunk mapping tensors must be int64")
+        if any(t.device != self.global_row.device for t in
+               (self.chunk_index, self.local_row)):
+            raise ValueError("chunk mapping tensors must share a device")
+        expected = tuple((start, min(start + MAX_ROUTE_QUERY_BATCH, self.row_count))
+                         for start in range(0, self.row_count, MAX_ROUTE_QUERY_BATCH))
+        if self.spans != expected:
+            raise ValueError("route chunk spans must be contiguous, ordered, and complete")
+
+
+def make_device_route_chunk_map(row_count: int, *, device) -> DeviceRouteChunkMap:
+    """Build host-known 64-row spans and device-resident row coordinates."""
+    if type(row_count) is not int or row_count < 0:
+        raise ValueError("row_count must be a nonnegative exact integer")
+    spans = tuple((start, min(start + MAX_ROUTE_QUERY_BATCH, row_count))
+                  for start in range(0, row_count, MAX_ROUTE_QUERY_BATCH))
+    global_row = torch.arange(row_count, device=device, dtype=torch.long)
+    chunk_index = torch.div(global_row, MAX_ROUTE_QUERY_BATCH,
+                            rounding_mode="floor")
+    local_row = global_row.remainder(MAX_ROUTE_QUERY_BATCH)
+    return DeviceRouteChunkMap(row_count, spans, global_row, chunk_index, local_row)
+
+
+def validate_device_route_batch(batch: "DeviceRouteBatch", queries, *, device):
+    """Return an on-device scalar contract bit; malformed batches fail closed.
+
+    Python checks cover immutable identity/order/shape metadata. Numeric validity
+    stays as a device predicate and can be combined with the support mask without
+    synchronizing the route decision.
+    """
+    items = tuple(queries)
+    if not isinstance(batch, DeviceRouteBatch):
+        raise TypeError("batch must be a DeviceRouteBatch")
+    if batch.queries != items or len(batch.queries) != len(items):
+        raise ValueError("route batch identity/order differs from requested rows")
+    target = torch.device(device)
+    if batch.device != target:
+        raise ValueError("route batch is on the wrong device")
+    count = len(items)
+    expected_shapes = ((count,), (count,), (count, 2), (count,), (count,),
+                       (count,), (count,))
+    actual = (batch.status_code.shape, batch.feasible.shape,
+              batch.path_xy.shape[:1] + batch.path_xy.shape[2:],
+              batch.path_length.shape, batch.distance_m.shape,
+              batch.endpoint_error_m.shape, batch.weighted_cost_grid_edges.shape)
+    if actual != expected_shapes:
+        raise ValueError("route batch numeric shapes are malformed")
+    rows = torch.arange(count, device=target, dtype=torch.long)
+    lengths_ok = ((batch.path_length >= 0) &
+                  (batch.path_length <= batch.path_xy.shape[1]))
+    finite = (torch.isfinite(batch.path_xy).all() &
+              torch.isfinite(batch.distance_m).all() &
+              torch.isfinite(batch.endpoint_error_m).all() &
+              torch.isfinite(batch.weighted_cost_grid_edges).all())
+    indices_ok = (batch.candidate_index == rows).all()
+    status_ok = ((batch.status_code >= DeviceRouteBatch.INVALID) &
+                 (batch.status_code <= DeviceRouteBatch.FEASIBLE)).all()
+    return lengths_ok.all() & finite & indices_ok & status_ok
+
+
+@dataclass(frozen=True, slots=True)
 class RouteQuery:
     """A requested XY route for one observed world/robot at one snapshot."""
 
@@ -75,6 +154,8 @@ class DeviceRouteBatch:
     candidate_index: torch.Tensor
     cost_units: str = "normalized_grid_edge_units"
     cost_provenance: str = "legacy_bump_cost_path_integral_v2"
+    bump_cost_grid_edges: torch.Tensor | None = None
+    learned_cost_grid_edges: torch.Tensor | None = None
 
     INVALID = 0
     AT_GOAL = 1
@@ -101,8 +182,16 @@ class DeviceRouteBatch:
         tensors = (self.feasible, self.path_xy, self.path_length, self.distance_m,
                    self.endpoint_error_m, self.weighted_cost_grid_edges,
                    self.candidate_index)
+        tensors += tuple(value for value in (self.bump_cost_grid_edges,
+                                              self.learned_cost_grid_edges)
+                         if value is not None)
         if any(value.device != self.status_code.device for value in tensors):
             raise ValueError("DeviceRouteBatch tensors must share one device")
+        for name, value in (("bump_cost_grid_edges", self.bump_cost_grid_edges),
+                            ("learned_cost_grid_edges", self.learned_cost_grid_edges)):
+            if value is not None and (value.shape != (count,) or
+                                      not value.is_floating_point()):
+                raise ValueError(f"{name} must be a floating [Q] tensor")
 
     @property
     def device(self):
@@ -358,7 +447,9 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
             empty_float.clone(), empty_float.clone(),
             torch.empty((0,), device=device, dtype=torch.long),
             cost_provenance=("legacy_bump_cost_path_integral_v2"
-                if learned_traversal_cost is None else learned_cost_provenance))
+                if learned_traversal_cost is None else learned_cost_provenance),
+            bump_cost_grid_edges=empty_float.clone(),
+            learned_cost_grid_edges=empty_float.clone())
     if len(items) > MAX_ROUTE_QUERY_BATCH:
         raise ValueError(f"route batch exceeds {MAX_ROUTE_QUERY_BATCH} queries")
     if any(not isinstance(query, DeviceRouteQuery) for query in items):
@@ -513,12 +604,20 @@ def evaluate_device_routes(env, queries: tuple[DeviceRouteQuery, ...] | list[Dev
     distance = torch.where(feasible, distance, distance)
     endpoint_error = torch.where(at_goal_clear, torch.zeros_like(endpoint_error),
                                  endpoint_error)
-    weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
-                                               learned_map, learned_cost_scale)
+    bump_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
+                                           None, 1.)
+    if learned_map is not None:
+        weighted_cost = _path_weighted_cost_device(scratch, path_xy, path_length,
+                                                   learned_map, learned_cost_scale)
+        learned_cost = weighted_cost - bump_cost
+    else:
+        weighted_cost = bump_cost
+        learned_cost = torch.zeros_like(weighted_cost)
     return DeviceRouteBatch(items, status, feasible, path_xy, path_length,
         distance.to(torch.float64), endpoint_error.to(torch.float64),
         weighted_cost, torch.arange(count, device=device, dtype=torch.long),
-        cost_provenance=cost_provenance)
+        cost_provenance=cost_provenance, bump_cost_grid_edges=bump_cost,
+        learned_cost_grid_edges=learned_cost)
 
 
 @torch.no_grad()
@@ -530,23 +629,60 @@ def evaluate_device_route_chunks(env, queries, goal_xy: torch.Tensor, **kwargs):
         raise ValueError("goal_xy must be floating [Q,2] aligned with queries")
     if goal_xy.device != torch.device(env.device) or not goal_xy.is_floating_point():
         raise ValueError("goal_xy must be floating on env.device")
-    if len(items) <= MAX_ROUTE_QUERY_BATCH:
-        return evaluate_device_routes(env, items, goal_xy, **kwargs)
+    mapping = make_device_route_chunk_map(len(items), device=goal_xy.device)
     chunks = []
-    for start in range(0, len(items), MAX_ROUTE_QUERY_BATCH):
-        stop = start + MAX_ROUTE_QUERY_BATCH
-        chunks.append(evaluate_device_routes(env, items[start:stop],
-            goal_xy[start:stop], **kwargs))
-    return DeviceRouteBatch(items,
+    for start, stop in mapping.spans:
+        chunk_queries = items[start:stop]
+        chunk = evaluate_device_routes(env, chunk_queries,
+            goal_xy[start:stop], **kwargs)
+        contract_ok = validate_device_route_batch(chunk, chunk_queries,
+                                                  device=goal_xy.device)
+        # Do not synchronize to inspect this predicate. If any numeric row is
+        # malformed/non-finite, mark the complete chunk invalid on device; its
+        # callers intersect the result with support and therefore cannot select
+        # from a partially accepted chunk.
+        chunk = DeviceRouteBatch(chunk.queries,
+            torch.where(contract_ok, chunk.status_code,
+                        torch.full_like(chunk.status_code, DeviceRouteBatch.INVALID)),
+            chunk.feasible & contract_ok, chunk.path_xy, chunk.path_length,
+            chunk.distance_m, chunk.endpoint_error_m,
+            chunk.weighted_cost_grid_edges,
+            torch.arange(stop - start, device=goal_xy.device, dtype=torch.long),
+            cost_provenance=chunk.cost_provenance,
+            bump_cost_grid_edges=chunk.bump_cost_grid_edges,
+            learned_cost_grid_edges=chunk.learned_cost_grid_edges)
+        chunks.append(chunk)
+    if not chunks:
+        return evaluate_device_routes(env, (), goal_xy, **kwargs)
+    def concatenate_optional(name):
+        values = [getattr(batch, name) for batch in chunks]
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise ValueError(f"route chunks disagree on optional {name} output")
+        return torch.cat(values)
+    result = DeviceRouteBatch(items,
         torch.cat([batch.status_code for batch in chunks]),
         torch.cat([batch.feasible for batch in chunks]),
         torch.cat([batch.path_xy for batch in chunks]),
         torch.cat([batch.path_length for batch in chunks]),
         torch.cat([batch.distance_m for batch in chunks]),
-        torch.cat([batch.endpoint_error_m for batch in chunks]),
-        torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
-        torch.arange(len(items), device=goal_xy.device, dtype=torch.long),
-        cost_provenance=chunks[0].cost_provenance)
+            torch.cat([batch.endpoint_error_m for batch in chunks]),
+            torch.cat([batch.weighted_cost_grid_edges for batch in chunks]),
+            mapping.global_row, cost_provenance=chunks[0].cost_provenance,
+            bump_cost_grid_edges=concatenate_optional("bump_cost_grid_edges"),
+            learned_cost_grid_edges=concatenate_optional("learned_cost_grid_edges"))
+    result_contract_ok = validate_device_route_batch(result, items,
+                                                      device=goal_xy.device)
+    return DeviceRouteBatch(result.queries,
+        torch.where(result_contract_ok, result.status_code,
+                    torch.full_like(result.status_code, DeviceRouteBatch.INVALID)),
+        result.feasible & result_contract_ok, result.path_xy,
+        result.path_length, result.distance_m, result.endpoint_error_m,
+        result.weighted_cost_grid_edges, result.candidate_index,
+        cost_provenance=result.cost_provenance,
+        bump_cost_grid_edges=result.bump_cost_grid_edges,
+        learned_cost_grid_edges=result.learned_cost_grid_edges)
 
 
 @torch.no_grad()

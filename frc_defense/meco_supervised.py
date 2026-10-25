@@ -910,7 +910,7 @@ def warm_start_plan_a_expert_goals_v1(track: str, dataset: Path,
         if sample is None or sample["row"].get("support_digest") != row.get("support_digest"):
             raise ValueError("expert annotation has no exact replayed legal support sample")
         goal_node = row["selected_goal"]["node_id"]
-        node_position = goal_node if 0 <= goal_node < sample["graph"].node_count else None
+        node_position = goal_node if 0 <= goal_node < sample["graph"].node_capacity else None
         if node_position is None:
             raise ValueError("annotated goal node is absent from replayed graph")
         b_pairs = [(pair["behavior_id"], pair["pair_index"])
@@ -2884,7 +2884,8 @@ def warm_start_counterfactual_plan_a_p_v1(track: str, dataset: Path,
             graph = sample["graph_object"]
             penalty_map = project_pose_penalty(track, raw["penalty"],
                 graph.lookup, sample["planner"],
-                sample["field_length"], sample["field_width"])
+                sample["field_length"], sample["field_width"],
+                node_valid=graph.node_valid)
             route_losses = []
             for outcomes in sample["route_groups"]:
                 unique = {}
@@ -4454,7 +4455,8 @@ def warm_start_plan_a_joint_ubp_v1(track: str, legal_dataset: Path,
 
             raw_p = model(raster=ps["raster"], globals_=ps["globals"], **ps["graph"])
             pmap = project_pose_penalty(track, raw_p["penalty"], ps["graph_object"].lookup,
-                ps["planner"], ps["field_length"], ps["field_width"])
+                ps["planner"], ps["field_length"], ps["field_width"],
+                node_valid=ps["graph_object"].node_valid)
             route_terms = []
             for outcomes in ps["route_groups"]:
                 unique = {}
