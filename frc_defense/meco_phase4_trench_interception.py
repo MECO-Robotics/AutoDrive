@@ -7,6 +7,7 @@ import math
 
 
 TRENCH_OUTCOME_SCHEMA = "meco-phase4-trench-interception-outcome-v1"
+TRENCH_FOCAL_ROBOT_DIMENSIONS_M = (0.9, 0.9)
 TRENCH_POLICY_IDS = tuple(sorted(("A1", "A2", "A3", "C1", "C2",
     "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2")))
 
@@ -14,6 +15,44 @@ TRENCH_POLICY_IDS = tuple(sorted(("A1", "A2", "A3", "C1", "C2",
 def _sha(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
         allow_nan=False).encode()).hexdigest()
+
+
+def _pinned_opening_geometry(layout_id: str, robot_length: float,
+        robot_width: float) -> tuple[list[dict], str]:
+    """Derive clearance from the named field layout and frozen chassis model."""
+    from .field import qualification_field
+    if (not math.isclose(robot_length, TRENCH_FOCAL_ROBOT_DIMENSIONS_M[0], abs_tol=1e-9)
+            or not math.isclose(robot_width, TRENCH_FOCAL_ROBOT_DIMENSIONS_M[1], abs_tol=1e-9)):
+        raise ValueError("trench geometry validator requires the frozen 0.9 m chassis")
+    boxes = qualification_field(layout_id)
+    support_names = ("red_trench_support_lower", "red_trench_support_upper",
+                     "blue_trench_support_lower", "blue_trench_support_upper")
+    supports = {}
+    for name in support_names:
+        found = [box for box in boxes if box.name == name]
+        if len(found) != 1:
+            raise ValueError("pinned trench layout lacks a unique support box")
+        supports[name] = found[0]
+    radius = math.hypot(robot_length, robot_width) / 2
+    result = []
+    for color in ("red", "blue"):
+        lower = supports[f"{color}_trench_support_lower"]
+        upper = supports[f"{color}_trench_support_upper"]
+        if (not math.isclose(lower.x, upper.x, abs_tol=1e-9) or
+                lower.y + lower.width / 2 >= upper.y - upper.width / 2):
+            raise ValueError("pinned trench supports do not define one opening")
+        result.append({"opening_id": f"{color}_trench_opening",
+            "trench_x_m": float(lower.x),
+            "centerline_band_x_m": [float(lower.x - lower.length / 2 - radius),
+                                     float(lower.x + lower.length / 2 + radius)],
+            "clear_center_y_m": [float(lower.y + lower.width / 2 + radius),
+                                 float(upper.y - upper.width / 2 - radius)],
+            "source_support_box_ids": [lower.name, upper.name],
+            "robot_conservative_radius_m": radius})
+    source_digest = _sha({"layout_id": layout_id,
+        "support_boxes": {name: supports[name].as_dict() for name in support_names},
+        "robot_dimensions_m": [robot_length, robot_width]})
+    return result, source_digest
 
 
 def _finite_pair(value) -> bool:
@@ -134,6 +173,14 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
         raise ValueError("trench outcome lacks samples or horizon contract")
     expected_ticks = horizon.get("expected_physics_ticks")
     dt = horizon.get("physics_dt_s")
+    horizon_elapsed = horizon.get("horizon_elapsed_s")
+    if (type(expected_ticks) is not int or expected_ticks <= 0 or
+            type(dt) not in (int, float) or not math.isfinite(dt) or dt <= 0 or
+            type(horizon_elapsed) not in (int, float) or
+            not math.isfinite(horizon_elapsed) or
+            not math.isclose(horizon_elapsed, expected_ticks * dt,
+                rel_tol=0., abs_tol=max(1e-9, dt * 1e-6))):
+        raise ValueError("trench horizon elapsed time does not match its tick clock")
     full = (type(expected_ticks) is int and expected_ticks > 0 and
         type(dt) in (int, float) and math.isfinite(dt) and dt > 0 and
         len(samples) == expected_ticks + 1)
@@ -147,6 +194,13 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
                         rel_tol=0., abs_tol=max(1e-9, dt * 1e-6))):
                 full = False
                 break
+    observed_ticks = horizon.get("observed_physics_ticks")
+    expected_horizon_full = (full and observed_ticks == expected_ticks and
+        horizon.get("full_horizon") is True and horizon.get("invalid_reason") is None and
+        math.isclose(samples[-1]["physics_time_s"], horizon_elapsed,
+            rel_tol=0., abs_tol=max(1e-9, dt * 1e-6)))
+    if full != expected_horizon_full:
+        raise ValueError("trench horizon and final pose sample do not reconcile")
     if record.get("full_horizon_pose_coverage") is not full:
         raise ValueError("trench full-horizon pose coverage does not reconcile")
     if not full:
@@ -154,11 +208,24 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
     openings = record.get("opening_geometry")
     if not isinstance(openings, list) or not openings:
         raise ValueError("trench record lacks pinned opening geometry")
+    case = binding.get("qualification_case")
+    if not isinstance(case, dict) or not isinstance(case.get("layout_id"), str):
+        raise ValueError("trench binding lacks its pinned field layout")
+    expected_openings, expected_geometry_sha256 = _pinned_opening_geometry(
+        case["layout_id"], *TRENCH_FOCAL_ROBOT_DIMENSIONS_M)
+    if (openings != expected_openings or record.get("geometry_source_sha256") !=
+            expected_geometry_sha256):
+        raise ValueError("trench opening geometry differs from pinned field/chassis geometry")
     route = record.get("initial_executable_route")
     if not isinstance(route, dict) or not isinstance(route.get("points_m"), list):
         reasons.append("initial_executable_route_unavailable")
         designated = None
     else:
+        if record.get("initial_route_capture_timing") != (
+                "after_first_executed_physics_tick; planner.last_path is the "
+                "selected executable route used for that tick") or record.get(
+                    "initial_route_capture_physics_tick") != 1:
+            raise ValueError("trench route is not bound to the first selected executable route")
         points = route["points_m"]
         if (len(points) < 2 or any(not _finite_pair(point) for point in points) or
                 route.get("route_sha256") != _sha(points)):
@@ -174,6 +241,10 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
         raise ValueError("trench invalid-row reasons do not reconcile")
     if not isinstance(events, list):
         raise ValueError("trench record lacks a pair-contact event list")
+    if record.get("contact_clock_semantics") != (
+            "physics_time_s=physics_tick*physics_dt_s_since_reset; "
+            "event sourced from simulator pair_contact_last_substep/time_s"):
+        raise ValueError("trench pair-contact clock semantics are absent or changed")
     if record.get("contact_capture_complete") is not full:
         reasons.append("incomplete_solver_contact_coverage")
     if record.get("simulator_contact_distinct_substep_count") != len(events):
@@ -182,11 +253,20 @@ def validate_trench_interception_record(record: dict, *, binding: dict,
     for index, event in enumerate(events):
         if (not isinstance(event, dict) or event.get("event_index") != index or
                 event.get("robot_slot_ids") != [0, 3] or
+                event.get("clock_source") != "simulator_pair_contact_last_substep_and_time_s" or
                 type(event.get("physics_tick")) is not int or
                 event["physics_tick"] <= previous_tick or
                 event["physics_tick"] > (expected_ticks or 0) or
                 type(event.get("physics_time_s")) not in (int, float) or
                 not math.isfinite(event["physics_time_s"]) or
+                type(dt) not in (int, float) or not math.isfinite(dt) or dt <= 0 or
+                event["physics_tick"] >= len(samples) or
+                not math.isclose(event["physics_time_s"], event["physics_tick"] * dt,
+                    rel_tol=0., abs_tol=max(1e-9, dt * 1e-6)) or
+                samples[event["physics_tick"]].get("physics_tick") != event["physics_tick"] or
+                not math.isclose(event["physics_time_s"],
+                    samples[event["physics_tick"]].get("physics_time_s"),
+                    rel_tol=0., abs_tol=max(1e-9, dt * 1e-6)) or
                 event.get("source") != "simulator_robot_pair_sat_contact_solver"):
             raise ValueError("trench slot-0/slot-3 contact event identity or clock is invalid")
         previous_tick = event["physics_tick"]
@@ -310,15 +390,33 @@ class TrenchInterceptionEpisodeCapture:
             raise ValueError("trench capture requires the reset physics clock")
         self.dt = float(sim.dt)
         self.openings = self._opening_geometry()
+        case = binding.get("qualification_case")
+        if not isinstance(case, dict) or not isinstance(case.get("layout_id"), str):
+            raise ValueError("trench binding lacks its pinned field layout")
+        expected_openings, self.geometry_source_sha256 = _pinned_opening_geometry(
+            case["layout_id"], float(sim.length[0, 3].item()),
+            float(sim.width[0, 3].item()))
+        if self.openings != expected_openings:
+            raise ValueError("runtime field/chassis geometry differs from pinned trench geometry")
         self.route_points = None
         self.samples = [{"physics_tick": 0, "physics_time_s": 0.,
             "xy_m": [float(v) for v in sim.pose[0, 3, :2].tolist()]}]
         self.events = []
+        self.route_capture_timing = None
+        self.route_freeze_attempted = False
+        self.route_capture_physics_tick = None
 
     def freeze_initial_route(self):
-        """Freeze the first selected executable route before its first physics tick."""
-        if self.route_points is None:
-            self.route_points = self._initial_route()
+        """Freeze planner.last_path for the first tick after that route executes."""
+        if self.route_freeze_attempted:
+            return
+        self.route_freeze_attempted = True
+        self.route_points = self._initial_route()
+        if self.route_points is not None:
+            self.route_capture_physics_tick = self.last_tick
+            self.route_capture_timing = (
+                "after_first_executed_physics_tick; planner.last_path is the "
+                "selected executable route used for that tick")
 
     def _opening_geometry(self):
         boxes = getattr(self.env, "field_boxes", None)
@@ -389,12 +487,15 @@ class TrenchInterceptionEpisodeCapture:
                 raise RuntimeError("trench solver contact pair has mismatched substep/time")
             self.events.append({"event_index": len(self.events),
                 "source": "simulator_robot_pair_sat_contact_solver",
+                "clock_source": "simulator_pair_contact_last_substep_and_time_s",
                 "robot_slot_ids": [0, 3], "physics_tick": tick,
                 "physics_time_s": event_time})
         self.previous_count = count
         self.last_tick, self.last_time = tick, time_s
         self.samples.append({"physics_tick": tick, "physics_time_s": time_s,
             "xy_m": pose})
+        if tick == 1:
+            self.freeze_initial_route()
 
     def finish(self, *, episode_censored: bool = False) -> dict:
         expected_ticks = int(self.env.horizon)
@@ -451,10 +552,16 @@ class TrenchInterceptionEpisodeCapture:
             "applied_slots": applied,
             "contact_capture_complete": (full_coverage and
                 self.last_tick == len(self.samples) - 1),
+            "contact_clock_semantics": (
+                "physics_time_s=physics_tick*physics_dt_s_since_reset; "
+                "event sourced from simulator pair_contact_last_substep/time_s"),
             "simulator_contact_distinct_substep_count": self.previous_count,
             "contact_events": self.events,
+            "geometry_source_sha256": self.geometry_source_sha256,
+            "initial_route_capture_timing": self.route_capture_timing,
             "opening_geometry": self.openings,
             "initial_executable_route": route,
+            "initial_route_capture_physics_tick": self.route_capture_physics_tick,
             "designated_initial_opening_id": designated,
             "truth_pose_samples": self.samples,
             "horizon": {"expected_physics_ticks": expected_ticks,
@@ -488,8 +595,7 @@ def reduce_trench_interception_pair(control: dict, treatment: dict, *, binding: 
     if control.get("pair_binding_id") != treatment.get("pair_binding_id"):
         raise ValueError("trench arms differ in stable pair binding")
     if (not rows["no_factor"]["crossing_row_valid"] or
-            not rows["factor_treatment"]["crossing_row_valid"] or
-            not rows["factor_treatment"]["interception_row_valid"]):
+            not rows["factor_treatment"]["crossing_row_valid"]):
         raise ValueError("invalid trench rows cannot satisfy paired outcome gate")
     return {"policy_id": policy_id, "seed": seed,
         "control_episode_id": control["episode_id"],
@@ -509,7 +615,8 @@ def reduce_trench_interception_pair(control: dict, treatment: dict, *, binding: 
             "trench_crossing_time_s"],
         "trench_crossing_time_delta_s": rows["factor_treatment"][
             "trench_crossing_time_s"] - rows["no_factor"]["trench_crossing_time_s"],
-        "treatment_interception_episode": rows["factor_treatment"][
-            "interception_episode_numerator"] == 1,
+        "treatment_interception_episode": (None if not rows["factor_treatment"][
+            "interception_row_valid"] else rows["factor_treatment"][
+                "interception_episode_numerator"] == 1),
         "interception_control_denominator": None,
         "qualification_eligible": False}

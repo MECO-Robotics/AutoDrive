@@ -192,7 +192,10 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         "policy_id": assignment["policy_id"],
         "schedule_sha256": schedule["schedule_sha256"],
         "runtime_status": ("outcomes_captured_pending_replay_review" if
-            (direct_pursuit or trench_interception) and pairing else "scheduled_not_simulator_validated"),
+            (direct_pursuit or trench_interception) and pairing and
+                pairing.get("outcome_signals_complete") else
+            "paired_outcomes_rejected" if trench_interception and pairing else
+            "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
         "outcome_signals_complete": bool((direct_pursuit or trench_interception) and pairing and
             pairing.get("outcome_signals_complete")),
@@ -1117,7 +1120,8 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
         treatment, treatment_check = arm_rows["factor_treatment"][key]
         valid = (control_check is not None and treatment_check is not None and
             control_check["crossing_row_valid"] and treatment_check["crossing_row_valid"] and
-            treatment_check["interception_row_valid"])
+            control_check["full_horizon_pose_valid"] and
+            treatment_check["full_horizon_pose_valid"])
         if valid:
             try:
                 paired.append(reduce_trench_interception_pair(control, treatment,
@@ -1134,7 +1138,9 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
             row_errors["no_factor" if control_check is None else "factor_treatment"].append(
                 {"policy_id": key[0], "seed": key[2], "reason": reason})
         pair_statuses.append({"policy_id": key[0], "seed": key[2], "valid_pair": bool(valid),
-            "invalid_reason": None if valid else reason})
+            "invalid_reason": None if valid else reason,
+            "treatment_interception_row_valid": bool(treatment_check is not None and
+                treatment_check.get("interception_row_valid"))})
     paired_valid = [row for row in paired if row.get("valid_pair") is True and
         "alternate_crossing_success_delta" in row]
     pair_count = len(expected_keys)
@@ -1172,6 +1178,10 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
         "paired_rows_per_condition": {arm: pair_count for arm in CONDITIONS},
         "invalid_pair_count": pair_count - len(paired_valid),
         "valid_pair_count": len(paired_valid),
+        "treatment_interception_valid_count": per_arm["factor_treatment"][
+            "interception_denominator"],
+        "treatment_interception_invalid_count": pair_count - per_arm[
+            "factor_treatment"]["interception_denominator"],
         "unaccounted_assignments": 0,
         "arm_invalid_row_count": {arm: len(row_errors[arm]) for arm in CONDITIONS},
         "arm_invalid_rows": row_errors,
@@ -1179,7 +1189,8 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
         "paired_outcomes": paired_valid,
         "exact_pair_coverage": len(pair_statuses) == pair_count,
         "all_pairs_full_horizon_valid": len(paired_valid) == pair_count,
-        "outcome_signals_complete": len(paired_valid) == pair_count,
+        "outcome_signals_complete": (len(paired_valid) == pair_count and
+            per_arm["factor_treatment"]["interception_denominator"] == pair_count),
         "runtime_status": "outcomes_captured_pending_replay_review",
         "source_identity_sha256": paired_binding.get("source_identity_sha256"),
         "checkpoint_bundle_sha256": paired_binding.get("checkpoint_bundle_sha256"),
@@ -1191,8 +1202,9 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
         "control_policy_ids": policy_ids,
         "qualification_eligible": False,
         "matrix_sha256": matrix_files}
-    coverage["paired_outcomes_artifact_sha256"] = _sha(coverage)
-    _write_immutable(case_dir / "paired-trench-outcomes.json", coverage)
+    coverage["pairing_sha256"] = _sha(coverage)
+    coverage["paired_outcomes_artifact_sha256"] = _write_immutable(
+        case_dir / "paired-trench-outcomes.json", coverage)
     return coverage
 
 

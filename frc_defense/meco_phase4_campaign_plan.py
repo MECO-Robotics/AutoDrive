@@ -71,6 +71,10 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
             "factor_treatment": len(TRENCH_POLICY_IDS) * VALIDATION_SEEDS_PER_CASE}
         and row.get("exact_pair_coverage") is True
         and row.get("all_pairs_full_horizon_valid") is True
+        and row.get("outcome_signals_complete") is True
+        and row.get("treatment_interception_valid_count") ==
+            len(TRENCH_POLICY_IDS) * VALIDATION_SEEDS_PER_CASE
+        and row.get("treatment_interception_invalid_count") == 0
         and row.get("unaccounted_assignments") == 0
         and row.get("invalid_pair_count") == 0
         and row.get("qualification_eligible") is False
@@ -80,6 +84,13 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
         and bool(row["checkpoint_bundle_sha256"])
         and isinstance(row.get("execution_device"), dict)
         and bool(row["execution_device"])
+        and isinstance(row.get("schedule_sha256"), str)
+        and bool(row["schedule_sha256"])
+        and isinstance(row.get("seed_manifest_sha256"), str)
+        and bool(row["seed_manifest_sha256"])
+        and row.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and isinstance(row.get("frontend_asset_manifest_sha256"), str)
+        and bool(row["frontend_asset_manifest_sha256"])
         and isinstance(row.get("paired_outcomes_artifact_sha256"), str)
         and bool(row["paired_outcomes_artifact_sha256"]))
     replay = row.get("replay_review")
@@ -88,7 +99,21 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
     exact = exact and all(replay.get(flag) is True for flag in (
         "dashboard_backend_current", "dashboard_frontend_current", "endpoint_healthy",
         "replay_current_checkout", "replay_seed_is_in_exact_validation_manifest"))
+    exact = exact and replay.get("backend_source_identity_sha256") == row.get(
+        "source_identity_sha256")
+    exact = exact and replay.get("frontend_asset_manifest_sha256") == row.get(
+        "frontend_asset_manifest_sha256")
+    exact = exact and replay.get("seed_manifest_sha256") == row.get("seed_manifest_sha256")
+    exact = exact and type(replay.get("replay_seed")) is int
+    exact = exact and replay.get("replay_seed") == next(iter(
+        {item.get("seed") for item in replay.get("paired_replays", [])
+         if isinstance(item, dict)}), None)
     exact = exact and isinstance(replays, list) and len(replays) == 2
+    if not isinstance(replays, list):
+        exact = False
+    elif any(not isinstance(item, dict) or type(item.get("seed")) is not int
+            for item in replays):
+        exact = False
     exact = exact and {item.get("condition") for item in replays if isinstance(item, dict)} == set(CONDITIONS)
     exact = exact and len({item.get("seed") for item in replays if isinstance(item, dict)}) == 1
     exact = exact and all(isinstance(item, dict)
@@ -101,11 +126,22 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
         and item.get("source_identity_sha256") == row.get("source_identity_sha256")
         and item.get("checkpoint_bundle_sha256") == row.get("checkpoint_bundle_sha256")
         and item.get("execution_device") == row.get("execution_device")
+        and item.get("source_identity_sha256") == row.get("source_identity_sha256")
+        and item.get("frontend_asset_manifest_sha256") == row.get(
+            "frontend_asset_manifest_sha256")
+        and item.get("policy_id") == "trench_interceptor"
+        and item.get("schedule_sha256") == row.get("schedule_sha256")
+        and item.get("assignment_identity_sha256") == assignment_sha256
+        and item.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
+        and item.get("seed") == replay.get("replay_seed")
+        and item.get("seed_manifest_sha256") == replay.get("seed_manifest_sha256")
+        and item.get("backend_source_identity_sha256") == row.get("source_identity_sha256")
         and item.get("assigned_pressure_slots") == [0]
         and item.get("applied_slots") == ([] if item.get("condition") == "no_factor" else [0])
         and isinstance(item.get("replay_id"), str) and bool(item["replay_id"])
         and isinstance(item.get("replay_sha256"), str) and bool(item["replay_sha256"])
         for item in replays)
+    exact = exact and len({item.get("replay_id") for item in replays if isinstance(item, dict)}) == 2
     exact = exact and isinstance(replay.get("reviewer"), str) and bool(replay["reviewer"])
     if not exact:
         return {"accepted": False, "reason": "trench review evidence is incomplete or mismatched"}
@@ -113,6 +149,8 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
         "source_identity_sha256": row["source_identity_sha256"],
         "checkpoint_bundle_sha256": row["checkpoint_bundle_sha256"],
         "execution_device": row["execution_device"],
+        "schedule_sha256": row["schedule_sha256"],
+        "frontend_asset_manifest_sha256": row["frontend_asset_manifest_sha256"],
         "paired_outcomes_artifact_sha256": row["paired_outcomes_artifact_sha256"]}
 
 
@@ -540,6 +578,7 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                         trench_interception_assignment = {
                             "schema": "meco-phase4-trench-interception-assignment-v1",
                             "policy_id": "trench_interceptor", "factor_id": factor,
+                            "policy_family": schedule["policy_family"],
                             "policy_config_sha256": schedule["policy_config_sha256"],
                             "configured_pressure_slots": [0],
                             "control_policy_ids": list(TRENCH_POLICY_IDS),
@@ -621,7 +660,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                                 runtime_binding["authoritative_signals"])),
                         "executed": False,
                         "simulator_behavior_validated": bool(
-                            direct_review_gate and direct_review_gate.get("accepted")),
+                            (direct_review_gate and direct_review_gate.get("accepted")) or
+                            (trench_review_gate and trench_review_gate.get("accepted"))),
                         "direct_pursuit_review_gate": direct_review_gate,
                         "trench_interception_review_gate": trench_review_gate,
                         "trench_interception_tranche_status": (
