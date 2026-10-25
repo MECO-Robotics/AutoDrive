@@ -65,6 +65,54 @@ def _campaign(monkeypatch, **overrides):
     return q.build_paired_calibration_campaign(**values)
 
 
+def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
+    control = next(row for row in campaign["controls"]
+        if row["control_id"] == unit["control_id"])
+    source_hash = campaign["source"]["source_identity_sha256"]
+    metrics = {name: .1 for name in q.SAFETY_METRIC_NAMES}
+    metrics.update({"success": 1.0, "useful_throughput": 3.5})
+    ledger = {"ledger_sha256": "9" * 64,
+        "simulated_match_score": {"red": 2, "blue": 1}}
+    evaluation = {**{key: unit[key] for key in (
+        "scenario_id", "category", "layout_id", "defender_family",
+        "start_condition", "sensor_profile", "split", "seed")},
+        "policy": control["policy"], "policy_id": control["policy_id"],
+        "prediction_mode": control["prediction_mode"],
+        "prediction_contract": control["prediction_contract"],
+        "source_identity_sha256": source_hash,
+        "safety_metrics_schema": q.SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": source_hash,
+        "metrics": metrics, "score_terminal_counters": [2, 1],
+        "fuel_score_count": [2, 1], "official_match_points": None,
+        "qualification_eligible": False,
+        "simulated_score_ledger": ledger,
+        "simulated_match_score": ledger["simulated_match_score"]}
+    replay_digest = q._canonical_sha256(evaluation)
+    replay_ref = {"simulation_id": "sim-001",
+        "result_path": "sim-001.result.json",
+        "evaluation_record_digest": replay_digest}
+    replay = {"simulation_id": "sim-001", "evaluation_record_digest": replay_digest,
+        "replay_contract_schema": q.PAIRED_CALIBRATION_REPLAY_CONTRACT,
+        "source_identity_sha256": source_hash,
+        "scenario_id": unit["scenario_id"], "category": unit["category"],
+        "seed": unit["seed"], "split": unit["split"],
+        "policy": control["policy"], "policy_id": control["policy_id"],
+        "prediction_mode": control["prediction_mode"],
+        "score_event_stream": {"schema": campaign["scoring"]["event_stream_schema"],
+            "events_sha256": "8" * 64}}
+    replay_raw = json.dumps(replay, sort_keys=True).encode()
+    (replay_root / replay_ref["result_path"]).write_bytes(replay_raw)
+    from frc_defense import meco_simulated_score_ledger as ledger_api
+    monkeypatch.setattr(ledger_api, "validate_estimand_approval", lambda *a, **k: None)
+    monkeypatch.setattr(ledger_api, "estimand_approval_digest", lambda approval: "f" * 64)
+    monkeypatch.setattr(ledger_api, "validate_replay_score_binding",
+        lambda *args: ledger)
+    approval = {"approved": True}
+    row = q.build_paired_calibration_outcome_row(campaign, 0, unit, evaluation,
+        replay_raw, replay_ref, approval)
+    return row, approval, ledger, replay_raw, evaluation, replay_ref
+
+
 def test_paired_campaign_binds_all_controls_and_complete_calibration_schedule(monkeypatch):
     campaign = _campaign(monkeypatch)
     units = [unit for shard in campaign["shards"] for unit in shard["work_units"]]
@@ -124,31 +172,66 @@ def test_paired_campaign_rejects_unpinned_summary_configuration(monkeypatch, fie
         q.validate_paired_calibration_campaign(campaign)
 
 
-def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch):
+def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch, tmp_path):
     campaign = _campaign(monkeypatch)
     shard = campaign["shards"][0]
     unit = shard["work_units"][0]
-    row = {"schema": q.PAIRED_CALIBRATION_ARTIFACT,
-        "campaign_id": campaign["campaign_id"],
-        "work_unit_id": q._canonical_sha256(unit), "work_unit": unit,
-        "row_payload": {"replay_sha256": "a" * 64}}
-    progress = q.build_paired_calibration_progress(campaign, 0, [row])
+    row, approval, _, _, _, _ = _outcome_fixture(monkeypatch, campaign, unit, tmp_path)
+    progress = q.build_paired_calibration_progress(campaign, 0, [row],
+        replay_root=tmp_path, approval=approval)
     assert progress["complete"] is False
-    assert q.validate_paired_calibration_progress(campaign, 0, progress) == progress
+    assert q.validate_paired_calibration_progress(campaign, 0, progress,
+        replay_root=tmp_path, approval=approval) == progress
 
     changed = copy.deepcopy(progress)
     changed["completed_rows"].append(row)
     body = {key: value for key, value in changed.items() if key != "progress_id"}
     changed["progress_id"] = q._canonical_sha256(body)
     with pytest.raises(ValueError, match="duplicate, unordered"):
-        q.validate_paired_calibration_progress(campaign, 0, changed)
+        q.validate_paired_calibration_progress(campaign, 0, changed,
+            replay_root=tmp_path, approval=approval)
 
     altered = copy.deepcopy(progress)
     altered["shard_manifest_id"] = "b" * 64
     body = {key: value for key, value in altered.items() if key != "progress_id"}
     altered["progress_id"] = q._canonical_sha256(body)
     with pytest.raises(ValueError, match="another manifest"):
-        q.validate_paired_calibration_progress(campaign, 0, altered)
+        q.validate_paired_calibration_progress(campaign, 0, altered,
+            replay_root=tmp_path, approval=approval)
+
+
+def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_path):
+    campaign = _campaign(monkeypatch)
+    unit = campaign["shards"][0]["work_units"][0]
+    row, approval, ledger, replay_raw, evaluation, replay_ref = _outcome_fixture(
+        monkeypatch, campaign, unit, tmp_path)
+    assert row["replay_sha256"] == hashlib.sha256(replay_raw).hexdigest()
+    assert row["ledger_sha256"] == ledger["ledger_sha256"]
+    assert row["simulated_match_score"] == ledger["simulated_match_score"]
+    assert row["official_match_points"] is None
+    assert row["qualification_eligible"] is False
+    assert q.validate_paired_calibration_outcome_row(campaign, 0, row,
+        replay_root=tmp_path, approval=approval) == row
+
+    replay_path = tmp_path / replay_ref["result_path"]
+    replay_path.write_bytes(replay_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="artifact bytes changed"):
+        q.validate_paired_calibration_outcome_row(campaign, 0, row,
+            replay_root=tmp_path, approval=approval)
+    replay_path.write_bytes(replay_raw)
+
+    mutated = copy.deepcopy(row)
+    mutated["event_stream_sha256"] = "0" * 64
+    body = {key: value for key, value in mutated.items() if key != "outcome_row_sha256"}
+    mutated["outcome_row_sha256"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match="replay identity/event stream changed"):
+        q.validate_paired_calibration_outcome_row(campaign, 0, mutated,
+            replay_root=tmp_path, approval=approval)
+
+    changed = dict(replay_ref, evaluation_record_digest="0" * 64)
+    with pytest.raises(ValueError, match="evaluation digest differs"):
+        q.build_paired_calibration_outcome_row(campaign, 0, unit, evaluation,
+            replay_raw, changed, {"approved": True})
 
 
 @pytest.mark.parametrize("field,value", [

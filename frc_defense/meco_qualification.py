@@ -1811,6 +1811,7 @@ PAIRED_CALIBRATION_CAMPAIGN = "meco-paired-calibration-campaign-v1"
 PAIRED_CALIBRATION_SHARD = "meco-paired-calibration-shard-manifest-v1"
 PAIRED_CALIBRATION_ARTIFACT = "meco-paired-calibration-shard-v1"
 PAIRED_CALIBRATION_PROGRESS = "meco-paired-calibration-shard-progress-v1"
+PAIRED_CALIBRATION_REPLAY_CONTRACT = "dashboard-replay-generation-v1"
 PAIRED_CALIBRATION_CONTROLS = (
     "D0", "D1/current", "D2/cv", "D2/multi_model_v1",
 )
@@ -2012,6 +2013,7 @@ def build_paired_calibration_campaign(*, episodes, repetitions, master_seed,
     scoring = {"ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
         "rules_sha256": RULES_SHA256, "rules": RULES,
         "event_stream_schema": EVENT_STREAM_SCHEMA,
+        "replay_contract_schema": PAIRED_CALIBRATION_REPLAY_CONTRACT,
         "estimand_approval_sha256": approval["approval_sha256"],
         "source_identity_sha256": source["source_identity_sha256"],
         "outcome_name": OUTCOME_NAME, "unit": RULES["unit"],
@@ -2104,6 +2106,7 @@ def validate_paired_calibration_campaign(campaign):
     expected_scoring = {"ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
         "rules_sha256": RULES_SHA256, "rules": RULES,
         "event_stream_schema": EVENT_STREAM_SCHEMA,
+        "replay_contract_schema": PAIRED_CALIBRATION_REPLAY_CONTRACT,
         "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
         "source_identity_sha256": source["source_identity_sha256"],
         "outcome_name": OUTCOME_NAME, "unit": RULES["unit"],
@@ -2157,8 +2160,9 @@ def _paired_shard_for_index(campaign, shard_index):
     return campaign["shards"][shard_index]
 
 
-def build_paired_calibration_progress(campaign, shard_index, completed_rows):
-    """Compile immutable resumable progress from already validated outcome rows."""
+def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,
+        replay_root, approval):
+    """Compile progress only after reloading and revalidating every replay row."""
     shard = _paired_shard_for_index(campaign, shard_index)
     if not isinstance(completed_rows, list):
         raise ValueError("paired calibration progress rows must be a list")
@@ -2175,6 +2179,8 @@ def build_paired_calibration_progress(campaign, shard_index, completed_rows):
             raise ValueError("paired calibration progress row work unit changed")
         if row.get("campaign_id") != campaign["campaign_id"]:
             raise ValueError("paired calibration progress row campaign changed")
+        validate_paired_calibration_outcome_row(campaign, shard_index, row,
+            replay_root=replay_root, approval=approval)
         seen.add(unit_id)
         rows.append(row)
     rows.sort(key=lambda row: row["work_unit_id"])
@@ -2187,11 +2193,16 @@ def build_paired_calibration_progress(campaign, shard_index, completed_rows):
     return {**body, "progress_id": _canonical_sha256(body)}
 
 
-def validate_paired_calibration_progress(campaign, shard_index, progress):
+def validate_paired_calibration_progress(campaign, shard_index, progress, *,
+        replay_root, approval):
     """Validate resume bytes semantically; never repair or relabel stale progress."""
     shard = _paired_shard_for_index(campaign, shard_index)
     if not isinstance(progress, dict) or progress.get("schema") != PAIRED_CALIBRATION_PROGRESS:
         raise ValueError("paired calibration progress schema is unsupported")
+    if set(progress) != {"schema", "campaign_id", "shard_index",
+            "shard_manifest_id", "completed_work_unit_ids", "completed_rows",
+            "complete", "progress_id"}:
+        raise ValueError("paired calibration progress schema is extended or incomplete")
     body = {key: value for key, value in progress.items() if key != "progress_id"}
     if progress.get("progress_id") != _canonical_sha256(body):
         raise ValueError("paired calibration progress digest is invalid")
@@ -2212,6 +2223,8 @@ def validate_paired_calibration_progress(campaign, shard_index, progress):
         unit_id = row.get("work_unit_id")
         if unit_id not in expected or row.get("work_unit") != expected[unit_id]:
             raise ValueError("paired calibration progress contains a changed or foreign work unit")
+        validate_paired_calibration_outcome_row(campaign, shard_index, row,
+            replay_root=replay_root, approval=approval)
         row_ids.append(unit_id)
     if (row_ids != sorted(row_ids) or len(row_ids) != len(set(row_ids))
             or ids != row_ids or any(value not in expected for value in ids)):
@@ -2219,6 +2232,218 @@ def validate_paired_calibration_progress(campaign, shard_index, progress):
     if progress.get("complete") is not (set(ids) == set(expected)):
         raise ValueError("paired calibration progress completion flag is inconsistent")
     return progress
+
+
+def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
+        evaluation_record, replay_raw, replay_ref, approval):
+    """Bind one evaluated work unit to exact replay bytes and reconstructed score."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    unit_id = _canonical_sha256(work_unit)
+    if work_unit not in shard["work_units"]:
+        raise ValueError("paired calibration outcome work unit is outside its shard")
+    control = next((row for row in campaign["controls"]
+        if row["control_id"] == work_unit["control_id"]), None)
+    if control is None or control.get("execution_supported") is not True:
+        raise ValueError("paired calibration control is not executable")
+    if not isinstance(evaluation_record, dict) or not isinstance(replay_ref, dict):
+        raise ValueError("paired calibration evaluation or replay reference is malformed")
+    for field in ("scenario_id", "category", "layout_id", "defender_family",
+            "start_condition", "sensor_profile", "split", "seed"):
+        if evaluation_record.get(field) != work_unit[field]:
+            raise ValueError("paired calibration evaluation tuple differs from frozen work unit")
+    if any(evaluation_record.get(key) != control.get(key) for key in
+            ("policy", "policy_id", "prediction_mode", "prediction_contract")):
+        raise ValueError("paired calibration evaluation control differs from frozen registry")
+    source_hash = campaign["source"]["source_identity_sha256"]
+    if evaluation_record.get("source_identity_sha256") != source_hash:
+        raise ValueError("paired calibration evaluation source identity changed")
+    metrics = evaluation_record.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError("paired calibration evaluation metrics are missing")
+    required_metrics = set(SAFETY_METRIC_NAMES) | {"success", "useful_throughput"}
+    if (not required_metrics <= set(metrics)
+            or type(metrics.get("success")) not in (int, float)
+            or not math.isfinite(float(metrics["success"]))
+            or not 0 <= float(metrics["success"]) <= 1
+            or type(metrics.get("useful_throughput")) not in (int, float)
+            or not math.isfinite(float(metrics["useful_throughput"]))
+            or metrics["useful_throughput"] < 0
+            or any(type(metrics.get(name)) not in (int, float)
+                or not math.isfinite(float(metrics[name]))
+                or not 0 <= float(metrics[name]) <= 1 for name in SAFETY_METRIC_NAMES)):
+        raise ValueError("paired calibration evaluation metrics are incomplete or invalid")
+    if (evaluation_record.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or evaluation_record.get("safety_metrics_source_identity_sha256") != source_hash):
+        raise ValueError("paired calibration safety metrics lack exact source binding")
+    replay_path = replay_ref.get("result_path")
+    replay_id = replay_ref.get("simulation_id")
+    replay_record_digest = replay_ref.get("evaluation_record_digest")
+    if (not isinstance(replay_raw, bytes) or not replay_raw
+            or not isinstance(replay_path, str) or not replay_path.strip()
+            or not isinstance(replay_id, str) or not replay_id.strip()
+            or not isinstance(replay_record_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", replay_record_digest) is None):
+        raise ValueError("paired calibration replay bytes or reference are incomplete")
+    replay_relative = Path(replay_path)
+    if (replay_relative.is_absolute()
+            or any(part in ("", ".", "..") for part in replay_relative.parts)
+            or "\\" in replay_path):
+        raise ValueError("paired calibration replay path is unsafe")
+    expected_record_digest = _canonical_sha256({key: value
+        for key, value in evaluation_record.items() if key != "dashboard_replay"})
+    if replay_record_digest != expected_record_digest:
+        raise ValueError("paired calibration replay reference evaluation digest differs")
+    try:
+        replay = json.loads(replay_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("paired calibration replay is invalid JSON") from exc
+    if (not isinstance(replay, dict) or replay.get("simulation_id") != replay_id
+            or replay.get("evaluation_record_digest") != replay_record_digest
+            or replay.get("replay_contract_schema") != PAIRED_CALIBRATION_REPLAY_CONTRACT
+            or replay.get("source_identity_sha256") != source_hash):
+        raise ValueError("paired calibration replay identity/source differs from its reference")
+    for field in ("scenario_id", "category", "seed", "split", "policy", "policy_id",
+            "prediction_mode"):
+        expected = evaluation_record.get(field)
+        if replay.get(field) != expected:
+            raise ValueError("paired calibration replay tuple/control differs from evaluation")
+    from .meco_simulated_score_ledger import (estimand_approval_digest,
+        validate_estimand_approval, validate_replay_score_binding)
+    validate_estimand_approval(approval, source_identity_sha256=source_hash)
+    approval_digest = estimand_approval_digest(approval)
+    if approval_digest != campaign["estimand_approval"]["approval_sha256"]:
+        raise ValueError("paired calibration score approval differs from campaign")
+    terminal_counts = evaluation_record.get("score_terminal_counters")
+    ledger = validate_replay_score_binding(replay, evaluation_record,
+        terminal_counts, approval)
+    from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
+        RULES_ID, RULES_SHA256)
+    worker = campaign["worker_assignments"][shard_index % len(campaign["worker_assignments"])]
+    body = {"schema": PAIRED_CALIBRATION_ARTIFACT,
+        "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
+        "shard_manifest_id": shard["manifest_id"], "work_unit_id": unit_id,
+        "work_unit": work_unit, "pair_id": work_unit["pair_id"],
+        "control_id": work_unit["control_id"], "replay_id": replay_id,
+        "replay_path": replay_path,
+        "replay_sha256": hashlib.sha256(replay_raw).hexdigest(),
+        "evaluation_record_sha256": replay_record_digest,
+        "worker_assignment": worker,
+        "worker_assignment_sha256": _canonical_sha256(worker),
+        "ledger_schema": LEDGER_SCHEMA, "rules_id": RULES_ID,
+        "rules_sha256": RULES_SHA256,
+        "event_stream_schema": EVENT_STREAM_SCHEMA,
+        "replay_contract_schema": PAIRED_CALIBRATION_REPLAY_CONTRACT,
+        "event_stream_sha256": replay["score_event_stream"]["events_sha256"],
+        "ledger_sha256": ledger["ledger_sha256"],
+        "estimand_approval_sha256": approval_digest,
+        "terminal_score_counts": terminal_counts,
+        "score_binding": {key: evaluation_record.get(key) for key in (
+            "simulated_score_ledger", "simulated_match_score",
+            "source_identity_sha256", "official_match_points",
+            "qualification_eligible")},
+        "simulated_match_score": ledger["simulated_match_score"],
+        "official_match_points": None, "qualification_eligible": False,
+        "useful_throughput": float(metrics["useful_throughput"]),
+        "raw_fuel_counts": list(terminal_counts),
+        "safety_metrics_schema": SAFETY_METRICS_SCHEMA,
+        "safety_metrics_source_identity_sha256": source_hash,
+        "safety_metrics": {name: float(metrics[name]) for name in sorted(SAFETY_METRIC_NAMES)}}
+    return {**body, "outcome_row_sha256": _canonical_sha256(body)}
+
+
+def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
+        replay_root, approval):
+    """Fail closed unless row schema, worker, exact replay bytes, and score agree."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    expected_fields = {"schema", "campaign_id", "shard_index", "shard_manifest_id",
+        "work_unit_id", "work_unit", "pair_id", "control_id", "replay_id",
+        "replay_path", "replay_sha256", "evaluation_record_sha256",
+        "worker_assignment", "worker_assignment_sha256", "ledger_schema", "rules_id",
+        "rules_sha256", "event_stream_schema", "replay_contract_schema",
+        "event_stream_sha256", "ledger_sha256", "estimand_approval_sha256",
+        "terminal_score_counts", "score_binding", "simulated_match_score",
+        "official_match_points", "qualification_eligible", "useful_throughput",
+        "raw_fuel_counts", "safety_metrics_schema",
+        "safety_metrics_source_identity_sha256", "safety_metrics",
+        "outcome_row_sha256"}
+    if not isinstance(row, dict) or set(row) != expected_fields:
+        raise ValueError("paired calibration outcome row schema is incomplete or extended")
+    body = {key: value for key, value in row.items() if key != "outcome_row_sha256"}
+    if row.get("outcome_row_sha256") != _canonical_sha256(body):
+        raise ValueError("paired calibration outcome row digest is invalid")
+    unit = row.get("work_unit")
+    unit_id = row.get("work_unit_id")
+    if (row.get("schema") != PAIRED_CALIBRATION_ARTIFACT
+            or row.get("campaign_id") != campaign["campaign_id"]
+            or row.get("shard_index") != shard_index
+            or row.get("shard_manifest_id") != shard["manifest_id"]
+            or not isinstance(unit, dict) or unit not in shard["work_units"]
+            or unit_id != _canonical_sha256(unit)
+            or row.get("pair_id") != unit["pair_id"]
+            or row.get("control_id") != unit["control_id"]):
+        raise ValueError("paired calibration outcome row is foreign to its manifest/work unit")
+    control = next(item for item in campaign["controls"]
+        if item["control_id"] == unit["control_id"])
+    if control.get("execution_supported") is not True:
+        raise ValueError("paired calibration outcome row uses a blocked control")
+    worker = campaign["worker_assignments"][shard_index % len(campaign["worker_assignments"])]
+    if (row.get("worker_assignment") != worker
+            or row.get("worker_assignment_sha256") != _canonical_sha256(worker)):
+        raise ValueError("paired calibration outcome worker/device identity changed")
+    from .meco_simulated_score_ledger import (EVENT_STREAM_SCHEMA, LEDGER_SCHEMA,
+        RULES_ID, RULES_SHA256, estimand_approval_digest,
+        validate_estimand_approval, validate_replay_score_binding)
+    if (row.get("ledger_schema") != LEDGER_SCHEMA or row.get("rules_id") != RULES_ID
+            or row.get("rules_sha256") != RULES_SHA256
+            or row.get("event_stream_schema") != EVENT_STREAM_SCHEMA
+            or row.get("replay_contract_schema") != PAIRED_CALIBRATION_REPLAY_CONTRACT
+            or row.get("estimand_approval_sha256") != campaign["estimand_approval"]["approval_sha256"]):
+        raise ValueError("paired calibration replay/scorer/approval contract changed")
+    source_hash = campaign["source"]["source_identity_sha256"]
+    validate_estimand_approval(approval, source_identity_sha256=source_hash)
+    if estimand_approval_digest(approval) != row["estimand_approval_sha256"]:
+        raise ValueError("paired calibration approval bytes do not match row digest")
+    replay_path = row.get("replay_path")
+    resolved, raw, replay = _paired_repo_json_file(replay_root, replay_path,
+        kind="paired replay")
+    if hashlib.sha256(raw).hexdigest() != row["replay_sha256"]:
+        raise ValueError("paired calibration replay artifact bytes changed")
+    if (replay.get("simulation_id") != row["replay_id"]
+            or replay.get("evaluation_record_digest") != row["evaluation_record_sha256"]
+            or replay.get("source_identity_sha256") != source_hash
+            or replay.get("score_event_stream", {}).get("schema") != EVENT_STREAM_SCHEMA
+            or replay.get("score_event_stream", {}).get("events_sha256") != row["event_stream_sha256"]):
+        raise ValueError("paired calibration replay identity/event stream changed")
+    for field in ("scenario_id", "category", "seed", "split", "policy", "policy_id",
+            "prediction_mode"):
+        if replay.get(field) != ({"scenario_id": unit["scenario_id"],
+                "category": unit["category"], "seed": unit["seed"],
+                "split": unit["split"], "policy": control["policy"],
+                "policy_id": control["policy_id"],
+                "prediction_mode": control["prediction_mode"]}[field]):
+            raise ValueError("paired calibration replay tuple/control differs from work unit")
+    rebuilt = validate_replay_score_binding(replay, row["score_binding"],
+        row["terminal_score_counts"], approval)
+    if (rebuilt["ledger_sha256"] != row["ledger_sha256"]
+            or rebuilt["simulated_match_score"] != row["simulated_match_score"]
+            or row["score_binding"].get("simulated_match_score") != row["simulated_match_score"]
+            or row.get("official_match_points") is not None
+            or row.get("qualification_eligible") is not False
+            or row.get("safety_metrics_schema") != SAFETY_METRICS_SCHEMA
+            or row.get("safety_metrics_source_identity_sha256") != source_hash
+            or set(row.get("safety_metrics", {})) != SAFETY_METRIC_NAMES
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                or not 0 <= value <= 1 for value in row["safety_metrics"].values())
+            or type(row.get("useful_throughput")) not in (int, float)
+            or not math.isfinite(row["useful_throughput"])
+            or row["useful_throughput"] < 0
+            or row.get("raw_fuel_counts") != row.get("terminal_score_counts")
+            or not isinstance(row.get("terminal_score_counts"), list)
+            or len(row["terminal_score_counts"]) != 2
+            or any(type(value) is not int or value < 0
+                for value in row["terminal_score_counts"])):
+        raise ValueError("paired calibration outcome row disagrees with replay score/safety contract")
+    return row
 
 
 def _read_paired_bound_json(repo_root, binding, *, kind):
