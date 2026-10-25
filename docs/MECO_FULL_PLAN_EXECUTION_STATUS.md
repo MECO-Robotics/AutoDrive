@@ -1,3 +1,7 @@
+## Dashboard refreshed for reviewed three-pass provenance — 2026-10-25
+
+After the integration reached `main` at `86706ad9d`, `frc-defense-dashboard.service` was restarted from the current checkout (PID `3503505`, active). `/`, `/assets/meco.js`, and `/assets/dashboard.js` returned HTTP 200; each served body matched the current checkout byte-for-byte. The dashboard API provenance loader validates the pinned ledger locally as `validated_summary_only` with 87 tranches. I did not query `/api/curriculum-status` because this dashboard instance is configured to read the active r4 evaluation directory. No replay was generated or reviewed, so no simulator result, replay ID, or replay currentness is claimed. Training was left untouched.
+
 # Phase 0 effective-v3 paired calibration code integration — 2026-10-25
 
 The reviewed integration is pushed at `ac590f5487436735c78aef7671be5a9f8aaee187`. It binds the effective source/runtime receipt, freeze-v3, closed tuple registry and partition into paired D0/D1/D2 calibration, carries registered tuple IDs and full predictor contracts through derived artifacts, and revalidates the same bundle before training setup. Independent Pass 3 approved the freeze, paired, validator-fix, and combined heads. The combined focused offline suites passed **172 tests**; the dashboard provenance manifest now records this scoped tranche and its dashboard API digest pin has been updated.
