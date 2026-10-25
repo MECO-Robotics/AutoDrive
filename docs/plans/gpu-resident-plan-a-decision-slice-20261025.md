@@ -1,8 +1,8 @@
 # Pass 1 plan: GPU-resident Plan A decision path
 
 **Role:** Pass 1 implementation plan
-**Status:** Proposed; implementation waits for exact-head independent Pass 3 approval
-**Base:** `dd6ca02af38d998eec8f956645de88065c19f7b0` (`origin/main`)
+**Status:** Proposed; awaiting independent Pass 1 approval. Pass 2 implementation follows that approval, and its exact candidate requires independent Pass 3 review.
+**Base:** `e87d757cb70262b523a4342315695bf600cf24c7` (`origin/main`, integrated Plan C candidate)
 **Source evaluation plan SHA-256:** `718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10`
 
 ## Objective and boundary
@@ -15,25 +15,28 @@ The residency claim is limited to Plan A legal-pose support construction, route 
 
 ## Source audit and exact pins
 
-The audited source frontier is `origin/main` at `dd6ca02af38d998eec8f956645de88065c19f7b0`. Exact mainline source commits for the decision path and launch dependencies are:
+The audited source frontier is `origin/main` at `e87d757cb70262b523a4342315695bf600cf24c7`. Exact source commits present at that frontier for the decision path and launch dependencies are:
 
 - `frc_defense/meco_plan_a_policy.py` — `ade65b20f8aba6229d0d64207ed832ee2a1ed1ef`.
 - `frc_defense/meco_plan_a_shortest_path.py` — `fa59b2dcda336585d266137603ebd586be3f1d70`.
 - `frc_defense/meco_plan_a_shortest_path_hip.py` — `eae7c8ebfea8dce971845b95597ee95ca90a157d`.
 - `frc_defense/meco_plan_a_hip_parity_harness.py` — `ca4604e019826cb6b2a010f84872d0eb15f83d16`.
 - `frc_defense/meco_pose_graph.py` — `a9071b6bf1cdc55f22881e579dbf1bf875d497f9`.
-- `frc_defense/meco_track_training.py` — `fd544a8dfcd43eb144aff284d03c3b714354f092`.
-- `frc_defense/meco_tracks.py` — `fd7afd224dd2daf902156fff0f5c7b04caba199d`.
-- Shared route references `frc_defense/experimental_route_evaluation.py` and `frc_defense/tensor_adstar.py` — `6ddc7157ebf2fce4da45fec9411fdfc87ce6d30a`.
+- `frc_defense/meco_track_training.py` — `cb8a89b5ca0fcefc3bba1f3432501f76ccd09f33`.
+- `frc_defense/meco_tracks.py` — `493c9eba5a4842092c785da553330b25a726a0c5`.
+- Shared route API `frc_defense/experimental_route_evaluation.py` — `9d4af6f64e85bac260e4aabf5dc7c06b8b898bb2`; route-planner reference `frc_defense/tensor_adstar.py` — `6ddc7157ebf2fce4da45fec9411fdfc87ce6d30a`.
+- Live numeric candidate integration `frc_defense/meco_candidates.py` — `b048ccb7f93761d408720bde5b8e476fcef16687`.
 - `frc_defense/meco_supervisor.py` — `4714bab0b7bbae89c780893ef428c57d0fe87b7e`.
 - `frc_defense/meco_training_manifest.py` — `4a4e4687d5587030aa1585346cbb2528724a4480`.
 - Phase 2 artifact prerequisites: `frc_defense/meco_phase2_multicase.py` — `d20a55a18259c4dc41e01b8040c8c2826ebc6833`; `frc_defense/meco_phase2_complete_set.py` — `dd529484795856530e9be18e933206b108a7ee7a`.
 - Phase 0 calibration/freeze chain plans: `docs/plans/phase0-baseline-heldout-calibration-20261025.md` — SHA-256 `95e1b9185509259af952fab7fc956c12974d50aacf43525302275f859f917d49`; `docs/plans/phase0-resumable-paired-d0-d2-calibration-20261025.md` — SHA-256 `b0342fa0d397d9be6b4f6df96a66c1dace7a8fe00e27b7ad49cd3b57e59ae96a`.
 - Phase 2 full-freeze and production execution plans: `docs/plans/phase2-warmstart-production-execution-20261025.md` — SHA-256 `04322980aa10eca3b858f3abfc3cfd5fa49ad653a41ca302a58fac587259037b`; `docs/plans/phase2-multi-case-five-track-warmstart-20261025.md` — SHA-256 `ebfb38a05d1bd9ca443c29f3b7af08401ea6dedaaaf58e68382480696daecf54`; `docs/plans/phase2-five-track-runtime-plan-20261025.md` — SHA-256 `5f42beef6d754c10ad52ee54bf6a5f4a3ae7cacb11e0bbb30da81cc7ee4a08f5`; `docs/plans/phase2-effective-freeze-warmstart-binding-20261025.md` — SHA-256 `3080b5adccca984a01b54fa4bfa27efe77ac8f084a2245481d5851b5ba23c848`.
 
+The integrated C API defines `DeviceRouteQuery`, `DeviceRouteBatch`, and `evaluate_device_routes` in `frc_defense/experimental_route_evaluation.py`; it returns fixed-shape numeric tensors on the selected device and limits each route call to 64 queries. The live candidate builder consumes this API in `frc_defense/meco_candidates.py`. Query identity/order remains immutable host metadata, and `DeviceRouteBatch.project_results()` is an explicit post-decision reporting boundary. Plan A must use this API and its chunking contract; it must not duplicate route integration.
+
 Relevant isolated GPU prototypes are not source authority and are not approved for wholesale reuse: candidate geometry/risk batch `01a000f231e8f5bb79497091094054c5b8f4dd8f` on `codex/gpu-meco-candidate-batch` (tip `4b6bf3fbbb53b43524a54325a365a0e10bdff191`); weighted route-cost math `8372b58de47489949f7c13b4cc20c489b718b9a2`; D1/D2 score work `bd15e50721c8739a2adba5bdfdb1d35208e0cd69`; and pose-connectivity work `002396b5369f3b897ab34354150edb15d8f5c286`. Audit exact hunks against this scope and the integrated C API before any reuse; do not cherry-pick a mixed branch.
 
-Pass 3's finding on `48dd075983bfa66dd4de74cd1f9f8e24a7ef7cbc` (`origin/codex/plan-c-device-resident-selection-20261025`) is that it adds scaffolding only; live C/D decision paths still use legacy CPU behavior. That seam is not an implementation or a satisfied C-slice prerequisite. The C slice must first reach its live route evaluator, candidate builder, and scorer/selection paths and be integrated/reviewed before this Plan A follow-up starts.
+The Plan C implementation candidate `cdeb9391bf23e5c2460527959132008aee6f8eb1` received independent source-level Pass 3 approval; its integration merge candidate is `e87d757cb70262b523a4342315695bf600cf24c7`. At this frontier, the C route evaluator, candidate builder, and live scorer/selection paths consume the shared device API described above, satisfying Plan A's code-integration prerequisite. This approval establishes source-level code review and integration only. HIP parity/profile, full decision-window device residency traces, simulator behavior, fresh replay inspection, and current-dashboard evidence remain pending; it does not qualify the C runtime or clear Plan A's deferred device and simulator gates.
 
 ## Current Plan A path and CPU synchronization to remove
 
