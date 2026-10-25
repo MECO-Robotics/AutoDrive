@@ -1,9 +1,10 @@
 # MECO learning tracks plan: execution status
 
-> **R4 live training snapshot — 2026-10-25 01:50 UTC.** The service remains
-> active (PID `2750253`). A1 is at 83/100 and A2 at 75/100 optimizer updates
-> on `cuda:0` and `cuda:1`; A3, C1, and C2 are queued. No 100-update chunk,
-> five-track cycle, or evaluation has completed. This campaign is pinned to
+> **R4 live training snapshot — 2026-10-25 02:10 UTC.** The service remains
+> active (PID `2750253`). A1 completed its first 100-update chunk; A2 reached
+> 100/100 updates and was still finalizing that chunk; A3 had started at 6/100
+> on `cuda:0`; C1 and C2 remained queued. One chunk is complete, with no full
+> five-track cycle or evaluation complete. This campaign is pinned to
 > source `9bf7d8d55e75821b67eb1c5d1c01871f666ea85d`, uses only the diagnostic
 > `pickup_simple/cluster` assignment, has no evaluation-protocol binding, and
 > consumes no warm-start artifacts. Its online task counters at the same
@@ -11,6 +12,29 @@
 > counters, not held-out evaluation or qualification results. The scheduler is
 > progressing through all five lanes two at a time, but this campaign does not
 > establish the plan's curriculum or evaluation gates.
+
+> **Three-pass dashboard refresh — 2026-10-25 02:13 UTC.** After integrating
+> the reviewed Phase 4 start-profile outcome wiring and registering its scoped
+> planner/implementer/reviewer evidence, `frc-defense-dashboard.service` was
+> restarted on this checkout (PID `2825838`, working directory `AutoDrive`).
+> `/`, `/api/meco-status`, `/api/curriculum-status`, `/assets/meco.js`, and
+> `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 59
+> validated scoped tranches. Served frontend hashes match this checkout:
+> `meco.js` `6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98e9a62533c`
+> and `dashboard.js`
+> `487dff5cfb48d4d7e6d419be343d5e1149c291b4ba9866d227fa312972867219`.
+> No simulator replay was generated or reviewed.
+
+> **Phase 4 legal start-profile outcome wiring — 2026-10-25.** The reviewed
+> implementation is integrated at `b2509fc44` and its provenance-bound digest
+> follow-up at `1929e355e`. Runtime now records all-world legality after the
+> full-team profile is applied and before observation; the paired reducer
+> checks exact policy/category/seed coverage, finite outcomes, and binds the
+> per-world legality evidence into its coverage digest. Scoped contract checks
+> passed and an independent exact-head review approved the final implementation
+> commit. No Phase 4 simulator evaluation, replay, or GPU run was performed;
+> qualification remains false. The dashboard provenance ledger now contains
+> 59 scoped tranches.
 
 > **Three-pass dashboard re-verification — 2026-10-25 01:55 UTC.** After adding
 > the reviewed Plan A exact-heap tranche, `frc-defense-dashboard.service` was
