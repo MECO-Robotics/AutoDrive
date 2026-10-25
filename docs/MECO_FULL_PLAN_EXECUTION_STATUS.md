@@ -12,7 +12,10 @@ This is static source evidence only. No tests, HIP build, runtime/GPU execution,
 seeded simulator evaluation, replay, or qualification was performed. The
 qualification path currently fails closed when score-ledger event recording is
 enabled because event extraction still needs host materialization. The
-five-track PPO residency tranche and all five stage-one passes remain open.
+five-track PPO residency tranche and all five stage-one passes remain open. The
+three-pass ledger, dashboard APIs, and all eight frontend routes were verified
+after restart from the integrated checkout; see
+[`gpu-gamepiece-dashboard-currentness-20261026.md`](implementation-provenance/gpu-gamepiece-dashboard-currentness-20261026.md).
 
 ## V4 GPU cluster-bootstrap implementation — 2026-10-26
 
