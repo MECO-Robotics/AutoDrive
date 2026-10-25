@@ -292,6 +292,8 @@ def _validate_receipt(receipt):
         _digest(digest, "phase0_authoritative_source")
     runtime = _runtime(receipt["runtime"])
     snapshot = receipt["effective_snapshot"]
+    if not isinstance(snapshot, dict):
+        raise ValueError("phase0_receipt_snapshot_invalid")
     if _digest(receipt["effective_snapshot_sha256"], "phase0_snapshot_link") != snapshot.get("snapshot_sha256"):
         raise ValueError("phase0_receipt_snapshot_link_mismatch")
     config = _config_artifacts(receipt["configuration_artifacts"])
