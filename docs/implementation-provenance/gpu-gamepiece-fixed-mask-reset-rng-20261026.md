@@ -1,7 +1,7 @@
 # GPU gamepiece fixed-mask/reset checkpoint
 
-**Status:** Pass 2 intermediate implementation checkpoint; not a completed or validated gamepiece-physics tranche.  
-**Plan:** `docs/plans/gpu-simulator-gamepiece-physics-tranche-20261026.md` (SHA-256 `4fad637c060cc55478c2999564162c269668b5ab24c5a6c04d2a0aad1ad0ec5b`).  
+**Status:** Pass 2 intermediate implementation checkpoint; not a completed or validated gamepiece-physics tranche.
+**Plan:** `docs/plans/gpu-simulator-gamepiece-physics-tranche-20261026.md` (SHA-256 `4fad637c060cc55478c2999564162c269668b5ab24c5a6c04d2a0aad1ad0ec5b`).
 **Base:** `84982b536199a939160682559c92a63cd737eea7`; implementer branch `codex/gamepiece-physics-impl-20261026`.
 
 ## Changes in this checkpoint
