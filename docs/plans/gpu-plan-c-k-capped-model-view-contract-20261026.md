@@ -51,8 +51,8 @@ Only the following paths may change. Stop and request another Pass 1 amendment i
 - `frc_defense/meco_track_training.py`: route the v2 device view through C1/C2 scoring and bind selected global-row identity into device action/route evidence and evaluation `route_trace`; do not change training schedule, campaigns, checkpoints, hardware selection or launch orchestration.
 - `tests/test_meco_tracks.py`: v1 compatibility and v2 request/broker shape/provenance contracts, C2 masked context semantics, malformed/mismatch fail-closed behavior, and zero-valid-row handling.
 - `tests/test_meco_multimodel_prediction.py`: C1/C2 v2 scoring and output-index-to-global-row mapping, preserving D1/D2/A contracts.
-- `tests/test_meco_candidate_generation.py` (or the existing focused candidate test file if this exact path is absent at implementation base): K=8/16/32 ordering, K-width, continuation slot, eligibility-before-cap, unique/range-valid map, and extra/offset exclusion.
-- `tests/test_meco_track_training.py`: route trace selected identity/provenance mapping and no pre-selection host synchronization guards, only if existing fixtures can exercise the contract without simulator/GPU side effects.
+- `tests/test_meco_candidates.py` (new focused file; no candidate-generation test file exists at the planning base): K=8/16/32 ordering, K-width, continuation slot, eligibility-before-cap, unique/range-valid map, and extra/offset exclusion.
+- `tests/test_meco_track_training_candidate_view.py` (new focused file): route-trace selected identity/provenance mapping and no pre-selection host synchronization guards, using fixtures with no simulator/GPU side effects.
 
 Do not change model checkpoint weights, `MECO_INPUT_NAMES` schemas other than explicit versioned candidate metadata, candidate feature meanings/order, Plan A or D1/D2 behavior, route evaluator/search/safety/native legality, action macros, dashboard/replay code, active campaign, curriculum, or GPU kernels in this tranche.
 
