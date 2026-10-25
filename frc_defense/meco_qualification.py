@@ -4820,6 +4820,11 @@ def preflight_stage1(*, protocol_path, phase0_index_path, campaign_manifest_path
         for name in ("score_estimand_review", "d0_calibration_bundle",
                 "matched_reference_calibration_bundle", "margin_review"):
             _stage1_check_phase0_artifact(name, loaded_artifacts[name], protocol)
+        for bundle_name in ("d0_calibration_bundle", "matched_reference_calibration_bundle"):
+            reports = loaded_artifacts[bundle_name]["calibration_reports"]
+            for report in reports.values():
+                if report.get("normalized_runtime_identity") != chain_binding["normalized_runtime"]:
+                    raise ValueError("phase0_calibration_runtime_binding_mismatch")
         review = loaded_artifacts["score_estimand_review"]
         if review.get("simulator_source_sha256") != phase0_binding["source_identity_sha256"]:
             raise ValueError("phase0_estimand_source_binding_invalid")

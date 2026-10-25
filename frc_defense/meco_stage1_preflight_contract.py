@@ -26,6 +26,14 @@ RUNTIME_FIELDS = frozenset({"simulator_id", "simulator_version", "simulator_buil
     "dependency_lock_sha256"})
 TUPLE_FIELDS = ("scenario_id", "case_id", "category", "defender_family", "layout_id",
     "start_condition", "sensor_profile", "seed", "repetition", "evaluation_phase")
+PUBLIC_FACTORY_ARGUMENTS = frozenset({"scenario_id", "category", "num_envs", "device",
+    "seed", "horizon", "fuel_physics", "production_d0", "layout_id",
+    "defender_family", "start_condition", "sensor_profile", "phase4_factor",
+    "contact_geometry_id", "contact_geometry_config", "phase4_opponent_policy_id",
+    "phase4_opponent_schedule", "phase4_opponent_seed",
+    "phase4_start_profile_assignment", "phase4_focal_pose_assignment",
+    "phase4_teammate_behavior_assignment", "evaluation_protocol_content_base64",
+    "evaluation_protocol_object", "evaluation_protocol_content_sha256"})
 PARTITIONS = ("train", "calibration", "validation", "final_test")
 TRUSTED_ALLOCATION_ARTIFACT_SHA256 = frozenset()
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -161,6 +169,15 @@ def _digest(value, label):
     return value
 
 
+def _reject_duplicate_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("phase0_snapshot_protocol_duplicate_key")
+        result[key] = value
+    return result
+
+
 def _runtime(value):
     if not isinstance(value, dict) or set(value) != RUNTIME_FIELDS | {"device_model", "device_index"}:
         raise ValueError("phase0_runtime_schema_invalid")
@@ -177,6 +194,24 @@ def _runtime(value):
     if value["device_id"].startswith(("auto", "cuda", "hip", "rocm")):
         raise ValueError("phase0_runtime_device_id_invalid")
     return value
+
+
+def _normalized_calibration_runtime(runtime):
+    """Mirror qualification's pure normalized calibration-runtime contract."""
+    backend = runtime["backend"].strip().lower()
+    if backend in {"rocm", "hip"}:
+        backend, hip_version = "hip", runtime["backend_version"]
+    elif backend == "cuda":
+        hip_version = None
+    else:
+        raise ValueError("phase0_runtime_backend_invalid")
+    if backend == "hip" and (not isinstance(hip_version, str) or not hip_version.strip()):
+        raise ValueError("phase0_runtime_hip_version_invalid")
+    # Mirror _normalized_calibration_runtime: omit device selector and expose
+    # the runtime device name under both `device_name` and `device_model`.
+    return {"backend": backend, "torch_version": runtime["torch_version"],
+        "hip_version": hip_version, "device_name": runtime["device_model"],
+        "device_model": runtime["device_model"]}
 
 
 def _config_artifacts(value, *, snapshot=False):
@@ -242,8 +277,28 @@ def _validate_snapshot(snapshot, receipt_source, receipt_runtime):
         "evaluation_protocol_content_base64", "evaluation_protocol_content_sha256"}
     if (not isinstance(snapshot["factory_arguments"], dict)
             or not required_arguments <= set(snapshot["factory_arguments"])
+            or not set(snapshot["factory_arguments"]) <= PUBLIC_FACTORY_ARGUMENTS
             or any(not isinstance(k, str) or k.startswith("_") for k in snapshot["factory_arguments"])):
         raise ValueError("phase0_snapshot_factory_arguments_invalid")
+    snapshot_config = _config_artifacts(snapshot["configuration_artifacts"], snapshot=True)
+    arguments = snapshot["factory_arguments"]
+    protocol_artifact = snapshot["configuration_artifacts"]["evaluation_protocol"]
+    try:
+        protocol_bytes = base64.b64decode(arguments["evaluation_protocol_content_base64"], validate=True)
+        artifact_bytes = base64.b64decode(protocol_artifact["content_base64"], validate=True)
+        protocol_object = json.loads(protocol_bytes, object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("phase0_snapshot_protocol_bytes_invalid") from exc
+    protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+    if (not isinstance(protocol_object, dict)
+            or protocol_bytes != artifact_bytes
+            or protocol_sha256 != _digest(arguments["evaluation_protocol_content_sha256"],
+                "phase0_snapshot_protocol")
+            or protocol_sha256 != _digest(protocol_artifact["content_sha256"],
+                "phase0_snapshot_protocol_artifact")
+            or protocol_object != arguments["evaluation_protocol_object"]):
+        raise ValueError("phase0_snapshot_protocol_binding_mismatch")
     if snapshot["runtime_identity"] != receipt_runtime:
         raise ValueError("phase0_snapshot_runtime_binding_mismatch")
     if _runtime(snapshot["runtime_identity"]) != _runtime(receipt_runtime):
@@ -253,7 +308,7 @@ def _validate_snapshot(snapshot, receipt_source, receipt_runtime):
         raise ValueError("phase0_snapshot_field_set_invalid")
     if not isinstance(receipt_source, dict):
         raise ValueError("phase0_receipt_source_invalid")
-    return _config_artifacts(snapshot["configuration_artifacts"], snapshot=True)
+    return snapshot_config
 
 
 def _validate_receipt(receipt):
@@ -504,7 +559,9 @@ def validate_phase0_chain(chain):
         "source": freeze["source"], "runtime": freeze["runtime"],
         "runtime_sha256": canonical_sha256(freeze["runtime"]),
         "dependency_lock_sha256": freeze["runtime"]["dependency_lock_sha256"],
-        "normalized_runtime_sha256": canonical_sha256(freeze["runtime"]),
+        "normalized_runtime": _normalized_calibration_runtime(freeze["runtime"]),
+        "normalized_runtime_sha256": canonical_sha256(
+            _normalized_calibration_runtime(freeze["runtime"])),
         "config_sha256": receipt_result["config_sha256"],
         "configuration_artifacts": receipt_result["configuration_artifacts"],
         "tuple_registry_sha256": partition["tuple_registry_sha256"],
@@ -530,6 +587,8 @@ def validate_phase0_index(index, chain, artifact_sha256s):
     for key in ("runtime_sha256", "dependency_lock_sha256", "normalized_runtime_sha256", "config_sha256", "capture_receipt_sha256", "effective_snapshot_sha256", "effective_freeze_sha256", "tuple_registry_sha256", "partition_sha256", "assignment_table_sha256"):
         if index[key] != chain_ids.get(key):
             raise ValueError(f"phase0_index_{key}_mismatch")
+    if index["dependency_lock_sha256"] != chain_ids["runtime"]["dependency_lock_sha256"]:
+        raise ValueError("phase0_index_dependency_lock_runtime_mismatch")
     if index["configuration_artifacts"] != chain_ids["configuration_artifacts"]:
         raise ValueError("phase0_index_configuration_binding_mismatch")
     artifact_names = {"capture_receipt", "effective_snapshot", "effective_freeze",
