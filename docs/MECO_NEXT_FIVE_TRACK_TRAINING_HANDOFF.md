@@ -34,11 +34,12 @@ independent reviewer confirmed the manifest's internal bindings but rejected
 it as a full-coverage execution guarantee until this is fixed.
 
 The current runtime also does not meet the user's CPU-free request. The two
-WX9100s run the model and much tensor state, but Plan A graph routing and fuel
-contact coloring still move work into Python/CPU; orchestration and output
-serialization are CPU work by design. There is no manifest setting that
-changes this. Any future GPU-hot-path rewrite needs dedicated implementation
-and seeded simulator/replay evidence.
+WX9100s run the model and much tensor state, but Plan A graph routing moves
+work into Python/CPU; orchestration and output serialization are CPU work by
+design. Fuel contact coloring also has a Python fallback when `solver="colored"`
+is selected, while the current default is `jacobi`. There is no manifest
+setting that makes the runtime CPU-free. Any future GPU-hot-path rewrite needs
+dedicated implementation and seeded simulator/replay evidence.
 
 - Create one frozen supervisor configuration for A1, A2, A3, C1, and C2; bind
   the training protocol, qualification protocol, source identity, runtime and

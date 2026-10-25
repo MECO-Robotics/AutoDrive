@@ -48,12 +48,13 @@
 > **GPU/CPU execution audit — 2026-10-25.** The active A3 and C1 workers are
 > assigned to the two WX9100s and use HIP tensors, but execution is hybrid, not
 > CPU-free. Plan A transfers graph data to Python and runs `heapq` Dijkstra;
-> the fuel-contact coloring path transfers contact pairs for Python sorting
-> and coloring. Python orchestration, host synchronization, and logging remain
-> on CPU as well. No runtime setting moves these paths wholly onto GPU. The
-> user's CPU-free request is therefore not satisfied; the campaign was not
-> changed. A GPU-hot-path conversion needs separate implementation and seeded
-> simulator/replay evidence.
+> Python orchestration, host synchronization, and logging remain on CPU as
+> well. Fuel contact coloring also has a Python transfer path when the
+> `colored` solver is selected, but the configured default is `jacobi`, so that
+> coloring path is not claimed as active in r4. No runtime setting moves these
+> remaining paths wholly onto GPU. The user's CPU-free request is therefore
+> not satisfied; the campaign was not changed. A GPU-hot-path conversion needs
+> separate implementation and seeded simulator/replay evidence.
 
 > **R4 live training snapshot — 2026-10-25 02:10 UTC.** The service remains
 > active (PID `2750253`). A1 completed its first 100-update chunk; A2 reached
