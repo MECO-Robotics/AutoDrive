@@ -8,11 +8,13 @@ stimuli and evaluator wiring are implemented and verified.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -65,6 +67,104 @@ def _read_bound_trench_artifact(root: Path, row: dict, *, path_key: str,
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return (payload, digest) if isinstance(payload, dict) else None
+
+
+def _bound_evidence_bytes(root: Path, relative: Any, expected_sha256: Any
+        ) -> bytes | None:
+    """Read a retained evidence file only when its safe path and digest match."""
+    if (not isinstance(relative, str) or not relative or
+            not isinstance(expected_sha256, str) or
+            re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None):
+        return None
+    value = Path(relative)
+    if value.is_absolute() or ".." in value.parts:
+        return None
+    root = root.resolve()
+    target = (root / value).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return None
+    raw = target.read_bytes()
+    return raw if hashlib.sha256(raw).hexdigest() == expected_sha256 else None
+
+
+def _parse_http_capture(raw: bytes) -> tuple[int, dict[str, str], bytes] | None:
+    """Parse a retained complete HTTP response, including its captured headers."""
+    marker = raw.find(b"\r\n\r\n")
+    if marker < 0:
+        return None
+    try:
+        lines = raw[:marker].decode("iso-8859-1").split("\r\n")
+        match = re.fullmatch(r"HTTP/1\.[01] ([0-9]{3})(?: .*)?", lines[0])
+        if match is None:
+            return None
+        headers = {}
+        for line in lines[1:]:
+            name, separator, value = line.partition(":")
+            if not separator or not name or name.lower() in headers:
+                return None
+            headers[name.lower()] = value.strip()
+        return int(match.group(1)), headers, raw[marker + 4:]
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _checkout_matches_source_identity(service: dict, expected_sha256: str
+        ) -> bool:
+    """Rehash source files under the declared checkout and verify its Git head."""
+    root_text = service.get("checkout_root")
+    identity = service.get("checkout_source_identity")
+    if (not isinstance(root_text, str) or not Path(root_text).is_absolute() or
+            not isinstance(identity, dict)):
+        return False
+    root = Path(root_text).resolve()
+    if not root.is_dir():
+        return False
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if commit != service.get("checkout_commit"):
+        return False
+    source_digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    if source_digest != expected_sha256:
+        return False
+    for relative, expected in identity.items():
+        if relative.startswith("_"):
+            continue
+        value = Path(relative)
+        if (value.is_absolute() or ".." in value.parts or
+                not isinstance(expected, str) or
+                re.fullmatch(r"[0-9a-f]{64}", expected) is None):
+            return False
+        path = (root / value).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return False
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            return False
+    return True
+
+
+def _service_process_matches_checkout(service: dict) -> bool:
+    """Bind captured service PID/start data to a live dashboard process."""
+    pid = service.get("main_pid")
+    start_ticks = service.get("proc_start_ticks")
+    if type(pid) is not int or pid <= 1 or type(start_ticks) is not int:
+        return False
+    proc = Path("/proc") / str(pid)
+    try:
+        command = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", errors="replace")
+        actual_root = (proc / "cwd").resolve()
+        stat = (proc / "stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        actual_start_ticks = int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return False
+    expected_root = Path(service.get("checkout_root", "")).resolve()
+    return (actual_root == expected_root and actual_start_ticks == start_ticks and
+        ("frc_defense.dashboard" in command or "frc_defense/dashboard.py" in command))
 
 
 def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
@@ -765,6 +865,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             len(item["checkout_sha256"]) == 64 and
             isinstance(item.get("served_sha256"), str) and
             len(item["served_sha256"]) == 64 and
+            isinstance(item.get("checkout_path"), str) and
+            isinstance(item.get("served_path"), str) and
             item["checkout_sha256"] == item["served_sha256"]
             for item in asset_manifest) and
         len(asset_paths) == len(asset_manifest) and
@@ -780,6 +882,9 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             endpoints[path].get("http_status") == 200 and
             isinstance(endpoints[path].get("response_sha256"), str) and
             len(endpoints[path]["response_sha256"]) == 64 and
+            isinstance(endpoints[path].get("capture_path"), str) and
+            isinstance(endpoints[path].get("capture_sha256"), str) and
+            len(endpoints[path]["capture_sha256"]) == 64 and
             isinstance(endpoints[path].get("url"), str) and
             urlsplit(endpoints[path]["url"]).scheme in ("http", "https") and
             bool(urlsplit(endpoints[path]["url"]).netloc) and
@@ -793,6 +898,38 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
                 if item["path"] == path) for path in asset_paths)
         if assets_well_formed else False)
     service = dashboard.get("service") if isinstance(dashboard, dict) else None
+    checkout_exact = (isinstance(service, dict) and
+        _checkout_matches_source_identity(service, dashboard_source))
+    endpoint_capture_records = []
+    if endpoint_evidence_exact:
+        for path in required_endpoint_paths:
+            capture = _bound_evidence_bytes(evidence_root,
+                endpoints[path].get("capture_path"),
+                endpoints[path].get("capture_sha256"))
+            parsed = _parse_http_capture(capture) if capture is not None else None
+            endpoint_capture_records.append((path, parsed))
+    endpoint_captures_exact = (endpoint_evidence_exact and
+        len(endpoint_capture_records) == len(required_endpoint_paths) and
+        all(parsed is not None and parsed[0] == 200 and parsed[2] and
+            hashlib.sha256(parsed[2]).hexdigest() ==
+                endpoints[path]["response_sha256"] and
+            parsed[1].get("x-autodrive-source-identity-sha256") == dashboard_source and
+            (path not in asset_paths or hashlib.sha256(parsed[2]).hexdigest() ==
+                next(asset["served_sha256"] for asset in asset_manifest
+                     if asset["path"] == path))
+            for path, parsed in endpoint_capture_records))
+    assets_bytes_exact = False
+    if isinstance(service, dict) and assets_well_formed:
+        asset_checks = []
+        for item in asset_manifest:
+            checkout_bytes = _bound_evidence_bytes(
+                Path(service["checkout_root"]), item.get("checkout_path"),
+                item.get("checkout_sha256"))
+            served_bytes = _bound_evidence_bytes(evidence_root,
+                item.get("served_path"), item.get("served_sha256"))
+            asset_checks.append(checkout_bytes is not None and
+                served_bytes is not None and checkout_bytes == served_bytes)
+        assets_bytes_exact = all(asset_checks)
     dashboard_valid = (isinstance(dashboard, dict) and
         dashboard.get("schema") ==
             "meco-phase4-start-profile-dashboard-evidence-v1" and
@@ -804,11 +941,13 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         service["main_pid"] > 1 and
         isinstance(service.get("started_at_utc"), str) and
         bool(service["started_at_utc"]) and
+        _service_process_matches_checkout(service) and
         isinstance(service.get("checkout_root"), str) and
         Path(service["checkout_root"]).is_absolute() and
         isinstance(service.get("checkout_commit"), str) and
         re.fullmatch(r"[0-9a-f]{40}", service["checkout_commit"]) is not None and
         service.get("checkout_source_identity_sha256") == dashboard_source and
+        checkout_exact and assets_bytes_exact and endpoint_captures_exact and
         assets_well_formed and dashboard.get(
             "frontend_asset_manifest_sha256") == manifest_sha and
         dashboard.get("checkout_frontend_asset_manifest_sha256") == manifest_sha and
@@ -820,6 +959,36 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             "reason": "dashboard backend, endpoint responses, or frontend asset manifest is not source-bound"}
     reviewer = replay.get("reviewer_identity") if isinstance(replay, dict) else None
     replays = replay.get("paired_replays") if isinstance(replay, dict) else None
+    replay_artifacts_exact = (isinstance(replays, list) and len(replays) == 2)
+    replay_payloads = []
+    if replay_artifacts_exact:
+        for item in replays:
+            raw = (_bound_evidence_bytes(evidence_root, item.get("artifact_path"),
+                item.get("replay_sha256")) if isinstance(item, dict) else None)
+            try:
+                payload = json.loads(raw) if raw is not None else None
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            replay_payloads.append(payload)
+        replay_artifacts_exact = (all(isinstance(item, dict)
+            for item in replay_payloads) and
+            len({item.get("simulation_id") for item in replay_payloads
+                 if isinstance(item, dict)}) == 2 and
+            all(isinstance(item.get("simulation_id"), str) and
+                item.get("simulation_id") == review_item.get("replay_id") and
+                item.get("scenario_id") == case["scenario_id"] and
+                item.get("category") == case["category"] and
+                item.get("split") == "validation" and
+                item.get("condition") in CONDITIONS and
+                item.get("seed") == review_item.get("seed") ==
+                    replay.get("replay_seed") and
+                item.get("phase4_start_profile_assignment") ==
+                    (assignment if item.get("condition") == "factor_treatment" else None) and
+                item.get("source_identity_sha256") == outcomes.get(
+                    "source_identity_sha256") and
+                item.get("checkpoint_sha256") == outcomes.get("checkpoint_sha256") and
+                item.get("execution_device") == outcomes.get("execution_device")
+                for review_item, item in zip(replays, replay_payloads)))
     exact_review = (row.get("schema") ==
         "meco-phase4-start-profile-review-evidence-v1" and
         row.get("protocol_id") == protocol.get("protocol_id") and
@@ -874,7 +1043,7 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
         {item.get("condition") for item in replays if isinstance(item, dict)} ==
             set(CONDITIONS) and
         len({item.get("seed") for item in replays if isinstance(item, dict)}) == 1 and
-        all(isinstance(item, dict) and
+        replay_artifacts_exact and all(isinstance(item, dict) and
             item.get("scenario_id") == case["scenario_id"] and
             item.get("category") == case["category"] and
             item.get("qualification_case") == case_axes and
@@ -896,7 +1065,8 @@ def _start_profile_review_gate(rows: list[dict], *, protocol: dict,
             item.get("seed") == replay.get("replay_seed") and
             isinstance(item.get("replay_id"), str) and bool(item["replay_id"]) and
             isinstance(item.get("replay_sha256"), str) and
-            len(item["replay_sha256"]) == 64 for item in replays) and
+            re.fullmatch(r"[0-9a-f]{64}", item["replay_sha256"]) is not None
+            for item in replays) and
         isinstance(reviewer, dict) and all(isinstance(reviewer.get(key), str) and
             reviewer.get(key) for key in ("subject_id", "identity_provider",
                                          "review_record_id")))

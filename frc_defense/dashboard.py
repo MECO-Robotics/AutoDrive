@@ -11,12 +11,22 @@ import time
 import secrets
 import threading
 import math
+from functools import lru_cache
 from contextlib import contextmanager
 from .dashboard_api import field_layout_payload, curriculum_status_payload
 from .meco_dashboard import meco_status_payload
 
 
 STATIC_DIR = Path(__file__).with_name("dashboard_static")
+
+
+@lru_cache(maxsize=1)
+def _dashboard_source_identity_sha256() -> str:
+    """Return the source identity emitted with dashboard responses."""
+    import hashlib
+    from .curriculum_training import source_identity
+    identity = json.dumps(source_identity(), sort_keys=True, allow_nan=False).encode()
+    return hashlib.sha256(identity).hexdigest()
 from .dashboard_simulation import (
     PPO_CAMPAIGN_UNIT,
     BEHAVIOR_PROBE_TICKS,
@@ -770,6 +780,8 @@ def create_handler(run_dir: Path, curriculum_root: Path | None = None, *,
                 self.send_header("Vary","Accept-Encoding")
             if playback_decoded_size is not None:
                 self.send_header("X-Playback-Decoded-Length",str(playback_decoded_size))
+            self.send_header("X-AutoDrive-Source-Identity-SHA256",
+                _dashboard_source_identity_sha256())
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
