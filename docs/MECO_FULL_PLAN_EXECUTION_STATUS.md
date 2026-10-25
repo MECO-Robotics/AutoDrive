@@ -13,12 +13,12 @@
 > progressing through all five lanes two at a time, but this campaign does not
 > establish the plan's curriculum or evaluation gates.
 
-> **Three-pass dashboard refresh — 2026-10-25 02:13 UTC.** After integrating
-> the reviewed Phase 4 start-profile outcome wiring and registering its scoped
-> planner/implementer/reviewer evidence, `frc-defense-dashboard.service` was
-> restarted on this checkout (PID `2825838`, working directory `AutoDrive`).
+> **Three-pass dashboard refresh — 2026-10-25 02:17 UTC.** After integrating
+> the reviewed Phase 4 start-profile outcome and signed Plan A choice wiring,
+> `frc-defense-dashboard.service` was restarted on this checkout (PID `2829590`,
+> working directory `AutoDrive`).
 > `/`, `/api/meco-status`, `/api/curriculum-status`, `/assets/meco.js`, and
-> `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 59
+> `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 60
 > validated scoped tranches. Served frontend hashes match this checkout:
 > `meco.js` `6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98e9a62533c`
 > and `dashboard.js`
@@ -34,7 +34,7 @@
 > passed and an independent exact-head review approved the final implementation
 > commit. No Phase 4 simulator evaluation, replay, or GPU run was performed;
 > qualification remains false. The dashboard provenance ledger now contains
-> 59 scoped tranches.
+> 60 scoped tranches.
 
 > **Plan A signed expert-choice authority — 2026-10-25.** The reviewed code path
 > is integrated at `54de5352f` through `c118f0db0`. A protocol-pinned Ed25519
