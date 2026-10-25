@@ -2,6 +2,7 @@ import pytest
 import math
 import time
 import torch
+from dataclasses import replace
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from frc_defense.experimental_route_evaluation import (
@@ -273,6 +274,32 @@ def test_c1_production_worker_accepts_device_mask_and_returns_model_response():
                        torch.zeros_like(guarded.outputs["candidate_utility"]))
 
 
+def test_plan_a_worker_rejects_nonfinite_input_before_model_call():
+    track = "A1"
+    adapter = object.__new__(ProductionMecoAdapter)
+    adapter.track = track
+    adapter.device = torch.device("cuda:0")
+    adapter.checkpoint_sha256 = "e" * 64
+    adapter.protocol_id = "plan-a-input-guard"
+    adapter.next_request_identity = lambda: (1, "plan-a-input-generation")
+    called = []
+    adapter.model = lambda **_inputs: called.append(True)
+    fake = lambda value: value.as_subclass(_CudaContractTensor)
+    raster = torch.zeros((1, 6, 16, 16))
+    raster[0, 0, 0, 0] = float("nan")
+    inputs = {"raster": fake(raster), "globals_": fake(torch.zeros((1, 7))),
+              "hidden": fake(torch.zeros((1, 64)))}
+    features = tuple(SAFE_ACTION_FEATURES)
+    table = CandidateTable("plan-a-input-guard:1", ("pose:0",),
+        (tuple(None for _ in features),), (True,), features)
+    request = make_meco_inference_request(adapter, table=table,
+        observation_timestamp=1., capture_monotonic=time.monotonic() - .01,
+        inputs=inputs, legal_pose_order_digest="f" * 64)
+    result = adapter._infer_sync(request, inputs, now=time.monotonic())
+    assert result is None
+    assert not called
+
+
 def test_c2_context_matches_unmasked_all_query_baseline_for_empty_and_mixed_support():
     model = make_meco_track("C2").eval()
     raster = torch.randn((1, 6, 16, 16))
@@ -340,7 +367,7 @@ def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback(monkeyp
         route_cost=torch.tensor([[0., 4., 0.]]),
         risk_cost=torch.zeros((1, 3)), observation_timestamp=1.,
         capture_monotonic=time.monotonic() - .01)
-    assert decision["inference_status"] == "device_validated"
+    assert decision["inference_status"] == "device_outcome"
     assert decision["inference_status_codes"]["deterministic_fallback"] == 1
     assert decision["inference_status_code"].item() == 1
     assert torch.isneginf(decision["logits"][0, 0])
@@ -357,6 +384,11 @@ def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback(monkeyp
         "valid_mask": torch.zeros_like(valid_mask),
         "fallback_index": torch.tensor(0),
     })
+    def valid_response(request, handle):
+        response = invalid_response(request, handle)
+        return replace(response, outputs={**response.outputs,
+                                          "__inference_valid": torch.tensor(True)})
+    adapter.poll_inference = valid_response
     no_feasible = score_candidates(track, adapter,
         raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
         table=table, candidate_batch=no_feasible_batch,
@@ -364,10 +396,23 @@ def test_invalid_numeric_adapter_response_is_stochastic_one_hot_fallback(monkeyp
         observation_timestamp=1., capture_monotonic=time.monotonic() - .01)
     assert no_feasible["inference_status_codes"]["no_feasible_candidate"] == 2
     assert no_feasible["inference_status_code"].item() == 2
+    assert no_feasible["inference_status"] == "device_outcome"
     assert torch.isneginf(no_feasible["logits"]).all()
     with pytest.raises((AssertionError, RuntimeError),
                        match="finite candidate logit|each decision"):
         sample_candidate_action(no_feasible["logits"], deterministic=False)
+
+    # On an absent response, keep the string label generic and use the typed
+    # device code to distinguish deterministic fallback from empty support.
+    adapter.poll_inference = lambda _request, _handle: None
+    absent = score_candidates(track, adapter,
+        raster=torch.zeros((1, 6, 16, 16)), globals_=torch.zeros((1, 7)),
+        table=table, candidate_batch=no_feasible_batch,
+        route_cost=torch.zeros((1, 3)), risk_cost=torch.zeros((1, 3)),
+        observation_timestamp=1., capture_monotonic=time.monotonic() - .01)
+    assert absent["inference_status"] == "device_outcome"
+    assert absent["inference_status_code"].item() == 2
+    assert torch.isneginf(absent["logits"]).all()
 
 
 @pytest.mark.parametrize("track", ("C1", "C2"))

@@ -340,6 +340,9 @@ class ProductionMecoAdapter:
             else:
                 # Preserve the established A1/A2/A3 adapter contract from
                 # mainline; Plan C's no-sync change does not modify Plan A.
+                if any(tensor.is_floating_point() and
+                       not bool(torch.isfinite(tensor).all()) for tensor in tensors):
+                    return None
                 safe_tensors = list(tensors)
             for name, tensor in zip(request.input_names, tensors):
                 if name in ("edge_mask", "coarse_edge_mask") and tensor.dtype != torch.bool:
@@ -1454,7 +1457,8 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
                 "counters": model.inference_counters}
             return {"logits": fallback_logits, "utility": utility, "hidden": hidden,
                     "uncertainty": None, "raw": None,
-                    "inference_status": "deterministic_fallback",
+                    "inference_status": ("device_outcome" if candidate_batch is not None
+                                         else "deterministic_fallback"),
                     "inference_status_code": torch.where(fallback_available,
                         torch.ones((), device=utility.device, dtype=torch.uint8),
                         torch.full((), 2, device=utility.device, dtype=torch.uint8)),
@@ -1511,13 +1515,17 @@ def score_candidates(track: str, model: nn.Module, *, raster: torch.Tensor,
             fallback_available = fallback_support.any(dim=-1, keepdim=True)
             logits = torch.where(inference_valid.reshape(1, 1), logits,
                                  numeric_fallback_logits)
-            inference_status_code = torch.where(inference_valid,
-                torch.zeros((), device=utility.device, dtype=torch.uint8),
-                torch.where(fallback_available.squeeze(-1),
-                    torch.ones((), device=utility.device, dtype=torch.uint8),
-                    torch.full((), 2, device=utility.device, dtype=torch.uint8)))
+            no_feasible_candidates = ~valid_candidates.any(dim=-1)
+            inference_status_code = torch.where(no_feasible_candidates.squeeze(0),
+                torch.full((), 2, device=utility.device, dtype=torch.uint8),
+                torch.where(inference_valid,
+                    torch.zeros((), device=utility.device, dtype=torch.uint8),
+                    torch.where(fallback_available.squeeze(-1),
+                        torch.ones((), device=utility.device, dtype=torch.uint8),
+                        torch.full((), 2, device=utility.device, dtype=torch.uint8))))
         output_hidden = torch.where(inference_valid, output["hidden"], hidden)
-        inference_status = "device_validated"
+        inference_status = ("device_outcome" if candidate_batch is not None
+                            else "device_validated")
     else:
         output_hidden = output["hidden"]
         inference_status_code = None
