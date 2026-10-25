@@ -565,7 +565,8 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
     for row_index, (action, variant, _forward, _lateral, target_track) in enumerate(specs):
         is_continue = continue_index is not None and row_index == continue_index
         if is_continue:
-            candidate_id = "continue:" + active_commitment.candidate_id
+            candidate_id = ("continue:inactive" if active_commitment is None else
+                            "continue:" + active_commitment.candidate_id)
         elif target_track is not None:
             candidate_id = (base.table.candidate_ids[action]
                 if not variant and target_track in base_tracks else
@@ -598,6 +599,8 @@ def _build_device_candidate_set(env, base, graph, specs, *,
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
     dtype = env.sim.pose.dtype
+    if continue_index is None:
+        raise RuntimeError("device candidate construction requires its reserved continuation row")
     ids = _device_candidate_ids(base, specs, continue_index, active_commitment)
     count = len(specs)
     actions = torch.tensor([row[0] for row in specs], device=device, dtype=torch.long)
@@ -632,15 +635,14 @@ def _build_device_candidate_set(env, base, graph, specs, *,
             raise RuntimeError("oracle target tensor does not align with its candidate specifications")
         oracle_slice = slice(oracle_track_start, oracle_track_start + oracle_count)
         track_indices[oracle_slice] = oracle_track_indices.repeat(oracle_variant_count)
-    if continue_index is not None:
-        if continue_action_tensor is not None:
-            if continue_action_tensor.device != device or continue_action_tensor.numel() != 1:
-                raise RuntimeError("commitment action tensor is not a device scalar")
-            actions[continue_index] = continue_action_tensor.reshape(())
-        if continue_track_tensor is not None:
-            if continue_track_tensor.device != device or continue_track_tensor.numel() != 1:
-                raise RuntimeError("commitment target tensor is not a device scalar")
-            track_indices[continue_index] = continue_track_tensor.reshape(())
+    if (continue_action_tensor is None or continue_action_tensor.device != device
+            or continue_action_tensor.numel() != 1):
+        raise RuntimeError("commitment action tensor is not a device scalar")
+    if (continue_track_tensor is None or continue_track_tensor.device != device
+            or continue_track_tensor.numel() != 1):
+        raise RuntimeError("commitment target tensor is not a device scalar")
+    actions[continue_index] = continue_action_tensor.reshape(())
+    track_indices[continue_index] = continue_track_tensor.reshape(())
     target_available = ((track_indices >= 0) &
                         (track_indices < env.track_pos.shape[2]))
     safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
@@ -695,11 +697,10 @@ def _build_device_candidate_set(env, base, graph, specs, *,
         oracle_rows = torch.arange(count, device=device) >= int(oracle_track_start)
         oracle_track_available = (oracle_track_indices >= 0).repeat(oracle_variant_count)
         route_available = route_available & (~oracle_rows | oracle_track_available)
-    if continue_index is not None and commitment_match_valid is not None:
-        route_available = route_available & torch.where(
-            torch.arange(count, device=device) == continue_index,
-            commitment_match_valid.to(device=device, dtype=torch.bool),
-            torch.ones(count, device=device, dtype=torch.bool))
+    route_available = route_available & torch.where(
+        torch.arange(count, device=device) == continue_index,
+        commitment_match_valid.to(device=device, dtype=torch.bool),
+        torch.ones(count, device=device, dtype=torch.bool))
     distance = torch.where(route_available, route_full.distance_m.to(dtype),
                            torch.zeros(count, device=device, dtype=dtype))
     heading_delta = geometry["headings"] - env.policy_pose[0, 3, 2]
@@ -748,10 +749,8 @@ def _build_device_candidate_set(env, base, graph, specs, *,
     raw[:, 4] = geometry["heading_bins"].to(dtype)
     raw[:, 13] = eta
     missing[:, 13] = (~route_available).to(dtype)
-    continue_mask = torch.tensor([continue_index == i for i in range(count)],
-                                 device=device, dtype=torch.bool)
-    commitment_live = (route_available[continue_index] if continue_index is not None
-                       else torch.zeros((), device=device, dtype=torch.bool))
+    continue_mask = torch.arange(count, device=device) == continue_index
+    commitment_live = route_available[continue_index]
     switch_cost = (commitment_live & ~continue_mask).to(dtype)
     raw = torch.cat((raw, torch.stack((geometry["nodes"].clamp_min(0).to(dtype),
         distance, risk, geometry["headings"].to(dtype),
@@ -781,12 +780,9 @@ def _build_device_candidate_set(env, base, graph, specs, *,
     ranks[policy_offset_start:policy_offset_start + offset_count] = offset_ranks
     selected_policy = torch.argsort(ranks, stable=True)[:candidate_k]
     policy_indices = selected_policy.detach().to(device="cpu").tolist()
-    if continue_index is not None:
-        policy_indices.append(continue_index)
-        selected = torch.cat((selected_policy,
-            torch.tensor([continue_index], device=device, dtype=torch.long)))
-    else:
-        selected = selected_policy
+    policy_indices.append(continue_index)
+    selected = torch.cat((selected_policy,
+        torch.tensor([continue_index], device=device, dtype=torch.long)))
     policy_ids = tuple(ids[index] for index in policy_indices)
     policy_queries = tuple(query_rows[index] for index in policy_indices)
     policy_routes = DeviceRouteBatch(policy_queries,
@@ -833,16 +829,19 @@ def _build_device_candidate_set(env, base, graph, specs, *,
             "expires_sequence": active_commitment.expires_sequence},
             sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
             if active_commitment is not None else ""))
+    variant_flags = torch.tensor([bool(row[1]) for row in specs],
+                                 device=device, dtype=torch.bool)
+    route_override_flags = torch.stack((
+        torch.cat((variant_flags.index_select(0, selected_policy),
+                   variant_flags[continue_index].reshape(1))),
+        continue_mask.index_select(0, selected)), dim=-1)
     device_batch = DeviceCandidateBatch(policy_ids, feature_names,
         torch.arange(len(policy_indices), device=device, dtype=torch.long),
         actions.index_select(0, selected), track_indices.index_select(0, selected),
         torch.nan_to_num(fuel_xy.index_select(0, selected)),
         geometry["targets"].index_select(0, selected),
         geometry["headings"].index_select(0, selected).to(dtype),
-        torch.stack((torch.tensor([bool(specs[i][1]) for i in policy_indices],
-                                  device=device),
-                     torch.tensor([continue_index == i for i in policy_indices],
-                                  device=device)), dim=-1),
+        route_override_flags,
         policy_raw, policy_missing, valid, eta.index_select(0, selected)[None],
         route_points, risk_points, policy_routes, fallback,
         prediction.index_select(0, selected)[None],
@@ -1279,72 +1278,111 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             specs.append((action, variant, forward, lateral, track))
     # Reconcile a carried task against this snapshot before adding it. Intake
     # commitments follow the same sensed target by position, not a transient
-    # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
+    # top-four buffer index. The device row remains fixed-capacity and masks
+    # lost, illegal, or expired commitments from selection.
     active_commitment = commitment
     continue_spec = None
     continue_action_tensor = None
     continue_track_tensor = None
-    commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
-    if active_commitment is not None:
+    commitment_match_valid = torch.zeros((), device=env.device, dtype=torch.bool)
+    if device_resident:
+        # The device candidate pool always reserves exactly one continuation
+        # row. Presence, expiry, legal action support, and target revalidation
+        # form a same-device eligibility scalar; inactive rows remain masked.
+        action_index = (7 if active_commitment is None else
+                        min(max(int(active_commitment.action_index), 0), 7))
+        goal_variant = (0 if active_commitment is None else
+                        int(active_commitment.goal_variant))
+        continue_spec = (action_index, goal_variant, 0., 0., None)
+        continue_action_tensor = torch.tensor(action_index, device=env.device,
+                                               dtype=torch.long)
+        continue_track_tensor = torch.full((), -1, device=env.device,
+                                            dtype=torch.long)
+        commitment_present = torch.tensor(active_commitment is not None,
+                                           device=env.device, dtype=torch.bool)
+        expires_sequence = (sequence if active_commitment is None else
+                            active_commitment.expires_sequence)
+        source = (None if active_commitment is None else
+                  active_commitment.source_xy_m)
+        source_present = torch.tensor(source is not None, device=env.device,
+                                      dtype=torch.bool)
+        source_xy = torch.as_tensor((0., 0.) if source is None else source,
+            device=env.device, dtype=env.sim.pose.dtype)
+        live = (env.steps[0].to(device=env.device, dtype=torch.long) <
+                torch.tensor(expires_sequence, device=env.device, dtype=torch.long))
+        requested_action = torch.tensor(
+            7 if active_commitment is None else active_commitment.action_index,
+            device=env.device, dtype=torch.long)
+        action_in_range = (requested_action >= 0) & (requested_action < 8)
+        safe_action = requested_action.clamp(0, 7)
+        collect_action = requested_action < 4
+        first_legal_collect = base.device_valid_mask[:4].to(torch.long).argmax()
+        collect_supported = base.device_valid_mask[:4].any()
+        direct_supported = (action_in_range &
+                            base.device_valid_mask.index_select(
+                                0, safe_action.reshape(1)).reshape(()))
+        continue_action_tensor = torch.where(collect_action,
+            first_legal_collect, safe_action)
+        points, _, sensed = _world_zero_perceived_fuel(env)
+        if points.shape[0]:
+            gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+            nearest_gap, nearest_track = gaps.masked_fill(
+                ~sensed, float("inf")).min(dim=0)
+            target_match = (torch.isfinite(nearest_gap) &
+                (nearest_gap <= CANDIDATE_BOUNDARY[
+                    "commitment_target_matching_tolerance_m"]))
+        else:
+            nearest_gap = torch.full((), float("inf"), device=env.device)
+            nearest_track = torch.zeros((), device=env.device, dtype=torch.long)
+            target_match = torch.zeros((), device=env.device, dtype=torch.bool)
+        commitment_match_valid = (commitment_present & live & action_in_range &
+            torch.where(collect_action,
+                collect_supported & source_present & target_match,
+                direct_supported))
+        continue_track_tensor = torch.where(
+            collect_action & source_present & target_match, nearest_track,
+            torch.full_like(nearest_track, -1))
+        continue_index = len(specs)
+        specs.append(continue_spec)
+    else:
+        commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
+    if active_commitment is not None and not device_resident:
         action = active_commitment.action_index
         if sequence >= active_commitment.expires_sequence:
             active_commitment = None
         elif action < 4:
             source = active_commitment.source_xy_m
             points, _, sensed = _world_zero_perceived_fuel(env)
-            if device_resident:
-                action_tensor = base.device_valid_mask[:4].to(torch.long).argmax()
-                continue_action_tensor = action_tensor
-                if source is not None and points.shape[0]:
-                    source_xy = torch.as_tensor(source, device=points.device,
-                                                dtype=points.dtype)
-                    gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
-                    nearest_gap, nearest_track = gaps.masked_fill(
-                        ~sensed, float("inf")).min(dim=0)
-                    commitment_match_valid = (torch.isfinite(nearest_gap) &
-                        (nearest_gap <= CANDIDATE_BOUNDARY[
-                            "commitment_target_matching_tolerance_m"]))
-                    continue_track_tensor = nearest_track
-                else:
-                    commitment_match_valid = torch.zeros((), device=env.device,
-                                                          dtype=torch.bool)
-                    continue_track_tensor = torch.zeros((), device=env.device,
-                                                         dtype=torch.long)
-                continue_spec = (action, active_commitment.goal_variant,
-                                 0., 0., None)
+            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
+            if source is not None and points.shape[0] and action is not None:
+                source_xy = torch.as_tensor(source, device=points.device,
+                                            dtype=points.dtype)
+                gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+                nearest_gap, nearest_track = gaps.masked_fill(
+                    ~sensed, float("inf")).min(dim=0)
+                commitment_match_valid = (torch.isfinite(nearest_gap) &
+                    (nearest_gap <= CANDIDATE_BOUNDARY[
+                        "commitment_target_matching_tolerance_m"]))
+                # Legacy candidate IDs require a scalar sensor identity.
+                track = int(nearest_track.item())
             else:
-                action = next((i for i in range(4) if base.table.valid_mask[i]), None)
-                if source is not None and points.shape[0] and action is not None:
-                    source_xy = torch.as_tensor(source, device=points.device,
-                                                dtype=points.dtype)
-                    gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
-                    nearest_gap, nearest_track = gaps.masked_fill(
-                        ~sensed, float("inf")).min(dim=0)
-                    commitment_match_valid = (torch.isfinite(nearest_gap) &
-                        (nearest_gap <= CANDIDATE_BOUNDARY[
-                            "commitment_target_matching_tolerance_m"]))
-                    # Legacy candidate IDs require a scalar sensor identity.
-                    track = int(nearest_track.item())
-                else:
-                    commitment_match_valid = torch.zeros((), device=env.device,
-                                                          dtype=torch.bool)
-                    track = 0
-                if action is None:
-                    active_commitment = None
-                else:
-                    continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
+                commitment_match_valid = torch.zeros((), device=env.device,
+                                                      dtype=torch.bool)
+                track = 0
+            if action is None:
+                active_commitment = None
+            else:
+                continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
         else:
-            if device_resident:
-                commitment_match_valid = base.device_valid_mask[action]
-                continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
-            elif not base.table.valid_mask[action]:
+            if not base.table.valid_mask[action]:
                 active_commitment = None
             else:
                 continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
-    continue_index = None
-    if continue_spec is not None:
-        continue_index = len(specs)
-        specs.append(continue_spec)
+    if not device_resident:
+        continue_index = None
+        if continue_spec is not None:
+            continue_index = len(specs)
+            specs.append(continue_spec)
     oracle_offsets = ((.50, 0.), (-.50, 0.), (0., .50), (0., -.50),
         (.50, .50), (.50, -.50), (-.50, .50), (-.50, -.50),
         (.68, 0.), (-.68, 0.), (0., .68), (0., -.68),
