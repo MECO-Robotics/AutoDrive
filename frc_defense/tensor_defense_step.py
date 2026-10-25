@@ -27,10 +27,10 @@ class TensorDefenseStepMixin:
                      torch.as_tensor(active_mask,device=self.device,dtype=torch.bool).reshape(self.n))
         active_count=(self.n if full_batch else
                       int(_active_count) if _active_count is not None else None)
-        if not full_batch:
-            self._planner_tick_aligned=False
-        self._planner_full_batch_active=(self._planner_tick_aligned and
-                                         full_batch)
+        # Retain the dashboard's host-side full-batch cadence metadata. Device
+        # planner eligibility itself is computed from per-world ticks below.
+        if full_batch:
+            self._planner_tick_scalar += 1
         a=torch.as_tensor(action,device=self.device,dtype=self.sim.pose.dtype)
         if self.action_mode=="strategic":
             if a.ndim==2 and a.shape[-1]==1:a=a.squeeze(-1)

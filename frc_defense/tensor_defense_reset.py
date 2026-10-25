@@ -318,10 +318,6 @@ class TensorDefenseResetMixin:
                 (not isinstance(mask, torch.Tensor) or mask.device != self.device)):
             raise ValueError("GPU reset mask must already reside on the environment device")
         mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
-        # A device reset mask cannot select a host-side scalar fast path.
-        # Keep per-world cadence active after every reset call.
-        self._planner_tick_aligned=False
-        self._planner_full_batch_active=False
         self.sim.reset_done(mask)
         self._sample_static_opponents(mask)
         if self._adstar_planners is not None:
