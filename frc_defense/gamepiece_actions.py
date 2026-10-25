@@ -23,15 +23,33 @@ def initialize_fuel_score_event_buffer(env, recorder):
     world_count = int(env.n)
     horizon = int(env.horizon)
     robot_count = int(env.sim.num_robots)
-    capacity = world_count * horizon * robot_count
+    intervals = tuple(float(value) for value in env.robot_score_interval_values)
+    dt = float(env.sim.dt)
     if (world_count < 1 or horizon < 1 or robot_count < 1 or
-            capacity > MAX_SCORE_EVENTS_PER_EPISODE):
+            len(intervals) != robot_count or not math.isfinite(dt) or dt <= 0 or
+            any(not math.isfinite(value) or value <= 0 for value in intervals)):
+        raise ValueError("GPU score-event buffer has invalid scoring cadence")
+    # Scoring is checked once per robot per outer transition. A successful
+    # award advances that robot's next_score by its configured interval. The
+    # 1ms margin bounds the readiness epsilon and float32 clock rounding.
+    max_elapsed = min(horizon * dt, 160.0)
+    per_robot_capacity = tuple(min(horizon,
+        int(math.floor(max_elapsed / max(interval - 0.001, interval * 0.5))) + 1)
+        for interval in intervals)
+    capacity_per_world = sum(per_robot_capacity)
+    capacity = world_count * capacity_per_world
+    if capacity > MAX_SCORE_EVENTS_PER_EPISODE:
         raise ValueError(
             "GPU score-event buffer bound exceeds the fixed aggregate episode cap")
     if recorder.context.get("world_count") != world_count:
         raise ValueError("GPU score-event buffer worlds differ from recorder context")
     device = env.device
-    shape = (world_count, horizon, robot_count)
+    shape = (world_count, capacity_per_world)
+    robot_offsets = []
+    offset = 0
+    for robot_capacity in per_robot_capacity:
+        robot_offsets.append(offset)
+        offset += robot_capacity
     env._meco_gpu_score_event_buffer = {
         "event_mask": torch.zeros(shape, device=device, dtype=torch.bool),
         "tick": torch.zeros(shape, device=device, dtype=torch.long),
@@ -45,9 +63,18 @@ def initialize_fuel_score_event_buffer(env, recorder):
         "source_site_code": torch.zeros(shape, device=device, dtype=torch.int8),
         "world_counts": torch.zeros((world_count,), device=device,
                                     dtype=torch.long),
+        "world_robot_counts": torch.zeros((world_count, robot_count),
+                                          device=device, dtype=torch.long),
+        "last_event_tick": torch.full((world_count, robot_count), -1,
+                                       device=device, dtype=torch.long),
+        "reset_seen": torch.zeros((world_count,), device=device,
+                                  dtype=torch.bool),
         "aggregate_count": torch.zeros((), device=device, dtype=torch.long),
         "overflow_flags": torch.zeros((), device=device, dtype=torch.long),
         "capacity": capacity,
+        "capacity_per_world": capacity_per_world,
+        "per_robot_capacity": per_robot_capacity,
+        "robot_offsets": tuple(robot_offsets),
         "episode_binding": {
             "episode_id": recorder.context["episode_id"],
             "seed": recorder.context["seed"],
@@ -74,7 +101,7 @@ def reset_fuel_score_event_buffer(env, mask=None):
         reset_mask = mask
     if reset_mask.ndim != 1 or reset_mask.shape[0] != env.n:
         raise ValueError("score-event reset mask must be device bool [world]")
-    rows = reset_mask[:, None, None]
+    rows = reset_mask[:, None]
     for name in ("event_mask", "tick", "match_elapsed_s", "world_slot",
                  "alliance", "robot_slot", "piece_slot", "piece_generation",
                  "source_site_code"):
@@ -85,6 +112,9 @@ def reset_fuel_score_event_buffer(env, mask=None):
         reset_mask, torch.zeros_like(buffer["world_counts"]),
         buffer["world_counts"]))
     buffer["aggregate_count"].sub_(removed.sum())
+    buffer["world_robot_counts"].masked_fill_(reset_mask[:, None], 0)
+    buffer["last_event_tick"].masked_fill_(reset_mask[:, None], -1)
+    buffer["reset_seen"].logical_or_(reset_mask)
 
 
 def _capture_gpu_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
@@ -98,7 +128,7 @@ def _capture_gpu_fuel_score_awards(env, chosen, *, source_site, robot_slot=None)
     if chosen.ndim == 3:
         world_count, robot_count, _ = chosen.shape
         if (world_count != env.n or
-                robot_count != buffer["event_mask"].shape[2]):
+                robot_count != buffer["world_robot_counts"].shape[1]):
             env._meco_gpu_score_event_buffer_error = (
                 "vectorized score-event mask shape changed")
             return
@@ -112,7 +142,7 @@ def _capture_gpu_fuel_score_awards(env, chosen, *, source_site, robot_slot=None)
     elif chosen.ndim == 2 and robot_slot is not None:
         world_count = chosen.shape[0]
         if (world_count != env.n or
-                not 0 <= int(robot_slot) < buffer["event_mask"].shape[2]):
+                not 0 <= int(robot_slot) < buffer["world_robot_counts"].shape[1]):
             env._meco_gpu_score_event_buffer_error = (
                 "robot-loop score-event mask shape changed")
             return
@@ -131,16 +161,20 @@ def _write_gpu_score_event_slot(env, buffer, accepted, piece_slots,
                                 generations, robot_slot, source_code):
     from .meco_simulated_score_ledger import MAX_SCORE_EVENTS_PER_EPISODE
 
-    world_count, horizon, robot_count = buffer["event_mask"].shape
+    world_count, capacity_per_world = buffer["event_mask"].shape
     rows = torch.arange(world_count, device=env.device)
     raw_tick = env.steps.to(torch.long) - 1
+    horizon = int(env.horizon)
     tick_valid = (raw_tick >= 0) & (raw_tick < horizon)
-    safe_tick = raw_tick.clamp(0, horizon - 1)
     robot_indices = torch.full_like(rows, int(robot_slot))
-    index = (rows, safe_tick, robot_indices)
-    previous = buffer["event_mask"][index]
-    duplicate = accepted & previous
-    write = accepted & ~previous & tick_valid
+    robot_capacity = buffer["per_robot_capacity"][int(robot_slot)]
+    event_slot = (buffer["robot_offsets"][int(robot_slot)] +
+                  buffer["world_robot_counts"][:, int(robot_slot)])
+    slot_valid = event_slot < (buffer["robot_offsets"][int(robot_slot)] +
+                               robot_capacity)
+    index = (rows, event_slot.clamp(0, capacity_per_world - 1))
+    duplicate = accepted & (buffer["last_event_tick"][:, int(robot_slot)] == raw_tick)
+    write = accepted & ~duplicate & slot_valid & tick_valid
     slot_values = {
         "tick": raw_tick.clamp_min(0),
         "match_elapsed_s": env.match_elapsed,
@@ -155,12 +189,16 @@ def _write_gpu_score_event_slot(env, buffer, accepted, piece_slots,
     for name, values in slot_values.items():
         current = buffer[name][index]
         buffer[name].index_put_(index, torch.where(write, values, current))
+    previous = buffer["event_mask"][index]
     buffer["event_mask"].index_put_(index, previous | write)
     added = write.to(torch.long)
     buffer["world_counts"].add_(added)
+    buffer["world_robot_counts"][:, int(robot_slot)].add_(added)
+    buffer["last_event_tick"][:, int(robot_slot)].copy_(torch.where(
+        write, raw_tick, buffer["last_event_tick"][:, int(robot_slot)]))
     aggregate_count = buffer["aggregate_count"] + added.sum()
     buffer["aggregate_count"].copy_(aggregate_count)
-    flags = ((duplicate | (accepted & ~tick_valid)).any().to(torch.long) * 1)
+    flags = ((duplicate | (accepted & (~tick_valid | ~slot_valid))).any().to(torch.long) * 1)
     flags = flags | (aggregate_count > MAX_SCORE_EVENTS_PER_EPISODE).to(torch.long) * 2
     buffer["overflow_flags"].bitwise_or_(flags)
 
@@ -192,6 +230,9 @@ def _materialize_fuel_score_awards(env, recorder):
         return False, env._meco_gpu_score_event_buffer_error
     overflow_flags = int(buffer["overflow_flags"].detach().cpu().item())
     aggregate_count = int(buffer["aggregate_count"].detach().cpu().item())
+    reset_seen = bool(buffer["reset_seen"].detach().cpu().any().item())
+    if reset_seen:
+        return False, "selected world reset crossed the shared score-event episode context"
     if overflow_flags or aggregate_count > MAX_SCORE_EVENTS_PER_EPISODE:
         return False, f"device score-event buffer overflow flags={overflow_flags}"
     rows = {name: buffer[name].detach().cpu()
@@ -202,29 +243,32 @@ def _materialize_fuel_score_awards(env, recorder):
     source_site_by_code = {code: source for source, code in
                            _SCORE_SOURCE_SITE_CODES.items()}
     def order_key(position):
-        world, tick, slot = position
-        source_code = int(rows["source_site_code"][world, tick, slot])
+        world, slot = position
+        tick = int(rows["tick"][world, slot])
+        robot = int(rows["robot_slot"][world, slot])
+        source_code = int(rows["source_site_code"][world, slot])
         if source_code == 1:
-            return (tick, 0, world, slot)
+            return (tick, 0, world, robot)
         if source_code == 2:
-            return (tick, slot, world, slot)
-        return (tick, 0, world, slot)
+            return (tick, robot, world, robot)
+        return (tick, 0, world, robot)
     accepted.sort(key=order_key)
     if len(accepted) != aggregate_count:
         return False, "device score-event count differs from captured rows"
-    for world, tick, slot in accepted:
+    for world, slot in accepted:
+        tick = int(rows["tick"][world, slot])
         source_site = source_site_by_code.get(
-            int(rows["source_site_code"][world, tick, slot]))
+            int(rows["source_site_code"][world, slot]))
         if source_site is None:
             return False, "device score-event source code is unsupported"
         recorder.record_award(
-            tick=int(rows["tick"][world, tick, slot]),
-            match_elapsed_s=float(rows["match_elapsed_s"][world, tick, slot]),
-            world_slot=int(rows["world_slot"][world, tick, slot]),
-            alliance=int(rows["alliance"][world, tick, slot]),
-            robot_slot=int(rows["robot_slot"][world, tick, slot]),
-            piece_slot=int(rows["piece_slot"][world, tick, slot]),
-            piece_generation=int(rows["piece_generation"][world, tick, slot]),
+            tick=tick,
+            match_elapsed_s=float(rows["match_elapsed_s"][world, slot]),
+            world_slot=int(rows["world_slot"][world, slot]),
+            alliance=int(rows["alliance"][world, slot]),
+            robot_slot=int(rows["robot_slot"][world, slot]),
+            piece_slot=int(rows["piece_slot"][world, slot]),
+            piece_generation=int(rows["piece_generation"][world, slot]),
             source_site=source_site)
     return True, None
 

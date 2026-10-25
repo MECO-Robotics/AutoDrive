@@ -88,9 +88,6 @@ class TensorThreeVsThreeGamepieceMixin:
             self._meco_world_reset_generation = torch.zeros(
                 self.n, device=self.device, dtype=torch.long)
         else:
-            recorder = getattr(self, "_meco_score_event_recorder", None)
-            if recorder is not None:
-                recorder.invalidate("episode reset during score event capture")
             reset_fuel_score_event_buffer(self, mask)
             self._meco_world_reset_generation.add_(mask.long())
             self._meco_piece_generation.masked_fill_(mask[:, None], 0)

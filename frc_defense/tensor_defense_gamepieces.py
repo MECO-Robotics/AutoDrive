@@ -93,9 +93,6 @@ class TensorDefenseGamepieceMixin:
             mask=torch.ones((self.n,),device=self.device,dtype=torch.bool)
         else:
             mask=torch.as_tensor(mask,device=self.device,dtype=torch.bool).reshape(self.n)
-        recorder=getattr(self,"_meco_score_event_recorder",None)
-        if recorder is not None:
-            recorder.invalidate("episode reset during score event capture")
         reset_fuel_score_event_buffer(self,mask)
         positions=torch.zeros_like(self.piece_pos)
         active=torch.zeros_like(self.piece_active)

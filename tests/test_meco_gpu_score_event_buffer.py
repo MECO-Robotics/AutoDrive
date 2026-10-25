@@ -44,7 +44,8 @@ def _approval():
 def _env(world_count=2, horizon=4):
     return SimpleNamespace(
         n=world_count, horizon=horizon, device=torch.device("cpu"),
-        sim=SimpleNamespace(num_robots=6),
+        sim=SimpleNamespace(num_robots=6, dt=0.02),
+        robot_score_interval_values=(0.10,) * 6,
         match_elapsed=torch.zeros(world_count, dtype=torch.float32),
         steps=torch.ones(world_count, dtype=torch.long),
         team_ids=torch.tensor([0, 0, 0, 1, 1, 1]),
@@ -124,18 +125,43 @@ def test_selected_reset_preserves_other_world_rows_and_counts():
     chosen[1, 2, 1] = True
     _capture_fuel_score_awards(env, chosen, source_site=(
         "gamepiece_actions.update_fuel_actions.vectorized_score_mutation"))
-    reset_fuel_score_event_buffer(env, torch.tensor([True, False]))
     buffer = env._meco_gpu_score_event_buffer
+    buffer["overflow_flags"].fill_(2)
+    reset_fuel_score_event_buffer(env, torch.tensor([True, False]))
     assert buffer["world_counts"].tolist() == [0, 1]
     assert int(buffer["aggregate_count"]) == 1
     assert not bool(buffer["event_mask"][0].any())
     assert bool(buffer["event_mask"][1].any())
+    assert buffer["reset_seen"].tolist() == [True, False]
+    assert int(buffer["overflow_flags"]) == 2
+    complete, reason = materialize_fuel_score_awards(env, recorder)
+    assert not complete and "reset crossed" in reason
+
+
+def test_all_false_reset_is_exact_noop():
+    env, recorder = _env(), _recorder()
+    initialize_fuel_score_event_buffer(env, recorder)
+    chosen = torch.zeros((2, 6, 8), dtype=torch.bool)
+    chosen[1, 2, 1] = True
+    _capture_fuel_score_awards(env, chosen, source_site=(
+        "gamepiece_actions.update_fuel_actions.vectorized_score_mutation"))
+    buffer = env._meco_gpu_score_event_buffer
+    before = {name: value.clone() for name, value in buffer.items()
+              if isinstance(value, torch.Tensor)}
+    reset_fuel_score_event_buffer(env, torch.tensor([False, False]))
+    for name, value in before.items():
+        assert buffer[name].equal(value), name
 
 
 def test_capacity_bound_and_overflow_fail_closed_without_partial_stream():
-    oversized = _env(world_count=2, horizon=3000)
+    supported = _env(world_count=1, horizon=8000)
+    initialize_fuel_score_event_buffer(supported, _recorder(world_count=1))
+    assert supported._meco_gpu_score_event_buffer["capacity"] <= 32768
+
+    oversized = _env(world_count=10, horizon=8000)
     with pytest.raises(ValueError, match="aggregate episode cap"):
-        initialize_fuel_score_event_buffer(oversized, _recorder())
+        initialize_fuel_score_event_buffer(
+            oversized, _recorder(world_count=10))
 
     env, recorder = _env(), _recorder()
     initialize_fuel_score_event_buffer(env, recorder)
