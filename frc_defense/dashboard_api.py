@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 
-_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "569a266fdecdea585901a9107ca5f24f487466e9fce40c1f2a3da8721ad66f35"
+_EXPECTED_THREE_PASS_PROVENANCE_SHA256 = "1f6569ef86e3b99edb49b1b6d15278cb4b0dc443aeff0e2bdf5aca71cdbff84c"
 _EXPECTED_PLAN_SHA256 = "718ef9d76f5525bf8e4759d3a0a46790a3c978e2b146efec6436c89dbbb49b10"
 _QUEUE_STATUS_FILES = {"queue-status.json", "orchestration.json", "queue.json",
                       "task-scheduler-state.json"}

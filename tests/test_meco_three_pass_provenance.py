@@ -53,7 +53,7 @@ def test_current_manifest_is_validated_as_summary_only():
     phase4_status = result["tranches"][-1]
     assert phase4_status["planner"]["artifact"] == {
         "path": "docs/plans/phase4-runtime-status-ledger-dashboard-20261025.md",
-        "sha256": "10363db292fcf81a50d818283eaeddc8f77a95420b154c580b0a712a0074cdde",
+        "sha256": "3fd84e8adaab8b8ab92d08123dd10d7486890255476259a17de7c31d6a95549c",
         "kind": "scoped-transcript-summary",
         "status": "transcript-summary",
     }
@@ -69,8 +69,8 @@ def test_current_manifest_is_validated_as_summary_only():
         phase4_status["implementer"]["runtime_status_pass2_commit"])
     assert phase4_status["implementer"]["runtime_status_integration_commit"] == (
         "384c9a2baa9a97a27271cc6ed26fb316f01be8ed")
-    assert phase4_status["reviewer"]["approved_commit"] == (
-        phase4_status["implementer"]["runtime_status_approved_commit"])
+    assert phase4_status["implementer"]["candidate_commit"] == (
+        phase4_status["reviewer"]["approved_commit"])
     assert phase4_status["reviewer"]["artifact"]["path"] == (
         "docs/implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md")
     phase4_status_summary = (REPO / phase4_status["reviewer"]["artifact"]["path"]).read_text()

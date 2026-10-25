@@ -3530,14 +3530,12 @@
         "status": "summary-only",
         "artifact": {
           "path": "docs/plans/phase4-runtime-status-ledger-dashboard-20261025.md",
-          "sha256": "10363db292fcf81a50d818283eaeddc8f77a95420b154c580b0a712a0074cdde",
+          "sha256": "3fd84e8adaab8b8ab92d08123dd10d7486890255476259a17de7c31d6a95549c",
           "kind": "scoped-transcript-summary",
           "status": "transcript-summary"
         }
       },
       "implementer": {
-        "candidate_commit": "3ed5c86e5108db24eb1588afc890d1cf379cad39",
-        "integration_commit": "384c9a2baa9a97a27271cc6ed26fb316f01be8ed",
         "focal_status_pass2_commit": "2357ae4a9661c7cb6d6c038a72881a55fbdcfbec",
         "focal_status_approved_commit": "2357ae4a9661c7cb6d6c038a72881a55fbdcfbec",
         "focal_status_integration_commit": "252eb3d65e27a0d96352cf2abb83265384ce1d8d",
@@ -3554,19 +3552,12 @@
           "frc_defense/dashboard_api.py",
           "tests/test_meco_three_pass_provenance.py"
         ],
-        "status": "implemented"
+        "status": "implemented",
+        "candidate_review_pending": true
       },
       "reviewer": {
-        "artifact": {
-          "path": "docs/implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md",
-          "sha256": "3317087b6d6a40cb001a94d2a8dd5861b9b95a81a9c318fae6a823a19ed949cc",
-          "kind": "scoped-transcript-summary",
-          "status": "review-summary"
-        },
-        "approved_commit": "3ed5c86e5108db24eb1588afc890d1cf379cad39",
-        "verdict": "approved",
-        "verdict_detail": "Independent exact-head Pass 3 approved the focal-pose status correction at 2357ae4a9661c7cb6d6c038a72881a55fbdcfbec and the four-row correction at 3ed5c86e5108db24eb1588afc890d1cf379cad39 after the amended plan efbe2bb33cc29cb611de654179fedc5f91497a57 was approved. The two status changes are integrated at 252eb3d65e27a0d96352cf2abb83265384ce1d8d and 384c9a2baa9a97a27271cc6ed26fb316f01be8ed. They are documentation/source-wiring summaries only; no new simulator evaluation, replay, held-out outcome, or qualification evidence is asserted.",
-        "status": "approved-summary"
+        "status": "pending-review",
+        "verdict": "pending"
       },
       "limits": "Documentation and provenance summary for reviewed Phase 4 runtime wiring. No new end-to-end simulator evaluation, fresh replay, held-out behavior outcomes, current-dashboard replay review, qualification, or promotion is established; qualification remains disabled."
     }
