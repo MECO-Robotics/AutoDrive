@@ -71,6 +71,39 @@ should identify a concrete uncovered contract before changing code. Do not
 expand this tranche into estimator correction, later relocalization logic,
 other Phase 4 factors, model training, or qualification.
 
+## Pass 2 deliverable: correct the stale focal-pose status row
+
+Pass 2 must update only the focal-pose row in
+`docs/MECO_PHASE4_RUNTIME_STATUS.md` to reflect current source. Replace the
+stale statement that validation reset/observation application is unwired and
+that no runtime event exists. The corrected row must say:
+
+- A protocol-bound paired no-offset/registered-offset assignment exists and is
+  validated against its full-match validation case, categories, seeds, and
+  protocol.
+- The assignment is applied after final scenario reset and before perception
+  and the first policy observation. Simulator truth is unchanged.
+- Evaluator records contain initial simulator truth, policy estimate, and
+  initial pose error. They do not establish later relocalization or recovery.
+- End-to-end simulator/replay evidence is not yet accepted; relocalization
+  time, pose-error recovery, and safety-contact outcomes remain unavailable;
+  qualification stays disabled.
+
+Bind the status row's runtime-event text to the implementation contract:
+`phase4_focal_pose_assignment` and
+`records[].phase4_focal_pose.applied_before_policy_observation`, as declared in
+`frc_defense/meco_phase4_runtime_adapter.py:198-206`. Cite the reset,
+application, and diagnostic anchors listed above in an adjacent note or
+provenance reference. Do not change any other requirement row or imply that
+focal-pose qualification is executable.
+
+**Pass 2 acceptance:** inspect the final diff to confirm it changes only the
+focal-pose status wording and directly supporting citation; compare every claim
+to the source anchors in this plan; run no simulator/device workload. Submit
+the exact commit for independent Pass 3 review before considering the status
+correction accepted. Do not edit the status document before this plan amendment
+has received independent review.
+
 ## Deferred runtime evidence gate
 
 After the active r4 lease releases and the required device/simulator capacity is
