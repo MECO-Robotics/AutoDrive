@@ -1102,10 +1102,9 @@ def _phase4_route_completion_observation(record: dict | None, *,
     if (not isinstance(attempts, list) or type(attempted) is not int or attempted <= 0 or
             len(attempts) != attempted or type(completed) is not int or completed < 0 or
             type(failures) is not int or failures < 0 or type(censored) is not int or
-            censored != 0 or completed + failures != attempted or
-            type(rate) not in (int, float) or not math.isfinite(rate) or
-            not math.isclose(rate, completed / attempted, rel_tol=0., abs_tol=1e-12)):
+            censored != 0):
         return None
+    observed_completed = observed_failures = 0
     for attempt in attempts:
         if (not isinstance(attempt, dict) or attempt.get("outcome") not in
                 ("completed", "observed_failure") or attempt.get("censor_reasons") or
@@ -1119,10 +1118,18 @@ def _phase4_route_completion_observation(record: dict | None, *,
                     "meco-evaluator-route-endpoint-v1" or event.get("source") !=
                     "evaluator_terminal_slot3_truth_after_executed_macro"):
                 return None
+            observed_completed += 1
         elif (not isinstance(event, dict) or event.get("schema") !=
                 "meco-registered-route-objective-failure-v1" or event.get("source") !=
                 "registered_route_objective_failure_event"):
             return None
+        else:
+            observed_failures += 1
+    if (completed != observed_completed or failures != observed_failures or
+            completed + failures != attempted or type(rate) not in (int, float) or
+            not math.isfinite(rate) or not math.isclose(
+                rate, observed_completed / attempted, rel_tol=0., abs_tol=1e-12)):
+        return None
     return {"schema": "meco-phase4-route-outcome-observation-v1",
         "factor_id": expected_binding["factor_id"],
         "condition": expected_binding["condition"],

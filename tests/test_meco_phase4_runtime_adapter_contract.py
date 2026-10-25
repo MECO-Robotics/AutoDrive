@@ -173,6 +173,16 @@ def test_capture_accepts_only_complete_route_outcome_with_exact_episode_binding(
     wrong_condition["route_outcome_observation"]["binding"]["condition"] = "no_factor"
     with pytest.raises(ValueError, match="binding mismatch"):
         validate_phase4_capture(wrong_condition, expected_source_identity=source)
+    inconsistent_counts = copy.deepcopy(capture)
+    inconsistent_observation = inconsistent_counts["route_outcome_observation"]
+    # Preserve the completed lifecycle row while falsifying aggregate counts.
+    assert inconsistent_observation["attempts"][0]["outcome"] == "completed"
+    inconsistent_observation["completed"] = 0
+    inconsistent_observation["observed_failure"] = 1
+    inconsistent_observation["route_completion_rate"] = 0.
+    with pytest.raises(ValueError, match="incomplete or invalid"):
+        validate_phase4_capture(inconsistent_counts,
+            expected_source_identity=source)
 
     wrong_episode = copy.deepcopy(route)
     wrong_episode["binding"]["episode_id"] = "episode-2"
