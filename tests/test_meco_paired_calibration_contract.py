@@ -158,6 +158,8 @@ def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
         "paired_calibration_binding": q.paired_calibration_replay_binding(
             campaign, 0, unit),
         "source_identity_sha256": source_hash,
+        "condition_id": q.paired_calibration_condition_id(
+            q.paired_calibration_replay_binding(campaign, 0, unit)),
         "paired_calibration_worker_identity": worker,
         "device": {"device": "cuda:0", "accelerator_backend": "ROCm"},
         "execution_device": {"device": "cuda:0", "accelerator_backend": "ROCm"},

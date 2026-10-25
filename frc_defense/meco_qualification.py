@@ -2177,6 +2177,19 @@ def paired_calibration_replay_binding(campaign, shard_index, work_unit):
         "scoring": campaign["scoring"]}
 
 
+def paired_calibration_condition_id(binding):
+    """Stable unique replay condition for one comparator/pair/repetition row."""
+    if not isinstance(binding, dict) or not isinstance(binding.get("work_unit"), dict):
+        raise ValueError("paired calibration replay binding is malformed")
+    unit = binding["work_unit"]
+    control = binding.get("control_id")
+    if (unit.get("control_id") != control or unit.get("pair_id") != binding.get("pair_id")
+            or type(unit.get("repetition")) is not int or unit["repetition"] < 0):
+        raise ValueError("paired calibration replay binding identity is inconsistent")
+    return (f"paired-cal-{binding['campaign_id'][:12]}-{binding['pair_id'][:16]}-"
+        f"{control.replace('/', '-')}-r{unit['repetition']:04d}")
+
+
 def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,
         replay_root, approval):
     """Compile progress only after reloading and revalidating every replay row."""
@@ -2396,6 +2409,13 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
         expected_ids = sorted(_canonical_sha256(unit) for unit in shard["work_units"])
         if artifact.get("completed_work_unit_ids") != expected_ids:
             raise ValueError("paired calibration final shard has incomplete or extra work")
+        progress_body = {"schema": PAIRED_CALIBRATION_PROGRESS,
+            "campaign_id": campaign["campaign_id"], "shard_index": index,
+            "shard_manifest_id": shard["manifest_id"],
+            "completed_work_unit_ids": expected_ids,
+            "completed_rows": artifact.get("completed_rows"), "complete": True}
+        if artifact.get("progress_id") != _canonical_sha256(progress_body):
+            raise ValueError("paired calibration final shard progress digest is invalid")
         row_ids = []
         for row in artifact.get("completed_rows", []):
             validate_paired_calibration_outcome_row(campaign, index, row,
@@ -2550,6 +2570,8 @@ def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,
             or replay.get("replay_contract_schema") != PAIRED_CALIBRATION_REPLAY_CONTRACT
             or replay.get("paired_calibration_binding") != paired_calibration_replay_binding(
                 campaign, shard_index, work_unit)
+            or replay.get("condition_id") != paired_calibration_condition_id(
+                paired_calibration_replay_binding(campaign, shard_index, work_unit))
             or replay.get("source_identity_sha256") != source_hash):
         raise ValueError("paired calibration replay identity/source differs from its reference")
     for field in ("scenario_id", "category", "seed", "split", "policy", "policy_id",
@@ -2686,6 +2708,7 @@ def validate_paired_calibration_outcome_row(campaign, shard_index, row, *,
             or replay.get("source_identity_sha256") != source_hash
             or replay.get("paired_calibration_worker_identity") != worker
             or replay.get("paired_calibration_binding") != replay_binding
+            or replay.get("condition_id") != paired_calibration_condition_id(replay_binding)
             or replay.get("execution_device") != {"device": worker["device"],
                 "accelerator_backend": "ROCm"}
             or replay.get("device") != {"device": worker["device"],
