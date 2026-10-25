@@ -324,10 +324,11 @@ class ProductionMecoAdapter:
                 return None
             if any(t.device != self.device or t.device.type != "cuda" for t in tensors):
                 return None
-            # Device-mask requests keep the dynamic support mask and numeric
-            # validity predicates on the scoring device for both Plan A and C.
-            # Table-mask requests retain the established synchronous contract.
-            device_validity_mode = request.candidate_support_mode == "device-mask"
+            # Plan C device-mask requests and all A2/A3 graph requests keep
+            # dynamic validity predicates on device. A2/A3 status is runtime
+            # tensor state even when their legacy CandidateTable API wraps it.
+            device_validity_mode = (request.candidate_support_mode == "device-mask"
+                                    or self.track in ("A2", "A3"))
             inference_valid = None
             if device_validity_mode:
                 # Plan C device-mask requests cannot synchronize dynamic CUDA
@@ -402,8 +403,6 @@ class ProductionMecoAdapter:
                     return None
                 if device_validity_mode:
                     inference_valid &= model_input_valid.reshape(())
-                elif not bool(model_input_valid.reshape(())):
-                    return None
             values = {name: outputs[name] for name in expected}
             if any(not isinstance(value, torch.Tensor) or not value.is_floating_point()
                    or value.device != self.device or value.device.type != "cuda"
