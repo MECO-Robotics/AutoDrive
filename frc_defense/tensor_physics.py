@@ -25,7 +25,7 @@ def _require_torch():
         raise RuntimeError("Tensor simulation requires PyTorch; install torch first")
 
 
-RESET_RNG_SCHEMA_ID = "meco-per-world-reset-rng-v1"
+RESET_RNG_SCHEMA_ID = "meco-per-world-reset-rng-v2"
 
 
 def counter_uniform(world_seed, counter, active, tail_shape, *, dtype=None):

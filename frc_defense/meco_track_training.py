@@ -87,7 +87,7 @@ class PlanADeviceSelectionOutcome:
 CHUNK_RESET_POLICY = ("reset environment and GRU hidden state at each invocation chunk; "
     "shared scheduled task seed initializes the episode; subsequent episode seeds "
     "are task seed + global episode index; selected rows use "
-    "meco-3v3-per-world-rng-v1 and meco-per-world-reset-rng-v1")
+    "meco-3v3-per-world-rng-v2 and meco-per-world-reset-rng-v2")
 TRACK_LOSS_RESET_POLICY = {
     "id": "opponent-track-loss-v1",
     "signal": "opponent-confidence-and-signed-time observation raster channels 4 and 5",
@@ -2379,7 +2379,7 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         resume_pressure_anchor_state = anchor_state
         resume_reset_rng_state = payload.get("reset_rng_state")
         if (not isinstance(resume_reset_rng_state, dict) or
-                resume_reset_rng_state.get("schema_id") != "meco-3v3-per-world-rng-v1"):
+                resume_reset_rng_state.get("schema_id") != "meco-3v3-per-world-rng-v2"):
             raise ValueError("MECO checkpoint reset RNG schema is missing or incompatible")
         _validate_module_checkpoint_state(model, payload.get("model"),
                                           label="policy model")
@@ -2403,6 +2403,10 @@ def train_meco(config: MecoTrainConfig, *, resume: str | None = None,
         resume_rng_device = payload["rng_device"]
     env = make_curriculum_env(task_scenario, task_category, 1,
         config.device, task_seed, phase4_factor=phase4_factor)
+    if resume_payload is not None:
+        # Validate every saved per-world counter and generator before the
+        # deterministic chunk reset or any checkpoint state is applied.
+        env.validate_reset_rng_state_dict(resume_reset_rng_state)
     chunk_seed = task_seed
     _reset_episode(env, chunk_seed)
     chunk_pressure_anchor_state = {
