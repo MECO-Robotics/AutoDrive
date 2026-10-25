@@ -1,5 +1,19 @@
 # MECO learning tracks plan: execution status
 
+> **Dashboard direct-root verification — 2026-10-25 00:58 UTC.** The
+> `frc-defense-dashboard.service` was restarted against this `main` checkout at
+> 00:57:14 UTC after integrating the reviewed direct-campaign-root resolver.
+> The page, `/api/meco-status`, `/api/curriculum-status`, and `/assets/meco.js`
+> all returned HTTP 200. The MECO API now resolves r4's direct `checkpoints/`
+> and `evaluations/` roots and reports a fresh queue: A1 10 updates, A2 9,
+> A3/C1/C2 queued. Curriculum provenance validates as 56 scoped summaries.
+> The served `meco.js` SHA-256 matches this checkout:
+> `6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98a5e9a62533c`.
+> A follow-up campaign read at 00:57:52 UTC showed A1 11/100 and A2 10/100;
+> no complete five-track chunk, cycle, or evaluation had finished. Dashboard
+> projection is verified current, but the live run remains early diagnostic
+> training rather than held-out or qualification evidence.
+
 > **Live throughput check — 2026-10-25 00:57 UTC.** The r4 service remains
 > active (PID `2750253`; started 00:46:34 UTC). Both WX9100 workers are alive.
 > From update timestamps, A1 is completing about 90–100 optimizer updates/hour
