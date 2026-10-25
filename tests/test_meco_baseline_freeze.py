@@ -570,6 +570,23 @@ def test_factory_rejects_preloaded_behavior_module_from_other_checkout(monkeypat
         freeze_api._validate_factory_module_origins(make_curriculum_env, root)
 
 
+def test_factory_rejects_preloaded_module_without_file_using_foreign_spec_origin(monkeypatch):
+    import importlib.machinery
+    import sys
+    from types import SimpleNamespace
+    import frc_defense.meco_baseline_freeze as freeze_api
+    from frc_defense.curriculum_scenarios import make_curriculum_env
+    root = Path(__file__).resolve().parents[1]
+    module = SimpleNamespace(__file__=None,
+        __spec__=importlib.machinery.ModuleSpec(
+            "frc_defense.no_file_mixed_checkout_fixture",
+            loader=None, origin="/tmp/other-autodrive/frc_defense/mixed.py"))
+    monkeypatch.setitem(sys.modules,
+        "frc_defense.no_file_mixed_checkout_fixture", module)
+    with pytest.raises(ValueError, match="another checkout"):
+        freeze_api._validate_factory_module_origins(make_curriculum_env, root)
+
+
 def test_tuple_partition_closes_registry_for_five_identical_tracks():
     registry, assignments = _registry_and_assignment()
     freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
@@ -607,6 +624,8 @@ def test_final_test_authorization_transition_is_single_use_and_does_not_read_out
         monkeypatch, tmp_path):
     import base64
     import frc_defense.meco_baseline_freeze as freeze_api
+    ledger_root = tmp_path / "final-test-ledgers"
+    monkeypatch.setattr(freeze_api, "FINAL_TEST_LEDGER_ROOT", ledger_root)
     registry, assignments = _registry_and_assignment()
     freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
     partition = compile_tuple_partition_materialization(freeze_sha256=freeze_sha,
@@ -627,10 +646,18 @@ def test_final_test_authorization_transition_is_single_use_and_does_not_read_out
         "approval_artifact_sha256": approval_sha, "authorized_by": "reviewer",
         "purpose": "final_evaluation", "issued_at_utc": "2026-10-25T00:00:00Z"}
     authorization["authorization_sha256"] = canonical_sha256(authorization)
+    alternate_ledger_path = ledger_root / "alternate-fresh-path.json"
+    with pytest.raises(ValueError, match="policy root and immutable partition digest"):
+        consume_final_test_authorization(partition,
+            prior_ledger_state=ledger, authorization=authorization,
+            consumer_id="evaluation-run-alternate-path",
+            consumed_at_utc="2026-10-25T00:00:30Z",
+            ledger_path=alternate_ledger_path)
+    assert not alternate_ledger_path.exists()
     state, receipt = consume_final_test_authorization(partition,
         prior_ledger_state=ledger, authorization=authorization,
         consumer_id="evaluation-run-1", consumed_at_utc="2026-10-25T00:01:00Z",
-        ledger_path=tmp_path / "final-test-ledger.json")
+        ledger_path=ledger_root / f"{partition['partition_sha256']}.json")
     assert state["authorization_count"] == 1
     assert state["outcomes_read"] is False
     assert receipt["outcomes_read"] is False
@@ -639,8 +666,8 @@ def test_final_test_authorization_transition_is_single_use_and_does_not_read_out
         consume_final_test_authorization(partition, prior_ledger_state=state,
             authorization=authorization, consumer_id="evaluation-run-2",
             consumed_at_utc="2026-10-25T00:02:00Z",
-            ledger_path=tmp_path / "final-test-ledger.json")
-    ledger_path = tmp_path / "final-test-ledger.json"
+            ledger_path=ledger_root / f"{partition['partition_sha256']}.json")
+    ledger_path = ledger_root / f"{partition['partition_sha256']}.json"
     with pytest.raises(ValueError, match="compare-and-swap"):
         consume_final_test_authorization(partition, prior_ledger_state=ledger,
             authorization=authorization, consumer_id="evaluation-run-replay",
@@ -654,7 +681,10 @@ def test_final_test_authorization_transition_is_single_use_and_does_not_read_out
             consumed_at_utc="2026-10-25T00:04:00Z", ledger_path=ledger_path)
 
 
-def test_final_test_authorization_rejects_self_asserted_digest(tmp_path):
+def test_final_test_authorization_rejects_self_asserted_digest(monkeypatch, tmp_path):
+    import frc_defense.meco_baseline_freeze as freeze_api
+    ledger_root = tmp_path / "final-test-ledgers"
+    monkeypatch.setattr(freeze_api, "FINAL_TEST_LEDGER_ROOT", ledger_root)
     registry, assignments = _registry_and_assignment()
     partition = compile_tuple_partition_materialization(
         freeze_sha256=hashlib.sha256(b"freeze").hexdigest(),
@@ -670,7 +700,7 @@ def test_final_test_authorization_rejects_self_asserted_digest(tmp_path):
             prior_ledger_state=partition["final_test_access_ledger"],
             authorization=authorization, consumer_id="evaluation-run",
             consumed_at_utc="2026-10-25T00:01:00Z",
-            ledger_path=tmp_path / "final-test-ledger.json")
+            ledger_path=ledger_root / f"{partition['partition_sha256']}.json")
 
 
 @pytest.mark.parametrize("mutation", ["missing_tuple", "track_membership", "axis_leak", "exclusion_reason"])

@@ -41,6 +41,7 @@ PARTITION_CONTRACT_SCHEMA = "meco-heldout-partitions-v1"
 # pinned here. Empty sets intentionally keep materialized drafts non-authorizing.
 TRUSTED_ALLOCATION_ARTIFACT_SHA256: frozenset[str] = frozenset()
 TRUSTED_FINAL_TEST_APPROVAL_SHA256: frozenset[str] = frozenset()
+FINAL_TEST_LEDGER_ROOT = Path(__file__).resolve().parents[1] / "qualifications/meco/final-test-ledgers"
 
 # Every field is an effective value to be extracted from a real campaign
 # instance. Source hashes identify the code that defines or consumes it; they
@@ -567,9 +568,17 @@ def _validate_factory_module_origins(factory: Any, repo_root: str | Path) -> Non
                 or module_name.startswith("frc_defense.")):
             continue
         module_file = getattr(module, "__file__", None)
-        if module_file is None:
-            continue
-        origin = Path(module_file).resolve()
+        spec = getattr(module, "__spec__", None)
+        spec_origin = getattr(spec, "origin", None) if spec is not None else None
+        # A behavior module with no verifiable filesystem origin can still be a
+        # preloaded module from another checkout (or an injected module). Fail
+        # closed instead of silently omitting it from the source closure.
+        module_origin = module_file or spec_origin
+        if not isinstance(module_origin, str) or not module_origin:
+            raise ValueError(f"loaded behavior module {module_name} has no verifiable source origin")
+        if module_origin in {"built-in", "frozen"}:
+            raise ValueError(f"loaded behavior module {module_name} has no verifiable source origin")
+        origin = Path(module_origin).resolve()
         try:
             origin.relative_to(package_root)
         except ValueError as exc:
@@ -1147,6 +1156,10 @@ def consume_final_test_authorization(partition_contract: Mapping[str, Any], *,
     except ImportError as exc:
         raise ValueError("this platform cannot enforce the final-test ledger lock") from exc
     path = Path(ledger_path).resolve()
+    expected_path = (Path(FINAL_TEST_LEDGER_ROOT).resolve()
+        / f"{partition_contract.get('partition_sha256')}.json")
+    if path != expected_path:
+        raise ValueError("final-test ledger path must match the policy root and immutable partition digest")
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".lock")
     with lock_path.open("a+b") as lock_stream:
