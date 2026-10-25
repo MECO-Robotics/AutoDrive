@@ -40,7 +40,7 @@ def _schedule(protocol, sha):
     ]
 
 
-def test_schedule_progression_is_one_case_per_cycle_and_resume_deterministic():
+def test_schedule_advances_by_cycle_and_repeated_selection_is_deterministic():
     from frc_defense.meco_track_training import _EVALUATION_CASE_FIELDS
     assert manifest_api.EVALUATION_CASE_FIELDS == _EVALUATION_CASE_FIELDS
     protocol, sha = _protocol()
@@ -49,7 +49,9 @@ def test_schedule_progression_is_one_case_per_cycle_and_resume_deterministic():
     assert [row["index"] for row in schedule] == [0, 1]
     assert [_scheduled_evaluation_case(schedule, cycle)["index"]
         for cycle in (1, 2, 3, 4)] == [0, 1, 0, 1]
-    # A resumed supervisor derives the same case from the frozen schedule and cycle.
+    # Repeating selection for the same cycle within one supervisor lifetime is stable.
+    cycle_two = _scheduled_evaluation_case(schedule, 2)
+    assert _scheduled_evaluation_case(schedule, 2) == cycle_two
     assert _scheduled_evaluation_case(schedule, 3) == schedule[0]
     assert _scheduled_evaluation_case(schedule, 4) == schedule[1]
 

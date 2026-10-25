@@ -156,7 +156,11 @@ def _checkpoint_info(path: Path):
 
 
 def _scheduled_evaluation_case(schedule, cycle):
-    """Select one frozen case per complete five-track cycle deterministically."""
+    """Select a frozen case by cycle; this does not persist a restart cursor.
+
+    Manifest campaigns require fresh output roots, so campaign-level restart and
+    persisted schedule continuation are unsupported.
+    """
     if not isinstance(schedule, list) or not schedule:
         raise ValueError("frozen evaluation schedule must be a nonempty list")
     if type(cycle) is not int or cycle < 1:
