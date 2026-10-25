@@ -2,21 +2,33 @@
 
 **Role:** Pass 1 planner artifact
 **Status:** Proposed; implementation waits for exact-head independent Pass 3 review
-**Plan basis:** integrated `origin/main` at `d6805960c1176cdb3a83d30ba61164e55cd6f072`, source plan §§2–5 and §8, and the existing broader GPU-only roadmap `docs/plans/gpu-only-plan-a-c-residency-20261025.md`
+**Plan basis:** integrated `origin/main` at `d6805960c1176cdb3a83d30ba61164e55cd6f072` and the project evaluation plan §§2–5 and §8
 **Scope:** one Plan C route-evaluation slice: keep numeric candidate features, batched route feasibility, path metrics, route-cost features, and C1/C2/D1/D2 candidate scoring and selection tensors on the selected HIP/CUDA device. Permit one compact chosen-action handoff to the existing simulator interface if it cannot consume the selected tensor directly. This advances GPU residency; it does not complete the user's GPU-only request or the full MECO plan.
 
 ## Why this is the next slice
 
 The evaluator used by Plan C already builds occupancy grids and runs `TensorADStar` with tensor state, but `evaluate_routes` then enumerates device masks with `.tolist()`/`.item()`, copies every path and cost map to CPU, performs per-route endpoint and weighted-cost work in Python, and returns `RouteResult` objects with Python floats and point tuples. `build_route_feasible_candidates` consumes those objects to build Plan C features. The live C1/C2 caller later materializes route values back into tensors; `_d1_d2_scores` also reads route/risk tensors one scalar at a time before rebuilding device logits. This places repeated synchronization and host computation directly between route planning, candidate scoring, and action sampling.
 
-The slice is deliberately limited to the **Plan C numeric candidate, route-result, policy-input, and selection path**. Python candidate identity strings and the deterministic ordered candidate-spec list remain host metadata. Numeric candidate feature construction and route qualification must remain device tensors after the spec list is formed; do not materialize a Python row/list per candidate. Replay/report serialization and hashes occur after a decision and never control feasibility, utility, or the selected action. Plan A does not call `build_route_feasible_candidates`; its separate `build_plan_a_support`/HIP Dijkstra path is explicitly out of scope here and remains gated. The broad GPU-only roadmap remains the authority for legal-graph construction, Plan A support/Dijkstra, complete candidate enumeration, PPO, training, simulator internals, OS/process work, and all remaining residency work.
+The slice is deliberately limited to the **Plan C numeric candidate, route-result, policy-input, and selection path**. Python candidate identity strings and the deterministic ordered candidate-spec list remain host metadata. Numeric candidate feature construction and route qualification must remain device tensors after the spec list is formed; do not materialize a Python row/list per candidate. Replay/report serialization and hashes occur after a decision and never control feasibility, utility, or the selected action. Plan A does not call `build_route_feasible_candidates`; its separate `build_plan_a_support`/HIP Dijkstra path is explicitly out of scope here and remains gated.
+
+### Residual work outside this tranche
+
+This slice advances GPU residency in the Plan C route decision path only. It does not satisfy the user's GPU-only requirement or complete the project evaluation plan. The following CPU work remains explicit:
+
+- **Plan A:** legal pose-graph construction, support candidate generation, normal support Dijkstra, Plan A route choice and P-route integration remain CPU-backed in the normal path; the gated HIP prototype is not qualified by this work.
+- **Candidate specification:** Plan C Python candidate identity, ordered candidate-spec creation, and query/action metadata remain host-side before numeric batch construction.
+- **Perception and extraction:** observation parsing, object/track extraction, feature-source assembly, and any device-input copies remain host work.
+- **Simulator and dispatch:** simulator physics, native safety/state transitions, and Python action dispatch remain host-side. The one compact selected-action handoff allowed by this slice is itself a host boundary.
+- **Orchestration and learning:** rollout/PPO, training and fitting loops, process/OS orchestration, scheduling, and their statistics remain outside this slice and may continue to use CPU.
+- **Serialization:** report, artifact, record, hash, and replay serialization remain host-side after decisions; this slice does not move those paths to GPU.
+
+No other project phases or gates are closed by this plan.
 
 ## Existing work to reuse, not duplicate
 
 - `codex/gpu-route-weighted-cost` (`8372b58de`) has a tensor implementation of raster-boundary weighted path integration, but its current contract returns a Python `float` and its branch includes unrelated qualification/matrix changes. Inspect the exact diff and reuse only the tensor math if its edge semantics match.
 - `codex/gpu-meco-candidate-batch` (`4b6bf3fbb`) batches Plan C numeric geometry, clearance, ETA, and risk. Its stable candidate specs, Python `RouteQuery` construction, route-result object consumption, and serializer boundary remain host-side. Inspect the exact diff and reuse only applicable tensor kernels/contracts; do not merge the branch wholesale.
 - The gated Plan A HIP shortest-path prototype is already integrated into `main` (`4164f4988`/`fa59b2dcd`) but normal support construction still uses CPU Dijkstra. It is not part of this slice and its hardware parity/profile gate stays closed.
-- The broad roadmap already defines the full CPU-removal work. This plan is a bounded G2 follow-up, not a replacement for G0–G4 and not a means to mark GPU-only compliance satisfied.
 
 ## Required vertical slice
 
@@ -26,7 +38,9 @@ Add a typed `DeviceCandidateBatch` and fixed-capacity/chunked `DeviceRouteBatch`
 - `path_xy` and `path_length`: padded `[Q, MAX_ROUTE_POINTS, 2]` coordinates plus device lengths. Preserve the current AD* route point order and start-escape segment.
 - `distance_m`, `endpoint_error_m`, and `weighted_cost_grid_edges`: device scalars per row. Integrate learned and bump costs at the same raster-boundary interval midpoints and preserve normalized cardinal-grid-edge units.
 - `candidate_index` (or the existing stable query slot): device integer mapping to the immutable host metadata order. Keep parallel device columns for simulator action, target track index, snapped goal XY/heading, and route-override flags. A selected tensor index maps to the same candidate ID without reading a device scalar to Python during the decision.
-- `candidate_features` and `missing_mask`: raw schema-20 features plus matching missingness indicators, as `[1, K, 40]` model input tensors, aligned with the existing canonical candidate ID tuple and `valid_mask`. Preserve the schema and unavailable-value meaning. Keep policy candidates separate from expanded route-oracle candidates used only for recall.
+- `raw_features`: schema-20 feature values with shape `[1, K, 20]`.
+- `missing_mask`: matching schema-20 missingness indicators with shape `[1, K, 20]`.
+- `candidate_features`: concatenated raw values and missingness indicators with shape `[1, K, 40]`, aligned with the existing canonical candidate ID tuple and `valid_mask`. Preserve schema order and unavailable-value meaning. Keep policy candidates separate from expanded route-oracle candidates used only for recall.
 
 `evaluate_routes` may keep its current `RouteResult` return API for offline diagnostics and post-decision reports, but the live path must call a device-returning entry point. The compatibility projection must be an explicit post-decision operation; the live decision path cannot accidentally call it. C1/C2 model invocation and D1/D2 scoring must accept the device candidate feature, feasibility, route, and risk tensors directly. `candidate_ids` remain ordered host metadata used to bind a selected index after the decision.
 
@@ -72,7 +86,7 @@ These are gates for a later implementer/reviewer pass; this planning pass does n
 - Do not start implementation until the active Phase 4 three-pass ledger finalization has integrated and the exact planner head here is approved by Pass 3.
 - Code-only implementation and pure fixture tests may proceed while r4 remains active; do not run device parity, GPU profiling, simulator behavior evaluation, training, fitting, or launch any competing workload until r4 exits and both leases are released.
 - If a device-independent parity contract cannot be established without changing model features, support ordering, or safety, stop and return a new Pass 1 amendment.
-- If the scoped live path still requires per-candidate host synchronization before selection, report the remaining sites and do not claim this slice's residency gate passed. The one compact chosen-action handoff may be retained if required by the current simulator host interface. Subsequent Plan A legal graph/support, full Plan C generation, rollout/PPO, training/fitting, simulator-host work and OS/process boundaries remain in the broad GPU-only roadmap.
+- If the scoped live path still requires per-candidate host synchronization before selection, report the remaining sites and do not claim this slice's residency gate passed. The one compact chosen-action handoff may be retained if required by the current simulator host interface. The residual work listed above—Plan A legal graph/support/Dijkstra and route choice; host candidate specification; perception/extraction; simulator physics and action dispatch; orchestration and learning; and serialization—requires separately scoped implementation and validation.
 - This plan does not authorize restarting/reconfiguring training or claiming a valid five-track campaign. The current r4 run remains diagnostic and unchanged.
 
 ## Pass 1 audit evidence
@@ -82,6 +96,5 @@ These are gates for a later implementer/reviewer pass; this planning pass does n
 - Model input schema: `frc_defense/meco_tracks.py::candidate_feature_tensor` and `score_candidates`; stable raw feature order/missing masks are externally bound and cannot change silently.
 - Device planner exists: `frc_defense/tensor_adstar.py::TensorADStar`; this plan preserves its route/occupancy behavior.
 - Existing focused references: `tests/test_experimental_route_evaluation.py`, `tests/test_tensor_adstar_fused_route.py`, `tests/test_meco_tracks.py`, and `tests/test_meco_multimodel_prediction.py`.
-- Existing broader Pass 1 roadmap: `docs/plans/gpu-only-plan-a-c-residency-20261025.md`; it identifies graph/support/Dijkstra and the wider rollout/PPO paths that this slice leaves open.
-- Plan C ordered candidate-spec construction, earlier perception/extraction, simulator physics, selected-action host dispatch if retained, and Plan A legal-graph/support/Dijkstra remain CPU work outside this tranche. Plan A's gated HIP route path remains CPU-backed in normal support construction. None is solved by this tranche.
+- Residual CPU work is recorded directly in “Residual work outside this tranche” above: Plan A legal graph/support/Dijkstra and route choice; candidate-spec construction; perception/extraction; simulator physics and host dispatch; orchestration/learning; and serialization. Plan A's gated HIP route path remains CPU-backed in normal support construction. None is solved by this tranche.
 - No runtime code, GPU, campaign, dashboard, service, or checkpoint operation was performed for this plan. No test or simulator result is claimed.
