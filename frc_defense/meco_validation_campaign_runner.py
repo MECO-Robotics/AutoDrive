@@ -1141,7 +1141,10 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
             "invalid_reason": None if valid else reason,
             "treatment_interception_row_valid": bool(treatment_check is not None and
                 treatment_check.get("interception_row_valid"))})
-    paired_valid = [row for row in paired if row.get("valid_pair") is True and
+    valid_pair_keys = {(row["policy_id"], row["seed"]) for row in pair_statuses
+        if row.get("valid_pair") is True}
+    paired_valid = [row for row in paired
+        if (row.get("policy_id"), row.get("seed")) in valid_pair_keys and
         "alternate_crossing_success_delta" in row]
     pair_count = len(expected_keys)
     per_arm = {}

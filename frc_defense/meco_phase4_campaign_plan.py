@@ -43,7 +43,8 @@ TRENCH_POLICY_IDS = tuple(sorted((*POLICIES, "A1_P0", "A2_P0", "A3_P0")))
 
 def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
         protocol_sha256: str, registry_sha256: str, case: dict,
-        seed_sha256: str, assignment_sha256: str) -> dict | None:
+        seed_sha256: str, assignment_sha256: str,
+        expected_schedule_sha256: str) -> dict | None:
     """Accept only a complete, independently reviewed paired trench evidence row."""
     matches = [row for row in rows if isinstance(row, dict) and
         row.get("scenario_id") == case["scenario_id"] and
@@ -84,8 +85,7 @@ def _trench_interception_review_gate(rows: list[dict], *, protocol: dict,
         and bool(row["checkpoint_bundle_sha256"])
         and isinstance(row.get("execution_device"), dict)
         and bool(row["execution_device"])
-        and isinstance(row.get("schedule_sha256"), str)
-        and bool(row["schedule_sha256"])
+        and row.get("schedule_sha256") == expected_schedule_sha256
         and isinstance(row.get("seed_manifest_sha256"), str)
         and bool(row["seed_manifest_sha256"])
         and row.get("policy_config_sha256") == policy_pool_identity()["config_sha256"]
@@ -599,7 +599,8 @@ def compile_phase4_campaign_plan(protocol_path: str | Path,
                             protocol_sha256=_sha256(protocol_raw),
                             registry_sha256=_sha256(registry_raw), case=case,
                             seed_sha256=seed_info["seed_sha256"],
-                            assignment_sha256=schedule["per_episode_assignment_sha256"])
+                            assignment_sha256=schedule["per_episode_assignment_sha256"],
+                            expected_schedule_sha256=schedule["schedule_sha256"])
                     if req_id == "multiple_legal_team_start_states":
                         registry_profile_id = design_axes.get("legal_team_pose_sets")
                         start_profile_assignment = phase4_start_profile_assignment(
