@@ -55,6 +55,11 @@ PLAN_A_EXPERT_GOAL_SOURCE_TARGET_SCHEMA = "meco-plan-a-explicit-selected-goal-tr
 PLAN_A_LEGAL_NODE_MAX_BRANCHES_PER_PREFIX = 512
 PLAN_A_LEGAL_NODE_MAX_DATASET_BRANCHES = 12000
 PLAN_A_LEGAL_NODE_REPEATS = 2
+PLAN_C_MATCHED_REPEAT_COUNT = 2
+PLAN_C_REPEAT_TARGET_SCHEMA = "meco-plan-c-matched-repeated-gross-return-v1"
+PLAN_C_REPEAT_SEED_DERIVATION = "sha256-canonical-json-u32be-v1"
+PLAN_C_REPEAT_GENERATOR_SEED_DERIVATION = "sha256-repeat-seed-plus-stable-attribute-path-u64-v1"
+PLAN_C_PREFERENCE_POLICY = "same-strict-sign-for-every-paired-repeat-else-abstain-v1"
 # v2 hashes all canonical environment state except the root environment's
 # CUDA-graph execution cache (`env._physics_graphs`). Captured graph objects are
 # device/runtime execution machinery, not simulator state; every other field
@@ -97,6 +102,156 @@ _VALIDATED_EPISODE_ELIGIBILITY_CACHE = {}
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                             allow_nan=False).encode()).hexdigest()
+
+
+def plan_c_repeat_seed(*, protocol_id, scenario_id, category, seed,
+                       decision_index, repeat_index):
+    """Derive a candidate-matched branch RNG stream from a frozen identity."""
+    if (not isinstance(protocol_id, str) or not protocol_id or
+            not isinstance(scenario_id, str) or not scenario_id or
+            not isinstance(category, str) or not category or
+            any(type(value) is not int or value < 0 for value in
+                (seed, decision_index, repeat_index)) or
+            repeat_index >= PLAN_C_MATCHED_REPEAT_COUNT):
+        raise ValueError("invalid Plan C matched-repeat seed identity")
+    material = {"schema": PLAN_C_REPEAT_TARGET_SCHEMA,
+        "protocol_id": protocol_id, "scenario_id": scenario_id,
+        "category": category, "seed": seed,
+        "decision_index": decision_index, "repeat_index": repeat_index}
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
+def plan_c_repeat_protocol(protocol_id):
+    """Bind repeat count and seed/pairing rules to the qualification protocol."""
+    if not isinstance(protocol_id, str) or not protocol_id:
+        raise ValueError("Plan C repeat protocol requires a qualification protocol ID")
+    body = {"schema": PLAN_C_REPEAT_TARGET_SCHEMA,
+        "qualification_protocol_id": protocol_id,
+        "repeat_count": PLAN_C_MATCHED_REPEAT_COUNT,
+        "seed_derivation": PLAN_C_REPEAT_SEED_DERIVATION,
+        "environment_generator_seed_derivation": PLAN_C_REPEAT_GENERATOR_SEED_DERIVATION,
+        "common_random_numbers": "same repeat seed for all candidates at a prefix",
+        "prefix_replay": "replay archived prefix from base train seed; reseed global and environment RNGs at branch",
+        "continuation_policy": CONTINUATION_POLICY,
+        "preference_policy": PLAN_C_PREFERENCE_POLICY,
+        "variance_note": "two repeats support stability abstention, not precise variance calibration"}
+    return {**body, "repeat_protocol_id": _hash(body)}
+
+
+def _seed_plan_c_environment_generators(root, repeat_seed):
+    """Reseed every simulator-local Torch generator using a stable field path."""
+    if type(repeat_seed) is not int or repeat_seed < 0:
+        raise ValueError("Plan C repeat generator seed must be a nonnegative integer")
+    stack, seen, seeded = [("env", root)], set(), []
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, torch.Generator):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            material = f"plan-c-environment-generator-v1:{repeat_seed}:{path}"
+            seed = int.from_bytes(hashlib.sha256(material.encode()).digest()[:8], "big") & ((1 << 63) - 1)
+            value.manual_seed(seed)
+            seeded.append({"path": path, "seed": seed, "device": str(value.device)})
+            continue
+        if isinstance(value, (torch.Tensor, torch.nn.Module, types.ModuleType)) or callable(value):
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(value, dict):
+            entries = []
+            for key, item in value.items():
+                if type(key) not in (str, int, bool):
+                    continue
+                entries.append((f"{path}[{type(key).__name__}:{key}]", item))
+            stack.extend(reversed(sorted(entries, key=lambda pair: pair[0])))
+        elif isinstance(value, (list, tuple)):
+            stack.extend((f"{path}[{index}]", item)
+                         for index, item in reversed(list(enumerate(value))))
+        elif hasattr(value, "__dict__"):
+            stack.extend((f"{path}.{name}", vars(value)[name])
+                         for name in reversed(sorted(vars(value)))
+                         if not name.startswith("__"))
+    if not seeded:
+        raise RuntimeError("Plan C repeat found no simulator-local Torch generators to reseed")
+    seeded.sort(key=lambda item: item["path"])
+    return {"generator_count": len(seeded), "seed_manifest_sha256": _hash(seeded)}
+
+
+def plan_c_repeat_statistics(left_returns, right_returns):
+    """Calculate paired repeat statistics and a conservative stable preference."""
+    if (not isinstance(left_returns, (list, tuple)) or
+            not isinstance(right_returns, (list, tuple)) or
+            len(left_returns) != PLAN_C_MATCHED_REPEAT_COUNT or
+            len(right_returns) != PLAN_C_MATCHED_REPEAT_COUNT or
+            any(type(value) not in (int, float) or not math.isfinite(value)
+                for value in (*left_returns, *right_returns))):
+        raise ValueError("Plan C preference requires every finite matched repeat")
+    differences = [float(left) - float(right)
+                   for left, right in zip(left_returns, right_returns)]
+    mean = sum(differences) / len(differences)
+    variance = sum((value - mean) ** 2 for value in differences) / (len(differences) - 1)
+    standard_error = math.sqrt(variance / len(differences))
+    stable = all(value > 0 for value in differences) or all(value < 0 for value in differences)
+    return {"repeat_differences": differences,
+        "mean_difference": mean,
+        "sample_variance": variance,
+        "standard_error": standard_error,
+        "stable_preference": stable,
+        "preferred_side": ("left" if differences[0] > 0 else "right") if stable else None}
+
+
+def _plan_c_repeated_outcome(descriptor, repeats):
+    """Summarize complete repeated candidate returns without dropping evidence."""
+    if (not isinstance(repeats, list) or len(repeats) != PLAN_C_MATCHED_REPEAT_COUNT or
+            any(not isinstance(item, dict) or
+                not all(type(item.get(key)) in (int, float) and math.isfinite(item[key])
+                        for key in ("gross_macro_return", "gross_horizon_return",
+                                    "discounted_horizon_return"))
+                for item in repeats)):
+        raise ValueError("Plan C candidate is missing a finite matched repeat")
+    means = {}
+    for key in ("gross_macro_return", "gross_horizon_return", "discounted_horizon_return"):
+        values = [float(item[key]) for item in repeats]
+        mean = sum(values) / len(values)
+        means[key] = mean
+    returns = [float(item["gross_horizon_return"]) for item in repeats]
+    mean = means["gross_horizon_return"]
+    variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
+    return {"descriptor": descriptor, "repeat_count": PLAN_C_MATCHED_REPEAT_COUNT,
+        "repeat_returns": repeats, **means,
+        "repeat_sample_variance_gross_horizon_return": variance,
+        "continuation_policy": CONTINUATION_POLICY,
+        "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS}
+
+
+def _plan_c_pairwise_labels(outcomes):
+    """Build complete pair rows; unstable pairs are explicit abstentions."""
+    labels = []
+    for index, left in enumerate(outcomes):
+        for right in outcomes[index + 1:]:
+            left_id = left["descriptor"]["candidate_id"]
+            right_id = right["descriptor"]["candidate_id"]
+            left_returns = [item["gross_horizon_return"] for item in left["repeat_returns"]]
+            right_returns = [item["gross_horizon_return"] for item in right["repeat_returns"]]
+            stats = plan_c_repeat_statistics(left_returns, right_returns)
+            preferred = (left_id if stats["preferred_side"] == "left" else
+                         right_id if stats["preferred_side"] == "right" else None)
+            labels.append({"left_id": left_id, "right_id": right_id,
+                "gross_horizon_return_difference": left["gross_horizon_return"] -
+                    right["gross_horizon_return"],
+                "repeat_mean_difference": stats["mean_difference"],
+                "repeat_differences": stats["repeat_differences"],
+                "paired_sample_variance": stats["sample_variance"],
+                "paired_standard_error": stats["standard_error"],
+                "stable_preference": stats["stable_preference"],
+                "preferred_id": preferred})
+    return labels
 
 
 def _plan_a_u_evidence_sha256(support_digest, target, pair_outcomes):
@@ -876,7 +1031,7 @@ def _rebuild_and_check(env, graph, episode_id, expected, *, action_ticks,
 def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
                    action_ticks, decision_index, prefix, descriptor, kind,
                    candidate_k, prediction_mode, max_c_candidates,
-                   max_a_pairs, gamma_per_macro):
+                   max_a_pairs, gamma_per_macro, repeat_seed=None):
     """Evaluate one branch with isolated, reproducible RNG streams."""
     with _counterfactual_rng_scope(seed):
         return _branch_return_seeded(scenario_id=scenario_id, category=category,
@@ -885,16 +1040,18 @@ def _branch_return(*, scenario_id, category, seed, device, horizon_ticks,
             prefix=prefix, descriptor=descriptor, kind=kind,
             candidate_k=candidate_k, prediction_mode=prediction_mode,
             max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-            gamma_per_macro=gamma_per_macro)
+            gamma_per_macro=gamma_per_macro, repeat_seed=repeat_seed)
 
 
 def _branch_return_seeded(*, scenario_id, category, seed, device, horizon_ticks,
                    action_ticks, decision_index, prefix, descriptor, kind,
                    candidate_k, prediction_mode, max_c_candidates,
-                   max_a_pairs, gamma_per_macro):
+                   max_a_pairs, gamma_per_macro, repeat_seed=None):
     from .meco_track_training import _reset_episode
     env = make_curriculum_env(scenario_id, category, 1, device, seed,
                               horizon=horizon_ticks)
+    branch_rng = None
+    repeat_rng_provenance = None
     try:
         graph = build_legal_pose_graph(env, slot=3)
         episode_id = f"counterfactual-{scenario_id}-{category}-{seed}"
@@ -926,9 +1083,15 @@ def _branch_return_seeded(*, scenario_id, category, seed, device, horizon_ticks,
                           if item["descriptor_sha256"] == descriptor["descriptor_sha256"]), None)
             if match is None:
                 raise RuntimeError("archived Plan C descriptor is absent after strict replay")
+            if repeat_seed is not None:
+                branch_rng = _counterfactual_rng_scope(repeat_seed)
+                branch_rng.__enter__()
+                repeat_rng_provenance = _seed_plan_c_environment_generators(env, repeat_seed)
             reward, ended, timeout, _, _, _, _ = _reward_step(env, descriptor["action"],
                 branch_ticks, goal_xy=descriptor["goal_xy_m"])
         else:
+            if repeat_seed is not None:
+                raise ValueError("matched repeat RNG scopes are only defined for Plan C branches")
             match = next((item for item in current["plan_a_descriptors"]
                           if item["descriptor_sha256"] == descriptor["descriptor_sha256"]), None)
             if match is None:
@@ -958,11 +1121,17 @@ def _branch_return_seeded(*, scenario_id, category, seed, device, horizon_ticks,
             "continuation_policy": CONTINUATION_POLICY,
             "continuation_macro_horizon": continuation_decisions,
             "discount_semantics": COUNTERFACTUAL_DISCOUNT_SEMANTICS,
-            "terminal": bool(ended or timeout)}
+            "terminal": bool(ended or timeout),
+            **({"repeat_rng_provenance": repeat_rng_provenance}
+               if repeat_rng_provenance is not None else {})}
     finally:
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
+        try:
+            if branch_rng is not None:
+                branch_rng.__exit__(None, None, None)
+        finally:
+            close = getattr(env, "close", None)
+            if callable(close):
+                close()
 
 
 def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
@@ -1033,6 +1202,8 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
         "minimum_eligible_branches_per_seed": MIN_ELIGIBLE_BRANCHES_PER_SEED,
         "eligibility_coverage_policy": "prefix through final eligible branch point; later teacher-only suffix excluded",
         "plan_c_target_semantics": "gross simulator reward; exact archived candidate; same deterministic teacher continuation",
+        "plan_c_target_schema": PLAN_C_REPEAT_TARGET_SCHEMA,
+        "plan_c_repeat_protocol": plan_c_repeat_protocol(protocol_id),
         "plan_a_target_semantics": "gross simulator reward per sampled valid node_behavior_descriptor; no P route-cost label",
         "plan_a_p_target": None,
         "plan_a_p_prior": 0.0,
@@ -1164,30 +1335,33 @@ def collect_counterfactual_v2(output: Path, *, scenario_id: str, category: str,
                         "support_digest": item["support_digest"]},
                     "prefix_transcript": prefix_transcript,
                     "branch_eligibility": item["branch_eligibility"],
+                    "plan_c_target_schema": manifest["plan_c_target_schema"],
+                    "plan_c_repeat_protocol_id": manifest["plan_c_repeat_protocol"]["repeat_protocol_id"],
                     "seed_branch_summary": group_summary}
                 if decision_index == coverage_end:
                     group["episode_transcript"] = episode_transcript
                     group["episode_transcript_sha256"] = _hash(episode_transcript)
                 c_outcomes = []
                 for descriptor in item["candidate_descriptors"]:
-                    outcome = _branch_return(scenario_id=scenario_id, category=category,
-                        seed=seed, device=device, horizon_ticks=horizon_ticks,
-                        action_ticks=action_ticks, decision_index=decision_index,
-                        prefix=prefix, descriptor=descriptor, kind="C",
-                        candidate_k=candidate_k, prediction_mode=prediction_mode,
-                        max_c_candidates=max_c_candidates, max_a_pairs=max_a_pairs,
-                        gamma_per_macro=gamma_per_macro)
-                    _verify_native_fuel_extension(manifest["native_extension_identity"])
-                    c_outcomes.append({"descriptor": descriptor, **outcome})
-                c_pairs = [{"left_id": left["descriptor"]["candidate_id"],
-                    "right_id": right["descriptor"]["candidate_id"],
-                    "gross_horizon_return_difference": left["gross_horizon_return"] - right["gross_horizon_return"],
-                    "preferred_id": (left["descriptor"]["candidate_id"]
-                        if left["gross_horizon_return"] > right["gross_horizon_return"] else
-                        right["descriptor"]["candidate_id"]
-                        if right["gross_horizon_return"] > left["gross_horizon_return"] else None)}
-                    for index, left in enumerate(c_outcomes)
-                    for right in c_outcomes[index + 1:]]
+                    repeats = []
+                    for repeat_index in range(PLAN_C_MATCHED_REPEAT_COUNT):
+                        repeat_seed = plan_c_repeat_seed(protocol_id=protocol_id,
+                            scenario_id=scenario_id, category=category, seed=seed,
+                            decision_index=decision_index, repeat_index=repeat_index)
+                        outcome = _branch_return(scenario_id=scenario_id,
+                            category=category, seed=seed, device=device,
+                            horizon_ticks=horizon_ticks, action_ticks=action_ticks,
+                            decision_index=decision_index, prefix=prefix,
+                            descriptor=descriptor, kind="C", candidate_k=candidate_k,
+                            prediction_mode=prediction_mode,
+                            max_c_candidates=max_c_candidates,
+                            max_a_pairs=max_a_pairs,
+                            gamma_per_macro=gamma_per_macro, repeat_seed=repeat_seed)
+                        outcome.update(repeat_index=repeat_index, repeat_seed=repeat_seed)
+                        repeats.append(outcome)
+                        _verify_native_fuel_extension(manifest["native_extension_identity"])
+                    c_outcomes.append(_plan_c_repeated_outcome(descriptor, repeats))
+                c_pairs = _plan_c_pairwise_labels(c_outcomes)
                 a_outcomes = []
                 for descriptor in item["plan_a_descriptors"]:
                     outcome = _branch_return(scenario_id=scenario_id, category=category,

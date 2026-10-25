@@ -32,6 +32,7 @@ DATASET_SCHEMA = "meco-supervised-trajectory-v1"
 TARGET_SCHEMA = "meco-observed-action-target-v1"
 WEIGHTS_SCHEMA = "meco-warm-start-weights-v1"
 COUNTERFACTUAL_WEIGHTS_SCHEMA = "meco-counterfactual-warm-start-weights-v2"
+COUNTERFACTUAL_PLAN_C_REPEATED_WEIGHTS_SCHEMA = "meco-counterfactual-plan-c-repeated-warm-start-weights-v1"
 COUNTERFACTUAL_PLAN_A_VALUE_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-value-warm-start-weights-v3"
 COUNTERFACTUAL_PLAN_A_P_WEIGHTS_SCHEMA = "meco-counterfactual-plan-a-p-route-warm-start-weights-v1"
 PLAN_A_LEGAL_NODE_WEIGHTS_SCHEMA = "meco-plan-a-legal-node-u-b-weights-v1"
@@ -494,6 +495,95 @@ def warm_start(track: str, dataset: Path, output: Path, *, qualification_protoco
 
 def _finite_number(value):
     return (type(value) in (int, float) and math.isfinite(value))
+
+
+def _validate_plan_c_repeated_labels(row, *, repeat_protocol, protocol_id,
+        scenario_id, category, seed, decision_index):
+    from .meco_counterfactual import (CONTINUATION_POLICY,
+        COUNTERFACTUAL_DISCOUNT_SEMANTICS, PLAN_C_MATCHED_REPEAT_COUNT,
+        PLAN_C_REPEAT_TARGET_SCHEMA, _plan_c_repeated_outcome,
+        _plan_c_pairwise_labels, plan_c_repeat_seed)
+    if (row.get("plan_c_target_schema") != PLAN_C_REPEAT_TARGET_SCHEMA or
+            row.get("plan_c_repeat_protocol_id") != repeat_protocol.get("repeat_protocol_id")):
+        raise ValueError("row Plan C repeat identity differs from its manifest")
+    outcomes = row.get("plan_c_counterfactuals")
+    labels = row.get("plan_c_pairwise_labels")
+    if not isinstance(outcomes, list) or len(outcomes) < 2 or not isinstance(labels, list):
+        raise ValueError("Plan C repeated outcomes or paired labels are missing")
+    expected_seeds = [plan_c_repeat_seed(protocol_id=protocol_id,
+        scenario_id=scenario_id, category=category, seed=seed,
+        decision_index=decision_index, repeat_index=repeat_index)
+        for repeat_index in range(PLAN_C_MATCHED_REPEAT_COUNT)]
+    generator_provenance_by_repeat = {}
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            raise ValueError("Plan C candidate outcome is malformed")
+        repeats = outcome.get("repeat_returns")
+        if (outcome.get("repeat_count") != PLAN_C_MATCHED_REPEAT_COUNT or
+                not isinstance(repeats, list) or len(repeats) != PLAN_C_MATCHED_REPEAT_COUNT or
+                [item.get("repeat_index") if isinstance(item, dict) else None
+                 for item in repeats] != list(range(PLAN_C_MATCHED_REPEAT_COUNT)) or
+                [item.get("repeat_seed") if isinstance(item, dict) else None
+                 for item in repeats] != expected_seeds):
+            raise ValueError("Plan C candidate is missing its complete, matched repeat set")
+        for repeat_index, repeat in enumerate(repeats):
+            if (any(not _finite_number(repeat.get(key)) for key in
+                    ("gross_macro_return", "gross_horizon_return", "discounted_horizon_return")) or
+                    repeat.get("continuation_policy") != CONTINUATION_POLICY or
+                    repeat.get("discount_semantics") != COUNTERFACTUAL_DISCOUNT_SEMANTICS or
+                    type(repeat.get("continuation_macro_horizon")) is not int or
+                    repeat["continuation_macro_horizon"] < 0 or
+                    type(repeat.get("terminal")) is not bool):
+                raise ValueError("Plan C repeat return/provenance is malformed")
+            rng_provenance = repeat.get("repeat_rng_provenance")
+            if (not isinstance(rng_provenance, dict) or
+                    type(rng_provenance.get("generator_count")) is not int or
+                    rng_provenance["generator_count"] < 1 or
+                    not isinstance(rng_provenance.get("seed_manifest_sha256"), str) or
+                    len(rng_provenance["seed_manifest_sha256"]) != 64 or
+                    any(char not in "0123456789abcdef"
+                        for char in rng_provenance["seed_manifest_sha256"])):
+                raise ValueError("Plan C repeat is missing environment RNG provenance")
+            prior = generator_provenance_by_repeat.setdefault(repeat_index, rng_provenance)
+            if prior != rng_provenance:
+                raise ValueError("Plan C candidates do not share the repeat RNG generator manifest")
+        try:
+            canonical = _plan_c_repeated_outcome(outcome.get("descriptor"), repeats)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError("Plan C repeat outcome cannot be summarized") from exc
+        if canonical != outcome:
+            raise ValueError("Plan C repeat means/variance differ from per-repeat returns")
+    try:
+        expected_labels = _plan_c_pairwise_labels(outcomes)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError("Plan C paired labels cannot be derived from repeats") from exc
+    if labels != expected_labels:
+        raise ValueError("Plan C paired stability labels/variance are not derived from repeat returns")
+    return True
+
+
+def _plan_c_stable_pair_indices(outcomes, labels):
+    candidate_index_by_id = {}
+    for outcome in outcomes:
+        descriptor = outcome["descriptor"]
+        candidate_id, candidate_index = descriptor.get("candidate_id"), descriptor.get("candidate_index")
+        if (not isinstance(candidate_id, str) or type(candidate_index) is not int or
+                candidate_index < 0 or candidate_id in candidate_index_by_id):
+            raise ValueError("Plan C candidate-to-table index mapping is invalid")
+        candidate_index_by_id[candidate_id] = candidate_index
+    stable = []
+    for label in labels:
+        if not label["stable_preference"]:
+            continue
+        left, right = label["left_id"], label["right_id"]
+        if left not in candidate_index_by_id or right not in candidate_index_by_id:
+            raise ValueError("stable Plan C preference references an unknown candidate")
+        preferred = label.get("preferred_id")
+        if preferred not in (left, right):
+            raise ValueError("stable Plan C preference has no preferred candidate")
+        stable.append((candidate_index_by_id[left], candidate_index_by_id[right],
+                       preferred == left))
+    return stable
 
 
 def load_plan_a_expert_goal_annotations(dataset: Path, legal_node_dataset: Path,
@@ -1288,6 +1378,7 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
     """Validate v2 bytes and frozen identities before any replay is attempted."""
     from .meco_counterfactual import (DATASET_SCHEMA as cf_dataset_schema,
         TARGET_SCHEMA as cf_target_schema, CONTINUATION_POLICY,
+        PLAN_C_REPEAT_TARGET_SCHEMA, plan_c_repeat_protocol,
         MIN_ELIGIBLE_BRANCHES_PER_SEED,
         _artifact_identity_sha256, _device_identity,
         _require_native_extension_manifest_identity,
@@ -1354,6 +1445,12 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
             manifest.get("plan_a_p_unlabelled_reason") !=
             "simulator executor does not execute P-modified routes"):
         raise ValueError("counterfactual target semantics differ from v2 pairwise contract")
+    plan_c_repeated = manifest.get("plan_c_target_schema") == PLAN_C_REPEAT_TARGET_SCHEMA
+    if plan_c_repeated:
+        if manifest.get("plan_c_repeat_protocol") != plan_c_repeat_protocol(protocol_id):
+            raise ValueError("Plan C repeat protocol is not bound to the supplied qualification protocol")
+    elif "plan_c_repeat_protocol" in manifest or "plan_c_target_schema" in manifest:
+        raise ValueError("counterfactual manifest has a partial or unsupported Plan C repeat protocol")
     native_extension_identity = manifest.get("native_extension_identity")
     if manifest.get("native_extension_identity_schema") != 1:
         raise ValueError("legacy counterfactual v2 dataset lacks native identity schema v1; recollect it")
@@ -1425,6 +1522,10 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
                 row.get("source_identity_sha256") != manifest["source_identity_sha256"] or
                 row.get("device") != expected_device):
             raise ValueError("mixed schema, source, protocol, task, or device in v2 data")
+        if plan_c_repeated and (row.get("plan_c_target_schema") != PLAN_C_REPEAT_TARGET_SCHEMA or
+                row.get("plan_c_repeat_protocol_id") !=
+                    manifest["plan_c_repeat_protocol"]["repeat_protocol_id"]):
+            raise ValueError("row Plan C repeat identity differs from its manifest")
         seed, index = row.get("seed"), row.get("decision_index")
         if type(seed) is not int or seed not in seeds or seed not in allowed_seeds or type(index) is not int or index < 0:
             raise ValueError("counterfactual row is outside the frozen train assignment")
@@ -1491,6 +1592,12 @@ def _read_counterfactual_dataset(path: Path, *, qualification_protocol: Path,
                     raise ValueError("Plan A P must remain explicitly unlabelled with zero prior")
             if len(set(outcome_ids)) != len(outcome_ids):
                 raise ValueError(f"Plan {kind} branch outcomes are duplicated")
+            if kind == "C" and plan_c_repeated:
+                _validate_plan_c_repeated_labels(row,
+                    repeat_protocol=manifest["plan_c_repeat_protocol"],
+                    protocol_id=protocol_id, scenario_id=scenario_id,
+                    category=category, seed=seed, decision_index=index)
+                continue
             expected_count = len(outcomes) * (len(outcomes) - 1) // 2
             if len(pairs) != expected_count:
                 raise ValueError(f"Plan {kind} pair labels do not cover all within-prefix pairs")
@@ -1833,6 +1940,8 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
                     "field_length": field_length, "field_width": field_width,
                     "pairs": pairs})
             else:
+                if manifest.get("plan_c_target_schema") != "meco-plan-c-matched-repeated-gross-return-v1":
+                    raise ValueError("Plan C fitting requires the repeated matched-rollout label schema")
                 candidate_set = replay["candidate_set"]
                 table = candidate_set.table
                 outcomes = row["plan_c_counterfactuals"]
@@ -1843,6 +1952,7 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
                 route = replay["route_cost"].to(device)
                 risk = replay["risk_cost"].to(device)
                 pairs = []
+                candidate_index_by_id = {}
                 for outcome in outcomes:
                     descriptor = outcome["descriptor"]
                     exact = regenerated.get(descriptor["descriptor_sha256"])
@@ -1857,9 +1967,12 @@ def _materialize_counterfactual_rows(rows, manifest, *, track, train_device):
                         raise ValueError("Plan C descriptor does not map to its exact valid candidate")
                     pairs.append((candidate_index, outcome["gross_horizon_return"],
                                   descriptor["candidate_id"]))
+                    candidate_index_by_id[descriptor["candidate_id"]] = candidate_index
+                stable_pairs = _plan_c_stable_pair_indices(
+                    outcomes, row["plan_c_pairwise_labels"])
                 result.append({"kind": "C", "raster": raster, "globals": globals_,
                     "table": table, "route": route, "risk": risk,
-                    "pairs": pairs})
+                    "pairs": pairs, "stable_pairs": stable_pairs})
         finally:
             close = getattr(env, "close", None)
             if callable(close):
@@ -1889,12 +2002,20 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
     if (track.startswith("A") and track not in ("A1", "A2", "A3") or
             track.startswith("C") and track not in ("C1", "C2")):
         raise ValueError("v2 counterfactual fitting supports only Plan A1-A3 or Plan C1-C2")
+    if track.startswith("C") and manifest.get("plan_c_target_schema") != \
+            "meco-plan-c-matched-repeated-gross-return-v1":
+        raise ValueError("C1/C2 fitting rejects legacy single-rollout labels")
     rows = [row for row in rows if row["scenario_id"] == manifest["scenario_id"]]
     replayed = _materialize_counterfactual_rows(rows, manifest, track=track, train_device=device)
     tie_count = 0
     pair_count = 0
     for sample in replayed:
         values = sample["pairs"]
+        if sample["kind"] == "C":
+            total = len(values) * (len(values) - 1) // 2
+            pair_count += len(sample["stable_pairs"])
+            tie_count += total - len(sample["stable_pairs"])
+            continue
         for index, (left_index, left_return, _) in enumerate(values):
             for right_index, right_return, _ in values[index + 1:]:
                 if left_return == right_return:
@@ -1930,12 +2051,18 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
                 scores = [(result["utility"][index], ret)
                           for index, ret, _ in sample["pairs"]]
             pair_losses = []
-            for index, (left_logit, left_return) in enumerate(scores):
-                for right_logit, right_return in scores[index + 1:]:
-                    if left_return == right_return:
-                        continue
-                    sign = 1. if left_return > right_return else -1.
-                    pair_losses.append(F.softplus(-sign * (left_logit - right_logit)))
+            if sample["kind"] == "C":
+                for left_index, right_index, left_preferred in sample["stable_pairs"]:
+                    sign = 1. if left_preferred else -1.
+                    pair_losses.append(F.softplus(-sign *
+                        (result["utility"][left_index] - result["utility"][right_index])))
+            else:
+                for index, (left_logit, left_return) in enumerate(scores):
+                    for right_logit, right_return in scores[index + 1:]:
+                        if left_return == right_return:
+                            continue
+                        sign = 1. if left_return > right_return else -1.
+                        pair_losses.append(F.softplus(-sign * (left_logit - right_logit)))
             if not pair_losses:
                 continue
             loss = torch.stack(pair_losses).mean()
@@ -1947,8 +2074,12 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         if not epoch_losses:
             raise ValueError("no replayed branch produced a trainable pairwise loss")
         losses.append(sum(epoch_losses) / len(epoch_losses))
-    payload = {"schema": COUNTERFACTUAL_WEIGHTS_SCHEMA, "schema_version": 2,
-        "artifact_kind": "weights_only_counterfactual_pairwise_v2", "track": track,
+    repeated_plan_c = track.startswith("C")
+    payload = {"schema": (COUNTERFACTUAL_PLAN_C_REPEATED_WEIGHTS_SCHEMA if repeated_plan_c
+                           else COUNTERFACTUAL_WEIGHTS_SCHEMA),
+        "schema_version": 1 if repeated_plan_c else 2,
+        "artifact_kind": ("weights_only_plan_c_repeated_pairwise_v1" if repeated_plan_c
+                          else "weights_only_counterfactual_pairwise_v2"), "track": track,
         "model_schema_version": 1, "model": model.state_dict(),
         "dataset_sha256": data_hash, "dataset_schema": manifest["schema"],
         "dataset_manifest_sha256": manifest_hash,
@@ -1956,8 +2087,10 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         "source_runtime_device_bound": manifest["source_runtime_device_bound"],
         "state_digest_schema": manifest["state_digest_schema"],
         "target_schema": manifest["target_schema"],
-        "label_provenance": COUNTERFACTUAL_LABEL_PROVENANCE,
-        "target_semantics": "within_prefix_pairwise_preference_from_gross_horizon_return",
+        "label_provenance": ("within-prefix matched repeated simulator gross-horizon returns; stable paired sign only"
+            if repeated_plan_c else COUNTERFACTUAL_LABEL_PROVENANCE),
+        "target_semantics": ("within_prefix_repeated_matched_stable_pairwise_preference_from_gross_horizon_return"
+            if repeated_plan_c else "within_prefix_pairwise_preference_from_gross_horizon_return"),
         "scoring_semantics": ("raw_U_node_plus_B_behavior; no P gradient; p_mode=p0"
             if track.startswith("A") else
             "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target"),
@@ -1980,6 +2113,16 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
         "gamma_per_macro": manifest["gamma_per_macro"],
         "discount_semantics": manifest["discount_semantics"],
         "continuation_policy": manifest["continuation_policy"],
+        "plan_c_target_schema": (manifest.get("plan_c_target_schema") if repeated_plan_c else None),
+        "plan_c_repeat_protocol": (manifest.get("plan_c_repeat_protocol") if repeated_plan_c else None),
+        "plan_c_label_policy": ("stable_same_strict_sign_all_paired_repeats_else_abstain"
+            if repeated_plan_c else None),
+        "plan_c_repeat_variance_note": ("R=2 is a bounded replication policy, not precise variance calibration"
+            if repeated_plan_c else None),
+        "plan_c_stable_pair_count": pair_count if repeated_plan_c else None,
+        "plan_c_abstained_pair_count": tie_count if repeated_plan_c else None,
+        "pair_count_semantics": ("non_tied_pair_count counts stable Plan C labels; tied_pair_count counts all abstentions"
+            if repeated_plan_c else None),
         "source_identity_sha256": _canonical_hash(sources), "sources": sources,
         "collection_device": manifest["device"], "training_device": _device_identity(device),
         "protocol_id": protocol_id,
@@ -1995,6 +2138,8 @@ def warm_start_counterfactual_v2(track: str, dataset: Path, output: Path, *,
     torch.save(payload, output)
     return {"track": track, "checkpoint": str(output), "dataset_sha256": data_hash,
             "non_tied_pair_count": pair_count, "tied_pair_count": tie_count,
+            "stable_pair_count": pair_count if repeated_plan_c else None,
+            "abstained_pair_count": tie_count if repeated_plan_c else None,
             "mean_loss_by_epoch": losses}
 
 
@@ -2514,7 +2659,8 @@ def validate_warm_start_artifact(track: str, checkpoint: Path, *,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
             expected_prediction_mode=expected_prediction_mode)
-    if payload.get("schema") == COUNTERFACTUAL_WEIGHTS_SCHEMA:
+    if payload.get("schema") in (COUNTERFACTUAL_WEIGHTS_SCHEMA,
+                                  COUNTERFACTUAL_PLAN_C_REPEATED_WEIGHTS_SCHEMA):
         return validate_counterfactual_warm_start_artifact(track, checkpoint,
             qualification_protocol=qualification_protocol,
             expected_sources=expected_sources,
@@ -2849,26 +2995,33 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     mode = payload.get("prediction_mode")
     protocol, protocol_id, protocol_sha, protocol_path = _load_protocol(qualification_protocol)
-    from .meco_counterfactual import CONTINUATION_POLICY
+    from .meco_counterfactual import (CONTINUATION_POLICY,
+        PLAN_C_REPEAT_TARGET_SCHEMA, plan_c_repeat_protocol)
     valid_track = track in MECO_TRACKS and (
         track in ("A1", "A2", "A3") or track in ("C1", "C2"))
-    expected_target = "within_prefix_pairwise_preference_from_gross_horizon_return"
+    repeated_plan_c = track in ("C1", "C2")
+    expected_target = ("within_prefix_repeated_matched_stable_pairwise_preference_from_gross_horizon_return"
+        if repeated_plan_c else "within_prefix_pairwise_preference_from_gross_horizon_return")
     expected_scoring = ("raw_U_node_plus_B_behavior; no P gradient; p_mode=p0"
         if track.startswith("A") else
         "raw_candidate_utility; route_and_risk_costs_excluded_for_gross_return_target")
     losses = payload.get("mean_loss_by_epoch")
     pairs = payload.get("non_tied_pair_count")
     ties = payload.get("tied_pair_count")
-    if (not valid_track or payload.get("schema") != COUNTERFACTUAL_WEIGHTS_SCHEMA or
-            payload.get("schema_version") != 2 or
-            payload.get("artifact_kind") != "weights_only_counterfactual_pairwise_v2" or
+    if (not valid_track or payload.get("schema") != (
+                COUNTERFACTUAL_PLAN_C_REPEATED_WEIGHTS_SCHEMA if repeated_plan_c else
+                COUNTERFACTUAL_WEIGHTS_SCHEMA) or
+            payload.get("schema_version") != (1 if repeated_plan_c else 2) or
+            payload.get("artifact_kind") != ("weights_only_plan_c_repeated_pairwise_v1"
+                if repeated_plan_c else "weights_only_counterfactual_pairwise_v2") or
             payload.get("track") != track or payload.get("model_schema_version") != 1 or
             payload.get("dataset_schema") != "meco-counterfactual-trajectory-v3" or
             payload.get("target_schema") != "meco-matched-prefix-gross-return-v3" or
             payload.get("records_have_prefix_replay_parity") is not True or
             payload.get("source_runtime_device_bound") is not True or
             payload.get("state_digest_schema") != "meco-full-environment-state-v2" or
-            payload.get("label_provenance") != COUNTERFACTUAL_LABEL_PROVENANCE or
+            payload.get("label_provenance") != ("within-prefix matched repeated simulator gross-horizon returns; stable paired sign only"
+                if repeated_plan_c else COUNTERFACTUAL_LABEL_PROVENANCE) or
             payload.get("target_semantics") != expected_target or
             payload.get("scoring_semantics") != expected_scoring or
             payload.get("plan_a_p_target", "missing") is not None or
@@ -2920,6 +3073,16 @@ def validate_counterfactual_warm_start_artifact(track: str, checkpoint: Path, *,
             not 0 < payload["gamma_per_macro"] <= 1 or
             payload.get("discount_semantics") != COUNTERFACTUAL_DISCOUNT_SEMANTICS or
             payload.get("continuation_policy") != CONTINUATION_POLICY or
+            (repeated_plan_c and (payload.get("plan_c_target_schema") !=
+                PLAN_C_REPEAT_TARGET_SCHEMA or payload.get("plan_c_repeat_protocol") !=
+                plan_c_repeat_protocol(protocol_id) or payload.get("plan_c_label_policy") !=
+                "stable_same_strict_sign_all_paired_repeats_else_abstain" or
+                payload.get("plan_c_repeat_variance_note") !=
+                "R=2 is a bounded replication policy, not precise variance calibration" or
+                payload.get("plan_c_stable_pair_count") != pairs or
+                payload.get("plan_c_abstained_pair_count") != ties or
+                payload.get("pair_count_semantics") !=
+                    "non_tied_pair_count counts stable Plan C labels; tied_pair_count counts all abstentions")) or
             not isinstance(payload.get("collection_device"), dict) or
             payload.get("training_device") != payload.get("collection_device") or
             type(pairs) is not int or pairs < 1 or type(ties) is not int or ties < 0 or
@@ -3166,7 +3329,7 @@ def validate_counterfactual_plan_a_p_artifact(track: str, checkpoint: Path, *,
 def load_counterfactual_warm_start(track: str, model, checkpoint: Path, *,
         qualification_protocol: Path, expected_sources: dict,
         expected_prediction_mode: str | None = None):
-    """Load v2 pairwise model weights only; optimizer/RNG/cursor stay fresh."""
+    """Load validated pairwise weights only; optimizer/RNG/cursor stay fresh."""
     payload = validate_counterfactual_warm_start_artifact(track, checkpoint,
         qualification_protocol=qualification_protocol, expected_sources=expected_sources,
         expected_prediction_mode=expected_prediction_mode)
