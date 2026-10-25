@@ -326,31 +326,37 @@ class TensorDefenseResetMixin:
         self._sample_static_opponents(mask)
         if self._adstar_planners is not None:
             self._adstar_contact_latched &= ~mask
-        if self.randomize:
-            vx=(self._random_active(mask,(2,2))*2-1)*.25*self.sim.speed[:,:,None]
-            vw=(self._random_active(mask,(2,))*2-1)*.2*self.sim.omega_limit
-            self.sim.velocity=torch.where(mask[:,None,None],torch.cat((vx,vw[...,None]),-1),self.sim.velocity)
-        static_velocity=torch.where(self.static_opponent_mask[:,None],
-            torch.zeros_like(self.sim.velocity[:,1]),self.sim.velocity[:,1])
-        self.sim.velocity[:,1]=torch.where(mask[:,None],static_velocity,self.sim.velocity[:,1])
         pidx=0 if self.task=="counter_defense" else 1
         start, goal = self._sample_episode_endpoints(mask=mask)
         self.sim.pose[:, pidx, :2] = torch.where(mask[:, None], start, self.sim.pose[:, pidx, :2])
-        self.goal=torch.where(mask[:,None],goal,self.goal)
-        self.match_elapsed=torch.where(mask,torch.zeros_like(self.match_elapsed),self.match_elapsed)
-        self.match_remaining=torch.where(mask,torch.full_like(self.match_remaining,160.),self.match_remaining)
-        self.hub_active=torch.where(mask[:,None],torch.ones_like(self.hub_active),self.hub_active)
+        self.goal.copy_(torch.where(mask[:,None],goal,self.goal))
+        if self.randomize:
+            vx=(self._random_active(mask,(2,2))*2-1)*.25*self.sim.speed[:,:,None]
+            vw=(self._random_active(mask,(2,))*2-1)*.2*self.sim.omega_limit
+            randomized_velocity=torch.cat((vx,vw[...,None]),-1)
+            self.sim.velocity.copy_(torch.where(mask[:,None,None],
+                randomized_velocity,self.sim.velocity))
+            radii=.3+self._random_active(mask,())*.5
+        else:
+            radii=torch.full_like(self.goal_radius,self.base_goal_radius)
+        self.goal_radius.copy_(torch.where(mask,radii,self.goal_radius))
+        static_velocity=torch.where(self.static_opponent_mask[:,None],
+            torch.zeros_like(self.sim.velocity[:,1]),self.sim.velocity[:,1])
+        self.sim.velocity[:,1]=torch.where(mask[:,None],static_velocity,self.sim.velocity[:,1])
+        self.match_elapsed.copy_(torch.where(mask,torch.zeros_like(self.match_elapsed),self.match_elapsed))
+        self.match_remaining.copy_(torch.where(mask,torch.full_like(self.match_remaining,160.),self.match_remaining))
+        self.hub_active.copy_(torch.where(mask[:,None],torch.ones_like(self.hub_active),self.hub_active))
         tie_choice=self._random_active(mask,(),high=2).long()
-        self.hub_inactive_first=torch.where(mask,tie_choice,self.hub_inactive_first)
-        self.auto_fuel_scores=torch.where(mask[:,None],torch.zeros_like(self.auto_fuel_scores),self.auto_fuel_scores)
-        self._last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self._last_hub_zone),self._last_hub_zone)
-        self.last_hub_zone=torch.where(mask[:,None],torch.zeros_like(self.last_hub_zone),self.last_hub_zone)
+        self.hub_inactive_first.copy_(torch.where(mask,tie_choice,self.hub_inactive_first))
+        self.auto_fuel_scores.copy_(torch.where(mask[:,None],torch.zeros_like(self.auto_fuel_scores),self.auto_fuel_scores))
+        self._last_hub_zone.copy_(torch.where(mask[:,None],torch.zeros_like(self._last_hub_zone),self._last_hub_zone))
+        self.last_hub_zone.copy_(torch.where(mask[:,None],torch.zeros_like(self.last_hub_zone),self.last_hub_zone))
         self._initialize_gamepieces(mask)
         reset_fuel_physics(self,mask)
         self._update_perception(mask,active_mask=mask)
         self._move_adstar_defenders_to_clear_start(mask)
         self._place_defenders_near_clear_adstar_paths(mask)
-        self._last_strategic_action=torch.where(mask,torch.zeros_like(self._last_strategic_action),self._last_strategic_action)
+        self._last_strategic_action.copy_(torch.where(mask,torch.zeros_like(self._last_strategic_action),self._last_strategic_action))
         for value in (self.fuel_acquisition_count,self.fuel_score_count,self.fuel_denied_count,
                       self.fuel_abandoned_count,self.fuel_acquired_event,self.fuel_scored_event,
                       self.fuel_denied_event,self.fuel_abandoned_event,
@@ -359,36 +365,34 @@ class TensorDefenseResetMixin:
         for value in (self.next_intake_time,self.next_score_time,self.next_score,
                       self.next_ferry):
             value.masked_fill_(mask[:,None],0)
-        self.last_actions[mask]=7
-        self._intake_collecting[mask]=False
-        self._planner_tick=torch.where(mask,torch.full_like(self._planner_tick,
-            self.adstar_replan_interval-1),self._planner_tick)
+        self.last_actions.masked_fill_(mask[:,None],7)
+        self._intake_collecting.masked_fill_(mask[:,None],False)
+        self._planner_tick.copy_(torch.where(mask,torch.full_like(self._planner_tick,
+            self.adstar_replan_interval-1),self._planner_tick))
         # Per-world cadence remains active for full and partial reset batches.
-        radii=.3+self._random_active(mask,())*.5
-        self.goal_radius=torch.where(mask,radii if self.randomize else torch.full_like(radii,self.base_goal_radius),self.goal_radius)
-        self.steps=torch.where(mask,torch.zeros_like(self.steps),self.steps)
-        self.last_contact=torch.where(mask,torch.zeros_like(self.last_contact),self.last_contact)
-        self.last_static_contact=torch.where(mask,torch.zeros_like(self.last_static_contact),self.last_static_contact)
+        self.steps.copy_(torch.where(mask,torch.zeros_like(self.steps),self.steps))
+        self.last_contact.copy_(torch.where(mask,torch.zeros_like(self.last_contact),self.last_contact))
+        self.last_static_contact.copy_(torch.where(mask,torch.zeros_like(self.last_static_contact),self.last_static_contact))
         for values in (self.path_length,self.contact_steps,self.contact_count,self.blocked_steps,self.out_of_bounds_steps):
             values.masked_fill_(mask,0)
-        self.last_action=torch.where(mask[:,None],torch.zeros_like(self.last_action),self.last_action)
-        self.action_history=torch.where(mask[:,None,None],torch.zeros_like(self.action_history),self.action_history)
+        self.last_action.copy_(torch.where(mask[:,None],torch.zeros_like(self.last_action),self.last_action))
+        self.action_history.copy_(torch.where(mask[:,None,None],torch.zeros_like(self.action_history),self.action_history))
         if self.randomize and self.max_control_latency_steps:
             delays=self._random_active(mask,(),high=self.max_control_latency_steps+1).long()
-            self.control_delay=torch.where(mask,delays,self.control_delay)
+            self.control_delay.copy_(torch.where(mask,delays,self.control_delay))
         if self.randomize and self.max_observation_latency_steps:
             delays=self._random_active(mask,(),high=self.max_observation_latency_steps+1).long()
-            self.observation_delay=torch.where(mask,delays,self.observation_delay)
+            self.observation_delay.copy_(torch.where(mask,delays,self.observation_delay))
         distance=(self._attacker_objective()-self.sim.pose[:,pidx,:2]).norm(dim=-1)
-        self.previous=torch.where(mask,distance,self.previous)
+        self.previous.copy_(torch.where(mask,distance,self.previous))
         fresh=self._obs(mask,active_mask=mask)
-        self._last_observation=torch.where(mask[:,None],fresh,self._last_observation)
+        self._last_observation.copy_(torch.where(mask[:,None],fresh,self._last_observation))
         return self._last_observation
 
     def _sample_static_opponents(self,mask):
         if self.static_opponent_fraction<=0.:
-            self.static_opponent_mask=torch.where(mask,torch.zeros_like(self.static_opponent_mask),
-                self.static_opponent_mask)
+            self.static_opponent_mask.copy_(torch.where(mask,
+                torch.zeros_like(self.static_opponent_mask),self.static_opponent_mask))
             return
         sampled=self._random_active(mask,())<self.static_opponent_fraction
-        self.static_opponent_mask=torch.where(mask,sampled,self.static_opponent_mask)
+        self.static_opponent_mask.copy_(torch.where(mask,sampled,self.static_opponent_mask))

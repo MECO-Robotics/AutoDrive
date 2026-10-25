@@ -603,16 +603,15 @@ class TensorThreeVsThreeEnv(
         mask = torch.as_tensor(mask, device=self.device, dtype=torch.bool).reshape(self.n)
         self._invalidate_last_action_audit(mask)
         self.sim.reset_done(mask)
-        if self.n == 1:
-            self._planner_traversal_request_signature=None
-            self._last_applied_planner_traversal_signature=None
-        self._planner_traversal_pending &= ~mask
+        # Keep shared traversal signatures/cache objects intact. The selected
+        # rows carry their own pending replan bit; an all-false reset is a no-op.
+        self._planner_traversal_pending |= mask
         self._planner_controller_modes_dirty_mask |= mask
         pose=self._hub_line_spawn_poses(mask)
         self.sim.pose.copy_(torch.where(mask[:,None,None],pose,self.sim.pose))
         self.sim._field_collision(mask)
         self.synchronize_policy_pose(mask)
-        self._prepare_score_grid()
+        self._prepare_score_grid(mask)
         # Keep the counter monotonic across matches so counter-based sensor
         # noise does not repeat from the same episode tick on every reset.
         self._target_collect_heading.copy_(torch.where(
@@ -646,24 +645,31 @@ class TensorThreeVsThreeEnv(
                        self._ferry_committed,self._score_committed,
                        self._avoidance_winner,
                        self.last_hub_zone):
-            tensor[mask] = 0
-        self._avoidance_winner[mask] = -1
-        self.hub_active[mask] = True
+            tensor.masked_fill_(mask.reshape((self.n,) + (1,) * (tensor.ndim - 1)), 0)
+        self._avoidance_winner.masked_fill_(mask[:,None], -1)
+        self.hub_active.masked_fill_(mask[:,None], True)
         self._randomize_pass_zone_positions(mask)
         self._initialize_fuel(mask)
         reset_fuel_physics(self,mask)
-        self.track_mask[mask] = False; self.track_age[mask] = float("inf")
-        self.perception_quality_state[mask] = 0.
-        self.track_confidence[mask] = 0.; self.track_spatial_extent[mask] = 0.
-        self.track_angular_extent[mask] = 0.; self.track_merged[mask] = False
-        self.opponent_valid[mask] = False; self.opponent_age[mask] = float("inf")
-        self.opponent_size[mask] = 0.
-        self.last_actions[mask] = 7
-        self._intake_collecting[mask] = False
-        self._last_score_intent[mask] = False
+        row_mask = mask.reshape((self.n,) + (1,) * (self.track_mask.ndim - 1))
+        self.track_mask.masked_fill_(row_mask, False)
+        self.track_age.masked_fill_(row_mask, float("inf"))
+        self.perception_quality_state.masked_fill_(row_mask, 0.)
+        self.track_confidence.masked_fill_(row_mask, 0.)
+        self.track_spatial_extent.masked_fill_(row_mask, 0.)
+        self.track_angular_extent.masked_fill_(row_mask, 0.)
+        self.track_merged.masked_fill_(row_mask, False)
+        opponent_mask = mask.reshape((self.n,) + (1,) * (self.opponent_valid.ndim - 1))
+        self.opponent_valid.masked_fill_(opponent_mask, False)
+        self.opponent_age.masked_fill_(opponent_mask, float("inf"))
+        self.opponent_size.masked_fill_(opponent_mask, 0.)
+        self.last_actions.masked_fill_(mask[:,None], 7)
+        self._intake_collecting.masked_fill_(mask[:,None], False)
+        self._last_score_intent.masked_fill_(mask[:,None], False)
         if not defer_perception:
             self._update_perception(mask)
-            self._last_obs = torch.where(mask[:, None, None], self.observe(), self._last_obs)
+            self._last_obs.copy_(torch.where(
+                mask[:, None, None], self.observe(), self._last_obs))
         return self._last_obs
 
     def _target_for_actions_step(self, actions, active, full_batch,
