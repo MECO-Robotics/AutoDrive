@@ -1941,6 +1941,32 @@ def _validate_effective_phase0_bundle(bundle, repo_root):
     return digests
 
 
+def _validate_effective_phase0_configuration_bytes(bundle, configuration_artifacts):
+    """Match caller-loaded bytes to the configuration snapshot authenticated by v3."""
+    import base64
+
+    receipt = bundle.get("capture_receipt") if isinstance(bundle, dict) else None
+    artifacts = receipt.get("configuration_artifacts") if isinstance(receipt, dict) else None
+    if not isinstance(artifacts, list) or not isinstance(configuration_artifacts, dict):
+        raise ValueError("effective Phase 0 configuration artifact bytes are missing")
+    expected = {}
+    for artifact in artifacts:
+        if (not isinstance(artifact, dict) or set(artifact) != {
+                "artifact_id", "content_sha256", "content_base64"}
+                or not isinstance(artifact["artifact_id"], str)):
+            raise ValueError("effective Phase 0 configuration artifact row is malformed")
+        try:
+            content = base64.b64decode(artifact["content_base64"], validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("effective Phase 0 configuration artifact bytes are malformed") from exc
+        if hashlib.sha256(content).hexdigest() != artifact["content_sha256"]:
+            raise ValueError("effective Phase 0 configuration artifact digest changed")
+        expected[artifact["artifact_id"]] = content
+    if len(expected) != len(artifacts) or configuration_artifacts != expected:
+        raise ValueError("effective Phase 0 configuration bytes differ from caller artifacts")
+    return expected
+
+
 def _paired_calibration_registered_tuples(bundle):
     """Select only eligible tuple IDs assigned to calibration by the closed bundle."""
     if not isinstance(bundle, dict):
@@ -3397,9 +3423,7 @@ def prepare_paired_calibration_gate_bindings(*, repo_root, phase0_bundle,
         repo_root, estimand_approval_path, kind="estimand approval")
     phase0_digests = _validate_effective_phase0_bundle(phase0_bundle, repo_root)
     phase0 = _paired_phase0_bundle_binding(phase0_bundle, phase0_digests)
-    from .meco_baseline_freeze import validate_baseline_freeze
-    validate_baseline_freeze(phase0_bundle["baseline_freeze"], repo_root,
-        configuration_artifacts=configuration_artifacts)
+    freeze = phase0_bundle["baseline_freeze"]
     registered_tuples = _paired_calibration_registered_tuples(phase0_bundle)
     materialization = phase0_bundle["partition_materialization"]
     budget = materialization.get("evaluation_budget")
@@ -3428,6 +3452,7 @@ def prepare_paired_calibration_gate_bindings(*, repo_root, phase0_bundle,
     if (phase0["source_commit"] != commit or phase0["source_tree"] != tree
             or phase0["dependency_lock_sha256"] == ""):
         raise ValueError("paired calibration baseline source/runtime binding is stale")
+    _validate_effective_phase0_configuration_bytes(phase0_bundle, configuration_artifacts)
     if source_hash != _calibration_source_identity_sha256():
         raise ValueError("paired calibration source identity helpers disagree")
     source = {"commit": commit, "tree": tree,
@@ -3473,10 +3498,8 @@ def validate_paired_calibration_gate_artifacts(campaign, *, repo_root, phase0_bu
     actual_phase0 = _paired_phase0_bundle_binding(phase0_bundle, phase0_digests)
     if actual_phase0 != campaign["phase0_binding"]:
         raise ValueError("paired calibration effective Phase 0 bundle bytes or digests changed")
+    _validate_effective_phase0_configuration_bytes(phase0_bundle, configuration_artifacts)
     freeze = phase0_bundle["baseline_freeze"]
-    from .meco_baseline_freeze import validate_baseline_freeze
-    freeze = validate_baseline_freeze(freeze, root,
-        configuration_artifacts=configuration_artifacts)
     if (freeze.get("source", {}).get("commit") != campaign["source"]["commit"]
             or freeze.get("source", {}).get("tree") != campaign["source"]["tree"]
             or freeze.get("runtime", {}).get("dependency_lock_sha256")
