@@ -215,6 +215,24 @@ def test_large_report_uses_digest_bound_strict_comparison_summary(tmp_path, monk
                            "raw_bytes": 0, "records": 0})
     assert rejected is None and forged_error == "dashboard summary is unavailable or invalid"
 
+    for mutate in (
+        lambda projection: projection["policy_metrics"]["A1"]["open"].pop("success"),
+        lambda projection: projection["policy_metrics"]["A1"]["open"]
+            ["collection_action_bouts"].update(count=-1, acquired_count=-1),
+    ):
+        assert _write_dashboard_comparison_summary(source, report)
+        malformed_sidecar = json.loads(summary_path.read_text())
+        mutate(malformed_sidecar["comparison"])
+        malformed_sidecar["comparison_sha256"] = hashlib.sha256(
+            dashboard._dashboard_summary_json_bytes(
+                malformed_sidecar["comparison"])).hexdigest()
+        summary_path.write_text(json.dumps(malformed_sidecar, separators=(",", ":")))
+        bind_status(source)
+        malformed, _, malformed_error, _ = _read_evaluation_comparison(
+            source, tmp_path, {"files": 0, "summary_bytes": 0,
+                               "raw_bytes": 0, "records": 0})
+        assert malformed is None and malformed_error == "dashboard summary is unavailable or invalid"
+
     published = tmp_path / "scheduled-evaluation.json"
     published.write_bytes(source.read_bytes())
     assert not _copy_dashboard_comparison_summary(source, published)

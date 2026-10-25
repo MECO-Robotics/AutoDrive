@@ -1323,6 +1323,8 @@ def _dashboard_summary_valid(payload, raw_sha256):
         for category_metrics in metrics.values():
             if not isinstance(category_metrics, dict) or "collection_action_bouts" not in category_metrics:
                 return None
+            if not {"success", "useful_throughput"} <= set(category_metrics):
+                return None
             if not set(category_metrics) - {"collection_action_bouts"} <= metric_names:
                 return None
             for name, summary in category_metrics.items():
@@ -1350,9 +1352,11 @@ def _dashboard_summary_valid(payload, raw_sha256):
                         if (summary["available_records"] != 0 or unsuccessful is not None
                                 or proportion is not None):
                             return None
-                    elif (type(count) is not int or type(acquired) is not int
-                            or acquired > count or type(unsuccessful) not in (int, type(None))
-                            or (unsuccessful is not None and acquired + unsuccessful != count)
+                    elif (type(count) is not int or count < 0
+                            or type(acquired) is not int or acquired < 0 or acquired > count
+                            or type(unsuccessful) not in (int, type(None))
+                            or (unsuccessful is not None and (unsuccessful < 0
+                                or unsuccessful > count or acquired + unsuccessful != count))
                             or (count == 0 and proportion is not None)
                             or (count > 0 and (not _finite_number(proportion)
                                 or not 0 <= proportion <= 1
@@ -1372,6 +1376,9 @@ def _dashboard_summary_valid(payload, raw_sha256):
                         or name == "useful_throughput" and summary["mean"] < 0):
                     return None
                 interval = summary.get("normal_95_interval")
+                if (summary["n"] == 1 and interval is not None
+                        or summary["n"] > 1 and interval is None):
+                    return None
                 if (interval is not None and (not isinstance(interval, list)
                         or len(interval) != 2
                         or any(not _finite_number(value) for value in interval)
