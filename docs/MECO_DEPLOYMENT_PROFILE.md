@@ -67,16 +67,61 @@ physical actuation, Hailo compilation, or robot hardware. Neither parity mode
 is a deployment qualification or promotion decision.
 
 Export requires PyTorch's ONNX exporter and the `onnx` package for graph
-inspection. Profiling benchmarks CPU and each visible ROCm/CUDA device. It
-reports model-only and synthetic raw-scorer-plus-argmax p50/p95/p99 latency,
-process peak RSS, and accelerator peak allocated memory. The scorer-plus-argmax
-interval uses one model forward pass and applies argmax to that pass's output.
-The argmax diagnostic
-does not apply candidate feasibility, route/risk cost, or production action
-arbitration. Its reported age proxy repeats the same scorer-plus-argmax timing;
-it is not an independent measurement and is not real inference age or
-sensor-to-actuator age. Inputs are preloaded on device, so transfer time is
-excluded.
+inspection. With no `--production-capture-dir`, profiling retains the existing
+synthetic diagnostic: it benchmarks CPU and each visible ROCm/CUDA device,
+uses fixed synthetic inputs, and labels the repeated timing-as-age field as a
+synthetic diagnostic. It does not infer capture provenance or deployment
+evidence from the checkpoint alone.
+
+For a capture-backed scorer-only measurement, first produce one fresh,
+checkpoint-matched production request capture for each of A1, A2, A3, C1, and
+C2 by running the actual production adapter with both bounded capture
+environment variables enabled. The selected `TRACK/latest.pt`, adjacent
+`run.json`, capture checkpoint SHA-256, protocol, source snapshot digest, and
+current input contract must agree. Use a clean profiler checkout and the
+exclusive device lease must be available for both pinned WX9100 cards. Invoke:
+
+```bash
+python scripts/profile_meco_deployment.py \
+  --checkpoint-root checkpoints/meco-five \
+  --production-capture-dir evaluations/meco-production-captures \
+  --device cuda:0 --device cuda:1 \
+  --output evaluations/meco-deployment/production-capture-profile.json
+```
+
+This mode requires exactly one canonical `<TRACK>-*.npz` for each of the five
+tracks, and exactly the explicit device pair `cuda:0`, `cuda:1`. It acquires an
+exclusive lease and attests both logical devices against the pinned host GPU
+inventory, including BDF, PCI ID, HIP UUID, and the P600 exclusion. Missing or
+changed captures/checkpoints, source or protocol mismatches, a dirty profiler
+checkout, unavailable tools/devices, or either physical-identity mismatch fail
+the run. It never falls back to synthetic inputs, CPU, one GPU, or another
+visible accelerator. Every capture is validated before timing and rechecked
+along with its checkpoint immediately before and after each device run.
+
+The immutable JSON report uses a distinct
+`meco-production-capture-scorer-profile-v1` schema and
+`production-capture-backed scorer microbenchmark; not deployment qualification`
+evidence class. It records the all-five validation result, capture file and
+content/metadata/contract digests, request/generation/snapshot identity,
+consumed input names/shapes/dtypes/content digest, checkpoint hash/run/update/
+protocol/training-source snapshot, profiler Git commit plus clean-tree
+assertion, exact physical device identity and inventory hash, runtime versions,
+and warmup/iteration counts. Scorer-forward and scorer-plus-argmax latency
+distributions and peak allocated memory are reported separately for each card.
+Captured tensors are copied to each card before warmup; host-to-device transfer
+is excluded and labelled. The profile does not report inference age or
+end-to-end latency. Existing reports are never overwritten; the command prints
+the successful report SHA-256 for the evidence ledger.
+
+Both profile modes measure scorer work only. The argmax diagnostic does not
+apply candidate feasibility, route/risk cost, or production action arbitration.
+Neither mode measures request freshness, host-to-device transfer, route
+construction, AD* search, simulator feature assembly, action execution, or
+physical actuation. Neither mode establishes Hailo compilation, target-device
+memory fit, deployment qualification, or promotion readiness. Those gates
+remain false until independently measured on the actual target and through the
+required end-to-end evaluation.
 
 Inputs use fixed shapes: 64×64 six-channel raster, seven globals, 256 graph
 nodes at degree eight, 64 regions, and 16 candidate rows. This is a bounded

@@ -1,3 +1,18 @@
+> **Phase 5 capture-backed scorer profiler implementation — 2026-10-25.** An
+> isolated implementation adds a separate all-five production-capture profile
+> mode, bound to selected checkpoint/source/protocol and a clean profiler Git
+> commit. It requires the exclusive `cuda:0`/`cuda:1` lease and physical
+> attestation of both pinned WX9100 devices; it has no CPU, single-card,
+> P600, or synthetic fallback. Existing synthetic diagnostics retain their
+> separate evidence labels. The profiler records capture/input/checkpoint/
+> device/runtime provenance and reports scorer-only timing with transfer
+> excluded. No tests, profile, GPU probe, simulator/replay, or training action
+> was run for this code tranche. It creates no profile artifact or report
+> digest, and it does not establish Hailo support, deployment qualification,
+> or full-pipeline performance. Runtime evidence still requires a complete
+> current-source five-checkpoint bundle, matching fresh captures, and both
+> WX9100 leases to become available.
+
 > **Phase 2 provenance and dashboard currentness — 2026-10-25 05:58 UTC.**
 > The approved Phase 2 runtime tranche is registered as summary 71 in the
 > dashboard three-pass ledger, whose digest pin now matches. After integration
