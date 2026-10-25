@@ -88,41 +88,64 @@ provenance tranche.
    update being implemented. State only evidence actually reported by the
    implementer/reviewer for the latter; do not infer test or service results.
 3. Append exactly one `meco-three-pass-provenance-v2`
-   `scoped_transcript_summary` entry, with a unique ID such as
-   `phase4-runtime-status-ledger-dashboard`. Use this plan as the planner
-   artifact and the implementation/review summary as the reviewer artifact,
-   with exact path, kind, status, and SHA-256 values. Record the two prior
-   Pass 2 heads, their exact Pass 3 approvals, and integration commits in the
-   summary and explicit distinct commit fields in the new implementer object.
-   The new entry's reviewer `approved_commit` must identify the exact reviewed
-   ledger-update candidate, not a prior status-document commit or an
-   integration merge. The new entry must say summary-only and must not imply
-   whole-plan approval.
-4. Preserve every existing ledger object and order. Update top-level scope,
+   `scoped_transcript_summary` entry with requirement ID
+   `phase4-runtime-status-ledger-dashboard`. The entry records both prior
+   Pass 2 heads, their exact Pass 3 approvals, and their distinct integration
+   commits. Store these source-correction references under distinct fields;
+   they must not be presented as review of the new ledger update.
+4. Use a candidate/review/finalization sequence to avoid self-referential
+   commit attribution:
+   - **Candidate commit:** include the ledger entry, API pin, focused contract
+     test changes, status-only execution-status update, plan, and summary.
+     Mark the new entry's own reviewer state explicitly pending, with no
+     `reviewer.approved_commit`. The candidate is intentionally not a
+     validated/servable manifest until approval is recorded. Push it and
+     request exact-head Pass 3 review. The reviewer checks the candidate's
+     full content, links, test coverage, and fail-closed pending state before
+     granting approval; do not run or report the final acceptance test as
+     passing at this stage.
+   - **Post-review finalization commit:** only after the candidate is approved,
+     update the new entry's `reviewer.approved_commit` to the exact candidate
+     SHA, record the candidate/integration distinction in the implementer
+     fields, update the reviewer summary with the actual approval, recompute
+     the ledger SHA, and update the dashboard pin. Run the focused offline
+     contract tests and diff checks on this finalization state, then request a
+     second exact-head Pass 3 review of the finalization commit. That review
+     must verify both the earlier candidate approval and the exact finalizer
+     state. Do not integrate until the finalization review passes.
+   - A final valid ledger entry must have its `reviewer.approved_commit`
+     pointing to the reviewed candidate, never to a prior status-document
+     commit or to the finalization/integration commit itself. The metadata
+     finalization does not change runtime behavior.
+   The new entry must say summary-only and must not imply whole-plan approval.
+5. Preserve every existing ledger object and order. Update top-level scope,
    artifact-origin, and limits only enough to record this one additional
    scoped documentation/provenance summary. Keep the existing schema,
    `plan_path`, `plan_sha256`, status, and evidence class unchanged.
-5. Update only `_EXPECTED_THREE_PASS_PROVENANCE_SHA256` in
+6. Update only `_EXPECTED_THREE_PASS_PROVENANCE_SHA256` in
    `frc_defense/dashboard_api.py` to the SHA-256 of the final ledger bytes.
    Leave `_EXPECTED_PLAN_SHA256` unchanged.
-6. Add focused offline metadata/contract coverage. Assert the new entry names
+7. Add focused offline metadata/contract coverage. Assert the new entry names
    both prior plans, exact Pass 2 and approved Pass 3 heads, and both
    integration commits; assert 88 valid tranches and the exact ledger/API
    digest match; and assert the previous 87 entry objects remain equal and in
-   order. Keep existing mutation/rejection coverage intact. These checks do
+   order. The finalization test must also assert that the new entry's
+   `reviewer.approved_commit` equals the candidate SHA approved in the first
+   Pass 3. Keep existing mutation/rejection coverage intact. These checks do
    not test simulator behavior.
-7. Add a concise status-only section to
+8. Add a concise status-only section to
    `docs/MECO_FULL_PLAN_EXECUTION_STATUS.md`, citing the runtime-status document
    and the two approved plans/heads. Say the status rows summarize wired code
    paths only; no fresh E2E simulator evaluation/replay or held-out dashboard
    review was performed for these corrections; outcome claims and
    qualification remain unavailable/disabled. Do not claim the dashboard
    currently serves the new ledger before the separate post-merge check.
-8. Commit the coherent implementation in reviewable increments, run only the
-   scoped offline contract tests and static diff checks authorized by the
-   implementation plan, and request independent exact-head review before
-   integration. No dashboard service, API, simulator, replay, training,
-   private-campaign-data, GPU, or device operation occurs in this gate.
+9. Commit and push the candidate and post-review finalization as separate
+   reviewable checkpoints. Run the focused metadata contract tests and static
+   diff checks only after finalization and before its second exact-head review.
+   No dashboard service operation occurs before integration. No simulator,
+   replay, training, private-campaign-data, GPU, or device operation occurs in
+   either review gate.
 
 ## Post-merge dashboard operation and acceptance
 
@@ -155,11 +178,13 @@ check against the exact current checkout:
   this evidence note is committed after the service check, state its commit
   separately; it does not change application code or the ledger digest.
 
-Acceptance requires an independently approved exact candidate before merge,
-preservation of the original 87 entries, a valid 88-entry ledger and matching
-API pin, status-only execution-plan wording with all outcome/qualification
-limits intact, and successful post-merge API/asset verification from the
-current checkout. Report implementation tests separately from service checks.
+Acceptance requires independent exact-head approval of both the candidate and
+post-review finalization, with the final ledger row's `reviewer.approved_commit`
+equal to the candidate SHA and the finalizer SHA stored separately. Preserve
+the original 87 entries, produce a valid 88-entry ledger and matching API pin,
+retain status-only execution-plan wording with all outcome/qualification
+limits intact, and complete post-merge API/asset verification from the current
+checkout. Report implementation tests separately from service checks.
 
 ## Explicit exclusions
 
