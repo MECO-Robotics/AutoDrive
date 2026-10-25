@@ -1,9 +1,9 @@
 # MECO learning tracks plan: execution status
 
-> **Live r4 and durable-evaluation update — 2026-10-25 03:29 UTC.** The
+> **Live r4 and durable-evaluation update — 2026-10-25 03:34 UTC.** The
 > supervisor PID `2750253` is active with both WX9100 lanes. Its queue
-> heartbeat at `2026-10-25T03:29:14Z` shows A1, A2, A3, and C1 complete at
-> 100/100; C2 is running at 2/100 on `cuda:0`. It is cycle 1, with no matched
+> heartbeat at `2026-10-25T03:34:20Z` shows A1, A2, A3, and C1 complete at
+> 100/100; C2 is running at 11/100 on `cuda:0`. It is cycle 1, with no matched
 > cycle completion or evaluation. This is still the older single-scenario
 > `pickup_simple/cluster` diagnostic, without an evaluation binding, warm
 > starts, or Phase 4 exposure. The five model tracks are being exercised, but
@@ -18,6 +18,11 @@
 > retries the same index after failed or interrupted evaluation, and advances
 > only after verified report/status/history. The integrated focused suite
 > passed 115 tests and 5 subtests, with 3 lease-acquiring tests deselected.
+> The follow-up Plan A device-resident route prototype is integrated as
+> `fa59b2dcd` and independently approved as a gated prototype. Thirteen
+> focused CPU source-contract tests passed; runtime support construction still
+> uses the CPU oracle, and the WX9100 parity/profile gate remains closed. No
+> HIP compile, device parity/profile, or simulator replay has been completed.
 > No simulator evaluation or replay was run. A replacement r5 manifest was
 > generated and validated offline at source
 > `9830c2647bce05bea01d59eed0c569d6b9e15550`, digest
