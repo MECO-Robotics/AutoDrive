@@ -3654,6 +3654,70 @@
         "verdict_detail": "Independent exact-head Pass 3 approved checkpoint D for ledger correctness. This approval is distinct from the code-candidate C review and is recorded by the separate E finalizer."
       },
       "limits": "Source/code review only: candidate C code review and D ledger review are approved. E remains subject to its second exact-head review and integration. GPU/HIP parity and profiling, simulator behavior, fresh replay, runtime evidence, dashboard currentness, training, qualification, and whole-system GPU-only execution remain pending."
+    },
+    {
+      "requirement_id": "plan-a-fixed-capacity-integration",
+      "title": "Plan A fixed-capacity graph integration and scoped provenance",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/plans/plan-a-fixed-capacity-integration-20261026.md",
+          "sha256": "d08eeeafeb3f48ea9205d0f02a30972e3080ad7cf63d15f99e5eca407aeb023f",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        },
+        "pass1_plan_commit": "c9c0ffe327593474d9122d028a950a0592c7c38e"
+      },
+      "implementer": {
+        "source_candidate_commit": "e116941c439020b8a4bf7447972d9229190f1fbe",
+        "source_candidate_parent": "b9489cfa615a236db2cbf1a65402ee06ed515804",
+        "source_candidate_verdict": "approved",
+        "code_integration_commit": "305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95",
+        "code_integration_parents": [
+          "c9c0ffe327593474d9122d028a950a0592c7c38e",
+          "e116941c439020b8a4bf7447972d9229190f1fbe"
+        ],
+        "status": "implemented",
+        "paths": [
+          "frc_defense/csrc/meco_plan_a_shortest_path_hip.cpp",
+          "frc_defense/csrc/meco_plan_a_shortest_path_hip_kernel.cu",
+          "frc_defense/experimental_route_evaluation.py",
+          "frc_defense/meco_candidates.py",
+          "frc_defense/meco_counterfactual.py",
+          "frc_defense/meco_deployment.py",
+          "frc_defense/meco_input_provenance.py",
+          "frc_defense/meco_path_penalty.py",
+          "frc_defense/meco_plan_a_hip_parity_harness.py",
+          "frc_defense/meco_plan_a_policy.py",
+          "frc_defense/meco_plan_a_shortest_path.py",
+          "frc_defense/meco_pose_graph.py",
+          "frc_defense/meco_supervised.py",
+          "frc_defense/meco_track_training.py",
+          "frc_defense/meco_tracks.py",
+          "tests/fixtures/plan_a_hip/manifest.json",
+          "tests/test_meco_device_route_batch.py",
+          "tests/test_meco_parameter_inventory.py",
+          "tests/test_meco_plan_a_device_sha.py",
+          "tests/test_meco_plan_a_hip_fixture_digest_contract.py",
+          "tests/test_meco_plan_a_penalty_contract.py",
+          "tests/test_meco_pose_graph_fixed_capacity.py",
+          "tests/test_meco_tracks.py",
+          "tests/test_plan_a_pose_pair_contracts.py"
+        ]
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/plan-a-fixed-capacity-integration-20261026.md",
+          "sha256": "f422a8bf077a952c753009f14bbf2118cafbc24858ebe4eab2c286534bcc8b26",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "status": "approved-summary",
+        "verdict": "approved",
+        "approved_commit": "305b8d9fef3db7bf2ee8cd98c6740c55b8f7da95",
+        "verdict_detail": "Independent exact-head Pass 3 approved the integrated code candidate against its actual parents. The verdict is recorded from the reviewer message; no standalone reviewer artifact was persisted. The source candidate e116941c439020b8a4bf7447972d9229190f1fbe had a separate approved exact-head review against b9489cf."
+      },
+      "limits": "Scoped source integration and review evidence only. Source-candidate checks were py_compile and git diff --check; no pytest, HIP compilation/import/profile, GPU/device work, simulator, replay, dashboard currentness, or training validation was performed. The ledger candidate still requires its own exact-head review. API digest pin finalization and dashboard restart/currentness verification remain pending. No runtime memory admission, WX9100 parity/profile, simulator behavior, campaign passage, training, deployment, qualification, or whole-plan completion is established."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
