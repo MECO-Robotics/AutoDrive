@@ -828,3 +828,28 @@ def export_training_manifest_warm_starts(manifest: dict, descriptor: dict) -> di
     # This mapping is directly accepted by the training manifest's exact-five
     # path field. Case-set binding stays in the bundle manifest, not this map.
     return {track: artifacts[track]["path"] for track in MECO_TRACKS}
+
+
+def export_training_manifest_binding(manifest: dict, descriptor: dict) -> dict:
+    """Export and byte-bind the descriptor/bundle case set for training manifests."""
+    if (manifest.get("descriptor_sha256") != descriptor.get("descriptor_sha256") or
+            manifest.get("case_set_sha256") != descriptor.get("case_set_sha256")):
+        raise ValueError("training manifest binding requires the exact multi-case bundle")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != set(MECO_TRACKS):
+        raise ValueError("training manifest binding requires all five tracks")
+    descriptor_path = Path(descriptor["outputs"]["descriptor"])
+    bundle_path = Path(descriptor["outputs"]["manifest"])
+    if not descriptor_path.is_file() or not bundle_path.is_file():
+        raise ValueError("training manifest binding requires published descriptor and bundle files")
+    if json.loads(bundle_path.read_text(encoding="utf-8")) != manifest:
+        raise ValueError("training manifest export differs from the published bundle bytes")
+    return {"schema": SCHEMA + ".training-binding",
+        "descriptor_path": str(descriptor_path),
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "descriptor_file_sha256": _sha(descriptor_path.read_bytes()),
+        "bundle_manifest_path": str(bundle_path),
+        "bundle_manifest_sha256": _sha(bundle_path.read_bytes()),
+        "case_set_sha256": descriptor["case_set_sha256"],
+        "artifact_sha256_by_track": {track: artifacts[track]["sha256"]
+            for track in MECO_TRACKS}}

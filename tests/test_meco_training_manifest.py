@@ -530,3 +530,40 @@ def test_warm_start_metadata_binds_source_projection_and_defers_loaded_binary_pa
     assert result["native_extension_identity_sha256"] == manifest_api._sha(native)
     assert result["native_runtime_attested"] is False
     assert result["reason"] == "loaded HIP parity is required at runtime"
+
+
+def test_multicase_warm_start_binding_requires_exact_five_artifact_hashes(tmp_path, monkeypatch):
+    descriptor_path = tmp_path / "descriptor.json"
+    bundle_path = tmp_path / "bundle.json"
+    descriptor = {"descriptor_sha256": "d" * 64, "case_set_sha256": "c" * 64}
+    artifacts = {track: tmp_path / f"{track}.pt" for track in MECO_TRACKS}
+    for path in artifacts.values():
+        path.write_bytes(b"artifact")
+    bundle = {"descriptor_sha256": "d" * 64, "case_set_sha256": "c" * 64,
+        "phase2_ready": False, "phase2_complete": False,
+        "qualification_eligible": False, "artifacts": {track: {"sha256": manifest_api._file_sha(path)}
+            for track, path in artifacts.items()}}
+    descriptor_path.write_text(json.dumps(descriptor))
+    bundle_path.write_text(json.dumps(bundle))
+    binding = {"schema": "meco-phase2-multi-case-five-track-v1.training-binding",
+        "descriptor_path": str(descriptor_path),
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "descriptor_file_sha256": manifest_api._file_sha(descriptor_path),
+        "bundle_manifest_path": str(bundle_path),
+        "bundle_manifest_sha256": manifest_api._file_sha(bundle_path),
+        "case_set_sha256": "c" * 64,
+        "artifact_sha256_by_track": {track: manifest_api._file_sha(path)
+            for track, path in artifacts.items()}}
+    starts = {track: {"present": True, "sha256": manifest_api._file_sha(path),
+        "binding_valid": True} for track, path in artifacts.items()}
+    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_multicase_descriptor",
+        lambda value: value)
+    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_five_track_manifest",
+        lambda value, frozen, **kwargs: value)
+    assert manifest_api._validate_multicase_warm_start_binding(binding,
+        {track: str(path) for track, path in artifacts.items()}, starts) == binding
+    bad = copy.deepcopy(binding)
+    bad["artifact_sha256_by_track"].pop("A1")
+    with pytest.raises(ValueError, match="exactly five"):
+        manifest_api._validate_multicase_warm_start_binding(bad,
+            {track: str(path) for track, path in artifacts.items()}, starts)

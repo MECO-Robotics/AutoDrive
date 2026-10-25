@@ -470,6 +470,54 @@ def _warm_start(path, track, expected_sources, protocol_path, protocol_id, proto
             "source projection, native identity, protocol, or track binding mismatch")}
 
 
+def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts):
+    """Bind a five-track multicase bundle without upgrading target readiness."""
+    if binding is None:
+        return None
+    required = {"schema", "descriptor_path", "descriptor_sha256", "descriptor_file_sha256",
+        "bundle_manifest_path", "bundle_manifest_sha256", "case_set_sha256",
+        "artifact_sha256_by_track"}
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError("multi-case warm-start binding must use the exact versioned shape")
+    if binding.get("schema") != "meco-phase2-multi-case-five-track-v1.training-binding":
+        raise ValueError("unsupported multi-case warm-start binding schema")
+    if set(warm_artifacts) != set(MECO_TRACKS) or any(
+            not warm_starts[track].get("present") for track in MECO_TRACKS):
+        raise ValueError("multi-case binding requires all five present warm-start artifacts")
+    for name in ("descriptor_sha256", "descriptor_file_sha256", "bundle_manifest_sha256", "case_set_sha256"):
+        value = binding.get(name)
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError(f"multi-case binding has invalid {name}")
+    if set(binding.get("artifact_sha256_by_track", {})) != set(MECO_TRACKS):
+        raise ValueError("multi-case binding must bind exactly five track artifacts")
+    for track in MECO_TRACKS:
+        if (binding["artifact_sha256_by_track"][track] != warm_starts[track].get("sha256") or
+                not warm_starts[track].get("binding_valid")):
+            raise ValueError(f"multi-case binding {track} artifact differs from the campaign warm start")
+    descriptor_path = Path(binding["descriptor_path"]).expanduser().resolve(strict=True)
+    bundle_path = Path(binding["bundle_manifest_path"]).expanduser().resolve(strict=True)
+    if (_file_sha(descriptor_path) != binding["descriptor_file_sha256"] or
+            _file_sha(bundle_path) != binding["bundle_manifest_sha256"]):
+        raise ValueError("multi-case descriptor or bundle manifest bytes changed")
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    if (descriptor.get("descriptor_sha256") != binding["descriptor_sha256"] or
+            descriptor.get("case_set_sha256") != binding["case_set_sha256"] or
+            bundle.get("descriptor_sha256") != binding["descriptor_sha256"] or
+            bundle.get("case_set_sha256") != binding["case_set_sha256"] or
+            bundle.get("phase2_ready") is not False or bundle.get("phase2_complete") is not False or
+            bundle.get("qualification_eligible") is not False):
+        raise ValueError("multi-case descriptor/bundle case-set binding or conservative gates differ")
+    from .meco_phase2_multicase import (validate_multicase_descriptor,
+        validate_five_track_manifest)
+    validate_multicase_descriptor(descriptor)
+    artifact_paths = {track: Path(warm_artifacts[track]).expanduser().resolve(strict=True)
+        for track in MECO_TRACKS}
+    validate_five_track_manifest(bundle, descriptor,
+        validator_receipts=bundle.get("validator_receipts", {}), artifact_paths=artifact_paths)
+    return {key: binding[key] for key in sorted(binding)}
+
+
 def describe_campaign(config, *, source_root=ROOT, output=None):
     """Describe a campaign from explicit config; write only when output is passed."""
     source_root = Path(source_root).resolve()
@@ -542,6 +590,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         raise ValueError("warm starts must be present for all five tracks or none")
     if all(present_warm_starts) and any(not item["binding_valid"] for item in warm.values()):
         raise ValueError("all supplied warm starts must bind the current source, protocol and track")
+    multicase_binding = _validate_multicase_warm_start_binding(
+        config.get("multicase_warm_start_binding"), warm_artifacts, warm)
     schedule = config.get("scheduler")
     if not isinstance(schedule, dict) or schedule.get("master_seed") != base_seed:
         raise ValueError("scheduler must explicitly bind the protocol master seed")
@@ -609,7 +659,8 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
             "evaluation": eval_device,
             "indexed_device_leases": leases},
         "chunk_reset_policy": CHUNK_RESET_POLICY,
-        "warm_starts": warm}
+        "warm_starts": warm,
+        "multicase_warm_start_binding": multicase_binding}
     if evaluation_schedule is not None:
         manifest["evaluation_schedule"] = evaluation_schedule
     if diagnostic_monitor is not None:
@@ -772,6 +823,11 @@ def validate_campaign_manifest(manifest, *, source_root=ROOT):
         if current != item:
             raise ValueError(f"{track} warm-start bytes, binding, or target coverage changed")
     present_warm_starts = [item.get("present") is True for item in warm.values()]
+    binding = _validate_multicase_warm_start_binding(
+        manifest.get("multicase_warm_start_binding"),
+        {track: item.get("path") for track, item in warm.items()}, warm)
+    if binding != manifest.get("multicase_warm_start_binding"):
+        raise ValueError("multi-case warm-start binding is not canonical")
     if any(present_warm_starts) and not all(present_warm_starts):
         raise ValueError("campaign manifest contains a partial five-track warm-start set")
     if all(present_warm_starts) and any(item.get("binding_valid") is not True
