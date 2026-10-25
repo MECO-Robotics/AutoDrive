@@ -47,6 +47,17 @@
 > expertise or simulator performance. The three-pass ledger now has 60 scoped
 > tranches.
 
+> **Continual evaluation schedule — 2026-10-25.** The reviewed implementation
+> is integrated at `de03ce27a` with the fresh-root limitation correction at
+> `89d0e86db`. Future manifests can pin an ordered diagnostic/validation case
+> schedule to an exact protocol ID and digest; selection rotates deterministically
+> by completed five-track cycle, and evaluation history hashes all five
+> checkpoint snapshots. Existing manifests keep the prior behavior. This is not
+> enabled in the active r4 manifest, whose evaluations remain fixed to one
+> diagnostic `pickup_simple/cluster` seed. Campaign restart in place is
+> unsupported. Twenty-five focused contract tests passed; no simulator, GPU, or
+> replay was run. The three-pass ledger now has 61 scoped tranches.
+
 > **Three-pass dashboard re-verification — 2026-10-25 01:55 UTC.** After adding
 > the reviewed Plan A exact-heap tranche, `frc-defense-dashboard.service` was
 > restarted on current `main` (PID `2810214`). `/`, `/api/meco-status`,

@@ -2368,6 +2368,45 @@
         "status": "approved-summary"
       },
       "limits": "Nineteen focused CPU contract tests passed using a mocked replay adapter and small test model. No real expert annotations/key registry, production simulator replay, GPU fit, dashboard replay, or campaign warm-start exists. This is a validated code path, not evidence of human expertise or simulator performance."
+    },
+    {
+      "requirement_id": "continual-five-track-evaluation-schedule",
+      "title": "Manifest-bound continual five-track evaluation schedule",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/implementation-provenance/continual-five-track-eval-schedule.md",
+          "sha256": "45660fda311ef1d3f1f8fd4f5eac49afb8a2e25b4d377848cc1a8431978744f1",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "e5fefae63049048a72b625633f028e1bfdd6d05b",
+        "within_run_scope_followup_commit": "cb21b7edce24b7f24506ae27d4518f30a7f67910",
+        "integrated_commit": "89d0e86db7774c014ce0b1c66c8f7426a969d039",
+        "paths": [
+          "frc_defense/meco_training_manifest.py",
+          "frc_defense/meco_supervisor.py",
+          "tests/test_meco_training_manifest.py",
+          "tests/test_meco_continual_eval_schedule.py",
+          "docs/implementation-provenance/continual-five-track-eval-schedule.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/continual-five-track-eval-schedule.md",
+          "sha256": "45660fda311ef1d3f1f8fd4f5eac49afb8a2e25b4d377848cc1a8431978744f1",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "89d0e86db7774c014ce0b1c66c8f7426a969d039",
+        "verdict": "approved",
+        "verdict_detail": "Independent exact-main review found no drift from the reviewed branch and approved protocol/seed binding, leakage rejection, deterministic within-run case rotation, five-track checkpoint snapshots, and backward compatibility.",
+        "status": "approved-summary"
+      },
+      "limits": "Twenty-five focused CPU manifest/schedule tests, py_compile, and diff check passed. Device dispatch tests were excluded while the live service held cuda:0. Schedule is not enabled in the active r4 manifest; manifest campaigns require fresh output roots and do not resume in place. No simulator evaluation, replay inspection, dashboard replay verification, GPU execution, or qualification occurred."
     }
   ],
   "evidence_class": "scoped_transcript_summary",
