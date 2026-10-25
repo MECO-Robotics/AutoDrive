@@ -3833,6 +3833,11 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         **(qualification_case or {}))
                     score_event_recorder = None
                     if score_estimand_approval is not None:
+                        if getattr(getattr(env, "fuel_physics", None),
+                                   "_gpu_qualifying", False):
+                            raise RuntimeError(
+                                "GPU-qualifying fuel physics cannot use the "
+                                "CPU score-event recorder")
                         from .meco_simulated_score_ledger import MecoScoreEventRecorder
                         score_context = _meco_score_ledger_context(env,
                             episode_id=episode_id, seed=seed, scenario_id=scenario_id,

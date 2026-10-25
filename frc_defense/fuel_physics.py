@@ -173,6 +173,9 @@ class FuelPhysics:
         if self.config.sleep_islands:
             raise RuntimeError(
                 "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
+        if not self.config.adaptive_substeps:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics requires adaptive stability bounds")
 
     def _spawn_height(self, xy):
         """Place released ground fuel on the analytic terrain contact plane."""
@@ -619,8 +622,13 @@ class FuelPhysics:
             "adaptive fuel substep capacity exceeded; refusing unstable physics step")
         return limit
 
-    def step(self, active_mask, piece_active, piece_owner, *, dt=None, substeps=None, adaptive=None):
+    def _step_impl(self, active_mask, piece_active, piece_owner, *,
+                   dt=None, substeps=None, adaptive=None):
         self._validate_qualifying_backend()
+        if (self._gpu_qualifying and adaptive is False and
+                (substeps != 1 or not torch.cuda.is_current_stream_capturing())):
+            raise RuntimeError(
+                "fixed qualifying fuel steps are restricted to one-step graph capture")
         if self._gpu_qualifying:
             for name, tensor, shape in (
                     ("active mask", active_mask, (self.n,)),
@@ -652,3 +660,23 @@ class FuelPhysics:
         self.piece_vel.copy_(self.vel[...,:2])
         self._last_xy.copy_(self.piece_pos); self._last_vxy.copy_(self.piece_vel)
         return self.pos,self.vel
+
+    def step(self, active_mask, piece_active, piece_owner, *, dt=None,
+             substeps=None, adaptive=None):
+        self._validate_qualifying_backend()
+        if self._gpu_qualifying and adaptive is False:
+            raise RuntimeError(
+                "GPU-qualifying fuel steps cannot disable adaptive stability bounds")
+        return self._step_impl(active_mask, piece_active, piece_owner, dt=dt,
+                               substeps=substeps, adaptive=adaptive)
+
+    def _step_graph_capture_substep(self, active_mask, piece_active,
+                                    piece_owner, *, dt):
+        """Run one trusted fixed iteration while a qualifying graph is captured."""
+        self._validate_qualifying_backend()
+        if (not self._gpu_qualifying or
+                not torch.cuda.is_current_stream_capturing()):
+            raise RuntimeError(
+                "fixed fuel substeps are restricted to qualifying graph capture")
+        return self._step_impl(active_mask, piece_active, piece_owner,
+                               dt=dt, substeps=1, adaptive=False)

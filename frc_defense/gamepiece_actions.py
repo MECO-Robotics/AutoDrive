@@ -26,6 +26,12 @@ def _capture_fuel_score_awards(env, chosen, *, source_site, robot_slot=None):
 
 def _flush_fuel_score_awards(env):
     """Serialize queued awards after all gameplay and physics updates."""
+    physics = getattr(env, "fuel_physics", None)
+    recorder = getattr(env, "_meco_score_event_recorder", None)
+    if (physics is not None and getattr(physics, "_gpu_qualifying", False)
+            and recorder is not None):
+        raise RuntimeError(
+            "GPU-qualifying fuel physics cannot materialize CPU score events")
     pending = getattr(env, "_pending_fuel_score_awards", None)
     if not pending:
         return

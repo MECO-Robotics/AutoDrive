@@ -73,6 +73,10 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     if physics._gpu_qualifying and not env._physics_graph_enabled:
         raise RuntimeError(
             "GPU-qualifying fuel physics requires HIP graph capture to be enabled")
+    if (physics._gpu_qualifying and
+            getattr(env, "_meco_score_event_recorder", None) is not None):
+        raise RuntimeError(
+            "GPU-qualifying fuel physics cannot use the CPU score-event recorder")
     if physics._gpu_qualifying:
         for name, tensor, shape in (
                 ("commands",commands,
@@ -99,7 +103,8 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
     outer_dt = env.sim.dt
     substeps = (physics.required_substeps(outer_dt,None,active,
                                          env.piece_active,env.piece_owner)
-                if physics.config.adaptive_substeps else physics.config.substeps)
+                if physics._gpu_qualifying or physics.config.adaptive_substeps
+                else physics.config.substeps)
     substep_dt = outer_dt / substeps
     if env._physics_graph_enabled:
         graph = env._physics_graphs.get(substeps)
@@ -116,9 +121,9 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
                     with torch.cuda.graph(graph):
                         env.sim.step(graph_command, graph_active,
                                      _active_nonempty=active_nonempty)
-                        physics.step(graph_active, env.piece_active,
-                                     env.piece_owner, dt=substep_dt,
-                                     substeps=1, adaptive=False)
+                        physics._step_graph_capture_substep(
+                            graph_active, env.piece_active, env.piece_owner,
+                            dt=substep_dt)
                 finally:
                     env.sim.dt = outer_sim_dt
             except Exception as exc:
@@ -146,8 +151,12 @@ def advance_with_fuel(env, commands, active_mask, *, active_nonempty=True):
         env.sim.dt = substep_dt
         for _ in range(substeps):
             env.sim.step(commands, active, _active_nonempty=active_nonempty)
-            physics.step(active, env.piece_active, env.piece_owner,
-                         dt=substep_dt, substeps=1,adaptive=False)
+            if physics._gpu_qualifying:
+                physics._step_graph_capture_substep(
+                    active, env.piece_active, env.piece_owner, dt=substep_dt)
+            else:
+                physics.step(active, env.piece_active, env.piece_owner,
+                             dt=substep_dt, substeps=1, adaptive=False)
     finally:
         env.sim.dt = outer_dt
     _flush_fuel_score_awards(env)
@@ -328,17 +337,29 @@ def launch_fuel(env, selected, destinations, *, origins=None, height=.35,
     physics = bind_fuel_state(env)
     physics._validate_qualifying_backend()
     if physics._gpu_qualifying:
+        target_shape = (physics.n, physics.p, 2)
+
+        def broadcasts_to_target(tensor):
+            shape = tuple(tensor.shape)
+            if len(shape) > len(target_shape):
+                return False
+            aligned = (1,) * (len(target_shape) - len(shape)) + shape
+            return all(actual in (1, expected)
+                       for actual, expected in zip(aligned, target_shape))
+
         for name, tensor, shape in (
                 ("selected mask", selected, (physics.n, physics.p)),
-                ("destinations", destinations, None),
-                ("origins", origins, None),
-                ("spawn positions", spawn_positions, None)):
+                ("destinations", destinations, target_shape),
+                ("origins", origins, target_shape),
+                ("spawn positions", spawn_positions, target_shape)):
             if tensor is None:
                 continue
             if (not isinstance(tensor, torch.Tensor) or
                     tensor.device != physics.device or
-                    (shape is not None and tensor.shape != shape)):
-                expected = f" with shape {shape}" if shape is not None else ""
+                    (tensor.shape != shape if name == "selected mask"
+                     else not broadcasts_to_target(tensor))):
+                expected = (f" with shape {shape}" if name == "selected mask"
+                            else f" broadcastable to {target_shape}")
                 raise ValueError(
                     f"GPU-qualifying fuel {name} must be a device-resident "
                     f"tensor{expected}")
