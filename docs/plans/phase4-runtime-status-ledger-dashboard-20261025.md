@@ -133,13 +133,17 @@ check against the exact current checkout:
   PID, invocation ID, service working directory, checkout commit, and source
   identity. Verify the service is active and the endpoint responses succeed.
 - Query `/api/meco-status` and `/api/curriculum-status`. Both must return HTTP
-  200. In the `three_pass_provenance` payload, require
+  200. In `/api/curriculum-status.three_pass_provenance`, require
   `validation_status == "validated_summary_only"`; this is the API's derived
   validation result. Preserve the manifest's stored
   `status == "scoped-transcript-summaries"` rather than replacing it with the
-  API result. Also require 88 tranches, the new final requirement ID, no
-  `untrusted_reason`, and the exact ledger digest pinned in
-  `dashboard_api.py`. Report unrelated data-read errors separately from
+  API result. Also require 88 tranches and
+  `tranches[-1].requirement_id == "phase4-runtime-status-ledger-dashboard"`,
+  with no `untrusted_reason`. Separately compute the local SHA-256 of
+  `docs/MECO_THREE_PASS_PROVENANCE.json` and verify it equals
+  `_EXPECTED_THREE_PASS_PROVENANCE_SHA256` in
+  `frc_defense/dashboard_api.py` from the same checkout; the API does not
+  expose this digest. Report unrelated data-read errors separately from
   provenance validation state.
 - Fetch `/`, `/meco`, `/assets/dashboard.css`, `/assets/dashboard.js`,
   `/assets/meco.css`, `/assets/meco.js`, `/assets/field_rendering.js`, and
