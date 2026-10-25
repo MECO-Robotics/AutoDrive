@@ -1337,3 +1337,27 @@ execution, parity/profile, source-bound calibration, training/evaluation,
 promotion, or qualification result is established. Runtime/device evidence
 and qualification remain pending; this tranche does not establish whole-plan
 or whole-compute GPU-only completion.
+
+## GPU observation, reset, and planner residency — 2026-10-25
+
+The approved observation/sensor plan is recorded in
+`docs/plans/gpu-observation-sensor-preprocessing-tranche-20261026.md` (SHA-256
+`4517ca3fcf0970dc0466287e3889d7e9b3de4a47fa9999647b30f79ee4b0e5c0`). The
+implementation candidate `da6a2223d9822d87088e7cf90ad108c3a7384e29` received
+exact-head Pass 3 approval and was integrated at `c0a696524`. A subsequent
+integration review found and corrected unknown-scheduler-count handling in
+`_held_action_interval`; the exact correction `c399f66a68200fe7b8b78c5ab9bddc37ceb3b236`
+was independently approved and pushed.
+
+The scoped changes move observation/reset placement masks, opponent replanning
+cadence, delayed-observation capture, and 3v3 planner work to fixed-shape
+device masks. The no-scheduler-count interval preserves the full device mask;
+its single active-tick scalar is materialized only as post-interval reporting.
+Static `py_compile` and `git diff --check` passed. No tests or runtime, GPU,
+simulator, replay, or qualification run was performed for these changes. The
+serving dashboard was restarted and API/frontend currentness was recorded in
+[the observation dashboard evidence](implementation-provenance/gpu-observation-dashboard-currentness-20261025.md).
+
+These changes provide source-level implementation and review evidence only.
+The gamepiece physics tranche, five-track PPO batched residency, simulator
+replay validation, and all five stage-one qualifications remain outstanding.
