@@ -148,6 +148,18 @@ class FuelPhysics:
                 self._hip is None):
             raise RuntimeError(
                 "GPU-qualifying fuel physics cannot select the Torch fallback")
+        supported_options = {
+            "broadphase": ("grid", "all_pairs"),
+            "robot_broadphase": ("grid", "all_pairs"),
+            "contact_mode": ("compact", "fused"),
+            "compact_capacity": ("bounded", "full"),
+            "solver": ("jacobi", "colored"),
+        }
+        for name, choices in supported_options.items():
+            if getattr(self.config, name) not in choices:
+                raise RuntimeError(
+                    f"GPU-qualifying fuel physics does not support {name}="
+                    f"{getattr(self.config, name)!r}")
         if self.config.sleep and self.config.sleep_islands:
             raise RuntimeError(
                 "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
