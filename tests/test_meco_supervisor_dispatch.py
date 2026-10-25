@@ -229,7 +229,8 @@ def test_worker_provenance_rejects_run_or_checkpoint_binding_drift(tmp_path):
     run_record = {"sources": sources, "source_identity_sha256": supervisor.source_hash,
         "supervisor_source_identity_sha256": supervisor.source_hash,
         "supervisor_native_extension_attestation": supervisor.native_extension_attestation,
-        "run_id": "run", "track": "A1", "task_assignment": assignment,
+        "run_id": "run", "track": "A1", "config": {"track": "A1"},
+        "task_assignment": assignment,
         "completed_updates": 10, "protocol_id": "protocol", "status": "complete"}
     checkpoint = {"config": {"track": "A1"}, "sources": sources,
         "run_id": "run", "protocol_id": "protocol",
