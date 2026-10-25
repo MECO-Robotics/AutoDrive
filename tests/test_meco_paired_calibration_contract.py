@@ -89,19 +89,14 @@ def _campaign(monkeypatch, **overrides):
     return q.build_paired_calibration_campaign(**values)
 
 
-def _release_observation(campaign):
-    devices = {device: {**identity, "active_owners": []}
-        for device, identity in sorted(release_gate.WX9100_BY_INDEX.items())}
-    owners = {device: [] for device in release_gate.WX9100_BY_INDEX}
-    body = {"schema": "meco-external-release-observation-v1",
-        "campaign_id": release_gate.R4_CAMPAIGN_ID,
-        "manifest_path": str(release_gate.R4_MANIFEST_PATH),
-        "manifest_id": "acaf745eb84eb66ea8447a884ad6eb036166abe2f596b168ee392fb6d423bc03",
-        "devices": devices,
-        "observations": [{"r4_processes": [], "device_owners": owners} for _ in range(2)],
-        "settle_seconds": 1.0, "observed_utc": "2026-10-25T00:00:00+00:00",
-        "method": "proc-cmdline-and-proc-fd-render-node-bdf-v1"}
-    return {**body, "observation_sha256": q._canonical_sha256(body)}
+def _release_observation(campaign, tmp_path):
+    proc_root = tmp_path / "release-proc"
+    sys_root = tmp_path / "release-sys"
+    (proc_root / "1/fd").mkdir(parents=True, exist_ok=True)
+    (proc_root / "1/cmdline").write_bytes(b"fixture-process\0")
+    (sys_root / "class/drm").mkdir(parents=True, exist_ok=True)
+    return release_gate.verify_external_release_before_paired_run(campaign,
+        proc_root=proc_root, sys_root=sys_root, settle_seconds=0)
 
 
 def _outcome_fixture(monkeypatch, campaign, unit, replay_root):
@@ -347,7 +342,7 @@ def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch,
     with pytest.raises(ValueError, match="progress is incomplete"):
         q.build_paired_calibration_final_shard(campaign, 0, progress,
             replay_root=tmp_path, approval=approval,
-            release_observation=_release_observation(campaign))
+            release_observation=_release_observation(campaign, tmp_path))
 
 
 def test_paired_artifact_writer_is_atomic_idempotent_and_never_overwrites(tmp_path):
@@ -525,7 +520,11 @@ def test_multimodel_contract_digest_survives_final_shard_and_merged_bundle(monke
             shard["shard_index"], rows, replay_root=tmp_path, approval=approval)
         final = q.build_paired_calibration_final_shard(campaign,
             shard["shard_index"], progress, replay_root=tmp_path, approval=approval,
-            release_observation=_release_observation(campaign))
+            release_observation=_release_observation(campaign, tmp_path))
+        with pytest.raises(ValueError, match="fresh live release observer capability"):
+            q.build_paired_calibration_final_shard(campaign,
+                shard["shard_index"], progress, replay_root=tmp_path, approval=approval,
+                release_observation=final["release_observation"])
         expected_binding = next(control["control_binding_sha256"]
             for control in campaign["controls"]
             if control["control_id"] == "D2/multi_model_v1")

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import time
+import copy
 
 R4_CAMPAIGN_ID = "meco-five-continuous-20261025-r4"
 R4_CAMPAIGN_ROOT = Path(
@@ -22,6 +23,23 @@ WX9100_BY_INDEX = {
     "cuda:0": {"bdf": "0000:19:00.0", "uuid": "30323133-6632-6261-3734-313632316134"},
     "cuda:1": {"bdf": "0000:67:00.0", "uuid": "30323133-6661-3836-3737-346334386134"},
 }
+_CAPABILITY_TOKEN = object()
+
+
+class _LiveReleaseCapability:
+    """Process-local proof that this module just completed both live scans."""
+    __slots__ = ("_token", "_receipt")
+
+    def __init__(self, token, receipt):
+        if token is not _CAPABILITY_TOKEN:
+            raise TypeError("live release capabilities can only come from the observer")
+        self._token = token
+        self._receipt = copy.deepcopy(receipt)
+
+    def record(self):
+        if self._token is not _CAPABILITY_TOKEN:
+            raise ValueError("live release capability is invalid")
+        return copy.deepcopy(self._receipt)
 
 
 def _sha256(value: bytes) -> str:
@@ -216,11 +234,21 @@ def verify_external_release_before_paired_run(campaign, *, proc_root="/proc",
         "method": "proc-cmdline-and-proc-fd-render-node-bdf-v1"}
     receipt["observation_sha256"] = _sha256(json.dumps(receipt,
         sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
-    return receipt
+    return _LiveReleaseCapability(_CAPABILITY_TOKEN, receipt)
 
 
-def validate_release_observation_record(receipt, campaign):
-    """Check a persisted receipt's structure and digest; never use it to authorize a run."""
+def require_live_release_capability(capability, campaign):
+    """Accept only the process-local capability returned by this live observer."""
+    if (not isinstance(capability, _LiveReleaseCapability)
+            or capability._token is not _CAPABILITY_TOKEN):
+        raise ValueError("finalization requires a fresh live release observer capability")
+    receipt = capability.record()
+    digest = validate_persisted_release_observation_record(receipt, campaign)
+    return receipt, digest
+
+
+def validate_persisted_release_observation_record(receipt, campaign):
+    """Validate stored receipt integrity only; this is never run authorization."""
     if not isinstance(receipt, dict) or receipt.get("schema") != "meco-external-release-observation-v1":
         raise ValueError("paired calibration release observation is missing or malformed")
     body = {key: value for key, value in receipt.items() if key != "observation_sha256"}

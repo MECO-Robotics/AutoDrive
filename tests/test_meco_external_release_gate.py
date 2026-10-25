@@ -105,14 +105,17 @@ def test_release_observation_emits_two_empty_read_only_observations(tmp_path):
     observation = release_gate.verify_external_release_before_paired_run(
         _campaign(), proc_root=proc_root, sys_root=sys_root,
         settle_seconds=0.25, clock=lambda: now[0], sleep=fake_sleep)
+    receipt = observation.record()
     assert sleeps == [0.25]
-    assert observation["schema"] == "meco-external-release-observation-v1"
-    assert observation["campaign_id"] == release_gate.R4_CAMPAIGN_ID
-    assert len(observation["observations"]) == 2
-    assert all(not row["r4_processes"] for row in observation["observations"])
+    assert receipt["schema"] == "meco-external-release-observation-v1"
+    assert receipt["campaign_id"] == release_gate.R4_CAMPAIGN_ID
+    assert len(receipt["observations"]) == 2
+    assert all(not row["r4_processes"] for row in receipt["observations"])
     assert all(not any(row["device_owners"].values())
-               for row in observation["observations"])
-    assert observation["devices"]["cuda:0"]["uuid"] == release_gate.WX9100_BY_INDEX[
+               for row in receipt["observations"])
+    assert receipt["devices"]["cuda:0"]["uuid"] == release_gate.WX9100_BY_INDEX[
         "cuda:0"]["uuid"]
-    assert release_gate.validate_release_observation_record(
-        observation, _campaign()) == observation["observation_sha256"]
+    assert release_gate.validate_persisted_release_observation_record(
+        receipt, _campaign()) == receipt["observation_sha256"]
+    with pytest.raises(TypeError, match="only come from the observer"):
+        release_gate._LiveReleaseCapability(object(), receipt)

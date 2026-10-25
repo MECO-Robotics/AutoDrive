@@ -2397,7 +2397,7 @@ def run_paired_calibration_shard(campaign, shard_index, *, repo_root,
         "worker_id": worker["worker_id"], "completed_work_units": len(completed_rows),
         "progress_id": progress["progress_id"], "final_shard_sha256": digest,
         "final_shard": str(final_path),
-        "external_release_observation": release_observation}
+        "external_release_observation": release_observation.record()}
 
 
 def build_paired_calibration_progress(campaign, shard_index, completed_rows, *,
@@ -2486,8 +2486,8 @@ def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
         replay_root=replay_root, approval=approval)
     if progress.get("complete") is not True:
         raise ValueError("paired calibration shard progress is incomplete")
-    from .meco_external_release_gate import validate_release_observation_record
-    release_observation_sha256 = validate_release_observation_record(
+    from .meco_external_release_gate import require_live_release_capability
+    release_observation, release_observation_sha256 = require_live_release_capability(
         release_observation, campaign)
     body = {"schema": PAIRED_CALIBRATION_FINAL_SHARD,
         "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
@@ -2682,9 +2682,9 @@ def build_paired_calibration_merged_report(campaign, final_shard_raws, *,
             "control_binding_sha256", "progress_id",
             "release_observation", "release_observation_sha256",
             "completed_work_unit_ids", "completed_rows", "complete", "final_shard_id"}
-        from .meco_external_release_gate import validate_release_observation_record
+        from .meco_external_release_gate import validate_persisted_release_observation_record
         try:
-            release_observation_sha256 = validate_release_observation_record(
+            release_observation_sha256 = validate_persisted_release_observation_record(
                 artifact.get("release_observation"), campaign)
         except ValueError as exc:
             raise ValueError("paired calibration final shard release observation is invalid") from exc
