@@ -2251,7 +2251,7 @@ _EVALUATION_CASE_FIELDS = frozenset(("layout_id", "defender_family",
     "start_condition", "sensor_profile"))
 
 
-def load_evaluation_protocol(value, *, scenario_id=None):
+def load_evaluation_protocol(value, *, scenario_id=None, include_raw_bytes=False):
     if isinstance(value, dict):
         protocol = value
         raw = json.dumps(protocol, sort_keys=True, separators=(",", ":"),
@@ -2281,7 +2281,11 @@ def load_evaluation_protocol(value, *, scenario_id=None):
     if version == PROTOCOL_VERSION and not isinstance(value, dict):
         from .meco_supervised import _load_protocol
         checked, checked_id, checked_sha, checked_path = _load_protocol(Path(value))
-        return checked, checked_id, checked_sha, checked_path.name
+        result = (checked, checked_id, checked_sha, checked_path.name)
+        if include_raw_bytes:
+            import base64
+            return (*result, base64.b64encode(raw).decode("ascii"))
+        return result
     if version in (LEGACY_CALIBRATED_PROTOCOL_VERSION,
                    D0_PAIRED_REFERENCE_PROTOCOL_VERSION, CALIBRATED_PROTOCOL_VERSION):
         if not isinstance(scenario_id, str) or not scenario_id:
@@ -2305,7 +2309,11 @@ def load_evaluation_protocol(value, *, scenario_id=None):
             or split_seeds["train"] & split_seeds["test"]
             or split_seeds["validation"] & split_seeds["test"]):
         raise ValueError("evaluation protocol split seed pools overlap")
-    return protocol, protocol_id, hashlib.sha256(raw).hexdigest(), path_name
+    result = (protocol, protocol_id, hashlib.sha256(raw).hexdigest(), path_name)
+    if include_raw_bytes:
+        import base64
+        return (*result, base64.b64encode(raw).decode("ascii"))
+    return result
 
 
 def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
@@ -2315,8 +2323,8 @@ def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
         raise ValueError("evaluation protocol binding is only valid for validation or test")
     if path is None:
         raise ValueError("held-out evaluation requires an explicit evaluation protocol")
-    protocol, protocol_id, protocol_sha256, protocol_file = load_evaluation_protocol(
-        path, scenario_id=scenario_id)
+    protocol, protocol_id, protocol_sha256, protocol_file, protocol_content_base64 = load_evaluation_protocol(
+        path, scenario_id=scenario_id, include_raw_bytes=True)
     if not isinstance(qualification_case, dict) or set(qualification_case) != _EVALUATION_CASE_FIELDS:
         raise ValueError("held-out evaluation requires an exact four-field case stratum")
     if not categories or len(set(categories)) != len(categories):
@@ -2344,7 +2352,9 @@ def resolve_evaluation_protocol(path, *, scenario_id, categories, split,
                 and case.get("split") != split and set(seeds).intersection(case.get("seeds", []))):
             raise ValueError("evaluation seed list overlaps another protocol split")
     return {"protocol_id": protocol_id, "protocol_sha256": protocol_sha256,
-        "protocol_file": protocol_file, "split": split,
+        "protocol_file": protocol_file, "protocol_content_base64": protocol_content_base64,
+        "protocol_object": protocol,
+        "split": split,
         "scenario_id": scenario_id, "categories": list(categories),
         "qualification_case": dict(qualification_case), "seeds": list(seeds),
         "case_ids": [{"category": case["category"], **{
@@ -3074,6 +3084,15 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                         phase4_start_profile_assignment=phase4_start_profile_assignment,
                         phase4_focal_pose_assignment=phase4_focal_pose_assignment,
                         phase4_teammate_behavior_assignment=phase4_teammate_behavior_assignment,
+                        evaluation_protocol_content_base64=(
+                            evaluation_binding.get("protocol_content_base64")
+                            if evaluation_binding is not None else None),
+                        evaluation_protocol_object=(
+                            evaluation_binding.get("protocol_object")
+                            if evaluation_binding is not None else None),
+                        evaluation_protocol_content_sha256=(
+                            evaluation_binding.get("protocol_sha256")
+                            if evaluation_binding is not None else None),
                         **(qualification_case or {}))
                     score_event_recorder = None
                     if score_estimand_approval is not None:

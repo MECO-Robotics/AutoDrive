@@ -20,9 +20,11 @@ from .curriculum_training import source_identity
 from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
                           PREDICTION_MODES, make_meco_track)
 from .meco_track_training import CHUNK_RESET_POLICY, MecoTrainConfig
+from .meco_baseline_freeze import validate_effective_phase0_bundle
 from .training_curriculum import get_scenario
 
 SCHEMA = "meco-five-track-campaign-manifest-v2"
+PHASE0_SCHEMA = "meco-five-track-campaign-manifest-v3"
 ROOT = Path(__file__).resolve().parents[1]
 LEASE_CONTRACT = {"owner_limit_per_index": 1,
     "training_policy": "sequential_round_robin_tracks",
@@ -212,7 +214,6 @@ def _validate_evaluation_schedule(schedule, protocol, protocol_sha256):
             raise ValueError("evaluation_schedule indices must match frozen order")
         scenario, category, split = row["scenario_id"], row["category"], row["split"]
         seeds = row["seeds"]
-        from .training_curriculum import get_scenario
         definition = get_scenario(scenario) if isinstance(scenario, str) else None
         if (not isinstance(scenario, str) or not scenario or
                 not isinstance(category, str) or not category or
@@ -646,7 +647,11 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
     diagnostic_monitor = _validate_diagnostic_monitor(
         config.get("diagnostic_monitor"), evaluation_protocol, evaluation_sha,
         device_pool, eval_device, protocol)
-    manifest = {"schema": SCHEMA, "source_identity_policy": SOURCE_IDENTITY_POLICY,
+    phase0_bundle = config.get("phase0_materialization")
+    phase0_binding = (validate_effective_phase0_bundle(phase0_bundle, source_root)
+        if phase0_bundle is not None else None)
+    manifest = {"schema": PHASE0_SCHEMA if phase0_binding is not None else SCHEMA,
+        "source_identity_policy": SOURCE_IDENTITY_POLICY,
         "source": {"commit": git["commit"],
             "clean": git["clean"], "status_sha256": git["status_sha256"],
             "identity_sha256": source_hash, "identity": source},
@@ -674,6 +679,9 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
         "chunk_reset_policy": CHUNK_RESET_POLICY,
         "warm_starts": warm,
         "multicase_warm_start_binding": multicase_binding}
+    if phase0_binding is not None:
+        manifest["phase0_materialization"] = phase0_bundle
+        manifest["phase0_binding"] = phase0_binding
     if evaluation_schedule is not None:
         manifest["evaluation_schedule"] = evaluation_schedule
     if diagnostic_monitor is not None:
@@ -702,12 +710,20 @@ def describe_campaign(config, *, source_root=ROOT, output=None):
 
 def validate_campaign_manifest(manifest, *, source_root=ROOT):
     """Validate canonical digest, clean source binding, protocol bytes and track map."""
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+    if (not isinstance(manifest, dict)
+            or manifest.get("schema") not in (SCHEMA, PHASE0_SCHEMA)):
         raise ValueError("unsupported campaign manifest")
     data = dict(manifest)
     digest = data.pop("canonical_sha256", None)
     if digest != _sha(data):
         raise ValueError("campaign manifest canonical digest mismatch")
+    if manifest["schema"] == PHASE0_SCHEMA:
+        binding = validate_effective_phase0_bundle(
+            manifest.get("phase0_materialization"), source_root)
+        if manifest.get("phase0_binding") != binding:
+            raise ValueError("campaign manifest Phase 0 freeze/partition binding mismatch")
+    elif "phase0_binding" in manifest or "phase0_materialization" in manifest:
+        raise ValueError("legacy diagnostic manifest cannot carry current Phase 0 evidence")
     campaign_config = manifest.get("campaign")
     if not isinstance(campaign_config, dict):
         raise ValueError("campaign manifest campaign config is malformed")

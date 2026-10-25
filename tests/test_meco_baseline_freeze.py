@@ -15,8 +15,15 @@ from frc_defense.meco_baseline_freeze import (
     canonical_sha256,
     compile_baseline_freeze,
     compile_partition_contract,
+    compile_effective_capture_receipt,
+    compile_effective_baseline_freeze,
+    compile_tuple_partition_materialization,
+    consume_final_test_authorization,
     validate_baseline_freeze,
+    validate_effective_capture_receipt,
+    validate_effective_baseline_freeze,
     validate_partition_contract,
+    validate_tuple_partition_materialization,
 )
 
 
@@ -167,6 +174,57 @@ def _valid_partitions() -> dict[str, dict[str, list]]:
 
 def _valid_uses() -> dict[str, list[str]]:
     return {name: sorted(PARTITION_WORKFLOWS[name]) for name in PARTITION_NAMES}
+
+
+def _factory_arguments():
+    protocol = {"protocol_version": "fixture-v1", "cases": []}
+    protocol_bytes = __import__("json").dumps(protocol, sort_keys=True,
+        separators=(",", ":")).encode()
+    return {"scenario_id": "pickup_simple", "category": "single", "num_envs": 1,
+        "device": "cuda:0", "seed": 13, "fuel_physics": True,
+        "production_d0": False, "layout_id": "2026_rebuilt",
+        "defender_family": "category_scripted", "start_condition": "scenario_defined",
+        "sensor_profile": "standard",
+        "evaluation_protocol_object": protocol,
+        "evaluation_protocol_content_base64": __import__("base64").b64encode(
+            protocol_bytes).decode(),
+        "evaluation_protocol_content_sha256": hashlib.sha256(protocol_bytes).hexdigest()}
+
+
+def _effective_runtime_identity():
+    digest = hashlib.sha256(b"fixture-runtime").hexdigest()
+    return {"simulator_id": "fixture-sim", "simulator_version": "1",
+        "simulator_build_sha256": digest, "python_version": "3.fixture",
+        "torch_version": "fixture", "backend": "ROCm", "backend_version": "fixture",
+        "device_id": "GPU-0123456789abcdef", "device_index": 0,
+        "device_model": "fixture WX9100", "dependency_lock_sha256": digest}
+
+
+def _registry_and_assignment():
+    tuples = []
+    assignments = {}
+    for partition_i, partition in enumerate(PARTITION_NAMES):
+        for j in range(2):
+            item = {"scenario_id": "pickup_simple", "case_id": f"case-{partition_i}-{j}",
+                "category": "single", "defender_family": f"family-{partition_i}-{j}",
+                "layout_id": f"layout-{partition_i}-{j}",
+                "start_condition": f"start-{partition_i}-{j}",
+                "sensor_profile": "standard", "seed": partition_i * 10 + j,
+                "repetition": 0, "evaluation_phase": partition}
+            tuple_id = canonical_sha256(item)
+            tuples.append({**item, "eligible": True})
+            assignments[tuple_id] = partition
+    registry = {"schema": "meco-evaluation-tuple-registry-v1", "tuples": tuples}
+    eligible = sorted(assignments)
+    budget = {"episodes_per_tuple": 1, "repetitions": 2}
+    allocation = {"authored_by": "human-review-fixture", "authored_at_utc": "2026-10-25T00:00:00Z",
+        "source_sha256": hashlib.sha256(b"fixed table").hexdigest(), "outcomes_accessed": False}
+    tracks = {track: {"tuple_ids": eligible, "evaluation_budget": budget}
+        for track in ("A1", "A2", "A3", "C1", "C2")}
+    table = {"schema": "meco-partition-assignment-table-v1", "assignments": assignments,
+        "model_tracks": tracks, "evaluation_budget": budget,
+        "allocation_provenance": allocation}
+    return registry, table
 
 
 def test_baseline_freeze_is_bound_to_clean_source_runtime_and_field_sources(tmp_path):
@@ -358,3 +416,121 @@ def test_partition_contract_rejects_final_test_use_for_training_or_margin_review
             partitions=_valid_partitions(),
             allowed_uses=uses,
         )
+
+
+def test_effective_receipt_and_freeze_bind_factory_snapshot_bytes_and_source(tmp_path):
+    _init_repo(tmp_path)
+    receipt = compile_effective_capture_receipt(tmp_path,
+        source_plan_path=SOURCE_PLAN, factory_arguments=_factory_arguments(),
+        runtime_identity=_effective_runtime_identity(),
+        captured_at_utc="2026-10-25T00:00:00Z")
+    assert validate_effective_capture_receipt(receipt, tmp_path) == receipt
+    freeze = compile_effective_baseline_freeze(receipt, tmp_path)
+    assert freeze["qualification_eligible"] is False
+    assert validate_effective_baseline_freeze(freeze, receipt, tmp_path) == freeze
+
+    changed_receipt = __import__("copy").deepcopy(receipt)
+    changed_receipt["fields"]["robot_dynamics"]["value"]["forged"] = True
+    with pytest.raises(ValueError, match="field value digest|receipt digest"):
+        validate_effective_capture_receipt(changed_receipt, tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ["missing_field", "default_only", "noncanonical_config",
+    "protocol_object_mismatch", "duplicate_protocol_key"])
+def test_effective_receipt_rejects_unresolved_or_noncanonical_snapshot(tmp_path, mutation):
+    _init_repo(tmp_path)
+    arguments = _factory_arguments()
+    if mutation == "missing_field":
+        arguments.pop("sensor_profile")
+    elif mutation == "default_only":
+        arguments["sensor_profile"] = None
+    elif mutation == "protocol_object_mismatch":
+        arguments["evaluation_protocol_object"] = {"scenario_id": "forged"}
+    elif mutation == "duplicate_protocol_key":
+        raw = b'{"scenario_id":"first","scenario_id":"second"}'
+        arguments["evaluation_protocol_content_base64"] = __import__("base64").b64encode(raw).decode()
+        arguments["evaluation_protocol_content_sha256"] = hashlib.sha256(raw).hexdigest()
+        arguments["evaluation_protocol_object"] = {"scenario_id": "second"}
+    if mutation != "noncanonical_config":
+        with pytest.raises(ValueError):
+            compile_effective_capture_receipt(tmp_path, source_plan_path=SOURCE_PLAN,
+                factory_arguments=arguments, runtime_identity=_effective_runtime_identity(),
+                captured_at_utc="2026-10-25T00:00:00Z")
+        return
+    receipt = compile_effective_capture_receipt(tmp_path, source_plan_path=SOURCE_PLAN,
+        factory_arguments=arguments, runtime_identity=_effective_runtime_identity(),
+        captured_at_utc="2026-10-25T00:00:00Z")
+    item = next(value for value in receipt["configuration_artifacts"]
+        if value["artifact_id"] == "field_layout")
+    item["content_base64"] = __import__("base64").b64encode(b'{ "not": "canonical" }').decode()
+    item["content_sha256"] = hashlib.sha256(
+        __import__("base64").b64decode(item["content_base64"])).hexdigest()
+    receipt["receipt_sha256"] = canonical_sha256({k: v for k, v in receipt.items()
+        if k != "receipt_sha256"})
+    with pytest.raises(ValueError, match="canonical"):
+        validate_effective_capture_receipt(receipt, tmp_path)
+
+
+def test_tuple_partition_closes_registry_for_five_identical_tracks():
+    registry, assignments = _registry_and_assignment()
+    freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
+    materialized = compile_tuple_partition_materialization(freeze_sha256=freeze_sha,
+        registry=registry, assignment_table=assignments)
+    assert set(materialized["partitions"]) == set(PARTITION_NAMES)
+    assert materialized["final_test_access_ledger"]["status"] == "locked"
+    assert materialized["final_test_access_ledger"]["outcomes_read"] is False
+    assert validate_tuple_partition_materialization(materialized,
+        freeze_sha256=freeze_sha, registry=registry, assignment_table=assignments) == materialized
+
+
+def test_final_test_authorization_transition_is_single_use_and_does_not_read_outcomes():
+    registry, assignments = _registry_and_assignment()
+    freeze_sha = hashlib.sha256(b"fixture freeze").hexdigest()
+    partition = compile_tuple_partition_materialization(freeze_sha256=freeze_sha,
+        registry=registry, assignment_table=assignments)
+    ledger = dict(partition["final_test_access_ledger"])
+    approval_sha = hashlib.sha256(b"approved authorization fixture").hexdigest()
+    authorization = {"schema": "meco-final-test-single-use-authorization-v1",
+        "partition_sha256": partition["partition_sha256"],
+        "approval_artifact_sha256": approval_sha, "authorized_by": "reviewer",
+        "purpose": "final_evaluation", "issued_at_utc": "2026-10-25T00:00:00Z"}
+    authorization["authorization_sha256"] = canonical_sha256(authorization)
+    state, receipt = consume_final_test_authorization(partition,
+        prior_ledger_state=ledger, authorization=authorization,
+        consumer_id="evaluation-run-1", consumed_at_utc="2026-10-25T00:01:00Z")
+    assert state["authorization_count"] == 1
+    assert state["outcomes_read"] is False
+    assert receipt["outcomes_read"] is False
+    assert "outcomes" not in receipt
+    with pytest.raises(ValueError, match="consumed|single-use"):
+        consume_final_test_authorization(partition, prior_ledger_state=state,
+            authorization=authorization, consumer_id="evaluation-run-2",
+            consumed_at_utc="2026-10-25T00:02:00Z")
+
+
+@pytest.mark.parametrize("mutation", ["missing_tuple", "track_membership", "axis_leak", "exclusion_reason"])
+def test_tuple_partition_rejects_incomplete_or_leaking_assignments(mutation):
+    registry, assignments = _registry_and_assignment()
+    if mutation == "missing_tuple":
+        assignments["assignments"].pop(next(iter(assignments["assignments"])))
+    elif mutation == "track_membership":
+        assignments["model_tracks"]["C2"]["tuple_ids"].pop()
+    elif mutation == "axis_leak":
+        train_id = next(key for key, value in assignments["assignments"].items() if value == "train")
+        cal_id = next(key for key, value in assignments["assignments"].items() if value == "calibration")
+        train_tuple = next(item for item in registry["tuples"] if canonical_sha256(
+            {k: v for k, v in item.items() if k != "eligible"}) == train_id)
+        cal_tuple = next(item for item in registry["tuples"] if canonical_sha256(
+            {k: v for k, v in item.items() if k != "eligible"}) == cal_id)
+        cal_tuple["seed"] = train_tuple["seed"]
+        assignments["assignments"].pop(cal_id)
+        assignments["assignments"][canonical_sha256({k: v for k, v in cal_tuple.items()
+            if k != "eligible"})] = "calibration"
+        for track in assignments["model_tracks"].values():
+            track["tuple_ids"] = sorted(assignments["assignments"])
+    else:
+        registry["tuples"][0]["eligible"] = False
+        registry["tuples"][0]["exclusion_reason"] = ""
+    with pytest.raises(ValueError):
+        compile_tuple_partition_materialization(freeze_sha256=hashlib.sha256(b"fixture").hexdigest(),
+            registry=registry, assignment_table=assignments)
