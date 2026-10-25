@@ -51,6 +51,27 @@ def _regular_nonsymlink(path: Path) -> Path:
     return path
 
 
+def _trusted_private_file(path: Path) -> Path:
+    path = _regular_nonsymlink(path)
+    info = path.stat(follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            info.st_mode & 0o077):
+        raise ValueError(f"resume metadata must be a coordinator-owned private file: {path}")
+    return path
+
+
+def _validate_existing_attempt_root(root: Path, outputs: dict) -> None:
+    info = Path(root).stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+            info.st_mode & 0o077):
+        raise ValueError("existing attempt root must be coordinator-owned mode 0700 or stricter")
+    _trusted_private_file(Path(outputs["state"]))
+    for key in ("stage_journal", "manifest"):
+        path = Path(outputs[key])
+        if path.exists() or path.is_symlink():
+            _trusted_private_file(path)
+
+
 def _reject_symlink_path(path: Path, *, allow_missing_leaf=True) -> None:
     path = Path(path).absolute()
     cursor = Path(path.anchor)
@@ -492,7 +513,7 @@ def _append_stage_receipt(path: Path, receipt: dict) -> str:
 
 
 def _read_stage_journal(path: Path) -> list[dict]:
-    path = _regular_nonsymlink(path)
+    path = _trusted_private_file(path)
     records = []
     attempt_ids = set()
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -727,14 +748,15 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
     if root.exists():
         if root.is_symlink():
             raise ValueError("existing coordinator root lacks a safe matching resume state")
-        state_path = _regular_nonsymlink(state_path)
+        _validate_existing_attempt_root(root, outputs)
+        state_path = _trusted_private_file(state_path)
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if (state.get("schema") != SCHEMA or
                 state.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
             raise ValueError("existing coordinator state is not bound to this descriptor")
         if manifest_path.exists():
             return validate_complete_set_manifest(
-                json.loads(_regular_nonsymlink(manifest_path).read_text(encoding="utf-8")), descriptor)
+                json.loads(_trusted_private_file(manifest_path).read_text(encoding="utf-8")), descriptor)
     elif manifest_path.exists():
         raise ValueError("complete-set manifest exists without its attempt directory")
 
@@ -770,6 +792,9 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                 root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                     getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
             root_identity = os.fstat(root_fd)
+            if (not stat.S_ISDIR(root_identity.st_mode) or
+                    root_identity.st_uid != os.geteuid() or root_identity.st_mode & 0o077):
+                raise ValueError("pinned attempt root must be coordinator-owned and private")
         except BaseException:
             os.close(parent_fd)
             raise
@@ -796,7 +821,8 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
                     current.st_ino != root_identity.st_ino):
                 raise ValueError("complete-set output root changed after it was pinned")
         if root.exists():
-            state = json.loads(_regular_nonsymlink(state_path).read_text(encoding="utf-8"))
+            _validate_existing_attempt_root(root, outputs)
+            state = json.loads(_trusted_private_file(state_path).read_text(encoding="utf-8"))
             if (state.get("schema") != SCHEMA or
                     state.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
                 raise ValueError("attempt state changed while acquiring device lease")

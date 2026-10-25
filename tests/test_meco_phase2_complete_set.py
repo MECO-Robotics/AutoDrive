@@ -1,5 +1,6 @@
 import hashlib
 import copy
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -149,6 +150,54 @@ def test_output_parent_symlink_created_during_lease_is_rejected(tmp_path, monkey
     with pytest.raises(ValueError, match="symlink"):
         coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
             a_execute=lambda *_a, **_kw: None, lease_factory=swap_parent)
+
+
+def test_resume_rejects_preseeded_permissive_attempt_root(tmp_path, monkeypatch):
+    descriptor = _descriptor(tmp_path)
+    _install_adapters(monkeypatch)
+    root = Path(descriptor["outputs"]["root"])
+    root.mkdir(mode=0o777)
+    root.chmod(0o777)
+    Path(descriptor["outputs"]["state"]).write_text(json.dumps({
+        "schema": coordinator.SCHEMA,
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "attempt_number": 1, "status": "running", "completed_stages": []}))
+    leases = []
+
+    @contextmanager
+    def lease(_devices, owner=None):
+        leases.append(True)
+        yield
+
+    with pytest.raises(ValueError, match="coordinator-owned mode 0700"):
+        coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
+            a_execute=lambda *_a, **_kw: None, lease_factory=lease)
+    assert leases == []
+
+
+@pytest.mark.parametrize("hostile_file", ["state", "stage_journal", "manifest"])
+def test_resume_rejects_permissive_state_or_journal(tmp_path, monkeypatch, hostile_file):
+    descriptor = _descriptor(tmp_path)
+    _install_adapters(monkeypatch)
+    root = Path(descriptor["outputs"]["root"])
+    root.mkdir(mode=0o700)
+    state = Path(descriptor["outputs"]["state"])
+    state.write_text(json.dumps({"schema": coordinator.SCHEMA,
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "attempt_number": 1, "status": "running", "completed_stages": []}))
+    state.chmod(0o600)
+    target = Path(descriptor["outputs"][hostile_file])
+    if hostile_file == "stage_journal":
+        target.write_text("{}\n")
+    elif hostile_file == "manifest":
+        target.write_text("{}")
+    else:
+        target.chmod(0o644)
+    if hostile_file in ("stage_journal", "manifest"):
+        target.chmod(0o644)
+    with pytest.raises(ValueError, match="coordinator-owned private file"):
+        coordinator.execute_complete_set(descriptor, c_execute=lambda _d: None,
+            a_execute=lambda *_a, **_kw: None, lease_factory=lambda *_a, **_kw: None)
 
 
 def test_root_replacement_during_stage_aborts_before_next_stage(tmp_path, monkeypatch):
