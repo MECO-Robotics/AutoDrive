@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from .meco_tracks import MECO_TRACKS
@@ -224,7 +225,8 @@ class MecoEvaluationSchedule:
         if item is None or item["status"] not in ("queued", "failed"):
             return None
         attempt = {"number": len(item["attempts"]) + 1,
-            "output_file": str(output_file), "status": "running"}
+            "output_file": str(output_file), "status": "running",
+            "started_at_unix": time.time()}
         item["attempts"].append(attempt)
         item.update(status="running", last_error=None)
         self._save()

@@ -391,6 +391,7 @@ class MecoSupervisor:
         if type(resume_campaign) is not bool:
             raise ValueError("resume_campaign must be boolean")
         self.resume_campaign = resume_campaign
+        self._campaign_roots_claimed = False
         self.manifest = None
         self.manifest_validation = None
         self.manifest_digest = None
@@ -785,6 +786,8 @@ class MecoSupervisor:
                 else self.last_evaluation.get("output_file") if self.last_evaluation else None)}
 
     def _read_or_create_runs(self):
+        if self.manifest is not None and not self._campaign_roots_claimed:
+            raise RuntimeError("manifest campaign filesystem initialization requires claimed roots")
         self.output.mkdir(parents=True, exist_ok=True)
         self.evaluation_output.mkdir(parents=True, exist_ok=True)
         if self.stop_file.exists() and not self.resume_campaign:
@@ -1428,6 +1431,12 @@ class MecoSupervisor:
                 return
             if item["status"] == "running":
                 raise RuntimeError("scheduled evaluator is marked running without a process handle")
+            if item["status"] == "failed" and item["attempts"]:
+                last_attempt = item["attempts"][-1].get("started_at_unix")
+                if isinstance(last_attempt, (int, float)) and not isinstance(last_attempt, bool):
+                    retry_delay = min(64., 2. ** min(len(item["attempts"]), 6))
+                    if time.time() < last_attempt + retry_delay:
+                        return
             schedule_case = item["schedule_case"]
             checkpoints = {row["track"]: Path(row["path"])
                 for row in item["checkpoint_snapshots"]}
@@ -1491,7 +1500,8 @@ class MecoSupervisor:
     def _poll_evaluator(self, cycle, statuses, *, occupied_devices=()):
         self._observe_stop()
         if self.evaluator is None:
-            if self.last_evaluation["status"] == "complete":
+            if (self.last_evaluation and
+                    self.last_evaluation.get("status") == "complete"):
                 self._start_next_evaluation(occupied_devices=occupied_devices)
         if self.evaluator is None:
             return
@@ -1524,7 +1534,8 @@ class MecoSupervisor:
                 self.evaluator = None
                 self.evaluator_log = None
                 self.evaluator_job = None
-            self._start_next_evaluation(occupied_devices=occupied_devices)
+            if self.last_evaluation["status"] == "complete":
+                self._start_next_evaluation(occupied_devices=occupied_devices)
             self._publish(cycle=cycle,
                 phase="stopping" if self.request_stop else "training",
                 statuses=statuses, evaluation=self.last_evaluation)
@@ -1655,10 +1666,12 @@ class MecoSupervisor:
     def _claim_fresh_manifest_roots(self):
         if self.manifest is None:
             self.output.mkdir(parents=True, exist_ok=True)
+            self._campaign_roots_claimed = True
             return
         if self.resume_campaign:
             if not self.output.is_dir() or not self.evaluation_output.is_dir():
                 raise ValueError("manifest campaign resume roots are missing")
+            self._campaign_roots_claimed = True
             return
         if self.output.exists() or self.evaluation_output.exists():
             raise ValueError("manifest campaign roots must remain absent until device leases are acquired")
@@ -1687,6 +1700,7 @@ class MecoSupervisor:
             except OSError:
                 pass
             raise
+        self._campaign_roots_claimed = True
 
     def run(self):
         from .meco_device_lease import lease_devices

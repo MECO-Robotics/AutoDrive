@@ -106,7 +106,9 @@ def test_evaluator_spawn_failure_retains_same_schedule_index(tmp_path, monkeypat
     supervisor.evaluator_log = None
     supervisor.last_evaluation = None
 
+    launches = []
     def fail_spawn(*_args, **_kwargs):
+        launches.append(1)
         raise OSError("simulated spawn failure")
 
     monkeypatch.setattr(supervisor_module.subprocess, "Popen", fail_spawn)
@@ -114,6 +116,45 @@ def test_evaluator_spawn_failure_retains_same_schedule_index(tmp_path, monkeypat
     assert journal.head()["index"] == 0
     assert journal.head()["status"] == "failed"
     assert journal.head()["attempts"][0]["status"] == "failed"
+    started_at = journal.head()["attempts"][0]["started_at_unix"]
+    monkeypatch.setattr(supervisor_module.time, "time", lambda: started_at + 1)
+    supervisor._start_next_evaluation()
+    assert len(launches) == 1
+    monkeypatch.setattr(supervisor_module.time, "time", lambda: started_at + 2)
+    supervisor._start_next_evaluation()
+    assert len(launches) == 2
+
+
+def test_first_evaluator_poll_with_no_active_job_is_safe(tmp_path):
+    from frc_defense.meco_supervisor import MecoSupervisor
+
+    supervisor = object.__new__(MecoSupervisor)
+    supervisor.stop_file = tmp_path / "STOP"
+    supervisor.request_stop = False
+    supervisor.evaluator = None
+    supervisor.last_evaluation = None
+    supervisor.evaluation_schedule_journal = None
+    supervisor.pending_evaluations = []
+    supervisor.started = False
+    supervisor._start_next_evaluation = lambda **_kwargs: setattr(supervisor, "started", True)
+
+    supervisor._poll_evaluator(0, {})
+    assert supervisor.started is False
+
+
+def test_manifest_state_initialization_requires_claimed_roots(tmp_path):
+    from frc_defense.meco_supervisor import MecoSupervisor
+
+    supervisor = object.__new__(MecoSupervisor)
+    supervisor.manifest = {"campaign": {"id": "fixture"}}
+    supervisor._campaign_roots_claimed = False
+    supervisor.output = tmp_path / "campaign"
+    supervisor.evaluation_output = tmp_path / "evaluations"
+
+    with pytest.raises(RuntimeError, match="requires claimed roots"):
+        supervisor._read_or_create_runs()
+    assert not supervisor.output.exists()
+    assert not supervisor.evaluation_output.exists()
 
 
 def test_restart_recovers_last_completed_cycle_missing_queue_snapshot(tmp_path, monkeypatch):
