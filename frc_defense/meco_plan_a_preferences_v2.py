@@ -457,12 +457,21 @@ def load_plan_a_preferences_v2(dataset: Path, legal_node_dataset: Path,
                     signed_choice.get("support_digest") != sample["support"].support_digest):
                 raise ValueError("signed choice does not bind the freshly replayed legal support")
             _, baseline = _select_plan_a_expert_goal_v1(sample["support"])
+            selected_pair = (signed_choice.get("node_id"), signed_choice.get("behavior_id"))
+            baseline_pair = (baseline["node_id"], baseline["behavior_id"])
+            expected_action_preferences = [{
+                "left_node_id": selected_pair[0], "left_behavior_id": selected_pair[1],
+                "right_node_id": baseline_pair[0], "right_behavior_id": baseline_pair[1],
+                "preferred_node_id": selected_pair[0],
+                "preferred_behavior_id": selected_pair[1]}]
             if ((signed_choice.get("baseline_node_id"),
-                    signed_choice.get("baseline_behavior_id")) !=
-                    (baseline["node_id"], baseline["behavior_id"]) or
-                    (signed_choice.get("node_id"), signed_choice.get("behavior_id")) ==
-                    (baseline["node_id"], baseline["behavior_id"])):
+                    signed_choice.get("baseline_behavior_id")) != baseline_pair or
+                    selected_pair == baseline_pair):
                 raise ValueError("signed human choice is not distinct from exact min-route baseline")
+            if (row.get("goal_preference_tiers") != [] or row.get("goal_preferences") != [] or
+                    row.get("behavior_preferences") != [] or
+                    row.get("action_pair_preferences") != expected_action_preferences):
+                raise ValueError("signed action-pair labels differ from signed choice and replayed baseline")
         validated.append((row, sample))
     return validated, manifest, data_sha, hashlib.sha256(manifest_bytes).hexdigest(), replay_manifest
 

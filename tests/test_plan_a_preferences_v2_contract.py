@@ -263,6 +263,31 @@ def test_signed_choice_flows_through_v2_replay_and_fitter(tmp_path, monkeypatch)
     assert len(validated) == 1
     assert validated[0][0]["action_pair_preferences"][0]["preferred_behavior_id"] == 2
 
+    # Rewriting the unsigned preference rows and manifest must not let an
+    # attacker change the signed selected-vs-baseline target or add labels.
+    tampered = tmp_path / "tampered-preferences.jsonl"
+    tampered_row = dict(materialized)
+    tampered_row.update({
+        "goal_preference_tiers": [[2], [1]],
+        "goal_preferences": [{"left_node_id": 2, "right_node_id": 1,
+            "preferred_node_id": 2}],
+        "behavior_preferences": [{"node_id": 1, "left_behavior_id": 1,
+            "right_behavior_id": 2, "preferred_behavior_id": 1}],
+        "action_pair_preferences": [{"left_node_id": 2, "left_behavior_id": 1,
+            "right_node_id": 1, "right_behavior_id": 2,
+            "preferred_node_id": 2, "preferred_behavior_id": 1}],
+    })
+    tampered_sha = _write_jsonl(tampered, [tampered_row])
+    tampered_manifest_path = tampered.with_suffix(".jsonl.manifest.json")
+    tampered_manifest = json.loads(out.with_suffix(".jsonl.manifest.json").read_text())
+    tampered_manifest["dataset_sha256"] = tampered_sha
+    _write(tampered_manifest_path, tampered_manifest)
+    with pytest.raises(ValueError,
+            match="signed action-pair labels differ from signed choice and replayed baseline"):
+        preferences.load_plan_a_preferences_v2(tampered, legal, source,
+            qualification_protocol=protocol_path, expected_sources=sources,
+            authority_json=authority_path, device="cpu", track=None)
+
     # Exercise the actual fitter and weights-only artifact validator on CPU.
     class TinyTrack(torch.nn.Module):
         def __init__(self):
