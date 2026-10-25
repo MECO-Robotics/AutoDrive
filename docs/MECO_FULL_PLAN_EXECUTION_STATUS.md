@@ -13,12 +13,12 @@
 > progressing through all five lanes two at a time, but this campaign does not
 > establish the plan's curriculum or evaluation gates.
 
-> **Three-pass dashboard refresh — 2026-10-25 02:17 UTC.** After integrating
-> the reviewed Phase 4 start-profile outcome and signed Plan A choice wiring,
-> `frc-defense-dashboard.service` was restarted on this checkout (PID `2829590`,
+> **Three-pass dashboard refresh — 2026-10-25 02:29 UTC.** After integrating
+> the reviewed continual evaluation schedule and registering its three-pass
+> summary, `frc-defense-dashboard.service` was restarted on this checkout (PID `2840384`,
 > working directory `AutoDrive`).
 > `/`, `/api/meco-status`, `/api/curriculum-status`, `/assets/meco.js`, and
-> `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 60
+> `/assets/dashboard.js` returned HTTP 200. The curriculum API reports 61
 > validated scoped tranches. Served frontend hashes match this checkout:
 > `meco.js` `6178a524853b0223d4c6975c9a11b7dc7dc54131e41b383374a98e9a62533c`
 > and `dashboard.js`
