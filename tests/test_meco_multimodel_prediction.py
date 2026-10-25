@@ -1,6 +1,8 @@
 import math
 
 import pytest
+import torch
+from types import SimpleNamespace
 
 from frc_defense.meco_tracks import (
     MULTIMODEL_HYPOTHESES,
@@ -68,3 +70,73 @@ def test_multimodel_missing_or_nonfinite_pose_has_no_risk():
     assert missing["fallback"] == "none_no_finite_observed_pose"
     assert opponent_risk_penalty((0., 0.), missing) is None
     assert opponent_risk_penalty((0., 0.), nonfinite) is None
+
+
+def test_plan_a_tensor_node_risk_matches_scalar_mixture_per_eta():
+    from frc_defense.meco_track_training import _plan_a_prediction_risk
+
+    goals = torch.tensor(((2., 1.), (4., 2.), (7., 3.)))
+    support = SimpleNamespace(goal_xy=goals,
+        valid_mask=torch.ones(3 * 8, dtype=torch.bool))
+    env = SimpleNamespace(
+        opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_pose=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                    [0., 0., 0.], [1., 2., 0.]]]),
+        opponent_velocity=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                         [0., 0., 0.], [2., .5, .8]]]),
+        opponent_age=torch.tensor([[0., 0., 0., .1]]))
+    eta = torch.tensor((.3, 1.4, 4.))
+    actual, metadata = _plan_a_prediction_risk(env, support, eta, "multi_model_v1")
+    expected = []
+    for goal, horizon in zip(goals.tolist(), eta.tolist()):
+        forecast = opponent_forecast(mode="multi_model_v1", valid=True,
+            position_xy=(1., 2.), velocity_xy=(2., .5), age_s=.1,
+            horizon_s=horizon, angular_velocity_rad_s=.8)
+        expected.append(opponent_risk_penalty(goal, forecast))
+    assert actual.tolist() == pytest.approx(expected, abs=2e-6)
+    assert metadata["used_multimodel"] is True
+    assert metadata["risk_semantics"] == "weighted_expected_penalty_over_hypothesis_endpoints"
+
+
+def test_plan_a_stale_multimodel_track_falls_back_to_observed_pose_and_masks_nodes():
+    from frc_defense.meco_track_training import _plan_a_prediction_risk
+
+    goals = torch.tensor(((0., 0.), (5., 0.)))
+    support = SimpleNamespace(goal_xy=goals,
+        valid_mask=torch.tensor([True] * 8 + [False] * 8))
+    env = SimpleNamespace(
+        opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_pose=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                    [0., 0., 0.], [0., 0., 0.]]]),
+        opponent_velocity=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                         [0., 0., 0.], [1., 0., 0.]]]),
+        opponent_age=torch.tensor([[0., 0., 0., .6]]))
+    risk, metadata = _plan_a_prediction_risk(env, support,
+        torch.tensor((.5, float("nan"))), "multi_model_v1")
+    assert risk.tolist() == pytest.approx((.75, 0.))
+    assert metadata["fallback"] == "observed_current_pose"
+    assert metadata["used_multimodel"] is False
+
+
+def test_candidate_opponent_batch_seam_passes_heading_rate_to_canonical_predictor():
+    from frc_defense.meco_candidates import _opponent_prediction
+
+    env = SimpleNamespace(
+        opponent_valid=torch.tensor([[False, False, False, True]]),
+        opponent_age=torch.tensor([[0., 0., 0., .1]]),
+        opponent_pose=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                    [0., 0., 0.], [1., 2., 0.]]]),
+        opponent_velocity=torch.tensor([[[0., 0., 0.], [0., 0., 0.],
+                                         [0., 0., 0.], [2., .5, .8]]]))
+    result = _opponent_prediction(env, horizon=1.4, mode="multi_model_v1")
+    expected = opponent_forecast(mode="multi_model_v1", valid=True,
+        position_xy=(1., 2.), velocity_xy=(2., .5), age_s=.1,
+        horizon_s=1.4, angular_velocity_rad_s=.8)
+    assert result["mode"] == expected["mode"]
+    assert result["hypotheses"] and len(result["hypotheses"]) == 4
+    assert result["xy"] == pytest.approx(expected["xy"], abs=1e-6)
+    for actual_hypothesis, expected_hypothesis in zip(
+            result["hypotheses"], expected["hypotheses"]):
+        assert actual_hypothesis["id"] == expected_hypothesis["id"]
+        assert actual_hypothesis["xy"] == pytest.approx(expected_hypothesis["xy"], abs=1e-6)
+    assert opponent_risk_penalty((4., 2.), result) is not None

@@ -41,10 +41,12 @@ from .meco_tracks import (MECO_TRACKS, MECO_CANDIDATE_RAW_FEATURE_COUNT,
     ordered_candidate_mask_digest,
     managed_meco_adapters,
     sample_candidate_action, score_candidates, build_safe_action_candidates,
-    candidate_digest, opponent_forecast, prediction_contract, PREDICTION_MODES,
+    candidate_digest, opponent_forecast, opponent_risk_penalty, prediction_contract, PREDICTION_MODES,
     PREDICTION_MAX_SPEED_MPS, PREDICTION_MAX_AGE_S,
     PREDICTION_THREAT_RADIUS_M, PREDICTION_MAX_PENALTY_POINTS,
-    PREDICTION_MODEL_ID)
+    PREDICTION_MODEL_ID, MULTIMODEL_HYPOTHESES, MULTIMODEL_MAX_HORIZON_S,
+    MULTIMODEL_TURN_RATE_MIN_RAD_S, MULTIMODEL_TURN_RATE_MAX_RAD_S,
+    MULTIMODEL_DAMPING_PER_S)
 from .meco_plan_a_policy import (PlanAActionSupport, build_plan_a_support,
     gather_pose_behavior_logits, graph_path_integral, plan_a_support_digest,
     PlanAEmptySupportError, SUPPORT_ORDER)
@@ -900,7 +902,7 @@ def _plan_a_logits(track, raw, support, graph, raster, env, config, *,
 
 
 def _plan_a_prediction_risk(env, support, eta, prediction_mode):
-    """Compute Plan A endpoint risk under the shared current/CV contract."""
+    """Compute Plan A endpoint risk under the shared prediction contract."""
     if prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     if eta.ndim != 1 or eta.shape[0] != support.goal_xy.shape[0]:
@@ -919,6 +921,7 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
     meta = prediction_contract(prediction_mode, horizon_s=horizon)
     horizon_semantics = (
         "observed_current_pose" if prediction_mode == "current" else
+        "per_support_node_eta_clamped_to_multi_model_max_horizon" if prediction_mode == "multi_model_v1" else
         "maximum_eta_over_support_valid_pair_nodes; unreachable_and_masked_nodes_excluded; null_when_no_valid_endpoint")
     valid = bool(env.opponent_valid[0, 3])
     if not valid:
@@ -945,14 +948,55 @@ def _plan_a_prediction_risk(env, support, eta, prediction_mode):
         predicted = position[None] + safe_eta[:, None] * bounded_velocity[None]
         fallback = None
         used_cv = True
+    used_multimodel = False
+    if prediction_mode == "multi_model_v1":
+        fresh_motion = (math.isfinite(age) and 0. <= age <= PREDICTION_MAX_AGE_S
+                        and bool(torch.isfinite(velocity).all()))
+        if fresh_motion:
+            t = safe_eta.clamp_max(MULTIMODEL_MAX_HORIZON_S)
+            speed = velocity.norm().clamp_min(1e-8)
+            bounded_velocity = velocity * torch.clamp(
+                PREDICTION_MAX_SPEED_MPS / speed, max=1.)
+            omega_observed = (float(env.opponent_velocity[0, 3, 2])
+                if env.opponent_velocity.shape[-1] > 2 else 0.)
+            if not math.isfinite(omega_observed):
+                omega_observed = 0.
+            turn_rate = min(MULTIMODEL_TURN_RATE_MAX_RAD_S,
+                max(MULTIMODEL_TURN_RATE_MIN_RAD_S, abs(omega_observed)))
+            weighted_risk = torch.zeros_like(eta)
+            for name, weight in MULTIMODEL_HYPOTHESES:
+                if name == "constant_velocity":
+                    endpoint = position[None] + t[:, None] * bounded_velocity[None]
+                elif name == "damped_velocity":
+                    distance_time = -torch.expm1(-MULTIMODEL_DAMPING_PER_S * t) / MULTIMODEL_DAMPING_PER_S
+                    endpoint = position[None] + distance_time[:, None] * bounded_velocity[None]
+                else:
+                    omega = turn_rate * (1. if name == "turn_left" else -1.)
+                    angle = omega * t
+                    sin_angle, cos_angle = torch.sin(angle), torch.cos(angle)
+                    dx = (bounded_velocity[0] * sin_angle + bounded_velocity[1] * (cos_angle - 1.)) / omega
+                    dy = (bounded_velocity[0] * (1. - cos_angle) + bounded_velocity[1] * sin_angle) / omega
+                    endpoint = position[None] + torch.stack((dx, dy), dim=-1)
+                separation = (support.goal_xy - endpoint).norm(dim=-1)
+                penalty = PREDICTION_MAX_PENALTY_POINTS * (
+                    (PREDICTION_THREAT_RADIUS_M - separation) /
+                    PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+                weighted_risk = weighted_risk + float(weight) * penalty
+            risk = torch.where(valid_nodes, weighted_risk, risk)
+            fallback = None
+            used_multimodel = True
     separation = (support.goal_xy - predicted).norm(dim=-1)
-    risk_values = PREDICTION_MAX_PENALTY_POINTS * (
-        (PREDICTION_THREAT_RADIUS_M - separation) /
-        PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
-    risk = torch.where(valid_nodes, risk_values, risk)
+    if prediction_mode != "multi_model_v1" or not used_multimodel:
+        risk_values = PREDICTION_MAX_PENALTY_POINTS * (
+            (PREDICTION_THREAT_RADIUS_M - separation) /
+            PREDICTION_THREAT_RADIUS_M).clamp(0., 1.)
+        risk = torch.where(valid_nodes, risk_values, risk)
     age = float(env.opponent_age[0, 3])
     return risk, {**meta, "horizon_semantics": horizon_semantics,
         "fallback": fallback, "used_cv": used_cv,
+        "used_multimodel": used_multimodel,
+        "risk_semantics": ("weighted_expected_penalty_over_hypothesis_endpoints"
+            if prediction_mode == "multi_model_v1" else "single_endpoint_penalty"),
         "observed_age_s": age if math.isfinite(age) else None,
         "horizon_min_s": horizon_min,
         "horizon_max_s": horizon_max}
