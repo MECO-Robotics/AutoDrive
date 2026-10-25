@@ -67,6 +67,14 @@ def source_hashes(root: Path | None = None) -> dict[str, str]:
     return result
 
 
+def _git_source_state(root: Path) -> tuple[str, bool]:
+    commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    dirty = bool(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+        check=True, capture_output=True, text=True).stdout)
+    return commit, dirty
+
+
 def _large_pose_lattice(recipe: dict) -> dict:
     from .meco_plan_a_hip_fixture_graph import open_pose_lattice
     return open_pose_lattice(recipe)
@@ -384,14 +392,34 @@ def run_device(root: Path, device: str, *,
         raise ValueError("device verification requires explicit cuda:0 or cuda:1")
     if warmups < 1 or repeats < 3:
         raise ValueError("device profiling requires warmups >= 1 and repeats >= 3")
+    root = root.resolve()
+    start_commit, start_dirty = _git_source_state(root)
+    if start_dirty:
+        raise RuntimeError("device candidate requires a clean checkout at invocation start")
+    start_sources = source_hashes(root)
+    fixture_path = root / FIXTURE_RELATIVE
+    start_fixture_sha256 = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
     fixture, _ = _fixture_result(root)
+    if fixture.get("source_sha256") != start_sources:
+        raise RuntimeError("fixture source pins do not match invocation-start source identity")
     from .meco_device_lease import lease_devices
     from .meco_gpu_attestation import verify_post_lease_wx9100
     lease = lease_devices((device,), owner="plan-a-hip-parity-profile")
     with lease:
         attestation = verify_post_lease_wx9100(lease, (device,))
-        return _run_device_under_lease(root, device, fixture, lease, attestation,
-                                       warmups=warmups, repeats=repeats)
+        report = _run_device_under_lease(root, device, fixture, lease, attestation,
+                                         warmups=warmups, repeats=repeats)
+    end_commit, end_dirty = _git_source_state(root)
+    end_sources = source_hashes(root)
+    end_fixture_sha256 = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
+    if (end_commit != start_commit or end_dirty or end_sources != start_sources or
+            end_fixture_sha256 != start_fixture_sha256):
+        raise RuntimeError("checkout, pinned sources, or fixture changed during device candidate run")
+    report.update({"git_commit": start_commit, "git_dirty": False,
+        "source_sha256": start_sources,
+        "fixture_manifest_sha256": start_fixture_sha256,
+        "source_identity_verified_at_start_and_end": True})
+    return report
 
 
 def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
@@ -548,10 +576,7 @@ def _run_device_under_lease(root: Path, device: str, fixture: dict, lease,
             "timing_boundary": "Per hip_paths entry; geometry CPU reference includes edge-weight precomputation while graph_geometry HIP computes geometry in the kernel; host-to-device input transfers and extension compilation are excluded",
             "hip_paths": hip_rows})
     source_id = source_hashes(root)
-    git_commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True).stdout.strip()
-    git_dirty = bool(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
-        check=True, capture_output=True, text=True).stdout)
+    git_commit, git_dirty = _git_source_state(root)
     rows_by_id = {row.get("id"): row for row in output}
     all_ids_present = set(rows_by_id) == set(cases_by_id) and len(output) == len(cases_by_id)
     passed = all_ids_present and all(
