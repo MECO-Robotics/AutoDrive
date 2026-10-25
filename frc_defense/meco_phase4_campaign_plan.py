@@ -81,9 +81,10 @@ def _direct_pursuit_review_gate(rows: list[dict], *, protocol: dict,
         and row.get("configured_pressure_slots") == configured_pressure_slots
         and row.get("control_policy_ids") == list(DIRECT_PURSUIT_POLICY_IDS)
         and isinstance(row.get("paired_rows_per_condition"), dict)
-        and bool(row["paired_rows_per_condition"])
-        and all(value == pair_count
-                for value in row["paired_rows_per_condition"].values())
+        and set(row["paired_rows_per_condition"]) == {
+            "no_factor", "factor_treatment"}
+        and row["paired_rows_per_condition"] == {
+            "no_factor": pair_count, "factor_treatment": pair_count}
         and isinstance(row.get("source_identity_sha256"), str)
         and bool(row.get("source_identity_sha256"))
         and isinstance(row.get("checkpoint_bundle_sha256"), dict)
