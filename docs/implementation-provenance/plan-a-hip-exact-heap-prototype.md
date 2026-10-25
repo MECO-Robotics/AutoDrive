@@ -92,3 +92,21 @@ loading, dispatch remains CPU-only, and both Python and C++ fail closed on
 invalid device/shape/edge/heap inputs. The review explicitly does not establish
 HIP parity, runtime speedup, or simulator behavior. The hardened commit was
 integrated as `4164f49885d3c74fb56d8499d9089d1b039f4e17`.
+
+**Device-resident routing follow-up — implementer.** Commit
+`07d7f9d68257ee3760a8406f1d30d01a273e6484` adds an opt-in HIP kernel that
+computes graph edge geometry and exact-heap routes on the device. The normal
+`build_plan_a_support` path remains on the CPU oracle, and the parity/profile
+gate remains false. Thirteen focused CPU contract tests, Python compilation,
+and `git diff --check` passed. No HIP compile/run, WX9100 parity/profile, or
+simulator/replay validation was performed.
+
+**Independent exact-head review.** The reviewer approved
+`07d7f9d68257ee3760a8406f1d30d01a273e6484` as a gated prototype. Static review
+confirmed the heap ordering, edge-slot traversal, `1e-9` relaxation threshold,
+root connector, parent and physical-distance updates, unreachable values, and
+failure checks. The review also confirmed that runtime support construction
+still dispatches to the CPU oracle. Source-contract tests do not prove compiled
+HIP parity; hardware compilation, exact output/support-digest comparison,
+profiling, and a seeded simulator replay remain outstanding. The approved code
+was integrated on `main` as `fa59b2dcd`.
