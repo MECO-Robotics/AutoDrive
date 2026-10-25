@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 from pathlib import Path
 import argparse
 import re
@@ -2057,7 +2058,15 @@ def validate_paired_calibration_campaign(campaign):
             or campaign.get("campaign_type") != PAIRED_CALIBRATION_VERSION):
         raise ValueError("unsupported paired calibration campaign schema")
     config = campaign.get("config")
-    if not isinstance(config, dict) or config.get("split") != "calibration":
+    expected_config_keys = {"split", "episodes_per_category_stratum", "repetitions",
+        "master_seed", "shard_count", "control_ids", "repeat_semantics",
+        "summary_method", "bootstrap_replicates"}
+    if (not isinstance(config, dict) or set(config) != expected_config_keys
+            or config.get("split") != "calibration"
+            or config.get("control_ids") != list(PAIRED_CALIBRATION_CONTROLS)
+            or config.get("repeat_semantics") != "identical frozen tuple and seed, independently repeated"
+            or config.get("summary_method") != "paired_seed_cluster_bootstrap_v1"
+            or config.get("bootstrap_replicates") != BOOTSTRAP_REPLICATES):
         raise ValueError("paired calibration campaign config is invalid")
     units = _paired_calibration_work_units(
         episodes=config.get("episodes_per_category_stratum"),
@@ -2139,6 +2148,77 @@ def paired_calibration_execution_blockers(campaign):
     validate_paired_calibration_campaign(campaign)
     return [row["control_id"] for row in campaign["controls"]
         if row.get("execution_supported") is not True]
+
+
+def _paired_shard_for_index(campaign, shard_index):
+    validate_paired_calibration_campaign(campaign)
+    if type(shard_index) is not int or not 0 <= shard_index < len(campaign["shards"]):
+        raise ValueError("paired calibration shard index is invalid")
+    return campaign["shards"][shard_index]
+
+
+def build_paired_calibration_progress(campaign, shard_index, completed_rows):
+    """Compile immutable resumable progress from already validated outcome rows."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    if not isinstance(completed_rows, list):
+        raise ValueError("paired calibration progress rows must be a list")
+    expected = {_canonical_sha256(unit): unit for unit in shard["work_units"]}
+    seen = set()
+    rows = []
+    for row in completed_rows:
+        if not isinstance(row, dict) or row.get("schema") != PAIRED_CALIBRATION_ARTIFACT:
+            raise ValueError("paired calibration progress contains an unsupported row")
+        unit_id = row.get("work_unit_id")
+        if unit_id not in expected or unit_id in seen:
+            raise ValueError("paired calibration progress has an unknown or duplicate work unit")
+        if row.get("work_unit") != expected[unit_id]:
+            raise ValueError("paired calibration progress row work unit changed")
+        if row.get("campaign_id") != campaign["campaign_id"]:
+            raise ValueError("paired calibration progress row campaign changed")
+        seen.add(unit_id)
+        rows.append(row)
+    rows.sort(key=lambda row: row["work_unit_id"])
+    body = {"schema": PAIRED_CALIBRATION_PROGRESS,
+        "campaign_id": campaign["campaign_id"],
+        "shard_index": shard_index, "shard_manifest_id": shard["manifest_id"],
+        "completed_work_unit_ids": [row["work_unit_id"] for row in rows],
+        "completed_rows": rows,
+        "complete": seen == set(expected)}
+    return {**body, "progress_id": _canonical_sha256(body)}
+
+
+def validate_paired_calibration_progress(campaign, shard_index, progress):
+    """Validate resume bytes semantically; never repair or relabel stale progress."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    if not isinstance(progress, dict) or progress.get("schema") != PAIRED_CALIBRATION_PROGRESS:
+        raise ValueError("paired calibration progress schema is unsupported")
+    body = {key: value for key, value in progress.items() if key != "progress_id"}
+    if progress.get("progress_id") != _canonical_sha256(body):
+        raise ValueError("paired calibration progress digest is invalid")
+    if (progress.get("campaign_id") != campaign["campaign_id"]
+            or progress.get("shard_index") != shard_index
+            or progress.get("shard_manifest_id") != shard["manifest_id"]):
+        raise ValueError("paired calibration progress belongs to another manifest")
+    expected = {_canonical_sha256(unit): unit for unit in shard["work_units"]}
+    rows = progress.get("completed_rows")
+    ids = progress.get("completed_work_unit_ids")
+    if not isinstance(rows, list) or not isinstance(ids, list):
+        raise ValueError("paired calibration progress completion index is malformed")
+    row_ids = []
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("schema") != PAIRED_CALIBRATION_ARTIFACT
+                or row.get("campaign_id") != campaign["campaign_id"]):
+            raise ValueError("paired calibration progress contains an invalid outcome row")
+        unit_id = row.get("work_unit_id")
+        if unit_id not in expected or row.get("work_unit") != expected[unit_id]:
+            raise ValueError("paired calibration progress contains a changed or foreign work unit")
+        row_ids.append(unit_id)
+    if (row_ids != sorted(row_ids) or len(row_ids) != len(set(row_ids))
+            or ids != row_ids or any(value not in expected for value in ids)):
+        raise ValueError("paired calibration progress has duplicate, unordered, or foreign completion")
+    if progress.get("complete") is not (set(ids) == set(expected)):
+        raise ValueError("paired calibration progress completion flag is inconsistent")
+    return progress
 
 
 def _read_paired_bound_json(repo_root, binding, *, kind):

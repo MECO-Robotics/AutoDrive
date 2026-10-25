@@ -113,6 +113,45 @@ def test_paired_campaign_rejects_schedule_or_binding_mutation(monkeypatch):
 
 
 @pytest.mark.parametrize("field,value", [
+    ("repeat_semantics", "resample rows"),
+    ("summary_method", "choose-best-observed"),
+    ("bootstrap_replicates", 1),
+])
+def test_paired_campaign_rejects_unpinned_summary_configuration(monkeypatch, field, value):
+    campaign = _campaign(monkeypatch)
+    campaign["config"][field] = value
+    with pytest.raises(ValueError, match="config is invalid"):
+        q.validate_paired_calibration_campaign(campaign)
+
+
+def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch):
+    campaign = _campaign(monkeypatch)
+    shard = campaign["shards"][0]
+    unit = shard["work_units"][0]
+    row = {"schema": q.PAIRED_CALIBRATION_ARTIFACT,
+        "campaign_id": campaign["campaign_id"],
+        "work_unit_id": q._canonical_sha256(unit), "work_unit": unit,
+        "row_payload": {"replay_sha256": "a" * 64}}
+    progress = q.build_paired_calibration_progress(campaign, 0, [row])
+    assert progress["complete"] is False
+    assert q.validate_paired_calibration_progress(campaign, 0, progress) == progress
+
+    changed = copy.deepcopy(progress)
+    changed["completed_rows"].append(row)
+    body = {key: value for key, value in changed.items() if key != "progress_id"}
+    changed["progress_id"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match="duplicate, unordered"):
+        q.validate_paired_calibration_progress(campaign, 0, changed)
+
+    altered = copy.deepcopy(progress)
+    altered["shard_manifest_id"] = "b" * 64
+    body = {key: value for key, value in altered.items() if key != "progress_id"}
+    altered["progress_id"] = q._canonical_sha256(body)
+    with pytest.raises(ValueError, match="another manifest"):
+        q.validate_paired_calibration_progress(campaign, 0, altered)
+
+
+@pytest.mark.parametrize("field,value", [
     ("device", "cuda"),
     ("device", "cpu"),
     ("device_model", "NVIDIA P600"),
@@ -157,6 +196,18 @@ def test_gate_artifact_reader_binds_exact_bytes_and_rejects_symlinks(tmp_path):
 
     with pytest.raises(ValueError, match="unsafe"):
         q._paired_repo_json_file(tmp_path, "../outside-freeze.json", kind="baseline freeze")
+
+
+def test_gate_binding_reports_git_lookup_failure_without_name_error(monkeypatch, tmp_path):
+    for name in ("freeze.json", "partition.json", "approval.json"):
+        (tmp_path / name).write_text("{}")
+    def fail_git(*args, **kwargs):
+        raise q.subprocess.CalledProcessError(128, args[0], stderr="not a git checkout")
+    monkeypatch.setattr(q.subprocess, "run", fail_git)
+    with pytest.raises(ValueError, match="cannot inspect source commit/tree"):
+        q.prepare_paired_calibration_gate_bindings(repo_root=tmp_path,
+            baseline_freeze_path="freeze.json", partition_path="partition.json",
+            estimand_approval_path="approval.json", configuration_artifacts={})
 
 
 @pytest.mark.parametrize("source_key,value", [
