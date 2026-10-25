@@ -897,10 +897,24 @@ def run_matrix(*, checkpoints: dict[str, str], scenario_id: str,
     bundle_hashes = _checkpoint_hashes(checkpoints)
     source_hash = _source_identity_hash(source_identity())
     if phase4_direct_pursuit_binding is not None:
-        phase4_direct_pursuit_binding = {**phase4_direct_pursuit_binding,
+        pair_binding = {"schema": "meco-phase4-direct-pursuit-pair-binding-v1",
+            "protocol_id": qualification_provenance["protocol_id"],
+            "protocol_sha256": qualification_provenance["protocol_sha256"],
+            "scenario_id": scenario_id, "categories": list(categories),
+            "qualification_case": qualification_case, "seed_list": list(seeds),
+            "conditions": ["no_factor", "factor_treatment"],
+            "conditions": ["no_factor", "factor_treatment"],
+            "schedule_sha256": phase4_direct_pursuit_binding["schedule_sha256"],
             "checkpoint_bundle_sha256": bundle_hashes,
             "source_identity_sha256": source_hash,
             "execution_device": execution_device}
+        pair_binding_id = _canonical_hash(pair_binding)
+        phase4_direct_pursuit_binding = {**phase4_direct_pursuit_binding,
+            "checkpoint_bundle_sha256": bundle_hashes,
+            "source_identity_sha256": source_hash,
+            "execution_device": execution_device,
+            "pair_binding_id": pair_binding_id,
+            "pair_binding": pair_binding}
     config_hashes, protocol_ids, frozen_shared_config = (
         _checkpoint_configuration_provenance(checkpoints))
     conditions = default_conditions(scenario_id, categories=categories,

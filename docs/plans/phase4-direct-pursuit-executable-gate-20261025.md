@@ -16,6 +16,56 @@ expand to trench interception, the full opponent pool, or final qualification.
 
 ## Current evidence and gap
 
+Implementation now samples the simulator's pair-specific SAT contact counters
+after every evaluator physics step. Each counter increment is emitted with its
+slot pair, physics tick, and physics time; per-pair summaries are reconciled to
+that event stream. The evaluator also records slot-3 displacement every physics
+12 physics ticks along a frozen start-to-field-end-center segment. Threshold
+crossing time is linearly interpolated between adjacent timestamped samples. The
+paired time-loss
+measure is the treatment minus no-factor crossing time at 50% of that same
+segment. Here, the no-factor reference keeps the registered category-script
+opponent in the assigned pressure slot; the result measures the additional
+delay from replacing that slot with direct pursuit. Either arm failing to cross
+is censored and rejected.
+
+The frozen interception criterion is episode-level physical encounter: at least
+one SAT contact between focal slot 3 and an assigned pursuer in a fully observed
+episode. Its numerator is the number of such episodes and its denominator is
+the number of uncensored eligible paired episodes. This incidence measure is
+kept separate from contact frequency, which counts every distinct contact
+substep over assigned pair-seconds. This operational criterion measures direct
+physical encounter with a pursuer; it does not claim that contact alone proves
+a score was prevented.
+
+The code now captures these records and computes paired outcomes, but no
+representative replay has been run or reviewed. The campaign planner therefore
+continues to report every direct-pursuit cell as non-executable until the
+required held-out simulator and current-dashboard evidence is accepted. The
+optional `--direct-pursuit-review-evidence` compiler input uses
+`meco-phase4-direct-pursuit-review-evidence-bundle-v1`; each row must bind the
+exact protocol/case/seed and assignment digests, checkpoint bundle, source,
+device, all uncensored policy/seed pairs and outcome aggregates, plus a reviewed
+fresh replay whose backend and frontend are verified current. Missing or
+mismatched fields leave the cell non-executable. Qualification remains false
+even when that candidate gate is satisfied.
+
+The two matrix launches may have different arm-specific `condition_id` values.
+They therefore share a stable `pair_binding_id` derived from the exact protocol,
+case, seed list, schedule, checkpoint bundle, source, and execution device; each
+outcome keeps its own `condition_id` and the reducer preserves both IDs.
+
+For each case, the evidence row uses
+`meco-phase4-direct-pursuit-review-evidence-v1` and carries the exact configured
+pressure slots, schedule and seed-manifest digests, paired-outcome artifact
+digest, and a `replay_review` with two replay records (`no_factor` and
+`factor_treatment`) for one seed attested as present in that manifest. Each replay
+record binds all eleven policy IDs, assignment/config digest, checkpoint bundle,
+source, device, applied slots, replay ID and hash, and current frontend asset
+manifest hash. The case-level review must also carry the current backend source
+hash, healthy endpoint, reviewer identity, uncensored 11-by-100 policy/seed pair
+coverage, and reconciled outcome denominators.
+
 - `frc_defense/meco_phase4_opponents.py` already defines `direct_pursuit` and
   `opponent_velocity_command`; the command is based on `own_xy` and a
   validity-masked sensed target.

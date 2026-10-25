@@ -8,7 +8,7 @@ import math
 
 DIRECT_PURSUIT_OUTCOME_SCHEMA = "meco-phase4-direct-pursuit-outcome-v1"
 DIRECT_PURSUIT_TIME_LOSS_SCHEMA = "meco-phase4-direct-pursuit-time-loss-v1"
-DIRECT_PURSUIT_PROGRESS_SAMPLE_TICKS = 1
+DIRECT_PURSUIT_PROGRESS_SAMPLE_TICKS = 12
 DIRECT_PURSUIT_PROGRESS_THRESHOLD_FRACTION = 0.5
 
 
@@ -57,6 +57,21 @@ class DirectPursuitEpisodeCapture:
                 not self.checkpoint_bundle or any(not isinstance(value, str) or not value
                     for value in self.checkpoint_bundle.values())):
             raise ValueError("direct-pursuit binding lacks exact checkpoint bundle identity")
+        pair_binding = binding.get("pair_binding")
+        if (not isinstance(pair_binding, dict)
+                or _sha(pair_binding) != self.pair_binding_id
+                or pair_binding.get("protocol_id") != binding.get("protocol_id")
+                or pair_binding.get("protocol_sha256") != binding.get("protocol_sha256")
+                or pair_binding.get("scenario_id") != scenario_id
+                or pair_binding.get("categories") != [category]
+                or pair_binding.get("qualification_case") != qualification_case
+                or pair_binding.get("seed_list") != binding.get("seed_list")
+                or pair_binding.get("schedule_sha256") != binding.get("schedule_sha256")
+                or pair_binding.get("checkpoint_bundle_sha256") != self.checkpoint_bundle
+                or pair_binding.get("source_identity_sha256") != source_identity_sha256
+                or pair_binding.get("execution_device") != execution_device
+                or pair_binding.get("conditions") != ["no_factor", "factor_treatment"]):
+            raise ValueError("direct-pursuit paired identity differs from case/seed/source/checkpoint/device")
         self.scenario_id = scenario_id
         self.category = category
         self.qualification_case = dict(qualification_case)
@@ -65,6 +80,9 @@ class DirectPursuitEpisodeCapture:
         self.policy_id = policy_id
         self.device = execution_device
         self.condition_id = condition_id
+        self.pair_binding_id = binding.get("pair_binding_id")
+        if not isinstance(self.pair_binding_id, str) or not self.pair_binding_id:
+            raise ValueError("direct-pursuit binding lacks stable paired-experiment identity")
         self.slots = tuple(slots)
         self.sim = env.sim
         if (getattr(self.sim, "num_robots", None) != 6 or
@@ -110,6 +128,7 @@ class DirectPursuitEpisodeCapture:
             raise ValueError("direct-pursuit capture requires reset simulator time")
         self.progress_samples = []
         self.contact_events = []
+        self.threshold_crossing_sampled = False
         self._append_progress_sample()
 
     def _append_progress_sample(self, *, force=False):
@@ -150,6 +169,13 @@ class DirectPursuitEpisodeCapture:
                     "distinct_contact_substep_index": count})
             self.previous_counts[slot] = count
         self.last_tick, self.last_time_s = tick, time_s
+        if not self.threshold_crossing_sampled:
+            pose = [float(value) for value in self.sim.pose[0, 3, :2].tolist()]
+            progress = ((pose[0] - self.start_xy[0]) * self.direction[0] +
+                        (pose[1] - self.start_xy[1]) * self.direction[1])
+            if progress >= self.route_length_m * DIRECT_PURSUIT_PROGRESS_THRESHOLD_FRACTION:
+                self._append_progress_sample(force=True)
+                self.threshold_crossing_sampled = True
         if tick % DIRECT_PURSUIT_PROGRESS_SAMPLE_TICKS == 0:
             self._append_progress_sample()
 
@@ -220,6 +246,7 @@ class DirectPursuitEpisodeCapture:
             "schedule_sha256": self.binding["schedule_sha256"],
             "assignment_identity": self.binding["per_episode_assignment_sha256"],
             "condition": self.condition, "scenario_id": self.scenario_id,
+            "pair_binding_id": self.pair_binding_id,
             "category": self.category, "qualification_case": self.qualification_case,
             "split": self.split, "seed": self.seed, "episode_id": self.episode_id,
             "condition_id": self.condition_id,
@@ -256,7 +283,8 @@ class DirectPursuitEpisodeCapture:
                 "threshold_fraction_for_paired_time_loss": DIRECT_PURSUIT_PROGRESS_THRESHOLD_FRACTION,
                 "censored": bool(route_censored)},
             "time_lost_to_opponents_s": None,
-            "time_loss_status": "requires_exact_same_seed_no_factor_pair",
+            "time_loss_status": "requires_exact_same_seed_registered_script_pair",
+            "time_loss_reference_semantics": ("factor-treatment crossing time minus same-seed crossing time with the registered category-script opponent in the assigned pressure slot"),
             "qualification_eligible": False}
 
 
@@ -290,8 +318,8 @@ def paired_direct_pursuit_outcomes(control: dict, treatment: dict) -> dict:
     """Reconcile one exact control/treatment episode pair and derive outcomes."""
     identity_keys = ("scenario_id", "category", "qualification_case", "split",
         "seed", "policy_id", "factor_id", "policy_config_sha256",
-        "assignment_identity", "source_identity_sha256", "checkpoint_bundle_sha256",
-        "execution_device",
+            "assignment_identity", "source_identity_sha256", "checkpoint_bundle_sha256",
+        "pair_binding_id", "execution_device",
         "policy_checkpoint_sha256", "configured_slots", "focal_robot_slot_id",
         "pursuit_robot_slot_ids")
     if (not isinstance(control, dict) or not isinstance(treatment, dict) or
@@ -303,7 +331,8 @@ def paired_direct_pursuit_outcomes(control: dict, treatment: dict) -> dict:
             not isinstance(control.get("episode_id"), str) or
             not isinstance(treatment.get("episode_id"), str) or
             control.get("episode_id") == treatment.get("episode_id") or
-            control.get("condition_id") != treatment.get("condition_id") or
+            not isinstance(control.get("condition_id"), str) or
+            not isinstance(treatment.get("condition_id"), str) or
             control.get("applied_slots") != [] or
             treatment.get("applied_slots") != treatment.get("configured_slots") or
             control.get("objective_route", {}).get("route_id") !=
@@ -373,6 +402,9 @@ def paired_direct_pursuit_outcomes(control: dict, treatment: dict) -> dict:
         "assignment_identity": treatment["assignment_identity"],
         "control_episode_id": control["episode_id"],
         "treatment_episode_id": treatment["episode_id"],
+        "pair_binding_id": treatment["pair_binding_id"],
+        "control_condition_id": control["condition_id"],
+        "treatment_condition_id": treatment["condition_id"],
         "interception_episode_numerator": treatment["interception_episode_numerator"],
         "interception_eligible_episode_denominator":
             treatment["interception_eligible_episode_denominator"],
@@ -385,6 +417,10 @@ def paired_direct_pursuit_outcomes(control: dict, treatment: dict) -> dict:
         "control_crossing_time_s": control_time,
         "treatment_crossing_time_s": treatment_time,
         "time_lost_to_opponents_s": treatment_time - control_time,
-        "control_progress_intervals": control["objective_route"]["progress_intervals"],
-        "treatment_progress_intervals": treatment["objective_route"]["progress_intervals"],
+        "time_loss_reference_semantics": ("additional focal delay from direct pursuit relative to the registered category-script opponent in the same assigned pressure slot"),
+        "progress_samples_interval_ticks": DIRECT_PURSUIT_PROGRESS_SAMPLE_TICKS,
+        "control_progress_samples_sha256": _sha(
+            control["objective_route"]["progress_samples"]),
+        "treatment_progress_samples_sha256": _sha(
+            treatment["objective_route"]["progress_samples"]),
         "control_censored": False, "treatment_censored": False}
