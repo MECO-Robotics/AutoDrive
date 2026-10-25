@@ -1,3 +1,25 @@
+## Phase 4 runtime-status documentation corrections — 2026-10-25
+
+The reviewed focal-pose status row and the later stationary-blockage, direct-
+pursuit, trench-interception, and legal-start rows are integrated in
+`docs/MECO_PHASE4_RUNTIME_STATUS.md` at `384c9a2baa9a97a27271cc6ed26fb316f01be8ed`.
+The rows describe source-level assignment, capture, and paired-reducer wiring
+with their current evidence limits. These documentation corrections do not
+provide a fresh end-to-end simulator evaluation or replay, held-out behavior
+outcomes, or current-dashboard replay review. The focal-pose outcome measures
+remain unavailable; stationary-blockage registry outcomes remain
+unavailable/non-authoritative; direct pursuit, trench interception, and legal
+start execution remain fail-closed pending their accepted source-bound
+evidence. Qualification remains disabled.
+
+The dashboard refresh note immediately below records a prior 87-entry ledger
+and predates this integration. It is not evidence that the current checkout's
+updated ledger or frontend is being served. That requires a post-merge restart
+and current-checkout API/asset verification after the separately reviewed
+provenance update. See
+[`phase4-runtime-status-ledger-dashboard-20261025.md`](implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md)
+and its entry in [`MECO_THREE_PASS_PROVENANCE.json`](MECO_THREE_PASS_PROVENANCE.json).
+
 ## Dashboard refreshed for reviewed three-pass provenance — 2026-10-25
 
 After the integration reached `main` at `86706ad9d`, `frc-defense-dashboard.service` was restarted from the current checkout (PID `3503505`, active). `/`, `/assets/meco.js`, and `/assets/dashboard.js` returned HTTP 200; each served body matched the current checkout byte-for-byte. The dashboard API provenance loader validates the pinned ledger locally as `validated_summary_only` with 87 tranches. I did not query `/api/curriculum-status` because this dashboard instance is configured to read the active r4 evaluation directory. No replay was generated or reviewed, so no simulator result, replay ID, or replay currentness is claimed. Training was left untouched.
