@@ -340,7 +340,12 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
             "checkpoint_sha256": dispatch_binding["checkpoint_sha256"],
             "execution_device": dispatch_binding["execution_device"],
             "condition_report_sha256": pairing["condition_report_sha256"],
+            "condition_report_paths": pairing["condition_report_paths"],
+            "condition_matrix_sha256": pairing["condition_matrix_sha256"],
+            "condition_matrix_paths": pairing["condition_matrix_paths"],
             "paired_keys": pairing["paired_keys"],
+            "per_world_legality_records": pairing[
+                "per_world_legality_records"],
             "state_ids": ["scenario_defined", assignment["registry_profile_id"]],
             "outcome_by_start_state": pairing["outcome_by_start_state"],
             "exact_pair_coverage": pairing["exact_pair_coverage"],
@@ -672,11 +677,20 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                      for category in categories for seed in seeds}
     arms = {}
     condition_report_sha256 = {}
+    condition_report_paths = {}
+    condition_matrix_sha256 = {}
+    condition_matrix_paths = {}
     for arm in ("no_factor", "factor_treatment"):
         paths = sorted((case_dir / arm).glob("*.matrix.json"))
         if len(paths) != 1:
             raise ValueError(f"Phase 4 {arm} start-profile arm lacks exactly one matrix report")
-        matrix = _read_json(paths[0])
+        matrix_bytes = paths[0].read_bytes()
+        condition_matrix_sha256[arm] = hashlib.sha256(matrix_bytes).hexdigest()
+        evidence_matrix_path = case_dir / "paired-evidence-reports" / f"{arm}.matrix.json"
+        _write_immutable_bytes(evidence_matrix_path, matrix_bytes)
+        condition_matrix_paths[arm] = evidence_matrix_path.relative_to(
+            case_dir.resolve()).as_posix()
+        matrix = json.loads(matrix_bytes)
         protocol = matrix.get("protocol", {})
         if (matrix.get("qualification_eligible") is not False or
                 protocol.get("categories") != categories or
@@ -697,8 +711,13 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
             raise ValueError(f"Phase 4 {arm} matrix has unexpected condition coverage")
         condition = conditions["architecture_matched_cv_k16"]
         report_path = Path(condition["report_path"]).resolve()
-        condition_report_sha256[arm] = _file_sha(report_path)
-        report = _read_json(report_path)
+        report_bytes = report_path.read_bytes()
+        condition_report_sha256[arm] = hashlib.sha256(report_bytes).hexdigest()
+        evidence_report_path = case_dir / "paired-evidence-reports" / f"{arm}.json"
+        _write_immutable_bytes(evidence_report_path, report_bytes)
+        condition_report_paths[arm] = evidence_report_path.relative_to(
+            case_dir.resolve()).as_posix()
+        report = json.loads(report_bytes)
         _validate_phase4_dispatch_report_binding(condition, expected_binding,
             context=f"{arm} matrix condition")
         _validate_phase4_dispatch_report_binding(report, expected_binding,
@@ -842,8 +861,10 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
         "condition_report_sha256": condition_report_sha256,
+        "condition_matrix_sha256": condition_matrix_sha256,
         "per_world_legality_records": legality_records,
         "outcome_by_start_state": outcome_by_start_state})
+    per_world_legality_records = legality_records
     return {"policies": sorted(policies), "categories": categories,
         "condition_names": ["architecture_matched_cv_k16"],
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
@@ -859,7 +880,11 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "legal_world_count": legal_world_count_total,
         "legal_world_legal_count": legal_world_total,
         "condition_report_sha256": condition_report_sha256,
+        "condition_report_paths": condition_report_paths,
+        "condition_matrix_sha256": condition_matrix_sha256,
+        "condition_matrix_paths": condition_matrix_paths,
         "paired_keys": [list(key) for key in sorted(expected_keys)],
+        "per_world_legality_records": per_world_legality_records,
         "exact_pair_coverage": True,
         "paired_deltas_reconciled": True,
         "all_treatment_worlds_legal": legal_world_total == legal_world_count_total,
@@ -1290,7 +1315,10 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
 
 
 def _write_immutable(path: Path, value: dict) -> str:
-    data = _artifact_bytes(value)
+    return _write_immutable_bytes(path, _artifact_bytes(value))
+
+
+def _write_immutable_bytes(path: Path, data: bytes) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if path.read_bytes() != data:
