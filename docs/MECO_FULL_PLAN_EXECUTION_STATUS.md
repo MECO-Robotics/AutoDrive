@@ -1,3 +1,19 @@
+## GPU gamepiece physics source implementation — 2026-10-26
+
+The fixed-mask gamepiece and qualifying HIP physics tranche is integrated and
+has exact-head three-pass source review at `4c604e0f30324d0b20bb38fe5f9b177264a5adcd`.
+Pass 3 approved the broadphase grid rebuild, adaptive stability bound, required
+graph capture/fail-closed behavior, fixed-shape gameplay/reset paths, and
+qualification device/shape/config guards. The summary and reviewer record are
+in [`gpu-gamepiece-fixed-mask-reset-rng-20261026.md`](implementation-provenance/gpu-gamepiece-fixed-mask-reset-rng-20261026.md)
+and [`gpu-gamepiece-fixed-mask-reset-pass3-review-20261026.md`](implementation-provenance/gpu-gamepiece-fixed-mask-reset-pass3-review-20261026.md).
+
+This is static source evidence only. No tests, HIP build, runtime/GPU execution,
+seeded simulator evaluation, replay, or qualification was performed. The
+qualification path currently fails closed when score-ledger event recording is
+enabled because event extraction still needs host materialization. The
+five-track PPO residency tranche and all five stage-one passes remain open.
+
 ## V4 GPU cluster-bootstrap implementation — 2026-10-26
 
 The scoped GPU-resident v4 category-level and final-test cluster-bootstrap

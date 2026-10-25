@@ -1,0 +1,7 @@
+# Pass 3 review summary: GPU gamepiece fixed-mask and qualifying HIP path
+
+**Verdict: approved for static source review.** The independent reviewer examined exact implementation head `4c604e0f30324d0b20bb38fe5f9b177264a5adcd` against Pass 1 plan SHA-256 `4fad637c060cc55478c2999564162c269668b5ab24c5a6c04d2a0aad1ad0ec5b`.
+
+The review verified the full-grid clear before HIP broadphase binning; mandatory adaptive stability bounds and graph capture in qualifying mode; no eager fallback after graph-capture failure; private fixed-one-step semantics restricted to active qualifying graph capture; device/shape checks before qualifying state mutation; fixed-mask score/pass/launch/reset/preload/random-placement/outpost paths; supported solver configuration pinning; and fail-closed behavior for CPU pair generation, solver, and sleep-island paths. It also verified that live score-event extraction cannot materialize device values during GPU qualification: recorder use is rejected before physics evaluation, and the guarded flush rejects the qualifying path.
+
+The reviewer found no remaining source-level blocker within the approved tranche. Static review only: no tests, Python import, HIP build, runtime, GPU/WX9100, simulator, dashboard, or replay was executed. This is not behavior, runtime, hardware, or qualification evidence. The score-ledger/GPU-qualification incompatibility remains explicit and requires a separate plan to resolve.
