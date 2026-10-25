@@ -62,7 +62,7 @@ Only these paths may change; a required path outside this list requires a new Pa
 - `tests/test_meco_onnx_runtime_parity.py`: default seeded and capture-bound v2 verification both report explicit unsupported C1/C2 results without invoking dummy/seeded input construction, capture tensor loading, or ONNX Runtime; legacy/A-track paths retain their contracts.
 - `tests/test_meco_onnx_v2_protocol_gate.py` (new focused file): exercise CLI `export_meco_onnx.py` protocol selection and verify `verify_onnx_parity` returns the explicit C1/C2 unsupported result for both default synthetic and capture-bound v2 requests before any checkpoint/input/graph runtime call.
 
-Do not change Plan A/D1/D2, model weights/checkpoint parameters, route physics/search/safety, simulator, action macro implementation, dashboard/replay implementation, deployment/export scripts, training schedule, active training, campaign data, GPU kernels, or qualification gates.
+Do not change Plan A/D1/D2, model weights/checkpoint parameters, route physics/search/safety, simulator, action macro implementation, dashboard/replay implementation, training schedule, active training, campaign data, GPU kernels, or qualification gates. Changes to the three explicitly allowlisted export/provenance paths are limited to the fail-closed protocol gates described above; no other deployment or export behavior is authorized.
 
 ## Invariants and Pass 3 evidence
 
