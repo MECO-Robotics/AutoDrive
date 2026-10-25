@@ -46,7 +46,7 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         raise ValueError("Phase 4 campaign plan digest mismatch")
     requirement = next((row for row in plan.get("requirements", [])
         if row.get("requirement_id") in ("reactive_defenders_and_opponent_pools",
-                                          "direct_pursuit") and any(
+                                          "direct_pursuit", "trench_interception") and any(
             cell.get("case_cell_key") == cell_key for cell in row.get("cells", []))), None)
     if requirement is None:
         raise ValueError("Phase 4 plan lacks the requested opponent requirement")
@@ -56,7 +56,9 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         raise ValueError("Phase 4 reactive cell key is missing or duplicated")
     cell = matches[0]
     direct_pursuit = requirement.get("requirement_id") == "direct_pursuit"
+    trench_interception = requirement.get("requirement_id") == "trench_interception"
     assignment = (cell.get("direct_pursuit_assignment") if direct_pursuit else
+                 cell.get("trench_interception_assignment") if trench_interception else
                  cell.get("opponent_schedule_assignment"))
     if (not isinstance(assignment, dict) or
             cell.get("scheduler_assignment_supported") is not True or
@@ -80,7 +82,7 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     domain_supported = (
         trench_interception_runtime_domain_supported(
             case_axes["scenario_id"], case_axes["category"])
-        if cell.get("factor_id") == "opponent.trench_interception" else
+        if trench_interception else
         opponent_policy_runtime_domain_supported(
             case_axes["scenario_id"], case_axes["category"]))
     if not domain_supported:
@@ -96,7 +98,8 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     qualification_case = {axis: case_axes[axis] for axis in (
         "layout_id", "defender_family", "start_condition", "sensor_profile")}
     schedule = compile_opponent_policy_schedule(
-        policy_id=("direct_pursuit" if direct_pursuit else assignment["policy_id"]),
+        policy_id=("direct_pursuit" if direct_pursuit else
+            "trench_interceptor" if trench_interception else assignment["policy_id"]),
         scenario_id=case_axes["scenario_id"],
         categories=(case_axes["category"],), qualification_case=qualification_case,
         seeds=seeds, split="validation", factor_id=cell["factor_id"],
@@ -118,6 +121,11 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
                 or assignment.get("configured_pressure_slots") !=
                     [assignment.get("assigned_pursuit_slot")]
                 or assignment.get("control_policy_ids") != sorted(
+                    (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))))
+            or (trench_interception and (
+                schedule["configured_pressure_slots"].get(case_axes["category"]) != [0]
+                or assignment.get("configured_pressure_slots") != [0]
+                or assignment.get("control_policy_ids") != sorted(
                     (*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))))):
         raise ValueError("runtime schedule differs from the planner's exact policy/config/seed assignment")
     case_dir = Path(output_dir).resolve()
@@ -133,11 +141,24 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
     direct_binding = {**schedule, "schedule": schedule,
         "protocol_sha256": hashlib.sha256(raw).hexdigest()}
     direct_binding_path = case_dir / "direct-pursuit-binding.json"
+    trench_binding = {"schema": "meco-phase4-trench-interception-binding-v1",
+        "factor_id": "opponent.trench_interception", "policy_id": "trench_interceptor",
+        "scenario_id": case_axes["scenario_id"], "category": case_axes["category"],
+        "qualification_case": qualification_case, "protocol_id": protocol["protocol_id"],
+        "protocol_sha256": hashlib.sha256(raw).hexdigest(), "split": "validation",
+        "seed_list": seeds, "seed_manifest_sha256": hashlib.sha256(
+            _artifact_bytes(seed_manifest)).hexdigest(),
+        "schedule": schedule, "schedule_sha256": schedule["schedule_sha256"],
+        "policy_config_sha256": schedule["policy_config_sha256"],
+        "per_episode_assignment_sha256": schedule["per_episode_assignment_sha256"]}
+    trench_binding_path = case_dir / "trench-interception-binding.json"
     case_path = case_dir / "qualification-case.json"
     _write_immutable(seed_path, seed_manifest)
     _write_immutable(schedule_path, schedule)
     if direct_pursuit:
         _write_immutable(direct_binding_path, direct_binding)
+    if trench_interception:
+        _write_immutable(trench_binding_path, trench_binding)
     _write_immutable(case_path, qualification_case)
     base_argv = [sys.executable, str(Path(matrix_script).resolve()),
         "--scenario", case_axes["scenario_id"], "--categories", case_axes["category"],
@@ -153,34 +174,39 @@ def run_phase4_opponent_cell(plan: dict, cell_key: str, *,
         argv = [*base_argv, "--output-dir", str(case_dir / condition)]
         if direct_pursuit:
             argv += ["--phase4-direct-pursuit-binding-json", str(direct_binding_path)]
+        if trench_interception:
+            argv += ["--phase4-trench-interception-binding-json", str(trench_binding_path)]
         if condition == "factor_treatment":
             argv += ["--phase4-opponent-schedule-json", str(schedule_path)]
         pair_results[condition] = execute(argv)
     pairing = None
     if all(result == 0 for result in pair_results.values()):
-        pairing = _validate_phase4_opponent_pair(case_dir, schedule,
-            categories=[case_axes["category"]], seeds=seeds,
-            qualification_case=qualification_case,
-            direct_pursuit=direct_pursuit)
+        pairing = (_validate_phase4_trench_interception_pair(case_dir, trench_binding,
+            policy_ids=assignment["control_policy_ids"], category=case_axes["category"],
+            seeds=seeds, qualification_case=qualification_case)
+            if trench_interception else _validate_phase4_opponent_pair(case_dir, schedule,
+                categories=[case_axes["category"]], seeds=seeds,
+                qualification_case=qualification_case,
+                direct_pursuit=direct_pursuit))
     return {"case_cell_key": cell_key,
         "policy_id": assignment["policy_id"],
         "schedule_sha256": schedule["schedule_sha256"],
         "runtime_status": ("outcomes_captured_pending_replay_review" if
-            direct_pursuit and pairing else "scheduled_not_simulator_validated"),
+            (direct_pursuit or trench_interception) and pairing else "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
-        "outcome_signals_complete": bool(direct_pursuit and pairing and
+        "outcome_signals_complete": bool((direct_pursuit or trench_interception) and pairing and
             pairing.get("outcome_signals_complete")),
         "qualification_eligible": False,
         "required_family_outcomes": ({"interception_rate": None,
             "policy_family_coverage": None, "paired_outcome_by_family": None}
-            if not direct_pursuit else None),
+            if not direct_pursuit and not trench_interception else None),
         "paired_coverage": pairing,
         "promotion_gate": ({"simulator_outcomes_captured": bool(pairing and
             pairing.get("outcome_signals_complete")),
             "held_out_replay_review_accepted": False,
             "dashboard_backend_current": False,
             "dashboard_frontend_current": False,
-            "executable_promotion_allowed": False} if direct_pursuit else None),
+            "executable_promotion_allowed": False} if direct_pursuit or trench_interception else None),
         "dispatch_return_codes": pair_results,
         "executed": all(result == 0 for result in pair_results.values())}
 
@@ -1021,6 +1047,153 @@ def _validate_phase4_opponent_pair(case_dir: Path, schedule: dict,
     artifact_path = case_dir / "paired-coverage.json"
     _write_immutable(artifact_path, pairing)
     return pairing
+
+
+def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
+        policy_ids: list[str], category: str, seeds: list[int],
+        qualification_case: dict) -> dict:
+    """Reconcile all assigned trench rows and retain invalid policy/seed pairs."""
+    from .meco_phase4_trench_interception import (
+        reduce_trench_interception_pair, validate_trench_interception_record)
+    expected_policy_ids = sorted((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
+    if policy_ids != expected_policy_ids or len(seeds) != 100 or len(set(seeds)) != 100:
+        raise ValueError("trench pair validator requires the exact 11-by-100 frozen matrix")
+    expected_keys = {(policy, category, seed) for policy in policy_ids for seed in seeds}
+    outcomes, row_errors, arm_rows, matrix_files = {}, {"no_factor": [], "factor_treatment": []}, {}, {}
+    paired_binding = None
+    for arm in CONDITIONS:
+        matrix_paths = sorted((case_dir / arm).glob("*.matrix.json"))
+        if len(matrix_paths) != 1:
+            raise ValueError(f"trench {arm} arm lacks exactly one matrix report")
+        matrix = _read_json(matrix_paths[0])
+        protocol = matrix.get("protocol", {})
+        arm_binding = protocol.get("phase4_trench_interception_binding")
+        expected_schedule = binding["schedule"] if arm == "factor_treatment" else None
+        if (protocol.get("qualification_case") != qualification_case
+                or protocol.get("categories") != [category]
+                or protocol.get("seed_list") != seeds
+                or protocol.get("phase4_opponent_schedule") != expected_schedule
+                or not isinstance(arm_binding, dict)
+                or arm_binding.get("schedule_sha256") != binding["schedule_sha256"]
+                or not arm_binding.get("pair_binding_id")
+                or arm_binding.get("pair_binding", {}).get("source_identity_sha256") !=
+                    protocol.get("source_identity_sha256")
+                or arm_binding.get("pair_binding", {}).get("execution_device") !=
+                    protocol.get("execution_device")):
+            raise ValueError(f"trench {arm} matrix differs from frozen assignment/provenance")
+        if paired_binding is None:
+            paired_binding = arm_binding
+        elif arm_binding != paired_binding:
+            raise ValueError("trench arms do not share the exact stable pair binding")
+        matrix_files[arm] = _file_sha(matrix_paths[0])
+        entries = matrix.get("conditions")
+        if not isinstance(entries, dict) or set(entries) != {"architecture_matched_cv_k16"}:
+            raise ValueError(f"trench {arm} matrix has unexpected condition coverage")
+        report = _read_json(Path(entries["architecture_matched_cv_k16"]["report_path"]).resolve())
+        rows = _records_by_key(report)
+        if set(rows) != expected_keys or report.get("qualification_eligible") is not False:
+            raise ValueError(f"trench {arm} report has missing/extra assignments or qualification state")
+        outcomes[arm], row_errors[arm], arm_rows[arm] = {}, [], {}
+        for key in sorted(expected_keys):
+            row = rows[key]
+            record = row.get("phase4_trench_interception")
+            try:
+                if not isinstance(record, dict):
+                    raise ValueError("missing trench outcome record")
+                check = validate_trench_interception_record(record,
+                    binding=arm_binding, expected_condition=arm,
+                    expected_policy_id=key[0], expected_seed=key[2],
+                    expected_source_sha256=protocol["source_identity_sha256"],
+                    expected_checkpoint_sha256=row.get("checkpoint_sha256"),
+                    expected_device=protocol["execution_device"])
+                arm_rows[arm][key] = (record, check)
+            except (KeyError, TypeError, ValueError) as exc:
+                row_errors[arm].append({"policy_id": key[0], "seed": key[2],
+                    "reason": str(exc)})
+                arm_rows[arm][key] = (record, None)
+    paired, pair_statuses = [], []
+    for key in sorted(expected_keys):
+        control, control_check = arm_rows["no_factor"][key]
+        treatment, treatment_check = arm_rows["factor_treatment"][key]
+        valid = (control_check is not None and treatment_check is not None and
+            control_check["crossing_row_valid"] and treatment_check["crossing_row_valid"] and
+            treatment_check["interception_row_valid"])
+        if valid:
+            try:
+                paired.append(reduce_trench_interception_pair(control, treatment,
+                    binding=paired_binding, policy_id=key[0], seed=key[2],
+                    source_identity_sha256=paired_binding["source_identity_sha256"],
+                    checkpoint_sha256=control["policy_checkpoint_sha256"],
+                    execution_device=paired_binding["execution_device"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                valid = False
+                reason = str(exc)
+        else:
+            reason = "one_or_both_arm_rows_failed_full_horizon_or_contact_validation"
+        if not valid:
+            row_errors["no_factor" if control_check is None else "factor_treatment"].append(
+                {"policy_id": key[0], "seed": key[2], "reason": reason})
+        pair_statuses.append({"policy_id": key[0], "seed": key[2], "valid_pair": bool(valid),
+            "invalid_reason": None if valid else reason})
+    paired_valid = [row for row in paired if row.get("valid_pair") is True and
+        "alternate_crossing_success_delta" in row]
+    pair_count = len(expected_keys)
+    per_arm = {}
+    for arm in CONDITIONS:
+        full_rows = [(record, check) for record, check in arm_rows[arm].values()
+            if check is not None and check.get("full_horizon_pose_valid") is True]
+        crossing_rows = [(record, check) for record, check in full_rows
+            if check.get("crossing_row_valid") is True]
+        per_arm[arm] = {
+            "assigned_count": pair_count,
+            "full_horizon_valid_count": len(full_rows),
+            "invalid_or_censored_count": pair_count - len(full_rows),
+            "alternate_crossing_success_numerator": sum(
+                check["alternate_crossing_success"] is True for _, check in crossing_rows),
+            "alternate_crossing_success_denominator": len(crossing_rows),
+            "crossing_time_rmst_numerator_s": sum(
+                check["trench_crossing_time_s"] for _, check in crossing_rows),
+            "crossing_time_rmst_denominator": len(crossing_rows),
+            "crossing_event_count": sum(not check["crossing_right_censored"]
+                for _, check in crossing_rows),
+            "horizon_censor_count": sum(check["crossing_right_censored"]
+                for _, check in crossing_rows),
+            "restricted_mean_crossing_time_s": (
+                sum(check["trench_crossing_time_s"] for _, check in crossing_rows) /
+                len(crossing_rows) if crossing_rows else None),
+            "interception_numerator": (sum(check["interception_episode_numerator"] == 1
+                for _, check in full_rows if check.get("interception_episode_numerator") is not None)
+                if arm == "factor_treatment" else None),
+            "interception_denominator": (sum(check.get("interception_row_valid") is True
+                for _, check in full_rows) if arm == "factor_treatment" else None)}
+    coverage = {"schema": "meco-phase4-trench-interception-pair-outcomes-v1",
+        "policy_ids": policy_ids, "category": category, "seed_count": len(seeds),
+        "assigned_rows_per_condition": {arm: pair_count for arm in CONDITIONS},
+        "paired_rows_per_condition": {arm: pair_count for arm in CONDITIONS},
+        "invalid_pair_count": pair_count - len(paired_valid),
+        "valid_pair_count": len(paired_valid),
+        "unaccounted_assignments": 0,
+        "arm_invalid_row_count": {arm: len(row_errors[arm]) for arm in CONDITIONS},
+        "arm_invalid_rows": row_errors,
+        "per_arm_outcomes": per_arm,
+        "paired_outcomes": paired_valid,
+        "exact_pair_coverage": len(pair_statuses) == pair_count,
+        "all_pairs_full_horizon_valid": len(paired_valid) == pair_count,
+        "outcome_signals_complete": len(paired_valid) == pair_count,
+        "runtime_status": "outcomes_captured_pending_replay_review",
+        "source_identity_sha256": paired_binding.get("source_identity_sha256"),
+        "checkpoint_bundle_sha256": paired_binding.get("checkpoint_bundle_sha256"),
+        "execution_device": paired_binding.get("execution_device"),
+        "schedule_sha256": binding["schedule_sha256"],
+        "seed_manifest_sha256": paired_binding.get("seed_manifest_sha256"),
+        "validation_seed_assignment_sha256": _sha(seeds),
+        "assigned_pressure_slots": [0],
+        "control_policy_ids": policy_ids,
+        "qualification_eligible": False,
+        "matrix_sha256": matrix_files}
+    coverage["paired_outcomes_artifact_sha256"] = _sha(coverage)
+    _write_immutable(case_dir / "paired-trench-outcomes.json", coverage)
+    return coverage
 
 
 def _write_immutable(path: Path, value: dict) -> str:

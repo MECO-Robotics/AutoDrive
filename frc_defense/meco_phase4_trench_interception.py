@@ -315,6 +315,11 @@ class TrenchInterceptionEpisodeCapture:
             "xy_m": [float(v) for v in sim.pose[0, 3, :2].tolist()]}]
         self.events = []
 
+    def freeze_initial_route(self):
+        """Freeze the first selected executable route before its first physics tick."""
+        if self.route_points is None:
+            self.route_points = self._initial_route()
+
     def _opening_geometry(self):
         boxes = getattr(self.env, "field_boxes", None)
         if not isinstance(boxes, (tuple, list)):
@@ -390,8 +395,6 @@ class TrenchInterceptionEpisodeCapture:
         self.last_tick, self.last_time = tick, time_s
         self.samples.append({"physics_tick": tick, "physics_time_s": time_s,
             "xy_m": pose})
-        if self.route_points is None:
-            self.route_points = self._initial_route()
 
     def finish(self, *, episode_censored: bool = False) -> dict:
         expected_ticks = int(self.env.horizon)
