@@ -202,6 +202,19 @@ def test_transition_history_audit_binds_five_snapshots_to_queue_configuration(tm
 
     history_path = tmp_path / "evaluation-history.json"
     history = json.loads(history_path.read_text())
+    original_history = json.loads(json.dumps(history))
+    row = history["entries"][0]
+    row["checkpoint_snapshots"][1]["track"] = row["checkpoint_snapshots"][0]["track"]
+    body = {key: value for key, value in row.items() if key != "entry_sha256"}
+    row["entry_sha256"] = hashlib.sha256(json.dumps(body, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+    history_path.write_text(json.dumps(history))
+    queue["evaluation_history"]["head_sha256"] = row["entry_sha256"]
+    queue_path.write_text(json.dumps(queue))
+    with pytest.raises(ValueError, match="duplicate or unknown track labels"):
+        meco_protocol_transition._evaluation_inventory(tmp_path, queue_path)
+
+    history = original_history
     row = history["entries"][0]
     row["campaign_binding"]["phase4_train_exposure"] = False
     for snapshot in row["checkpoint_snapshots"]:

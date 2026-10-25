@@ -485,12 +485,30 @@ def _evaluation_inventory(evaluation_root: Path, queue_status_path: Path):
         snapshot_rows = [{"path": str(path.resolve()), "sha256": _sha(path.read_bytes())}
             for path in snapshots]
         indexed_snapshots = history_row.get("checkpoint_snapshots")
-        indexed_snapshot_rows = sorted(({"path": row.get("path"), "sha256": row.get("sha256")}
-            for row in indexed_snapshots or []), key=lambda row: row["path"] or "")
-        if (len(snapshot_rows) != len(MECO_TRACKS)
-                or {Path(row["path"]).name for row in snapshot_rows} !=
-                    {f"{track}.pt" for track in MECO_TRACKS}
-                or snapshot_rows != indexed_snapshot_rows):
+        if not isinstance(indexed_snapshots, list) or len(indexed_snapshots) != len(MECO_TRACKS):
+            raise ValueError(f"evaluation history must identify exactly five checkpoint tracks: {report_path.name}")
+        indexed_by_track = {}
+        for row in indexed_snapshots:
+            if not isinstance(row, dict):
+                raise ValueError(f"evaluation checkpoint snapshot track row is malformed: {report_path.name}")
+            track = row.get("track")
+            if track not in MECO_TRACKS or track in indexed_by_track:
+                raise ValueError(f"evaluation checkpoint snapshot has duplicate or unknown track labels: {report_path.name}")
+            indexed_by_track[track] = row
+        if set(indexed_by_track) != set(MECO_TRACKS):
+            raise ValueError(f"evaluation checkpoint snapshot is missing a track label: {report_path.name}")
+        actual_by_track = {}
+        for path in snapshots:
+            track = path.stem
+            if track not in MECO_TRACKS or path.name != f"{track}.pt" or path.resolve().parent != snapshot_dir.resolve():
+                raise ValueError(f"evaluation checkpoint snapshot path does not belong to a track: {report_path.name}")
+            actual_by_track[track] = {"path": str(path.resolve()),
+                "sha256": _sha(path.read_bytes())}
+        if len(actual_by_track) != len(MECO_TRACKS) or set(actual_by_track) != set(MECO_TRACKS):
+            raise ValueError(f"evaluation checkpoint snapshot inventory is incomplete: {report_path.name}")
+        if any(indexed_by_track[track].get("path") != actual_by_track[track]["path"] or
+                indexed_by_track[track].get("sha256") != actual_by_track[track]["sha256"]
+                for track in MECO_TRACKS):
             raise ValueError(f"evaluation checkpoint snapshot inventory disagrees with durable history: {report_path.name}")
         entries.append({"path": str(report_path), "sha256": report_sha,
             "status_path": str(status_path), "status_sha256": status_sha,
