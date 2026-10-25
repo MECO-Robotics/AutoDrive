@@ -1811,6 +1811,7 @@ PAIRED_CALIBRATION_CAMPAIGN = "meco-paired-calibration-campaign-v1"
 PAIRED_CALIBRATION_SHARD = "meco-paired-calibration-shard-manifest-v1"
 PAIRED_CALIBRATION_ARTIFACT = "meco-paired-calibration-shard-v1"
 PAIRED_CALIBRATION_PROGRESS = "meco-paired-calibration-shard-progress-v1"
+PAIRED_CALIBRATION_FINAL_SHARD = "meco-paired-calibration-shard-final-v1"
 PAIRED_CALIBRATION_REPLAY_CONTRACT = "dashboard-replay-generation-v1"
 PAIRED_CALIBRATION_CONTROLS = (
     "D0", "D1/current", "D2/cv", "D2/multi_model_v1",
@@ -2232,6 +2233,77 @@ def validate_paired_calibration_progress(campaign, shard_index, progress, *,
     if progress.get("complete") is not (set(ids) == set(expected)):
         raise ValueError("paired calibration progress completion flag is inconsistent")
     return progress
+
+
+def build_paired_calibration_final_shard(campaign, shard_index, progress, *,
+        replay_root, approval):
+    """Freeze a complete shard; refuse finalization while any control is blocked."""
+    shard = _paired_shard_for_index(campaign, shard_index)
+    blockers = paired_calibration_execution_blockers(campaign)
+    if blockers:
+        raise ValueError("paired calibration finalization blocked by controls: "
+            + ", ".join(blockers))
+    validate_paired_calibration_progress(campaign, shard_index, progress,
+        replay_root=replay_root, approval=approval)
+    if progress.get("complete") is not True:
+        raise ValueError("paired calibration shard progress is incomplete")
+    body = {"schema": PAIRED_CALIBRATION_FINAL_SHARD,
+        "campaign_id": campaign["campaign_id"], "shard_index": shard_index,
+        "shard_manifest_id": shard["manifest_id"],
+        "worker_id": shard["worker_id"],
+        "worker_assignment_sha256": shard["worker_assignment_sha256"],
+        "source_binding": campaign["source"],
+        "baseline_freeze_sha256": campaign["baseline_freeze"]["freeze_sha256"],
+        "partition_sha256": campaign["partition"]["partition_sha256"],
+        "estimand_approval_sha256": campaign["estimand_approval"]["approval_sha256"],
+        "scoring": campaign["scoring"], "progress_id": progress["progress_id"],
+        "completed_work_unit_ids": progress["completed_work_unit_ids"],
+        "completed_rows": progress["completed_rows"], "complete": True}
+    return {**body, "final_shard_id": _canonical_sha256(body)}
+
+
+def write_paired_calibration_artifact_immutable(path, artifact):
+    """Atomically publish canonical JSON without replacing conflicting bytes."""
+    path = Path(path)
+    if not isinstance(artifact, dict):
+        raise ValueError("paired calibration artifact must be an object")
+    raw = json.dumps(artifact, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8")
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    absolute = path.absolute()
+    for part in (absolute, *absolute.parents):
+        if part.is_symlink():
+            raise ValueError("paired calibration artifact output path uses a symlink")
+    temporary = parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+            created = True
+        except FileExistsError:
+            created = False
+        if not created:
+            if path.is_symlink() or path.read_bytes() != raw:
+                raise ValueError("paired calibration immutable artifact ID has conflicting bytes")
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return hashlib.sha256(raw).hexdigest()
 
 
 def build_paired_calibration_outcome_row(campaign, shard_index, work_unit,

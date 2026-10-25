@@ -199,6 +199,21 @@ def test_paired_progress_is_manifest_bound_unique_and_resume_stable(monkeypatch,
         q.validate_paired_calibration_progress(campaign, 0, altered,
             replay_root=tmp_path, approval=approval)
 
+    with pytest.raises(ValueError, match="blocked by controls: D2/multi_model_v1"):
+        q.build_paired_calibration_final_shard(campaign, 0, progress,
+            replay_root=tmp_path, approval=approval)
+
+
+def test_paired_artifact_writer_is_atomic_idempotent_and_never_overwrites(tmp_path):
+    path = tmp_path / "progress.json"
+    artifact = {"schema": q.PAIRED_CALIBRATION_PROGRESS, "progress_id": "a" * 64}
+    digest = q.write_paired_calibration_artifact_immutable(path, artifact)
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert q.write_paired_calibration_artifact_immutable(path, artifact) == digest
+    with pytest.raises(ValueError, match="conflicting bytes"):
+        q.write_paired_calibration_artifact_immutable(path,
+            {"schema": q.PAIRED_CALIBRATION_PROGRESS, "progress_id": "b" * 64})
+
 
 def test_paired_outcome_row_binds_evaluation_and_exact_replay(monkeypatch, tmp_path):
     campaign = _campaign(monkeypatch)
