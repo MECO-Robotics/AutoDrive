@@ -4,6 +4,7 @@ These tests intentionally target an explicitly selected WX9100. They have no
 CPU fallback; run only after the training owner releases the assigned device.
 """
 from types import SimpleNamespace
+import math
 
 import pytest
 import torch
@@ -170,7 +171,7 @@ def test_plan_a_masked_support_sampling_and_exact_replay(track):
     metrics = _ppo_update(track, model, value_head, optimizer, [row], config,
         torch.zeros((), device=DEVICE), update_number=1, diagnostic_output=None)
     assert optimizer.step_count == 1
-    assert torch.isfinite(torch.tensor(metrics["policy_loss"]))
+    assert math.isfinite(metrics["policy_loss"])
 
 
 @pytest.mark.parametrize("track", ["A1", "A2", "A3"])
