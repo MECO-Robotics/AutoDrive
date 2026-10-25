@@ -556,12 +556,14 @@ def test_multicase_warm_start_binding_requires_exact_five_artifact_hashes(tmp_pa
             for track, path in artifacts.items()}}
     starts = {track: {"present": True, "sha256": manifest_api._file_sha(path),
         "binding_valid": True} for track, path in artifacts.items()}
-    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_multicase_descriptor",
-        lambda value: value)
-    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_five_track_manifest",
-        lambda value, frozen, **kwargs: value)
+    calls = []
+    monkeypatch.setattr("frc_defense.meco_phase2_multicase.validate_multicase_warm_start_bundle",
+        lambda desc, bundle, **kwargs: calls.append((desc, bundle, kwargs)) or {
+            "training_readiness_proven": False})
     assert manifest_api._validate_multicase_warm_start_binding(binding,
         {track: str(path) for track, path in artifacts.items()}, starts) == binding
+    assert len(calls) == 1
+    assert calls[0][2]["expected_case_set_sha256"] == "c" * 64
     bad = copy.deepcopy(binding)
     bad["artifact_sha256_by_track"].pop("A1")
     with pytest.raises(ValueError, match="exactly five"):

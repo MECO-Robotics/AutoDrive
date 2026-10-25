@@ -494,8 +494,12 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
         if (binding["artifact_sha256_by_track"][track] != warm_starts[track].get("sha256") or
                 not warm_starts[track].get("binding_valid")):
             raise ValueError(f"multi-case binding {track} artifact differs from the campaign warm start")
-    descriptor_path = Path(binding["descriptor_path"]).expanduser().resolve(strict=True)
-    bundle_path = Path(binding["bundle_manifest_path"]).expanduser().resolve(strict=True)
+    descriptor_path = Path(binding["descriptor_path"]).expanduser()
+    bundle_path = Path(binding["bundle_manifest_path"]).expanduser()
+    if any(path.is_symlink() or not path.is_file() for path in (descriptor_path, bundle_path)):
+        raise ValueError("multi-case descriptor and bundle must be regular non-symlink files")
+    descriptor_path = descriptor_path.resolve(strict=True)
+    bundle_path = bundle_path.resolve(strict=True)
     if (_file_sha(descriptor_path) != binding["descriptor_file_sha256"] or
             _file_sha(bundle_path) != binding["bundle_manifest_sha256"]):
         raise ValueError("multi-case descriptor or bundle manifest bytes changed")
@@ -508,13 +512,17 @@ def _validate_multicase_warm_start_binding(binding, warm_artifacts, warm_starts)
             bundle.get("phase2_ready") is not False or bundle.get("phase2_complete") is not False or
             bundle.get("qualification_eligible") is not False):
         raise ValueError("multi-case descriptor/bundle case-set binding or conservative gates differ")
-    from .meco_phase2_multicase import (validate_multicase_descriptor,
-        validate_five_track_manifest)
-    validate_multicase_descriptor(descriptor)
-    artifact_paths = {track: Path(warm_artifacts[track]).expanduser().resolve(strict=True)
+    artifact_paths = {track: Path(warm_artifacts[track]).expanduser()
         for track in MECO_TRACKS}
-    validate_five_track_manifest(bundle, descriptor,
-        validator_receipts=bundle.get("validator_receipts", {}), artifact_paths=artifact_paths)
+    if any(path.is_symlink() or not path.is_file() for path in artifact_paths.values()):
+        raise ValueError("multi-case binding artifacts must be regular non-symlink files")
+    from .meco_phase2_multicase import validate_multicase_warm_start_bundle
+    validate_multicase_warm_start_bundle(descriptor_path, bundle_path,
+        expected_descriptor_sha256=binding["descriptor_sha256"],
+        expected_descriptor_file_sha256=binding["descriptor_file_sha256"],
+        expected_bundle_file_sha256=binding["bundle_manifest_sha256"],
+        expected_case_set_sha256=binding["case_set_sha256"],
+        artifact_paths=artifact_paths)
     return {key: binding[key] for key in sorted(binding)}
 
 

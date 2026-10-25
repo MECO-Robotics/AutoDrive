@@ -105,7 +105,8 @@ def _execute_adapters(tmp_path, descriptor, *, collector_hook=None, combine_hook
                 "manifest_sha256": multi._sha(sidecar.read_bytes()),
                 "record_count": len(rows), "schema": "synthetic-v1", "target_schema": "synthetic-v1"})
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in records))
+        output.write_text("".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in records))
         coverage = multi.case_coverage(expected_cases, records)
         manifest = {"schema": multi.SCHEMA + ".combined-target", "target_family": family,
             "descriptor_sha256": descriptor["descriptor_sha256"],
@@ -258,6 +259,45 @@ def test_execute_multicase_publishes_only_after_serial_shards_and_five_receipts(
         multi.validate_five_track_manifest(result, descriptor,
             validator_receipts=result["validator_receipts"],
             artifact_paths={track: Path(entry["path"]) for track, entry in result["artifacts"].items()})
+
+
+def test_production_bundle_revalidator_rechecks_shards_combined_bytes_and_all_tracks(
+        tmp_path, frozen_protocol, monkeypatch):
+    protocol, repo = frozen_protocol
+    descriptor = _describe(tmp_path, protocol, repo, [
+        {"scenario_id": "case-a", "category": "single"},
+        {"scenario_id": "case-b", "category": "pair"}])
+    result, _, _, _ = _run_synthetic_execute(monkeypatch, tmp_path, descriptor)
+    from frc_defense import meco_supervised
+    calls = []
+    def validate_track(track, artifact, **kwargs):
+        calls.append(track)
+        return {"track": track, "schema": "synthetic-composite-v1",
+            "descriptor_sha256": descriptor["descriptor_sha256"],
+            "case_set_sha256": descriptor["case_set_sha256"],
+            ("combined_input" if track.startswith("C") else "combined_inputs"):
+                (result["combined_inputs"]["trajectory"] if track.startswith("C")
+                    else result["combined_inputs"])}
+    monkeypatch.setattr(meco_supervised, "validate_warm_start_artifact", validate_track)
+    receipt = multi.validate_multicase_warm_start_bundle(
+        descriptor["outputs"]["descriptor"], descriptor["outputs"]["manifest"],
+        expected_descriptor_sha256=descriptor["descriptor_sha256"],
+        expected_case_set_sha256=descriptor["case_set_sha256"],
+        artifact_paths={track: Path(item["path"]) for track, item in result["artifacts"].items()})
+    assert calls == list(multi.MECO_TRACKS)
+    assert set(receipt["cases"]) == {"case-a::single", "case-b::pair"}
+    assert set(receipt["tracks"]) == set(multi.MECO_TRACKS)
+    assert receipt["training_readiness_proven"] is False
+    assert receipt["phase2_complete"] is False
+    assert receipt["qualification_eligible"] is False
+    pooled = Path(result["combined_inputs"]["ub"]["path"])
+    pooled.write_bytes(pooled.read_bytes() + b"tamper\n")
+    with pytest.raises(ValueError, match="combined ub bytes changed"):
+        multi.validate_multicase_warm_start_bundle(
+            descriptor["outputs"]["descriptor"], descriptor["outputs"]["manifest"],
+            expected_descriptor_sha256=descriptor["descriptor_sha256"],
+            expected_case_set_sha256=descriptor["case_set_sha256"],
+            artifact_paths={track: Path(item["path"]) for track, item in result["artifacts"].items()})
 
 
 @pytest.mark.parametrize("tamper_kind", ["receipt", "malformed", "malformed_row",

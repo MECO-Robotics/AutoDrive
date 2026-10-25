@@ -926,7 +926,8 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"missing or unsafe {track} artifact")
         record, receipt = artifacts[track], validator_receipts[track]
-        if (record.get("track") != track or record.get("sha256") != _sha(path.read_bytes()) or
+        if (record.get("track") != track or Path(record.get("path", "")).resolve() != path.resolve() or
+                record.get("sha256") != _sha(path.read_bytes()) or
                 record.get("sha256") != receipt.get("artifact_sha256") or
                 receipt.get("track") != track or receipt.get("case_set_sha256") != descriptor["case_set_sha256"] or
                 receipt.get("descriptor_sha256") != descriptor["descriptor_sha256"]):
@@ -934,6 +935,155 @@ def validate_five_track_manifest(manifest: dict, descriptor: dict,
     if manifest.get("phase2_ready") is not False or manifest.get("phase2_complete") is not False or manifest.get("qualification_eligible") is not False:
         raise ValueError("multi-case training bundle cannot claim readiness or qualification")
     return manifest
+
+
+def validate_multicase_warm_start_bundle(descriptor_path, bundle_path, *,
+        expected_descriptor_sha256=None, expected_descriptor_file_sha256=None,
+        expected_bundle_file_sha256=None, expected_case_set_sha256=None,
+        artifact_paths=None) -> dict:
+    """Re-open and revalidate the published multi-case data and five artifacts.
+
+    This is the production manifest-consumption boundary. It deliberately
+    repeats expensive CPU-side validation and does not attest runtime devices
+    or elevate any training/qualification gate.
+    """
+    from . import meco_supervised
+    from .curriculum_training import source_identity
+
+    descriptor_path = Path(descriptor_path).expanduser()
+    bundle_path = Path(bundle_path).expanduser()
+    for path in (descriptor_path, bundle_path):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("descriptor and bundle must be regular files")
+    descriptor_path = descriptor_path.resolve(strict=True)
+    bundle_path = bundle_path.resolve(strict=True)
+    descriptor_raw, bundle_raw = descriptor_path.read_bytes(), bundle_path.read_bytes()
+    if (expected_descriptor_file_sha256 is not None and
+            _sha(descriptor_raw) != expected_descriptor_file_sha256):
+        raise ValueError("descriptor bytes differ from the training binding")
+    if expected_bundle_file_sha256 is not None and _sha(bundle_raw) != expected_bundle_file_sha256:
+        raise ValueError("bundle bytes differ from the training binding")
+    descriptor, manifest = json.loads(descriptor_raw), json.loads(bundle_raw)
+    if not isinstance(descriptor, dict) or not isinstance(manifest, dict):
+        raise ValueError("descriptor and bundle must be JSON objects")
+    validate_multicase_descriptor(descriptor)
+    if (expected_descriptor_sha256 is not None and
+            descriptor.get("descriptor_sha256") != expected_descriptor_sha256):
+        raise ValueError("descriptor digest differs from the training binding")
+    if (expected_case_set_sha256 is not None and
+            descriptor.get("case_set_sha256") != expected_case_set_sha256):
+        raise ValueError("case-set digest differs from the training binding")
+    if descriptor.get("outputs", {}).get("descriptor") != str(descriptor_path) or \
+            descriptor.get("outputs", {}).get("manifest") != str(bundle_path):
+        raise ValueError("descriptor output paths do not identify the bound files")
+
+    artifact_records = manifest.get("artifacts")
+    if not isinstance(artifact_records, dict) or set(artifact_records) != set(MECO_TRACKS):
+        raise ValueError("published bundle must identify exactly five artifacts")
+    paths = artifact_paths or {track: Path(item["path"])
+        for track, item in artifact_records.items()}
+    paths = {track: Path(path).expanduser() for track, path in paths.items()}
+    if set(paths) != set(MECO_TRACKS) or any(path.is_symlink() or not path.is_file()
+            for path in paths.values()):
+        raise ValueError("five-track artifacts must be regular non-symlink files")
+    paths = {track: path.resolve(strict=True) for track, path in paths.items()}
+    validate_five_track_manifest(manifest, descriptor,
+        validator_receipts=manifest.get("validator_receipts", {}), artifact_paths=paths)
+    canonical = _canonical_combined_inputs(manifest["combined_inputs"])
+    for family in ("trajectory", "ub", "p"):
+        expected_data = Path(descriptor["outputs"]["combined"][family]).resolve(strict=True)
+        expected_sidecar = expected_data.with_suffix(expected_data.suffix + ".manifest.json")
+        if (Path(canonical[family]["path"]).resolve(strict=True) != expected_data or
+                Path(canonical[family]["manifest_path"]).resolve(strict=True) != expected_sidecar):
+            raise ValueError(f"combined {family} files differ from the frozen descriptor output paths")
+
+    # Revalidate original one-case receipts and prove that each pooled family
+    # was recomputed from the exact ordered shards named by those receipts.
+    pooled = {}
+    case_reports = {f"{c['scenario_id']}::{c['category']}": {
+        "case_key": [c["scenario_id"], c["category"]], "seeds": list(c["seeds"]),
+        "target_families": {}} for c in descriptor["ordered_cases"]}
+    receipt_rows = manifest.get("shard_receipts")
+    if not isinstance(receipt_rows, list) or len(receipt_rows) != len(descriptor["shards"]):
+        raise ValueError("bundle omits complete ordered case receipts")
+    sidecars = {family: json.loads(Path(canonical[family]["manifest_path"]).read_text(encoding="utf-8"))
+        for family in ("trajectory", "ub", "p")}
+    receipts = []
+    for index, (shard, row) in enumerate(zip(descriptor["shards"], receipt_rows)):
+        if (not isinstance(row, dict) or row.get("case_key") != shard["case_key"] or
+                row.get("seeds") != shard["seeds"]):
+            raise ValueError("bundle case receipt order or identity differs from descriptor")
+        entries = {}
+        for family in ("trajectory", "ub", "p"):
+            shard_entries = sidecars[family].get("shard_manifests")
+            if not isinstance(shard_entries, list) or len(shard_entries) != len(descriptor["shards"]):
+                raise ValueError(f"combined {family} sidecar has incomplete shard bindings")
+            entry = shard_entries[index]
+            if (entry.get("case_key") != shard["case_key"] or entry.get("seeds") != shard["seeds"]):
+                raise ValueError(f"combined {family} sidecar case order differs from descriptor")
+            entries[family] = entry
+        receipt_path = Path(entries["trajectory"]["path"]).parent / "case-receipt.json"
+        if not receipt_path.is_file() or receipt_path.is_symlink():
+            raise ValueError("original case receipt is missing or unsafe")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if _digest(receipt) != row.get("receipt_sha256"):
+            raise ValueError("original case receipt differs from the published receipt digest")
+        validate_case_receipt(receipt, shard, descriptor, require_complete_set=True)
+        receipts.append(receipt)
+        for target, actual in entries.items():
+            source = receipt["datasets"][target]
+            if any(actual.get(k) != source.get(src_k) for k, src_k in (
+                    ("path", "path"), ("manifest_path", "manifest_path"),
+                    ("dataset_sha256", "sha256"), ("manifest_sha256", "manifest_sha256"))):
+                raise ValueError(f"combined {target} shard binding differs from its case receipt")
+            case_reports["::".join(shard["case_key"])]["target_families"][target] = {
+                "dataset_sha256": source["sha256"], "manifest_sha256": source["manifest_sha256"],
+                "record_count": json.loads(Path(source["manifest_path"]).read_text()).get("record_count")}
+
+    for family in ("trajectory", "ub", "p"):
+        item = canonical[family]
+        fd, temp_name = tempfile.mkstemp(prefix="." + Path(item["path"]).name + ".revalidate-",
+            dir=Path(item["path"]).parent)
+        os.close(fd)
+        temp = Path(temp_name)
+        temp.unlink()
+        try:
+            result = combine_jsonl_shards(
+                [Path(r["datasets"][family]["path"]) for r in receipts], temp,
+                expected_cases=descriptor["ordered_cases"])
+            if result["sha256"] != item["sha256"]:
+                raise ValueError(f"combined {family} bytes do not equal rederived shard bytes")
+            pooled[family] = {"record_count": result["record_count"],
+                "case_coverage": result["case_coverage"]}
+        finally:
+            temp.unlink(missing_ok=True)
+
+    track_reports = {}
+    protocol_path = Path(descriptor["qualification_protocol"]["path"])
+    for track in MECO_TRACKS:
+        path = paths[track]
+        payload = meco_supervised.validate_warm_start_artifact(track, path,
+            qualification_protocol=protocol_path, expected_sources=source_identity(),
+            expected_prediction_mode=descriptor["prediction_mode"])
+        if (payload.get("case_set_sha256") != descriptor["case_set_sha256"] or
+                payload.get("descriptor_sha256") != descriptor["descriptor_sha256"] or
+                payload.get("track") != track):
+            raise ValueError(f"{track} artifact does not bind the exact descriptor and case set")
+        expected_inputs = (canonical["trajectory"] if track.startswith("C") else canonical)
+        payload_inputs = payload.get("combined_input", payload.get("combined_inputs"))
+        if payload_inputs != expected_inputs:
+            raise ValueError(f"{track} artifact does not bind the published combined corpus")
+        track_reports[track] = {"artifact_sha256": _sha(path.read_bytes()),
+            "artifact_schema": payload.get("schema"),
+            "case_coverage": payload.get("case_coverage", payload.get("case_coverage_by_case"))}
+
+    return {"schema": SCHEMA + ".production-validation-receipt-v1",
+        "descriptor_sha256": descriptor["descriptor_sha256"],
+        "case_set_sha256": descriptor["case_set_sha256"],
+        "bundle_manifest_sha256": _sha(bundle_raw), "combined_inputs": pooled,
+        "cases": case_reports, "tracks": track_reports,
+        "training_readiness_proven": False, "phase2_complete": False,
+        "qualification_eligible": False}
 
 
 def export_training_manifest_warm_starts(manifest: dict, descriptor: dict) -> dict[str, str]:
