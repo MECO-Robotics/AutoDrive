@@ -95,6 +95,9 @@ class FuelPhysics:
                 torch.version.hip is None or self.config.backend!="hip"):
             raise RuntimeError(
                 "GPU-qualifying fuel physics requires an explicitly indexed HIP device and backend='hip'")
+        if self.config.gpu_qualifying and self.config.sleep and self.config.sleep_islands:
+            raise RuntimeError(
+                "GPU-qualifying fuel physics does not support CPU sleep-island helpers")
         self.pos = torch.zeros((self.n, self.p, 3), device=self.device, dtype=piece_pos.dtype)
         self.vel = torch.zeros_like(self.pos)
         self.angular = torch.zeros_like(self.pos)
@@ -151,15 +154,22 @@ class FuelPhysics:
 
     def reset(self, mask=None):
         mask = torch.ones(self.n, device=self.device, dtype=torch.bool) if mask is None else torch.as_tensor(mask, device=self.device, dtype=torch.bool)
-        self.pos[mask, :, :2] = self.piece_pos[mask]
-        self.pos[mask, :, 2] = self._spawn_height(self.piece_pos[mask])
-        self.vel[mask, :, :2] = self.piece_vel[mask]
-        self.vel[mask, :, 2] = 0
-        self.angular[mask] = 0
-        self.sleeping[mask] = False
-        self.sleep_clock[mask] = 0
-        self._last_xy[mask] = self.piece_pos[mask]
-        self._last_vxy[mask] = self.piece_vel[mask]
+        mask = mask.reshape(self.n)
+        selected = mask[:, None]
+        self.pos[..., :2].copy_(torch.where(
+            selected[..., None], self.piece_pos, self.pos[..., :2]))
+        spawn_height = self._spawn_height(self.piece_pos)
+        self.pos[..., 2].copy_(torch.where(selected, spawn_height, self.pos[..., 2]))
+        self.vel[..., :2].copy_(torch.where(
+            selected[..., None], self.piece_vel, self.vel[..., :2]))
+        self.vel[..., 2].masked_fill_(selected, 0.)
+        self.angular.masked_fill_(selected[..., None], 0.)
+        self.sleeping.masked_fill_(selected, False)
+        self.sleep_clock.masked_fill_(selected, 0.)
+        self._last_xy.copy_(torch.where(
+            selected[..., None], self.piece_pos, self._last_xy))
+        self._last_vxy.copy_(torch.where(
+            selected[..., None], self.piece_vel, self._last_vxy))
         self._valid_cache = False
         if self._hip is not None:
             self._hip.invalidate()
