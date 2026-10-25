@@ -3580,9 +3580,16 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     "assignment_sha256"],
                                 "profile_applied_before_observation": bool(
                                     env.phase4_start_profile_applied),
-                                "validated_pose_world_count": int(env.n),
-                                "legal_start_validation_rate": None,
-                                "outcome_by_start_state": None,
+                                "validated_pose_world_count": int(
+                                    env.phase4_start_profile_validated_world_count),
+                                "per_world_legal": list(
+                                    env.phase4_start_profile_legality or ()),
+                                "legal_start_validation_rate": float(
+                                    env.phase4_start_profile_validation_rate),
+                                "outcome_metrics": {
+                                    name: metrics[name] for name in (
+                                        "success", "scores", "useful_throughput",
+                                        "completed_cycles")},
                                 "qualification_eligible": False,
                             } if phase4_start_profile_assignment is not None else None),
                             "phase4_focal_pose": phase4_focal_pose_record,

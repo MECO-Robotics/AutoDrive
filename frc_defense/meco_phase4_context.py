@@ -391,15 +391,49 @@ def apply_full_team_start_profile(env, profile: str) -> torch.Tensor:
     poses = full_team_start_profile(env, profile)
     env.sim.pose.copy_(poses)
     env.sim.velocity.zero_()
+    # Validate the poses that actually landed in simulator state.  This is
+    # sampled in reset before the caller builds/returns observations.
+    legal = full_team_start_profile_legality(env, env.sim.pose)
+    env.phase4_start_profile_legality = legal.detach().cpu().tolist()
+    env.phase4_start_profile_validation_rate = float(legal.float().mean().item())
+    env.phase4_start_profile_validated_world_count = int(legal.numel())
+    if not bool(legal.all()):
+        raise ValueError("applied start profile is illegal in one or more worlds")
     return poses
 
 
-def validate_full_team_start_profile(env, poses: torch.Tensor) -> None:
-    """Reject bounds, inter-robot envelope, and solid-field collisions."""
+def full_team_start_profile_legality(env, poses: torch.Tensor) -> torch.Tensor:
+    """Return per-world legality for bounds, chassis overlap, and obstacles."""
     if not isinstance(poses, torch.Tensor) or poses.shape != (env.n, 6, 3):
         raise ValueError("start poses must have shape [num_worlds, 6, 3]")
     if not torch.isfinite(poses).all():
         raise ValueError("start poses must be finite")
+    length, width = _dimensions(env)
+    radius = _robot_radii(env)
+    xy = poses[..., :2]
+    legal = ~((xy[..., 0] < radius) | (xy[..., 0] > length-radius) |
+            (xy[..., 1] < radius) | (xy[..., 1] > width-radius)).any(dim=1)
+    distance = torch.linalg.vector_norm(xy[:, :, None, :] - xy[:, None, :, :], dim=-1)
+    pair_radius = radius[:, :, None] + radius[:, None, :]
+    pair_mask = ~torch.eye(6, device=env.device, dtype=torch.bool)
+    overlap = distance[:, pair_mask] < pair_radius[:, pair_mask] + .02
+    legal &= ~overlap.any(dim=1)
+
+    from .field import static_collision_boxes
+    for box in static_collision_boxes(env.field_boxes):
+        dx = (xy[..., 0] - float(box.x)).abs()
+        dy = (xy[..., 1] - float(box.y)).abs()
+        legal &= ~(((dx <= float(box.length)/2 + radius) &
+                (dy <= float(box.width)/2 + radius)).any(dim=1))
+    return legal
+
+
+def validate_full_team_start_profile(env, poses: torch.Tensor) -> None:
+    """Reject bounds, inter-robot envelope, and solid-field collisions."""
+    legal = full_team_start_profile_legality(env, poses)
+    if bool(legal.all()):
+        return
+    # Keep established error detail for callers and test diagnostics.
     length, width = _dimensions(env)
     radius = _robot_radii(env)
     xy = poses[..., :2]
@@ -411,7 +445,6 @@ def validate_full_team_start_profile(env, poses: torch.Tensor) -> None:
     pair_mask = ~torch.eye(6, device=env.device, dtype=torch.bool)
     if (distance[:, pair_mask] < pair_radius[:, pair_mask] + .02).any():
         raise ValueError("start profile has overlapping robot chassis envelopes")
-
     from .field import static_collision_boxes
     for box in static_collision_boxes(env.field_boxes):
         dx = (xy[..., 0] - float(box.x)).abs()

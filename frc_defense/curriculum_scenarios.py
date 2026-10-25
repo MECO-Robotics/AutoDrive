@@ -749,6 +749,9 @@ def reset_curriculum_scenario(env, seed):
         env.sim.velocity.zero_()
     start_assignment = getattr(env, 'phase4_start_profile_assignment', None)
     env.phase4_start_profile_applied = False
+    env.phase4_start_profile_legality = None
+    env.phase4_start_profile_validation_rate = None
+    env.phase4_start_profile_validated_world_count = 0
     if start_assignment is not None:
         start_assignment = validate_phase4_start_profile_assignment(start_assignment)
         apply_full_team_start_profile(env,

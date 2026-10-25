@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -263,8 +264,12 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
         "dispatch_binding": dispatch_binding,
         "runtime_status": "scheduled_not_simulator_validated",
         "simulator_behavior_validated": False,
-        "legal_start_validation_rate": None,
-        "outcome_by_start_state": None,
+        "legal_start_validation_rate": (None if pairing is None else
+            pairing["legal_start_validation_rate"]),
+        "outcome_by_start_state": (None if pairing is None else
+            pairing["outcome_by_start_state"]),
+        "coverage_digest_sha256": (None if pairing is None else
+            pairing["coverage_digest_sha256"]),
         "qualification_eligible": False,
         "paired_coverage": pairing,
         "dispatch_return_codes": return_codes,
@@ -554,7 +559,7 @@ def _validate_phase4_context_matrix_pair(case_dir: Path, *, factor: str,
 
 def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         categories: list[str], seeds: list[int], expected_binding: dict) -> dict:
-    """Check only exact assignment/coverage metadata, not behavioral outcomes."""
+    """Validate paired coverage and aggregate realized legal-start outcomes."""
     from .meco_tracks import MECO_TRACKS
     policies = set((*MECO_TRACKS, "A1_P0", "A2_P0", "A3_P0", "D0", "D1", "D2"))
     expected_keys = {(policy, category, seed) for policy in policies
@@ -613,10 +618,31 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                     captured.get("profile_config_sha256") != assignment["profile_config_sha256"] or
                     captured.get("assignment_sha256") != assignment["assignment_sha256"] or
                     captured.get("profile_applied_before_observation") is not True or
-                    captured.get("legal_start_validation_rate") is not None or
-                    captured.get("outcome_by_start_state") is not None or
                     captured.get("qualification_eligible") is not False):
                 raise ValueError(f"Phase 4 treatment row lacks exact profile provenance: {key}")
+            else:
+                legal_worlds = captured.get("per_world_legal")
+                world_count = captured.get("validated_pose_world_count")
+                rate = captured.get("legal_start_validation_rate")
+                if (type(world_count) is not int or world_count < 1 or
+                        not isinstance(legal_worlds, list) or
+                        len(legal_worlds) != world_count or
+                        any(type(value) is not bool for value in legal_worlds) or
+                        not all(legal_worlds) or type(rate) not in (int, float) or
+                        not math.isfinite(float(rate)) or float(rate) != 1.0):
+                    raise ValueError(f"Phase 4 treatment row has missing or partial per-world legality: {key}")
+                outcome = captured.get("outcome_metrics")
+                metrics = row.get("metrics")
+                names = ("success", "scores", "useful_throughput", "completed_cycles")
+                if (not isinstance(outcome, dict) or not isinstance(metrics, dict) or
+                        set(outcome) != set(names)):
+                    raise ValueError(f"Phase 4 treatment row has missing outcome metrics: {key}")
+                for name in names:
+                    value = outcome[name]
+                    if (type(value) not in (bool, int, float) or
+                            (type(value) is not bool and not math.isfinite(float(value))) or
+                            metrics.get(name) != value):
+                        raise ValueError(f"Phase 4 treatment row has invalid outcome metric {name}: {key}")
         manifest = report.get("policy_manifest")
         if not isinstance(manifest, dict):
             raise ValueError(f"Phase 4 {arm} evaluation lacks per-policy provenance")
@@ -633,6 +659,57 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         arms[arm] = rows
     if set(arms["no_factor"]) != set(arms["factor_treatment"]):
         raise ValueError("Phase 4 start-profile arms do not have exact paired rows")
+    metric_names = ("success", "scores", "useful_throughput", "completed_cycles")
+    by_state = {}
+    treatment_legal_rates = []
+    for state, arm in (("scenario_defined", "no_factor"),
+                       (assignment["registry_profile_id"], "factor_treatment")):
+        by_policy = {}
+        for policy in sorted(policies):
+            records = [arms[arm][(policy, category, seed)]
+                for category in categories for seed in seeds]
+            values = {name: [] for name in metric_names}
+            for row in records:
+                metrics = row.get("metrics")
+                if not isinstance(metrics, dict):
+                    raise ValueError(f"Phase 4 {arm} row has missing outcome metrics")
+                for name in metric_names:
+                    value = metrics.get(name)
+                    if (type(value) not in (bool, int, float) or
+                            (type(value) is not bool and not math.isfinite(float(value)))):
+                        raise ValueError(f"Phase 4 {arm} row has null/nonfinite {name}")
+                    values[name].append(float(value))
+                if arm == "factor_treatment":
+                    captured = row["phase4_start_profile"]
+                    treatment_legal_rates.append(float(
+                        captured["legal_start_validation_rate"]))
+            by_policy[policy] = {"n": len(records), "metrics": {
+                "success_rate": sum(values["success"]) / len(records),
+                **{name: sum(values[name]) / len(records)
+                   for name in metric_names if name != "success"}}}
+        by_state[state] = {"n": len(expected_keys), "by_policy": by_policy}
+    paired_deltas = {}
+    for policy in sorted(policies):
+        by_metric = {}
+        for name in metric_names:
+            deltas = []
+            for category in categories:
+                for seed in seeds:
+                    control = arms["no_factor"][(policy, category, seed)]["metrics"][name]
+                    treatment = arms["factor_treatment"][(policy, category, seed)]["metrics"][name]
+                    deltas.append({"category": category, "seed": seed,
+                        "delta": float(treatment) - float(control)})
+            by_metric[name] = {"mean_delta": sum(row["delta"] for row in deltas) / len(deltas),
+                               "paired_n": len(deltas), "per_category_seed": deltas}
+        paired_deltas[policy] = by_metric
+    outcome_by_start_state = {"states": by_state,
+        "paired_deltas_vs_scenario_defined": paired_deltas}
+    coverage_digest = _sha({"expected_keys": [list(key) for key in sorted(expected_keys)],
+        "assignment_sha256": assignment["assignment_sha256"],
+        "checkpoint_sha256": expected_binding["checkpoint_sha256"],
+        "source_identity_sha256": expected_binding["source_identity_sha256"],
+        "execution_device": expected_binding["execution_device"],
+        "outcome_by_start_state": outcome_by_start_state})
     return {"policies": sorted(policies), "categories": categories,
         "condition_names": ["architecture_matched_cv_k16"],
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
@@ -644,7 +721,9 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
-        "outcome_by_start_state": None, "qualification_eligible": False}
+        "legal_start_validation_rate": sum(treatment_legal_rates) / len(treatment_legal_rates),
+        "outcome_by_start_state": outcome_by_start_state,
+        "coverage_digest_sha256": coverage_digest, "qualification_eligible": False}
 
 
 def _dispatch_checkpoint_hashes(checkpoint_paths: dict[str, str]) -> dict[str, str]:

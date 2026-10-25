@@ -49,6 +49,9 @@ def test_full_team_start_profiles_are_legal_and_apply_only_at_reset(profile):
     applied = apply_full_team_start_profile(env, profile)
     assert torch.equal(env.sim.pose, applied)
     assert not env.sim.velocity.any()
+    assert env.phase4_start_profile_legality == [True, True]
+    assert env.phase4_start_profile_validated_world_count == 2
+    assert env.phase4_start_profile_validation_rate == 1.
 
 
 @pytest.mark.parametrize("geometry", CONTACT_GEOMETRIES)

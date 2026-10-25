@@ -314,11 +314,13 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
     monkeypatch.setattr(campaign_runner, "_source_identity_sha256",
         lambda: expected_binding["source_identity_sha256"])
     observed = []
+    observed_seeds = []
 
     def fake_runner(argv):
         output_dir = Path(argv[argv.index("--output-dir") + 1])
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest = json.loads(Path(argv[argv.index("--seed-manifest") + 1]).read_text())
+        observed_seeds[:] = manifest["seed_list"]
         case_binding = json.loads(Path(argv[argv.index("--qualification-case-json") + 1]).read_text())
         has_profile = "--phase4-start-profile" in argv
         arm = "factor_treatment" if has_profile else "no_factor"
@@ -338,6 +340,8 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
                             policy[:-3] if policy.endswith("_P0") else policy)),
                         "source_identity_sha256": expected_binding["source_identity_sha256"],
                         "execution_device": expected_binding["execution_device"],
+                        "metrics": {"success": seed % 2 == 0, "scores": float(seed % 4),
+                            "useful_throughput": .25, "completed_cycles": float(seed % 3)},
                         "phase4_start_profile": (None if assignment is None else {
                             "factor_id": assignment["factor_id"],
                             "registry_profile_id": assignment["registry_profile_id"],
@@ -345,8 +349,13 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
                             "profile_config_sha256": assignment["profile_config_sha256"],
                             "assignment_sha256": assignment["assignment_sha256"],
                             "profile_applied_before_observation": True,
-                            "legal_start_validation_rate": None,
-                            "outcome_by_start_state": None,
+                            "validated_pose_world_count": 1,
+                            "per_world_legal": [True],
+                            "legal_start_validation_rate": 1.,
+                            "outcome_metrics": {"success": seed % 2 == 0,
+                                "scores": float(seed % 4),
+                                "useful_throughput": .25,
+                                "completed_cycles": float(seed % 3)},
                             "qualification_eligible": False})})
         report_path = output_dir / "condition.json"
         policy_manifest = {}
@@ -389,12 +398,40 @@ def test_phase4_start_profile_dispatch_pairs_all_policies_and_exact_seeds(tmp_pa
     assert result["executed"] is True
     assert result["simulator_behavior_validated"] is False
     assert result["qualification_eligible"] is False
-    assert result["legal_start_validation_rate"] is None
-    assert result["outcome_by_start_state"] is None
+    assert result["legal_start_validation_rate"] == 1.
+    assert len(result["coverage_digest_sha256"]) == 64
+    outcomes = result["outcome_by_start_state"]
+    assert set(outcomes["states"]) == {"scenario_defined", "team_start_set_b"}
+    assert outcomes["states"]["team_start_set_b"]["by_policy"]["A1"]["n"] == cell["seed_count"]
+    assert outcomes["paired_deltas_vs_scenario_defined"]["A1"]["scores"]["mean_delta"] == 0.
     assert result["dispatch_return_codes"] == {"no_factor": 0, "factor_treatment": 0}
     assert result["paired_coverage"]["paired_row_count"] == (
         (len(MECO_TRACKS) + 3 + 3) * cell["seed_count"])
     assert len(observed) == 2
+
+    treatment_report_path = tmp_path / "dispatch/factor_treatment/condition.json"
+    original = json.loads(treatment_report_path.read_text())
+    assignment = cell["start_profile_assignment"]
+
+    def reject(mutator, message):
+        damaged = json.loads(json.dumps(original))
+        mutator(damaged)
+        treatment_report_path.write_text(json.dumps(damaged))
+        with pytest.raises(ValueError, match=message):
+            campaign_runner._validate_phase4_start_profile_pair(
+                tmp_path / "dispatch", assignment,
+                categories=[cell["case_axes"]["category"]],
+                seeds=observed_seeds, expected_binding=expected_binding)
+
+    reject(lambda report: report["records"][0].update(seed=-1), "exact profile/seed/policy coverage")
+    reject(lambda report: report["records"][0]["phase4_start_profile"].update(
+        per_world_legal=[True, False], validated_pose_world_count=2,
+        legal_start_validation_rate=.5), "partial per-world legality")
+    reject(lambda report: report["records"][0]["phase4_start_profile"][
+        "outcome_metrics"].update(scores=float("nan")), "invalid outcome metric")
+    reject(lambda report: report["records"][0].update(source_identity_sha256="wrong"),
+        "mismatched checkpoint/source/device binding")
+    treatment_report_path.write_text(json.dumps(original))
     assert all("--phase4-start-profile" not in argv for argv in observed[:1])
     assert "--phase4-start-profile" in observed[1]
     assert result["paired_coverage"]["paired_outcome_by_family"] is None
