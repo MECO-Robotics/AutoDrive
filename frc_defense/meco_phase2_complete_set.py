@@ -785,9 +785,11 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
             if root.exists():
                 if root.is_symlink() or not root.is_dir():
                     raise ValueError("existing complete-set root is not a safe directory")
+                root_was_present = True
                 root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                     getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
             else:
+                root_was_present = False
                 os.mkdir(root.name, mode=0o700, dir_fd=parent_fd)
                 root_fd = os.open(root.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                     getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
@@ -820,7 +822,7 @@ def execute_complete_set(descriptor: dict, *, repo_root: Path | None = None,
             if (current.st_dev != root_identity.st_dev or
                     current.st_ino != root_identity.st_ino):
                 raise ValueError("complete-set output root changed after it was pinned")
-        if root.exists():
+        if root_was_present:
             _validate_existing_attempt_root(root, outputs)
             state = json.loads(_trusted_private_file(state_path).read_text(encoding="utf-8"))
             if (state.get("schema") != SCHEMA or

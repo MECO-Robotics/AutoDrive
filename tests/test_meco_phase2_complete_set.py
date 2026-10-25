@@ -135,9 +135,10 @@ def test_tampered_c_output_fails_closed_on_resume(tmp_path, monkeypatch):
 
 
 def test_output_parent_symlink_created_during_lease_is_rejected(tmp_path, monkeypatch):
-    descriptor = _descriptor(tmp_path)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    descriptor = _descriptor(parent)
     _install_adapters(monkeypatch)
-    parent = Path(descriptor["outputs"]["root"]).parent
     target = tmp_path / "other"
     target.mkdir()
 
