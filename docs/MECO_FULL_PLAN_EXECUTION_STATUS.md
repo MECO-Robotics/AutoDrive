@@ -1,5 +1,30 @@
 # MECO learning tracks plan: execution status
 
+> **Live five-track campaign recheck — 2026-10-25 02:41 UTC.** The user
+> systemd service `meco-five-continuous-20261025.service` is active (PID
+> `2750253`). A1 and A2 are each at 100/100 updates; A3 is at 44/100 on
+> `cuda:0`, C1 at 62/100 on `cuda:1`, and C2 is queued. The status heartbeat
+> is `2026-10-25T02:41:33Z`; cycle 1 has two completed chunks, zero completed
+> cycles, and no evaluation yet. This is still the pinned older-source
+> diagnostic campaign, using only `pickup_simple/cluster`, without evaluation
+> protocol binding, warm starts, or Phase 4 training exposure. The first two
+> tracks reaching 100/100 means their training chunks completed; it does not
+> mean they passed a curriculum stage or evaluation gate. All five remain in
+> the continuous training schedule.
+
+> **Phase 4 training exposure manifest — 2026-10-25.** The reviewed tranche is
+> integrated in `main` as `24a280402`, `5659d7cfd`, and `e843d7ee6`. Campaign
+> manifests can now bind the opt-in Phase 4 exposure flag, and durable
+> evaluation history and transition auditing bind the campaign configuration
+> and verify exactly one correctly pathed and hashed snapshot per track.
+> Independent exact-head review approved the feature head before integration.
+> Twenty-five focused CPU checks across the history/transition/scheduler/eval
+> suites, compilation, and diff checks passed. The dashboard provenance ledger
+> is now updated to 62 scoped summaries; dashboard restart/currentness
+> verification is pending. The active r4 manifest and workers were not changed.
+> No simulator evaluation, replay, GPU check, outcome run, or qualification was
+> performed.
+
 > **R4 live training snapshot — 2026-10-25 02:10 UTC.** The service remains
 > active (PID `2750253`). A1 completed its first 100-update chunk; A2 reached
 > 100/100 updates and was still finalizing that chunk; A3 had started at 6/100
