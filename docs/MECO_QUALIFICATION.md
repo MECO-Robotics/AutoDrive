@@ -236,6 +236,7 @@ python -m frc_defense.meco_qualification create-protocol \
   --calibration-bundle-json "qualifications/meco/d0-calibration-${TARGET}-bundle.json" \
   --matched-reference-calibration-bundle-json "qualifications/meco/reference-variance-${TARGET}-bundle.json" \
   --reference-margin-review-json "qualifications/meco/reference-margin-review-${TARGET}.json" \
+  --phase0-identity-binding-json qualifications/meco/stage1-phase0-identity-binding.json \
   --safety-margins-json qualifications/meco/safety-margins.json \
   --output "qualifications/meco/protocol-${TARGET}-v5.json"
 ```
@@ -271,16 +272,27 @@ python -m frc_defense.meco_qualification preflight-stage1 \
   --output qualifications/meco/stage1-readiness.json
 ```
 
-The Phase 0 index uses schema `meco-stage1-phase0-evidence-index-v1` and
-contains `source_identity_sha256`, `config_sha256`, six relative JSON artifact
-references (`effective_freeze`, `seed_partition`, `score_estimand_review`,
-`d0_calibration_bundle`, `matched_reference_calibration_bundle`, and
-`margin_review`), and `index_sha256` over the other index fields. Each
-reference contains only `path` and the SHA-256 of the exact file bytes. Freeze
-and partition artifacts receive current-schema and self-digest/cross-binding
-checks; the report validators are reused for D0 calibration, matched-reference
-calibration, score-estimand, and margin-review content. This metadata check
-does not re-capture source/runtime state or execute the full Phase 0 materializer.
+The Phase 0 index uses schema `meco-stage1-phase0-evidence-index-v1`; it binds
+the evaluator `source_identity_sha256` separately from the freeze's Git
+`commit`, `tree`, `source_plan_path`, and `source_plan_sha256`. It contains
+relative path and exact-byte SHA-256 references for the capture receipt,
+effective snapshot, effective freeze, tuple registry, partition materialization,
+score-estimand review, D0 calibration bundle, matched-reference calibration
+bundle, and margin review. Its canonical `index_sha256` covers those references
+and the explicit runtime, dependency-lock, normalized-runtime, and eight
+configuration identities. For a new calibrated `pickup_simple` Stage 1
+protocol, `phase0_identity_binding` is required in the v5 protocol body and is
+covered by `protocol_id`; the campaign must carry the identical binding. The
+preflight checks the serialized receipt→snapshot→freeze→tuple registry/partition
+chain and each embedded digest/link. It does not re-capture source/runtime state,
+reproduce the factory, inspect the current checkout, or execute the full Phase 0
+materializer. Those freshness checks are explicitly reported as
+`current_source_factory_reproduction: not_performed`.
+The baseline-freeze contract currently has an empty trusted allocation-artifact
+digest allowlist. An absent authorization or an unpinned authorization digest
+therefore blocks readiness (`phase0_allocation_authorization_not_validated` or
+`phase0_allocation_authorization_untrusted`) until the separately reviewed
+approval digest is pinned in the canonical contract.
 The campaign manifest uses schema
 `meco-five-track-stage1-campaign-manifest-v1`; each track manifest uses
 `meco-stage1-checkpoint-manifest-v1`. These metadata contracts bind the
@@ -290,12 +302,12 @@ campaign ancestry. The campaign manifest fields are `qualification_eligible`,
 `evaluation_split`, `scenario_id`, `scenario_version`, `protocol_id`,
 `source_identity_sha256`, `config_sha256`, `promotion_comparator`,
 `safety_floor_policy`, `validation_seeds`, `final_test_seeds`,
-`matched_campaign_ancestry`, `campaign_roots`, and `checkpoint_roots`, in
-addition to its schema tag. Checkpoint manifests carry `policy_id`, the
-declared `checkpoint_sha256`, source/config/protocol/scenario bindings, both
-seed-partition digests, and `matched_campaign_ancestry`, in addition to their
-schema tag. Campaign-declared roots must be absolute paths that resolve to existing
-directories. Input and referenced evidence paths are canonicalized through
+`matched_campaign_ancestry`, `campaign_roots`, `checkpoint_roots`, and
+`phase0_identity_binding`, in addition to its schema tag. Checkpoint manifests
+carry `policy_id`, the declared `checkpoint_sha256`, source/config/protocol/scenario
+bindings, both seed-partition digests, and `matched_campaign_ancestry`, in
+addition to their schema tag. Campaign-declared roots must be absolute paths
+that resolve to existing directories. Input and referenced evidence paths are canonicalized through
 symlinks and rejected if they fall inside any protected root; the report path
 is subject to the same check. The output is written only to the explicit
 destination, and an existing non-identical report is never replaced.
@@ -318,17 +330,19 @@ the currently active training campaign.
 
 The output schema is `meco-stage1-readiness-preflight-v1`; it contains
 `status`, `ready`, `scope`, `checkpoint_digest_semantics`, explicit false
-side-effect/outcome flags, five separate `tracks` rows, per-check evidence
-paths and digests, and stable `blocker_codes`. Illustrative output fragments
-(not evidence):
+side-effect/outcome flags, `current_source_factory_reproduction`, five separate
+`tracks` rows, per-check evidence paths and digests, and stable `blocker_codes`.
+Illustrative output fragments (not evidence):
 
 ```json
 {"status":"blocked","ready":false,"scope":"metadata_consistent_only",
+ "current_source_factory_reproduction":"not_performed",
  "blocker_codes":["phase0_artifact_set_incomplete"]}
 ```
 
 ```json
 {"status":"ready","ready":true,"scope":"metadata_consistent_only",
+ "current_source_factory_reproduction":"not_performed",
  "checkpoint_digest_semantics":"declared_metadata_only_not_verified_against_checkpoint_bytes",
  "blocker_codes":[]}
 ```
