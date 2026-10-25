@@ -1,4 +1,5 @@
 import pytest
+import math
 import torch
 
 from frc_defense.experimental_route_evaluation import (
@@ -7,7 +8,7 @@ from frc_defense.experimental_route_evaluation import (
     MAX_ROUTE_QUERY_BATCH,
     evaluate_device_route_chunks,
 )
-from frc_defense.meco_candidates import DeviceCandidateBatch
+from frc_defense.meco_candidates import DeviceCandidateBatch, _goal_nodes_batch
 from frc_defense.meco_track_training import _d1_d2_scores
 from types import SimpleNamespace
 
@@ -173,3 +174,35 @@ def test_device_route_chunks_keep_query_order_without_host_projection(monkeypatc
     assert batch.queries == queries
     assert torch.equal(batch.distance_m, goals[:, 0].to(torch.float64))
     assert torch.equal(batch.candidate_index, torch.arange(count))
+
+
+def test_goal_node_batch_maps_legal_cells_without_scalar_extraction():
+    class Planner:
+        @staticmethod
+        def _footprint_path_clear(path, heading, length, width):
+            return torch.ones(path.shape[0], dtype=torch.bool, device=path.device)
+
+    class Sim:
+        field_length = 2.
+        field_width = 2.
+        length = torch.tensor([[0., 0., 0., .5, 0., 0.]])
+        width = torch.tensor([[0., 0., 0., .5, 0., 0.]])
+
+    env = SimpleNamespace(device="cpu", sim=Sim(), planner=Planner(),
+        _perceived_robot_obstacles=lambda: torch.zeros((6, 0, 3)))
+    class Graph:
+        node_count = 1
+        resolution_m = 1.
+        nx = 2
+        ny = 2
+        lookup = torch.zeros((8, 2, 2), dtype=torch.long)
+        xy = torch.tensor([[.5, .5]])
+        heading_bin = torch.tensor([2])
+
+    nodes, centers, bins, valid = _goal_nodes_batch(env, Graph(),
+        torch.tensor([[.5, .5], [3., 3.]]), torch.tensor([math.pi / 2, 0.]),
+        torch.tensor([False, False]))
+    assert nodes.tolist() == [0, -1]
+    assert centers[0].tolist() == [.5, .5]
+    assert bins.tolist() == [2, 0]
+    assert valid.tolist() == [True, False]
