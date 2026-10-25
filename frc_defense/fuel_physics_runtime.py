@@ -292,6 +292,22 @@ def launch_fuel(env, selected, destinations, *, origins=None, height=.35,
     illustrative.
     """
     physics = bind_fuel_state(env)
+    physics._validate_qualifying_backend()
+    if physics._gpu_qualifying:
+        for name, tensor, shape in (
+                ("selected mask", selected, (physics.n, physics.p)),
+                ("destinations", destinations, None),
+                ("origins", origins, None),
+                ("spawn positions", spawn_positions, None)):
+            if tensor is None:
+                continue
+            if (not isinstance(tensor, torch.Tensor) or
+                    tensor.device != physics.device or
+                    (shape is not None and tensor.shape != shape)):
+                expected = f" with shape {shape}" if shape is not None else ""
+                raise ValueError(
+                    f"GPU-qualifying fuel {name} must be a device-resident "
+                    f"tensor{expected}")
     start = env.piece_pos if origins is None else origins
     target = destinations.expand_as(env.piece_pos)
     z = max(height, physics.config.radius)
