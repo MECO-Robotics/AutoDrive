@@ -466,7 +466,9 @@ def _validate_paired_calibration_replay_binding(binding, worker, *, device,
                 binding["control_binding_sha256"]
             or binding["control_binding"].get("prediction_contract_sha256") !=
                 (_canonical_digest(binding["control_binding"].get("prediction_contract"))
-                 if binding["control_binding"].get("prediction_contract") is not None else None)):
+                 if binding["control_binding"].get("prediction_contract") is not None else None)
+            or _canonical_digest({key: value for key, value in binding["control_binding"].items()
+                if key != "control_binding_sha256"}) != binding["control_binding_sha256"]):
         raise ValueError("paired calibration binding does not match this replay")
     if (binding["work_unit"].get("category") not in (None, qualification_case.get("category"))
             or any(binding["work_unit"].get(key) != value
@@ -488,7 +490,8 @@ def _validate_paired_calibration_replay_binding(binding, worker, *, device,
         raise ValueError("paired calibration work unit differs from replay policy")
     if binding["control_id"] != policy and not binding["control_id"].startswith(policy + "/"):
         raise ValueError("paired calibration control ID differs from replay policy")
-    if (binding["control_binding"].get("policy") != policy
+    if (binding["control_binding"].get("control_id") != binding["control_id"]
+            or binding["control_binding"].get("policy") != policy
             or binding["control_binding"].get("prediction_mode") !=
                 prediction_mode):
         raise ValueError("paired calibration control binding differs from replay policy/mode")
@@ -538,6 +541,51 @@ def _validate_paired_calibration_replay_bindings(bindings, seeds, worker, *,
                 values[0]["work_unit"].get("repetition")
             for binding in values[1:]):
         raise ValueError("paired calibration per-seed bindings mix campaign pair/control units")
+
+
+def _validate_paired_calibration_campaign_inputs(campaign, shard_index, bindings,
+        worker, seeds, *, repo_root, configuration_artifacts, policy,
+        calibration_control_policy, candidate_k, route_cost_weight,
+        prediction_mode):
+    """Resolve all replay claims against the frozen campaign before simulation."""
+    from . import meco_qualification as qualification
+
+    gate = qualification.validate_paired_calibration_gate_artifacts(campaign,
+        repo_root=repo_root, configuration_artifacts=configuration_artifacts)
+    shard = qualification._paired_shard_for_index(campaign, shard_index)
+    if not isinstance(bindings, dict) or not bindings:
+        raise ValueError("paired calibration campaign requires per-seed bindings")
+    first_binding = next(iter(bindings.values()))
+    if not isinstance(first_binding, dict):
+        raise ValueError("paired calibration per-seed binding must be an object")
+    expected_worker = next((assignment for assignment in campaign["worker_assignments"]
+        if assignment["worker_id"] == shard["worker_id"]), None)
+    if expected_worker is None or worker != expected_worker:
+        raise ValueError("paired calibration worker identity differs from exact shard assignment")
+    units = {unit["seed"]: unit for unit in shard["work_units"]
+        if unit.get("pair_id") == first_binding.get("pair_id")
+        and unit.get("control_id") == first_binding.get("control_id")}
+    if set(units) != set(seeds) or set(bindings) != set(seeds):
+        raise ValueError("paired calibration shard bindings do not cover the exact scored seed tuple")
+    for seed in seeds:
+        expected_binding = qualification.paired_calibration_replay_binding(
+            campaign, shard_index, units[seed])
+        if bindings[seed] != expected_binding:
+            raise ValueError("paired calibration replay binding differs from frozen campaign work unit")
+    control_id = next(iter(bindings.values()))["control_id"]
+    controls = {control["control_id"]: control for control in campaign["controls"]}
+    selected_control = controls.get(control_id)
+    if selected_control is None or selected_control.get("execution_supported") is not True:
+        raise ValueError("paired calibration control is not executable in the frozen campaign")
+    if (selected_control.get("policy") != policy
+            or selected_control.get("prediction_mode") != prediction_mode
+            or (policy != "D0" and calibration_control_policy != policy)
+            or (policy == "D0" and calibration_control_policy not in ("D1", "D2"))
+            or selected_control.get("candidate_configuration", {}).get("candidate_k") != candidate_k
+            or selected_control.get("candidate_configuration", {}).get(
+                "route_cost_points_per_second") != route_cost_weight):
+        raise ValueError("paired calibration replay control differs from frozen control specification")
+    return gate
 
 
 def _evaluation_record_digest(record: dict) -> str:
@@ -2619,7 +2667,10 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                   condition_id: str | None = None,
                   simulated_score_estimand: str | Path | None = None,
                   paired_calibration_bindings: dict[int, dict] | None = None,
-                  paired_calibration_worker_identity: dict | None = None):
+                  paired_calibration_worker_identity: dict | None = None,
+                  paired_calibration_campaign: dict | None = None,
+                  paired_calibration_shard_index: int | None = None,
+                  paired_calibration_configuration_artifacts: dict | None = None):
     """Paired seeded simulator evaluation for D0/D1/D2 and five checkpoints."""
     if type(episodes) is not int or episodes < 1:
         raise ValueError("episodes must be positive")
@@ -2649,17 +2700,36 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
         replay_policy_seeds = {policy: set(selected)
                                for policy, selected in replay_selection.items()}
         replay_seed_set = set().union(*replay_policy_seeds.values())
-    paired_replay_requested = (paired_calibration_bindings is not None or
-        paired_calibration_worker_identity is not None)
-    if paired_replay_requested and (paired_calibration_bindings is None or
-            paired_calibration_worker_identity is None):
-        raise ValueError("paired calibration replay requires per-seed campaign bindings and worker identity")
+    paired_replay_requested = any(value is not None for value in (
+        paired_calibration_bindings, paired_calibration_worker_identity,
+        paired_calibration_campaign, paired_calibration_shard_index,
+        paired_calibration_configuration_artifacts))
+    if paired_replay_requested and any(value is None for value in (
+            paired_calibration_bindings, paired_calibration_worker_identity,
+            paired_calibration_campaign, paired_calibration_shard_index,
+            paired_calibration_configuration_artifacts)):
+        raise ValueError("paired calibration replay requires trusted campaign, shard, artifact, worker, and per-seed bindings")
     if paired_replay_requested and (split != "calibration" or
             calibration_control_policy is None):
         raise ValueError("paired replay bindings are accepted only for calibration controls")
     if paired_replay_requested and (not isinstance(paired_calibration_bindings, dict)
             or set(paired_calibration_bindings) != set(scored_seeds)):
         raise ValueError("paired calibration bindings must cover every exact scored seed")
+    if paired_replay_requested:
+        if not isinstance(replay_selection, dict) or len(replay_selection) != 1:
+            raise ValueError("paired calibration replay requires one exact selected policy")
+        trusted_policy = next(iter(replay_selection))
+        trusted_mode = ("current" if trusted_policy in ("D0", "D1") else
+            (control_prediction_modes or {}).get(trusted_policy, "cv"))
+        _validate_paired_calibration_campaign_inputs(
+            paired_calibration_campaign, paired_calibration_shard_index,
+            paired_calibration_bindings, paired_calibration_worker_identity,
+            scored_seeds, repo_root=Path(__file__).resolve().parents[1],
+            configuration_artifacts=paired_calibration_configuration_artifacts,
+            policy=trusted_policy, calibration_control_policy=calibration_control_policy,
+            candidate_k=candidate_k_override,
+            route_cost_weight=calibration_route_cost_points_per_second,
+            prediction_mode=trusted_mode)
     if simulated_score_estimand is not None:
         if (replay_output_dir is None or
                 (replay_selection is not None and not paired_replay_requested)
