@@ -1757,6 +1757,8 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
     """
     if env.n != 1 or world != 0 or slot != 3:
         raise ValueError("safe curriculum candidate source currently supports learner slot 3 in one world")
+    if observation.device != torch.device(env.device):
+        raise ValueError("safe curriculum observation is not on the assigned device")
     mask = observation[world, slot, -8:].bool()
     indices, available, _ = env._candidates()
     track_indices = indices[world, slot]
@@ -1869,6 +1871,10 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
     device_values[4:, 8] = torch.linalg.vector_norm(fixed_delta, dim=-1)
     device_missing[4:, (2, 3, 4, 8)] = 0.
     device_missing[:, 13] = 1.
+    device_values = torch.where(device_missing.bool(),
+                                torch.zeros_like(device_values), device_values)
+    torch._assert_async(torch.isfinite(device_values).all(),
+                        "base candidate features contain non-finite device values")
     return SafeActionCandidates(snap, table, table.candidate_ids[fallback_action],
         tuple(range(8)), device_values, device_missing, mask,
         track_indices.to(device=observation.device, dtype=torch.long),

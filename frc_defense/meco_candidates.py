@@ -575,6 +575,8 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
         extra_track_start=None, extra_track_indices=None,
+        oracle_track_start=None, oracle_track_indices=None,
+        oracle_variant_count=0,
         oracle_capacity, learned_traversal_cost, learned_cost_scale):
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
@@ -599,6 +601,14 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         extra_slice = slice(extra_track_start,
                             extra_track_start + extra_track_indices.numel())
         track_indices[extra_slice] = extra_track_indices
+    if oracle_track_indices is not None:
+        oracle_count = oracle_track_indices.numel() * oracle_variant_count
+        if (oracle_track_indices.device != device or oracle_track_indices.ndim != 1
+                or oracle_track_start is None or oracle_track_start < 0
+                or oracle_track_start + oracle_count > count):
+            raise RuntimeError("oracle target tensor does not align with its candidate specifications")
+        oracle_slice = slice(oracle_track_start, oracle_track_start + oracle_count)
+        track_indices[oracle_slice] = oracle_track_indices.repeat(oracle_variant_count)
     target_available = ((track_indices >= 0) &
                         (track_indices < env.track_pos.shape[2]))
     safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
@@ -617,6 +627,10 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
         ~base_track_present[None, :]).all(dim=-1) & (track_indices >= 0)
     first_legal_collect = base.device_valid_mask[:4].to(torch.long).argmax()
     actions = torch.where(extra_flags, first_legal_collect.expand_as(actions), actions)
+    if oracle_track_indices is not None:
+        row_ids = torch.arange(count, device=device)
+        oracle_rows = row_ids >= int(oracle_track_start)
+        actions = torch.where(oracle_rows, first_legal_collect.expand_as(actions), actions)
     fuel_xy = env.track_pos[0, 3].index_select(0, safe_tracks)
     sensed_points, _, sensed_mask = env._perceived_fuel(3)
     sensed_points, sensed_mask = sensed_points[0], sensed_mask[0]
@@ -1243,7 +1257,15 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         (.68, .25), (.68, -.25), (-.68, .25), (-.68, -.25),
         (.25, .68), (-.25, .68))
     oracle_start_index = len(specs)
-    oracle_track_ids = sorted(target_rows)
+    if device_resident:
+        base_oracle_tracks = base.device_track_indices[:4][
+            base.device_missing_mask[:4, 1] < .5]
+        oracle_track_indices = torch.unique(torch.cat((base_oracle_tracks,
+            additional_track_indices)), sorted=True)
+        oracle_track_ids = oracle_track_indices.detach().to(device="cpu").tolist()
+    else:
+        oracle_track_indices = None
+        oracle_track_ids = sorted(target_rows)
     for variant, (forward, lateral) in enumerate(oracle_offsets, 7):
         for track in oracle_track_ids:
             action = next((i for i in range(4) if base.table.valid_mask[i]), None)
@@ -1259,6 +1281,9 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             commitment_match_valid=commitment_match_valid,
             extra_track_start=additional_track_start,
             extra_track_indices=additional_track_indices,
+            oracle_track_start=oracle_start_index,
+            oracle_track_indices=oracle_track_indices,
+            oracle_variant_count=len(oracle_offsets),
             oracle_capacity=oracle_capacity,
             learned_traversal_cost=learned_traversal_cost,
             learned_cost_scale=learned_cost_scale)

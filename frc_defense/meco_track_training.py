@@ -2806,10 +2806,8 @@ def _d1_d2_scores(candidate_set: RouteFeasibleCandidates, env, policy: str,
         utility = (1. + .2 * safe_raw[:, columns["nearby_sensed_track_count"]]
                    + .25 * safe_raw[:, columns["track_confidence"]]
                    - .04 * safe_raw[:, columns["track_age_s"]])
-        fixed = {"score": .8, "intercept": .1, "ferry": .45, "hold": .05}
-        noncollect = torch.tensor([fixed.get(name.split(":", 1)[0], 0.)
-                                   for name in device_batch.candidate_ids],
-                                  device=device_batch.device, dtype=raw.dtype)
+        fixed = raw.new_tensor((0., 0., 0., 0., .8, .1, .45, .05))
+        noncollect = fixed.index_select(0, action.clamp(0, 7))
         utility = torch.where(collect, utility, noncollect)
         # Keep the score dtype identical to the legacy feature-table path.
         # Risk forecasts may carry a wider dtype due to geometric constants;
@@ -2859,6 +2857,9 @@ def _require_device_candidate_batch(candidate_set, env, policy):
             or any(query.snapshot_id != candidate_set.observation.snapshot_id
                    for query in batch.route_batch.queries)):
         raise RuntimeError(f"{policy} candidate batch shape or snapshot contract is invalid")
+    torch._assert_async(((batch.action_index >= 0) &
+                         (batch.action_index < 8)).all(),
+        f"{policy} candidate batch contains an invalid action index")
     torch._assert_async(torch.isfinite(batch.raw_features).all(),
         f"{policy} candidate batch contains non-finite features")
     torch._assert_async(torch.isfinite(batch.route_cost_points).all(),
