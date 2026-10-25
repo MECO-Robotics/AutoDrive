@@ -11,6 +11,10 @@ import math
 
 CURRICULUM_VERSION = '2'
 _SPLITS = {'train': 0, 'validation': 1, 'test': 2, 'calibration': 3}
+GPU_NUMERIC_GATE_PROTOCOL_VERSION = 'meco-qualification-v5-gpu-bootstrap'
+_LEGACY_QUALIFICATION_PROTOCOL_VERSIONS = (
+    'meco-qualification-v1', 'meco-qualification-v2',
+    'meco-qualification-v3', 'meco-qualification-v4')
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,7 @@ class EvaluationResult:
     curriculum_version: str = CURRICULUM_VERSION
     protocol_id: str = ''
     numeric_gate_verdict: dict | None = None
+    protocol_version: str | None = None
 
 
 @dataclass
@@ -246,6 +251,18 @@ def _failures(result, *, expected_verdict_scope='qualification'):
         failures.append('required categories must match exactly')
     numeric_verdict = result.numeric_gate_verdict
     device_category_verdicts = None
+    version = result.protocol_version
+    if (version is not None and
+            version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS and
+            version != GPU_NUMERIC_GATE_PROTOCOL_VERSION):
+        failures.append('qualification protocol version is unsupported')
+    verdict_required = (version == GPU_NUMERIC_GATE_PROTOCOL_VERSION or
+        (version is not None and version not in _LEGACY_QUALIFICATION_PROTOCOL_VERSIONS))
+    if numeric_verdict is None and verdict_required:
+        failures.append('GPU numeric gate verdict is missing or unbound')
+        # An empty device map suppresses all legacy host threshold fallbacks;
+        # category validation below will fail closed as well.
+        device_category_verdicts = {}
     if numeric_verdict is not None:
         required_verdict_categories = ('success_rate_pass',
             'throughput_ratio_pass', 'minimum_useful_throughput_pass',
@@ -257,6 +274,7 @@ def _failures(result, *, expected_verdict_scope='qualification'):
                 or numeric_verdict.get('verdict_type') != 'meco-gpu-numeric-gate-verdict-v1'
                 or numeric_verdict.get('implementation_id') !=
                     'meco-v4-cluster-episode-device-percentile-v1'
+                or version != GPU_NUMERIC_GATE_PROTOCOL_VERSION
                 or numeric_verdict.get('verdict_scope') != expected_verdict_scope
                 or numeric_verdict.get('evaluation_id') != result.evaluation_id
                 or numeric_verdict.get('protocol_id') != result.protocol_id

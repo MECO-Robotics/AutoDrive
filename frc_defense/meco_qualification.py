@@ -18,14 +18,14 @@ import re
 import uuid
 
 from .training_curriculum import (CURRICULUM_VERSION, CategoryResult,
-    CurriculumState, EvaluationResult, SCENARIOS, _ancestors, evaluate_promotion,
-    seed_partition)
+    CurriculumState, EvaluationResult, GPU_NUMERIC_GATE_PROTOCOL_VERSION,
+    SCENARIOS, _ancestors, evaluate_promotion, seed_partition)
 
 PROTOCOL_VERSION = "meco-qualification-v1"
 LEGACY_CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v2"
 D0_PAIRED_REFERENCE_PROTOCOL_VERSION = "meco-qualification-v3"
 CALIBRATED_PROTOCOL_VERSION = "meco-qualification-v4"
-GPU_BOOTSTRAP_PROTOCOL_VERSION = "meco-qualification-v5-gpu-bootstrap"
+GPU_BOOTSTRAP_PROTOCOL_VERSION = GPU_NUMERIC_GATE_PROTOCOL_VERSION
 GPU_BOOTSTRAP_IMPLEMENTATION_ID = "meco-v4-cluster-episode-device-percentile-v1"
 D0_CALIBRATION_VERSION = "meco-d0-calibration-v2"
 D0_CALIBRATION_SHARD_MANIFEST = "meco-d0-calibration-shard-manifest-v1"
@@ -4063,7 +4063,7 @@ def consume_validation_round(report: dict, *, protocol: dict,
     result = EvaluationResult(report["evaluation_id"], scenario, "validation",
         tuple(categories), report["bundle_id"],
         SCENARIOS[scenario].version, CURRICULUM_VERSION, protocol_id,
-        numeric_verdict)
+        numeric_verdict, protocol.get("protocol_version"))
     retention_results = tuple(_retention_result(item, protocol, report,
                                 device=device, state=state)
                               for item in retention_reports)
@@ -4158,7 +4158,8 @@ def _retention_result(report, protocol, primary, *, device, state):
         "category_verdicts": verdict_by_category, "failures": numeric_failures}
     return EvaluationResult(report["evaluation_id"], scenario, "validation",
         tuple(categories), report["bundle_id"], SCENARIOS[scenario].version,
-        CURRICULUM_VERSION, protocol["protocol_id"], numeric_verdict)
+        CURRICULUM_VERSION, protocol["protocol_id"], numeric_verdict,
+        protocol.get("protocol_version"))
 
 
 def write_immutable_report(path: str | Path, report: dict) -> str:

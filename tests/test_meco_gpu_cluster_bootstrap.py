@@ -120,13 +120,33 @@ def test_retention_verdict_requires_explicit_scope_and_safety_disposition():
         "category_verdicts": device, "failures": []}
     result = EvaluationResult("fixture-eval", scenario.scenario_id, "validation",
         categories, "fixture-bundle", scenario.version, CURRICULUM_VERSION,
-        "fixture-protocol", verdict)
+        "fixture-protocol", verdict,
+        protocol_version="meco-qualification-v5-gpu-bootstrap")
     assert _failures(result, expected_verdict_scope="retention") == []
     assert "GPU numeric gate verdict is missing or unbound" in _failures(result)
 
     malformed = {**verdict, "verdict_scope": "qualification"}
     malformed_result = EvaluationResult("fixture-eval", scenario.scenario_id,
         "validation", categories, "fixture-bundle", scenario.version,
-        CURRICULUM_VERSION, "fixture-protocol", malformed)
+        CURRICULUM_VERSION, "fixture-protocol", malformed,
+        protocol_version="meco-qualification-v5-gpu-bootstrap")
     assert any("GPU numeric category verdict is invalid" in failure
                for failure in _failures(malformed_result))
+
+    failing_categories = tuple(CategoryResult(name, len(seeds), 0,
+        0.0, 0.0, True, True, "fixture-protocol", seeds, seeds)
+        for name in scenario.required_categories)
+    missing_v4 = EvaluationResult("missing-verdict", scenario.scenario_id,
+        "validation", failing_categories, "fixture-bundle", scenario.version,
+        CURRICULUM_VERSION, "fixture-protocol",
+        protocol_version="meco-qualification-v5-gpu-bootstrap")
+    missing_failures = _failures(missing_v4)
+    assert "GPU numeric gate verdict is missing or unbound" in missing_failures
+    assert not any("success gate failed" in failure or
+                   "absolute delivery minimum failed" in failure
+                   for failure in missing_failures)
+
+    legacy = EvaluationResult("legacy", scenario.scenario_id, "validation",
+        failing_categories, "fixture-bundle", scenario.version,
+        CURRICULUM_VERSION, "legacy-protocol")
+    assert any("success gate failed" in failure for failure in _failures(legacy))
