@@ -210,6 +210,14 @@ class DeviceCandidateBatch:
                 tuple(query.candidate_id for query in self.route_batch.queries) !=
                 tuple(self.candidate_ids)):
             raise ValueError("route batch must align with device candidate order")
+        torch._assert_async(self.valid_mask.any(),
+            "device candidate batch has no feasible candidate")
+        torch._assert_async((self.fallback_index >= 0) &
+            (self.fallback_index < count),
+            "device candidate fallback index is out of range")
+        safe_fallback = self.fallback_index.clamp(0, count - 1)
+        torch._assert_async(self.valid_mask[0, safe_fallback],
+            "device candidate fallback is not feasible")
 
     @property
     def device(self):
@@ -571,12 +579,13 @@ def _device_candidate_ids(base, specs, continue_index, active_commitment):
 
 
 @torch.no_grad()
-def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
+def _build_device_candidate_set(env, base, graph, specs, *,
         candidate_k, action_ticks, prediction_mode, active_commitment,
         continue_index, commitment_match_valid=None,
         extra_track_start=None, extra_track_indices=None,
         oracle_track_start=None, oracle_track_indices=None,
-        oracle_variant_count=0,
+        oracle_variant_count=0, continue_action_tensor=None,
+        continue_track_tensor=None,
         oracle_capacity, learned_traversal_cost, learned_cost_scale):
     """Build Plan C policy tensors on env.device from stable host spec IDs."""
     device = torch.device(env.device)
@@ -609,6 +618,15 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
             raise RuntimeError("oracle target tensor does not align with its candidate specifications")
         oracle_slice = slice(oracle_track_start, oracle_track_start + oracle_count)
         track_indices[oracle_slice] = oracle_track_indices.repeat(oracle_variant_count)
+    if continue_index is not None:
+        if continue_action_tensor is not None:
+            if continue_action_tensor.device != device or continue_action_tensor.numel() != 1:
+                raise RuntimeError("commitment action tensor is not a device scalar")
+            actions[continue_index] = continue_action_tensor.reshape(())
+        if continue_track_tensor is not None:
+            if continue_track_tensor.device != device or continue_track_tensor.numel() != 1:
+                raise RuntimeError("commitment target tensor is not a device scalar")
+            track_indices[continue_index] = continue_track_tensor.reshape(())
     target_available = ((track_indices >= 0) &
                         (track_indices < env.track_pos.shape[2]))
     safe_tracks = track_indices.clamp(0, max(env.track_pos.shape[2] - 1, 0))
@@ -754,10 +772,9 @@ def _build_device_candidate_set(env, base, graph, specs, target_rows, *,
     fallback_valid = valid[0].gather(0, fallback.reshape(1)).squeeze(0)
     valid_cost = route_cost_for_fallback.masked_fill(~valid[0], float("inf"))
     cheapest = valid_cost.argmin()
-    hold_index = next((i for i, candidate_id in enumerate(policy_ids)
-                       if candidate_id == "hold"), fallback_index)
+    hold_index = torch.tensor(7, device=device, dtype=torch.long)
     fallback = torch.where(fallback_valid, fallback,
-        torch.where(valid[0, hold_index], torch.tensor(hold_index, device=device), cheapest))
+        torch.where(valid[0, hold_index], hold_index, cheapest))
     # With no feasible route, ``cheapest`` is the argmin of all +inf and is
     # only a structural placeholder. Consumers must intersect fallback support
     # with ``valid`` before making it selectable; the inference adapter does so.
@@ -1060,6 +1077,9 @@ def _world_zero_perceived_fuel(env):
             or points.shape[-1] != 2 or velocities.shape != points.shape
             or sensed.shape != points.shape[:2]):
         raise ValueError("slot-3 perceived FUEL buffers have misaligned batched shapes")
+    if any(value.device != torch.device(env.device)
+           for value in (points, velocities, sensed)):
+        raise ValueError("slot-3 perceived FUEL buffers are not on the assigned device")
     # Keep the native accessor's [world, track, ...] contract intact, then
     # select the sole supported world explicitly for candidate construction.
     return points[0], velocities[0], sensed[0]
@@ -1131,7 +1151,7 @@ def _additional_sensed_target_specs(env, base: SafeActionCandidates):
         raise RuntimeError("device base action table has an invalid fixed-capacity shape")
     points, _, sensed = _world_zero_perceived_fuel(env)
     distances = torch.linalg.vector_norm(points - env.policy_pose[0, 3, :2], dim=-1)
-    eligible = sensed.clone()
+    eligible = sensed & torch.isfinite(points).all(dim=-1)
     buffer_ids = torch.arange(points.shape[0], device=points.device, dtype=torch.long)
     in_base = ((buffer_ids[:, None] == base.device_track_indices[:4][None, :]) &
                (base.device_missing_mask[:4, 1] < .5)[None, :]).any(dim=-1)
@@ -1175,7 +1195,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     if prediction_mode not in PREDICTION_MODES:
         raise ValueError(f"prediction_mode must be one of {PREDICTION_MODES}")
     base = build_safe_action_candidates(env, observation, world=0, slot=3,
-                                        episode_id=episode_id)
+                                        episode_id=episode_id,
+                                        device_resident=device_resident)
     sequence = int(env.steps[0].item())
     if base.observation.sequence != sequence:
         raise ValueError("candidate snapshot does not match current simulator step")
@@ -1188,9 +1209,10 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         base.fallback_candidate_id, base.action_indices, base.device_features,
         base.device_missing_mask, base.device_valid_mask,
         base.device_track_indices, base.device_fallback_index)
-    target_rows = {int(base.table.features[action][1]): base.table.features[action]
-                   for action in range(4) if base.table.valid_mask[action] and
-                   base.table.features[action][1] is not None}
+    target_rows = ({} if device_resident else {
+        int(base.table.features[action][1]): base.table.features[action]
+        for action in range(4) if base.table.valid_mask[action] and
+        base.table.features[action][1] is not None})
     specs = [(action, 0, 0., 0., None) for action in range(8)]
     additional_track_indices = None
     additional_track_start = None
@@ -1200,7 +1222,7 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     else:
         additional_targets = _additional_sensed_target_rows(env, base)
     for action, row, track in additional_targets:
-        if row is not None or device_resident:
+        if not device_resident:
             target_rows[track] = row
         specs.append((action, 0, 0., 0., track))
     offsets = ((.22, 0.), (-.22, 0.), (0., .22), (0., -.22),
@@ -1214,6 +1236,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
     # top-four buffer index. Any lost, illegal, or expired commitment is dropped.
     active_commitment = commitment
     continue_spec = None
+    continue_action_tensor = None
+    continue_track_tensor = None
     commitment_match_valid = torch.ones((), device=env.device, dtype=torch.bool)
     if active_commitment is not None:
         action = active_commitment.action_index
@@ -1221,29 +1245,53 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             active_commitment = None
         elif action < 4:
             source = active_commitment.source_xy_m
-            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
             points, _, sensed = _world_zero_perceived_fuel(env)
-            if source is not None and points.shape[0] and action is not None:
-                source_xy = torch.as_tensor(source, device=points.device,
-                                            dtype=points.dtype)
-                gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
-                nearest_gap, nearest_track = gaps.masked_fill(
-                    ~sensed, float("inf")).min(dim=0)
-                commitment_match_valid = (torch.isfinite(nearest_gap) &
-                    (nearest_gap <= CANDIDATE_BOUNDARY[
-                        "commitment_target_matching_tolerance_m"]))
-                # Transfer only the selected stable sensed-track identity.
-                track = int(nearest_track.item())
+            if device_resident:
+                action_tensor = base.device_valid_mask[:4].to(torch.long).argmax()
+                continue_action_tensor = action_tensor
+                if source is not None and points.shape[0]:
+                    source_xy = torch.as_tensor(source, device=points.device,
+                                                dtype=points.dtype)
+                    gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+                    nearest_gap, nearest_track = gaps.masked_fill(
+                        ~sensed, float("inf")).min(dim=0)
+                    commitment_match_valid = (torch.isfinite(nearest_gap) &
+                        (nearest_gap <= CANDIDATE_BOUNDARY[
+                            "commitment_target_matching_tolerance_m"]))
+                    continue_track_tensor = nearest_track
+                else:
+                    commitment_match_valid = torch.zeros((), device=env.device,
+                                                          dtype=torch.bool)
+                    continue_track_tensor = torch.zeros((), device=env.device,
+                                                         dtype=torch.long)
+                continue_spec = (action, active_commitment.goal_variant,
+                                 0., 0., None)
             else:
-                commitment_match_valid = torch.zeros((), device=env.device,
-                                                      dtype=torch.bool)
-                track = 0
-            if action is None:
-                active_commitment = None
-            else:
-                continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
+                action = next((i for i in range(4) if base.table.valid_mask[i]), None)
+                if source is not None and points.shape[0] and action is not None:
+                    source_xy = torch.as_tensor(source, device=points.device,
+                                                dtype=points.dtype)
+                    gaps = torch.linalg.vector_norm(points - source_xy, dim=-1)
+                    nearest_gap, nearest_track = gaps.masked_fill(
+                        ~sensed, float("inf")).min(dim=0)
+                    commitment_match_valid = (torch.isfinite(nearest_gap) &
+                        (nearest_gap <= CANDIDATE_BOUNDARY[
+                            "commitment_target_matching_tolerance_m"]))
+                    # Legacy candidate IDs require a scalar sensor identity.
+                    track = int(nearest_track.item())
+                else:
+                    commitment_match_valid = torch.zeros((), device=env.device,
+                                                          dtype=torch.bool)
+                    track = 0
+                if action is None:
+                    active_commitment = None
+                else:
+                    continue_spec = (action, active_commitment.goal_variant, 0., 0., track)
         else:
-            if not base.table.valid_mask[action]:
+            if device_resident:
+                commitment_match_valid = base.device_valid_mask[action]
+                continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
+            elif not base.table.valid_mask[action]:
                 active_commitment = None
             else:
                 continue_spec = (action, active_commitment.goal_variant, 0., 0., None)
@@ -1268,13 +1316,11 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
         oracle_track_ids = sorted(target_rows)
     for variant, (forward, lateral) in enumerate(oracle_offsets, 7):
         for track in oracle_track_ids:
-            action = next((i for i in range(4) if base.table.valid_mask[i]), None)
-            if action is not None:
-                specs.append((action, variant, forward, lateral, track))
+            specs.append((0, variant, forward, lateral, track))
     if device_resident:
         oracle_capacity = (8 + len(additional_targets) + 4 * len(offsets) +
                            len(oracle_track_ids) * len(oracle_offsets))
-        return _build_device_candidate_set(env, base, graph, specs, target_rows,
+        return _build_device_candidate_set(env, base, graph, specs,
             candidate_k=candidate_k, action_ticks=action_ticks,
             prediction_mode=prediction_mode, active_commitment=active_commitment,
             continue_index=continue_index,
@@ -1284,6 +1330,8 @@ def build_route_feasible_candidates(env, observation: torch.Tensor,
             oracle_track_start=oracle_start_index,
             oracle_track_indices=oracle_track_indices,
             oracle_variant_count=len(oracle_offsets),
+            continue_action_tensor=continue_action_tensor,
+            continue_track_tensor=continue_track_tensor,
             oracle_capacity=oracle_capacity,
             learned_traversal_cost=learned_traversal_cost,
             learned_cost_scale=learned_cost_scale)

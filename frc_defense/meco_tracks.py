@@ -1748,7 +1748,8 @@ class SafeActionCandidates:
 
 @torch.no_grad()
 def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slot=3,
-                                 episode_id: str | None = None) -> SafeActionCandidates:
+                                 episode_id: str | None = None,
+                                 device_resident: bool = False) -> SafeActionCandidates:
     """Expose only the simulator's existing eight masked choices in stable row order.
 
     The existing action mask and action executor remain authoritative. This
@@ -1772,14 +1773,27 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
     all_points = env.track_pos[world, slot]
     all_mask = env.track_mask[world, slot]
     nearby = (((points[:, None] - all_points[None]).norm(dim=-1) < 1.25) & all_mask[None]).sum(-1)
+    ids = []
+    if device_resident:
+        # Only stable labels cross to host here; numeric feature rows below are
+        # computed on-device and the device policy never reads this table.
+        track_labels = track_indices.detach().to(device="cpu").tolist()
+        available_labels = candidate_available.detach().to(device="cpu").tolist()
+        for action_index in range(4):
+            ids.append(f"collect:track:{int(track_labels[action_index])}"
+                if available_labels[action_index] else
+                f"collect:unavailable-slot:{action_index}")
+        ids.extend(("score", "intercept", "ferry", "hold"))
+        rows = [tuple(None for _ in SAFE_ACTION_FEATURES) for _ in range(8)]
+    else:
+        rows = []
     opponent_distance = None
-    if bool(env.opponent_valid[world, slot]):
+    if not device_resident and bool(env.opponent_valid[world, slot]):
         opponent_distance = (points - env.opponent_pose[world, slot, :2]).norm(dim=-1)
     field_length, field_width = float(env.sim.field_length), float(env.sim.field_width)
     # Existing behavior rows retain canonical names and stable action order.
     fixed = {4: ("score", 2), 5: ("intercept", 4), 6: ("ferry", 3), 7: ("hold", 0)}
-    ids, rows = [], []
-    for action_index in range(8):
+    for action_index in range(8) if not device_resident else ():
         if action_index < 4 and bool(candidate_available[action_index]):
             track = int(track_indices[action_index])
             target = points[action_index]
@@ -1819,7 +1833,8 @@ def build_safe_action_candidates(env, observation: torch.Tensor, *, world=0, slo
     generation = new_meco_episode_id(episode_id or "curriculum")
     snap = build_observation_snapshot(env, world=world, slot=slot, episode_id=generation)
     table = CandidateTable(snap.snapshot_id, tuple(ids), tuple(rows),
-                           tuple(bool(x) for x in mask.cpu().tolist()), SAFE_ACTION_FEATURES,
+                           (tuple(True for _ in range(8)) if device_resident else
+                            tuple(bool(x) for x in mask.cpu().tolist())), SAFE_ACTION_FEATURES,
                            route_costs=(None,) * 8)
     from .curriculum_scenarios import teacher_actions
     torch._assert_async(mask.any(), "simulator exposed no legal fallback action")
