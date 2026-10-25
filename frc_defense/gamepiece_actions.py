@@ -88,10 +88,22 @@ def _capture_fuel_proxy_step_events(env, active):
         active[:, None], env._fuel_proxy_step_piece_ids, prior)
 
 
+def _auto_fuel_score_time_mask(env):
+    """Apply MECO's pinned half-open AUTO period or preserve legacy cadence.
+
+    Six-slot MECO environments expose the TU22-pinned exclusive boundary.
+    Shared scorer environments without that field retain their historical
+    one-step-inclusive window for compatibility.
+    """
+    auto_period_end_time_s = getattr(env, "auto_period_end_time_s", None)
+    if auto_period_end_time_s is not None:
+        return env.match_elapsed < auto_period_end_time_s
+    return env.match_elapsed <= 20. + env.dt
+
+
 def update_fuel_actions(self, active, score_intent):
     proxy_enabled = getattr(self, "fuel_proxy_enabled", False)
     match_end_time_s = getattr(self, "match_end_time_s", None)
-    auto_period_end_time_s = getattr(self, "auto_period_end_time_s", None)
     self.fuel_acquired_event[active]=0; self.fuel_scored_event[active]=0
     self.fuel_passed_event[active]=0; self.fuel_denied_event[active]=0
     if proxy_enabled:
@@ -393,9 +405,7 @@ def update_fuel_actions(self, active, score_intent):
         self.fuel_denied_count+=entering.long()
         match_time_valid = (torch.ones_like(self.match_elapsed, dtype=torch.bool)
             if match_end_time_s is None else self.match_elapsed < match_end_time_s)
-        auto_time_valid = (self.match_elapsed <= 20.+self.dt
-            if auto_period_end_time_s is None else
-            self.match_elapsed < auto_period_end_time_s)
+        auto_time_valid = _auto_fuel_score_time_mask(self)
         can_score=(ready&score_intent&robot_hub_active&in_alliance_zone&
             active[:,None]&match_time_valid[:,None]&
             (self.match_elapsed[:,None]+1e-6>=self.next_score))
@@ -450,9 +460,7 @@ def update_fuel_actions(self, active, score_intent):
             self.fuel_denied_count[:,robot]+=entering.long()
             match_time_valid = (torch.ones_like(self.match_elapsed, dtype=torch.bool)
                 if match_end_time_s is None else self.match_elapsed < match_end_time_s)
-            auto_time_valid = (self.match_elapsed <= 20.+self.dt
-                if auto_period_end_time_s is None else
-                self.match_elapsed < auto_period_end_time_s)
+            auto_time_valid = _auto_fuel_score_time_mask(self)
             can_score=(ready&score_intent[:,robot]&
                 (self.match_elapsed+1e-6>=self.next_score[:,robot])&
                 match_time_valid&

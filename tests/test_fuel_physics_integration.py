@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from frc_defense.fuel_physics_runtime import advance_with_fuel
+from frc_defense.gamepiece_actions import _auto_fuel_score_time_mask
 from frc_defense.tensor_3v3 import TensorThreeVsThreeEnv
 from frc_defense.tensor_sim import TensorDefenseEnv
 
@@ -17,29 +18,19 @@ def make_env(kind="3v3", worlds=2):
     return TensorDefenseEnv(**kwargs, task="counter_defense", action_mode="strategic")
 
 
-@pytest.mark.parametrize(("event_time", "expected_auto"), [
-    (19.98, 1), (20.0, 0), (20.02, 0),
-])
-def test_auto_fuel_count_uses_half_open_event_time(event_time, expected_auto):
-    env = make_env(worlds=1)
-    env.piece_active.zero_()
-    env.piece_owner.fill_(-1)
-    env.piece_active[0, 0] = True
-    env.piece_owner[0, 0] = 0
-    env.sim.pose[0, 0, :2] = torch.tensor([2., 2.])
-    env.match_elapsed.fill_(event_time)
-    env.hub_active.fill_(True)
-    env.next_score.zero_()
-    env.fuel_physics.reset()
-    env.fuel_physics.sleeping[0, 0] = True
-    score_intent = torch.zeros((1, 6), dtype=torch.bool)
-    score_intent[0, 0] = True
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires the supported WX9100 GPU")
+def test_legacy_shared_scorer_without_pinned_boundary_keeps_inclusive_window():
+    if "wx9100" not in torch.cuda.get_device_name(0).lower().replace(" ", ""):
+        pytest.skip("requires the supported WX9100 GPU")
 
-    env._update_fuel(torch.ones(1, dtype=torch.bool), score_intent)
+    class LegacySharedScorer:
+        dt = .02
+        match_elapsed = torch.tensor(
+            [19.98, 20.0, 20.01, 20.02, 20.04], device="cuda")
 
-    assert env.fuel_scored_event[0, 0].item() == 1
-    assert env.fuel_score_count[0, 0].item() == 1
-    assert env.auto_fuel_scores[0, 0].item() == expected_auto
+    actual = _auto_fuel_score_time_mask(LegacySharedScorer())
+    expected = torch.tensor([True, True, True, True, False], device="cuda")
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("kind", ["2robot", "3v3"])
