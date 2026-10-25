@@ -214,12 +214,15 @@ def _validate_field_records(
             required_score_semantics = {
                 "simulator_metric": "fuel_score_count",
                 "metric_semantics": "scored_fuel_piece_count",
-                "official_match_points_available": False,
             }
             if (not isinstance(value, dict)
+                    or set(value) != {
+                        "simulator_metric", "metric_semantics",
+                        "official_match_points_available",
+                    }
                     or any(value.get(key) != expected
                            for key, expected in required_score_semantics.items())
-                    or "match_points" in value):
+                    or value.get("official_match_points_available") is not False):
                 raise ValueError(
                     "current simulator scoring must remain explicitly FUEL-piece-count-only"
                 )

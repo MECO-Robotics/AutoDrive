@@ -187,6 +187,16 @@ def test_scoring_field_cannot_claim_official_match_points_or_convert_fuel_counts
             field_records=records,
         )
 
+    records = _field_records(tmp_path)
+    records["scoring_observation_semantics"]["value"]["official_match_points_available"] = 0
+    with pytest.raises(ValueError, match="FUEL-piece-count-only"):
+        compile_baseline_freeze(
+            tmp_path,
+            source_plan_path=SOURCE_PLAN,
+            runtime_identity=_runtime_identity(),
+            field_records=records,
+        )
+
 
 def test_partition_contract_is_deterministic_disjoint_and_final_test_isolated():
     baseline_digest = hashlib.sha256(b"synthetic freeze").hexdigest()
