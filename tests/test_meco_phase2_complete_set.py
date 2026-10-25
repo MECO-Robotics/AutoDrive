@@ -20,7 +20,13 @@ def _descriptor(tmp_path):
             "path": str(protocol), "id": "p", "sha256": "p" * 64},
         "scenario_id": "s", "category": "c", "seeds": [1],
         "device": "cuda:0", "outputs": outputs,
-        "c_campaign_descriptor": {"outputs": {"root": str(root / coordinator.STAGE_C)}},
+        "c_campaign_descriptor": {"campaign_id": "campaign-test", "outputs": {
+            "root": str(root / coordinator.STAGE_C),
+            "dataset": outputs["source_dataset"],
+            "manifest": outputs["source_manifest"],
+            "C1": outputs["artifacts"]["C1"],
+            "C2": outputs["artifacts"]["C2"],
+            "report": outputs["c_campaign_report"]}},
         "plan_a_ubp": {"output_dir": str(root / coordinator.STAGE_A)}}
 
 
@@ -48,8 +54,9 @@ def _install_adapters(monkeypatch):
         bundle.write_text("bundle")
 
     def load_c(desc, *, expected_sources):
+        outputs = desc["c_campaign_descriptor"]["outputs"]
         for track in ("C1", "C2"):
-            path = Path(desc["outputs"][track])
+            path = Path(outputs[track])
             digest = coordinator._sha_file(path)
             if track in c_receipts and c_receipts[track]["artifact_sha256"] != digest:
                 raise ValueError("C output changed after validation")
@@ -70,7 +77,8 @@ def _install_adapters(monkeypatch):
     monkeypatch.setattr(coordinator, "_load_c_stage", load_c)
     monkeypatch.setattr(coordinator, "_load_a_stage", load_a)
     monkeypatch.setattr(coordinator, "validate_complete_set_manifest", validate_seal)
-    monkeypatch.setattr("frc_defense.curriculum_training.source_identity", lambda: {})
+    monkeypatch.setattr("frc_defense.curriculum_training.source_identity",
+        lambda: {"identity": "test"})
     monkeypatch.setattr("frc_defense.meco_supervised._read_counterfactual_dataset",
         lambda *_a, **_kw: ([], source_hash, "b" * 64, None, "p", "p" * 64,
             {"seeds": [1]}))
@@ -210,14 +218,16 @@ def test_root_replacement_during_stage_aborts_before_next_stage(tmp_path, monkey
         yield
 
     def replace_after_c(desc):
-        output = Path(desc["outputs"]["root"])
+        outputs = desc["outputs"]
+        output = Path(outputs["root"])
+        attempt_root = output.parent
         output.mkdir()
         for key in ("dataset", "C1", "C2", "report"):
-            Path(desc["outputs"][key]).write_text(key)
-        Path(desc["outputs"]["dataset"] + ".manifest.json").write_text("manifest")
-        moved = output.with_name("detached-attempt")
-        output.rename(moved)
-        output.symlink_to(moved, target_is_directory=True)
+            Path(outputs[key]).write_text(key)
+        Path(outputs["dataset"] + ".manifest.json").write_text("manifest")
+        moved = attempt_root.with_name("detached-attempt")
+        attempt_root.rename(moved)
+        attempt_root.symlink_to(moved, target_is_directory=True)
 
     called_a = []
     with pytest.raises(ValueError, match="replaced after pinning"):
