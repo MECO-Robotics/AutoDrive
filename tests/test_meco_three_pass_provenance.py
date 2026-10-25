@@ -69,8 +69,12 @@ def test_current_manifest_is_validated_as_summary_only():
         phase4_status["implementer"]["runtime_status_pass2_commit"])
     assert phase4_status["implementer"]["runtime_status_integration_commit"] == (
         "384c9a2baa9a97a27271cc6ed26fb316f01be8ed")
+    assert phase4_status["implementer"]["status"] == "implemented"
+    assert "candidate_review_pending" not in phase4_status["implementer"]
     assert phase4_status["implementer"]["candidate_commit"] == (
         phase4_status["reviewer"]["approved_commit"])
+    assert phase4_status["reviewer"]["status"] == "approved-summary"
+    assert phase4_status["reviewer"]["verdict"] == "approved"
     assert phase4_status["reviewer"]["artifact"]["path"] == (
         "docs/implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md")
     phase4_status_summary = (REPO / phase4_status["reviewer"]["artifact"]["path"]).read_text()
@@ -81,6 +85,7 @@ def test_current_manifest_is_validated_as_summary_only():
         "3ed5c86e5108db24eb1588afc890d1cf379cad39",
         "252eb3d65e27a0d96352cf2abb83265384ce1d8d",
         "384c9a2baa9a97a27271cc6ed26fb316f01be8ed",
+        "cfadae21999fdbd31597fd096bc916485d20ec98",
     ):
         assert required_reference in phase4_status_summary
     phase2_complete_set = next(t for t in result["tranches"]

@@ -50,3 +50,14 @@ established held-out outcomes, verified current-dashboard replay provenance,
 or enabled qualification. The separately planned ledger update and post-merge
 dashboard currentness check provide provenance/serving evidence only and do
 not close any Phase 4 outcome or qualification gate.
+
+## Ledger-update candidate review
+
+Independent Pass 3 approved the exact pending-review ledger/API/test candidate
+`cfadae21999fdbd31597fd096bc916485d20ec98`. The candidate explicitly kept its
+new ledger reviewer state pending and fail-closed while preserving the exact
+source status-correction references above. The finalization records this
+candidate SHA as the new tranche's `implementer.candidate_commit` and
+`reviewer.approved_commit`; the finalizer SHA and its separate review verdict
+are intentionally kept outside the digest-pinned ledger. No simulator,
+replay, training, device, or service operation was part of this review.

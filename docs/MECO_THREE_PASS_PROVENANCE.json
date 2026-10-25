@@ -3553,11 +3553,19 @@
           "tests/test_meco_three_pass_provenance.py"
         ],
         "status": "implemented",
-        "candidate_review_pending": true
+        "candidate_commit": "cfadae21999fdbd31597fd096bc916485d20ec98"
       },
       "reviewer": {
-        "status": "pending-review",
-        "verdict": "pending"
+        "artifact": {
+          "path": "docs/implementation-provenance/phase4-runtime-status-ledger-dashboard-20261025.md",
+          "sha256": "e58ea45c5ba4e5b4a4a1ab66db6c9431b5c9ac5ca6b354ab173a2fe67c044f17",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "status": "approved-summary",
+        "verdict": "approved",
+        "approved_commit": "cfadae21999fdbd31597fd096bc916485d20ec98",
+        "verdict_detail": "Pass 3 approved the exact ledger/API/test candidate as the pending-review candidate. Finalization records that candidate SHA as both implementer.candidate_commit and reviewer.approved_commit; finalizer identity and its separate review verdict remain outside the pinned ledger."
       },
       "limits": "Documentation and provenance summary for reviewed Phase 4 runtime wiring. No new end-to-end simulator evaluation, fresh replay, held-out behavior outcomes, current-dashboard replay review, qualification, or promotion is established; qualification remains disabled."
     }
