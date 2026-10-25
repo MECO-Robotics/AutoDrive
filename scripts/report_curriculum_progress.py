@@ -39,11 +39,12 @@ def _queue_lane_directory(root, value):
     if not isinstance(value, str) or not value:
         raise ValueError('queue lane has no valid directory')
     relative = Path(value)
-    if relative.is_absolute() or not relative.parts or '..' in relative.parts:
-        raise ValueError('queue lane directory must be a safe relative path')
-    lexical = root / relative
-    cursor = root
-    for part in relative.parts:
+    if not relative.parts or '..' in relative.parts:
+        raise ValueError('queue lane directory must be a safe path')
+    lexical = relative if relative.is_absolute() else root / relative
+    cursor = Path(lexical.anchor) if relative.is_absolute() else root
+    parts = relative.parts[1:] if relative.is_absolute() else relative.parts
+    for part in parts:
         cursor = cursor / part
         if cursor.is_symlink():
             raise ValueError('queue lane directory traverses a symlink')

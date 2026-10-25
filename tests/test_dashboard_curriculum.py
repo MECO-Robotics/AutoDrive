@@ -273,13 +273,15 @@ def test_queue_directory_conflicts_and_unsafe_paths_fail_closed(tmp_path):
     for name in ("A1", "other"):
         (tmp_path / name).mkdir()
     (tmp_path / "linked").symlink_to(tmp_path / "other", target_is_directory=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
     queue = tmp_path / "queue-status.json"
 
     invalid_lanes = [
         {"track": "A1", "run_directory": "A1", "directory": "other"},
         {"track": "A1", "run_directory": "../other"},
         {"track": "A1", "run_directory": "A1", "directory": "linked"},
-        {"track": "A1", "run_directory": "A1", "directory": str(tmp_path / "A1")},
+        {"track": "A1", "run_directory": "A1", "directory": str(outside)},
         {"track": "A1", "run_directory": "missing"},
     ]
     for lane in invalid_lanes:
@@ -295,7 +297,7 @@ def test_matching_legacy_and_current_queue_directories_are_unambiguous(tmp_path)
     (run / "stats.json").write_text(json.dumps({
         "curriculum_state": {}, "stats": [], "config": {"eval_every": 1}}))
     (tmp_path / "queue-status.json").write_text(json.dumps({"lanes": [{
-        "track": "A1", "run_directory": "A1", "directory": "A1",
+        "track": "A1", "run_directory": "A1", "directory": str(run.resolve()),
         "status": "queued", "completed_updates": 0}]}))
 
     report = summarize(tmp_path)
