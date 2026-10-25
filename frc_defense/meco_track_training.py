@@ -25,7 +25,7 @@ import torch
 from torch import nn
 
 from .curriculum_scenarios import make_curriculum_env, reset_curriculum_scenario
-from .curriculum_training import source_identity
+from .curriculum_training import source_identity, source_tree_identity
 from .training_curriculum import get_scenario
 from .meco_candidates import (CANDIDATE_BASE_FEATURE_COUNT, CANDIDATE_BOUNDARY, CandidateCommitment,
     ROUTE_COST_POINTS_PER_SECOND,
@@ -2700,6 +2700,9 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
     sources = source_identity()
     source_hash = hashlib.sha256(json.dumps(
         sources, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    source_tree = source_tree_identity()
+    source_tree_hash = hashlib.sha256(json.dumps(source_tree, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
     loaded = {}
     policy_manifest = {}
     route_weight = None
@@ -3759,6 +3762,12 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                     env.phase4_start_profile_applied),
                                 "validated_pose_world_count": int(
                                     env.phase4_start_profile_validated_world_count),
+                                "validated_pose_legal_world_count": int(sum(
+                                    env.phase4_start_profile_legality or ())),
+                                "validated_pose_world_indices": list(range(
+                                    int(env.phase4_start_profile_validated_world_count))),
+                                "validated_pose_world_index_semantics":
+                                    "zero_based_simulator_batch_index",
                                 "per_world_legal": list(
                                     env.phase4_start_profile_legality or ()),
                                 "legal_start_validation_rate": float(
@@ -3926,6 +3935,8 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "policy_id": record["policy_id"],
                                 "evaluation_id": eval_id,
                                 "condition_id": replay_condition_id,
+                                "phase4_start_profile_assignment":
+                                    phase4_start_profile_assignment,
                                 "evaluation_report_path": (str(output_path.resolve())
                                     if output_path is not None else None),
                                 "evaluation_record_index": len(records),
@@ -3940,6 +3951,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "checkpoint_source_outdated": source_checkpoint_outdated,
                                 "replay_source_sha256": source_hash,
                                 "source_identity_sha256": source_hash,
+                                "source_tree_identity_sha256": source_tree_hash,
                                 "protocol_id": record["protocol_id"],
                                 "qualification_protocol_id": qualification_protocol_id,
                                 "training_protocol_id": manifest.get("training_protocol_id"),
@@ -3949,6 +3961,7 @@ def evaluate_meco(checkpoints: dict[str, str], *, scenario_id: str,
                                 "prediction_mode": decision_prediction_mode,
                                 "p_mode": record["p_mode"],
                                 "device": execution_device,
+                                "execution_device": execution_device,
                                 "simulation_device": device,
                                 "code_state": code_state,
                                 "evaluation_record": {"scenario_id": scenario_id,

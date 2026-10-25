@@ -309,6 +309,7 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
             argv += ["--phase4-start-profile", assignment["registry_profile_id"]]
         return_codes[arm] = execute(argv)
     pairing = None
+    paired_outcomes_artifact = None
     if all(code == 0 for code in return_codes.values()):
         pairing = _validate_phase4_start_profile_pair(case_dir, assignment,
             categories=[case_axes["category"]], seeds=seeds,
@@ -316,15 +317,69 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
         current_source_hash = _source_identity_sha256()
         if current_source_hash != dispatch_binding["source_identity_sha256"]:
             raise ValueError("Phase 4 start-profile source identity drifted during paired dispatch")
+        if (_source_tree_identity_sha256() !=
+                dispatch_binding["source_tree_identity_sha256"]):
+            raise ValueError("Phase 4 start-profile source tree changed during paired dispatch")
         if _dispatch_checkpoint_hashes(checkpoint_paths) != dispatch_binding[
                 "checkpoint_sha256"]:
             raise ValueError("Phase 4 start-profile checkpoint files drifted during paired dispatch")
+        outcome_payload = {
+            "schema": "meco-phase4-start-profile-paired-outcomes-v1",
+            "protocol_id": protocol["protocol_id"],
+            "protocol_sha256": protocol_sha256,
+            "registry_sha256": plan["registry_binding"][
+                "registry_raw_file_sha256"],
+            "scenario_id": case_axes["scenario_id"],
+            "category": case_axes["category"],
+            "qualification_case": qualification_case,
+            "split": "validation",
+            "validation_seed_assignment_sha256": _sha(seeds),
+            "seed_manifest_sha256": _file_sha(seed_path),
+            "registry_profile_id": assignment["registry_profile_id"],
+            "profile_config_sha256": assignment["profile_config_sha256"],
+            "assignment_sha256": assignment["assignment_sha256"],
+            "source_identity_sha256": dispatch_binding[
+                "source_identity_sha256"],
+            "source_tree_identity": dispatch_binding["source_tree_identity"],
+            "source_tree_identity_sha256": dispatch_binding[
+                "source_tree_identity_sha256"],
+            "checkpoint_sha256": dispatch_binding["checkpoint_sha256"],
+            "execution_device": dispatch_binding["execution_device"],
+            "condition_report_sha256": pairing["condition_report_sha256"],
+            "condition_report_paths": pairing["condition_report_paths"],
+            "condition_matrix_sha256": pairing["condition_matrix_sha256"],
+            "condition_matrix_paths": pairing["condition_matrix_paths"],
+            "condition_ids": pairing["condition_ids"],
+            "paired_keys": pairing["paired_keys"],
+            "per_world_legality_records": pairing[
+                "per_world_legality_records"],
+            "state_ids": ["scenario_defined", assignment["registry_profile_id"]],
+            "outcome_by_start_state": pairing["outcome_by_start_state"],
+            "exact_pair_coverage": pairing["exact_pair_coverage"],
+            "paired_deltas_reconciled": pairing["paired_deltas_reconciled"],
+            "coverage_digest_sha256": pairing["coverage_digest_sha256"],
+            "legal_world_count": pairing["legal_world_count"],
+            "legal_world_legal_count": pairing["legal_world_legal_count"],
+            "legal_start_validation_rate": pairing[
+                "legal_start_validation_rate"],
+            "all_treatment_worlds_legal": pairing[
+                "all_treatment_worlds_legal"],
+            "qualification_eligible": False,
+        }
+        outcome_path = case_dir / "start-profile-paired-outcomes.json"
+        _write_immutable(outcome_path, outcome_payload)
+        paired_outcomes_artifact = {"path": str(outcome_path),
+            "sha256": _file_sha(outcome_path)}
     return {"case_cell_key": cell_key,
         "registry_profile_id": assignment["registry_profile_id"],
         "profile_config_sha256": assignment["profile_config_sha256"],
         "assignment_sha256": assignment["assignment_sha256"],
         "dispatch_binding": dispatch_binding,
-        "runtime_status": "scheduled_not_simulator_validated",
+        "runtime_status": ("paired_outcomes_captured_pending_replay_review"
+            if pairing is not None and pairing[
+                "all_treatment_worlds_legal"] else
+            "paired_outcomes_rejected_world_legality" if pairing is not None else
+            "scheduled_not_simulator_validated"),
         "simulator_behavior_validated": False,
         "legal_start_validation_rate": (None if pairing is None else
             pairing["legal_start_validation_rate"]),
@@ -334,6 +389,7 @@ def run_phase4_start_profile_cell(plan: dict, cell_key: str, *,
             pairing["coverage_digest_sha256"]),
         "qualification_eligible": False,
         "paired_coverage": pairing,
+        "paired_outcomes_artifact": paired_outcomes_artifact,
         "dispatch_return_codes": return_codes,
         "executed": all(code == 0 for code in return_codes.values())}
 
@@ -627,11 +683,22 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
     expected_keys = {(policy, category, seed) for policy in policies
                      for category in categories for seed in seeds}
     arms = {}
+    condition_report_sha256 = {}
+    condition_report_paths = {}
+    condition_matrix_sha256 = {}
+    condition_matrix_paths = {}
+    condition_ids = {}
     for arm in ("no_factor", "factor_treatment"):
         paths = sorted((case_dir / arm).glob("*.matrix.json"))
         if len(paths) != 1:
             raise ValueError(f"Phase 4 {arm} start-profile arm lacks exactly one matrix report")
-        matrix = _read_json(paths[0])
+        matrix_bytes = paths[0].read_bytes()
+        condition_matrix_sha256[arm] = hashlib.sha256(matrix_bytes).hexdigest()
+        evidence_matrix_path = case_dir / "paired-evidence-reports" / f"{arm}.matrix.json"
+        _write_immutable_bytes(evidence_matrix_path, matrix_bytes)
+        condition_matrix_paths[arm] = evidence_matrix_path.relative_to(
+            case_dir.resolve()).as_posix()
+        matrix = json.loads(matrix_bytes)
         protocol = matrix.get("protocol", {})
         if (matrix.get("qualification_eligible") is not False or
                 protocol.get("categories") != categories or
@@ -650,9 +717,16 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         if not isinstance(conditions, dict) or set(conditions) != {
                 "architecture_matched_cv_k16"}:
             raise ValueError(f"Phase 4 {arm} matrix has unexpected condition coverage")
-        report = _read_json(Path(conditions["architecture_matched_cv_k16"][
-            "report_path"]).resolve())
         condition = conditions["architecture_matched_cv_k16"]
+        condition_ids[arm] = condition.get("condition_id")
+        report_path = Path(condition["report_path"]).resolve()
+        report_bytes = report_path.read_bytes()
+        condition_report_sha256[arm] = hashlib.sha256(report_bytes).hexdigest()
+        evidence_report_path = case_dir / "paired-evidence-reports" / f"{arm}.json"
+        _write_immutable_bytes(evidence_report_path, report_bytes)
+        condition_report_paths[arm] = evidence_report_path.relative_to(
+            case_dir.resolve()).as_posix()
+        report = json.loads(report_bytes)
         _validate_phase4_dispatch_report_binding(condition, expected_binding,
             context=f"{arm} matrix condition")
         _validate_phase4_dispatch_report_binding(report, expected_binding,
@@ -686,13 +760,21 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
             else:
                 legal_worlds = captured.get("per_world_legal")
                 world_count = captured.get("validated_pose_world_count")
+                world_indices = captured.get("validated_pose_world_indices")
+                legal_count = captured.get("validated_pose_legal_world_count")
                 rate = captured.get("legal_start_validation_rate")
                 if (type(world_count) is not int or world_count < 1 or
                         not isinstance(legal_worlds, list) or
                         len(legal_worlds) != world_count or
+                        world_indices != list(range(world_count)) or
+                        captured.get("validated_pose_world_index_semantics") !=
+                            "zero_based_simulator_batch_index" or
                         any(type(value) is not bool for value in legal_worlds) or
-                        not all(legal_worlds) or type(rate) not in (int, float) or
-                        not math.isfinite(float(rate)) or float(rate) != 1.0):
+                        type(legal_count) is not int or
+                        legal_count != sum(legal_worlds) or
+                        type(rate) not in (int, float) or
+                        not math.isfinite(float(rate)) or
+                        float(rate) != sum(legal_worlds) / world_count):
                     raise ValueError(f"Phase 4 treatment row has missing or partial per-world legality: {key}")
                 outcome = captured.get("outcome_metrics")
                 metrics = row.get("metrics")
@@ -724,7 +806,8 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         raise ValueError("Phase 4 start-profile arms do not have exact paired rows")
     metric_names = ("success", "scores", "useful_throughput", "completed_cycles")
     by_state = {}
-    treatment_legal_rates = []
+    legal_world_total = 0
+    legal_world_count_total = 0
     for state, arm in (("scenario_defined", "no_factor"),
                        (assignment["registry_profile_id"], "factor_treatment")):
         by_policy = {}
@@ -744,8 +827,10 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
                     values[name].append(float(value))
                 if arm == "factor_treatment":
                     captured = row["phase4_start_profile"]
-                    treatment_legal_rates.append(float(
-                        captured["legal_start_validation_rate"]))
+                    worlds = captured["per_world_legal"]
+                    count = captured["validated_pose_world_count"]
+                    legal_world_total += sum(worlds)
+                    legal_world_count_total += count
             by_policy[policy] = {"n": len(records), "metrics": {
                 "success_rate": sum(values["success"]) / len(records),
                 **{name: sum(values[name]) / len(records)
@@ -772,15 +857,23 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         captured = arms["factor_treatment"][key]["phase4_start_profile"]
         legality_records.append({"policy": key[0], "category": key[1],
             "seed": key[2], "world_count": captured["validated_pose_world_count"],
+            "world_index_semantics": captured[
+                "validated_pose_world_index_semantics"],
+            "world_indices": captured["validated_pose_world_indices"],
             "per_world_legal": captured["per_world_legal"],
+            "legal_world_count": captured[
+                "validated_pose_legal_world_count"],
             "legal_start_validation_rate": captured["legal_start_validation_rate"]})
     coverage_digest = _sha({"expected_keys": [list(key) for key in sorted(expected_keys)],
         "assignment_sha256": assignment["assignment_sha256"],
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
+        "condition_report_sha256": condition_report_sha256,
+        "condition_matrix_sha256": condition_matrix_sha256,
         "per_world_legality_records": legality_records,
         "outcome_by_start_state": outcome_by_start_state})
+    per_world_legality_records = legality_records
     return {"policies": sorted(policies), "categories": categories,
         "condition_names": ["architecture_matched_cv_k16"],
         "seed_count": len(seeds), "paired_row_count": len(expected_keys),
@@ -792,7 +885,19 @@ def _validate_phase4_start_profile_pair(case_dir: Path, assignment: dict, *,
         "checkpoint_sha256": expected_binding["checkpoint_sha256"],
         "source_identity_sha256": expected_binding["source_identity_sha256"],
         "execution_device": expected_binding["execution_device"],
-        "legal_start_validation_rate": sum(treatment_legal_rates) / len(treatment_legal_rates),
+        "legal_start_validation_rate": legal_world_total / legal_world_count_total,
+        "legal_world_count": legal_world_count_total,
+        "legal_world_legal_count": legal_world_total,
+        "condition_report_sha256": condition_report_sha256,
+        "condition_report_paths": condition_report_paths,
+        "condition_matrix_sha256": condition_matrix_sha256,
+        "condition_matrix_paths": condition_matrix_paths,
+        "condition_ids": condition_ids,
+        "paired_keys": [list(key) for key in sorted(expected_keys)],
+        "per_world_legality_records": per_world_legality_records,
+        "exact_pair_coverage": True,
+        "paired_deltas_reconciled": True,
+        "all_treatment_worlds_legal": legal_world_total == legal_world_count_total,
         "outcome_by_start_state": outcome_by_start_state,
         "coverage_digest_sha256": coverage_digest, "qualification_eligible": False}
 
@@ -808,13 +913,27 @@ def _source_identity_sha256() -> str:
         allow_nan=False).encode()).hexdigest()
 
 
+def _source_tree_identity() -> dict:
+    from .curriculum_training import source_tree_identity
+    return source_tree_identity()
+
+
+def _source_tree_identity_sha256(identity: dict | None = None) -> str:
+    identity = _source_tree_identity() if identity is None else identity
+    return hashlib.sha256(json.dumps(identity, sort_keys=True,
+        allow_nan=False).encode()).hexdigest()
+
+
 def _capture_phase4_dispatch_binding(checkpoint_paths: dict[str, str], device: str) -> dict:
     # Match matrix capture order: native runtime preparation precedes source identity.
     from .fuel_physics_hip import prepare_native_fuel_extension
     from .meco_device import normalized_device_info
     prepare_native_fuel_extension(device)
+    source_tree = _source_tree_identity()
     return {"checkpoint_sha256": _dispatch_checkpoint_hashes(checkpoint_paths),
         "source_identity_sha256": _source_identity_sha256(),
+        "source_tree_identity": source_tree,
+        "source_tree_identity_sha256": _source_tree_identity_sha256(source_tree),
         "execution_device": normalized_device_info(device)}
 
 
@@ -1220,7 +1339,10 @@ def _validate_phase4_trench_interception_pair(case_dir: Path, binding: dict, *,
 
 
 def _write_immutable(path: Path, value: dict) -> str:
-    data = _artifact_bytes(value)
+    return _write_immutable_bytes(path, _artifact_bytes(value))
+
+
+def _write_immutable_bytes(path: Path, data: bytes) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if path.read_bytes() != data:
