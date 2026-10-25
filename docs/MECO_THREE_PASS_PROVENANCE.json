@@ -2755,6 +2755,47 @@
         "status": "approved-summary"
       },
       "limits": "71 focused monitor/manifest/schedule tests passed in implementation; final reviewer ran 51 focused monitor/manifest tests. Compilation and diff checks passed. No simulator/replay, GPU execution, training, dashboard-currentness check, or qualification was performed. Opt-in future-campaign diagnostic only; active r4 remains untouched and reports cannot qualify/promote models."
+    },
+    {
+      "requirement_id": "diagnostic-monitor-dashboard",
+      "title": "Expose diagnostic monitor status in MECO dashboard",
+      "planner": {
+        "status": "summary-only",
+        "artifact": {
+          "path": "docs/plans/diagnostic-monitor-dashboard-scope.md",
+          "sha256": "ad4caf8aa7c3e8abf3f98355a539c174a0f555bf789ecab51871f03533e916b1",
+          "kind": "scoped-transcript-summary",
+          "status": "transcript-summary"
+        }
+      },
+      "implementer": {
+        "commit": "817a6f9076d4c28fea34ba26634458b8f69c5547",
+        "source_commits": [
+          "2e9206c518a806c3588b0099503eb290d4d7a653"
+        ],
+        "paths": [
+          "frc_defense/meco_dashboard.py",
+          "frc_defense/dashboard_static/meco.html",
+          "frc_defense/dashboard_static/meco.js",
+          "tests/test_meco_dashboard.py",
+          "docs/plans/diagnostic-monitor-dashboard-scope.md",
+          "docs/implementation-provenance/diagnostic-monitor-dashboard.md"
+        ],
+        "status": "implemented"
+      },
+      "reviewer": {
+        "artifact": {
+          "path": "docs/implementation-provenance/diagnostic-monitor-dashboard.md",
+          "sha256": "0aeb47b8aef23c560c926878c103eb3cdc0d9c9ab53bc50f3776d48921d6c261",
+          "kind": "scoped-transcript-summary",
+          "status": "review-summary"
+        },
+        "approved_commit": "817a6f9076d4c28fea34ba26634458b8f69c5547",
+        "verdict": "approved",
+        "verdict_detail": "Independent exact-head review approved. Confirmed allowlisted projection, freshness and malformed-input fail-closed behavior, bounded data, qualification-ineligible monitor semantics, safe rendering, and preserved finite schedule UI.",
+        "status": "approved-summary"
+      },
+      "limits": "32 focused dashboard tests passed; compilation, JS syntax, and diff checks passed. Dashboard projection only; no simulator/replay, GPU, training, or qualification run."
     }
   ],
   "evidence_class": "scoped_transcript_summary",

@@ -1,5 +1,18 @@
 # MECO learning tracks plan: execution status
 
+> **Diagnostic dashboard projection pushed — 2026-10-25.** Planner commit
+> `2e9206c518a806c3588b0099503eb290d4d7a653` and reviewed implementation
+> `817a6f9076d4c28fea34ba26634458b8f69c5547` are on `origin/main`. The
+> dashboard now exposes the supervisor's manifest-bound diagnostic monitor
+> through an allowlisted, freshness-aware projection and card; malformed or
+> stale data cannot imply active progress, and the monitor remains
+> qualification-ineligible. The focused dashboard suite passed 32 tests;
+> compilation, JS syntax, and diff checks passed. The three-pass ledger now
+> contains 70 summaries with its dashboard digest pin updated. No simulator,
+> replay, GPU, or training action was part of this dashboard-only change; the
+> active r4 training run was left untouched. Dashboard restart/currentness
+> verification follows this integration commit.
+
 > **Diagnostic monitor tranche reviewed and pushed — 2026-10-25 05:07 UTC.** The
 > manifest-bound diagnostic evaluation monitor is approved at exact head
 > `f79650107a5c92053d651a7d48d9bcd306257f1d`. The initial implementation and
